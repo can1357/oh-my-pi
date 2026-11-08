@@ -218,4 +218,243 @@ describe("handback through the subagent executor", () => {
 		// The wake/terminate machinery ran like a terminal yield's.
 		expect(handle.abortCalls()).toBeGreaterThan(0);
 	});
+
+	type ReportName = "yield" | "handback";
+
+	function reportEvent(
+		name: ReportName,
+		toolCallId: string,
+		details: Record<string, unknown> | undefined,
+		isError = false,
+	) {
+		return {
+			type: "tool_execution_end" as const,
+			toolCallId,
+			toolName: name,
+			result: {
+				content: [{ type: "text" as const, text: "tool result" }],
+				...(details !== undefined ? { details } : {}),
+			},
+			isError,
+		};
+	}
+
+	function invalidReportDetails(
+		name: ReportName,
+		kind: "foreign" | "missing-details" | "unknown-status",
+	): Record<string, unknown> | undefined {
+		if (kind === "foreign") return { evalTool: name, language: "python" };
+		if (kind === "unknown-status") return { status: "unknown", data: "rejected-unknown" };
+		return undefined;
+	}
+
+	/**
+	 * Drive one yield/handback monitor. `aborted()` is the live terminate count,
+	 * so a callback can tell an event that ended the run from one that did not.
+	 */
+	async function runReportMonitor(
+		name: ReportName,
+		onPrompt: (params: {
+			promptIndex: number;
+			emit: (event: never) => void;
+			pushMessage: (message: unknown) => void;
+			aborted: () => boolean;
+		}) => void | Promise<void>,
+	) {
+		const id = `Report${name}`;
+		let readAborts = () => 0;
+		const handle = createMockSession(params =>
+			onPrompt({ ...params, emit: params.emit as (event: never) => void, aborted: () => readAborts() > 0 }),
+		);
+		readAborts = () => handle.abortCalls();
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: handle.session,
+		} as CreateAgentSessionResult);
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			session: handle.session,
+			sessionFile: null,
+			status: "running",
+		});
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			task: "report",
+			index: 0,
+			id,
+			settings: Settings.isolated({ "task.softRequestBudget": 0 }),
+			modelRegistry: { refresh: async () => {} } as never,
+			enableLsp: false,
+			artifactsDir: tempDir.path(),
+			sessionFile: `${tempDir.path()}/parent.jsonl`,
+		});
+		return { result, handle };
+	}
+
+	function emitAssistant(
+		emit: (event: never) => void,
+		pushMessage: (message: unknown) => void,
+		text: string,
+	) {
+		const message = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text }],
+			stopReason: "stop" as const,
+		};
+		pushMessage(message);
+		emit({ type: "message_end", message } as never);
+	}
+
+	it.each([
+		{ name: "yield" as const, kind: "foreign" as const },
+		{ name: "yield" as const, kind: "missing-details" as const },
+		{ name: "yield" as const, kind: "unknown-status" as const },
+		{ name: "handback" as const, kind: "foreign" as const },
+		{ name: "handback" as const, kind: "missing-details" as const },
+		{ name: "handback" as const, kind: "unknown-status" as const },
+	])(
+		"does not accept or abort a $kind $name result, then accepts the later terminal report",
+		async ({ name, kind }) => {
+			let invalidAborted = false;
+			const { result, handle } = await runReportMonitor(name, ({ promptIndex, emit, pushMessage, aborted }) => {
+				if (promptIndex === 1) {
+					emitAssistant(emit, pushMessage, "foreign turn");
+					emit(reportEvent(name, "invalid", invalidReportDetails(name, kind)) as never);
+					invalidAborted = aborted();
+					return;
+				}
+				emit(
+					reportEvent(name, "terminal", {
+						status: "success",
+						data: "accepted-terminal",
+						type: "result",
+					}) as never,
+				);
+			});
+
+			expect(invalidAborted).toBe(false);
+			expect(handle.prompts.length).toBeGreaterThanOrEqual(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("accepted-terminal");
+			expect(result.extractedToolData?.yield).toEqual([
+				expect.objectContaining({ status: "success", data: "accepted-terminal", type: "result" }),
+			]);
+			expect(JSON.stringify(result.extractedToolData ?? {})).not.toContain("rejected-unknown");
+			expect(JSON.stringify(result.extractedToolData ?? {})).not.toContain("python");
+			expect(handle.abortCalls()).toBeGreaterThan(0);
+		},
+	);
+
+	it.each(["yield", "handback"] as const)(
+		"does not let an earlier accepted incremental %s authorize a later invalid result",
+		async name => {
+			let invalidAborted = false;
+			const { result, handle } = await runReportMonitor(name, ({ promptIndex, emit, pushMessage, aborted }) => {
+				if (promptIndex === 1) {
+					emitAssistant(emit, pushMessage, "section turn");
+					emit(
+						reportEvent(name, "incremental", {
+							status: "success",
+							data: { note: "kept-section" },
+							type: ["notes"],
+						}) as never,
+					);
+					emit(reportEvent(name, "invalid", { evalTool: name, language: "python" }) as never);
+					invalidAborted = aborted();
+					return;
+				}
+				emit(
+					reportEvent(name, "terminal", {
+						status: "success",
+						data: "accepted-terminal",
+						type: "result",
+					}) as never,
+				);
+			});
+
+			expect(invalidAborted).toBe(false);
+			expect(handle.prompts.length).toBeGreaterThanOrEqual(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("accepted-terminal");
+			expect(result.extractedToolData?.yield).toEqual([
+				expect.objectContaining({
+					status: "success",
+					data: { note: "kept-section" },
+					type: ["notes"],
+				}),
+				expect.objectContaining({ status: "success", data: "accepted-terminal", type: "result" }),
+			]);
+			expect(JSON.stringify(result.extractedToolData ?? {})).not.toContain("python");
+			expect(handle.abortCalls()).toBeGreaterThan(0);
+		},
+	);
+
+	it.each(["yield", "handback"] as const)(
+		"keeps a valid incremental %s from terminating until a later terminal report",
+		async name => {
+			let incrementalAborted = false;
+			const { result, handle } = await runReportMonitor(name, ({ promptIndex, emit, pushMessage, aborted }) => {
+				if (promptIndex === 1) {
+					emitAssistant(emit, pushMessage, "section turn");
+					emit(
+						reportEvent(name, "incremental", {
+							status: "success",
+							data: { note: "kept-section" },
+							type: ["notes"],
+						}) as never,
+					);
+					incrementalAborted = aborted();
+					return;
+				}
+				emit(
+					reportEvent(name, "terminal", {
+						status: "success",
+						data: "accepted-terminal",
+						type: "result",
+					}) as never,
+				);
+			});
+
+			expect(incrementalAborted).toBe(false);
+			expect(handle.prompts.length).toBeGreaterThanOrEqual(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("accepted-terminal");
+			expect(handle.abortCalls()).toBeGreaterThan(0);
+		},
+	);
+
+	it.each(["yield", "handback"] as const)(
+		"does not accept or abort an isError %s result, then accepts the later terminal report",
+		async name => {
+			let errorAborted = false;
+			const { result, handle } = await runReportMonitor(name, ({ promptIndex, emit, pushMessage, aborted }) => {
+				if (promptIndex === 1) {
+					emitAssistant(emit, pushMessage, "error turn");
+					emit(
+						reportEvent(name, "error", { status: "error", error: "Output does not match schema" }, true) as never,
+					);
+					errorAborted = aborted();
+					return;
+				}
+				emit(
+					reportEvent(name, "terminal", {
+						status: "success",
+						data: "accepted-terminal",
+						type: "result",
+					}) as never,
+				);
+			});
+
+			expect(errorAborted).toBe(false);
+			expect(handle.prompts.length).toBeGreaterThanOrEqual(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("accepted-terminal");
+			expect(result.extractedToolData?.yield).toEqual([
+				expect.objectContaining({ status: "success", data: "accepted-terminal", type: "result" }),
+			]);
+			expect(handle.abortCalls()).toBeGreaterThan(0);
+		},
+	);
 });

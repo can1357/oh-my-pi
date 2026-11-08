@@ -1161,6 +1161,33 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.abortReason).toBeUndefined();
 	});
 
+	it("returns only the fourth text-only turn for a schema-less structured run that never reports", async () => {
+		const turns = ["FIRST_TURN_NARRATION", "SECOND_TURN_NARRATION", "THIRD_TURN_NARRATION", "FOURTH_TURN_ONLY"];
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, promptIndex, emit, state }) => {
+			prompts.push(text);
+			const assistant = createAssistantStopMessage(turns[promptIndex - 1] ?? "unexpected-turn");
+			state.messages.push(assistant);
+			emit({ type: "message_end", message: assistant });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-last-text",
+			structured: true,
+		});
+
+		expect(prompts).toHaveLength(4);
+		expect(result.exitCode).toBe(0);
+		expect(result.stderr).toBe("");
+		expect(result.extractedToolData?.yield).toBeUndefined();
+		expect(result.output).toBe("FOURTH_TURN_ONLY");
+		expect(result.output).not.toContain("FIRST_TURN_NARRATION");
+		expect(result.output).not.toContain("SECOND_TURN_NARRATION");
+		expect(result.output).not.toContain("THIRD_TURN_NARRATION");
+	});
+
 	it("surfaces abort reason when yield reports aborted status", async () => {
 		const session = createMockSession(({ promptIndex, emit, state }) => {
 			if (promptIndex === 1) {

@@ -2068,7 +2068,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
 				let endsRun = false;
 				if (handler) {
-					// Extract data using handler
+					// Extract data using handler. yield/handback may request
+					// termination only after this event's extraction accepts data:
+					// a foreign result, missing details, or an unknown status must
+					// not abort, and an earlier accepted section cannot authorize
+					// this event. Other registered handlers are not gated.
+					let acceptedThisEvent = false;
 					if (handler.extractData) {
 						const data = handler.extractData({
 							toolName: event.toolName,
@@ -2078,28 +2083,37 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							isError: event.isError,
 						});
 						if (data !== undefined) {
+							acceptedThisEvent = true;
 							// `handback` delegates to `yield`: record its terminal payload
 							// as the run's yield item so acceptance and finalization take
 							// the same path as a real `yield` call.
-							recordExtractedToolData(event.toolName === HANDBACK_TOOL_NAME ? "yield" : event.toolName, data);
+							recordExtractedToolData(
+								event.toolName === HANDBACK_TOOL_NAME ? "yield" : event.toolName,
+								data,
+							);
 						}
 					}
 
-					if (isTerminalReportTool(event.toolName)) {
+					const terminalReport = isTerminalReportTool(event.toolName);
+					if (terminalReport) {
 						yieldCallPending = false;
 						if (budgetCheckDeferred) {
 							budgetCheckDeferred = false;
-							// The yield validated without ending the run: the turn
-							// that submitted it still counts against the budget.
+							// A report result that did not end the run still counts
+							// this turn against the budget, including a rejection.
 							if (!yieldCalled) evaluateSoftRequestBudget();
 						}
 					}
 
 					// Check if the handler wants to terminate the session. A forced
-					// final yield terminates too: it was accepted as terminal above,
-					// and leaving the turn running would let the pinned model answer
-					// with another incremental section instead of finishing.
+					// final yield terminates too, but only when this event was
+					// accepted: an incremental section is not itself terminal, and
+					// a rejected result must not end the run because an earlier
+					// section was. Leaving a forced turn running would let the
+					// pinned model answer with another incremental section.
+					const mayRequestTermination = !terminalReport || acceptedThisEvent;
 					const wantsTerminate =
+						mayRequestTermination &&
 						handler.shouldTerminate?.({
 							toolName: event.toolName,
 							toolCallId: event.toolCallId,
@@ -2107,10 +2121,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							result: event.result,
 							isError: event.isError,
 						}) === true;
-					const forcedFinalYield = isTerminalReportTool(event.toolName) && finalYieldForced && yieldCalled;
+					const forcedFinalYield = terminalReport && finalYieldForced && yieldCalled && acceptedThisEvent;
 					endsRun = wantsTerminate || forcedFinalYield;
 					if (endsRun) {
-						if (isTerminalReportTool(event.toolName) && sessionHasPendingAsyncWork()) {
+						if (terminalReport && sessionHasPendingAsyncWork()) {
 							// Terminal report with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
 							// it (see requestYieldTurnStop).
@@ -2947,12 +2961,24 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
-	// A structured run finalizes from its yield (falling back to the run's
-	// output); a message-result run is exactly its final report turn, never
-	// the narration of earlier turns.
+	// A structured run finalizes from an accepted yield. A clean schema-less
+	// run with no accepted yield is the last assistant turn only: earlier
+	// turns and reminder replies are narration, not the report. A
+	// message-result run is always that last turn. Accepted yield data,
+	// schema validation, and aborted or failed runs keep the accumulated
+	// output path.
 	const structured = args.structured !== false;
-	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
+	const hasAcceptedYield = Array.isArray(yieldItems) && yieldItems.length > 0;
+	const cleanSchemaLessFallback =
+		structured &&
+		exitCode === 0 &&
+		!done.aborted &&
+		!signal?.aborted &&
+		args.outputSchema === undefined &&
+		!hasAcceptedYield;
+	let rawOutput =
+		!structured || cleanSchemaLessFallback ? (monitor.lastReportTurnText() ?? "") : monitor.rawOutput();
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
