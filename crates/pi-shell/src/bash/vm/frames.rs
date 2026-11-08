@@ -23,7 +23,7 @@
 //! (and what externals held) are lost.
 //!
 //! Retained child statuses and wait bookkeeping use the optional keyed
-//! `JobFrames` store record, not new fields in the version-29 frames wire
+//! `JobFrames` store record, not new fields in the frames wire
 //! layout. Its absence means no such state was saved; it does not invent
 //! statuses an upstream engine already forgot. Root retained statuses are
 //! still in `BgPids`/`BangSeen` independently of the frames blob.

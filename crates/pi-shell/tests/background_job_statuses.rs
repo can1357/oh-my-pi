@@ -170,6 +170,34 @@ async fn disown_keeps_bash_statuses() {
 	.await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disown_all_clears_statuses_already_removed_from_the_job_table() {
+	assert_bash_outputs(&[
+		(
+			r#"f(){ return 6; }; f & p=$!; wait "$p"; jobs >/dev/null; wait "$p"; echo before=$?; disown -a; echo disown=$?; wait "$p" 2>/dev/null; echo after=$?"#,
+			"before=6\ndisown=0\nafter=127\n",
+		),
+		(
+			r#"f(){ return 6; }; f & p=$!; wait "$p"; jobs >/dev/null; disown -r; wait "$p"; echo after=$?"#,
+			"after=6\n",
+		),
+		(
+			r#"f(){ return 6; }; f & p=$!; wait "$p"; jobs >/dev/null; disown -ah; wait "$p"; echo after=$?"#,
+			"after=6\n",
+		),
+	])
+	.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_hundred_reaped_jobs_remain_waitable_by_pid() {
+	assert_bash_outputs(&[(
+		r#"pids=(); for ((i=0;i<300;i++)); do (exit 7) & pids+=("$!"); wait "$!"; done; jobs >/dev/null; kept=0; for p in "${pids[@]}"; do wait "$p" 2>/dev/null; [ $? -eq 7 ] && kept=$((kept+1)); done; echo kept=$kept"#,
+		"kept=300\n",
+	)])
+	.await;
+}
+
 /// `wait` without operands keeps the status of the job `$!` names only
 /// when it had finished and nothing reported it: a status above 128 is an
 /// ordinary exit status there (bash 5.3 also keeps a job this shell killed
@@ -412,7 +440,7 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 	use pi_shell::{
 		bash::{
 			Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Script, StateStore, Step,
-			StoreError, Vpid,
+			StoreError,
 			store::{BlobSlot, Change, Key, Record, RestoreWrite, Table},
 		},
 		testkit::{FakeHost, fault::skeleton_init},
@@ -441,7 +469,7 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 			if self.remaining > 0
 				&& matches!(
 					&change,
-					Change::Put(Key::Proc(_), Record::Proc { parent: Some(Vpid(0)), status: None })
+					Change::Put(Key::Proc(child), Record::Proc { parent: Some(parent), status: None }) if child == parent
 				) {
 				self.remaining -= 1;
 				self.refused += 1;
@@ -554,7 +582,7 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 	use pi_shell::{
 		bash::{
 			Budget, Cx, Engine, EngineConfig, ExtError, MemStore, RestoreOpts, Script, StateStore,
-			Step, StoreError, Vpid,
+			Step, StoreError,
 			store::{BlobSlot, Change, Key, KeyBuf, Record, RestoreWrite, Table},
 		},
 		testkit::{FakeHost, fault::skeleton_init},
@@ -584,7 +612,7 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 			if self.armed {
 				let marker = matches!(
 					&change,
-					Change::Put(Key::Proc(_), Record::Proc { parent: Some(Vpid(0)), status: None })
+					Change::Put(Key::Proc(child), Record::Proc { parent: Some(parent), status: None }) if child == parent
 				);
 				let deletion = matches!(&change, Change::Del(Key::Proc(_)));
 				if deletion {
@@ -784,9 +812,9 @@ fn wait_operand_order_survives_snapshot_restore() {
 	assert_eq!(host.stdout.bytes(), b"status=127\n");
 }
 
-/// A version-29 wait image restores and re-snapshots within one engine build.
+/// An upstream wait image restores and re-snapshots within one engine build.
 #[test]
-fn version_29_wait_image_restores_within_one_build_identity() {
+fn upstream_wait_image_restores_within_one_build_identity() {
 	use pi_shell::{
 		bash::{
 			Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Shell, StateStore, Step,

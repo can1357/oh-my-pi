@@ -668,14 +668,14 @@ impl Root {
 		self.fault.take()
 	}
 
-	/// A disowned proc, including an ownership release not yet accepted by
-	/// the store. Adoption and exit must observe the same transition.
+	/// A disowned child names itself as its record's parent. Adoption and
+	/// exit also observe an ownership release not yet accepted by the store.
 	pub fn disowned(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> bool {
 		if let Some(intent) = self.pending.value(Key::Proc(vpid)) {
-			return matches!(intent, ProcIntent::Proc { parent: Some(super::DISOWNED), .. });
+			return matches!(intent, ProcIntent::Proc { parent: Some(parent), .. } if parent == vpid);
 		}
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { parent: Some(super::DISOWNED), .. })) => true,
+			Ok(Some(Record::Proc { parent: Some(parent), .. })) => *parent == vpid,
 			Err(err) => {
 				self.fail(err);
 				false
@@ -3514,6 +3514,26 @@ mod tests {
 				self.inner.epoch()
 			}
 		}
+		for key in [KeyBuf::Job(JobId(7)), KeyBuf::Proc(Vpid(42))] {
+			let mut inner = crate::bash::MemStore::new();
+			inner
+				.put_blob(BlobSlot::Frames, b"contract frames")
+				.unwrap();
+			inner
+				.apply(Change::Put(Key::Proc(Vpid(42)), Record::Proc { parent: None, status: Some(7) }))
+				.unwrap();
+			let before = inner.to_bytes();
+			let epoch = inner.epoch();
+			let batch =
+				|| vec![RestoreWrite::DeleteBlob(BlobSlot::Frames), RestoreWrite::Delete(key.clone())];
+			let mut double = RefusingDel { inner: &mut inner, refuse: 1 };
+			assert!(double.commit_restore(batch()).is_err(), "job/proc deletion batch must refuse");
+			assert_eq!(double.inner.to_bytes(), before);
+			assert_eq!(double.epoch(), epoch);
+			double.commit_restore(batch()).unwrap();
+			assert!(double.inner.get_blob(BlobSlot::Frames).unwrap().is_none());
+			assert!(double.inner.get(key.as_key()).unwrap().is_none());
+		}
 		let (mut store, mut root, mut vp) = shell();
 		let (one, two) = (JobId(7), JobId(8));
 		vp.jobs
@@ -3612,6 +3632,33 @@ mod tests {
 				self.inner.epoch()
 			}
 		}
+		{
+			let mut inner = crate::bash::MemStore::new();
+			inner
+				.put_blob(BlobSlot::Frames, b"contract frames")
+				.unwrap();
+			let before = inner.to_bytes();
+			let epoch = inner.epoch();
+			let batch = || {
+				vec![
+					RestoreWrite::DeleteBlob(BlobSlot::Frames),
+					RestoreWrite::Put(KeyBuf::Misc(MiscKey::BgPids), Record::Words(vec![])),
+				]
+			};
+			let mut double = Refusing { inner: &mut inner, refuse: true };
+			assert!(double.commit_restore(batch()).is_err(), "BgPids batch must refuse");
+			assert_eq!(double.inner.to_bytes(), before);
+			assert_eq!(double.epoch(), epoch);
+			double.commit_restore(batch()).unwrap();
+			assert!(double.inner.get_blob(BlobSlot::Frames).unwrap().is_none());
+			assert!(
+				double
+					.inner
+					.get(Key::Misc(MiscKey::BgPids))
+					.unwrap()
+					.is_some()
+			);
+		}
 		let (mut store, mut root, mut vp) = shell();
 		vp.jobs.keep(crate::bash::vm::proc::KeptStatus {
 			vpid:   Vpid(42),
@@ -3691,6 +3738,33 @@ mod tests {
 				fn epoch(&self) -> u64 {
 					self.0.epoch()
 				}
+			}
+			{
+				let mut inner = crate::bash::MemStore::new();
+				inner
+					.put_blob(BlobSlot::Frames, b"contract frames")
+					.unwrap();
+				inner
+					.apply(Change::Put(Key::Proc(Vpid(42)), Record::Proc {
+						parent: None,
+						status: Some(7),
+					}))
+					.unwrap();
+				let before = inner.to_bytes();
+				let epoch = inner.epoch();
+				let batch = || {
+					vec![
+						RestoreWrite::DeleteBlob(BlobSlot::Frames),
+						RestoreWrite::Delete(KeyBuf::Proc(Vpid(42))),
+					]
+				};
+				let mut double = RefuseDel(&mut inner);
+				assert!(double.commit_restore(batch()).is_err(), "record deletion batch must refuse");
+				assert_eq!(double.0.to_bytes(), before);
+				assert_eq!(double.epoch(), epoch);
+				double.0.commit_restore(batch()).unwrap();
+				assert!(double.0.get_blob(BlobSlot::Frames).unwrap().is_none());
+				assert!(double.0.get(Key::Proc(Vpid(42))).unwrap().is_none());
 			}
 			let mut refusing = RefuseDel(&mut store);
 			root.write(&mut refusing, Change::Del(key));
@@ -3778,6 +3852,38 @@ mod tests {
 				self.inner.epoch()
 			}
 		}
+		for put in [false, true] {
+			let mut inner = MemStore::new();
+			inner
+				.put_blob(BlobSlot::Frames, b"contract frames")
+				.unwrap();
+			inner
+				.apply(Change::Put(Key::Proc(Vpid(42)), Record::Proc { parent: None, status: Some(7) }))
+				.unwrap();
+			let before = inner.to_bytes();
+			let epoch = inner.epoch();
+			let batch = || {
+				vec![
+					RestoreWrite::DeleteBlob(BlobSlot::Frames),
+					if put {
+						RestoreWrite::Put(KeyBuf::Proc(Vpid(42)), Record::Proc {
+							parent: None,
+							status: Some(23),
+						})
+					} else {
+						RestoreWrite::Delete(KeyBuf::Proc(Vpid(42)))
+					},
+				]
+			};
+			let mut double = Refusing { inner, refuse: true };
+			assert!(double.commit_restore(batch()).is_err(), "Proc put/delete batch must refuse");
+			assert_eq!(double.inner.to_bytes(), before);
+			assert_eq!(double.epoch(), epoch);
+			double.refuse = false;
+			double.commit_restore(batch()).unwrap();
+			assert!(double.inner.get_blob(BlobSlot::Frames).unwrap().is_none());
+			assert_eq!(double.inner.get(Key::Proc(Vpid(42))).unwrap().is_some(), put);
+		}
 		use Op::{Delete as D, Marker as M, Owned as O, Sync as S};
 		let rows: &[(&str, &[(Op, bool)], bool)] = &[
 			("older marker then refused deletion", &[(M, true), (D, true), (S, true)], false),
@@ -3820,10 +3926,7 @@ mod tests {
 				match op {
 					M => shell.k.root.write(
 						&mut store,
-						Change::Put(Key::Proc(vpid), Record::Proc {
-							parent: Some(super::super::DISOWNED),
-							status: None,
-						}),
+						Change::Put(Key::Proc(vpid), Record::Proc { parent: Some(vpid), status: None }),
 					),
 					O => shell
 						.k
@@ -4074,7 +4177,7 @@ mod tests {
 					let vpid = Vpid(42 + i as u32);
 					store.mask = if op % 2 == 0 { 0 } else { 3 };
 					want[i] = match (op / 2) % 3 {
-						0 => Some(Record::Proc { parent: Some(Vpid(0)), status: None }),
+						0 => Some(Record::Proc { parent: Some(vpid), status: None }),
 						1 => Some(Record::Proc { parent, status: Some(23 + i as i32) }),
 						_ => None,
 					};
@@ -4127,12 +4230,13 @@ mod tests {
 
 	#[test]
 	fn proc_retry_obsolete_replays_and_acknowledgements_cannot_replace_current_intents() {
-		let values = [
-			ProcIntent::Delete,
-			ProcIntent::Proc { parent: Some(super::super::DISOWNED), status: None },
-			ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(23) },
-		];
-		for key in [Key::Proc(Vpid(42)), Key::Proc(Vpid(43))] {
+		for vpid in [Vpid(42), Vpid(43)] {
+			let key = Key::Proc(vpid);
+			let values = [
+				ProcIntent::Delete,
+				ProcIntent::Proc { parent: Some(vpid), status: None },
+				ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(23) },
+			];
 			let other = if key == Key::Proc(Vpid(42)) {
 				Key::Proc(Vpid(43))
 			} else {

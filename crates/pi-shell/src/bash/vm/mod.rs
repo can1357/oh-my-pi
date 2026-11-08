@@ -534,11 +534,6 @@ impl ProcState {
 	}
 }
 
-/// The parent a running child's record names once its job was deleted
-/// (`disown`): no vproc has this vpid, so no `wait` reaches it, and its
-/// record goes when it ends ([`Kernel::proc_exited`]).
-pub const DISOWNED: Vpid = Vpid(0);
-
 impl Kernel {
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
@@ -754,6 +749,9 @@ impl Kernel {
 	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
 	/// parent): a subshell copies `$!`, not its parent's children.
 	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
+		if vp == vpid {
+			return false;
+		}
 		match store.get(Key::Proc(vpid)) {
 			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
 			Ok(_) => false,
@@ -804,7 +802,7 @@ impl Kernel {
 
 	/// Delete job `number` of `vp` (bash `delete_job`): `keep` keeps its
 	/// status for `wait PID` ([`proc::JobTable::delete`]); its finished
-	/// vproc's record goes, a running one's is disowned ([`DISOWNED`]), so
+	/// vproc's record goes, a running one's is disowned, so
 	/// `wait` no longer reaches it through `$!` or its pid.
 	pub fn delete_job(
 		&mut self,
@@ -822,16 +820,17 @@ impl Kernel {
 	/// it runs. The caller applies its dialect's job-table deletion rules.
 	pub fn forget_job_proc(&mut self, store: &mut dyn StateStore, job: &proc::Job) {
 		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
-			// Still running (`disown`): no shell waits for it now, so its
-			// record names no parent and goes when it ends. A job disowned
-			// before its first turn has no record yet; `adopt` keeps this one.
+			// A live child cannot parent itself: roots have no parent and
+			// children and job-control parents have distinct allocated ids.
+			// This marker cannot collide with a configured root pid. Adoption
+			// preserves it until exit deletes the record.
 			let running = match store.get(Key::Proc(job.vpid)) {
 				Ok(Some(Record::Proc { status, .. })) => status.is_none(),
 				Ok(_) => !matches!(job.state, proc::JobState::Done(_)),
 				Err(_) => false,
 			};
 			if running {
-				let rec = Record::Proc { parent: Some(DISOWNED), status: None };
+				let rec = Record::Proc { parent: Some(job.vpid), status: None };
 				self
 					.root
 					.write(store, Change::Put(Key::Proc(job.vpid), rec));

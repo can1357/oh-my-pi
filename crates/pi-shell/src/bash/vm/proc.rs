@@ -368,7 +368,7 @@ pub struct JobTable {
 	pub subshell: bool,
 	/// What the shell keeps about children that ended (bash's `bgpids`).
 	/// Boxed: a vproc that starts no job keeps nothing (idle vproc ≤ 2 KiB).
-	/// Stored separately from the version-29 job-table layout.
+	/// Stored separately from the job-table wire layout.
 	#[serde(skip)]
 	pub ended:    Option<Box<Ended>>,
 }
@@ -1911,4 +1911,34 @@ pub const fn vproc_layout() -> [(&'static str, usize); 5] {
 		("ScratchIo", size_of::<ScratchIo>()),
 		("ExecState", size_of::<ExecState>()),
 	]
+}
+
+#[test]
+fn kept_statuses_evict_only_the_oldest_after_32768_children() {
+	// Seed the boundary without the quadratic cost of 32,767 insertions.
+	let mut jobs = JobTable {
+		ended: Some(Box::new(Ended {
+			kept: (1..=32_767)
+				.map(|pid| KeptStatus { vpid: Vpid(pid), os_pid: None, status: 7 })
+				.collect(),
+			..Default::default()
+		})),
+		..Default::default()
+	};
+	jobs.keep(KeptStatus { vpid: Vpid(32_768), os_pid: None, status: 8 });
+	assert_eq!(jobs.kept_status(1), Some(7), "no eviction below the 32,768-status ceiling");
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
+
+	jobs.keep(KeptStatus { vpid: Vpid(32_769), os_pid: None, status: 9 });
+	assert_eq!(jobs.kept_status(1), None, "the oldest status must be evicted at capacity");
+	assert_eq!(jobs.kept_status(2), Some(7));
+	assert_eq!(jobs.kept_status(32_768), Some(8));
+	assert_eq!(jobs.kept_status(32_769), Some(9));
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
+
+	jobs.keep(KeptStatus { vpid: Vpid(2), os_pid: Some(90_002), status: 23 });
+	assert_eq!(jobs.kept_status(2), Some(23));
+	assert_eq!(jobs.kept_status(90_002), Some(23));
+	assert_eq!(jobs.kept_status(3), Some(7), "replacement must not evict another child");
+	assert_eq!(jobs.ended.as_ref().unwrap().kept.len(), 32_768);
 }

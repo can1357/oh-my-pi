@@ -17,13 +17,16 @@ use serde::{Deserialize, Serialize};
 const BASE: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/base-parent-wait.image");
 const UNKNOWN: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-root-kept.image");
-const UNKNOWN_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-root-kept.record");
-const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-subshell-kept.image");
-const UNKNOWN_CHILD_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/unknown-subshell-kept.record");
+	include_bytes!("fixtures/format-vocabulary/future-unknown-18.18.2-ir17/unknown-root-kept.image");
+const UNKNOWN_RECORD: &[u8] = include_bytes!(
+	"fixtures/format-vocabulary/future-unknown-18.18.2-ir17/unknown-root-kept.record"
+);
+const UNKNOWN_CHILD: &[u8] = include_bytes!(
+	"fixtures/format-vocabulary/future-unknown-18.18.2-ir17/unknown-subshell-kept.image"
+);
+const UNKNOWN_CHILD_RECORD: &[u8] = include_bytes!(
+	"fixtures/format-vocabulary/future-unknown-18.18.2-ir17/unknown-subshell-kept.record"
+);
 const NEWER: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/18.18.2-ir17/newer-parent-wait.image");
 const FOREIGN: &[u8] =

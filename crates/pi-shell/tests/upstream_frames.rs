@@ -27,20 +27,19 @@ fn assert_upstream_restore(parent_wait: bool, runs: u32) {
 	assert_eq!(report, RestoreReport { vprocs: 2, runs, ..RestoreReport::default() });
 }
 
-// Each upstream-written pair runs
-// KEEP=preserved; f(){ hold; return 23; }; f & p=$!; <tail>
-// and externalizes after the child's `hold` call is pending. Writer shas and
-// crate versions are recorded at the shared fixture consumer. A crate version
+// Current upstream pairs suspend with a background function's `hold` pending.
+// The wait variant retains its parent run; the no-wait parent has finished.
+// Writer sources and crate versions accompany the fixtures. A crate version
 // bump changes Engine::build_id and requires a new pair, not an identity edit.
 #[test]
 fn upstream_frames_with_active_child_and_parent_wait_restore_losslessly() {
-	// tail: wait "$p"; upstream reports two vprocs and one unfinished run.
+	// tail: wait "$p"; echo child=$?; two vprocs and one unfinished run.
 	assert_upstream_restore(true, 1);
 }
 
 #[test]
 fn upstream_frames_with_active_child_without_parent_wait_restore_losslessly() {
-	// tail: :; upstream reports two vprocs and no unfinished root run.
+	// The parent is done: two vprocs and no unfinished root run.
 	assert_upstream_restore(false, 0);
 }
 
@@ -71,6 +70,7 @@ fn restored_upstream_shell_retains_new_statuses_without_optional_job_records() {
 		}
 	}
 	assert!(idle, "restored child must finish");
+	assert_eq!(host.stdout.bytes(), b"child=23\n", "the current fixture resumes its wait tail");
 	let run = shell.submit(Script::command(
 		br#"echo KEEP=$KEEP; wait "$p"; echo child=$?; wait; wait "$p" 2>/dev/null; echo forgotten=$?"#.as_slice(),
 	));
@@ -87,7 +87,7 @@ fn restored_upstream_shell_retains_new_statuses_without_optional_job_records() {
 		}
 	}
 	assert!(done, "restored shell must finish the status query");
-	assert_eq!(host.stdout.bytes(), b"KEEP=preserved\nchild=23\nforgotten=127\n");
+	assert_eq!(host.stdout.bytes(), b"child=23\nKEEP=preserved\nchild=23\nforgotten=127\n");
 }
 
 #[test]
