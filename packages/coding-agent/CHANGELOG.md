@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Consecutive identical generic aborts now exhaust after three model attempts instead of the full configured retry budget, while preserving the watchdog and first two retries
+- Same-model retries now stop after three identical generic aborts. The watchdog and first two retries remain intact ([#18535](https://github.com/can1357/oh-my-pi/pull/18535) by [@nick-maderight](https://github.com/nick-maderight))
 
 ## [18.18.2] - 2026-11-08
 
