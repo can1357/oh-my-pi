@@ -220,6 +220,9 @@ async function factoryRequestBody(model: Model<"factory-droid-agent">, context: 
 	await streamFactoryDroid(model, context, {
 		apiKey: `${header}.${claims}.sig`,
 		fetch: fetch as typeof globalThis.fetch,
+		// The canned reply is empty, which the provider would otherwise retry
+		// twice with real waits; only the first request's body is read here.
+		acceptEmptyResponse: true,
 	}).result();
 	if (!body) throw new Error("Factory request was not sent");
 	return body;

@@ -13506,6 +13506,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			 * `notice` event; for hosts that re-render the transcript after switching.
 			 */
 			onModelFallback?: (warning: string) => void;
+			/** Receives what to show while the session comes out of the archive. */
+			onArchiveRestore?: (line: string) => void;
 		},
 	): Promise<boolean> {
 		const explicitModel = options?.model;
@@ -13610,7 +13612,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			await this.sessionManager.setSessionFile(sessionPath);
+			await this.sessionManager.setSessionFile(sessionPath, { onArchiveRestore: options?.onArchiveRestore });
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
 			const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
