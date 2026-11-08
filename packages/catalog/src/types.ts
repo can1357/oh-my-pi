@@ -563,6 +563,15 @@ export interface OpenAICompat {
 	 */
 	supportsConfigurationUpdate?: boolean;
 	/**
+	 * Whether the Responses endpoint accepts mid-conversation `additional_tools`
+	 * input items, so a tool that becomes active later is added at that point
+	 * while the declared tools (and the cached prompt prefix) stay put.
+	 * Default: rule-detected. Set `false` for custom `openai-responses` /
+	 * `openai-codex-responses` endpoints that reject the item; every request
+	 * then declares its current tools.
+	 */
+	supportsMidConversationToolChanges?: boolean;
+	/**
 	 * Whether the Responses WebSocket accepts `response.steer`, which queues user
 	 * input into the in-flight response (GPT-6 family). Default: rule-detected.
 	 * Set `false` for proxies that reject the event; steering then waits for the
@@ -1100,6 +1109,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
 			| "supportsConfigurationUpdate"
+			| "supportsMidConversationToolChanges"
 			| "supportsSteering"
 			| "stripImageInput"
 			| "whenThinking"
@@ -1142,6 +1152,12 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * support the item type.
 	 */
 	supportsConfigurationUpdate: boolean;
+	/**
+	 * Whether a tool that becomes active mid-conversation may be added through an
+	 * `additional_tools` input item while the declared tools stay byte-stable
+	 * for prompt caching. Rule-owned: GPT-6 family.
+	 */
+	supportsMidConversationToolChanges: boolean;
 	/**
 	 * Whether the WebSocket transport may send `response.steer` to deliver user
 	 * input into the in-flight response. Rule-owned: GPT-6 family.

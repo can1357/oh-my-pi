@@ -65,6 +65,15 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
+	// A mid-conversation `additional_tools` input item adds a tool at that
+	// point; tools declared earlier and the cached prefix stay put (OpenAI's
+	// tool-search guide). Verified on the Codex backend for the GPT-6 family;
+	// proxies stay off until checked.
+	on "openai" "openai-codex" {
+		revision ">=6 <7" {
+			supports-mid-conversation-tool-changes #true
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

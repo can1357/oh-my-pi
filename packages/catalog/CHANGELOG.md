@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `supportsMidConversationToolChanges` compat axis for Responses models, on for the GPT-6 family on the `openai` and `openai-codex` hosts ([#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4))
+
 ### Fixed
 
 - Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.

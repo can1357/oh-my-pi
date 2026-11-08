@@ -113,6 +113,12 @@ import {
 	planStableOpenAIEffort,
 	resolveOpenAIEffortControlState,
 } from "./openai-configuration-update";
+import {
+	type OpenAIToolControlState,
+	planStableOpenAITools,
+	type ResponsesWireTool,
+	resolveOpenAIToolControlState,
+} from "./openai-tool-additions";
 import type {
 	ResponseComputerToolCall,
 	ResponseCustomToolCall,
@@ -450,6 +456,8 @@ export interface CodexProviderSessionState extends ProviderSessionState {
 	metadataSessions: Map<string, CodexMetadataSessionState>;
 	/** `configuration_update` effort baselines, keyed by model + session. */
 	effortControls: Map<string, OpenAIEffortControlState<ReasoningConfig["effort"]>>;
+	/** Declared tools and `additional_tools` additions, keyed by model + session. */
+	toolControls: Map<string, OpenAIToolControlState>;
 }
 
 /** Request classification encoded in Codex turn metadata. */
@@ -1429,8 +1437,41 @@ export async function buildTransformedCodexRequestBody(
 	};
 
 	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
+	applyCodexStableTools(model, body, options);
 	applyCodexStableEffort(model, body, options);
 	return body;
+}
+
+/**
+ * Keep the declared tools byte-stable across a conversation and carry later
+ * additions as `additional_tools` items. Responses Lite declares the tools in
+ * its leading `additional_tools` item, the full transport in `tools`. A forced
+ * tool choice that isolates one declaration (`"required"`) is left alone.
+ * Same session requirements as {@link applyCodexStableEffort}.
+ */
+function applyCodexStableTools(
+	model: Model<"openai-codex-responses">,
+	body: RequestBody,
+	options: OpenAICodexResponsesOptions | undefined,
+): void {
+	if (!model.compat.supportsMidConversationToolChanges || options?.codexCompaction || !body.input) return;
+	if (body.tool_choice === "required") return;
+	const providerState = getCodexProviderSessionState(options?.providerSessionState);
+	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
+	if (!providerState || !sessionId) return;
+	const lead = body.input[0];
+	const leading = lead?.type === "additional_tools" ? (lead as { tools: ResponsesWireTool[] }) : undefined;
+	const tools = leading ? leading.tools : Array.isArray(body.tools) ? (body.tools as ResponsesWireTool[]) : undefined;
+	if (!tools?.length) return;
+	const state = resolveOpenAIToolControlState(
+		providerState.toolControls,
+		id => `${model.id}\u0000${id}`,
+		sessionId,
+		normalizeOpenAIPromptCacheKey(options?.parentSessionId),
+	);
+	const declared = planStableOpenAITools(state, body.input, tools);
+	if (leading) leading.tools = declared;
+	else body.tools = declared;
 }
 
 /**

@@ -272,7 +272,10 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-eager-tool-input-streaming": wire("supportsEagerToolInputStreaming", ["anthropic"]),
 	"supports-long-cache-retention": wire("supportsLongCacheRetention", ["anthropic"]),
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
-	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
+	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", [
+		"anthropic",
+		"openai-responses",
+	]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
 	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic", "bedrock"]),
 	"supports-message-threads": wire("supportsMessageThreads", ["anthropic"]),
