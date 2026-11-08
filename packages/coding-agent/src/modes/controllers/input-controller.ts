@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
@@ -1219,12 +1220,22 @@ export class InputController {
 				try {
 					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
 				} catch (error) {
-					// Detached mode commands (plan/vibe/goal/guided-goal) rethrow so
-					// this caller — the one that took the draft's images out of the
-					// editor before dispatch — restores the submission and reports
-					// the error, mirroring `handleFollowUp`'s Ctrl+Enter path.
-					if (!draftDetached) throw error;
-					restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+					// Detached mode commands (plan/vibe/goal/guided-goal) and the approve chord
+					// own their detached submission: restore it here instead of letting the throw
+					// answer the approval. Ordinary Enter rethrows for the caller to handle.
+					if (!draftDetached && !options?.approveSteer) throw error;
+					if (draftDetached) {
+						restoreDetachedDraft(this.ctx.editor, text, inputImages, inputImageLinks);
+					} else if (!this.ctx.editor.getText()) {
+						if (inputImages?.length && this.ctx.editor.pendingImages.length === 0) {
+							this.ctx.editor.pendingImages = [...inputImages];
+							this.ctx.editor.pendingImageLinks = inputImageLinks
+								? [...inputImageLinks]
+								: inputImages.map(() => undefined);
+							this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+						}
+						this.ctx.editor.setCollapsedText(submittedText);
+					}
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 					return true;
 				}
@@ -1277,7 +1288,7 @@ export class InputController {
 					restore: () => this.#restoreResetSubmission(submittedText),
 				})
 			) {
-				return;
+				return true;
 			}
 
 			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
@@ -1295,10 +1306,17 @@ export class InputController {
 					this.ctx.queueCompactionMessage(text, "steer", images);
 					return true;
 				}
-				// Raise the steering baseline before dispatch so the deny-watch does not count
-				// the dispatched message as steering above the approval.
-				const undoBaseline = options?.approveSteer?.beforeSkillDispatch?.();
-				const outcome = await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks);
+				// Record messages pushed by an approved skill dispatch before the queue
+				// listeners fire, so the approval deny-watch ignores them instead of
+				// treating the dispatched skill as a denying steer.
+				const outcome = await this.#invokeSkillCommand(
+					text,
+					"steer",
+					inputImages,
+					inputImageLinks,
+					false,
+					options?.approveSteer?.onSkillQueued,
+				);
 				if (outcome === "dispatched") {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
@@ -1306,9 +1324,9 @@ export class InputController {
 					if (this.ctx.loopModeEnabled) {
 						this.ctx.armLoopAutoSubmit();
 					}
-					return true;
+					// The approve chord settles its approval; ordinary submits consume the draft.
+					return options?.approveSteer ? false : true;
 				}
-				undoBaseline?.();
 				// A throw stops every submit path. A decline keeps the chord pending, and
 				// ordinary submits send the restored text as a message.
 				if (outcome === "failed") return true;
@@ -1392,15 +1410,11 @@ export class InputController {
 				return true;
 			}
 
-			if (options?.approveSteer) {
-				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				await options.approveSteer.steer(text, images);
-				return false;
-			}
-
-			// If streaming, use prompt() with steer behavior
-			// This handles extension commands (execute immediately), prompt template expansion, and queueing
-			if (this.ctx.session.isStreaming) {
+			// If streaming, use prompt() with steer behavior. The approve chord shares
+			// the same bookkeeping but queues through the approval callback instead of a
+			// model prompt; a failed chord restores the draft and returns the pending
+			// marker so the approval dialog stays open.
+			if (this.ctx.session.isStreaming || options?.approveSteer) {
 				this.ctx.editor.addToHistory(text);
 				// Enter already cleared the editor synchronously. A later clear here
 				// can erase the tail of an unbracketed paste arriving after Enter.
@@ -1412,10 +1426,17 @@ export class InputController {
 				// (a user-role `message_start` event) leaves any draft the user has
 				// typed since queuing intact. Same protection as #783, applied to
 				// the streaming/queue path.
+				let forwarded = false;
 				try {
-					const forwarded = await this.ctx.withLocalSubmission(
+					forwarded = await this.ctx.withLocalSubmission(
 						text,
-						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
+						async () => {
+							if (options?.approveSteer) {
+								await options.approveSteer.steer(text, images);
+								return true;
+							}
+							return this.ctx.session.prompt(text, { streamingBehavior: "steer", images });
+						},
 						{ imageCount: images?.length ?? 0 },
 					);
 					// An inline `/loop` body arms the loop only after dispatch
@@ -1423,22 +1444,26 @@ export class InputController {
 					// retain a body whose dispatch rejects, resubmitting a failed
 					// prompt after every yield. A rejection leaves prior loop
 					// state untouched, so the previous body (if any) survives.
-					if (submittedMode === "loop" && forwarded) this.ctx.setLoopPrompt(text);
+					if (submittedMode === "loop" && forwarded && !options?.approveSteer) this.ctx.setLoopPrompt(text);
 				} catch (error) {
 					// Don't lose the queued steer draft: restore images then the collapsed
-					// text so chip tokens (and band cards) survive the retry.
-					if (images && images.length > 0) {
-						this.ctx.editor.pendingImages = [...images];
-						this.ctx.editor.pendingImageLinks = inputImageLinks
-							? [...inputImageLinks]
-							: images.map(() => undefined);
-						this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+					// text so chip tokens (and band cards) survive the retry. A newer draft
+					// typed while dispatch awaited owns the composer, so restore nothing.
+					if (!this.ctx.editor.getText()) {
+						if (images && images.length > 0 && this.ctx.editor.pendingImages.length === 0) {
+							this.ctx.editor.pendingImages = [...images];
+							this.ctx.editor.pendingImageLinks = inputImageLinks
+								? [...inputImageLinks]
+								: images.map(() => undefined);
+							this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+						}
+						this.ctx.editor.setCollapsedText(text);
 					}
-					this.ctx.editor.setCollapsedText(text);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
+				if (options?.approveSteer) return !forwarded;
 				return;
 			}
 			// Normal message submission
@@ -1917,6 +1942,7 @@ export class InputController {
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
+		onPromptQueued?: (queued: readonly AgentMessage[]) => void,
 	): Promise<"dispatched" | "not-dispatched" | "failed" | "not-skill"> {
 		if (!isKnownSkillCommand(this.ctx, text)) return "not-skill";
 		const draftImages = images && images.length > 0 ? [...images] : undefined;
@@ -1946,6 +1972,7 @@ export class InputController {
 				imageLinks: draftImageLinks,
 				optimistic: true,
 				propagateErrors: true,
+				onPromptQueued,
 			});
 			if (!dispatched) {
 				restoreDraft();

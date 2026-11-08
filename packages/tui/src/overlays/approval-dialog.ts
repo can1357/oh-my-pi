@@ -207,6 +207,7 @@ export class ApprovalDialogComponent implements Component {
 
 	dispose(): void {
 		this.#closed = true;
+		this.#commandPending = false;
 		this.#countdown?.dispose();
 		this.#panel.dispose();
 	}
@@ -214,6 +215,25 @@ export class ApprovalDialogComponent implements Component {
 	handleInput(keyData: string): void {
 		if (this.#closed) return;
 		this.#restartCountdown();
+		if (this.#commandPending) {
+			if (matchesAppApprove(keyData)) return;
+			if (this.#full && matchesAppToolsExpand(keyData)) {
+				this.#toggleExpanded();
+				return;
+			}
+			const pendingDraft = this.options.draft;
+			// Ctrl+C still clears a composer draft before it would answer the pending prompt.
+			if (pendingDraft?.hasDraft() && getKeybindings().matches(keyData, "app.clear")) {
+				this.#editDraft(pendingDraft, keyData);
+				return;
+			}
+			if (matchesSelectCancel(keyData)) {
+				this.#finish("deny");
+				return;
+			}
+			if (pendingDraft) this.#editDraft(pendingDraft, keyData);
+			return;
+		}
 		if (matchesAppApprove(keyData)) {
 			// A paste still landing counts as empty, so the chord waits.
 			const draft = this.options.draft;
@@ -433,31 +453,56 @@ export class ApprovalDialogComponent implements Component {
 
 	#finish(answer: ApprovalAnswer): void {
 		if (this.#closed) return;
-		this.#closed = true;
+		// A second Approve while a dispatched command owns the keys is meaningless;
+		// Esc/grants/session still answer the pending prompt.
+		if (answer === "once" && this.#commandPending) return;
 		if (answer === "once") {
-			// A dispatched command keeps the approval pending, so the prompt stays live.
+			let result: void | Promise<boolean> | undefined;
+			try {
+				result = this.callbacks.onApprove();
+			} catch {
+				this.#closed = true;
+				this.#commandPending = false;
+				this.#countdown?.dispose();
+				this.callbacks.onDeny();
+				return;
+			}
+			if (!(result instanceof Promise)) {
+				// A synchronous callback has already answered; async callbacks keep the
+				// prompt live until their dispatch settles.
+				this.#closed = true;
+				this.#commandPending = false;
+				this.#countdown?.dispose();
+				return;
+			}
+			// A dispatched command keeps the approval pending, so the prompt stays live and
+			// only the answer keys are held while the dispatch owns them.
 			this.#commandPending = true;
-			const result = this.callbacks.onApprove();
-			void Promise.resolve(result).then(
+			void result.then(
 				keep => {
 					this.#commandPending = false;
+					if (this.#closed) return;
 					if (keep === true) {
-						this.#closed = false;
 						this.#restartCountdown();
 						this.options.tui?.requestRender();
 						return;
 					}
+					this.#closed = true;
 					this.#countdown?.dispose();
 				},
 				() => {
 					// The callback threw without settling. Deny the call.
 					this.#commandPending = false;
+					if (this.#closed) return;
+					this.#closed = true;
 					this.#countdown?.dispose();
 					this.callbacks.onDeny();
 				},
 			);
 			return;
 		}
+		this.#closed = true;
+		this.#commandPending = false;
 		this.#countdown?.dispose();
 		if (answer === "session") this.options.session?.onApprove();
 		else if (answer.startsWith("grant")) {

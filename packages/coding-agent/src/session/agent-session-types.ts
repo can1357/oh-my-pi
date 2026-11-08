@@ -484,11 +484,11 @@ export interface PromptOptions {
 	 */
 	onPromptAdmitted?: () => void;
 	/**
-	 * Called synchronously when this prompt is pushed onto the steer or
+	 * Called synchronously just before this prompt is pushed onto the steer or
 	 * follow-up queue, just before {@link onPromptAdmitted}, with the messages it
-	 * pushed (its hidden companions, then the prompt), so a caller can tell them
-	 * from other queued work. Not called when the prompt starts its own turn or
-	 * is queued as an aside.
+	 * will push (its hidden companions, then the prompt), so queue listeners can
+	 * tell them from other queued work. Not called when the prompt starts its own
+	 * turn or is queued as an aside.
 	 */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
@@ -513,7 +513,7 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
-	/** Called synchronously with the messages pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
+	/** Called synchronously just before the messages are pushed onto the follow-up queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 }
 
@@ -521,7 +521,7 @@ export interface FollowUpOptions {
 export interface SteerOptions {
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
-	/** Called synchronously with the messages pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
+	/** Called synchronously just before the messages are pushed onto the steering queue. See {@link PromptOptions.onPromptQueued}. */
 	onPromptQueued?: PromptOptions["onPromptQueued"];
 	/** Approval context shown to the model only. */
 	approvalLine?: string;

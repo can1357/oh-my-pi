@@ -527,6 +527,49 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
+	it("approval: keys reach the composer while a dispatch is still in flight", async () => {
+		const base = Date.now();
+		let clock = base;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => clock);
+		try {
+			let draft = "";
+			const routed: string[] = [];
+			const gate = Promise.withResolvers<boolean>();
+			const callbacks = { onApprove: vi.fn(() => gate.promise), onDeny: vi.fn() };
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				draft: {
+					hasDraft: () => draft.length > 0,
+					pasteInFlight: () => false,
+					handleInput: key => {
+						routed.push(key);
+						if (key.length === 1 && key >= " ") draft += key;
+					},
+				},
+			});
+			clock = base + APPROVE_ARM_MS + 1;
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			// The dispatched command is still awaiting: typing belongs to the composer,
+			// and Esc answers the pending approval instead of dropping the keystrokes.
+			dialog.handleInput("x");
+			expect(routed).toEqual(["x"]);
+			dialog.handleInput("\x1b");
+			expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			gate.resolve(true);
+			await Promise.resolve();
+			await Promise.resolve();
+			dialog.handleInput("y");
+			expect(routed).toEqual(["x"]);
+
+			dialog.dispose();
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
 	it("approval: the deadline waits while a dispatched command owns the keys", async () => {
 		vi.useFakeTimers();
 		try {
@@ -550,6 +593,34 @@ describe("dialogs under a native surface", () => {
 			vi.advanceTimersByTime(1_000);
 			expect(onTimeout).not.toHaveBeenCalled();
 			dialog.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("approval: disposing while a dispatch is pending does not restart the countdown", async () => {
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<boolean>();
+			const callbacks = { onApprove: vi.fn(() => gate.promise), onDeny: vi.fn() };
+			const onTimeout = vi.fn();
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				timeout: 1_000,
+				onTimeout,
+			});
+			vi.advanceTimersByTime(APPROVE_ARM_MS + 1);
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			// The approval is torn down while the chord's dispatch still awaits.
+			dialog.dispose();
+			gate.resolve(true);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			vi.advanceTimersByTime(1_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}

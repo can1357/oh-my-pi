@@ -75,9 +75,15 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 			getQueuedMessages: () => ({ steering: steeringChips(), followUp: [], liveSteered: 0 }),
 			subscribe: (l: (e: { type: string; steering?: string[] }) => void) =>
 				agent.onQueueChange(() => l({ type: "queue_update", steering: steeringChips() })),
-			steer: (text: string) => {
+			steer: async (
+				text: string,
+				_images?: unknown,
+				options?: { onPromptQueued?: (queued: readonly AgentMessage[]) => void },
+			) => {
+				const message = { role: "user", content: text, timestamp: Date.now() } as AgentMessage;
+				options?.onPromptQueued?.([message]);
 				steerMessages.push(text);
-				agent.steer({ role: "user", content: text, timestamp: Date.now() });
+				agent.steer(message);
 			},
 			buildUserSkillPrompt: async (skill: Pick<Skill, "name" | "filePath" | "baseDir">, input: SkillPromptInput) => {
 				const loaded = await loadSkillPrompt(skill);
@@ -87,12 +93,17 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 				if (harnessOptions?.skillDispatchFails) throw new Error("skill dispatch failed");
 				sentSkillMessages.push({ message, options: messageOptions });
 				// Real dispatch queues the custom message as steering, which the deny-watch must not count.
-				agent.steer({
+				const queued = {
 					role: "custom",
 					customType: message.customType ?? "skill-prompt",
 					content: message.content ?? "",
 					timestamp: Date.now(),
-				} as AgentMessage);
+				} as AgentMessage;
+				if (messageOptions && typeof messageOptions === "object" && "onPromptQueued" in messageOptions) {
+					const callback = messageOptions.onPromptQueued;
+					if (typeof callback === "function") callback([queued]);
+				}
+				agent.steer(queued);
 				return true;
 			},
 		},
@@ -103,6 +114,8 @@ function makeHarness(harnessOptions?: { inputHook?: (text: string) => string; sk
 		clearOptimisticSkillMessage: vi.fn(),
 		optimisticSkillMessagePending: false,
 		flushPendingBashComponents: vi.fn(),
+		withLocalSubmission: async (_text: string, fn: () => Promise<unknown>) => await fn(),
+		updatePendingMessagesDisplay: vi.fn(),
 		closeLinkBrowser: vi.fn(),
 		rerenderInLinkBrowser: vi.fn(),
 		rebuildTranscriptScrollback: vi.fn(),

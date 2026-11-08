@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -755,13 +756,14 @@ export interface PasteOptions {
 export interface SubmitOptions {
 	/**
 	 * Set by the approve-and-steer chord. A non-command note runs the input hooks, then
-	 * `steer` queues the hook-rewritten text and images. A command dispatches as usual.
-	 * `beforeSkillDispatch` raises the steering baseline before an inline skill dispatch,
-	 * and the returned callback undoes the raise when the dispatch fails.
+	 * `steer` queues the hook-rewritten text and images; failures propagate to the submit
+	 * path, which restores the draft and reports the error. A command dispatches as usual.
+	 * `onSkillQueued` records messages pushed by an approved `/skill:` dispatch so the
+	 * approval deny-watch treats them as part of the approval, not as a denying steer.
 	 */
 	approveSteer?: {
-		steer: (text: string, images?: ImageContent[]) => Promise<boolean>;
-		beforeSkillDispatch?: () => (() => void) | undefined;
+		steer: (text: string, images?: ImageContent[]) => Promise<void>;
+		onSkillQueued?: (queued: readonly AgentMessage[]) => void;
 	};
 }
 
@@ -5327,6 +5329,7 @@ export class Editor implements Component, Focusable {
 		return this.#visibleAutocompleteList() !== undefined;
 	}
 
+	/** Dismisses an open autocomplete menu from a submit path that bypasses `submit()`. */
 	cancelAutocomplete(): void {
 		this.#cancelAutocomplete();
 	}
