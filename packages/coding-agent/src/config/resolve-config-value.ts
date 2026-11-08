@@ -7,6 +7,14 @@ const commandFailureRetryAt = new Map<string, number>();
 const commandInFlight = new Map<string, Promise<string | undefined>>();
 const commandGeneration = new Map<string, number>();
 
+/**
+ * The one re-mint in flight per command. A credential is shared by every
+ * request a session has in the air, so a provider that starts refusing it
+ * refuses all of them at once; without this they would each discard the cached
+ * value and run the mint again. See {@link remintCommandConfig}.
+ */
+const commandRemintInFlight = new Map<string, Promise<string | undefined>>();
+
 /** Materialize request headers for models and discovery without property-access side effects. */
 export type ConfigHeaderResolver = (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
 /** One raw header layer or previously composed request-time resolver. */
@@ -34,6 +42,7 @@ export function invalidateCommandConfig(valueConfig: string | undefined): void {
 	commandResultCache.delete(command);
 	commandFailureRetryAt.delete(command);
 	commandInFlight.delete(command);
+	commandRemintInFlight.delete(command);
 	commandGeneration.set(command, (commandGeneration.get(command) ?? 0) + 1);
 }
 
@@ -49,6 +58,42 @@ export function invalidateAllCommandConfigs(): void {
 	commandResultCache.clear();
 	commandFailureRetryAt.clear();
 	commandInFlight.clear();
+	commandRemintInFlight.clear();
+}
+
+/**
+ * Discard a command-backed value's cached stdout and run the command again,
+ * at most once at a time: a caller that asks while a re-mint is in flight
+ * joins that one run instead of starting its own. Ten requests sharing one
+ * credential, refused together, therefore cost one execution of the mint and
+ * ten retries — a mint can be an IAM `generateIdToken` call, and a burst of
+ * those per session across a fleet is what this bounds.
+ *
+ * The shared run is decisive for every waiter: a mint that fails resolves them
+ * all to `undefined` rather than leaving them waiting, and the entry is
+ * dropped as soon as the run settles, so the next refusal starts a fresh
+ * attempt instead of joining a dead promise. {@link invalidateCommandConfig}
+ * also clears the failure backoff, so a failed re-mint does not park the
+ * credential for the backoff window.
+ *
+ * Callers that merely want the value dropped use
+ * {@link invalidateCommandConfig}; this one is for the moment a provider has
+ * refused the credential and the fresh value is needed now.
+ */
+export function remintCommandConfig(valueConfig: string | undefined): Promise<string | undefined> {
+	if (!isCommandConfigValue(valueConfig)) return Promise.resolve(undefined);
+	const command = commandKey(valueConfig);
+	const joined = commandRemintInFlight.get(command);
+	if (joined) return joined;
+	invalidateCommandConfig(valueConfig);
+	// `executeCommand` registers its run in `commandInFlight` before its first
+	// await, so every later resolve of this command joins it too.
+	const started = executeCommand(valueConfig);
+	const tracked = started.finally(() => {
+		if (commandRemintInFlight.get(command) === tracked) commandRemintInFlight.delete(command);
+	});
+	commandRemintInFlight.set(command, tracked);
+	return tracked;
 }
 
 async function executeCommand(valueConfig: string): Promise<string | undefined> {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `credentialRejectionVerdict` reads whether a failed request's provider refused the *credential* it carried, from the provider's own structured error class (`error.type`/`error.code` on a 401) first and its documented wording only as a fallback
+
+### Fixed
+
+- A credential re-minted because the provider said it refused the one a request sent is now tried, even when the mint hands back the same bytes; a request still gets exactly one such retry
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

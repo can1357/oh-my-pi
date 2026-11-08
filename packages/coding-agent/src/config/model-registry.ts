@@ -69,6 +69,7 @@ import {
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
 	isCommandConfigValue,
+	remintCommandConfig,
 	resolveConfigHeaders,
 	resolveConfigValue,
 } from "./resolve-config-value";
@@ -518,6 +519,36 @@ export class ModelRegistry {
 		this.#owner?.invalidateCommandConfigs(provider);
 		this.#invalidateLocalProviderCommandConfigs(provider);
 		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+	}
+
+	/**
+	 * Re-mint every command-backed value this provider carries, after the
+	 * provider refused the credential one of them produced.
+	 *
+	 * The same work {@link #invalidateProviderCommandConfigs} asks for, but
+	 * single-flighted per command (see `remintCommandConfig`): a session's
+	 * in-flight requests share one credential, so a provider that starts
+	 * refusing it refuses them together, and invalidate-then-resolve ran the
+	 * mint once per refused request. Awaited, so the credential the retry
+	 * resolves is the re-minted one rather than whatever the cache happens to
+	 * hold when the resolve lands.
+	 */
+	async #remintProviderCommandConfigs(provider: string): Promise<void> {
+		this.#owner?.invalidateCommandConfigs(provider);
+		this.#recordMirrorChange({ kind: "invalidateCommands", provider });
+		const configs = this.#providerCommandConfigs(provider);
+		if (configs.length === 0) return;
+		await Promise.all(configs.map(config => remintCommandConfig(config)));
+	}
+
+	/** Every `!command` value `provider` carries: its apiKey plus header commands. */
+	#providerCommandConfigs(provider: string): string[] {
+		const configs = new Set<string>();
+		const apiKey = this.#customProviderApiKeys.get(provider);
+		if (isCommandConfigValue(apiKey)) configs.add(apiKey);
+		for (const config of this.#commandConfigsByProvider.get(provider) ?? []) configs.add(config);
+		for (const config of this.#runtimeCommandConfigsByProvider.get(provider) ?? []) configs.add(config);
+		return [...configs];
 	}
 
 	/** Drop only this process's cached results for `provider`'s command-backed values. */
@@ -3733,7 +3764,7 @@ export class ModelRegistry {
 		options?: AuthApiKeyOptions,
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
-		if (options?.forceRefresh) this.#invalidateProviderCommandConfigs(provider);
+		if (options?.forceRefresh) await this.#remintProviderCommandConfigs(provider);
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}

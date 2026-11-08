@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Requests that share a `!command` credential and are refused together now cost one run of the command, not one per request: the re-mint a 401 asks for is single-flight per command, so ten rejected requests make one call to the credential's issuer and ten retries. A re-mint that fails answers every waiter instead of leaving them waiting, and the next rejection starts a fresh attempt rather than joining the failed one.
+- A 401 whose own error class says it is not an authentication failure no longer re-runs a provider's `!command` credentials
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes

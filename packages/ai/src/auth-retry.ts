@@ -55,6 +55,16 @@ export interface ResolvedApiKey {
 	 * already sent it before that block.
 	 */
 	afterSiblingWait?: boolean;
+	/**
+	 * Resolved after the credential was re-minted because the provider said it
+	 * had refused the one the request sent. The driver accepts this bearer even
+	 * when the mint handed back the same bytes: the request has not yet been
+	 * tried with a credential minted *after* that refusal, and no client can
+	 * tell from the bytes whether the issuer renewed it. Bounded to one extra
+	 * attempt by `AuthRetryKeyState.refreshedCurrent`, which lets the
+	 * refresh-same step run once per logical operation.
+	 */
+	afterRemint?: boolean;
 	/** Non-secret request scope belonging to this bearer, replaced on account rotation. */
 	oauthIdentity?: OAuthRequestIdentity;
 }
@@ -79,6 +89,16 @@ export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResoluti
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };
+}
+
+/**
+ * Mark a post-re-mint resolution so the retry driver may resend a bearer the
+ * request already sent. See {@link ResolvedApiKey.afterRemint}.
+ */
+export function markAfterRemint(resolved: ApiKeyResolution): ApiKeyResolution {
+	const apiKey = resolvedApiKeyBearer(resolved);
+	if (apiKey === undefined) return resolved;
+	return typeof resolved === "string" ? { apiKey, afterRemint: true } : { ...resolved, apiKey, afterRemint: true };
 }
 
 /** Bearers a resolver served recently, each with the OAuth access token behind it. */
@@ -233,13 +253,23 @@ export function createAuthRetryKeyState(initialKey: string): AuthRetryKeyState {
 	};
 }
 
+/**
+ * Record an accepted retry key, or decline it.
+ *
+ * `resendAllowed` lifts the "never send a bearer this operation already sent"
+ * rule for the two resolutions that earn it: one taken after `rotate` slept out
+ * a sibling's short block ({@link ResolvedApiKey.afterSiblingWait}), and one
+ * taken after the credential was re-minted because the provider said it had
+ * refused it ({@link ResolvedApiKey.afterRemint}). Each is reachable once per
+ * logical operation, and {@link AUTH_RETRY_MAX_ATTEMPTS} bounds the rest.
+ */
 function acceptRetryKey(
 	state: AuthRetryKeyState,
 	key: string,
 	refreshedCurrent: boolean,
-	afterSiblingWait = false,
+	resendAllowed = false,
 ): string | undefined {
-	if ((!afterSiblingWait && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
+	if ((!resendAllowed && state.attemptedKeys.has(key)) || state.attempts >= AUTH_RETRY_MAX_ATTEMPTS) {
 		return undefined;
 	}
 	state.attemptedKeys.add(key);
@@ -269,11 +299,15 @@ export async function resolveNextAuthRetryKey(
 	const directRotation = isDirectCredentialRotationError(error);
 	if (!directRotation) {
 		if (!state.refreshedCurrent) {
-			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, onResolved);
+			let afterRemint = false;
+			const refreshed = await resolveRetryKey(resolver, false, error, signal, state.lastKey, resolved => {
+				afterRemint = typeof resolved === "object" && resolved?.afterRemint === true;
+				onResolved?.(resolved);
+			});
 			state.refreshedCurrent = true;
 			if (signal?.aborted) return undefined;
 			if (refreshed !== undefined) {
-				const accepted = acceptRetryKey(state, refreshed, true);
+				const accepted = acceptRetryKey(state, refreshed, true, afterRemint);
 				if (accepted !== undefined) return accepted;
 			}
 		}

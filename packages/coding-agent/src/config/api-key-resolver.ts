@@ -2,6 +2,7 @@ import {
 	type ApiKeyResolution,
 	type ApiKeyResolver,
 	createOAuthProvenance,
+	markAfterRemint,
 	markAfterSiblingWait,
 } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -109,6 +110,23 @@ export function createApiKeyResolver(
 			const resolved = await resolveKey(undefined);
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		return resolveKey(true, signal, AIError.status(error) === 401 ? "auth-recovery" : undefined, rejectedAccessToken);
+		// Step (b): the credential itself may be the problem, so re-mint it and
+		// let the driver try once more. A 401 whose own structured error class
+		// says it is NOT an authentication failure is the one case that skips
+		// the re-mint: refreshing cannot help, and a `!command` credential's
+		// re-mint is a call to its issuer.
+		const verdict = AIError.credentialRejectionVerdict(error);
+		const resolved = await resolveKey(
+			verdict !== "not-credential",
+			signal,
+			AIError.status(error) === 401 ? "auth-recovery" : undefined,
+			rejectedAccessToken,
+		);
+		// The provider said the credential was refused — structurally, or in one
+		// of its documented wordings. The retry is then worth making even when
+		// the mint handed back the same bytes: what the request has not yet
+		// tried is a credential minted after that refusal, and the bytes do not
+		// say whether the issuer renewed it.
+		return verdict === "structured" || verdict === "text" ? markAfterRemint(resolved) : resolved;
 	};
 }
