@@ -241,7 +241,7 @@ import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
-import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
+import { recoverAskHtml } from "../tools/ask";
 import {
 	armIdleCloseForOwner,
 	cancelIdleCloseForOwner,
@@ -695,12 +695,12 @@ export interface NavigateTreeResult {
 	/**
 	 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
 	 * was set, and `options.reanswerAskResult` was not supplied: nothing was
-	 * mutated. The caller must re-open the ask picker with these
-	 * `questions`, then call `navigateTree(targetId, { ...options,
+	 * mutated. The caller must re-open the ask form from this `html`,
+	 * then call `navigateTree(targetId, { ...options,
 	 * reanswerAskResult })` with the produced result to actually branch
 	 * (issue #5642).
 	 */
-	reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
+	reopenAsk?: { toolCallId: string; html: string };
 	/**
 	 * `true` when this call committed a new sibling answer for an `ask`
 	 * re-answer (`reanswerAskResult` was applied). The interactive caller
@@ -14623,9 +14623,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			targetEntry.message.toolName === "ask"
 		) {
 			const toolCallId = targetEntry.message.toolCallId;
-			const questions = this.#recoverAskReanswerQuestions(targetEntry.parentId, toolCallId);
-			if (questions) {
-				return { cancelled: false, reopenAsk: { toolCallId, questions } };
+			const html = this.#recoverAskReanswerHtml(targetEntry.parentId, toolCallId);
+			if (html !== undefined) {
+				return { cancelled: false, reopenAsk: { toolCallId, html } };
 			}
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
@@ -14894,7 +14894,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Look up the `ask` toolCall's persisted `arguments` and validate them
-	 * back into `questions`, for `/tree` `ask` re-answer (issue #5642). Walks
+	 * back into its form `html`, for `/tree` `ask` re-answer (issue #5642). Walks
 	 * up from the toolResult's parent past any interleaved ancestor entries
 	 * — sibling toolResults from other tool calls in the same turn (`ask`
 	 * runs `exclusive`, which only serializes *execution*, not persistence
@@ -14907,7 +14907,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `ask` toolCall, or the arguments can't be resolved — the caller falls
 	 * back to a plain leaf move rather than opening a picker with bad data.
 	 */
-	#recoverAskReanswerQuestions(parentId: string | null, toolCallId: string): AskToolInput["questions"] | undefined {
+	#recoverAskReanswerHtml(parentId: string | null, toolCallId: string): string | undefined {
 		let current = parentId;
 		while (current !== null) {
 			const entry = this.sessionManager.getEntry(current);
@@ -14922,7 +14922,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const args = this.#obfuscator?.hasSecrets()
 						? deobfuscateToolArguments(this.#obfuscator, toolCall.arguments)
 						: toolCall.arguments;
-					return recoverAskQuestions(args);
+					return recoverAskHtml(args);
 				}
 				if (entry.message.role === "user") return undefined;
 			}

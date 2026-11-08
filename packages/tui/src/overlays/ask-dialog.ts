@@ -159,7 +159,7 @@ interface AskDialogCallbacks {
  * keys are the explicit hand-off: they release the guard for the rest of the
  * dialog's life and the draft stays parked (intact) beneath it.
  */
-interface AskDialogInputGuard {
+export interface AskDialogInputGuard {
 	isBlocked(): boolean;
 	handleInput(keyData: string): void;
 	/** Shown after the release keys while the guard holds input. */

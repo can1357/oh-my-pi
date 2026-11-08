@@ -72,7 +72,7 @@ There are three leaf movement primitives:
 Flow:
 
 1. Validate the target and compute the abandoned path (`collectEntriesForBranchSummary`).
-2. For an interactive selection of an `ask` tool result whose original questions can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the question UI, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
+2. For an interactive selection of an `ask` tool result whose original form `html` can be recovered, return a `reopenAsk` request without mutating the tree. The selector re-opens the form, then calls `navigateTree` again with the replacement result; that second call appends a new sibling `toolResult` at the original answer's parent.
 3. Emit `session_before_tree` with `TreePreparation`.
 4. Optionally summarize abandoned entries (hook-provided summary or built-in summarizer).
 5. Compute the new leaf target:
