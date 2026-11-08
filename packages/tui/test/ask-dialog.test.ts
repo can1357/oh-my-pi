@@ -5,8 +5,9 @@ import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../src/native/node";
+import { setKeybindings, type TerminalFrameProvider } from "@oh-my-pi/pi-tui";
+import type { NativeSurfaceProvider, NativeUiEvent } from "../src/native/node";
+import { TspHarness } from "./native/tsp-harness";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -545,32 +546,20 @@ describe("AskDialogComponent", () => {
 		});
 	});
 
-	describe("Note target after a pick moved to the next question", () => {
+	describe("Note target", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{ id: "q1", question: "Q1?", options: [{ label: "Alpha" }, { label: "Beta" }] },
 			{ id: "q2", question: "Q2?", options: [{ label: "Gamma" }, { label: "Delta" }] },
 			{ id: "q3", question: "Q3?", options: [{ label: "Epsilon" }, { label: "Zeta" }] },
 		];
-		const cx: DescribeContext = {
-			cols: 100,
-			reduceMotion: false,
-			dark: true,
-			supports: () => true,
-			feature: () => true,
-		};
 		const action = (act: string): NativeUiEvent => ({ type: "action", key: `actions/${act}`, act, mods: [] });
 		const flush = async (): Promise<void> => {
 			for (let i = 0; i < 4; i++) await Promise.resolve();
 		};
-		const nodes = (child: NativeChild): NativeNode[] => {
-			const described = "k" in child ? child : child.describe?.(cx);
-			if (!described) return [];
-			return [described, ...(described.c ?? []).flatMap(nodes)];
-		};
-		const noteTitle = (component: AskDialogComponent): unknown =>
-			nodes(component.describe(cx)).find(node => node.p?.role === "omp.btn" && node.key === "note")?.p?.title;
 		const click = (component: AskDialogComponent, question: number, option: number): void =>
 			component.handleNativeEvent({ type: "activate", key: `q${question}`, item: `option:${option}` });
+		const rowMenuNote = (component: AskDialogComponent, question: number, row: string): void =>
+			component.handleNativeEvent({ type: "action", key: `q${question}/${row}`, act: "note", mods: [] });
 
 		it("TUI: Enter then `n` annotates the highlighted row of the question shown", async () => {
 			const onPrompt = vi.fn().mockResolvedValue("why Gamma");
@@ -616,37 +605,66 @@ describe("AskDialogComponent", () => {
 			expect(third).toMatchObject({ selectedOptions: ["Epsilon"], note: undefined });
 		});
 
-		it("Tern: a click then Note annotates the clicked answer, and the Note button names it", async () => {
+		it("Tern: the Note button after a click annotates the highlighted row of the question shown", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Gamma");
+			const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+
+			click(component, 0, 1); // Beta, on to Q2
+			component.handleNativeEvent(action("note"));
+			await flush();
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
+		});
+
+		it("Tern: a row's menu Note annotates that row without picking it, and the pick keeps the note", async () => {
 			const onPrompt = vi.fn().mockResolvedValue("why Beta");
 			const onSubmit = vi.fn();
 			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
 
-			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
-			click(component, 0, 1); // Beta, on to Q2
-			expect(noteTitle(component)).toBe("Add a note to Beta, just picked on q1  n");
-			component.handleNativeEvent(action("note"));
+			rowMenuNote(component, 0, "option:1");
 			await flush();
 			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
-			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
-
+			component.handleNativeEvent(action("submit")); // Next commits the row the menu highlighted
 			click(component, 1, 0);
 			click(component, 2, 0);
 			component.handleNativeEvent(action("submit"));
+
 			const [first, second] = onSubmit.mock.calls[0][0].results;
 			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
-			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined });
 		});
 
-		it("Tern: other input after the click returns Note to the highlighted row", async () => {
-			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+		it("Tern: a menu Note from a list the dialog has moved past does nothing", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("late");
 			const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
 
 			click(component, 0, 1); // Beta, on to Q2
-			component.handleInput(DOWN); // Delta highlighted
-			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
-			component.handleNativeEvent(action("note"));
+			rowMenuNote(component, 0, "option:0");
 			await flush();
-			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+			expect(onPrompt).not.toHaveBeenCalled();
+		});
+
+		it("Tern: a row's menu Note sent over the wire reaches that row", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Beta");
+			const dialog = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+				renderFrame: () => ({ viewport: [] }),
+				acknowledgeHistory: () => {},
+				describeSurface: () => ({ main: [], dock: [dialog] }),
+			};
+			const harness = await TspHarness.start(tui => {
+				tui.setFrameProvider(provider);
+				tui.setFocus(dialog);
+			});
+			try {
+				const beta = harness.find(node => node.k === "item" && node.id.endsWith("/option:1"));
+				expect(beta?.p).toMatchObject({ actions: { menu: ["note"] } });
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: beta!.id, act: "note" });
+				await flush();
+				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+				expect(harness.errors).toEqual([]);
+			} finally {
+				harness.stop();
+			}
 		});
 	});
 
