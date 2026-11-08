@@ -10,6 +10,7 @@
 
 - Isolated subagents no longer leave a `__omp_worker_daemon_broker` process behind for their checkout: omp closes its connection to that broker when it tears the worktree down, so the broker exits after its idle grace instead of living (and holding ~90 MB) until omp quits ([#18548](https://github.com/can1357/oh-my-pi/pull/18548) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 - Isolated subagents no longer keep their worktree (an ovnfs checkout or native copy) until omp exits: when a finished isolated agent parks after `task.agentIdleTtlMs` (7 minutes by default), omp captures its final changes and removes the worktree, and the agent becomes transcript-only. Agents whose worker thread died, and agents unregistered without a release, also run this cleanup now ([#18548](https://github.com/can1357/oh-my-pi/pull/18548) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 
 ## [18.18.2] - 2026-11-08
 

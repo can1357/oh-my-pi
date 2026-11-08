@@ -6,7 +6,7 @@ import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-d
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
-import type { DescribeContext, NativeUiEvent } from "../src/native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../src/native/node";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -545,10 +545,11 @@ describe("AskDialogComponent", () => {
 		});
 	});
 
-	describe("Note right after a pick that moved to the next question", () => {
-		const twoQuestions: ExtensionAskDialogQuestion[] = [
+	describe("Note target after a pick moved to the next question", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
 			{ id: "q1", question: "Q1?", options: [{ label: "Alpha" }, { label: "Beta" }] },
 			{ id: "q2", question: "Q2?", options: [{ label: "Gamma" }, { label: "Delta" }] },
+			{ id: "q3", question: "Q3?", options: [{ label: "Epsilon" }, { label: "Zeta" }] },
 		];
 		const cx: DescribeContext = {
 			cols: 100,
@@ -561,91 +562,92 @@ describe("AskDialogComponent", () => {
 		const flush = async (): Promise<void> => {
 			for (let i = 0; i < 4; i++) await Promise.resolve();
 		};
-		const surfaces = {
-			// Tern: a click commits a single-choice row, then the Note button.
-			tern: async (component: AskDialogComponent) => {
-				component.describe(cx);
-				component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
-				component.handleNativeEvent(action("note"));
-				await flush();
-				component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
-				component.handleNativeEvent(action("submit"));
-			},
-			tui: async (component: AskDialogComponent) => {
-				component.handleInput(DOWN);
-				component.handleInput(ENTER);
-				component.handleInput("n");
-				await flush();
-				component.handleInput(ENTER);
-				component.handleInput(ENTER);
-			},
+		const nodes = (child: NativeChild): NativeNode[] => {
+			const described = "k" in child ? child : child.describe?.(cx);
+			if (!described) return [];
+			return [described, ...(described.c ?? []).flatMap(nodes)];
 		};
+		const noteTitle = (component: AskDialogComponent): unknown =>
+			nodes(component.describe(cx)).find(node => node.p?.role === "omp.btn" && node.key === "note")?.p?.title;
+		const click = (component: AskDialogComponent, question: number, option: number): void =>
+			component.handleNativeEvent({ type: "activate", key: `q${question}`, item: `option:${option}` });
 
-		for (const [surface, run] of Object.entries(surfaces)) {
-			it(`annotates that pick, not the next question's row (${surface})`, async () => {
-				const onPrompt = vi.fn().mockResolvedValue("why Beta");
-				const onSubmit = vi.fn();
-				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
-
-				await run(component);
-
-				expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
-				const [first, second] = onSubmit.mock.calls[0][0].results;
-				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
-				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
-			});
-		}
-
-		it("goes back to the highlighted row once the next question gets other input", async () => {
-			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+		it("TUI: Enter then `n` annotates the highlighted row of the question shown", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Gamma");
 			const onSubmit = vi.fn();
-			const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
 
-			component.handleInput(ENTER); // Alpha, on to Q2
-			component.handleInput(DOWN); // Delta highlighted
+			component.handleInput(DOWN);
+			component.handleInput(ENTER); // Beta, on to Q2
 			component.handleInput("n");
 			await flush();
-			component.handleInput(ENTER);
-			component.handleInput(ENTER);
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
 
-			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+			component.handleInput(ENTER); // Gamma, on to Q3
+			component.handleInput(ENTER); // Epsilon, on to Review
+			component.handleInput(ENTER); // submit
 			const [first, second] = onSubmit.mock.calls[0][0].results;
-			expect(first.note).toBeUndefined();
-			expect(second).toMatchObject({ selectedOptions: ["Delta"], note: "why Delta", noteOption: "Delta" });
+			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: undefined, noteOption: undefined });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
 		});
-		for (const surface of ["tern", "tui"] as const) {
-			it(`starts a new note on the next question after annotating the previous answer (${surface})`, async () => {
-				const onPrompt = vi.fn().mockResolvedValueOnce("why Beta").mockResolvedValueOnce("why Gamma");
-				const onSubmit = vi.fn();
-				const component = new AskDialogComponent(twoQuestions, { onSubmit, onCancel: vi.fn(), onPrompt });
 
-				if (surface === "tern") {
-					component.describe(cx);
-					component.handleNativeEvent({ type: "activate", key: "q0", item: "option:1" });
-					component.handleNativeEvent(action("note"));
-				} else {
-					component.handleInput(DOWN);
-					component.handleInput(ENTER);
-					component.handleInput("n");
-				}
-				await flush();
-				if (surface === "tern") component.handleNativeEvent(action("note"));
-				else component.handleInput("n");
-				await flush();
+		it("TUI: annotates the middle answer after a cancelled note on the last question and going back (A > B > C)", async () => {
+			const onPrompt = vi.fn().mockResolvedValueOnce(undefined).mockResolvedValueOnce("why Gamma");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
 
-				expect(onPrompt.mock.calls[1]).toEqual([{ title: "Note for Gamma", question: "Q2?" }, undefined]);
-				if (surface === "tern") {
-					component.handleNativeEvent({ type: "activate", key: "q1", item: "option:0" });
-					component.handleNativeEvent(action("submit"));
-				} else {
-					component.handleInput(ENTER);
-					component.handleInput(ENTER);
-				}
-				const [first, second] = onSubmit.mock.calls[0][0].results;
-				expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
-				expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
-			});
-		}
+			component.handleInput(ENTER); // Alpha, on to Q2
+			component.handleInput(ENTER); // Gamma, on to Q3
+			component.handleInput("n"); // cancelled
+			await flush();
+			component.handleInput(SHIFT_TAB); // back to Q2
+			component.handleInput("n");
+			await flush();
+
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Epsilon", question: "Q3?" });
+			expect(onPrompt.mock.calls[1][0]).toEqual({ title: "Note for Gamma", question: "Q2?" });
+
+			component.handleInput(TAB); // Q3
+			component.handleInput(ENTER); // Epsilon, on to Review
+			component.handleInput(ENTER); // submit
+			const [first, second, third] = onSubmit.mock.calls[0][0].results;
+			expect(first.note).toBeUndefined();
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: "why Gamma", noteOption: "Gamma" });
+			expect(third).toMatchObject({ selectedOptions: ["Epsilon"], note: undefined });
+		});
+
+		it("Tern: a click then Note annotates the clicked answer, and the Note button names it", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Beta");
+			const onSubmit = vi.fn();
+			const component = new AskDialogComponent(questions, { onSubmit, onCancel: vi.fn(), onPrompt });
+
+			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
+			click(component, 0, 1); // Beta, on to Q2
+			expect(noteTitle(component)).toBe("Add a note to Beta, just picked on q1  n");
+			component.handleNativeEvent(action("note"));
+			await flush();
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Beta", question: "Q1?" });
+			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
+
+			click(component, 1, 0);
+			click(component, 2, 0);
+			component.handleNativeEvent(action("submit"));
+			const [first, second] = onSubmit.mock.calls[0][0].results;
+			expect(first).toMatchObject({ selectedOptions: ["Beta"], note: "why Beta", noteOption: "Beta" });
+			expect(second).toMatchObject({ selectedOptions: ["Gamma"], note: undefined, noteOption: undefined });
+		});
+
+		it("Tern: other input after the click returns Note to the highlighted row", async () => {
+			const onPrompt = vi.fn().mockResolvedValue("why Delta");
+			const component = new AskDialogComponent(questions, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+
+			click(component, 0, 1); // Beta, on to Q2
+			component.handleInput(DOWN); // Delta highlighted
+			expect(noteTitle(component)).toBe("Add a note to the highlighted answer  n");
+			component.handleNativeEvent(action("note"));
+			await flush();
+			expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Delta", question: "Q2?" });
+		});
 	});
 
 	it("note prefill is empty when editing a different row after noting another option", async () => {
