@@ -371,7 +371,6 @@ export const MATH_FONT_COMMANDS: ReadonlySet<string> = new Set([
 const TEXT_COMMANDS: Record<string, true> = {
 	text: true,
 	textrm: true,
-	textnormal: true,
 	textsc: true,
 	mathrm: true,
 	mathnormal: true,
