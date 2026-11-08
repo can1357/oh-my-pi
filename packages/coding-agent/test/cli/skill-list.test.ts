@@ -16,11 +16,19 @@ import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { restoreEnvValue } from "../helpers/settings-test-state";
 import * as skillsModule from "../../src/extensibility/skills";
-import { __resetDirsFromEnvForTests, getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	__resetDirsFromEnvForTests,
+	getAgentDir,
+	removeSyncWithRetries,
+	removeWithRetries,
+	setAgentDir,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 
-const CLAUDE_POISON = "omp-foundation-w6-claude-poison";
-const AGENTS_POISON = "omp-foundation-w6-agents-poison";
+const POISON_RUN = Snowflake.next();
+const CLAUDE_POISON = `omp-foundation-w6-claude-poison-${POISON_RUN}`;
+const AGENTS_POISON = `omp-foundation-w6-agents-poison-${POISON_RUN}`;
 const OUTER_CODEX = "omp-foundation-w6-outer-codex";
 
 /** Ambient Claude config the current fixture does not clear. Owned only when the variable was absent. */
@@ -30,6 +38,25 @@ let originalClaudeConfigDir: string | undefined;
 /** Real home captured before `os.homedir` is mocked; project ancestor walks can still see it. */
 let ambientHome = "";
 let agentsPoisonDir = "";
+
+/** Best-effort sync cleanup so an interrupted run does not leave poison skills in real directories. */
+function removeAmbientPoisonOnExit(): void {
+	const targets = [
+		ambientClaudeDir ? path.join(ambientClaudeDir, "skills", CLAUDE_POISON) : "",
+		ownedClaudeDir ? ambientClaudeDir : "",
+		agentsPoisonDir,
+	];
+	for (const target of targets) {
+		if (!target) continue;
+		try {
+			removeSyncWithRetries(target);
+		} catch {
+			// The process is already leaving; a locked file must not fail the exit.
+		}
+	}
+}
+
+process.on("exit", removeAmbientPoisonOnExit);
 
 function skillMarkdown(name: string, description: string): string {
 	return `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`;
@@ -379,6 +406,12 @@ describe("handleSkillList", () => {
 });
 
 describe("ambient skill isolation", () => {
+	test("gives ambient poison skills a per-run name and an exit cleanup", () => {
+		expect(CLAUDE_POISON).toMatch(/^omp-foundation-w6-claude-poison-[0-9a-f]{16}$/);
+		expect(AGENTS_POISON).toMatch(/^omp-foundation-w6-agents-poison-[0-9a-f]{16}$/);
+		expect(process.listeners("exit").some(listener => listener.name === "removeAmbientPoisonOnExit")).toBe(true);
+	});
+
 	test("lists only the requested fixture skill, not ambient Claude or .agents poison", async () => {
 		const directory = await isolatedDirectory("omp-skills-poison-");
 		const fixtureRoot = path.join(directory, "fixture-skills");
@@ -391,13 +424,17 @@ describe("ambient skill isolation", () => {
 				skillsSettings: { customDirectories: [fixtureRoot] },
 			});
 			const evidence = listingEvidence(result.skills);
-			const poisonHits = result.skills.filter(
-				skill => skill.name === CLAUDE_POISON || skill.name === AGENTS_POISON,
-			);
+			const poisonHits = result.skills.filter(skill => skill.name === CLAUDE_POISON || skill.name === AGENTS_POISON);
 			// Claude poison is claude:user via CLAUDE_CONFIG_DIR. The .agents poison is
 			// agents:project from the real-home ancestor walk, not the mocked ctx.home.
-			expect(poisonHits.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`), evidence).toEqual([]);
-			expect(result.skills.map(skill => skill.name), evidence).toEqual(["fixture-only"]);
+			expect(
+				poisonHits.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`),
+				evidence,
+			).toEqual([]);
+			expect(
+				result.skills.map(skill => skill.name),
+				evidence,
+			).toEqual(["fixture-only"]);
 		} finally {
 			await removeWithRetries(directory);
 		}
