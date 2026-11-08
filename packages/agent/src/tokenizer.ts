@@ -3,8 +3,16 @@ import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
 import { completionsDropsOwnThinking, isLiteLLMThinkingSignature } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { getNativeResponsesHistoryItems, replaysNativeResponsesHistory } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { dropsForeignReasoningPayload, isSameModelTurn } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import {
+	getNativeResponsesHistoryItems,
+	getReplayableNativeResponsesHistoryItems,
+	replaysNativeResponsesTurn,
+} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import {
+	dropsForeignReasoningPayload,
+	isSameModelTurn,
+	shouldDropTruncatedThinkingOnlyAssistant,
+} from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -587,14 +595,19 @@ export class Tokenizer {
 	 * its reasoning, so those send no reasoning and no signature (0).
 	 */
 	#replayedReasoningTokens(message: AssistantMessage): number | null | undefined {
-		// One replay decision, shared with `/shake`. A payload this reader does not
-		// own is not native history at all (its signatures are priced below); a
-		// turn whose replay sends no reasoning sends no signature either.
+		// A payload this reader does not own is not native history at all: the turn
+		// is rebuilt from its blocks, and its signatures are priced below.
 		if (!getNativeResponsesHistoryItems(message, this.#reasoningReader)) return undefined;
-		const replays = replaysNativeResponsesHistory(message, this.#reasoningReader, {
-			nativeHistoryReplay: this.nativeHistoryReplay,
-		});
-		if (!replays) return 0;
+		// The request decides whether the payload goes on the wire; `/shake` reads
+		// that same decision, so a kept turn and a billed turn always agree.
+		const replay = getReplayableNativeResponsesHistoryItems(message, this.#reasoningReader);
+		if (!replay || !replaysNativeResponsesTurn(replay, this.nativeHistoryReplay)) return 0;
+		// Then the amount: nothing reasoning-shaped survives to price, or the turn is
+		// dropped whole as truncated thinking, so it sends no reasoning and no
+		// signature either. An answer-only payload replays with neither.
+		if (!replay.some(item => item.type === "reasoning") || shouldDropTruncatedThinkingOnlyAssistant(message)) {
+			return 0;
+		}
 		return message.usage?.reasoningTokens ?? null;
 	}
 

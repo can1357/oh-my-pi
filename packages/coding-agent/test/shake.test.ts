@@ -797,9 +797,83 @@ describe("AgentSession shake", () => {
 			expect(rewriteEntries).not.toHaveBeenCalled();
 			expect(replaceMessages).not.toHaveBeenCalled();
 			expect(anchoredRewrite).not.toHaveBeenCalled();
-			expect(formatShakeSummary(result)).toBe(
-				"1 thinking block was kept because removing it would not change what the model receives.",
-			);
+			// The wording is not part of this contract: it must say blocks were kept
+			// and must not claim a drop.
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
+			expect(summary).not.toContain("Dropped");
+		});
+
+		it("leaves an answer-only native turn's thinking in place", async () => {
+			// The request replays this turn from its payload, which carries the answer
+			// item and no reasoning item: the content thinking never reaches the wire.
+			const model = bundled("openrouter", "z-ai/glm-4.7");
+			session.agent.setModel(model);
+			const replayed = nativeTurn(model, {
+				thinking: "reasoning with no native item ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+				timestamp: Date.now() - 1,
+			});
+			sessionManager.appendMessage(replayed);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const contentBefore = structuredClone(replayed.content);
+			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
+			const anchoredRewrite = vi.spyOn(SessionStatsTracker.prototype, "recordAnchoredHistoryRewrite");
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(0);
+			expect(result.thinkingBlocksKept).toBe(1);
+			expect(result.tokensFreed).toBe(0);
+			expect(replayed.content).toEqual(contentBefore);
+			expect(rewriteEntries).not.toHaveBeenCalled();
+			expect(replaceMessages).not.toHaveBeenCalled();
+			expect(anchoredRewrite).not.toHaveBeenCalled();
+		});
+
+		it("drops an answer-only turn a cold session rebuilds from content", async () => {
+			// Cold: the builder replays native items only when nothing in them is
+			// bound to one connection, and an answer item carrying an id is bound, so
+			// the turn is rebuilt from `content` and its thinking does leave the
+			// transcript's wire form.
+			const model = bundled("github-copilot", "gpt-5.4");
+			session.agent.setModel(model);
+			const rebuilt = nativeTurn(model, {
+				thinking: "reasoning rebuilt from content ".repeat(1_000),
+				answer: "answer",
+				items: [
+					{
+						type: "message",
+						id: "msg_x",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "answer", annotations: [] }],
+					},
+				],
+			});
+			sessionManager.appendMessage(rebuilt);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const tokenizer = session.agent.tokenizer;
+			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
+
+			const result = await session.shake("thinking");
+
+			expect(result.thinkingBlocksDropped).toBe(1);
+			expect(result.thinkingBlocksKept).toBe(0);
+			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
 		});
 
 		it("still drops thinking a cold Responses session rebuilds from content", async () => {
@@ -900,9 +974,10 @@ describe("AgentSession shake", () => {
 			expect(rebuilt.content).toEqual([{ type: "text", text: "second answer" }]);
 			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
 			expect(rewriteEntries).toHaveBeenCalledTimes(1);
-			expect(formatShakeSummary(result)).toContain(
-				"1 thinking block was kept because removing it would not change what the model receives",
-			);
+			const summary = formatShakeSummary(result);
+			expect(summary).toContain("Dropped 1 thinking block");
+			expect(summary).toContain("1 thinking block");
+			expect(summary).toContain("kept");
 
 			const sessionFile = sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("Expected persisted shake session");

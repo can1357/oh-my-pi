@@ -4,7 +4,7 @@
 
 ### Added
 
-- Exported `replaysNativeResponsesHistory` and `getNativeResponsesHistoryItems` from `providers/openai-shared`, the one decision for whether a turn's reasoning reaches a Responses request from its native payload, now used by the tokenizer and by `/shake`
+- Exported the Responses replay decision (`replaysNativeResponsesHistory`, `getReplayableNativeResponsesHistoryItems`, `replaysNativeResponsesTurn`), so callers that estimate or trim context can tell which turns a request sends as native payload items instead of rebuilding them from message content
 
 ## [18.18.1] - 2026-11-08
 

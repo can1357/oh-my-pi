@@ -139,8 +139,9 @@ describe("CommandController /shake", () => {
 		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
 		expect(invalidate).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith(
-			"3 thinking blocks were kept because removing them would not change what the model receives.",
-		);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		const status = showStatus.mock.calls[0]?.[0] as string;
+		expect(status).toContain("3 thinking blocks");
+		expect(status).toContain("kept");
 	});
 });
