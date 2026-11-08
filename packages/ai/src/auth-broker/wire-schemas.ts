@@ -263,18 +263,20 @@ const usageResetCreditsSchema = type({
 	}).array(),
 });
 
+const usageCreditsSchema = type({
+	balance: "string | null",
+	unit: "'credits'",
+	"hasCredits?": "boolean",
+	"unlimited?": "boolean",
+	"overageLimitReached?": "boolean",
+});
+
 const arkUsageReportSchema = type({
 	provider: "string",
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
-	"credits?": {
-		balance: "string | null",
-		unit: "'credits'",
-		"hasCredits?": "boolean",
-		"unlimited?": "boolean",
-		"overageLimitReached?": "boolean",
-	},
+	"credits?": usageCreditsSchema,
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	"raw?": "unknown",

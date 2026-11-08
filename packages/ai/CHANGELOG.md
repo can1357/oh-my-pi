@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed Codex usage-credit reports with partially reported flags being rejected by normalized and broker usage schemas ([#14795](https://github.com/can1357/oh-my-pi/pull/14795) by [@schickling-assistant](https://github.com/schickling-assistant))
 - Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
 - Fixed OpenAI image edits with multiple input images failing because image parameters were duplicated.
 - Fixed Cursor-provider reads of xd:// devices failing due to incorrect device URL handling.

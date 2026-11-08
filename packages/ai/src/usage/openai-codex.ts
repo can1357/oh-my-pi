@@ -267,13 +267,14 @@ function parseCredits(payload: unknown): UsageCredits | undefined {
 						: `${digits.slice(0, point)}.${digits.slice(point)}`);
 		}
 	}
-	return {
-		balance,
-		unit: "credits",
-		hasCredits: toBoolean(credits.has_credits),
-		unlimited: toBoolean(credits.unlimited),
-		overageLimitReached: toBoolean(credits.overage_limit_reached),
-	};
+	const result: UsageCredits = { balance, unit: "credits" };
+	const hasCredits = toBoolean(credits.has_credits);
+	const unlimited = toBoolean(credits.unlimited);
+	const overageLimitReached = toBoolean(credits.overage_limit_reached);
+	if (hasCredits !== undefined) result.hasCredits = hasCredits;
+	if (unlimited !== undefined) result.unlimited = unlimited;
+	if (overageLimitReached !== undefined) result.overageLimitReached = overageLimitReached;
+	return result;
 }
 
 /**

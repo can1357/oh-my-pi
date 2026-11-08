@@ -389,8 +389,8 @@ describe("openai-codex usage parser", () => {
 		}
 	});
 
-	it("distinguishes an unreported pool from unlimited credits with an unknown balance", async () => {
-		for (const credits of [undefined, null, { unlimited: true }] as const) {
+	it("omits an unreported credits pool", async () => {
+		for (const credits of [undefined, null]) {
 			const report = await openaiCodexUsageProvider.fetchUsage(
 				{
 					provider: "openai-codex",
@@ -398,12 +398,43 @@ describe("openai-codex usage parser", () => {
 				},
 				{ fetch: fakeFetch({ ...makePayload(), credits }) },
 			);
-			if (credits == null) {
-				expect(report).not.toHaveProperty("credits");
-			} else {
-				expect(report?.credits).toMatchObject({ balance: null, unit: "credits", unlimited: true });
-			}
+			expect(report).not.toHaveProperty("credits");
 		}
+	});
+
+	it.each([
+		["an empty pool", {}, { balance: null, unit: "credits" }],
+		["only a balance", { balance: "12.00" }, { balance: "12.00", unit: "credits" }],
+		["only unlimited", { unlimited: true }, { balance: null, unit: "credits", unlimited: true }],
+		["only has_credits", { has_credits: false }, { balance: null, unit: "credits", hasCredits: false }],
+		[
+			"only overage_limit_reached",
+			{ overage_limit_reached: false },
+			{ balance: null, unit: "credits", overageLimitReached: false },
+		],
+		[
+			"partial false flags",
+			{ balance: "0", has_credits: false, unlimited: false },
+			{ balance: "0", unit: "credits", hasCredits: false, unlimited: false },
+		],
+	] as const)("validates %s without materializing absent credit flags", async (_name, credits, expected) => {
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture },
+			},
+			{ fetch: fakeFetch({ ...makePayload(), credits }) },
+		);
+		expect(report?.credits).toStrictEqual(expected);
+		const local = usageReportSchema(report);
+		expect(local).not.toBeInstanceOf(type.errors);
+		if (local instanceof type.errors) throw new Error("expected valid normalized report");
+		const { raw: _raw, ...publicReport } = local;
+		// Validate the in-memory object: JSON serialization would hide undefined properties.
+		const brokered = usageResponseSchema({ generatedAt: 1, reports: [publicReport] });
+		expect(brokered).not.toBeInstanceOf(type.errors);
+		if (brokered instanceof type.errors) throw new Error("expected valid broker response");
+		expect(brokered.reports[0]?.credits).toStrictEqual(expected);
 	});
 
 	// Credit-billed workspace seats (Business/Enterprise flexible pricing) report
