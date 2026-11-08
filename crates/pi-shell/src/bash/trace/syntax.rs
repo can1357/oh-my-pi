@@ -7,7 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::bash::{ids::ModeId, ir, syntax as syn};
 
-const ARCHIVE_VERSION: u8 = 1;
+// Covers the archive envelope and its syntax tree, independently of IR_VERSION.
+const ARCHIVE_VERSION: u8 = 2;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
