@@ -102,6 +102,7 @@ import {
 	formatLocation,
 	formatSymbolInformation,
 	formatWorkspaceEdit,
+	mergeCodeActions,
 	resolveDiagnosticTargets,
 	resolveSymbolColumn,
 	sortDiagnostics,
@@ -396,8 +397,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						// build status settles.
 						let rebuildStatusSeq: number | undefined;
 						if (supportsDocumentDiagnostics(client)) {
-							// The wait pulls a fresh report; drop the cached one so it cannot answer first.
-							client.diagnostics.delete(uri);
 							await reconcileFileFromDisk(client, resolved, signal);
 						} else if (client.buildStatus) {
 							// clangd with build status: rebuild the main file in place, keeping the
@@ -1463,24 +1462,31 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
 						}
 					}
-					const context: CodeActionContext = {
-						diagnostics,
-						only: !apply && query ? [query] : undefined,
-						triggerKind: 1,
+					const requestActions = async (only: string[] | undefined) => {
+						const context: CodeActionContext = { diagnostics, only, triggerKind: 1 };
+						return (await sendRequest(
+							client,
+							"textDocument/codeAction",
+							{
+								textDocument: { uri },
+								range: { start: position, end: position },
+								context,
+							},
+							signal,
+						)) as (CodeAction | Command)[] | null;
 					};
+					// Servers like typescript-language-server return source actions (organize
+					// imports, fix all) only when `context.only` asks for them, as VS Code does.
+					// The unfiltered set backs both listing and apply (by title or index), so it
+					// also requests `source` kinds; a kind query narrows listing to that kind.
+					const result =
+						!apply && query
+							? ((await requestActions([query])) ?? [])
+							: mergeCodeActions(
+									...(await Promise.all([requestActions(undefined), requestActions(["source"])])),
+								);
 
-					const result = (await sendRequest(
-						client,
-						"textDocument/codeAction",
-						{
-							textDocument: { uri },
-							range: { start: position, end: position },
-							context,
-						},
-						signal,
-					)) as (CodeAction | Command)[] | null;
-
-					if (!result || result.length === 0) {
+					if (result.length === 0) {
 						output = "No code actions available";
 						break;
 					}

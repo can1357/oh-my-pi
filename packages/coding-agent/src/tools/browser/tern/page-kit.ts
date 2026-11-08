@@ -339,7 +339,13 @@ const textQueryAll = (root, query, cache, out) => {
 
 // ---- roles and names -----------------------------------------------------------------------
 
-const hasAccessibleLabel = el => !!(el.getAttribute("aria-label") || el.getAttribute("aria-labelledby"));
+// A section is a region only when it has a name, as the role/ handler decides: from its references, label or title.
+const hasAccessibleLabel = el =>
+	!!(
+		idrefText(el, "aria-labelledby") ||
+		normalizeSpace(el.getAttribute("aria-label")) ||
+		normalizeSpace(el.getAttribute("title"))
+	);
 const insideSectioning = el => {
 	for (let current = composedParent(el); current; current = composedParent(current)) {
 		if (["article", "aside", "main", "nav", "section"].includes(current.localName)) return true;
@@ -471,9 +477,31 @@ const idrefText = (el, attribute) => {
 	return normalizeSpace(ids.map(id => {
 		const target = lookup(id);
 		if (!target) return "";
+		// A target named by its own label, alt or control value gives that, as the role/ handler reads it.
+		const own = normalizeSpace(target.getAttribute("aria-label"));
+		if (own) return own;
+		if (target.localName === "img" || target.localName === "area") {
+			const alt = normalizeSpace(target.getAttribute("alt"));
+			if (alt) return alt;
+		}
+		// A select or text area stands for its value, as an embedded control does.
+		if (target.localName === "select") return normalizeSpace(Array.from(target.selectedOptions, option => option.text).join(" "));
+		if (target.localName === "textarea") return normalizeSpace(target.value);
+		if (target.localName === "input") {
+			const type = inputType(target);
+			if (type === "image") {
+				return normalizeSpace(target.getAttribute("alt") || target.getAttribute("value") || target.getAttribute("title")) || "Submit";
+			}
+			if (["button", "submit", "reset"].includes(type)) {
+				return normalizeSpace(target.value) || (type === "submit" ? "Submit" : type === "reset" ? "Reset" : "");
+			}
+			// A text field stands for its value; a checkbox's or radio's value ("on") is not text it shows.
+			if (!["checkbox", "radio", "file", "hidden", "range"].includes(type)) return normalizeSpace(target.value);
+		}
 		// A hidden target (visibility, display: none, aria-hidden, a hidden ancestor) is read whole, as the
 		// accessibility tree reads one aria-labelledby names; its own aria-labelledby is not followed.
-		return contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
+		const text = contentText(target, null, hiddenForA11y(target) ? "any" : "visible", false);
+		return text || normalizeSpace(target.getAttribute("title"));
 	}).join(" "));
 };
 const hiddenForA11y = el => {
@@ -533,11 +561,16 @@ const contentText = (el, skip, visibility = "visible", followRefs = true) => {
 	return normalizeSpace(out);
 };
 const accessibleName = (el, role) => {
-	const label = normalizeSpace(el.getAttribute("aria-label"));
-	if (label) return label;
+	// aria-labelledby wins over aria-label, as in the role/ handler and Chrome's accessibility tree.
 	const labelledBy = idrefText(el, "aria-labelledby");
 	if (labelledBy) return labelledBy;
-	if (el.labels && el.labels.length) {
+	const label = normalizeSpace(el.getAttribute("aria-label"));
+	if (label) return label;
+	// An optgroup is named by its label, never by the label of the select around it.
+	if (el.localName === "optgroup") {
+		const groupLabel = normalizeSpace(el.getAttribute("label"));
+		if (groupLabel) return groupLabel;
+	} else if (el.labels && el.labels.length) {
 		const text = normalizeSpace(Array.from(el.labels, labelEl => contentText(labelEl, el)).join(" "));
 		if (text) return text;
 	}
@@ -555,8 +588,9 @@ const accessibleName = (el, role) => {
 			if (type === "reset") return "Reset";
 		}
 	}
-	if (tag === "fieldset" || tag === "figure" || tag === "table") {
-		const caption = el.querySelector(tag === "fieldset" ? "legend" : tag === "figure" ? "figcaption" : "caption");
+	// A figure has no native name: Chrome does not name it from its figcaption.
+	if (tag === "fieldset" || tag === "table") {
+		const caption = el.querySelector(tag === "fieldset" ? "legend" : "caption");
 		if (caption) {
 			const text = contentText(caption, null);
 			if (text) return text;

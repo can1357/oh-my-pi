@@ -32,6 +32,7 @@ import {
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatLocation,
+	mergeDiagnosticLists,
 	readLocationContext,
 	sortDiagnostics,
 	uriToFile,
@@ -366,7 +367,7 @@ export async function waitForDiagnostics(
 
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 		const published = client.diagnostics.get(uri);
-		if (published && versionOk) {
+		if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 			// Server honored our exact document version → authoritative, accept now.
 			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 				return published.diagnostics;
@@ -419,7 +420,7 @@ export async function waitForDiagnostics(
 
 	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 	const published = client.diagnostics.get(uri);
-	if (published && versionOk) {
+	if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 			return published.diagnostics;
 		}
@@ -439,6 +440,31 @@ export async function waitForDiagnostics(
 	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
+		// The push fallback stands in for the pull only when a publish arrived after the
+		// caller's `minVersion`; an older push never vouches for the current document.
+		if (versionOk && supportsDocumentDiagnostics(client)) {
+			const publishedRecord = client.publishedDiagnostics.get(uri);
+			if (publishedRecord !== undefined) {
+				const now = Date.now();
+				const docVersion = client.openFiles.get(uri)?.version;
+				const isFresh =
+					publishedRecord.version === null
+						? !isProvisionalColdPublish(client, uri, publishedRecord, expectedDocumentVersion, now)
+						: docVersion === undefined || publishedRecord.version >= docVersion;
+				if (isFresh) {
+					const pulledRecord = client.pulledDiagnostics.get(uri);
+					const merged = pulledRecord
+						? mergeDiagnosticLists(pulledRecord.diagnostics, publishedRecord.diagnostics)
+						: publishedRecord.diagnostics;
+					client.diagnostics.set(uri, {
+						diagnostics: merged,
+						version: expectedDocumentVersion ?? docVersion ?? null,
+					});
+					client.diagnosticsVersion += 1;
+					return merged;
+				}
+			}
+		}
 		// A pull the server failed leaves the file's state unknown; never let it
 		// collapse into a clean empty result the caller renders as "OK".
 		if (pullFailure !== undefined) {
@@ -446,12 +472,25 @@ export async function waitForDiagnostics(
 		}
 		return undefined;
 	}
-	client.diagnostics.set(uri, {
+	client.pulledDiagnostics.set(uri, {
 		diagnostics: pulled,
 		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
 	});
+	const publishedRecord = client.publishedDiagnostics.get(uri);
+	const docVersion = client.openFiles.get(uri)?.version;
+	// Skip pushed records whose numeric version is older than the open document's version;
+	// unversioned flycheck publishes (version === null) still merge. Stale rustc warnings
+	// survive edits until the next flycheck publish (bounded by didSave), possibly with shifted ranges.
+	const canMergePush =
+		publishedRecord !== undefined &&
+		(publishedRecord.version === null || docVersion === undefined || publishedRecord.version >= docVersion);
+	const combined = canMergePush ? mergeDiagnosticLists(pulled, publishedRecord.diagnostics) : pulled;
+	client.diagnostics.set(uri, {
+		diagnostics: combined,
+		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
+	});
 	client.diagnosticsVersion += 1;
-	return pulled;
+	return combined;
 }
 
 interface WaitForRebuiltDiagnosticsOptions {

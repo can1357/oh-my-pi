@@ -13,6 +13,7 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorExecFrameContext,
 	CursorMcpCall,
 	CursorMcpResource,
 	CursorMcpResourceContent,
@@ -33,8 +34,10 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { editDiffString } from "@oh-my-pi/pi-natives";
+import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
 	approvalRestrictions,
@@ -50,6 +53,7 @@ import {
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
+import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -357,6 +361,57 @@ async function executeTool(
 	return bridgeContext.attach(createToolResultMessage(toolCallId, toolName, result, isError));
 }
 
+/** Tool result content as `executeTool` emits it: text passed through `sanitizeText`. */
+function sanitizedContent(content: ToolResultMessage["content"]): ToolResultMessage["content"] {
+	return content.map(c => (c.type === "text" ? { ...c, text: sanitizeText(c.text) } : c));
+}
+
+/** Bridge options whose tool runs surface no call of their own. */
+function withoutEvents(options: CursorExecBridgeOptions): CursorExecBridgeOptions {
+	return { ...options, emitEvent: undefined };
+}
+
+/**
+ * Writes a native StrReplace or Write back as its `edit` card's result: the
+ * diff against the file as it was, not a `write` call of its own.
+ */
+async function materializeEdit(
+	options: CursorExecBridgeOptions,
+	toolCallId: string,
+	pathArg: string,
+	content: string,
+): Promise<ToolResultMessage> {
+	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	let before: string | undefined;
+	try {
+		before = await fs.promises.readFile(absolutePath, "utf8");
+	} catch (error) {
+		if (isEnoent(error)) before = "";
+	}
+	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
+	const result: ToolResultMessage = { ...written, toolName: "edit" };
+	if (!written.isError && before !== undefined) {
+		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+		const { diff, firstChangedLine } = editDiffString(
+			normalizeToLF(stripBom(before).text),
+			normalizeToLF(stripBom(content).text),
+			absolutePath,
+		);
+		const writeDetails =
+			typeof written.details === "object" && written.details !== null ? written.details : undefined;
+		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
+		result.details = details;
+	}
+	options.emitEvent?.({
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "edit",
+		result: { content: sanitizedContent(result.content), details: result.details },
+		isError: result.isError,
+	});
+	return result;
+}
+
 function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
 	const grant = options.allowDirectFileMutation;
 	return typeof grant === "function" ? grant() : grant !== false;
@@ -557,7 +612,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * large file never advances. Composed with the same helper, so both frames
 	 * translate a range identically.
 	 */
-	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0]) {
+	async read(args: Parameters<NonNullable<ICursorExecHandlers["read"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const composed = piReadPath(
 			args.path,
@@ -568,7 +623,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (composed === null) {
 			return createToolResultMessage(toolCallId, "read", { content: [{ type: "text", text: "" }] }, false);
 		}
-		return await executeTool(this.options, "read", toolCallId, { path: composed });
+		const options = frame?.editMaterialization ? withoutEvents(this.options) : this.options;
+		return await executeTool(options, "read", toolCallId, { path: composed });
 	}
 
 	async ls(args: Parameters<NonNullable<ICursorExecHandlers["ls"]>>[0]) {
@@ -606,14 +662,26 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return toolResultMessage;
 	}
 
-	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0]) {
+	async write(args: Parameters<NonNullable<ICursorExecHandlers["write"]>>[0], frame?: CursorExecFrameContext) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
+		if (frame?.editMaterialization) return await materializeEdit(this.options, toolCallId, args.path, content);
 		const toolResultMessage = await executeTool(this.options, "write", toolCallId, {
 			path: args.path,
 			content,
 		});
 		return toolResultMessage;
+	}
+
+	/** Ends the live card of a native StrReplace or Write the server completed without writing. */
+	editSettled(result: ToolResultMessage): void {
+		this.options.emitEvent?.({
+			type: "tool_execution_end",
+			toolCallId: result.toolCallId,
+			toolName: "edit",
+			result: { content: sanitizedContent(result.content), details: result.details },
+			isError: result.isError,
+		});
 	}
 
 	async delete(args: Parameters<NonNullable<ICursorExecHandlers["delete"]>>[0]) {

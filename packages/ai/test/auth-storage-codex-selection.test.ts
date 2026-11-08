@@ -1513,6 +1513,54 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.keys.get("openai-codex", "allowed-team-at-100-percent")).toBe("api-acct-team");
 	});
 
+	test("selects an open Pro Max account over a blocked Pro account, including when pinned", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-pro", "pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-promax", "promax@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-pro",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-pro",
+					primary: { usedFraction: 1, resetInMs: 3 * 24 * HOUR_MS },
+					secondary: { usedFraction: 1, resetInMs: 3 * 24 * HOUR_MS },
+					metadata: { allowed: false, limitReached: true, planType: "pro" },
+				}),
+				1,
+				1,
+			),
+		);
+		usageByAccount.set(
+			"acct-promax",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-promax",
+					primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+					metadata: { allowed: true, limitReached: false, planType: "promax" },
+				}),
+				0.2,
+				0.2,
+			),
+		);
+		const proMax = authStorage.oauth.accounts("openai-codex").find(account => account.accountId === "acct-promax");
+		if (!proMax) throw new Error("expected Pro Max account");
+
+		expect(
+			await authStorage.keys.get("openai-codex", "promax-over-blocked-pro", { modelId: "gpt-5.3-codex-spark" }),
+		).toBe("api-acct-promax");
+		expect(
+			await authStorage.keys.get("openai-codex", "promax-over-blocked-pro-paid", { modelId: "gpt-6.1-terra" }),
+		).toBe("api-acct-promax");
+		expect(authStorage.sessions.pin("openai-codex", "pinned-promax", proMax.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", "pinned-promax", { modelId: "gpt-5.3-codex-spark" })).toBe(
+			"api-acct-promax",
+		);
+	});
+
 	test("temporarily blocks only the exhausted Codex OAuth credential after a quota 429", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

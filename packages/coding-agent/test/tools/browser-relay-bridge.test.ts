@@ -167,20 +167,16 @@ async function attachPage(
 	return sessionId;
 }
 
-/**
- * Emulate the omp tab worker adopting a tab: attach to its page target, then
- * claim it as this connection's drive target.
- */
-async function claimTab(
-	bridge: RelayBridge,
-	ext: FakeExtSocket,
-	cdp: FakeCdpSocket,
-	connId: number,
-	tabId: number,
-): Promise<void> {
-	const sessionId = await attachPage(bridge, ext, cdp, connId, tabId);
-	bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }));
-	await flush();
+/** The page target id of `tabId` in `instanceId`'s browser. */
+function pageId(tabId: number, instanceId = "anon"): string {
+	return `PAGE${instanceCode(instanceId)}.${tabId}`;
+}
+
+/** Emulate the omp tab worker adopting a tab: connect claiming it (`/cdp?claim=`), then attach to its page. */
+async function driveTab(bridge: RelayBridge, ext: FakeExtSocket, cdp: FakeCdpSocket, tabId: number): Promise<number> {
+	const connId = bridge.cdpConnected(cdp, pageId(tabId));
+	await attachPage(bridge, ext, cdp, connId, tabId);
+	return connId;
 }
 
 describe("RelayBridge target discovery", () => {
@@ -243,8 +239,7 @@ describe("RelayBridge tab grouping", () => {
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		await driveTab(bridge, ext, cdp, 1);
 		const groups = ext.rpcs("group");
 		expect(groups).toHaveLength(1);
 		expect(groups[0]!.tabIds).toEqual([1]);
@@ -256,10 +251,8 @@ describe("RelayBridge tab grouping", () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 3, pinned: true }), tab({ tabId: 4, groupId: 77 })]);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 3);
-		await claimTab(bridge, ext, cdp, connId, 4);
+		await driveTab(bridge, ext, new FakeCdpSocket(), 3);
+		await driveTab(bridge, ext, new FakeCdpSocket(), 4);
 		expect(ext.rpcs("group")).toHaveLength(0);
 	});
 
@@ -268,8 +261,7 @@ describe("RelayBridge tab grouping", () => {
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		await driveTab(bridge, ext, cdp, 1);
 		expect(ext.rpcs("group")).toHaveLength(0);
 	});
 
@@ -368,8 +360,7 @@ describe("RelayBridge tab grouping", () => {
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		await driveTab(bridge, ext, cdp, 1);
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 		// Chrome reports the grouping we just made — no opt-out.
@@ -394,8 +385,7 @@ describe("RelayBridge tab grouping", () => {
 		await attachPage(bridge, ext, registry, registryConn, 1);
 		// Worker connection: claims the tab.
 		const worker = new FakeCdpSocket();
-		const workerConn = bridge.cdpConnected(worker);
-		await claimTab(bridge, ext, worker, workerConn, 1);
+		const workerConn = await driveTab(bridge, ext, worker, 1);
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 		bridge.cdpClosed(workerConn);
@@ -404,17 +394,30 @@ describe("RelayBridge tab grouping", () => {
 		expect(ungroups[0]!.tabIds).toEqual([1]);
 	});
 
+	it("ungroups a tab whose claiming client closed while its group RPC was in flight", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		// A worker's socket claims the tab as it connects and closes before the group RPC answers.
+		const worker = bridge.cdpConnected(new FakeCdpSocket(), pageId(1));
+		expect(ext.pending("group").map(rpc => rpc.tabIds)).toEqual([[1]]);
+		bridge.cdpClosed(worker);
+		expect(ext.rpcs("ungroup")).toHaveLength(0);
+		ack(bridge, ext, "group", { grouped: { "1": 42 } });
+		await flush();
+		expect(ext.rpcs("ungroup").map(rpc => rpc.tabIds)).toEqual([[1]]);
+	});
+
 	it("never overlaps group RPCs: a tab claimed mid-flight waits for the pending group", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		await driveTab(bridge, ext, cdp, 1);
 		expect(ext.rpcs("group")).toHaveLength(1);
 		// Concurrent group RPCs race Chrome's non-atomic query→create→set-title
 		// and mint duplicate "omp" groups; the second request must queue.
-		await claimTab(bridge, ext, cdp, connId, 2);
+		await driveTab(bridge, ext, new FakeCdpSocket(), 2);
 		expect(ext.rpcs("group")).toHaveLength(1);
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
@@ -428,8 +431,7 @@ describe("RelayBridge tab grouping", () => {
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		await driveTab(bridge, ext, cdp, 1);
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 		// Relay/extension link drops: the extension dissolves the omp group on
@@ -1511,10 +1513,8 @@ describe("RelayBridge multiple extension instances", () => {
 		// Chrome both shows the selected tab and said hello last.
 		connectInstance(bridge, chrome, "chrome", [tab({ tabId: 1, active: true })]);
 		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		const sessionId = await attachPage(bridge, edge, cdp, connId, 1, "edge");
-		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "OMP.claimTarget" }));
-		await flush();
+		const connId = bridge.cdpConnected(cdp, pageId(1, "edge"));
+		await attachPage(bridge, edge, cdp, connId, 1, "edge");
 		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: {} }));
 		expect(edge.rpcs("createTab")).toHaveLength(1);
 		expect(chrome.rpcs("createTab")).toHaveLength(0);
@@ -2006,6 +2006,36 @@ describe("RelayBridge auto-attach gating", () => {
 		ack(bridge, ext, "attach");
 		await flush();
 		expect(attachedTab1()).toBe(2);
+	});
+
+	it("attaches and groups a tab Chrome refused over another extension's frame once a worker claims it", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+		// Unclaimed when Chrome detached it, the tab is refused with the frame left in place, and hidden.
+		bridge.extMessage(ext, JSON.stringify({ t: "detached", tabId: 1, reason: "target_closed" }));
+		await flush();
+		expect(ext.pending("attach").map(r => [r.tabId, r.clearForeignFrames])).toEqual([[1, false]]);
+		nack(bridge, ext, "attach", "Cannot access a chrome-extension:// URL of different extension");
+		await flush();
+		expect(bridge.listTargets().map(t => t.id)).toEqual([`PAGE${ANON}.2`]);
+
+		// The supervisor re-adopts the tab on a new worker, which claims it before anything else.
+		bridge.cdpConnected(new FakeCdpSocket(), pageId(1));
+		await flush();
+		expect(ext.pending("attach").map(r => [r.tabId, r.clearForeignFrames])).toEqual([[1, true]]);
+		expect(ext.rpcs("group").map(r => r.tabIds)).toEqual([[1]]);
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(bridge.listTargets().map(t => t.id)).toEqual([`PAGE${ANON}.1`, `PAGE${ANON}.2`]);
 	});
 
 	it("does not reattach an initially discovered tab discarded during attach", async () => {
@@ -2633,5 +2663,115 @@ describe("RelayBridge file chooser interception", () => {
 		expect(sent(ext).at(-1)).toBe(true);
 		await intercept(bridge, ext, connId, first, false);
 		expect(sent(ext).at(-1)).toBe(false);
+	});
+});
+
+describe("RelayBridge foreign extension frames", () => {
+	it("lets the extension empty another extension's frames only in a tab a client claimed", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp, pageId(1));
+		const driven = await attachPage(bridge, ext, cdp, connId, 1);
+		const other = await attachPage(bridge, ext, cdp, connId, 2);
+		for (const sessionId of [driven, other]) {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Page.getFrameTree" }));
+		}
+		await flush();
+		const flags = (tabId: number) =>
+			new Set(
+				[...ext.rpcs("attach"), ...ext.rpcs("send")]
+					.filter(rpc => rpc.tabId === tabId)
+					.map(rpc => rpc.clearForeignFrames),
+			);
+		expect(flags(1)).toEqual(new Set([true]));
+		expect(flags(2)).toEqual(new Set([false]));
+	});
+
+	it("takes the claim an older omp worker sends on its page session", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		// An older worker connects without `?claim=` and claims the page once it is attached.
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const claimId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: claimId, sessionId, method: "OMP.claimTarget" }));
+		await flush();
+		expect(cdp.messages.find(m => m.id === claimId)).toEqual({ id: claimId, sessionId, result: {} });
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId, method: "Page.getFrameTree" }));
+		await flush();
+		expect(ext.rpcs("send").map(rpc => [rpc.method, rpc.clearForeignFrames])).toContainEqual([
+			"Page.getFrameTree",
+			true,
+		]);
+		expect(ext.rpcs("send").some(rpc => rpc.method === "OMP.claimTarget")).toBeFalse();
+	});
+});
+
+describe("RelayBridge download paths", () => {
+	function hello(bridge: RelayBridge, socket: FakeExtSocket, downloadsProtocol?: number): void {
+		bridge.extConnected(socket);
+		bridge.extMessage(
+			socket,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				discardedTabsProtocol: 1,
+				downloadsProtocol,
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+			}),
+		);
+	}
+
+	async function askPath(bridge: RelayBridge, ext: FakeExtSocket): Promise<{ cdp: FakeCdpSocket; id: number }> {
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id, sessionId, method: "OMP.downloadPath", params: { guid: "guid-1" } }),
+		);
+		await flush();
+		return { cdp, id };
+	}
+
+	it("looks up where Chrome saved a completed download", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, 1);
+		const { cdp, id } = await askPath(bridge, ext);
+		expect(ext.pending("findDownload").map(rpc => rpc.guid)).toEqual(["guid-1"]);
+		ack(bridge, ext, "findDownload", { filename: "/Users/me/Downloads/r (1).csv", state: "complete" });
+		await flush();
+		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
+			result: { filePath: "/Users/me/Downloads/r (1).csv" },
+		});
+
+		// A download Chrome has not finished, or that the extension paired with no item of Chrome's, has no path yet.
+		for (const found of [{ filename: "/Users/me/Downloads/r.csv", state: "in_progress" }, null]) {
+			const pending = await askPath(bridge, ext);
+			ack(bridge, ext, "findDownload", found);
+			await flush();
+			expect(pending.cdp.messages.find(m => m.id === pending.id)).toMatchObject({
+				error: { message: "Chrome has no completed download for this report" },
+			});
+		}
+	});
+
+	it("tells an extension installed before download tracking to update, without asking it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext);
+		const { cdp, id } = await askPath(bridge, ext);
+		expect(ext.rpcs("findDownload")).toEqual([]);
+		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
+			error: { message: expect.stringContaining("run `omp browser-relay install`") },
+		});
 	});
 });

@@ -2390,14 +2390,15 @@ fn plan_operations(
 				let body = text.strip_suffix('\n').unwrap_or(text);
 				for candidate in &candidates {
 					let (offset, replacement) = match at {
-						// Insert at the first anchor line's start, ahead of its indentation.
+						// Insert at the first anchor line's start, ahead of its
+						// indentation.
 						Placement::Before => {
 							let start = candidate.match_start;
 							let offset = content[..start].rfind('\n').map_or(0, |at| at + 1);
 							(offset, format!("{body}\n"))
 						},
-						// Insert before the final anchor line's newline, retaining its EOF
-						// convention.
+						// Insert before the final anchor line's newline, retaining
+						// its EOF convention.
 						Placement::After => {
 							let end = candidate.match_end;
 							let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
