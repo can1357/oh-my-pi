@@ -1,6 +1,6 @@
 //! Cross-build images are written by independent libraries, never rewritten by
-//! these tests. See fixtures/format-vocabulary/provenance.json for their
-//! writers.
+//! these tests. The provenance manifests beside the legacy and 18.18 images
+//! identify each upstream-based writer.
 
 use bstr::BStr;
 use pi_shell::{
@@ -8,19 +8,20 @@ use pi_shell::{
 		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, Lost, MemStore,
 		RestoreError, RestoreOpts, RestoreReport, RunId, Shell, StateStore, Step,
 		snapshot::vocabulary::Entry,
-		store::{BlobSlot, Change, Key, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, Record, RestoreWrite, StoreError, Table},
 	},
 	testkit::FakeHost,
 };
 use serde::{Deserialize, Serialize};
 
-const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/base-parent-wait.image");
-const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-root-kept.image");
-const UNKNOWN_RECORD: &[u8] = include_bytes!("fixtures/format-vocabulary/unknown-root-kept.record");
+const BASE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
+const UNKNOWN: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.image");
+const UNKNOWN_RECORD: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18/unknown-root-kept.record");
 const UNKNOWN_CHILD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.image");
+	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.image");
 const UNKNOWN_CHILD_RECORD: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/unknown-subshell-kept.record");
+	include_bytes!("fixtures/format-vocabulary/18.18/unknown-subshell-kept.record");
 const NEWER: &[u8] = include_bytes!("fixtures/format-vocabulary/newer-parent-wait.image");
 const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
 
@@ -74,6 +75,11 @@ impl StateStore for UnreadableRecords {
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
 		self.writes += 1;
 		self.store.apply(change)
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		self.writes += writes.len();
+		self.store.commit_restore(writes)
 	}
 
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {

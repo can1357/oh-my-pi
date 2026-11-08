@@ -739,8 +739,9 @@ impl Shell {
 	}
 
 	/// Re-attach to a store that holds root state (and possibly a `Frames`
-	/// blob) — after a heap restore, in any process. The frames blob is
-	/// consumed (deleted) on success.
+	/// blob) — after a heap restore, in any process. Every store mutation is
+	/// committed atomically after preparation succeeds. Any refusal leaves the
+	/// image and store unchanged; success consumes the frames blob.
 	///
 	/// Externals in flight are lost (their waiters see 137 and a `Lost`
 	/// event); tasks resume through
@@ -760,15 +761,15 @@ impl Shell {
 		cx: &mut Cx<'_>,
 		opts: RestoreOpts,
 	) -> Result<(Self, RestoreReport), RestoreError> {
-		// Read-only compatibility/required-entry preflight precedes Root::load,
-		// every record read or write, and every blob deletion. R4's restore
-		// commit point is downstream; it must not consume an image before this.
+		// Compatibility preflight is read-only. The atomic commit below owns
+		// every store mutation, including consuming the execution image.
 		let prepared = cx
 			.store
 			.get_blob(BlobSlot::Frames)?
 			.map(|bytes| prepare(&bytes, opts.drop_frames))
 			.transpose()?;
-		let root = Root::load(cx.store)?;
+		let mut root = Root::load(cx.store)?;
+		root.stage_restore();
 		let argv0 = state::root_misc(cx.store, MiscKey::Argv0)?
 			.map_or_else(|| BString::from("bash"), BString::from);
 		let shell_pid = parse_misc(cx.store, MiscKey::ShellPid)?.unwrap_or(0);
@@ -854,7 +855,7 @@ impl Shell {
 				report.abandoned = prepared.header.runs;
 				report.frames_abandoned = prepared.frames_abandoned;
 			}
-			cx.store.del_blob(BlobSlot::Frames)?;
+			shell.k.root.delete_restore_blob(BlobSlot::Frames);
 		}
 		if !restored {
 			shell.lose_running(cx, &mut report)?;
@@ -864,6 +865,7 @@ impl Shell {
 			return Err(RestoreError::Store(err));
 		}
 		reinstall_signal_traps(cx)?;
+		shell.k.root.commit_restore(cx.store)?;
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k

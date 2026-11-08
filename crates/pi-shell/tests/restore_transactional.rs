@@ -8,7 +8,7 @@ use pi_shell::{
 	bash::{
 		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, MemStore, RestoreOpts, RestoreReport,
 		RunId, Script, Shell, ShellApi, StateStore, Step,
-		store::{BlobSlot, Change, Key, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, Record, RestoreWrite, StoreError, Table},
 	},
 	testkit::{FakeHost, fault::skeleton_init},
 };
@@ -62,6 +62,21 @@ impl StateStore for RefusingStore {
 		};
 		self.operation(operation, true)?;
 		self.inner.apply(change)
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		// Exercise every backend write's admission without publishing any of
+		// them.
+		for write in &writes {
+			let operation = match write {
+				RestoreWrite::Put(key, _) => format!("put {:?}", key.as_key()),
+				RestoreWrite::Delete(key) => format!("del {:?}", key.as_key()),
+				RestoreWrite::DeleteBlob(slot) => format!("del_blob {slot:?}"),
+			};
+			self.operation(operation, true)?;
+		}
+		self.operation("commit restore".into(), true)?;
+		self.inner.commit_restore(writes)
 	}
 
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {

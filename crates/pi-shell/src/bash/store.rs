@@ -48,6 +48,18 @@ use crate::bash::{
 
 mod key_wire;
 
+/// One complete-record or blob mutation in a restore's atomic commit.
+/// The backend validates the entire ordered batch before publishing any of it.
+#[derive(Debug)]
+pub enum RestoreWrite {
+	/// Replace a record, with the same shape and scope rules as [`Change::Put`].
+	Put(KeyBuf, Record),
+	/// Delete a record, with the same scope truncation rules as [`Change::Del`].
+	Delete(KeyBuf),
+	/// Delete an execution-image blob.
+	DeleteBlob(BlobSlot),
+}
+
 /// Persistent shell state, record by record.
 ///
 /// Implemented by `MemStore` (the reference, `mem-store` feature) and any
@@ -100,6 +112,16 @@ pub trait StateStore {
 	/// [`StoreError::Shape`] when a variant's precondition does not hold,
 	/// [`StoreError::Backend`] when the backend fails.
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError>;
+	/// Commit all restore mutations atomically, in order. On error every record,
+	/// blob and the epoch must be unchanged; on success all mutations are
+	/// visible. Validation, storage and durability failures must precede the
+	/// commit point. This is mandatory: a backend without an atomic commit
+	/// must return [`StoreError::Backend`], never apply an unsafe
+	/// write-through fallback.
+	///
+	/// # Errors
+	/// [`StoreError`] when validation or the atomic backend commit is refused.
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError>;
 	/// Store a blob (frames, IR units).
 	///
 	/// # Errors

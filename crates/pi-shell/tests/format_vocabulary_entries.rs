@@ -5,21 +5,22 @@ use pi_shell::{
 		Budget, CallId, CallOutcome, Cx, Engine, EngineConfig, Incompatibility, Lost, MemStore,
 		RestoreError, RestoreOpts, RunId, Script, Shell, StateStore, Step, Vpid,
 		snapshot::vocabulary::Entry,
-		store::{BlobSlot, Change, Key, Record, StoreError, Table},
+		store::{BlobSlot, Change, Key, Record, RestoreWrite, StoreError, Table},
 	},
 	testkit::FakeHost,
 };
 use serde::Deserialize;
 
 const REQUIRED: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/owned-required-vocabulary.image");
+	include_bytes!("fixtures/format-vocabulary/18.18/owned-required-vocabulary.image");
 const OPTIONAL: &[u8] =
-	include_bytes!("fixtures/format-vocabulary/owned-optional-vocabulary.image");
-const RESERVED: &[u8] = include_bytes!("fixtures/format-vocabulary/owned-reserved-required.image");
+	include_bytes!("fixtures/format-vocabulary/18.18/owned-optional-vocabulary.image");
+const RESERVED: &[u8] =
+	include_bytes!("fixtures/format-vocabulary/18.18/owned-reserved-required.image");
 const FRAMELESS: &[u8] = include_bytes!("fixtures/format-vocabulary/frameless-bg-pids.image");
 const FRAMELESS_MARKS: &[u8] =
 	include_bytes!("fixtures/format-vocabulary/frameless-root-marks.image");
-const READABLE: &[u8] = include_bytes!("fixtures/format-vocabulary/base-parent-wait.image");
+const READABLE: &[u8] = include_bytes!("fixtures/format-vocabulary/18.18/base-parent-wait.image");
 const FOREIGN: &[u8] = include_bytes!("fixtures/format-vocabulary/foreign-parent-wait.image");
 
 struct RecordsUnavailable {
@@ -42,6 +43,11 @@ impl StateStore for RecordsUnavailable {
 	fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
 		self.writes += 1;
 		self.store.apply(change)
+	}
+
+	fn commit_restore(&mut self, writes: Vec<RestoreWrite>) -> Result<(), StoreError> {
+		self.writes += writes.len();
+		self.store.commit_restore(writes)
 	}
 
 	fn put_blob(&mut self, slot: BlobSlot, bytes: &[u8]) -> Result<(), StoreError> {
