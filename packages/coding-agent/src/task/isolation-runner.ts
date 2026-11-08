@@ -475,11 +475,13 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * Kept-alive runs retain the isolation handle through idle/parked lifecycle
- * transitions, then capture final changes and clean up on release. One-shot
- * and failed startup paths clean up in `finally`. If captured changes cannot
- * be written to disk, the workspace is retained under a unique `.retained-*`
- * sibling and its path is named in the resulting error.
+ * Kept-alive runs keep the isolation handle only while the agent is idle.
+ * When the agent parks (after `task.agentIdleTtlMs`) or is released, final
+ * changes are captured and the workspace is cleaned up, so a parked isolated
+ * agent no longer owns its checkout. One-shot and failed startup paths clean
+ * up in `finally`. If captured changes cannot be written to disk, the
+ * workspace is retained under a unique `.retained-*` sibling and its path is
+ * named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let changes: RunChanges | undefined;
