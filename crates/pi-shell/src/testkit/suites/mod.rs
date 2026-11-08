@@ -39,6 +39,7 @@ mod restore_fidelity;
 mod skeleton;
 mod startup_vars;
 mod stdin_script;
+mod test_chain_depth;
 mod tool_profile;
 mod trace;
 mod trap;
