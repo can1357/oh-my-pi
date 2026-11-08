@@ -30,7 +30,7 @@
 
 ### Fixed
 
-- Subagents on models that fill in every task-tool field can dispatch ordinary tasks again while `task.perCallModel` is `off`: an empty per-call `model`, `sourceSession` or `outputSchema` now counts as left out, as does an empty `task` or `taskFile` beside a real value of the other; empty seance model overrides remain invalid ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
+- Subagents on models that fill in every task-tool field can dispatch ordinary tasks again while `task.perCallModel` is `off`: an empty per-call `model`, `sourceSession` or `outputSchema` now counts as left out, as does an empty `task` or `taskFile` beside a real value of the other; empty bundled seance overrides remain invalid even after a custom agent is removed mid-session ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
 - A subagent started early while a batch `task` call is still streaming is no longer cancelled and run a second time under a `-2` name because a later item in the same call left a field blank ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
 - A batch `task` call that sets `isolated` at the top level is refused and told to set `tasks[].isolated`, instead of silently starting its subagents unisolated and then running them a second time ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))
 - A `task` call whose `name` or `agent` is not a string reports the shape instead of failing with a `TypeError` ([#18149](https://github.com/can1357/oh-my-pi/pull/18149) by [@sjawhar](https://github.com/sjawhar))

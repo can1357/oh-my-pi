@@ -75,6 +75,7 @@ import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/too
 import { copyTaskFields, repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
+	isBlankModelPlaceholder,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -632,30 +633,6 @@ function isBlankString(value: unknown): boolean {
  */
 const ARRAY_BLANKABLE_KEYS: Partial<Record<BlankableKey, true>> = { model: true };
 
-/**
- * An array that names nothing — `[]`, or one whose every entry is a blank string. That is what a
- * model sends for a selector it has nothing to put in, and the per-call gate refuses it: the gate
- * fires for any value that is not `undefined`, before a selector is looked at, so `model: []` was
- * answered with "Per-call model is disabled… Omit model" for a field filled with nothing.
- *
- * A *populated* array stays. `task.md` documents "no roles, arrays, globs or partial IDs", so one
- * is a real mistake, and `invalidModelSelectorReason` answers it with the exact selector form.
- *
- * `every` on a blank rather than `!some` on a real one. They differ on an array holding a
- * non-string, which the looser form called blank and dropped. On the wire that case is
- * unreachable — the declared element type is `string`, so validation rewrites such an array to its
- * JSON text before dispatch sees it — but an internal caller and the lenient raw path both reach
- * it, and dropping a malformed selector there would spawn with the gate never consulted.
- *
- * This is safe on both planning paths only because ./types declares `model` as `string | string[]`
- * unconditionally. While that widening was seance-only, the narrow schema rewrote an array to its
- * JSON text, so dispatch saw `"[]"` where the speculative launcher — which plans from the raw
- * arguments — saw `[]`, and the two disagreed wherever seance was hidden.
- */
-function isBlankArray(value: unknown): boolean {
-	return Array.isArray(value) && value.every(entry => isBlankString(entry));
-}
-
 /** A string that names something: the other half of a `task`/`taskFile` pair that was really chosen. */
 function isRealString(value: unknown): boolean {
 	return typeof value === "string" && value.trim() !== "";
@@ -685,19 +662,17 @@ function isRealString(value: unknown): boolean {
  * blank sibling would then delete that selector on the way to the gate, and the spawn would run
  * on the agent's configured model while the approval prompt still named the requested one.
  */
-function withoutBlankFields<T extends TaskItem | TaskParams>(
-	item: T,
-	defaultAgent: string,
-	seanceAdvertised: boolean,
-): T {
+function withoutBlankFields<T extends TaskItem | TaskParams>(item: T, defaultAgent: string): T {
 	const agent = typeof item.agent === "string" ? item.agent.trim() || defaultAgent : defaultAgent;
 	const keys: BlankableKey[] = [...BLANKABLE_KEYS];
 	if (isRealString(item.taskFile)) keys.push("task");
 	if (isRealString(item.task) || isBlankString(item.task)) keys.push("taskFile");
 	let out = item;
 	for (const key of keys) {
-		if (key === "model" && seanceAdvertised && agent === SEANCE_AGENT_NAME) continue;
-		const blank = isBlankString(item[key]) || (ARRAY_BLANKABLE_KEYS[key] === true && isBlankArray(item[key]));
+		// Resolve a seance model's meaning only after dispatch discovers the actual agent definition.
+		if (key === "model" && agent === SEANCE_AGENT_NAME) continue;
+		const blank =
+			isBlankString(item[key]) || (ARRAY_BLANKABLE_KEYS[key] === true && isBlankModelPlaceholder(item[key]));
 		if (!blank) continue;
 		if (out === item) out = copyTaskFields(item, {});
 		delete out[key];
@@ -720,12 +695,10 @@ function planSpawns(
 ): SpawnPlan | string {
 	const repaired = repairTaskParams(rawParams as TaskParams);
 	// Only object-shaped calls and items: anything else is left for the shape checks to reject.
-	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired, defaultAgent, seanceAdvertised) : repaired;
+	const unblanked = isRecord(repaired) ? withoutBlankFields(repaired, defaultAgent) : repaired;
 	const params = Array.isArray(unblanked.tasks)
 		? copyTaskFields(unblanked, {
-				tasks: unblanked.tasks.map(task =>
-					isRecord(task) ? withoutBlankFields(task, defaultAgent, seanceAdvertised) : task,
-				),
+				tasks: unblanked.tasks.map(task => (isRecord(task) ? withoutBlankFields(task, defaultAgent) : task)),
 			})
 		: unblanked;
 	const error =
