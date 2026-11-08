@@ -7,7 +7,8 @@ exports_files(["Cargo.toml"])
 
 rust_library(
     name = "jaq-core",
-    srcs = glob(["src/**/*.rs", "src/**/*.jq"]),
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = glob(["src/**/*.jq"]),
     aliases = aliases(),
     crate_features = ["std"],
     crate_name = "jaq_core",
