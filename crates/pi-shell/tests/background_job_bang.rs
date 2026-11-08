@@ -69,3 +69,14 @@ async fn a_subshell_does_not_wait_for_its_parents_child() {
 	])
 	.await;
 }
+
+/// `$!` of a background pipeline is its last process's pid, as the process
+/// reports `$$` itself (it was the shell's virtual pid).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_pipelines_bang_is_its_last_process() {
+	assert_bash_outputs(&[(
+		r#"T=$(mktemp); /bin/sleep 0.1 | /bin/sh -c 'echo $$ >"$1"; exec /bin/sleep 0.1' sh "$T" & p=$!; wait; [ "$p" = "$(cat "$T")" ] && echo last; rm -f "$T""#,
+		"last\n",
+	)])
+	.await;
+}

@@ -180,19 +180,35 @@ fn assignments_redirections_and_exec_keep_the_os_pid() {
 }
 
 // Failure mode: a compound job, a builtin, a function running its external
-// as one command of its own, a pipeline or a subshell group reports the
-// pid of one of the programs it runs.
+// as one command of its own, or a subshell group reports the pid of one of
+// the programs it runs.
 #[test]
 fn compound_and_builtin_jobs_keep_virtual_pids() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		"{ :; /x/true; } & a=$!; : & b=$!; f() { /x/true; }; f & c=$!; /x/true | /x/true & d=$!; ( \
-		 /x/true ) & e=$!; { /x/true; } & g=$!; wait; echo $a $b $c $d $e $g",
+		"{ :; /x/true; } & a=$!; : & b=$!; f() { /x/true; }; f & c=$!; ( /x/true ) & e=$!; { \
+		 /x/true; } & g=$!; wait; echo $a $b $c $e $g",
 	);
 	let pids: Vec<&str> = out.split_whitespace().collect();
-	assert_eq!(pids.len(), 6, "{out}");
+	assert_eq!(pids.len(), 5, "{out}");
 	assert!(pids.iter().all(|p| is_virtual(p)), "{out}");
+}
+
+// Failure mode: a background pipeline's `$!` is the shell's virtual pid,
+// which `kill` cannot reach as a program, instead of its last program's
+// (bash: `kill $!` signals that program, `wait $!` gets its status).
+#[test]
+fn a_background_pipeline_is_known_by_its_last_program() {
+	let world = World::new();
+	let (out, _) = run(world.host(), "/x/true | /x/trap42 & p=$!; kill $p; wait $p; echo $?");
+	assert_eq!(out, "42\n");
+	let spawned = world.redirs.lock();
+	let last = spawned
+		.iter()
+		.position(|(argv0, _)| argv0.as_slice() == b"/x/trap42")
+		.expect("the last stage ran");
+	assert_eq!(world.got(FIRST + last as u32), [Signal::Term]);
 }
 
 // Failure mode: `wait -n -p` names the virtual pid while `$!` showed the OS

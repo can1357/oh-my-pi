@@ -3914,13 +3914,22 @@ fn stage_level(unit: &Unit, entry: u32, background: bool) -> u32 {
 
 /// Whether the background job whose body starts at `entry` may be known by
 /// its program's OS pid ([`Bang`]): its body is one simple command
-/// ([`BangStage::Lone`]), or a group that `exec`s one (`{ exec cmd; }`,
-/// [`BangStage::Exec`]). Any other compound job keeps its virtual pid at
-/// once: its readers never wait.
+/// ([`BangStage::Lone`]), a group that `exec`s one (`{ exec cmd; }`,
+/// [`BangStage::Exec`]), or a pipeline, whose last stage decides
+/// ([`BangStage::Pipeline`], [`retarget_bang`]). Any other compound job
+/// keeps its virtual pid at once: its readers never wait.
 fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 	let code = |at: u32| unit.ops.get(at as usize).map(|op| op.code);
 	if code(entry) == Some(Opcode::Exec) && code(entry + 1) == Some(Opcode::SubExit) {
 		return Some(BangStage::Lone);
+	}
+	if let Some(op) = unit.ops.get(entry as usize)
+		&& op.code == Opcode::Spawn
+		&& let Some(spawn) = unit.spawns.get(op.a as usize)
+		&& spawn.kind == SpawnKind::Pipeline
+		&& code(spawn.end) == Some(Opcode::SubExit)
+	{
+		return Some(BangStage::Pipeline);
 	}
 	let group = [Opcode::Enter, Opcode::Exec, Opcode::Leave, Opcode::SubExit]
 		.iter()
@@ -3937,6 +3946,27 @@ fn bang_stage(unit: &Unit, entry: u32) -> Option<BangStage> {
 			|w| matches!(w.parts.as_slice(), [ir::Part::Lit(name)] if name.as_slice() == b"exec"),
 		);
 	(group && exec).then_some(BangStage::Exec)
+}
+
+/// The pipeline a background job's body is ([`BangStage::Pipeline`])
+/// started: its last stage, run by vproc `last` (a child, or the job's own
+/// under `lastpipe`) from `entry`, decides the job's pid as a job body of
+/// its own would (bash and zsh name the last process in `$!`).
+fn retarget_bang(k: &mut Kernel, job_vproc: Vpid, unit: &Unit, last: Vpid, entry: u32) {
+	let Some(bang) = k
+		.bangs
+		.iter_mut()
+		.find(|b| b.vproc == job_vproc && b.stage == BangStage::Pipeline)
+	else {
+		return;
+	};
+	match bang_stage(unit, entry).filter(|s| *s != BangStage::Pipeline) {
+		Some(stage) => {
+			bang.vproc = last;
+			bang.stage = stage;
+		},
+		None => k.settle_bang(job_vproc, None),
+	}
 }
 
 /// Source text of stage `i` of pipeline `info`, for a pipe tap: the node of
@@ -3959,8 +3989,15 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 		.is_some_and(|s| !s.children.is_empty());
 	if !started {
 		// A job that forks (a subshell, pipeline, job or coprocess of its
-		// own) is not just one program: it keeps its virtual pid.
-		if !k.bangs.is_empty() {
+		// own) is not just one program: it keeps its virtual pid. The
+		// pipeline a job's body is passes the decision to its last stage
+		// ([`retarget_bang`]).
+		let own_pipeline = info.kind == SpawnKind::Pipeline
+			&& k
+				.bangs
+				.iter()
+				.any(|b| b.vproc == vp.vpid && b.stage == BangStage::Pipeline);
+		if !k.bangs.is_empty() && !own_pipeline {
 			k.settle_bang(vp.vpid, None);
 		}
 		let mut children = Vec::with_capacity(info.stages.len());
@@ -4047,6 +4084,9 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 				let mut stdin = vp.fds.get(0).cloned();
 				for (i, stage) in info.stages.iter().enumerate() {
 					if lastpipe && i + 1 == n {
+						if !k.bangs.is_empty() {
+							retarget_bang(k, vp.vpid, unit, vp.vpid, stage.entry);
+						}
 						k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 						let line_shift = top_frame(vp).line_shift;
 						let sc = scratch(vp);
@@ -4089,6 +4129,11 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 					}
 					children.push(child.vpid);
 					k.spawned.push(Box::new(child));
+				}
+				if !k.bangs.is_empty()
+					&& let (Some(&last), Some(stage)) = (children.last(), info.stages.last())
+				{
+					retarget_bang(k, vp.vpid, unit, last, stage.entry);
 				}
 				k.emit_op(cx, vp, op.node, EventData::Pipeline { stages: &children });
 			},

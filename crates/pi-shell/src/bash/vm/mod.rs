@@ -513,6 +513,11 @@ pub struct Kernel {
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
 	pub settled:            Vec<(Vpid, u32)>,
+	/// `(OS pid, vproc)`: a job's `$!` names a program a vproc other than
+	/// the job's own runs (a background pipeline's last stage), so `kill`
+	/// of that pid signals that vproc. Dropped when the vproc ends; not
+	/// imaged (a restored shell signals the job's vproc).
+	pub pid_owners:         Vec<(u32, Vpid)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
 	pub deferrals:          Vec<proc::Deferral>,
@@ -617,6 +622,7 @@ impl Kernel {
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
+			pid_owners: Vec::new(),
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
@@ -650,6 +656,9 @@ impl Kernel {
 		let bang = self.bangs.swap_remove(i);
 		if let Some(pid) = os {
 			self.settled.push((bang.job, pid));
+			if bang.vproc != bang.job {
+				self.pid_owners.push((pid, bang.vproc));
+			}
 		}
 		jobctl::bang_settled(self, bang.job, os);
 		self.ctl.notify();
@@ -751,6 +760,16 @@ impl Kernel {
 		id
 	}
 
+	/// The live vproc running the program OS pid `pid` names when that is
+	/// not its job's own vproc ([`Self::pid_owners`]).
+	pub fn pid_owner(&self, pid: u32) -> Option<Vpid> {
+		self
+			.pid_owners
+			.iter()
+			.find(|&&(p, _)| p == pid)
+			.map(|&(_, owner)| owner)
+	}
+
 	/// Child vproc `vpid` of `parent` ended with `status`; the record stays
 	/// until the status is collected ([`Self::proc_collect`]).
 	pub fn proc_exited(
@@ -760,6 +779,7 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		self.pid_owners.retain(|&(_, owner)| owner != vpid);
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
