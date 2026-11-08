@@ -8300,3 +8300,82 @@ export function scalewayModelManagerOptions(
 		mapModel: mapWithBundledReference,
 	});
 }
+
+// ---------------------------------------------------------------------------
+// Keln
+// ---------------------------------------------------------------------------
+
+/**
+ * Keln discovery configuration: the API key plus optional base-URL and fetch
+ * overrides. Consumed by {@link kelnModelManagerOptions}, and exported for
+ * extensions and tests that construct the manager directly.
+ */
+export interface KelnModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Maps one Keln `/v1/models` row. The row is the deployment truth for limits,
+ * modalities, prices, and reasoning controls, so a row with no effort levels
+ * offers no thinking control rather than inheriting guessed levels. `none`
+ * turns reasoning off and is not a level; a model without it reasons at its
+ * lowest level when thinking is off, since Keln answers
+ * `reasoning_not_disableable` to `none`.
+ */
+function mapKelnModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> | null {
+	// Rows without text output, such as decision, embedding and reranker models,
+	// cannot serve chat.
+	if (!Array.isArray(entry.output_modalities) || !entry.output_modalities.includes("text")) {
+		return null;
+	}
+	const controls = isRecord(entry.reasoning) ? entry.reasoning : undefined;
+	const wireEfforts: unknown[] = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : [];
+	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+	const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+	const thinking: ThinkingConfig | undefined =
+		efforts.length > 0
+			? {
+					mode: "effort",
+					efforts,
+					...(defaultLevel !== undefined && { defaultLevel }),
+					// Explicit in both directions: class rules mark some lineages as
+					// mandatory, and the row states what this deployment does.
+					requiresEffort: controls?.mandatory === true,
+				}
+			: undefined;
+	return {
+		...defaults,
+		reasoning: thinking !== undefined,
+		...(thinking && { thinking }),
+		input: toInputCapabilities(entry.input_modalities),
+		contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+		cost: perTokenPricingCost(entry.pricing),
+		compat: {
+			trustExplicitThinkingOnly: true,
+			...(thinking && {
+				reasoningDisableMode: wireEfforts.includes("none") ? ("none-effort" as const) : ("lowest-effort" as const),
+			}),
+		},
+	};
+}
+
+/**
+ * Keln model manager: OpenAI-compatible chat completions at `api.keln.ai/v1`.
+ * `/v1/models` is public and carries the live prices, so discovery runs with or
+ * without a key and a successful fetch is the complete roster.
+ */
+export function kelnModelManagerOptions(config?: KelnModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "keln",
+		defaultBaseUrl: "https://api.keln.ai/v1",
+		config,
+		dynamicModelsAuthoritative: true,
+		mapModel: mapKelnModel,
+	});
+}

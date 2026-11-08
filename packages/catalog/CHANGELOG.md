@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Keln as a built-in provider with API-key login and live discovery of chat models, prices, limits, and effort levels (default `zai-org/glm-5.3`)
+
 ### Changed
 
 - Added a `balanced` delegation bias between `eager` and `restrained`; models without a `delegation-bias` rule now resolve to it instead of `eager`

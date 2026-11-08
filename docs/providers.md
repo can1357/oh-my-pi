@@ -181,6 +181,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
 | `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
+| `keln`                           | `KELN_API_KEY`                                                                      |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
@@ -211,6 +212,8 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 `cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID`.
 
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
+
+`keln` is an inference platform for open models with an OpenAI-compatible API. Sign up at `https://app.keln.ai/signup`, open **Keys** → **Create key**, then set `KELN_API_KEY` or run `/login keln` and select `keln/zai-org/glm-5.3`. OMP reads the chat models, context windows, input types, effort levels, and prices live from the public `/v1/models` endpoint and leaves decision models out of the chat roster. The API publishes no maximum output, so OMP requests up to 32,768 output tokens per response, covering reasoning and answer together.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
 

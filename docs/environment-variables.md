@@ -125,6 +125,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `SINGULARITYAPI_DEV_API_KEY`          | SingularityAPI universal gateway auth              | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`                                                     |
 | `SINGULARITYAPI_TECH_API_KEY`         | SingularityAPI reserved lanes auth                 | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models`                                                  |
 | `SCW_SECRET_KEY`                      | Scaleway Generative APIs auth                      | Using `scaleway` provider                                      | Serverless open-weight chat models; validated against `https://api.scaleway.ai/v1/models`; `SCW_API_KEY` is accepted as a legacy alias       |
+| `KELN_API_KEY`                        | Keln auth                                          | Using `keln` provider                                          | Also available via `/login keln`, which validates the key with a 1-token chat request (`/v1/models` is public)                               |
 
 ### GitHub/Copilot tokens
 
