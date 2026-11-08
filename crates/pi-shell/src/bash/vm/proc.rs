@@ -629,6 +629,19 @@ impl JobTable {
 		if self.current != Some(job) {
 			self.previous = self.current;
 			self.current = Some(job);
+			// An in-process child may already be done before the parent has
+			// observed its completion. Keep the old current job as previous
+			// until that observation, as for Bash's pending SIGCHLD status.
+			if self
+				.previous
+				.and_then(|n| self.get(n))
+				.is_some_and(|previous| {
+					matches!(previous.state, JobState::Done(_))
+						&& !previous.notified
+						&& self.bang_seen() != previous.vpid.0
+				}) {
+				return;
+			}
 		}
 		if self.previous != self.current && self.is_stopped(self.previous) {
 			return;

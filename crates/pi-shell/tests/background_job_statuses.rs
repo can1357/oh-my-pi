@@ -1,7 +1,7 @@
 //! Job control after a background job ends, as Bash 5.3 runs a script
 //! (Bash 5.2.21 agrees on every row unless a test says otherwise): a job
-//! `wait` reported stays in the table until the shell next forks or runs
-//! `jobs`, and the status of a job that left the table is kept for
+//! `wait` reported stays in the table until cleanup at a later wait,
+//! fork or `jobs`, and the status of a job that left the table is kept for
 //! `wait PID` (bash's `bgpids`) until `wait` without operands or
 //! `disown -a` forgets it. `$!` is the same in every subshell.
 #![cfg(unix)]
@@ -214,6 +214,10 @@ async fn waiting_a_previous_job_cleans_up_before_waiting_the_current_job() {
 		(
 			r#"f(){ return 7; }; g(){ /bin/sleep .01; return 7; }; f & p=$!; wait "$p"; g & /bin/sleep .03; wait %%; echo c=$?; wait %- 2>/dev/null; echo p=$?; wait "$p"; echo numeric=$?"#,
 			"c=7\np=7\nnumeric=7\n",
+		),
+		(
+			r#"f(){ return 3; }; g(){ /bin/sleep .03; return 7; }; f & a=$!; /bin/sleep .03; g & b=$!; wait "$a"; wait %%; echo c=$?; wait %- 2>/dev/null; echo p=$?"#,
+			"c=7\np=7\n",
 		),
 	])
 	.await;
