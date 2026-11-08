@@ -1047,6 +1047,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#powerAssertion: PowerAssertionHandle | undefined;
+	#scopedModelsRefresher: (() => Promise<void>) | undefined;
 
 	readonly configWarnings: string[] = [];
 	/** Construction skipped fallback-chain validation; {@link validateRetryFallbackChains} still owes it. */
@@ -7923,6 +7924,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Replace the Ctrl+P/`/models` cycle scope (post-discovery rebuild; see {@link ModelControls.setScopedModels}). */
 	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
 		this.#models.setScopedModels(scopedModels);
+	}
+
+	setScopedModelsRefresher(refresher: (() => Promise<void>) | undefined): void {
+		this.#scopedModelsRefresher = refresher;
+	}
+
+	/** Logs a failure instead of throwing, so it cannot fail the sign-in or sign-out that triggered it. */
+	async refreshScopedModels(): Promise<void> {
+		try {
+			await this.#scopedModelsRefresher?.();
+		} catch (error) {
+			logger.warn("Scoped model refresh failed", { error: String(error) });
+		}
 	}
 
 	/** Prompt templates */

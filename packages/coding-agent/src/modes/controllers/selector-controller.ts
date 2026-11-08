@@ -1133,6 +1133,10 @@ export class SelectorController {
 					done();
 					void this.#loginThenReopenModelHub(providerId);
 				},
+				onCatalogRefreshed: async () => {
+					await this.ctx.session.refreshScopedModels();
+					return this.ctx.session.scopedModels;
+				},
 				onCycleOrderChange: order => {
 					try {
 						cfgCycleOrder.set(this.ctx.settings, order);
@@ -2195,11 +2199,7 @@ export class SelectorController {
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
 			await this.ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(providerId), "online");
-			try {
-				await this.ctx.refreshScopedModelsAfterLogin?.();
-			} catch (error) {
-				logger.warn("Scoped model refresh after login failed", { error: String(error) });
-			}
+			await this.ctx.session.refreshScopedModels();
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -2234,10 +2234,9 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const { removed, remainingSource } = await logoutCredential(
-				this.ctx.session.modelRegistry,
+				this.ctx.session,
 				providerId,
 				account.credentialId,
-				this.ctx.session.sessionId,
 			);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);

@@ -273,6 +273,13 @@
 ### Fixed
 
 - A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory ([#17986](https://github.com/can1357/oh-my-pi/pull/17986) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Breaking Changes
+
+- `logoutCredential()` takes the `AgentSession` instead of the model registry and session id, and `InteractiveMode` and `InteractiveModeContext` no longer take `refreshScopedModelsAfterLogin`; hosts install a scope refresher with `AgentSession.setScopedModelsRefresher()` ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Fixed
+
+- The scoped model list (`--models` or `enabledModels`; the scoped `/models` picker and Ctrl+P) is re-resolved after `/logout`, after a model hub catalog refresh, and after an RPC `login` or `logout`, so it drops the models of a provider you signed out of and picks up models a sign-in or refresh made available ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
