@@ -833,7 +833,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-fatal_unset-exit_trap-prior3",
@@ -848,7 +848,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-fatal_unset-exit_trap_errexit-clean",
@@ -1197,7 +1197,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-fatal_unset-exit_trap_posix-prior3",
@@ -1212,7 +1212,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-fatal_nounset-top-clean",
@@ -1257,7 +1257,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-fatal_nounset-exit_trap_errexit-clean",
@@ -1332,7 +1332,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "construct-simple-discard_readonly-top-clean",
@@ -1812,7 +1812,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "declare-Declare0-declaration-top-clean",
@@ -2248,7 +2248,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-plain-fatal",
@@ -2276,7 +2276,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-plain-readsub",
@@ -2535,7 +2535,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nofork-fatal",
@@ -2564,7 +2564,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nofork-readsub",
@@ -2825,7 +2825,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-reply-fatal",
@@ -2854,7 +2854,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-reply-readsub",
@@ -3121,7 +3121,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -3151,7 +3151,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -3415,7 +3415,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nofork_eval-fatal",
@@ -3444,7 +3444,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nofork_eval-readsub",
@@ -4577,7 +4577,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nested_nofork-fatal",
@@ -4606,7 +4606,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-nested_nofork-readsub",
@@ -4873,7 +4873,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -4903,7 +4903,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -5167,7 +5167,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-condition-fatal",
@@ -5196,7 +5196,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-normal-condition-readsub",
@@ -11604,7 +11604,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-wordarith",
@@ -11632,7 +11632,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-subarith",
@@ -11660,7 +11660,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-declsub",
@@ -11772,7 +11772,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-fatal",
@@ -11800,7 +11800,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-readsub",
@@ -11828,7 +11828,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-plain-false",
@@ -11884,7 +11884,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-wordarith",
@@ -11912,7 +11912,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-subarith",
@@ -11941,7 +11941,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-declsub",
@@ -12055,7 +12055,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-fatal",
@@ -12083,7 +12083,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-readsub",
@@ -12112,7 +12112,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork-false",
@@ -12170,7 +12170,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-wordarith",
@@ -12198,7 +12198,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-subarith",
@@ -12227,7 +12227,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-declsub",
@@ -12341,7 +12341,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-fatal",
@@ -12369,7 +12369,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-readsub",
@@ -12398,7 +12398,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-reply-false",
@@ -12456,7 +12456,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-wordarith",
@@ -12484,7 +12484,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-subarith",
@@ -12513,7 +12513,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-declsub",
@@ -12627,7 +12627,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-fatal",
@@ -12655,7 +12655,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-readsub",
@@ -12684,7 +12684,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-eval_nofork-false",
@@ -12742,7 +12742,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-wordarith",
@@ -12770,7 +12770,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-subarith",
@@ -12799,7 +12799,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-declsub",
@@ -12913,7 +12913,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-fatal",
@@ -12941,7 +12941,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-readsub",
@@ -12970,7 +12970,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nofork_eval-false",
@@ -13900,7 +13900,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-wordarith",
@@ -13928,7 +13928,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-subarith",
@@ -13957,7 +13957,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-declsub",
@@ -14071,7 +14071,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-fatal",
@@ -14099,7 +14099,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-readsub",
@@ -14128,7 +14128,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-nested_nofork-false",
@@ -14186,7 +14186,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-wordarith",
@@ -14214,7 +14214,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-subarith",
@@ -14243,7 +14243,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-declsub",
@@ -14357,7 +14357,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-fatal",
@@ -14385,7 +14385,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-readsub",
@@ -14414,7 +14414,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-source_nofork-false",
@@ -14472,7 +14472,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-wordarith",
@@ -14500,7 +14500,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-subarith",
@@ -14529,7 +14529,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-declsub",
@@ -14643,7 +14643,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-fatal",
@@ -14671,7 +14671,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-readsub",
@@ -14700,7 +14700,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-posix-condition-false",
@@ -18060,7 +18060,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-plain-fatal",
@@ -18088,7 +18088,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-plain-readsub",
@@ -18348,7 +18348,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nofork-fatal",
@@ -18377,7 +18377,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nofork-readsub",
@@ -18639,7 +18639,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-reply-fatal",
@@ -18668,7 +18668,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-reply-readsub",
@@ -18935,7 +18935,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -18965,7 +18965,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -19230,7 +19230,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nofork_eval-fatal",
@@ -19259,7 +19259,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nofork_eval-readsub",
@@ -20391,7 +20391,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nested_nofork-fatal",
@@ -20420,7 +20420,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-nested_nofork-readsub",
@@ -20687,7 +20687,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -20717,7 +20717,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127,
+			"engine_status": 7,
 			"bash_peer_lacks_nofork": true
 		},
 		{
@@ -20982,7 +20982,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-condition-fatal",
@@ -21011,7 +21011,7 @@
 			"out": "",
 			"status": 7,
 			"engine_out": "",
-			"engine_status": 127
+			"engine_status": 7
 		},
 		{
 			"id": "carrier-direct-nounset-condition-readsub",
