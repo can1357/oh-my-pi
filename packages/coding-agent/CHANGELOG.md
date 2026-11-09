@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
 ### Added
 
 - SDK: `PromptOptions.followUps` queues prompts to run after the prompt, in order; if the prompt never reaches the agent they come back with it in `DroppedPrompt.followUps`

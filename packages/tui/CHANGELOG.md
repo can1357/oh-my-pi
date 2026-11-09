@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
 ### Added
 
 - `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
