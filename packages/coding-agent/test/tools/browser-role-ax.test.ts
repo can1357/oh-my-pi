@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, jest, spyOn } from "bun:test";
 import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { isNavigatedContextError } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
 import { registerSemanticQueryHandlers } from "@oh-my-pi/pi-coding-agent/tools/browser/query-handlers";
@@ -23,13 +23,16 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			// A tab opened in the background is hidden: Chrome renders nothing for it until it is shown.
 			const page = await browser.newPage({ background: true });
 			await (await browser.newPage()).bringToFront();
-			await page.setContent(`<!doctype html>
+			await page.setContent(`<!doctype html><title>Role fixture</title>
 				<button id="outside">Outside</button>
 				<nav id="footer" aria-label="Footer"><a id="about" href="#about">About</a><a id="help" href="#help">Help</a></nav>
 				<a id="home" href="#home">Home</a>
 				<iframe srcdoc="<button id=framed>Framed</button>"></iframe>`);
 			expect(await page.evaluate(() => document.visibilityState)).toBe("hidden");
 			expect(await ids(page, "role/button")).toEqual(["outside"]);
+			const documentHandle = await page.$('role/RootWebArea[name="Role fixture" exact]');
+			expect(await documentHandle?.evaluate(node => node.nodeType)).toBe(9);
+			await documentHandle?.dispose();
 
 			const footer = (await page.$('role/navigation[name="Footer" exact]'))!;
 			expect(await footer.$$eval("role/link", elements => elements.map(element => element.id))).toEqual([
@@ -38,6 +41,7 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			]);
 			// The scope itself is not one of its matches.
 			expect(await footer.$$("role/navigation")).toEqual([]);
+			expect(await footer.$$("role/RootWebArea")).toEqual([]);
 			// A wait rooted at an element searches below it.
 			expect(
 				await (
@@ -49,6 +53,52 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			await frame.waitForSelector('role/button[name="Framed" exact]', { timeout: 10_000 });
 			expect(await frame.$$eval("role/button", elements => elements.map(element => element.id))).toEqual(["framed"]);
 		} finally {
+			await browser.close();
+		}
+	});
+
+	it.each(["timeout", "abort"] as const)("ends a role wait during a pending AX probe on %s", async mode => {
+		const puppeteer = await loadPuppeteer();
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const disposed = Promise.withResolvers<void>();
+		let restoreProbe: (() => void) | undefined;
+		try {
+			const page = await browser.newPage();
+			await page.setContent("<button>Save</button>");
+			const client = page.mainFrame().client;
+			const send = client.send.bind(client);
+			let objectId: unknown;
+			const probe = spyOn(client, "send").mockImplementation(async (method, ...args) => {
+				const params = args[0];
+				if (method === "Accessibility.getPartialAXTree" && params && "objectId" in params) {
+					objectId = params.objectId;
+					started.resolve();
+					await release.promise;
+				}
+				const result = await send(method, ...args);
+				if (method === "Runtime.releaseObject" && params && "objectId" in params && params.objectId === objectId)
+					disposed.resolve();
+				return result;
+			});
+			restoreProbe = () => probe.mockRestore();
+			const controller = new AbortController();
+			if (mode === "timeout") jest.useFakeTimers();
+			const rejection = rejectionOf(
+				page.waitForSelector("role/button", { timeout: mode === "timeout" ? 1_000 : 0, signal: controller.signal }),
+			);
+			await started.promise;
+			if (mode === "timeout") jest.advanceTimersByTime(1_000);
+			else controller.abort(new Error("Stopped"));
+			expect(await rejection).toMatchObject({ name: mode === "timeout" ? "TimeoutError" : "AbortError" });
+			release.resolve();
+			await disposed.promise;
+		} finally {
+			release.resolve();
+			jest.useRealTimers();
+			restoreProbe?.();
 			await browser.close();
 		}
 	});

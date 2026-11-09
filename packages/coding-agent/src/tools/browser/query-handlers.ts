@@ -1,4 +1,4 @@
-import { sleepLong } from "@oh-my-pi/pi-utils";
+import { sleepLong, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import type {
 	CustomQueryHandler,
 	ElementHandle,
@@ -699,11 +699,11 @@ function lookup<T>(table: Record<string, T>, key: string): T | undefined {
  * role, which the page cannot read back), in document order, each followed by the candidates inside its open shadow
  * root. A shadow host root is searched through its own shadow tree too. Runs in the page.
  */
-function collectCandidates(root: unknown, selector: string): unknown[] {
+function collectCandidates(root: unknown, selector: string, includeDocument: boolean): unknown[] {
 	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
-	type Scope = { querySelectorAll(selector: string): Iterable<Candidate>; shadowRoot?: Scope | null };
+	type Scope = { nodeType: number; querySelectorAll(selector: string): Iterable<Candidate>; shadowRoot?: Scope | null };
 	type Candidate = Scope & { localName: string; matches(selector: string): boolean };
-	const found: Candidate[] = [];
+	const found: Scope[] = [];
 	const visit = (scope: Scope): void => {
 		for (const element of scope.querySelectorAll("*")) {
 			if (element.localName.includes("-") || element.matches(selector)) found.push(element);
@@ -711,6 +711,7 @@ function collectCandidates(root: unknown, selector: string): unknown[] {
 		}
 	};
 	const scope = root as Scope;
+	if (includeDocument && scope.nodeType === 9) found.push(scope);
 	if (scope.shadowRoot) visit(scope.shadowRoot);
 	visit(scope);
 	return found;
@@ -733,7 +734,7 @@ async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: n
 	const tags = lookup(ROLE_TAGS, role) ?? (role.startsWith("mathml") ? MATHML_TAGS : undefined);
 	const tokens = (lookup(ROLE_TOKENS, role) ?? [role]).map(token => `[role~=${JSON.stringify(token)} i]`).join(", ");
 	const selector = tags ? `${tags}, ${tokens}` : tokens;
-	const list = await root.realm.evaluateHandle(collectCandidates, root, selector);
+	const list = await root.realm.evaluateHandle(collectCandidates, root, selector, role === "rootwebarea");
 	const client = root.frame.client;
 	const matches: ElementHandle[] = [];
 	try {
@@ -827,42 +828,54 @@ async function waitForRole(
 	const { visible = false, hidden = false, signal } = options;
 	const frame = "frame" in elementOrFrame ? elementOrFrame.frame : elementOrFrame;
 	const realm = frame.isolatedRealm();
-	const element = "frame" in elementOrFrame ? await realm.adoptHandle(elementOrFrame) : null;
 	const timeout = options.timeout ?? frame.page().getDefaultTimeout();
 	const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
-	try {
-		while (true) {
-			signal?.throwIfAborted();
-			let found: ElementHandle | undefined;
-			try {
-				// A frame is searched from its document, read on each poll since a navigation replaces it.
-				const root = element ?? ((await realm.evaluateHandle(() => document)) as unknown as ElementHandle);
+	const timeoutError = puppeteerTimeoutError(`Waiting for selector \`${selector}\` failed`);
+	timeoutError.cause = puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
+	const pending = (async () => {
+		const element = "frame" in elementOrFrame ? await realm.adoptHandle(elementOrFrame) : null;
+		try {
+			while (true) {
+				signal?.throwIfAborted();
+				let found: ElementHandle | undefined;
 				try {
-					[found] = await queryRoleInAXTree(root, query, 1);
-				} finally {
-					if (root !== element) await root.dispose();
-				}
-				if (found && !hidden && (!visible || (await found.isVisible()))) return found;
-				if (hidden && (!found || (await found.isHidden()))) {
+					// A navigation replaces the document, so read it anew on each poll.
+					const root = element ?? ((await realm.evaluateHandle(() => document)) as unknown as ElementHandle);
+					try {
+						[found] = await queryRoleInAXTree(root, query, 1);
+					} finally {
+						if (root !== element) await root.dispose();
+					}
+					if (found && !hidden && (!visible || (await found.isVisible()))) return found;
+					if (hidden && (!found || (await found.isHidden()))) {
+						await found?.dispose();
+						return null;
+					}
+				} catch (error) {
 					await found?.dispose();
-					return null;
+					// A replaced document leaves nothing to report until the next poll.
+					if (element || !isNavigatedContextError(error)) throw error;
 				}
-			} catch (error) {
-				// A navigation that replaced the document mid-poll leaves nothing to report yet; the next poll reads the
-				// new one.
-				if (element || !isNavigatedContextError(error)) throw error;
+				await found?.dispose();
+				const remaining = deadline - Date.now();
+				if (remaining <= 0) throw timeoutError;
+				await sleepLong(Math.min(ROLE_POLL_MS, remaining), signal);
 			}
-			await found?.dispose();
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) {
-				const error = puppeteerTimeoutError(`Waiting for selector \`${selector}\` failed`);
-				error.cause = puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
-				throw error;
-			}
-			await sleepLong(Math.min(ROLE_POLL_MS, remaining), signal);
+		} finally {
+			await element?.dispose();
 		}
-	} finally {
-		await element?.dispose();
+	})();
+	let found: ElementHandle | null | undefined;
+	try {
+		found = await (timeout > 0 ? withTimeout(pending, timeout, timeoutError, signal) : untilAborted(signal, pending));
+		signal?.throwIfAborted();
+		if (Date.now() >= deadline) throw timeoutError;
+		return found;
+	} catch (error) {
+		if (found) await found.dispose();
+		// CDP cannot cancel an in-flight probe; release any handle it returns after this wait has ended.
+		else void pending.then(late => late?.dispose()).catch(() => {});
+		throw error;
 	}
 }
 
