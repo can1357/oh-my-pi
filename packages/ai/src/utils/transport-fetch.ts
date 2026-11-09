@@ -4,6 +4,7 @@ import { withInferenceUserAgent } from "../providers/inference-headers";
 import type { Api, FetchImpl, Model } from "../types";
 import { getProxyForProvider, withProxyInit } from "./proxy";
 import { createFetchRequestDebugSession, isRequestDebugEnabled } from "./request-debug";
+import { fetchWithUploadProgress } from "./upload-progress-fetch";
 
 /** Stamped on a fetch already built by {@link transportFetch}. */
 const TRANSPORT_FETCH = Symbol("omp.transportFetch");
@@ -14,7 +15,10 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once.
+ * calls `fetchImpl` (or the model's default fetch) exactly once. On the Bun
+ * `fetch` default, a large request body is streamed so a connection lost
+ * before the response names how far the upload got
+ * ({@link fetchWithUploadProgress}).
  *
  * `beforeDispatch` runs for every HTTP attempt, including retries, before
  * dispatch bookkeeping; a thrown refusal prevents that attempt.
@@ -33,6 +37,9 @@ export function transportFetch(
 	if (given?.[TRANSPORT_FETCH]) return given;
 	const base =
 		given ?? (model.provider === "anthropic" && model.api === "anthropic-messages" ? coworkFetch : globalThis.fetch);
+	// coworkFetch needs the body whole and reports upload progress itself; a caller's fetch is left as given.
+	const send: FetchImpl =
+		given || base === coworkFetch ? base : (input, init) => fetchWithUploadProgress(base, input, init);
 	const proxyUrl = getProxyForProvider(model.provider);
 
 	const fetch: TransportFetch = async (input, init) => {
@@ -44,9 +51,9 @@ export function transportFetch(
 		const extraCa = resolveExtraCa();
 		if (extraCa) init = withExtraCaInit(init, extraCa);
 		if (proxyUrl) init = withProxyInit(input, init, proxyUrl);
-		if (!isRequestDebugEnabled()) return base(input, init);
+		if (!isRequestDebugEnabled()) return send(input, init);
 		const session = await createFetchRequestDebugSession(input, init);
-		return session.wrapResponse(await base(input, init));
+		return session.wrapResponse(await send(input, init));
 	};
 	if (base.preconnect) fetch.preconnect = base.preconnect;
 	fetch[TRANSPORT_FETCH] = true;

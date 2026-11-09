@@ -6,6 +6,7 @@ import * as zlib from "node:zlib";
 import { logger } from "@oh-my-pi/pi-utils";
 import { ConnectionLostBeforeResponseError } from "../error";
 import type { FetchImpl } from "../types";
+import { fetchWithUploadProgress } from "../utils/upload-progress-fetch";
 
 /** `host/path` for logging; query strings can carry keys. */
 function logTarget(input: string | URL | Request): string {
@@ -46,7 +47,7 @@ type RequestBody = string | Uint8Array;
 const directAgent = new https.Agent({ keepAlive: true });
 
 /** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
-const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
+const fallbackFetch: FetchImpl = (input, init) => fetchWithUploadProgress(globalThis.fetch, input, init as RequestInit);
 
 function isHeaderRecord(headers: RequestInit["headers"]): headers is Record<string, string> {
 	return headers !== undefined && !(headers instanceof Headers) && !Array.isArray(headers);
