@@ -867,6 +867,9 @@ const MIN_TREE_CONTENT_WIDTH = 8;
 const SGR_SEQUENCE_STICKY = /\x1b\[[0-9;:]*m/y;
 const SGR_SEQUENCE_GLOBAL = /\x1b\[[0-9;:]*m/g;
 
+/** An SGR sequence that only turns styling off: a full reset or attribute/color closes (`22`–`29`, `39`, `49`, `59`). */
+const SGR_CLOSER_SEQUENCE = /^\x1b\[(?:(?:0|2[2-9]|39|49|59)(?:;(?:0|2[2-9]|39|49|59))*)?m$/;
+
 /**
  * Everything before the last full SGR reset is dead state — drop it so the
  * re-played `carry` stays bounded by the paragraph's live style run instead
@@ -880,10 +883,21 @@ function compactSgrCarry(carry: string): string {
 }
 
 interface TreeGuidePrefix {
-	/** Index of the first char past the guide run (start of the node text). */
+	/**
+	 * Index just past the last guide glyph. SGR sequences between that glyph
+	 * and the node text (a `**bold**` opener, a prose-color close) stay with
+	 * the node text, so the slice from here is the styled node text.
+	 */
 	end: number;
-	/** SGR sequences interleaved with the guides, in order (zero visible width). */
+	/** SGR sequences opened before or among the guides, in order (zero visible width). */
 	codes: string;
+	/**
+	 * Closer-only SGR sequences between the last guide glyph and the node text,
+	 * in order: the author ending the guides' styling before the text starts
+	 * (`\x1b[2m├── \x1b[22mtext`). Replayed after each continuation rail so
+	 * the rail wears the guide styling and the text does not.
+	 */
+	closers: string;
 	/** Guide characters with SGR stripped, exactly as they appear on screen. */
 	guides: string;
 }
@@ -897,24 +911,32 @@ interface TreeGuidePrefix {
  */
 function matchTreeGuidePrefix(line: string): TreeGuidePrefix | undefined {
 	let codes = "";
+	let pendingCodes = "";
 	let guides = "";
+	let end = 0;
 	let i = 0;
 	while (i < line.length) {
 		if (line.charCodeAt(i) === 0x1b) {
 			SGR_SEQUENCE_STICKY.lastIndex = i;
 			const match = SGR_SEQUENCE_STICKY.exec(line);
 			if (!match) break;
-			codes += match[0];
+			pendingCodes += match[0];
 			i = SGR_SEQUENCE_STICKY.lastIndex;
 			continue;
 		}
 		const char = line[i]!;
 		if (!(char in TREE_GUIDE_CONTINUATION)) break;
 		guides += char;
-		i++;
+		codes += pendingCodes;
+		pendingCodes = "";
+		end = ++i;
 	}
 	if (i >= line.length || !TREE_BRANCH_CONNECTOR_RE.test(guides)) return undefined;
-	return { end: i, codes, guides };
+	let closers = "";
+	for (const sequence of pendingCodes.match(SGR_SEQUENCE_GLOBAL) ?? []) {
+		if (SGR_CLOSER_SEQUENCE.test(sequence)) closers += sequence;
+	}
+	return { end, codes, closers, guides };
 }
 
 /**
@@ -959,8 +981,12 @@ function hangWrapTreeGuideLines(text: string, width: number): string[] | undefin
 		const hangShortfall = visibleWidth(prefix.guides) - visibleWidth(hang);
 		if (hangShortfall > 0) hang += padding(hangShortfall);
 		out.push(carry + line.slice(0, prefix.end) + rows[0]!.slice(activeCodes.length));
+		// Continuation rails wear what the first row's guides wore (`activeCodes`),
+		// end it the way the first row did (`closers`), and the wrapped row then
+		// restores its own live state.
+		const rail = activeCodes + hang + prefix.closers;
 		for (let i = 1; i < rows.length; i++) {
-			out.push(activeCodes + hang + rows[i]!);
+			out.push(rail + rows[i]!);
 		}
 		carry = compactSgrCarry(carry + (line.match(SGR_SEQUENCE_GLOBAL)?.join("") ?? ""));
 	}
