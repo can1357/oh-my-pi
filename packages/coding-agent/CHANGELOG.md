@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+- Fixed `/usage` showing a Z.AI credit quota that reports only a percentage as "credits used"; it now shows a percentage ([#9979](https://github.com/can1357/oh-my-pi/pull/9979) by [@aleister1102](https://github.com/aleister1102))
 ### Added
 
 - `ask` forms can show pictures: `<img src>` from an http(s) URL, a `data:` URI or a local file (relative to the session's working directory), and inline `<svg>` diagrams, drawn in the terminal form and natively in Tern
