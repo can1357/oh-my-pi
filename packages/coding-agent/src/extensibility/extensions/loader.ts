@@ -31,6 +31,7 @@ import {
 	composeRemoteId,
 	isValidRemoteName,
 	isValidRemoteNamespace,
+	remoteNameOf,
 	remoteNamespaceOf,
 } from "../../registry/remote-id";
 import { AgentRegistry, type AgentRegistryApi } from "../../registry/agent-registry";
@@ -246,8 +247,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
-	/** The single namespace this extension load claimed via `irc.setRemoteTransport` (one per load). */
-	#claimedNamespace: string | undefined;
+	/**
+	 * The namespaces this extension load claimed via `irc.setRemoteTransport`, in claim order. A bridge
+	 * that reaches several clusters claims one per cluster (the home namespace plus every far cluster
+	 * whose agents appear as `@X/<name>`), so a load may own many; the bus keys its claims by namespace
+	 * per ownerToken and releases every one on `releaseIrc`. The FIRST claimed namespace is the default
+	 * a bare peer name composes against in registerRemotePeer/unregisterRemotePeer.
+	 */
+	readonly #claimedNamespaces = new Set<string>();
 	// Set by releaseIrc (session shutdown, suspension, factory failure): once released, this load's IRC
 	// surface is closed, so a later install/registration/inbound (e.g. an async reconnect firing after
 	// teardown, or a disabled bridge's socket still delivering) is rejected — it must not re-establish
@@ -255,22 +262,19 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	#ircClosed = false;
 	readonly irc: IrcApi = {
 		deliverInbound: (msg, opts) => {
-			// A load may only inject inbound from the namespace it claimed via setRemoteTransport, so a
+			// A load may only inject inbound from a namespace it claimed via setRemoteTransport, so a
 			// bridge for namespace A cannot forge `@B/x` and have B's wait/auto-reply route a reply back
 			// out through B's transport (#7401 review). Enforced per-load, above the shared-registry bus.
 			// A released load (shutdown / disabled) injects nothing.
-			if (
-				this.#ircClosed ||
-				this.#claimedNamespace === undefined ||
-				remoteNamespaceOf(msg.from) !== this.#claimedNamespace
-			) {
+			const fromNamespace = remoteNamespaceOf(msg.from);
+			if (this.#ircClosed || fromNamespace === undefined || !this.#claimedNamespaces.has(fromNamespace)) {
 				return Promise.resolve({
 					receipt: {
 						to: msg.to,
 						outcome: "failed" as const,
 						error: this.#ircClosed
 							? "This extension load's IRC surface was released (session shutdown or extension disabled)."
-							: `Inbound sender "${msg.from}" is not in this load's claimed IRC namespace "@${this.#claimedNamespace ?? "(none)"}/".`,
+							: `Inbound sender "${msg.from}" is not in this load's claimed IRC namespaces [${this.#claimedNamespaceList()}].`,
 					},
 					id: Snowflake.next(),
 				});
@@ -283,18 +287,15 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					`Invalid IRC namespace ${JSON.stringify(namespace)} (allowed: letters, digits, ".", "_", "-").`,
 				);
 			}
-			if (this.#claimedNamespace !== undefined && this.#claimedNamespace !== namespace) {
-				throw new Error(
-					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
-				);
-			}
+			// A load may claim several DISTINCT namespaces (one transport per bridged cluster); the bus
+			// keys each claim by namespace per ownerToken, so no per-load single-namespace guard here.
 			const bus = IrcBus.localForRegistry(this.registry);
 			if (transport === undefined) {
 				// Clearing this load's transport (reconnect / teardown). A clear of a namespace this load
 				// never claimed stays a hard error, but a clear when the claim is already gone — the
 				// runner's release ran first, or this load is a passenger on another owner's claim — is a
 				// no-op, so a bridge's own teardown clear never races the release (#7401 review).
-				if (this.#claimedNamespace !== namespace) {
+				if (!this.#claimedNamespaces.has(namespace)) {
 					throw new Error(
 						`IRC namespace ${JSON.stringify(namespace)} is not claimed; install a transport before clearing.`,
 					);
@@ -319,18 +320,20 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 				);
 			}
 			bus.setRemoteTransport(namespace, transport, this.ownerToken, this.extension.path, this.rootId);
-			this.#claimedNamespace = namespace;
+			this.#claimedNamespaces.add(namespace);
 		},
 		registerRemotePeer: peer => {
-			// A remote peer lives at `@<claimedNamespace>/<name>`; a namespace must be claimed first (via
-			// setRemoteTransport). The composed id is disjoint from local ids (`@` reserved) and from other
-			// extensions' peers (namespaces are globally unique), so registration is collision-free — no
-			// reserved-id or clobber guards. The proxy belongs to the namespace CLAIM (retired when its
-			// last owner releases), not to this load, so co-owning roots share one roster.
+			// A remote peer lives at `@<namespace>/<name>` in a namespace this load claimed (via
+			// setRemoteTransport). `peer.name` is either a bare name, composed against the FIRST claimed
+			// namespace, or a full `@ns/name` id whose `ns` must be one of this load's claims. The
+			// composed id is disjoint from local ids (`@` reserved) and from other extensions' peers
+			// (namespaces are globally unique), so registration is collision-free — no reserved-id or
+			// clobber guards. The proxy belongs to the namespace CLAIM (retired when its last owner
+			// releases), not to this load, so co-owning roots share one roster.
 			if (this.#ircClosed) return undefined; // released: no post-teardown roster writes
-			const namespace = this.#claimedNamespace;
-			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
-			const id = composeRemoteId(namespace, peer.name);
+			const resolved = this.#resolveClaimedRemoteId(peer.name);
+			if (resolved === undefined) return undefined;
+			const { namespace, id, name } = resolved;
 			// Only a namespace OWNER writes the roster. A subagent sharing the root's claim (a same-source
 			// passenger no-op in setRemoteTransport) is read-only: its registration would clobber the
 			// owner's `@ns/name` ref (status/displayName) with its own copy (#7401 review). Return the
@@ -340,7 +343,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			}
 			this.registry.register({
 				id,
-				displayName: sanitizeRemoteDisplayName(peer.displayName, peer.name),
+				displayName: sanitizeRemoteDisplayName(peer.displayName, name),
 				kind: "remote",
 				session: null,
 				status: peer.status,
@@ -348,14 +351,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			return id;
 		},
 		unregisterRemotePeer: idOrName => {
-			// Accept the composed `@ns/name` id or a bare name (composed against the claimed namespace).
-			let id = idOrName;
-			const namespace = this.#claimedNamespace;
-			if (remoteNamespaceOf(idOrName) === undefined && namespace !== undefined && isValidRemoteName(idOrName)) {
-				id = composeRemoteId(namespace, idOrName);
-			}
-			// Ownership-checked: a load may retract only proxies in the namespace it (co-)owns.
-			if (namespace === undefined || remoteNamespaceOf(id) !== namespace) return false;
+			// Accept the composed `@ns/name` id (any claimed ns) or a bare name (composed against the
+			// first claimed namespace). Ownership-checked: a load may retract only proxies in a namespace
+			// it (co-)owns.
+			const resolved = this.#resolveClaimedRemoteId(idOrName);
+			if (resolved === undefined) return false;
+			const { namespace, id } = resolved;
 			if (!IrcBus.localForRegistry(this.registry).isNamespaceOwner(namespace, this.ownerToken)) return false;
 			const ref = this.registry.get(id);
 			if (ref?.kind !== "remote") return false;
@@ -416,6 +417,32 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			this.#ircClosed = true;
 			releaseExtensionIrc(ownerToken, registry);
 		};
+	}
+
+	/** The first namespace this load claimed: the default a bare peer name composes against. */
+	#firstClaimedNamespace(): string | undefined {
+		for (const namespace of this.#claimedNamespaces) return namespace;
+		return undefined;
+	}
+
+	/** `@a/, @b/` for diagnostics; `(none)` before any claim. */
+	#claimedNamespaceList(): string {
+		if (this.#claimedNamespaces.size === 0) return "(none)";
+		return Array.from(this.#claimedNamespaces, ns => `@${ns}/`).join(", ");
+	}
+
+	/**
+	 * Resolve a remote peer reference to a `@ns/name` id in a namespace THIS load claimed: a full
+	 * `@ns/name` id whose `ns` is any claimed namespace, or a bare `name` composed against the first
+	 * claimed namespace. Undefined when nothing is claimed, the namespace is not this load's, or the
+	 * name is malformed.
+	 */
+	#resolveClaimedRemoteId(idOrName: string): { namespace: string; name: string; id: string } | undefined {
+		const namespace = remoteNamespaceOf(idOrName) ?? this.#firstClaimedNamespace();
+		if (namespace === undefined || !this.#claimedNamespaces.has(namespace)) return undefined;
+		const name = remoteNamespaceOf(idOrName) === undefined ? idOrName : remoteNameOf(idOrName);
+		if (name === undefined || !isValidRemoteName(name)) return undefined;
+		return { namespace, name, id: composeRemoteId(namespace, name) };
 	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {

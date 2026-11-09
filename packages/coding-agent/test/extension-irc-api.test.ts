@@ -256,12 +256,124 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(AgentRegistry.global().get("@cluster-a/again")).toBeUndefined();
 	});
 
-	it("setRemoteTransport rejects a second, different namespace from the same extension load", async () => {
+	it("one load claims several namespaces (murmur-k1xz): outbound routes to each transport independently", async () => {
+		const irc = await captureIrc();
+		const seenA: string[] = [];
+		const seenB: string[] = [];
+		irc.setRemoteTransport?.(
+			"cluster-a",
+			injectingTransport(to => seenA.push(to)),
+		);
+		expect(() =>
+			irc.setRemoteTransport?.(
+				"cluster-b",
+				injectingTransport(to => seenB.push(to)),
+			),
+		).not.toThrow();
+		// Re-using an already-claimed namespace is still fine (reinstall after a reconnect).
+		expect(() =>
+			irc.setRemoteTransport?.(
+				"cluster-a",
+				injectingTransport(to => seenA.push(to)),
+			),
+		).not.toThrow();
+
+		expect((await IrcBus.global().send({ from: "Main", to: "@cluster-a/alice", body: "to a" })).outcome).toBe(
+			"injected",
+		);
+		expect((await IrcBus.global().send({ from: "Main", to: "@cluster-b/bob", body: "to b" })).outcome).toBe(
+			"injected",
+		);
+		expect(seenA).toEqual(["@cluster-a/alice"]);
+		expect(seenB).toEqual(["@cluster-b/bob"]);
+	});
+
+	it("inbound is admitted from every namespace the load claimed and refused from an unclaimed one", async () => {
+		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const irc = await captureIrc();
 		irc.setRemoteTransport?.("cluster-a", injectingTransport());
-		expect(() => irc.setRemoteTransport?.("cluster-b", injectingTransport())).toThrow(/single namespace/);
-		// Re-using the SAME namespace is fine (reinstall after a reconnect).
-		expect(() => irc.setRemoteTransport?.("cluster-a", injectingTransport())).not.toThrow();
+		irc.setRemoteTransport?.("cluster-b", injectingTransport());
+
+		IrcBus.global().wait("Main", { from: "@cluster-a/alice" }, 1000);
+		const fromA = await irc.deliverInbound({ from: "@cluster-a/alice", to: "Main", body: "hi from a" });
+		expect(fromA.receipt.outcome).not.toBe("failed");
+		IrcBus.global().wait("Main", { from: "@cluster-b/bob" }, 1000);
+		const fromB = await irc.deliverInbound({ from: "@cluster-b/bob", to: "Main", body: "hi from b" });
+		expect(fromB.receipt.outcome).not.toBe("failed");
+
+		// The #7401 invariant holds per namespace: a sender in a namespace this load never claimed
+		// is refused even though the load owns others.
+		const forged = await irc.deliverInbound({ from: "@cluster-c/mallory", to: "Main", body: "forged" });
+		expect(forged.receipt.outcome).toBe("failed");
+		expect(forged.receipt.error).toMatch(/claimed IRC namespace/);
+		expect(forged.receipt.error).toContain("@cluster-a/");
+		expect(forged.receipt.error).toContain("@cluster-b/");
+		// A bare (non-remote) sender is not a bridged peer either.
+		const bare = await irc.deliverInbound({ from: "alice", to: "Main", body: "bare" });
+		expect(bare.receipt.outcome).toBe("failed");
+	});
+
+	it("a second extension cannot claim any namespace another load already owns", async () => {
+		const { irc: first } = await loadBridge({ name: "bridge-a.ts" });
+		first.setRemoteTransport?.("cluster-a", injectingTransport());
+		first.setRemoteTransport?.("cluster-b", injectingTransport());
+
+		const { irc: second } = await loadBridge({ name: "bridge-b.ts" });
+		expect(() => second.setRemoteTransport?.("cluster-a", injectingTransport())).toThrow(/already claimed/);
+		expect(() => second.setRemoteTransport?.("cluster-b", injectingTransport())).toThrow(/already claimed/);
+		// The refused load claimed nothing, so it may inject inbound from neither namespace...
+		const refused = await second.deliverInbound({ from: "@cluster-b/bob", to: "Main", body: "hi" });
+		expect(refused.receipt.outcome).toBe("failed");
+		expect(refused.receipt.error).toContain("(none)");
+		// ...while a distinct namespace of its own is still free.
+		expect(() => second.setRemoteTransport?.("cluster-c", injectingTransport())).not.toThrow();
+	});
+
+	it("clearing a namespace the load never claimed throws even when it owns others", async () => {
+		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		expect(() => irc.setRemoteTransport?.("cluster-b", undefined)).toThrow(/not claimed/);
+		// A clear of a claimed namespace keeps the bus semantics: routing drops, the claim survives.
+		irc.setRemoteTransport?.("cluster-b", injectingTransport());
+		expect(() => irc.setRemoteTransport?.("cluster-b", undefined)).not.toThrow();
+		expect(IrcBus.localForRegistry().isNamespaceClaimed("cluster-b")).toBe(true);
+		expect((await IrcBus.global().send({ from: "Main", to: "@cluster-b/bob", body: "x" })).outcome).toBe("failed");
+	});
+
+	it("registerRemotePeer/unregisterRemotePeer accept a full `@ns/name` id in any claimed namespace", async () => {
+		const irc = await captureIrc();
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		irc.setRemoteTransport?.("cluster-b", injectingTransport());
+
+		// A bare name composes against the FIRST claimed namespace (back-compat).
+		expect(irc.registerRemotePeer?.({ name: "alice" })).toBe("@cluster-a/alice");
+		// A full id lands in the named (second) namespace with the bare name as the display fallback.
+		expect(irc.registerRemotePeer?.({ name: "@cluster-b/bob" })).toBe("@cluster-b/bob");
+		const bob = AgentRegistry.global().get("@cluster-b/bob");
+		expect(bob?.kind).toBe("remote");
+		expect(bob?.displayName).toBe("bob");
+		// A full id in a namespace this load did not claim is refused.
+		expect(irc.registerRemotePeer?.({ name: "@cluster-c/carol" })).toBeUndefined();
+		expect(AgentRegistry.global().get("@cluster-c/carol")).toBeUndefined();
+
+		expect(irc.unregisterRemotePeer?.("@cluster-b/bob")).toBe(true);
+		expect(AgentRegistry.global().get("@cluster-b/bob")).toBeUndefined();
+		expect(irc.unregisterRemotePeer?.("alice")).toBe(true);
+		expect(AgentRegistry.global().get("@cluster-a/alice")).toBeUndefined();
+	});
+
+	it("releasing the load drops every namespace it claimed and retires their peers", async () => {
+		const { irc, extension } = await loadBridge({ name: "bridge.ts" });
+		irc.setRemoteTransport?.("cluster-a", injectingTransport());
+		irc.setRemoteTransport?.("cluster-b", injectingTransport());
+		irc.registerRemotePeer?.({ name: "alice" });
+		irc.registerRemotePeer?.({ name: "@cluster-b/bob" });
+
+		extension.releaseIrc?.();
+		expect(IrcBus.localForRegistry().isNamespaceClaimed("cluster-a")).toBe(false);
+		expect(IrcBus.localForRegistry().isNamespaceClaimed("cluster-b")).toBe(false);
+		expect(AgentRegistry.global().get("@cluster-a/alice")).toBeUndefined();
+		expect(AgentRegistry.global().get("@cluster-b/bob")).toBeUndefined();
 	});
 
 	it("a subagent load cannot originate an unclaimed namespace claim (#7401)", async () => {

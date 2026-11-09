@@ -103,7 +103,8 @@ that crosses a trust boundary must validate every line and authenticate the peer
 ## What it deliberately does not do
 
 - Authentication, multiple namespaces per process, or more than one connected session. A real bridge
-  (murmur) adds those; the omp seams support them (`setRemoteTransport` per namespace, ownership-checked
-  `registerRemotePeer`, inbound sender gating to the claimed namespace).
+  (murmur) adds those; the omp seams support them (one extension load may call `setRemoteTransport` for
+  several namespaces, ownership-checked `registerRemotePeer`, inbound sender gating to the claimed
+  namespaces).
 - Claim from a subagent. Only `ctx.agent.kind === "main"` connects; subagents share the root's
   registry, bus and transport.
