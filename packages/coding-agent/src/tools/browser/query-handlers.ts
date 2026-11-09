@@ -701,7 +701,11 @@ function lookup<T>(table: Record<string, T>, key: string): T | undefined {
  */
 function collectCandidates(root: unknown, selector: string, includeDocument: boolean): unknown[] {
 	// A document, element or shadow root of this page; the tool's TypeScript config has no DOM library to name them.
-	type Scope = { nodeType: number; querySelectorAll(selector: string): Iterable<Candidate>; shadowRoot?: Scope | null };
+	type Scope = {
+		nodeType: number;
+		querySelectorAll(selector: string): Iterable<Candidate>;
+		shadowRoot?: Scope | null;
+	};
 	type Candidate = Scope & { localName: string; matches(selector: string): boolean };
 	const found: Scope[] = [];
 	const visit = (scope: Scope): void => {
