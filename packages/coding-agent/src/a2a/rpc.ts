@@ -747,7 +747,9 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 			to: target.id,
 			body,
 			external: true,
-			...(request.inReplyTo !== undefined ? { a2aInReplyTo: request.inReplyTo } : {}),
+			...(request.inReplyTo !== undefined
+				? { a2aInReplyTo: request.inReplyTo }
+				: { a2aMessageId: request.messageId }),
 		});
 		if (receipt.outcome !== "failed" && request.from !== undefined && request.inReplyTo === undefined) {
 			deps.noteIncomingRequest?.({

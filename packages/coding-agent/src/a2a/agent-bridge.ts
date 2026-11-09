@@ -20,7 +20,7 @@ import { cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
 import { type AgentCard, A2A_PROTOCOL_VERSION, type AgentCardSkill } from "./card";
 import { A2A_CONNECT_TIMEOUT_MS, A2aClient, cardRequiresBearer, fetchAgentCard } from "./client";
-import { type A2aIncomingRequest, TASK_STATE, type TaskState } from "./rpc";
+import { TASK_STATE, type TaskState } from "./rpc";
 
 export const A2A_AGENT_PREFIX = "a2a:";
 /** The remote paused for input; omp v1 has no way to answer, so the spawn reports it. */
@@ -56,15 +56,6 @@ export interface A2aBridgeApi {
 	remove(name: string): boolean;
 	/** Drop every entry served by one endpoint before re-registering it (A5). */
 	removeByUrl(url: string): void;
-	/** Remember an unanswered request from a peer (A2). */
-	noteIncomingRequest(request: A2aIncomingRequest): void;
-	/**
-	 * Consume an outstanding request from `peer` (A2): the oldest one, or the
-	 * one with `messageId`. Returns the consumed request id.
-	 */
-	consumeOutstandingRequest(peer: string, messageId?: string): string | undefined;
-	/** Unanswered requests, oldest first per peer. */
-	outstandingRequests(): A2aIncomingRequest[];
 }
 
 /** A card skill id becomes a spawnable agent name: `a2a:<skill id>`. */
@@ -82,8 +73,6 @@ export function runtimeAgentName(skillId: string): string {
  */
 export class A2aAgentBridge implements A2aBridgeApi {
 	readonly #agents = new Map<string, A2aRuntimeAgent>();
-	/** Unanswered requests keyed by the peer identity that sent them (A2). */
-	readonly #outstandingRequests = new Map<string, A2aIncomingRequest[]>();
 
 	/**
 	 * Register one remote agent. Re-adding the SAME endpoint (refresh) replaces
@@ -127,31 +116,8 @@ export class A2aAgentBridge implements A2aBridgeApi {
 		}
 	}
 
-	/** Remember that a peer sent a request we have not answered yet (A2). */
-	noteIncomingRequest(request: A2aIncomingRequest): void {
-		const requests = this.#outstandingRequests.get(request.from);
-		if (requests) requests.push(request);
-		else this.#outstandingRequests.set(request.from, [request]);
-	}
-
-	/** Consume one unanswered request from `peer`, so a reply is correlated once (A2). */
-	consumeOutstandingRequest(peer: string, messageId?: string): string | undefined {
-		const requests = this.#outstandingRequests.get(peer);
-		if (!requests) return undefined;
-		const index = messageId === undefined ? 0 : requests.findIndex(request => request.messageId === messageId);
-		if (index < 0) return undefined;
-		const [request] = requests.splice(index, 1);
-		if (requests.length === 0) this.#outstandingRequests.delete(peer);
-		return request?.messageId;
-	}
-
-	outstandingRequests(): A2aIncomingRequest[] {
-		return [...this.#outstandingRequests.values()].flat();
-	}
-
 	clear(): void {
 		this.#agents.clear();
-		this.#outstandingRequests.clear();
 	}
 
 	/**

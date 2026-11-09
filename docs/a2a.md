@@ -56,6 +56,9 @@ on demand:
    `metadata.inReplyTo = <request messageId>` and consumes that outstanding
    request. The reply is labelled as an answer and receives no new reply
    envelope, so it does not start an unbounded request/reply chain.
+   Outstanding requests are shared across the process, including worker
+   sessions, and are consumed only by their addressed agent. Main's automatic
+   text relay and an explicit reply compete for the same request.
 
 Terminals that start later become visible on demand: a bare `read agent://`
 roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced

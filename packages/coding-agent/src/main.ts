@@ -2723,11 +2723,13 @@ export async function runRootCommand(
 						{ spawnSubagentForSession },
 						{ installA2aReplyRelay },
 						{ rescanLocalBridges },
+						{ IncomingRequests },
 					] = await Promise.all([
 						import("./a2a/server"),
 						import("./task/spawn-subagent"),
 						import("./a2a/reply-relay"),
 						import("./a2a/agent-bridge"),
+						import("./a2a/incoming-requests"),
 					]);
 					const a2a = await startA2aServer({
 						settings: settingsInstance,
@@ -2740,7 +2742,7 @@ export async function runRootCommand(
 						port: a2aPort ?? cfgA2aPort.get(settingsInstance),
 						...defaultA2aDeps(),
 						spawn: options => spawnSubagentForSession(session, options),
-						onIncomingRequest: request => session.a2aBridge.noteIncomingRequest(request),
+						onIncomingRequest: request => void IncomingRequests.global().note(request),
 						version: VERSION,
 					});
 					// A request answered in plain text still reaches its sender (A2).

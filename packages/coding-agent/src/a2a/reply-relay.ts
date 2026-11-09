@@ -27,6 +27,7 @@ import {
 	type SpawnA2aAgentResult,
 	spawnA2aAgent,
 } from "./agent-bridge";
+import { IncomingRequests } from "./incoming-requests";
 import type { A2aIncomingRequest } from "./rpc";
 
 export interface A2aReplyRelayOptions {
@@ -47,18 +48,29 @@ export interface A2aReplyRelayOptions {
 export function installA2aReplyRelay(options: A2aReplyRelayOptions): () => void {
 	// Requests whose relay chance was used up, kept open for a manual reply.
 	const settled = new Set<string>();
+	let pending = Promise.resolve();
 	return options.subscribe(event => {
 		if (event.type !== "agent_end" || event.isTerminal === false) return;
-		for (const request of options.bridge.outstandingRequests()) {
-			if (request.to !== MAIN_AGENT_ID || settled.has(request.messageId)) continue;
-			const answer = answerAfter(event.messages, request.at);
-			if (answer === undefined) {
-				settled.add(request.messageId);
-				continue;
-			}
-			if (options.bridge.consumeOutstandingRequest(request.from, request.messageId) === undefined) continue;
-			void relayAnswer(options, request, answer);
-		}
+		pending = pending
+			.then(async () => {
+				for (const request of await IncomingRequests.global().list(MAIN_AGENT_ID)) {
+					if (settled.has(request.messageId)) continue;
+					const answer = answerAfter(event.messages, request.at);
+					if (answer === undefined) {
+						settled.add(request.messageId);
+						continue;
+					}
+					const consumed = await IncomingRequests.global().consume({
+						to: MAIN_AGENT_ID,
+						from: request.from,
+						messageId: request.messageId,
+					});
+					if (consumed !== undefined) void relayAnswer(options, consumed, answer);
+				}
+			})
+			.catch(error => {
+				logger.warn("A2A reply relay failed", { error: String(error) });
+			});
 	});
 }
 

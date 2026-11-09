@@ -39,6 +39,9 @@ import {
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { type A2aIncomingRequest, type A2aTask, TASK_STATE, sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
+import { installA2aReplyRelay } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -160,6 +163,7 @@ afterEach(() => {
 	for (const server of servers.splice(0)) server.stop();
 	vi.restoreAllMocks();
 	vi.useRealTimers();
+	IncomingRequests.resetGlobalForTests();
 	OutgoingRequests.resetGlobalForTests();
 });
 
@@ -795,24 +799,24 @@ describe("A2aAgentBridge cross-terminal name collisions", () => {
 });
 
 describe("A2A reply correlation", () => {
-	it("correlates successive replies to separate unanswered requests from one peer", () => {
-		const bridge = new A2aAgentBridge();
-		bridge.noteIncomingRequest({ from: "peer", messageId: "first", to: "Main", at: 1 });
-		bridge.noteIncomingRequest({ from: "peer", messageId: "second", to: "Main", at: 2 });
-		expect(bridge.consumeOutstandingRequest("peer")).toBe("first");
-		expect(bridge.consumeOutstandingRequest("peer")).toBe("second");
-		expect(bridge.consumeOutstandingRequest("peer")).toBeUndefined();
+	it("correlates successive replies to separate unanswered requests from one peer", async () => {
+		const incoming = IncomingRequests.global();
+		await incoming.note({ from: "peer", messageId: "first", to: "Main", at: 1 });
+		await incoming.note({ from: "peer", messageId: "second", to: "Main", at: 2 });
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("first");
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("second");
+		expect(await incoming.consume({ to: "Main", from: "peer" })).toBeUndefined();
 	});
 
-	it("consumes one named request without disturbing the order of the rest", () => {
-		const bridge = new A2aAgentBridge();
+	it("consumes one named request without disturbing the order of the rest", async () => {
+		const incoming = IncomingRequests.global();
 		for (const messageId of ["first", "second", "third"]) {
-			bridge.noteIncomingRequest({ from: "peer", messageId, to: "Main", at: 1 });
+			await incoming.note({ from: "peer", messageId, to: "Main", at: 1 });
 		}
-		expect(bridge.consumeOutstandingRequest("peer", "second")).toBe("second");
-		expect(bridge.consumeOutstandingRequest("peer", "second")).toBeUndefined();
-		expect(bridge.outstandingRequests().map(request => request.messageId)).toEqual(["first", "third"]);
-		expect(bridge.consumeOutstandingRequest("peer")).toBe("first");
+		expect((await incoming.consume({ to: "Main", from: "peer", messageId: "second" }))?.messageId).toBe("second");
+		expect(await incoming.consume({ to: "Main", from: "peer", messageId: "second" })).toBeUndefined();
+		expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["first", "third"]);
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("first");
 	});
 });
 
@@ -1203,7 +1207,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 			agentDir: dir.path(),
 			cwd: builderCwd,
 			inbox: remoteInbox,
-			onIncomingRequest: request => builderReplyBridge.noteIncomingRequest(request),
+			onIncomingRequest: request => void IncomingRequests.global().note(request),
 		});
 		try {
 			const alphaName = (await fetchAgentCard({ url: sender.url })).card.name;
@@ -1234,7 +1238,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 				agent: replyTarget!,
 				prompt: "the answer is 42",
 				fromIdentity: { name: builderName, url: remote.url },
-				inReplyTo: builderReplyBridge.consumeOutstandingRequest(replyTarget!.skillId),
+				inReplyTo: (await IncomingRequests.global().consume({ to: "Main", from: replyTarget!.skillId }))?.messageId,
 			});
 			expect(reply.exitCode).toBe(0);
 			expect(senderInbox).toHaveLength(1);
@@ -2135,8 +2139,8 @@ describe("addressed A2A reply jobs", () => {
 				}),
 		});
 		const { bridge } = await registerFrom(server);
-		bridge.noteIncomingRequest({ from: "main", messageId: "owed-1", to: "Main", at: 1 });
-		bridge.noteIncomingRequest({ from: "main", messageId: "owed-2", to: "Main", at: 2 });
+		await IncomingRequests.global().note({ from: "main", messageId: "owed-1", to: OWNER, at: 1 });
+		await IncomingRequests.global().note({ from: "main", messageId: "owed-2", to: OWNER, at: 2 });
 		const manager = managerFor();
 		const registered = captureOutgoing();
 		const tool = await createTaskTool(bridge, Settings.isolated(), {
@@ -2145,7 +2149,7 @@ describe("addressed A2A reply jobs", () => {
 		});
 		const reply = await tool.execute("tc-reply", { agent: "a2a:main", task: "the answer" } as TaskParams);
 		expect(server.calls[0]?.params.metadata).toMatchObject({ inReplyTo: "owed-1" });
-		expect(bridge.outstandingRequests().map(request => request.messageId)).toEqual(["owed-2"]);
+		expect((await IncomingRequests.global().list(OWNER)).map(request => request.messageId)).toEqual(["owed-2"]);
 		expect(registered).toEqual([]);
 		expect(manager.getAllJobs({ ownerId: OWNER })).toEqual([]);
 		expect(replyJob(reply)).toBeUndefined();
@@ -2161,6 +2165,58 @@ describe("addressed A2A reply jobs", () => {
 		expect(textOf(spawned)).toContain('status="completed"');
 		expect(registered).toEqual([]);
 		expect(manager.getAllJobs({ ownerId: OWNER })).toEqual([]);
+	});
+
+	it("sends only the explicit Main task reply when the relay sees the same request", async () => {
+		const server = mockA2a({ onRpc: () => rpcResult(1, { task: deliveryTask() }) });
+		const { bridge } = await registerFrom(server);
+		const manager = managerFor();
+		const tool = await createTaskTool(bridge, Settings.isolated(), { asyncJobManager: manager });
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		let relaySends = 0;
+		const unsubscribe = installA2aReplyRelay({
+			bridge,
+			subscribe: next => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			identity: async () => ({}),
+			rescan: async () => {},
+			send: options => {
+				relaySends += 1;
+				return spawnA2aAgent(options);
+			},
+		});
+		try {
+			await IncomingRequests.global().note({ from: "main", messageId: "shared-request", to: "Main", at: 100 });
+			const reply = await tool.execute("tc-explicit-reply", {
+				agent: "a2a:main",
+				task: "explicit answer",
+			} as TaskParams);
+			expect(replyJob(reply)).toBeUndefined();
+			expect(server.calls).toHaveLength(1);
+			expect(server.calls[0]?.params.metadata).toMatchObject({ inReplyTo: "shared-request" });
+
+			listener?.({
+				type: "agent_end",
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "also answered" }],
+						timestamp: 150,
+						stopReason: "stop",
+					},
+				],
+			} as AgentSessionEvent);
+			await Bun.sleep(0);
+			expect(relaySends).toBe(0);
+			expect(server.calls).toHaveLength(1);
+			expect(await IncomingRequests.global().list("Main")).toEqual([]);
+		} finally {
+			unsubscribe();
+		}
 	});
 
 	it("waits inline for the reply when the session has no async manager", async () => {

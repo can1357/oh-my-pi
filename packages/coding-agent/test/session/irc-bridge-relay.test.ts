@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
@@ -20,6 +21,44 @@ function makeBridge() {
 }
 
 describe("IrcBridge wake-relay marking", () => {
+	it("carries request correlation from A2A through IRC without treating replies as requests", async () => {
+		const { bridge, woken } = makeBridge();
+		const registry = new AgentRegistry();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", status: "idle", session: null });
+		const deps = {
+			registry,
+			send: async (message: Omit<Parameters<typeof bridge.deliver>[0], "id" | "ts">) => {
+				const outcome = await bridge.deliver({ ...message, id: "irc-bus-id", ts: 123 });
+				return { to: message.to, outcome };
+			},
+		};
+		await sendA2aMessage(
+			{
+				message: { messageId: "a2a-request-id", parts: [{ text: "question" }] },
+				metadata: { to: "Main", from: "peer" },
+			},
+			deps,
+		);
+		await sendA2aMessage(
+			{
+				message: { messageId: "a2a-reply-id", parts: [{ text: "answer" }] },
+				metadata: { to: "Main", from: "peer", inReplyTo: "earlier-request" },
+			},
+			deps,
+		);
+		expect((woken[0][0] as CustomMessage).details).toMatchObject({
+			id: "irc-bus-id",
+			external: true,
+			a2aMessageId: "a2a-request-id",
+		});
+		expect((woken[1][0] as CustomMessage).details).toMatchObject({
+			id: "irc-bus-id",
+			external: true,
+			a2aInReplyTo: "earlier-request",
+		});
+		expect((woken[1][0] as CustomMessage).details).not.toHaveProperty("a2aMessageId");
+	});
+
 	it("marks relay messages so the peer never relays them back", async () => {
 		const { bridge, woken } = makeBridge();
 		const outcome = await bridge.deliver({
@@ -59,9 +98,11 @@ describe("IrcBridge wake-relay marking", () => {
 			body: "[A2A task from peer terminal builder. ...]\n\nreview src/",
 			ts: Date.now(),
 			external: true,
+			a2aMessageId: "request-main-1",
 		});
 
 		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ external: true, a2aMessageId: "request-main-1" });
 		expect(record.content).toContain("A2A task from peer terminal builder");
 		expect(record.content).not.toContain("agent://a2a");
 		expect(record.content).not.toContain("No one replies on your behalf");
@@ -79,11 +120,13 @@ describe("IrcBridge wake-relay marking", () => {
 			body: "[A2A task from peer terminal builder. ...]\n\nreview src/",
 			ts: Date.now(),
 			external: true,
+			a2aMessageId: "request-scout-1",
 		});
 
 		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ external: true, a2aMessageId: "request-scout-1" });
 		expect(record.content).toContain("never reaches the sender");
-		expect(record.content).not.toContain("sent to the sender automatically");
+		expect(record.content).toContain("with the `task` tool to the `a2a:` agent");
 	});
 
 	it("owes nothing back on an answer to this terminal's own A2A request", async () => {
@@ -99,6 +142,8 @@ describe("IrcBridge wake-relay marking", () => {
 		});
 
 		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ external: true, a2aInReplyTo: "req-1" });
+		expect(record.details).not.toHaveProperty("a2aMessageId");
 		expect(record.content).toContain("total() skips line 1");
 		expect(record.content).not.toContain("If response expected");
 		expect(record.content).not.toContain("sent to the sender automatically");

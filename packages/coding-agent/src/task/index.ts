@@ -59,7 +59,7 @@ import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { AgentRegistry, isResumable } from "../registry/agent-registry";
+import { AgentRegistry, isResumable, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
@@ -93,6 +93,7 @@ import {
 	type SpawnA2aAgentResult,
 	spawnA2aAgent,
 } from "../a2a/agent-bridge";
+import { IncomingRequests } from "../a2a/incoming-requests";
 import { OutgoingRequests } from "../a2a/outgoing-requests";
 import { TASK_STATE } from "../a2a/rpc";
 import {
@@ -2193,8 +2194,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	async #runA2aSpawn(args: A2aSpawnCall): Promise<AgentToolResult<TaskToolDetails>> {
 		const assignment = (args.params.task ?? "").trim();
 		if (args.params.a2aSpawn === true) return this.#finishA2aRun(args, assignment);
-		const inReplyTo = args.bridge?.consumeOutstandingRequest(args.agent.skillId);
-		if (inReplyTo !== undefined) return this.#finishA2aRun(args, assignment, inReplyTo);
+		const request = await IncomingRequests.global().consume({
+			to: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
+			from: args.agent.skillId,
+		});
+		if (request !== undefined) return this.#finishA2aRun(args, assignment, request.messageId);
 		return this.#awaitAddressedA2aReply(args, assignment);
 	}
 

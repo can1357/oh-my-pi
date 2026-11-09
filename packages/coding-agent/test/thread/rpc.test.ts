@@ -32,8 +32,11 @@ class Counter {
 
 let worker: Worker | undefined;
 let channel: MessageChannel | undefined;
+let fixtureLink: RpcLink<FixtureMainApi, FixtureWorkerApi> | undefined;
 
 afterEach(() => {
+	fixtureLink?.close("test end");
+	fixtureLink = undefined;
 	worker?.terminate();
 	worker = undefined;
 	channel?.port1.close();
@@ -70,7 +73,7 @@ async function startFixture(): Promise<{
 }> {
 	const spawned = new Worker(new URL("../fixtures/rpc-link-worker.ts", import.meta.url).href, { type: "module" });
 	worker = spawned;
-	const channel = new MessageChannel();
+	channel = new MessageChannel();
 	const counter = new SharedArrayBuffer(4);
 	const { promise: ready, resolve } = Promise.withResolvers<void>();
 	const onReady = (event: MessageEvent): void => {
@@ -93,6 +96,7 @@ async function startFixture(): Promise<{
 		},
 		{ name: "test", syncReplies: { port: channel.port1, counter: new Int32Array(counter) } },
 	);
+	fixtureLink = link;
 	const log: string[] = [];
 	const tokens = new Map<string, Token>();
 	link.codec<Token>({

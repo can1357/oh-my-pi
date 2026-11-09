@@ -328,6 +328,8 @@ export class IrcBridge {
 				// Read by the LLM converter: a peer terminal's text speaks as a user,
 				// never with developer authority.
 				...(msg.external ? { external: true } : {}),
+				...(msg.a2aMessageId !== undefined ? { a2aMessageId: msg.a2aMessageId } : {}),
+				...(msg.a2aInReplyTo !== undefined ? { a2aInReplyTo: msg.a2aInReplyTo } : {}),
 			},
 			attribution: "agent",
 			timestamp: msg.ts,

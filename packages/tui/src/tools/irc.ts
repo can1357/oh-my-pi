@@ -41,6 +41,8 @@ export interface IrcMessage {
 	 * boundary is its own throttle. Set by `a2a/rpc.ts`; agents never set it.
 	 */
 	external?: boolean;
+	/** Original A2A message id for an external request, distinct from the IRC bus id. */
+	a2aMessageId?: string;
 	/**
 	 * On an `external` delivery that answers an A2A request this terminal sent:
 	 * that request's `messageId`. An answer owes no reply. Set by `a2a/rpc.ts`.
