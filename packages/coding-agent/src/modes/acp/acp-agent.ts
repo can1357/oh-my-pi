@@ -2614,11 +2614,12 @@ export class AcpAgent implements Agent {
 				details,
 			};
 		}
-		// Approved. Set the plan reference so the next turn injects the plan
-		// content as context (the file keeps its agent-chosen name — no rename),
-		session.setPlanReferencePath(planFilePath);
+		// Approved. Exit plan mode first, then arm the approved reference: the
+		// state clear withdraws the draft, so setting the path afterwards is what
+		// marks it approved (#18610).
 		session.setPlanProposalHandler?.(null);
 		session.setPlanModeState(undefined);
+		session.setPlanReferencePath(planFilePath);
 		let autosaveFailed = false;
 		try {
 			await autosaveApprovedPlan({

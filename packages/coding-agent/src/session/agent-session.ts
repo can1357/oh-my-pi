@@ -1141,6 +1141,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
+	/** True only after an approval path armed the reference; a plan-mode draft is not approved. */
+	#planReferenceApproved = false;
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
 	/** Session file created by this session's `/move`; removed on dispose if it stayed empty. */
@@ -8056,11 +8058,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	setPlanModeState(state: PlanModeState | undefined): void {
+		const wasPlanModeEnabled = this.#planModeState?.enabled === true;
 		this.#planModeState = state;
 		if (state?.enabled) {
 			this.#planReferenceSent = false;
 			this.#planReferencePath = state.planFilePath;
+			// Entering plan mode arms a draft, not an approved plan.
+			this.#planReferenceApproved = false;
 		} else {
+			// Leaving an active plan mode withdraws its draft reference: a paused or
+			// exited plan must never be injected as approved (#18610). Approval paths
+			// re-arm via setPlanReferencePath after this clear. Guarded on the prior
+			// state so an unrelated mode clear cannot drop an already-approved plan.
+			if (wasPlanModeEnabled) this.#planReferenceApproved = false;
 			this.#planModeReminderCount = 0;
 			this.#planModeReminderAwaitingProgress = false;
 			// Drop any unconsumed forced decision so a post-plan execution turn
@@ -8142,6 +8152,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setPlanReferencePath(path: string): void {
 		this.#planReferencePath = path;
+		// Only approval paths call this: the armed reference is now an approved plan.
+		this.#planReferenceApproved = true;
 	}
 
 	getPlanReferencePath(): string {
@@ -8345,10 +8357,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * rewrite (new session, compaction, edit). Inlines the plan body so the
 	 * executor need not re-read it; the durable `local://` path stays in the
 	 * prompt as the recovery route when a compressor expires the inline copy.
-	 * Returns null during plan mode, once already sent, or when no plan exists.
+	 * Returns null during plan mode, before approval, once already sent, or when no plan exists.
 	 */
 	async #buildPlanReferenceMessage(): Promise<CustomMessage | null> {
 		if (this.#planModeState?.enabled) return null;
+		if (!this.#planReferenceApproved) return null;
 		if (this.#planReferenceSent) return null;
 
 		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
@@ -12151,6 +12164,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
 			this.#planReferencePath = "local://PLAN.md";
+			this.#planReferenceApproved = false;
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
