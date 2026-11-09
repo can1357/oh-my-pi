@@ -305,11 +305,14 @@ describe("RedisSessionStorage", () => {
 		const storage = await RedisSessionStorage.create({ client: redis });
 		const file = "/sessions/p/journal.jsonl";
 		const header = `${JSON.stringify({ type: "session", id: "journal", timestamp: "t1", cwd: "/repo" })}\n`;
+		// A first prompt inside the listing's prefix keeps prompt recovery from reading the body.
+		const user = `${JSON.stringify({ type: "message", message: { role: "user", content: "Prompt" } })}\n`;
 		const assistant = `${JSON.stringify({ type: "message", message: { role: "assistant", content: [] } })}\n`;
 		const title = { title: "Appended journal title", source: "user", updatedAt: "t2" } as const;
 		const content =
 			serializeTitleSlot({ title: "Stale", source: "auto", updatedAt: "t1" }) +
 			header +
+			user +
 			assistant +
 			"x".repeat(256 * 1024) +
 			"\n";

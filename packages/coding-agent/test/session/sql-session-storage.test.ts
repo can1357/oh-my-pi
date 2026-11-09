@@ -339,9 +339,11 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		try {
 			const storage = await SqlSessionStorage.create({ client });
 			const file = "/sessions/p/journal.jsonl";
+			// A first prompt inside the listing's prefix keeps prompt recovery from reading the body.
 			const content =
 				serializeTitleSlot({ title: "Stale", source: "auto", updatedAt: "t1" }) +
 				'{"type":"session","id":"journal","timestamp":"t1","cwd":"/repo"}\n' +
+				'{"type":"message","message":{"role":"user","content":"Prompt"}}\n' +
 				'{"type":"message","message":{"role":"assistant","content":[]}}\n' +
 				`${JSON.stringify({ type: "custom", data: "x".repeat(256 * 1024) })}\n`;
 			await storage.writeText(file, content);
