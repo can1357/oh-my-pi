@@ -79,6 +79,9 @@ export interface HookSelectorOptions {
 	onRight?: () => void;
 	onExternalEditor?: () => void;
 	helpText?: string;
+	/** Single-key shortcuts (case-insensitive) mapped to the label they select, e.g. `{ y: "Yes", n: "No" }`.
+	 *  Active only while the type-to-search query is empty; a key naming a missing or disabled option falls through. */
+	hotkeys?: Readonly<Record<string, string>>;
 	slider?: HookSelectorSlider;
 	/** Indices into the original options that cannot be selected: they render
 	 *  dimmed, are skipped during navigation, and reject enter/timeout. */
@@ -216,6 +219,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	readonly #detailLines: readonly string[];
 	readonly #inline: boolean;
 	readonly #helpText: string | undefined;
+	readonly #hotkeys: Readonly<Record<string, string>> | undefined;
 	/** Described option rows by original index; `marker` is the radio state baked into the label. */
 	readonly #nativeItems = new Map<number, { marker: boolean; node: NativeNode }>();
 	/** Title/detail/hint nodes, fixed for the dialog's lifetime. */
@@ -269,6 +273,7 @@ export class HookSelectorComponent extends OverlayPanel {
 		this.#baseTitle = this.title;
 		this.#detailLines = title.split(/\r?\n/).slice(1);
 		this.#helpText = opts?.helpText;
+		this.#hotkeys = opts?.hotkeys;
 		this.#inline = opts?.inline ?? false;
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
@@ -632,6 +637,16 @@ export class HookSelectorComponent extends OverlayPanel {
 		return true;
 	}
 
+	#handleHotkey(keyData: string): boolean {
+		if (!this.#hotkeys || this.#menu.query.length > 0 || keyData.length !== 1) return false;
+		const label = this.#hotkeys[keyData.toLowerCase()];
+		if (label === undefined) return false;
+		const index = this.#options.findIndex(option => option.label === label);
+		if (index < 0 || this.#isDisabled(index)) return false;
+		this.#onSelectCallback(label);
+		return true;
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#countdown) {
 			this.#countdown.reset();
@@ -640,6 +655,10 @@ export class HookSelectorComponent extends OverlayPanel {
 
 		if (matchesSelectCancel(keyData)) {
 			this.#onCancelCallback();
+			return;
+		}
+
+		if (this.#handleHotkey(keyData)) {
 			return;
 		}
 

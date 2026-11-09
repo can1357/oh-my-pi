@@ -24,6 +24,7 @@ import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { parseSessionUpdateArgs, runSessionUpdate, YES_NO_PROMPT } from "./helpers/self-update";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,
@@ -893,6 +894,34 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "exit",
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
+	},
+	{
+		name: "update",
+		icon: "package",
+		description: "Check for an omp update, install it in place, and optionally restart onto it",
+		inlineHint: "[--check] [--force] [--canary|--stable]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			const parsed = parseSessionUpdateArgs(command.args);
+			if ("error" in parsed) {
+				ctx.showStatus(parsed.error);
+				return;
+			}
+			await runSessionUpdate({
+				flags: parsed.flags,
+				ui: {
+					status: message => {
+						ctx.showStatus(message);
+						ctx.ui.requestRender();
+					},
+					confirm: (title, message) => ctx.showHookConfirm(title, message, YES_NO_PROMPT),
+					busy: () => ctx.session.isStreaming,
+					restart: entry => ctx.restart({ entry }),
+				},
+			});
+		},
 	},
 	{
 		name: "restart",

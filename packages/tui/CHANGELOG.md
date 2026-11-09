@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `hotkeys` option to `HookSelectorComponent` so a dialog can answer on a single keypress (for example `y` / `n` on a Yes/No prompt) ([#15153](https://github.com/can1357/oh-my-pi/pull/15153) by [@Shadorain](https://github.com/Shadorain))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
