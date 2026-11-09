@@ -18,6 +18,13 @@ function requestBodyBytes(body: RequestInit["body"]): Uint8Array | undefined {
 	return undefined;
 }
 
+/** The fetch standard's redirect limit, which Bun's `fetch` also applies. */
+const MAX_REDIRECTS = 20;
+/** Headers the fetch standard drops when a redirect turns the request into a bodiless GET. */
+const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
+/** Credentials Bun's `fetch` drops when a redirect leaves the origin. */
+const ORIGIN_CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+
 /**
  * Send a large string or byte body through Bun's `fetch` as a stream with an
  * explicit `Content-Length`, counting the bytes Bun pulls as the socket drains.
@@ -27,53 +34,69 @@ function requestBodyBytes(body: RequestInit["body"]): Uint8Array | undefined {
  * {@link ConnectionLostBeforeResponseError} with the original error as
  * `cause`; failures to connect, aborts and other errors keep their own.
  *
- * Bun cannot replay a streamed body to follow a redirect, so redirects are
- * taken manually and, when the caller follows them, the request is sent again
- * with the original body for Bun to follow.
+ * Bun cannot replay a streamed body to follow a redirect, so when the caller
+ * follows redirects they are followed here, as `fetch` would: 307/308 resend
+ * the body to the new location, 303 (and 301/302 after a POST) become a GET
+ * without it, and credentials are dropped when the location leaves the origin.
  */
 export async function fetchWithUploadProgress(
 	fetch: FetchImpl,
 	input: string | URL | Request,
 	init: RequestInit | undefined,
 ): Promise<Response> {
-	const bytes = input instanceof Request ? undefined : requestBodyBytes(init?.body);
-	if (!bytes || bytes.byteLength < UPLOAD_PROGRESS_MIN_BYTES) return fetch(input, init);
+	const bytes = requestBodyBytes(init?.body);
+	if (input instanceof Request || !bytes || bytes.byteLength < UPLOAD_PROGRESS_MIN_BYTES) return fetch(input, init);
 	const startedAt = performance.now();
-	let pulled = 0;
-	const body = new ReadableStream<Uint8Array>({
-		pull(controller) {
-			if (pulled >= bytes.byteLength) {
-				controller.close();
-				return;
-			}
-			const chunk = bytes.subarray(pulled, pulled + UPLOAD_CHUNK_BYTES);
-			pulled += chunk.byteLength;
-			controller.enqueue(chunk);
-		},
-	});
+	const follow = (init?.redirect ?? "follow") === "follow";
 	const headers = new Headers(init?.headers);
 	headers.set("content-length", String(bytes.byteLength));
-	const follow = (init?.redirect ?? "follow") === "follow";
-	let response: Response;
-	try {
-		response = await fetch(input, {
-			...init,
-			body,
-			headers,
-			duplex: "half",
-			redirect: follow ? "manual" : init?.redirect,
+	let url = new URL(input);
+	for (let redirects = 0; ; redirects++) {
+		let pulled = 0;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (pulled >= bytes.byteLength) {
+					controller.close();
+					return;
+				}
+				const chunk = bytes.subarray(pulled, pulled + UPLOAD_CHUNK_BYTES);
+				pulled += chunk.byteLength;
+				controller.enqueue(chunk);
+			},
 		});
-	} catch (error) {
-		if (init?.signal?.aborted || !(error instanceof Error) || !isUnexpectedSocketCloseMessage(error.message)) {
-			throw error;
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				...init,
+				body,
+				headers,
+				duplex: "half",
+				redirect: follow ? "manual" : init?.redirect,
+			});
+		} catch (error) {
+			if (init?.signal?.aborted || !(error instanceof Error) || !isUnexpectedSocketCloseMessage(error.message)) {
+				throw error;
+			}
+			throw new ConnectionLostBeforeResponseError(error, {
+				bodyBytes: bytes.byteLength,
+				bodySent: pulled === bytes.byteLength,
+				elapsedMs: performance.now() - startedAt,
+			});
 		}
-		throw new ConnectionLostBeforeResponseError(error, {
-			bodyBytes: bytes.byteLength,
-			bodySent: pulled === bytes.byteLength,
-			elapsedMs: performance.now() - startedAt,
-		});
+		const location = response.headers.get("location");
+		if (!follow || response.status < 300 || response.status >= 400 || location === null) return response;
+		await response.body?.cancel();
+		if (redirects === MAX_REDIRECTS) throw new TypeError(`Too many redirects (more than ${MAX_REDIRECTS})`);
+		const next = new URL(location, url);
+		if (next.origin !== url.origin) for (const name of ORIGIN_CREDENTIAL_HEADERS) headers.delete(name);
+		url = next;
+		const method = init?.method?.toUpperCase() ?? "GET";
+		if (
+			(response.status === 303 && method !== "HEAD") ||
+			((response.status === 301 || response.status === 302) && method === "POST")
+		) {
+			for (const name of BODY_HEADERS) headers.delete(name);
+			return fetch(url, { ...init, method: "GET", body: undefined, headers });
+		}
 	}
-	if (!follow || response.status < 300 || response.status >= 400 || !response.headers.has("location")) return response;
-	await response.body?.cancel();
-	return fetch(input, init);
 }
