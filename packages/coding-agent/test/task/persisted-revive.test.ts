@@ -15,6 +15,7 @@ import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolv
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
+import { A2A_ARTIFACT_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -1752,10 +1753,11 @@ describe("persisted subagent revival", () => {
 			}
 		});
 
-		it("sends the yield summary after an aborted yield wake turn", async () => {
+		it("sends capped published output rather than the local yield summary to an external peer", async () => {
 			const h = await externalHarness();
 			try {
 				await h.note("req-1");
+				const report = "x".repeat(A2A_ARTIFACT_MAX_CHARS + 1000);
 				const localReply = IrcBus.global().wait("Main", { from: h.ref.id }, 5000);
 				await h.finish([externalRecord("req-1"), wakeRecord("Main")], { stopReason: "aborted" }, async () => {
 					h.handle.emit({
@@ -1764,17 +1766,22 @@ describe("persisted subagent revival", () => {
 						toolName: "yield",
 						result: {
 							content: [{ type: "text", text: "Result submitted." }],
-							details: { status: "success", data: { report: "yielded answer" } },
+							details: { status: "success", data: { report } },
 						},
 						isError: false,
 					} as AgentSessionEvent);
 				});
 				const local = await localReply;
-				expect(local?.body).toContain('"report": "yielded answer"');
+				expect(local?.body).toContain("agent://");
 				await h.called;
 				expect(h.calls).toHaveLength(1);
+				const published = await Bun.file(path.join(path.dirname(h.ref.sessionFile!), `${h.ref.id}.md`)).text();
+				expect(published.length).toBeGreaterThan(A2A_ARTIFACT_MAX_CHARS);
 				expect(h.calls[0]).toMatchObject({
-					params: { metadata: { inReplyTo: "req-1" }, message: { parts: [{ text: local?.body }] } },
+					params: {
+						metadata: { inReplyTo: "req-1" },
+						message: { parts: [{ text: published.slice(0, A2A_ARTIFACT_MAX_CHARS) }] },
+					},
 				});
 			} finally {
 				h.server.stop(true);

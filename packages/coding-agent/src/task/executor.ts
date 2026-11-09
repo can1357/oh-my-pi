@@ -21,6 +21,7 @@ import {
 } from "../async";
 import { IncomingRequests } from "../a2a/incoming-requests";
 import { sendA2aReply } from "../a2a/reply-relay";
+import { A2A_ARTIFACT_MAX_CHARS } from "../a2a/rpc";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -3331,7 +3332,7 @@ async function relayA2aWakeTurnOutput(args: {
 	if (wakeTurnFailed(args)) return;
 	const answer =
 		args.yielded && args.result?.outputPath
-			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
+			? (await Bun.file(args.result.outputPath).text()).slice(0, A2A_ARTIFACT_MAX_CHARS)
 			: args.turnText.trim();
 	if (!answer) return;
 	const ids = new Set<string>();
