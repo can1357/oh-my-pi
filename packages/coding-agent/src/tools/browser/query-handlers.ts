@@ -132,8 +132,13 @@ export function roleRules(): RoleRules {
 			normalizeSpace(element.getAttribute("aria-label") ?? "") ||
 			normalizeSpace(element.getAttribute("title") ?? ""),
 		);
+	const parentAcrossShadowRoot = (element: Element): Element | null => {
+		// Page parents and shadow hosts share the queried element's interface.
+		const node = element as unknown as { parentElement: Element | null; getRootNode(): { host?: Element } };
+		return node.parentElement ?? node.getRootNode().host ?? null;
+	};
 	const isScoped = (element: Element, includeMain: boolean): boolean => {
-		for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+		for (let parent = parentAcrossShadowRoot(element); parent; parent = parentAcrossShadowRoot(parent)) {
 			const explicit = parent.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
 			if (!explicit && parent.tagName.toLocaleLowerCase() === "section") return true;
 			// Browser ancestors have the same element interface as the queried node.

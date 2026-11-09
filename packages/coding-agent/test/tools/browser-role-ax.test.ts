@@ -251,19 +251,18 @@ function unreselectable(): { role: string; name: string }[] {
 		const quote = entry.name.includes('"') ? "'" : '"';
 		const own = kit.mark({ engine: "id", id: entry.id });
 		const tokens = kit.markAll({ engine: "role", query: `${entry.role}[name=${quote}${entry.name}${quote} exact]` });
-		const marked = (
-			globalThis as unknown as { document: { querySelector(selector: string): TernElement | null } }
-		).document
-			.querySelector(`[data-omp-tern-handle~="${own}"]`)
-			?.getAttribute("data-omp-tern-handle")
-			?.split(/\s+/);
-		if (!tokens.some(token => marked?.includes(token))) misses.push({ role: entry.role, name: entry.name });
+		if (
+			!tokens.some(
+				token =>
+					kit.count({
+						engine: "pierce",
+						query: `[data-omp-tern-handle~="${own}"][data-omp-tern-handle~="${token}"]`,
+					}) > 0,
+			)
+		)
+			misses.push({ role: entry.role, name: entry.name });
 	}
 	return misses;
-}
-
-interface TernElement {
-	getAttribute(name: string): string | null;
 }
 
 interface TernKitProbe {
@@ -301,12 +300,14 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 				<input type="date" aria-label="When">
 				<a href="#docs"><x-label>Docs</x-label></a>
 				<x-save role="button"></x-save>
+				<article><x-scoped></x-scoped></article>
 				<script>
 					customElements.define("x-label", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<span><slot></slot></span>"; } });
 					customElements.define("x-save", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<span>Save</span>"; } });
+					customElements.define("x-scoped", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = '<header aria-label="Scoped head">Head</header><footer aria-label="Scoped foot">Foot</footer><aside>Scoped aside</aside>'; } });
 				</script>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
-			const [observed, interactive, docsLinks] = await page.evaluate(() => {
+			const [observed, interactive, docsLinks, complementary] = await page.evaluate(() => {
 				const kit = (globalThis as unknown as { __ompTernKit: TernKitProbe }).__ompTernKit;
 				const entries = (includeAll: boolean) =>
 					kit.observe({ includeAll }).elements.map(entry => `${entry.role} ${entry.name ?? ""}`);
@@ -314,6 +315,7 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 					entries(true),
 					entries(false),
 					kit.count({ engine: "role", query: 'link[name="Docs" exact]' }),
+					kit.count({ engine: "role", query: "complementary" }),
 				] as const;
 			});
 			// Codex's findings on #17895 (r4462930387, r4463081158, r4463081163, r4463081171).
@@ -326,11 +328,14 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 					"table Quarterly totals",
 					"caption Quarterly totals",
 					"StaticText Daily",
+					"sectionheader Scoped head",
+					"sectionfooter Scoped foot",
 				]),
 			);
 			// Date fields are text boxes to fill; slotted text names its link.
 			expect(interactive).toEqual(expect.arrayContaining(["textbox When", "link Docs", "button Save"]));
 			expect(docsLinks).toBe(1);
+			expect(complementary).toBe(1);
 			expect(await page.evaluate(unreselectable)).toEqual([]);
 		} finally {
 			await browser.close();
