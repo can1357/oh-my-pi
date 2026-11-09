@@ -490,7 +490,7 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
-	runTodoWrite?: <T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }) => Promise<T>;
+	runTodoWrite?: <T>(write: TodoWrite<T>, signal?: AbortSignal) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**

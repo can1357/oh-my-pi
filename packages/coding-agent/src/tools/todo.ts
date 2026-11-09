@@ -746,7 +746,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		try {
 			return await this.session.runTodoWrite(
 				(active, assertCurrent) => this.#write(params, active, assertCurrent, signal),
-				{ signal },
+				signal,
 			);
 		} catch (error) {
 			// The queued write can no longer commit, and its backend call (if any) saw the same abort.

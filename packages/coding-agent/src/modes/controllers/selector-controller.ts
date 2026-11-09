@@ -125,10 +125,7 @@ import { type ResetUsageAccount, ResetUsageSelectorComponent } from "@oh-my-pi/p
 import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
 import { SessionAccountSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "@oh-my-pi/pi-tui/overlays/session-selector";
-import {
-	type RuntimeSettingOptionsProvider,
-	SettingsSelectorComponent,
-} from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { ThinkingSelectorComponent } from "@oh-my-pi/pi-tui/overlays/thinking-selector";
@@ -329,16 +326,14 @@ export class SelectorController {
 		const menu = this.#claimMenu("settings");
 		getAvailableThemes()
 			.then(availableThemes => {
-				const todoBackendOptions: RuntimeSettingOptionsProvider = () => {
-					return [
-						{ value: NATIVE_TODO_BACKEND_ID, label: "Native", description: "omp's built-in todo list" },
-						...(this.ctx.session.extensionRunner?.listTodoBackends() ?? []).map(backend => ({
-							value: backend.id,
-							label: backend.label,
-							description: backend.description,
-						})),
-					];
-				};
+				const todoBackendOptions = () => [
+					{ value: NATIVE_TODO_BACKEND_ID, label: "Native", description: "omp's built-in todo list" },
+					...(this.ctx.session.extensionRunner?.listTodoBackends() ?? []).map(backend => ({
+						value: backend.id,
+						label: backend.label,
+						description: backend.description,
+					})),
+				];
 				// Fullscreen settings editor on the alternate screen: the overlay
 				// enables mouse tracking (click/hover/wheel) for its lifetime and
 				// the transcript stays untouched underneath.
@@ -353,9 +348,7 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
-						runtimeOptions: new Map<string, RuntimeSettingOptionsProvider>([
-							["todo.backend", todoBackendOptions],
-						]),
+						runtimeOptions: new Map([["todo.backend", todoBackendOptions]]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
 							(a, b) => a.localeCompare(b),
 						),

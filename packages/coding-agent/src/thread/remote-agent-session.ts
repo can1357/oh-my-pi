@@ -697,11 +697,6 @@ export class RemoteAgentSession implements AgentViewSession {
 		return Promise.resolve(phases);
 	}
 
-	/** Same as {@link commitTodoPhases}: with no backend, nothing can refuse an edit. */
-	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
-		return this.commitTodoPhases(update);
-	}
-
 	/**
 	 * Main-thread renderer source for the child's tool `name`: the nearest
 	 * main-thread ancestor's tool of that name (worker tool copies drop their

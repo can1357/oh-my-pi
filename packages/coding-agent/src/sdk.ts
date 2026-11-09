@@ -2699,7 +2699,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getFileMutationVersion: path => fileMutationVersions.get(path) ?? 0,
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
-			runTodoWrite: (write, options) => session.runTodoWrite(write, options),
+			runTodoWrite: (write, signal) => session.runTodoWrite(write, signal),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),

@@ -368,7 +368,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	setTodoPhases(phases: TodoPhase[]): void;
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
 	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
-	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
 	/** Whether the user approved approval scope `key` for the rest of this session, so its prompt is skipped. */
 	hasSessionApproval(key: string): boolean;
 	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */

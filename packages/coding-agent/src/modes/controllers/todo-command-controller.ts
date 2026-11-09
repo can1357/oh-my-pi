@@ -425,7 +425,6 @@ export class TodoCommandController {
 		}
 	}
 
-	/** The user may focus another agent mid-commit, so the HUD only updates if the focused one is unchanged. */
 	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
 		const { viewSession } = this.ctx;
 		// Commit first so HUD visibility binds to the new canonical source.
@@ -438,9 +437,9 @@ export class TodoCommandController {
 		// The HUD shows the focused agent's list; one focused mid-commit keeps it, and the main list returns on switching back.
 		if (this.ctx.viewSession === viewSession) this.ctx.setTodos(committed);
 
-		// Inject system reminder so the agent learns about the change next turn.
-		// Removals carry explicit intent so the agent does not rebuild the
-		// cleared/removed items on its next turn (issue #5258).
+		// 3. Inject system reminder so the agent learns about the change next turn.
+		//    Removals carry explicit intent so the agent does not rebuild the
+		//    cleared/removed items on its next turn (issue #5258).
 		const reminderText = buildSystemReminder(plan.action, committed, plan.removed ?? false);
 		const message = {
 			role: "developer" as const,

@@ -484,10 +484,10 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Runs an extension factory with registration rollback on failure.
- * Restores the complete provider registration queue when the factory throws because an
- * extension may unregister entries queued by an earlier extension, and drops the todo
- * backends the factory registered.
+ * Runs an extension factory with provider registration rollback on failure.
+ * Restores the complete registration queue when the factory throws because an
+ * extension may unregister entries queued by an earlier extension.
+ * Todo backends the factory registered are dropped too.
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,

@@ -2309,7 +2309,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			extensionRunner: () => this.#extensionRunner,
 			isMainAgent: () => this.#agentKind === "main",
 			isDisposed: () => this.#isDisposed,
-			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			warn: message => this.emitNotice("warning", message, "todo-backend"),
 			bindDeferredExtensions: async () => {
 				// A write issued from inside the deferred load must not wait on that load.
 				if (deferredExtensionLoadScope.getStore()) return false;
@@ -11391,8 +11391,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.setPhases(phases);
 	}
 
-	runTodoWrite<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
-		return this.#todoWrites.run(write, options);
+	runTodoWrite<T>(write: TodoWrite<T>, signal?: AbortSignal): Promise<T> {
+		return this.#todoWrites.run(write, signal);
 	}
 
 	get todoWritesQueued(): boolean {

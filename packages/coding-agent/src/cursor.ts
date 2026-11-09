@@ -572,34 +572,6 @@ function formatTodoSyncSummary(phases: TodoPhase[]): string {
 	return `${done}/${tasks.length} tasks completed`;
 }
 
-function mapCursorTodoSnapshot(snapshot: CursorTodoSnapshot, local: TodoPhase[]): TodoPhase[] {
-	const phaseByContent = new Map<string, string>();
-	for (const phase of local) {
-		for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
-	}
-
-	const grouped = new Map<string, TodoPhase["tasks"]>();
-	for (const todo of snapshot.todos) {
-		const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
-		let tasks = grouped.get(name);
-		if (!tasks) {
-			tasks = [];
-			grouped.set(name, tasks);
-		}
-		tasks.push({ content: todo.content, status: todo.status as TodoStatus });
-	}
-
-	const next: TodoPhase[] = [];
-	for (const phase of local) {
-		const tasks = grouped.get(phase.name);
-		if (!tasks) continue;
-		next.push({ name: phase.name, tasks });
-		grouped.delete(phase.name);
-	}
-	for (const [name, tasks] of grouped) next.push({ name, tasks });
-	return next;
-}
-
 /**
  * Persisted result for a server-resolved todo call.
  *
@@ -1109,15 +1081,43 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// only on a matching `tool_execution_end`, so a refusal, a server error,
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
+		const mapSnapshot = (snapshot: CursorTodoSnapshot, existing: TodoPhase[]): TodoPhase[] => {
+			const phaseByContent = new Map<string, string>();
+			for (const phase of existing) {
+				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
+			}
+
+			const grouped = new Map<string, TodoPhase["tasks"]>();
+			for (const todo of snapshot.todos) {
+				const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
+				let tasks = grouped.get(name);
+				if (!tasks) {
+					tasks = [];
+					grouped.set(name, tasks);
+				}
+				tasks.push({ content: todo.content, status: todo.status as TodoStatus });
+			}
+
+			// Preserve the local phase order; phases new to this snapshot append.
+			const next: TodoPhase[] = [];
+			for (const phase of existing) {
+				const tasks = grouped.get(phase.name);
+				if (!tasks) continue;
+				next.push({ name: phase.name, tasks });
+				grouped.delete(phase.name);
+			}
+			for (const [name, tasks] of grouped) next.push({ name, tasks });
+			return next;
+		};
 		if (snapshot && commitPhases) {
-			const next = mapCursorTodoSnapshot(snapshot, existing);
+			const next = mapSnapshot(snapshot, existing);
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
 				// Stays synchronous: the result below is returned mid-parse. The commit settles later
 				// and maps the snapshot again onto the list committed at its queue slot, so an earlier
 				// queued edit that renamed or regrouped phases survives.
-				commitPhases(current => mapCursorTodoSnapshot(snapshot, current)).catch((commitError: unknown) => {
+				commitPhases(current => mapSnapshot(snapshot, current)).catch((commitError: unknown) => {
 					logger.warn("Could not record the Cursor todo list", { error: String(commitError) });
 				});
 				phases = next;

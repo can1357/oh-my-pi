@@ -15,7 +15,6 @@ import type { SessionManager } from "./session-manager";
 import type { TodoTracker } from "./todo-tracker";
 
 const SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was saved; nothing was changed.";
-const NOTICE_SOURCE = "todo-backend";
 
 class TodoListChangedError extends Error {
 	constructor() {
@@ -31,7 +30,7 @@ export interface TodoWritesHost extends SettingsScope {
 	extensionRunner(): ExtensionRunner | undefined;
 	isMainAgent(): boolean;
 	isDisposed(): boolean;
-	emitNotice(level: "warning", message: string, source: string): void;
+	warn(message: string): void;
 	/**
 	 * Bind startup-deferred extensions if any are pending. Resolves `false` when called from inside
 	 * that load, where waiting on the backend would wait on the load itself.
@@ -52,7 +51,6 @@ export class TodoWrites {
 	#armed = false;
 	#resolvable = false;
 	#pending = 0;
-	#resolvedId: string | undefined;
 	#queuedWriteSinceSave = false;
 	#epoch = 0;
 
@@ -60,7 +58,6 @@ export class TodoWrites {
 		this.#host = host;
 	}
 
-	/** Call once, after the deferred extension loader is set. */
 	arm(): void {
 		const runner = this.#host.extensionRunner();
 		if (this.#armed || !runner) return;
@@ -83,11 +80,10 @@ export class TodoWrites {
 		if (this.#pending > 0 || this.#active) return true;
 		if (!this.#armed || !this.#host.isMainAgent()) return false;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		return isBackendId(id) && id !== this.#resolvedId;
+		return isBackendId(id) && id !== this.#requestedId;
 	}
 
-	run<T>(write: TodoWrite<T>, options?: { signal?: AbortSignal }): Promise<T> {
-		const signal = options?.signal;
+	run<T>(write: TodoWrite<T>, signal?: AbortSignal): Promise<T> {
 		const epoch = this.#epoch;
 		const assertCurrent = (): void => {
 			signal?.throwIfAborted();
@@ -101,7 +97,7 @@ export class TodoWrites {
 		}
 		const queued = this.#track(
 			(async () => {
-				await this.#ready();
+				if (await this.#host.bindDeferredExtensions()) this.allowBackendResolution();
 				this.#observeSetting();
 				return this.#queue.run(() => {
 					assertCurrent();
@@ -133,9 +129,8 @@ export class TodoWrites {
 	}
 
 	commit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
-		const todo = this.#host.todo;
 		return this.run(async active => {
-			const phases = update(todo.phases);
+			const phases = update(this.#host.todo.phases);
 			if (phases === undefined) return undefined;
 			const committed = this.#save(phases);
 			await this.#sync(active);
@@ -158,10 +153,8 @@ export class TodoWrites {
 		try {
 			await active.sync();
 		} catch (error) {
-			this.#host.emitNotice(
-				"warning",
+			this.#host.warn(
 				`Todo backend "${active.label}" did not take the todo list: ${sanitizeTodoBackendText(error)}`,
-				NOTICE_SOURCE,
 			);
 		}
 	}
@@ -209,12 +202,6 @@ export class TodoWrites {
 		});
 	}
 
-	async #ready(): Promise<void> {
-		if (!this.#armed) return;
-		if (!(await this.#host.bindDeferredExtensions())) return;
-		this.allowBackendResolution();
-	}
-
 	#track<T>(work: Promise<T>): Promise<T> {
 		this.#pending++;
 		const settle = (): void => {
@@ -227,7 +214,7 @@ export class TodoWrites {
 	#observeSetting(): void {
 		if (!this.#resolvable || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		const available = this.#isAvailable(id);
+		const available = this.#host.extensionRunner()?.getTodoBackend(id) !== undefined;
 		if (id === this.#requestedId && available === this.#requestedAvailable) return;
 		const wasBackend = this.#requestedId !== undefined && isBackendId(this.#requestedId);
 		this.#requestedId = id;
@@ -238,21 +225,14 @@ export class TodoWrites {
 		});
 	}
 
-	#isAvailable(id: string): boolean {
-		return this.#host.extensionRunner()?.getTodoBackend(id) !== undefined;
-	}
-
 	async #resolve(id: string): Promise<void> {
 		this.#active = undefined;
-		this.#resolvedId = id;
 		const runner = this.#host.extensionRunner();
 		if (!runner || this.#host.isDisposed() || !isBackendId(id)) return;
 		const definition = runner.getTodoBackend(id);
 		if (!definition) {
-			this.#host.emitNotice(
-				"warning",
+			this.#host.warn(
 				`Todo backend "${sanitizeTodoBackendText(id)}" is not registered by any enabled extension; using native todos.`,
-				NOTICE_SOURCE,
 			);
 			return;
 		}
@@ -301,10 +281,8 @@ export class TodoWrites {
 		} catch (error) {
 			const message = sanitizeTodoBackendText(error);
 			logger.warn("Todo backend create failed", { id, error: message });
-			this.#host.emitNotice(
-				"warning",
+			this.#host.warn(
 				`Todo backend "${sanitizeTodoBackendText(id)}" failed to start: ${message}; using native todos.`,
-				NOTICE_SOURCE,
 			);
 		}
 	}

@@ -17,14 +17,11 @@ export function sanitizeTodoBackendText(value: unknown): string {
 
 /**
  * The `todo` tool's params, as validated by the tool: the same value the native op applied, with
- * keys the tool schema does not declare removed. Public extension-facing name for `TodoParams`.
+ * keys the tool schema does not declare removed.
  */
 export type TodoBackendParams = TodoParams;
 
-/**
- * Operation name of a `todo` tool call.
- * Public extension-facing name for the tool's `TodoOperation`.
- */
+/** Operation name of a `todo` tool call. */
 export type TodoOp = TodoOperation;
 
 /**

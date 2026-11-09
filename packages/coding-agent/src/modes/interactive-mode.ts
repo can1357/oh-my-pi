@@ -634,6 +634,8 @@ function completeFinishedSubagentTodos(phases: TodoPhase[], completedDescs: stri
 			if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") return task;
 			if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
 			mutated = true;
+			// Drop any blocker note along with the blocked status — the wait the
+			// note described is over.
 			return { content: task.content, status: "completed" as const };
 		}),
 	}));
