@@ -202,6 +202,16 @@ export class AnthropicApiError extends ProviderHttpError {
 	}
 }
 
+/** How far a request got before its connection was lost. */
+export interface RequestUploadProgress {
+	/** Request body size on the wire. */
+	bodyBytes: number;
+	/** Whether the whole body was handed to the OS socket. */
+	bodySent: boolean;
+	/** Time since the request started. */
+	elapsedMs: number;
+}
+
 /**
  * An established connection that failed before any response headers arrived,
  * naming how far the request body got. "Sent" means the whole body was handed
@@ -209,7 +219,7 @@ export class AnthropicApiError extends ProviderHttpError {
  * "uploading".
  */
 export class ConnectionLostBeforeResponseError extends Error {
-	constructor(cause: unknown, bodyBytes: number, bodySent: boolean, elapsedMs: number) {
+	constructor(cause: unknown, { bodyBytes, bodySent, elapsedMs }: RequestUploadProgress) {
 		const after = `connection lost after ${formatDuration(elapsedMs)}`;
 		const code =
 			typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
