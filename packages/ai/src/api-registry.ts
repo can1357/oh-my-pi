@@ -16,7 +16,7 @@ import type {
 	StreamOptions,
 } from "./types";
 
-const BUILTIN_API_IDS = [
+export const BUILTIN_API_IDS = [
 	"openai-completions",
 	"openai-responses",
 	"openrouter",

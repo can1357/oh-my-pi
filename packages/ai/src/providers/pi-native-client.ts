@@ -123,29 +123,30 @@ function resolveStreamUrl(model: Model<Api>): string {
 export function piNativeEndpoint(baseUrl: string, path: string): string {
 	return `${baseUrl.replace(/\/+$/, "")}${path}`;
 }
+
 /**
- * Usage-attribution identity every pi-native request to the gateway carries
- * (stream and `GET /v1/models` alike): the gateway reports a request's token
- * burn to the broker under the ORIGINATING client, not the gateway host.
- * Attribution-only — the gateway never forwards x-omp-* upstream. Header
- * values must stay ISO-8859-1-safe, hence the hostname scrub.
+ * Whether `headers` already carry an `Authorization` header, whatever its case.
+ * The stream and gateway discovery share this rule, so both add the configured
+ * bearer under the same condition and never send two credentials.
  */
-export function buildPiNativeAttributionHeaders(): Record<string, string> {
-	return {
-		"x-omp-install-id": getInstallId(),
-		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
-		"x-omp-app": getAppName(),
-	};
+export function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+	return headers !== undefined && Object.keys(headers).some(name => name.toLowerCase() === "authorization");
 }
 
 function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Content-Type": "application/json",
 		Accept: "text/event-stream",
-		...buildPiNativeAttributionHeaders(),
+		// Usage-attribution identity: the gateway reports this request's token
+		// burn to the broker under the ORIGINATING client, not the gateway host.
+		// Attribution-only — the gateway never forwards x-omp-* upstream. Header
+		// values must stay ISO-8859-1-safe, hence the hostname scrub.
+		"x-omp-install-id": getInstallId(),
+		"x-omp-hostname": os.hostname().replace(/[^\x20-\x7e]/g, "?"),
+		"x-omp-app": getAppName(),
 		...model.headers,
 	};
-	if (apiKey && !headers.Authorization) {
+	if (apiKey && !hasAuthorizationHeader(headers)) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
 	return headers;

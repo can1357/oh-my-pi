@@ -202,6 +202,23 @@ describe("streamPiNative request shape", () => {
 		expect(body.stream).toBe(true);
 		expect(body.options.temperature).toBe(0.7);
 	});
+	it("sends one credential when the model headers carry a lowercase `authorization`", async () => {
+		const captured: { init?: RequestInit } = {};
+		const fetchImpl: FetchImpl = (async (_input, init) => {
+			captured.init = init;
+			return fakeResponse([{ type: "done", reason: "stop", message: baseAssistant() }]);
+		}) as FetchImpl;
+
+		await streamPiNative(fakeModel({ headers: { authorization: "Bearer from-headers" } }), baseContext, {
+			apiKey: "gw-bearer",
+			fetch: fetchImpl,
+		}).result();
+
+		const headers = captured.init?.headers as Record<string, string>;
+		const credentialNames = Object.keys(headers).filter(name => name.toLowerCase() === "authorization");
+		expect(credentialNames).toEqual(["authorization"]);
+		expect(headers.authorization).toBe("Bearer from-headers");
+	});
 	it("forwards Bedrock guardrails from the model through streamSimple", async () => {
 		const captured: { init?: RequestInit } = {};
 		const fetchImpl: FetchImpl = (async (_input, init) => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `pi-native` stream adding `Authorization: Bearer <apiKey>` next to a model header spelled `authorization` in another letter case, which `fetch` joined into one comma-separated credential; the header check is now case-insensitive and shared with gateway model discovery ([#18580](https://github.com/can1357/oh-my-pi/pull/18580) by [@enieuwy](https://github.com/enieuwy))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

@@ -5,6 +5,7 @@ import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-reg
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
+import { hasAuthorizationHeader } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
@@ -48,7 +49,7 @@ import {
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
-import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { $envExact, getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import { redactUrlForLog } from "../mcp/json-rpc";
@@ -82,7 +83,6 @@ import {
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
-	hasAuthorizationHeader,
 	isDiscoveryAuthRejection,
 	LLAMA_CPP_DEFAULT_BASE_URLS,
 	normalizeBareDiscoveryBaseUrl,
@@ -206,7 +206,7 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
-	/** The roster is the provider's whole chat roster: bundled chat rows it does not list are dropped. */
+	/** The roster is authoritative for the provider's chat models: bundled chat rows it does not list are dropped. */
 	authoritative?: boolean;
 }
 
@@ -1478,7 +1478,7 @@ export class ModelRegistry {
 			this.#loadBuiltInModels(this.#providerOverrides, providerFilter),
 		);
 		if (this.#cachedAuthoritativeProviders.size > 0) {
-			builtInModels = this.#dropSupersededModels(builtInModels, this.#cachedAuthoritativeProviders);
+			builtInModels = dropProviderModels(builtInModels, this.#cachedAuthoritativeProviders, { kind: "chat" });
 		}
 		return this.#mergeResolvedModels(
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
@@ -1486,31 +1486,11 @@ export class ModelRegistry {
 		);
 	}
 
-	/**
-	 * Drop what an authoritative discovery supersedes. A provider's endpoint
-	 * roster replaces its bundled chat rows; a pi-native gateway's roster is
-	 * the provider's whole catalog (it lists its image, speech and other
-	 * rows too), so bundled rows of every kind go.
-	 */
-	#dropSupersededModels(models: Model<Api>[], authoritative: ReadonlySet<string>): Model<Api>[] {
-		if (authoritative.size === 0) return models;
-		const gatewayRosters = new Set<string>();
-		for (const { provider, discovery } of this.#discoverableProviders) {
-			if (discovery.type === "pi-native-gateway" && authoritative.has(provider)) gatewayRosters.add(provider);
-		}
-		if (gatewayRosters.size === 0) return dropProviderModels(models, authoritative, { kind: "chat" });
-		const chatRosters = new Set([...authoritative].filter(provider => !gatewayRosters.has(provider)));
-		const withoutGatewayRosters = dropProviderModels(models, gatewayRosters);
-		return chatRosters.size === 0
-			? withoutGatewayRosters
-			: dropProviderModels(withoutGatewayRosters, chatRosters, { kind: "chat" });
-	}
-
 	/** The `#baseModels` stage: cached base models plus runtime discoveries. */
 	#composeBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		let resolvedDefaults = this.#composeCachedBaseModels(providerFilter);
 		if (this.#runtimeAuthoritativeProviders.size > 0) {
-			resolvedDefaults = this.#dropSupersededModels(resolvedDefaults, this.#runtimeAuthoritativeProviders);
+			resolvedDefaults = dropProviderModels(resolvedDefaults, this.#runtimeAuthoritativeProviders, { kind: "chat" });
 		}
 		return this.#mergeResolvedModels(
 			resolvedDefaults,
@@ -2298,7 +2278,14 @@ export class ModelRegistry {
 			authoritativeProviders.add(provider);
 		}
 		for (const result of currentConfiguredDiscoveryResults) {
-			if (result.authoritative) authoritativeProviders.add(result.provider.provider);
+			if (result.authoritative) {
+				authoritativeProviders.add(result.provider.provider);
+			} else if (result.replaceRuntimeModels && result.provider.discovery.type === "pi-native-gateway") {
+				// A refresh that replaced a gateway snapshot with an empty roster ends
+				// that snapshot's authority too: the startup read marked the provider
+				// cached-authoritative, and leaving it would hide the bundled roster.
+				this.#cachedAuthoritativeProviders.delete(result.provider.provider);
+			}
 		}
 
 		const replacedProviderSet = new Set(replacedConfiguredProviders);
@@ -2336,7 +2323,7 @@ export class ModelRegistry {
 			);
 		}
 		if (authoritativeProviders.size > 0) {
-			baseModels = this.#dropSupersededModels(baseModels, authoritativeProviders);
+			baseModels = dropProviderModels(baseModels, authoritativeProviders, { kind: "chat" });
 		}
 		this.#baseModels = this.#mergeResolvedModels(baseModels, discoveredModels);
 		this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
@@ -2432,9 +2419,10 @@ export class ModelRegistry {
 			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
 		}
 		if (providerConfig.discovery.type === "pi-native-gateway") {
-			// A gateway's roster belongs to that gateway: a snapshot read from one
-			// `baseUrl` must never answer for another, even when the provider id stays.
-			return `${providerConfig.provider}:pi-native-gateway-v1-${Bun.hash(providerConfig.baseUrl ?? "").toString(36)}`;
+			// A gateway's roster belongs to that gateway and to the credential that
+			// asked for it: tokens with different grants on one gateway see different
+			// rosters, so a snapshot never answers for another baseUrl or credential.
+			return `${providerConfig.provider}:pi-native-gateway-v2-${Bun.hash(this.#piNativeGatewayCacheScope(providerConfig)).toString(36)}`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
@@ -2445,6 +2433,25 @@ export class ModelRegistry {
 			return `${providerConfig.provider}:litellm-rich-v7`;
 		}
 		return providerConfig.provider;
+	}
+
+	/**
+	 * Scope of a pi-native gateway snapshot: `baseUrl`, the provider `apiKey` and
+	 * every provider header (they carry the client's identity and grants). It is
+	 * computed without running a command: a literal or env-var value is
+	 * fingerprinted as it resolves now, a `!command` value by its command text.
+	 * A command whose output changes therefore keeps the old snapshot until its
+	 * TTL ends or a refresh replaces it.
+	 */
+	#piNativeGatewayCacheScope(providerConfig: DiscoveryProviderConfig): string {
+		const fingerprint = (value: string) => (isCommandConfigValue(value) ? value : $envExact(value) || value);
+		const keyConfig = this.#customProviderApiKeys.get(providerConfig.provider);
+		const headers = Object.entries(providerConfig.headers ?? {})
+			.map(([name, value]) => `${name.toLowerCase()}=${fingerprint(value)}`)
+			.sort();
+		return [providerConfig.baseUrl ?? "", keyConfig === undefined ? "" : fingerprint(keyConfig), ...headers].join(
+			"\0",
+		);
 	}
 
 	#isDiscoveryCacheOlderThanModelsConfig(cacheUpdatedAt: number): boolean {
@@ -2464,31 +2471,36 @@ export class ModelRegistry {
 			strategy === "online-if-uncached" && (cacheOlderThanConfig || bypassFreshCache) ? "online" : strategy;
 		const willFetch =
 			effectiveStrategy === "online" || (effectiveStrategy === "online-if-uncached" && cached === null);
-		// A pi-native gateway can authenticate through a provider `Authorization`
-		// header alone, exactly as its stream request does.
+		// A pi-native gateway is asked with its own configured credential only:
+		// the provider's `apiKey` (runtime or models.yml) or an `Authorization`
+		// header, exactly what its stream request carries. The OAuth/stored/env
+		// cascade belongs to the upstream provider, so it is never consulted, and
+		// a gateway rejection never reaches any refresh or credential-rotation path.
 		const piNativeGateway = providerConfig.discovery.type === "pi-native-gateway";
-		const requiresAuth =
-			!this.#keylessProviders.has(providerConfig.provider) &&
-			!(piNativeGateway && hasAuthorizationHeader(providerConfig.headers));
-		if (requiresAuth && willFetch) {
-			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
-			if (!isAuthenticated(apiKey)) {
-				this.#providerDiscoveryStates.set(providerConfig.provider, {
-					provider: providerConfig.provider,
-					status: "unauthenticated",
-					optional: providerConfig.optional ?? false,
-					stale: cached !== null,
-					fetchedAt: cached?.updatedAt,
-					models: cached?.models.map(model => model.id) ?? [],
-				});
-				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
-				const cachedModels = cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [];
-				return {
-					models: cachedModels,
-					replaceRuntimeModels: false,
-					authoritative: piNativeGateway && cachedModels.length > 0,
-				};
+		let authenticated = true;
+		if (willFetch && !this.#keylessProviders.has(providerConfig.provider)) {
+			if (!piNativeGateway) {
+				authenticated = isAuthenticated(await this.#peekApiKeyForProvider(providerConfig.provider));
+			} else if (!hasAuthorizationHeader(providerConfig.headers)) {
+				authenticated = (await this.#resolveGatewayApiKey(providerConfig.provider)) !== undefined;
 			}
+		}
+		if (!authenticated) {
+			this.#providerDiscoveryStates.set(providerConfig.provider, {
+				provider: providerConfig.provider,
+				status: "unauthenticated",
+				optional: providerConfig.optional ?? false,
+				stale: cached !== null,
+				fetchedAt: cached?.updatedAt,
+				models: cached?.models.map(model => model.id) ?? [],
+			});
+			this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+			const cachedModels = cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [];
+			return {
+				models: cachedModels,
+				replaceRuntimeModels: false,
+				authoritative: piNativeGateway && cachedModels.length > 0,
+			};
 		}
 
 		const providerId = providerConfig.provider;
@@ -2500,7 +2512,16 @@ export class ModelRegistry {
 				const requestConfig = { ...providerConfig, headers: resolvedHeaders };
 				const models = this.#applyProviderModelOverrides(
 					providerId,
-					await discoverModelsByProviderType(requestConfig, this.#discoveryContext()),
+					await discoverModelsByProviderType(
+						requestConfig,
+						piNativeGateway
+							? {
+									fetch: this.#fetch,
+									// A plain string: no refresh, rotation or suspect-marking on a 401.
+									getBearerApiKeyResolver: provider => this.#resolveGatewayApiKey(provider),
+								}
+							: this.#discoveryContext(),
+					),
 				);
 				this.#lastDiscoveryWarnings.delete(providerId);
 				return models.map(toModelSpec);
@@ -2572,6 +2593,16 @@ export class ModelRegistry {
 			// roster stays rather than leaving the provider empty.
 			authoritative: piNativeGateway && result.models.length > 0,
 		};
+	}
+
+	/**
+	 * The configured gateway credential of a pi-native provider: its `apiKey`
+	 * (runtime or models.yml), resolved now. Never the stored/OAuth/env cascade.
+	 */
+	async #resolveGatewayApiKey(provider: string): Promise<string | undefined> {
+		const keyConfig = this.#customProviderApiKeys.get(provider);
+		const apiKey = keyConfig === undefined ? undefined : await resolveConfigValue(keyConfig);
+		return isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined;
 	}
 
 	#discoveryContext(): DiscoveryContext {
@@ -3704,7 +3735,11 @@ export class ModelRegistry {
 	}
 	/**
 	 * Materialize provider-level config headers for one outbound request.
-	 * Catalog inspection never executes command-backed values.
+	 * Catalog inspection never executes command-backed values, with one
+	 * exception: a `transport: pi-native` provider without a fresh gateway
+	 * snapshot runs its `!command` apiKey and headers in the startup background
+	 * refresh and in `omp models`, because online discovery is a request that
+	 * needs them.
 	 */
 	async getProviderHeaders(provider: string): Promise<Record<string, string> | undefined> {
 		const resolver = createConfigHeaderResolver([
