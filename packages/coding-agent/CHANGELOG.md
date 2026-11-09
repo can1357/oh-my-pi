@@ -11,6 +11,7 @@
 - Clarified tool and internal-URL descriptions for `history://` concise transcripts, `proc://` job retention and parked-agent lookups, and `read` JSON query text output ([#18553](https://github.com/can1357/oh-my-pi/pull/18553) by [@xiangnan0811](https://github.com/xiangnan0811))
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
 - In Tern, clicking an `ask` answer and then Note now annotates the answer highlighted on the question shown instead of the one just clicked ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+- Extensions that block or revise `browser` calls now see the same calls when eval makes them, and a `tool_result` follows each one so a handler can release what it set up ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
 
 ### Added
 
@@ -26,9 +27,6 @@
 - `ask` forms give every radio and checkbox group a free-text "Other" answer: its text is the radio's value or is appended to the checkbox group's array (field-by-field fallback, collab guests and ACP elicitation included)
 - Extension UI gains optional `ui.formDialog(html, options)`, which renders an HTML `<form>` and resolves to `{ data, timedOut? }` (undefined when cancelled). The interactive TUI renders it as a form dialog, ACP clients with form elicitation get one elicitation with a property per field, and hosts without it (RPC) answer the `ask` tool field by field through `select`/`input`/`editor`.
 - Eval cells can run shell commands with `sh`: `sh("git status")` in Python, `` await sh`ls ${dir}` `` or `await sh("make", { cwd })` in JavaScript. Commands run on the embedded bash engine to completion (never auto-backgrounded), return their output, and raise `ShellError` with the exit code on failure.
-### Changed
-
-- Extensions that block or revise `browser` calls now see the same calls when eval makes them, and a `tool_result` follows each one so a handler can release what it set up ([#18277](https://github.com/can1357/oh-my-pi/pull/18277) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.18.2] - 2026-11-08
 
