@@ -374,13 +374,22 @@ impl FdRef {
 
 	/// OS handle an external can inherit directly.
 	pub fn os_handle(&self) -> Option<OsHandle> {
-		self.0.state.lock().file_ref().and_then(|f| {
-			if f.observes_output() {
-				None
-			} else {
-				f.os_handle()
-			}
-		})
+		self.inheritable(|f| f.os_handle())
+	}
+
+	/// [`Self::os_handle`] for an external's output
+	/// ([`File::os_output_handle`]).
+	pub fn os_output_handle(&self) -> Option<OsHandle> {
+		self.inheritable(|f| f.os_output_handle())
+	}
+
+	/// `handle` of the object, unless the engine observes its output.
+	fn inheritable(&self, handle: impl FnOnce(&dyn File) -> Option<OsHandle>) -> Option<OsHandle> {
+		self.0.state.lock().file_ref().and_then(
+			|f| {
+				if f.observes_output() { None } else { handle(f) }
+			},
+		)
 	}
 
 	/// Whether the object is a command substitution's capture, whose bytes

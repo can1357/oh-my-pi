@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { getOAuthProvider } from "../registry/oauth";
+import { assertProviderEnabled, getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
@@ -78,6 +78,7 @@ export class OAuthAccounts implements OAuthApi {
 		if (!def?.login) {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
+		assertProviderEnabled(provider);
 		const result = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,

@@ -72,7 +72,7 @@ function rowParts(
 		row.state === "fail" && !rowFailedInSegments && row.role !== "head" && row.role !== "mid" && row.role !== "tail";
 	const gutter = failedStatement
 		? theme.fg("error", "×")
-		: presentation.running && row.active
+		: presentation.running && row.segments.some(segment => segment.active)
 			? theme.fg("accent", "▶")
 			: selected
 				? theme.fg("accent", "›")

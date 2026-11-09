@@ -3,6 +3,9 @@
 //! `sleep`, `pgrep`, `pkill`, `pidwait`). Hosts run them through [`extras`].
 #![cfg_attr(unix, feature(process_setsid))]
 
+/// Atomic whole-file replacement behind `sponge FILE` and `sd`'s in-place edits.
+#[cfg(any(feature = "util.sd", feature = "util.sponge"))]
+mod atomic_write;
 /// Output block sizes for `du` and `df`.
 #[cfg(any(feature = "util.du", feature = "util.df"))]
 mod block_size;
@@ -181,6 +184,8 @@ mod rm;
 mod rmdir;
 #[cfg(all(feature = "util.rsync", any(unix, windows)))]
 mod rsync;
+#[cfg(feature = "util.sd")]
+mod sd;
 #[cfg(feature = "util.sed")]
 mod sed;
 #[cfg(feature = "util.seq")]

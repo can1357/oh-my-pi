@@ -2,13 +2,19 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added Zig syntax highlighting for fenced Zig code in Markdown.
-
 ### Fixed
 
 - Fixed sourced-file prefixes in noninteractive shell diagnostics, preserved non-UTF-8 names and glob patterns, and corrected binary script detection using each reader's byte sample and file kinds ([#18246](https://github.com/can1357/oh-my-pi/pull/18246) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
+
+### Fixed
+
 - Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
 - Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
 - Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
