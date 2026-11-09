@@ -396,7 +396,7 @@ it("does not queue a snapshot for a peer shed earlier in the same hello", async 
 	}, 10);
 	try {
 		await waitFor(
-			() => greedyFrames.some(frame => frame.t === "error" && frame.message.includes("rejoin to resync")),
+			() => greedyFrames.some(frame => frame.t === "error" && frame.resync === true),
 			"shed guest was never told to rejoin",
 		);
 		await Bun.sleep(100);
@@ -490,4 +490,36 @@ it("sheds a flooding guest's backlog instead of ending the room for everyone", a
 	// The shed peer is told to resync rather than left guessing.
 	expect(seen.notices.some(notice => notice.includes("fell too far behind"))).toBe(true);
 	expect(hostWs.readyState).toBe(FakeWebSocket.OPEN);
+}, 20_000);
+
+it("tells a served peer it never welcomed to resync instead of rejecting it as read-only", async () => {
+	const relay = installInMemoryRelay();
+	instrumentRelay(relay, { throttle: false });
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+
+	// On the relay, never registered: the state a shed leaves a guest in.
+	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => guest.close());
+	const received: CollabFrame[] = [];
+	guest.onFrame = frame => received.push(frame);
+	const opened = Promise.withResolvers<void>();
+	guest.onOpen = () => opened.resolve();
+	guest.connect();
+	await opened.promise;
+
+	guest.send({ t: "prompt", text: "hi" });
+	await waitFor(() => received.some(frame => frame.t === "error"), "host never answered the unregistered peer");
+	const [reply] = received.filter(frame => frame.t === "error");
+	expect(reply).toEqual({ t: "error", message: expect.stringContaining("rejoin"), resync: true });
+
+	guest.send({ t: "hello", proto: COLLAB_PROTO, name: "returning", writeToken });
+	await waitFor(() => received.some(frame => frame.t === "welcome"), "the resync hello was never welcomed");
 }, 20_000);

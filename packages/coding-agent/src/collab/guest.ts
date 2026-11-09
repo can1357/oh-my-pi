@@ -47,16 +47,9 @@ import {
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
 /**
- * Ceiling on a thrown value quoted into a log line or a rejection here, in UTF-16
- * code units.
- *
- * Same rule as the host and the socket: `String` is what throws — on a hostile
- * `toString`, on a `toString` returning an object over a hostile `valueOf`, and
- * on a deeply nested value — so the treatment follows the conversion rather than
- * the sender. All three uses below sit in a `catch` — two in the one that handles
- * a failed frame apply, one in the ui-request presenter's — where an unrendered
- * throw stops being a warning and becomes an unhandled rejection. One of the
- * three is what settles the join, so throwing there hangs it instead.
+ * Ceiling, in UTF-16 code units, on a thrown value quoted into a log line or
+ * rejection. Every use sits in a `catch` where a throwing `String` would become an
+ * unhandled rejection, and one of them settles the join.
  */
 const THROWN_VALUE_MAX = 512;
 
@@ -218,6 +211,22 @@ function omittedStreamDeltas(
 	return omitted;
 }
 
+/**
+ * Each automatic rejoin costs the host a full snapshot, and a guest on a link
+ * too slow for the session is shed again after every one. Past the cap the
+ * guest stops rejoining on its own and leaves the decision to the user.
+ */
+export const MAX_AUTO_REJOINS = 3;
+export const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
+
+/** Records an automatic rejoin in {@link history} if the window has room for one. */
+export function takeAutoRejoin(history: number[], now = Date.now()): boolean {
+	while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
+	if (history.length >= MAX_AUTO_REJOINS) return false;
+	history.push(now);
+	return true;
+}
+
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -244,6 +253,8 @@ export class CollabGuestLink {
 	#applyChain: Promise<void> = Promise.resolve();
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
+	#introducedAt = 0;
+	#autoRejoins: number[] = [];
 	#left = false;
 	#replicaActivated = false;
 	/** One owner spans cancellation, queued snapshot work, and local restoration. */
@@ -367,13 +378,12 @@ export class CollabGuestLink {
 			firstWelcome.resolve();
 		};
 
-		socket.onOpen = () => {
-			if (this.#left) return;
-			// (Re)connect: re-introduce ourselves; the host answers with a fresh
-			// welcome which (re)syncs the replica. Discard any partially-streamed
-			// snapshot from a prior connection: the host will resend the full
-			// chunk train.
+		// Re-introduce ourselves; the host answers with a fresh welcome which
+		// (re)syncs the replica. Discard any partially-streamed snapshot: the host
+		// will resend the full chunk train.
+		const introduce = (): void => {
 			this.#welcomed = false;
+			this.#introducedAt = Date.now();
 			this.#pendingSnapshot = null;
 			this.#clearSnapshotProgressTimer();
 			this.#armWelcomeTimer();
@@ -383,6 +393,10 @@ export class CollabGuestLink {
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
 			});
+		};
+		socket.onOpen = () => {
+			if (this.#left) return;
+			introduce();
 		};
 		socket.onFrame = frame => {
 			this.#applyChain = this.#applyChain
@@ -403,6 +417,18 @@ export class CollabGuestLink {
 							await this.#finalizeSnapshot();
 							finishJoin();
 						}
+						return;
+					}
+					if (frame.t === "error" && frame.resync) {
+						// The host dropped us but the relay link is intact. A hello still
+						// awaiting its welcome is not repeated until the welcome timeout.
+						if (!this.#welcomed && Date.now() - this.#introducedAt < WELCOME_TIMEOUT_MS) return;
+						if (!takeAutoRejoin(this.#autoRejoins)) {
+							this.#ctx.showError(`Collab host: ${frame.message}`);
+							return;
+						}
+						this.#ctx.showStatus(`Collab host: ${frame.message}; rejoining…`, { dim: true });
+						introduce();
 						return;
 					}
 					if (frame.t === "error" && !this.#welcomed && !this.#left) {

@@ -5,14 +5,13 @@
 ### Fixed
 
 - Bounded each collab guest's queued welcomes and replies so slow connections cannot end sharing for the room; large-session joins remain usable and undeliverable guest questions settle as unavailable ([#11371](https://github.com/can1357/oh-my-pi/pull/11371) by [@iliaal](https://github.com/iliaal)).
+- A collab guest the host drops for falling behind now rejoins on its own (at most 3 times in 5 minutes) instead of staying connected but rejected as read-only, and an answer to a guest question is accepted only from a guest that was shown it ([#11371](https://github.com/can1357/oh-my-pi/pull/11371) by [@iliaal](https://github.com/iliaal)).
+- While the host's send queue is full, collab guests may miss roster, agent-list and notice updates; the roster catches up at the next session change but can stay stale while the session is quiet ([#11371](https://github.com/can1357/oh-my-pi/pull/11371) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes
 
-### Fixed
-
-## [18.8.6] - 2026-10-08
 - `logoutCredential()` now accepts an `AgentSession` instead of a model registry and session ID. Hosts must install a scoped-model refresher with `AgentSession.setScopedModelsRefresher()`; `InteractiveMode` and `InteractiveModeContext` no longer accept `refreshScopedModelsAfterLogin`.
 - `SessionStorage.hasAssistantTurn()` is replaced by the optional `scanLines(path, visit)`, which session listings use to recover both a missed assistant record and a first prompt past the 4 KB head; custom storages that implemented `hasAssistantTurn()` must implement `scanLines()` instead.
 

@@ -59,40 +59,18 @@ export const RELAY_PING_INTERVAL_MS = 15_000;
 export const RELAY_SILENCE_LIMIT_MS = 40_000;
 const MAX_PENDING_SENDS = 256;
 /**
- * Ceiling on the charge the queue is carrying, levied once per entry when it is
- * admitted: a frame's serialized byte length, and for a lazy batch whatever the
- * caller declares its iterator keeps reachable. Declaring retention is the point
- * — a batch is one entry that can pin a whole session snapshot for as long as
- * the transport takes to drain it, and nothing else in the accounting would show
- * that.
- *
- * A bound on the declarations, not on the heap and not on cumulative work: for
- * finite non-negative declarations the queue carries at most this much charge,
- * plus at most one entry the empty-queue floor admitted past it — see
- * {@link CollabSocket.#chargedBytes}. A declaration is only a proxy for the
- * object graph, loose in both directions. Serialized chunk bytes are transient by
- * comparison — one chunk is materialized at a time — and are not charged again as
- * they pass through.
+ * Ceiling on declared charge, levied once per entry at admission: a frame's
+ * serialized length, or what a lazy batch's iterator keeps reachable. Bounds the
+ * declarations, not the heap, plus one entry the empty-queue floor admits past it.
+ * See ADMISSION.md, "What a byte charge means".
  */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
-/**
- * Per-guest share of the queue. Legitimate targeted traffic for one peer is a
- * welcome, one lazy snapshot batch and a handful of ui-requests, so a peer that
- * holds this many entries is spamming or hopelessly behind. It loses its own
- * backlog; the room keeps running.
- */
+/** Per-guest share of the queue; a peer holding this many is shed, not the room. See ADMISSION.md, "Bounds". */
 const MAX_PEER_PENDING_SENDS = 32;
 /**
- * Lazy batches one peer may hold. A batch is a single queue entry that
- * materializes a chunk at a time, so the entry caps above put no bound at all on
- * how long it occupies the head of a queue shared with every other peer — its
- * byte charge bounds the memory it pins, not its residency.
- *
- * One, and `CollabHost` puts the welcome at the head of the same generator, so
- * this reads as one welcome-plus-snapshot per peer. That is what makes the pair
- * atomic: the newest one supersedes the previous whole unit, and there is no way
- * to express admitting a welcome without the chunks built with it — a guest
- * given one without the other finalizes a replica it believes is complete.
+ * Lazy batches one peer may hold. `CollabHost` puts the welcome inside the batch,
+ * so this is one welcome-plus-snapshot per peer and the newest supersedes the
+ * whole unit: the atomicity invariant in ADMISSION.md.
  */
 const MAX_PEER_PENDING_BATCHES = 1;
 /**
@@ -110,16 +88,10 @@ const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
 const WS_BACKPRESSURE_DRAIN_THRESHOLD = 32 * 1024;
 const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
 /**
- * Ceiling on a thrown value quoted into a close reason or a log line here, in
- * UTF-16 code units.
- *
- * Every conversion in this file goes through {@link describeThrown} at this
- * bound, not only the ones whose value looks guest-derived. The argument is about
- * the conversion and not the sender: `String` throws on a hostile `toString`, on
- * a `toString` returning an object over a hostile `valueOf`, and on a deeply
- * nested value. All four sites are `catch` handlers, and two of them — the drain
- * and the receive chain — are asynchronous, where throwing while rendering turns
- * a diagnostic into an unhandled rejection instead of a message anyone reads.
+ * Ceiling, in UTF-16 code units, on a thrown value quoted into a close reason or
+ * log line. Every conversion here uses {@link describeThrown}, whatever the
+ * value's origin: each site is a `catch`, where a throwing `String` would become
+ * an unhandled rejection.
  */
 const THROWN_VALUE_MAX = 512;
 
@@ -128,10 +100,9 @@ interface PendingSend {
 	targetPeer: number;
 	bytes: number;
 	/**
-	 * One entry that materializes its chunks as the transport drains and holds the
-	 * snapshot they come from until it does. Declared once, at admission, for what
-	 * it keeps reachable, and the declaration lives here rather than in a running
-	 * total — so dropping the entry is the refund, exact by construction.
+	 * Materializes chunks as the transport drains, charged once at admission. The
+	 * charge lives on the entry, not in a running total, so dropping the entry is
+	 * an exact refund.
 	 */
 	lazy: boolean;
 	/** Carries no replica state, so it may be discarded instead of ending the room. */
@@ -180,15 +151,9 @@ export class CollabSocket {
 	/** Set while a transient drop is being retried; the next open is a new room. */
 	#rejoining = false;
 	/**
-	 * Set for the dynamic extent of an overload report. Nothing a report causes
-	 * may cause another shed: the owner answers with a targeted resync error, and
-	 * mirrors a warning notice that `AgentSession#emit` dispatches to listeners
-	 * synchronously, so `CollabHost`'s own subscription turns it into a broadcast
-	 * from inside this scope. Letting either evict somebody would cost a
-	 * quota-abiding peer its backlog as a side effect of another peer's report,
-	 * and letting the broadcast reach the terminal path would end the room over an
-	 * advisory line. Remedy traffic fits in the queue, in the global budget and in
-	 * the recipient's own share, or it is dropped.
+	 * Set for the dynamic extent of an overload report. Nothing a report causes,
+	 * including the host's synchronously emitted notice mirror, may evict anything:
+	 * it fits or it is dropped. See ADMISSION.md, admission step 2.
 	 */
 	#reporting = false;
 	/**
@@ -222,31 +187,21 @@ export class CollabSocket {
 	 * runs, so it changes atomically with respect to anything that can enqueue.
 	 * Kept past the departure because decryption reorders dispatch: a frame that
 	 * finishes opening after its sender's `peer-left` must still be recognised as
-	 * stale. Stored as the exceptions rather than as the served set because a
-	 * socket cannot enumerate who it serves — `peer-joined` is advisory and an
-	 * owner may legitimately address a peer it learned of out of band — but it
-	 * always knows who it has written off.
+	 * stale. Stored as exceptions because a socket cannot enumerate who it serves
+	 * (`peer-joined` is advisory), but always knows who it has written off.
 	 *
-	 * - `left`: the relay retired the id. `settled` records whether the frames
-	 *   received before the departure have been dispatched; only settled records
-	 *   with no reply outstanding may be evicted, so neither connection churn nor
-	 *   the cap can retire a record whose frame is still in the chain or whose
-	 *   reply is still being computed, and {@link MAX_RETIRED_PEERS} bounds the
-	 *   remainder.
-	 * - `shed`: {@link #shedPeer} discarded the peer's backlog and has not
-	 *   reported it yet. Lives one microtask turn, so the cap never evicts it. A
-	 *   shed peer is still owed a resync error, so the mask lifts before the
-	 *   report; `left` overwrites it, because departure wins.
+	 * - `left`: the relay retired the id. Evictable only once `settled` (frames
+	 *   received before the departure dispatched) and no reply is outstanding.
+	 * - `shed`: backlog discarded, report pending; lives one microtask. `left`
+	 *   overwrites it.
 	 */
 	#notServing = new Map<number, { reason: "left" | "shed"; settled: boolean }>();
 	/** Replies captured by {@link addressee} and not yet delivered, per peer. */
 	#peerOps = new Map<number, number>();
 	/**
-	 * Bumped when the relay recreates the room, and the ownership token for
-	 * everything deferred across one. The ids are reissued and the records cleared,
-	 * so the same id is a different peer: a settlement queued behind a held
-	 * decryption must not mark the new occupant's record, and a capture taken in
-	 * the old room must not report the new room's peer as the one that asked.
+	 * Bumped when the relay recreates the room; the ownership token for anything
+	 * deferred across one. Ids are reissued, so work from the old room must not act
+	 * on the new occupant of the same id.
 	 */
 	#roomGeneration = 0;
 
@@ -271,19 +226,10 @@ export class CollabSocket {
 	/**
 	 * Captures who a not-yet-computed reply is for. Call the returned function at
 	 * the reply site: it reports whether that reply still goes to the peer that
-	 * asked, and releases the capture.
-	 *
-	 * Needed because {@link isServing} at the reply site is not enough on its own.
-	 * A retirement record is a *bounded* structure, so it can be evicted while an
-	 * asynchronous handler is still running, and a recreated room clears every
-	 * record and reissues the ids — either way the id reads as served again and
-	 * the reply is admitted for a peer that never asked for it. A capture holds
-	 * the record against eviction and remembers which room it belongs to.
-	 *
-	 * Only for work that finishes in bounded time: retention is why this is safe,
-	 * and a capture held across something as long as a model turn would let a
-	 * departed peer pin a record for the length of it. Use
-	 * {@link bestEffortAddressee} for work that cannot be bounded.
+	 * asked, and releases the capture. Holds the retirement record against eviction
+	 * and pins the room, which {@link isServing} alone cannot. Only for bounded work;
+	 * use {@link bestEffortAddressee} otherwise. See ADMISSION.md, "An exchange the
+	 * host started has to end".
 	 */
 	addressee(peerId: number): () => boolean {
 		const generation = this.#roomGeneration;
@@ -293,15 +239,10 @@ export class CollabSocket {
 			if (released) return false;
 			released = true;
 			const sameRoom = generation === this.#roomGeneration;
-			// Read before releasing. The release drops this capture's own protection
-			// against eviction, and the trim it runs would then forget the very
-			// retirement the answer turns on — reporting a departed peer as the asker.
+			// Read before releasing: the trim the release runs could forget the
+			// retirement this answer turns on.
 			const stillTheAsker = sameRoom && this.isServing(peerId);
-			// And release only into this capture's own room: #resetForRecreatedRoom
-			// already cleared the map, so an old-room capture has nothing of its own
-			// left here, while the id it held may now carry a live capture for the
-			// new room's occupant. Decrementing that one would unprotect a record
-			// somebody is still owed a reply against.
+			// An old-room capture must not decrement a new-room capture on the same id.
 			if (sameRoom) {
 				const outstanding = (this.#peerOps.get(peerId) ?? 1) - 1;
 				if (outstanding > 0) this.#peerOps.set(peerId, outstanding);
@@ -313,17 +254,9 @@ export class CollabSocket {
 	}
 
 	/**
-	 * Room-scoped addressee check for a reply whose latency has no bound. The
-	 * returned predicate reads the room, holds nothing, and may be called
-	 * whenever the answer finally exists.
-	 *
-	 * {@link addressee} is the exact one and the one to prefer: it pins the
-	 * retirement record, which is what makes its answer exact — and also why it
-	 * is only for bounded work. This keeps the room instead, so a departure the
-	 * record still remembers is suppressed and a room boundary always is. Past
-	 * eviction, in the same room, a retired id reads as served again; a relay
-	 * never reissues an id inside one room, so the residual cost is one stale
-	 * line the relay drops on arrival rather than a reply to the wrong peer.
+	 * Room-scoped addressee check that holds nothing, for replies of unbounded
+	 * latency. Past record eviction a retired id reads as served again within the
+	 * room, costing one stale frame the relay drops. Prefer {@link addressee}.
 	 */
 	bestEffortAddressee(peerId: number): () => boolean {
 		const generation = this.#roomGeneration;
@@ -361,9 +294,7 @@ export class CollabSocket {
 	 * emission order: the newest frame is appended, never moved ahead of frames
 	 * queued before it.
 	 *
-	 * @returns whether the newest frame was admitted. A superseded frame that was
-	 * not admitted leaves the previously queued one in place, so the guest still
-	 * receives an update either way.
+	 * @returns whether the newest frame was admitted.
 	 */
 	sendLatest(key: string, frame: CollabFrame | EncodedFrame): boolean {
 		const head = this.#pendingSends[0];
@@ -400,35 +331,18 @@ export class CollabSocket {
 	/**
 	 * Keeps a lazy snapshot contiguous with its welcome and ahead of subsequent live traffic.
 	 *
-	 * @param retainedBytes size of the data {@link frames} keeps reachable until the
-	 * batch drains, as a finite non-negative number. Charged against the send budget
-	 * at admission, since a lazy batch is one queue entry that can hold a whole
-	 * snapshot. A serialized size is the expected measure; it is a proxy for the
-	 * object graph, within a small factor in either direction, so pass an upper bound
-	 * where one is cheap. Anything outside that domain is treated as oversized rather
-	 * than trusted — see below.
+	 * @param retainedBytes finite non-negative size of the data {@link frames} keeps
+	 * reachable until the batch drains, charged once at admission. See ADMISSION.md,
+	 * "What a byte charge means".
 	 *
-	 * @returns whether the batch was admitted. A welcome lives inside its batch, so
-	 * a caller that registers the peer on the strength of sending one has to undo
-	 * that when it was not: the guest ignores everything until a welcome arrives, so
-	 * a host that counts it as joined is describing a participant that is not there.
+	 * @returns whether the batch was admitted. The welcome is inside the batch, so a
+	 * caller that registered the peer on sending it must undo that when refused.
 	 */
 	sendBatch(frames: Iterable<CollabFrame | EncodedFrame>, targetPeer: number, retainedBytes: number): boolean {
 		if (this.#closed) return false;
-		// The budget is a sum of declarations, so the domain has to hold at the one
-		// place a declaration enters. `NaN` fails every comparison, which makes the
-		// queue read as never full and bounds nothing at all; a negative one
-		// subtracts from the charge of every other entry. Neither is a legitimate
-		// measurement, so neither is trusted with a number of its own: they take the
-		// oversized path instead, which is the one case the policy already bounds
-		// without believing a figure — one entry, admitted by the empty-queue floor,
-		// excluded from the sum. Deliberately not zero, which is the under-charge the
-		// charge exists to prevent, and deliberately not a refusal, because a caller
-		// bug should not silently cost a guest its only route to a replica.
-		//
-		// Signed zero passes: `-0` is a declaration of zero, not a malformed one, and
-		// it sums as zero wherever the charge is read. Rejecting it would refuse a
-		// legitimate empty batch to no purpose.
+		// NaN would make the queue read as never full and a negative figure would
+		// offset other entries' charge, so both take the oversized (exempt) path:
+		// neither a zero charge nor a refusal.
 		const declared =
 			Number.isFinite(retainedBytes) && retainedBytes >= 0 ? retainedBytes : MAX_PENDING_SEND_BYTES + 1;
 		if (declared !== retainedBytes) {
@@ -441,10 +355,9 @@ export class CollabSocket {
 	}
 
 	/**
-	 * Broadcast that carries no replica state, so a full queue may discard it
-	 * rather than end the room. Guests can cause this traffic without it being
-	 * addressed to them — one notice per `hello` — and a peer-caused pile-up must
-	 * never reach the terminal path, so it is shed ahead of everything else.
+	 * Broadcast with no replica state, shed ahead of everything else so guest-caused
+	 * traffic (one notice per `hello`) never reaches the terminal path. See
+	 * ADMISSION.md, causation invariant.
 	 */
 	broadcastAdvisory(frame: CollabFrame | EncodedFrame): boolean {
 		if (this.#closed) return false;
@@ -498,9 +411,8 @@ export class CollabSocket {
 	 * this socket knew is meaningless and may already have been reissued.
 	 *
 	 * Targeted work is therefore undeliverable and must go. A lazy batch is the
-	 * pressing case: its charge bounds the snapshot it pins but says nothing about
-	 * how long it iterates, so nothing stops it running to the end of a whole
-	 * session at a retired id while every new guest's welcome waits behind it. Retirement records go too —
+	 * pressing case: nothing else stops it iterating a whole session at a retired
+	 * id while every new guest's welcome waits behind it. Retirement records go too —
 	 * keeping them would permanently refuse a reissued id, and so does the owner's
 	 * view of who is in the room — see {@link onRoomRecreated}, because an id is
 	 * also what the owner keys write permission off. Broadcast work is addressed to
@@ -515,6 +427,7 @@ export class CollabSocket {
 		if (discarded > 0) logger.debug("collab: discarded targeted sends across a reconnect", { discarded });
 	}
 
+	/** The single admission point; step order and shed order are specified in ADMISSION.md. */
 	#enqueueSend(
 		frames: Iterator<CollabFrame | string>,
 		targetPeer: number,
@@ -597,29 +510,10 @@ export class CollabSocket {
 	}
 
 	/**
-	 * The charge the budget is measured against: everything except an entry the
-	 * empty-queue floor admitted past the budget on its own.
-	 *
-	 * Counting that one holds the queue over capacity for its entire drain, and
-	 * over capacity is what every eviction path keys on — so the first
-	 * replica-bearing broadcast after it sheds the peer the floor just admitted it
-	 * for, which for a snapshot is the joining guest losing a half-delivered
-	 * replica. `CollabHost` broadcasts an `entry` per appended entry and an `event`
-	 * per agent event, so on a busy session that is the next few milliseconds, and
-	 * the rejoin it asks for is admitted by the same floor and shed the same way.
-	 * Excluding it makes the ceiling the budget *plus* that one entry, which is what
-	 * the floor always meant: live traffic queues behind the oversized snapshot in
-	 * order rather than evicting it.
-	 *
-	 * Summed rather than subtracted from a running total, because a declaration is
-	 * a caller's number and floating-point addition is lossy at scale: against an
-	 * accumulator holding a declared 1e30, every later frame's bytes vanish into
-	 * rounding and subtracting the exemption returns zero forever, admitting an
-	 * unbounded backlog. Summed, an exempt declaration is never added in the first
-	 * place, and what remains is exact — every entry over the budget is exempt by
-	 * construction, so this adds at most {@link MAX_PENDING_SENDS} terms of at most
-	 * {@link MAX_PENDING_SEND_BYTES} each, three orders of magnitude inside the
-	 * range where integer addition is exact.
+	 * Charge excluding the exempt entry, so an oversized snapshot is not shed by the
+	 * next live broadcast. Summed each call rather than kept as a running total: a
+	 * huge declaration would swallow later additions in floating-point rounding.
+	 * See ADMISSION.md, "An admission the floor makes, the next frame must not reverse".
 	 */
 	#chargedBytes(): number {
 		let charged = 0;
@@ -632,19 +526,9 @@ export class CollabSocket {
 	/**
 	 * Whether shedding every peer's queued work but {@link exclude}'s would leave
 	 * room for {@link bytes} — the fixed point of the shed loop, evaluated before it
-	 * takes anything.
-	 *
-	 * Modelled on exactly what its caller goes on to do, so the two cannot
-	 * disagree: the caller discards every advisory entry, then sheds peers other
-	 * than {@link exclude} until there is room — at most all of them, which is the
-	 * bound this predicts — and a shed takes a peer's entries whole. What survives
-	 * in that worst case is what this counts: non-advisory broadcasts and the
-	 * requester's own work, or the empty-queue floor when nothing survives at all.
-	 *
-	 * Advisories are skipped rather than counted as survivors because a single
-	 * queued one is otherwise decisive: it is a broadcast, so it is counted, and
-	 * once the count is non-zero the test becomes `charged + bytes`, which an
-	 * oversized welcome can never pass however little the advisory itself weighs.
+	 * takes anything. Must count exactly what the caller's shed sequence leaves
+	 * (non-advisory broadcasts and the requester's own work); see ADMISSION.md,
+	 * "Shed order for a welcome batch".
 	 */
 	#shedCouldAdmit(bytes: number, exclude: number): boolean {
 		let count = 0;
@@ -707,24 +591,17 @@ export class CollabSocket {
 	}
 
 	#shedPeer(peerId: number): void {
-		// Reporting a shed that freed nothing invites the owner to answer with a
-		// send that cannot be admitted, which schedules another report: an
-		// unbounded microtask cascade that starves the drain timer.
+		// A report for a shed that freed nothing can trigger an unadmittable reply
+		// and another report: an unbounded microtask cascade.
 		if (this.dropPeer(peerId) === 0) return;
-		// Deferred: the owner reacts by sending, and re-entering the queue mid-shed
-		// would let a callback refill what the shedding loop is trying to free. The
-		// mask closes the window that deferral opens; it lifts before the report so
-		// the owner's resync error is admitted. A departure inside the window
-		// overwrites the mask, and lifting it then would un-retire the peer.
+		// Deferred so the owner's reaction cannot refill the queue mid-shed. The mask
+		// covers the deferral window and lifts before the report so the resync error
+		// is admitted; a departure inside the window must not be un-retired.
 		if (this.#notServing.has(peerId)) return;
 		const generation = this.#roomGeneration;
 		this.#notServing.set(peerId, { reason: "shed", settled: true });
 		queueMicrotask(() => {
-			// Same ownership rule as every other deferral here. A transient reconnect
-			// lands a task later so this is protected by timing alone, but `close()`
-			// and `connect()` are synchronous and can both run before the microtask:
-			// the mask would then be lifted off a record in the reopened room, and the
-			// owner told to drop a peer id that now belongs to somebody else.
+			// `close()` then `connect()` can both run before this microtask.
 			if (generation !== this.#roomGeneration) return;
 			if (this.#notServing.get(peerId)?.reason === "shed") this.#notServing.delete(peerId);
 			this.#reporting = true;
@@ -765,10 +642,8 @@ export class CollabSocket {
 			const pending = this.#pendingSends[0];
 			if (!pending) return;
 			if (pending.lazy) {
-				// Advance before the writability gate, never behind it. Advancing resumes
-				// a batch's generator, and resuming past the last frame lets go of the
-				// snapshot it held. Gating that on the transport keeps a whole session
-				// clone reachable and charged for as long as the socket buffer drains.
+				// Advance before the writability gate: resuming past the last frame
+				// releases the snapshot, which must not wait on the socket buffer.
 				const next = pending.frames.next();
 				if (next.done) {
 					this.#pendingSends.shift();
@@ -896,10 +771,8 @@ export class CollabSocket {
 		// synchronous trigger instead of a timer.
 		this.#roomGeneration++;
 		this.#notServing.clear();
-		// A lease only exists to hold one against eviction, so leaving peer ops
-		// behind protects nothing and, across a connect() that reopens this socket,
-		// would have the reopened room's trim skipping records for replies the closed
-		// room was owed.
+		// Stale captures would make a reopened room's trim skip records for replies
+		// the closed room was owed.
 		this.#peerOps.clear();
 	}
 
@@ -1103,13 +976,6 @@ export class CollabSocket {
 				this.onFrame?.(frame, envelope.peerId);
 			})
 			.catch((err: unknown) => {
-				// The only way in is an owner frame handler throwing, and `String` on a
-				// thrown value is not itself safe — a nested one `RangeError`s, inside a
-				// `catch`, which is an unhandled rejection rather than a log line. That
-				// holds whether or not the value carries anything a guest sent, so it is
-				// not worth deciding: Bun's own parse failures quote fixed prose and no
-				// input, and the handlers upstream bound what they raise, but neither of
-				// those is a property this catch can enforce.
 				logger.debug("collab: frame handler failed", { error: describeThrown(err, THROWN_VALUE_MAX) });
 			});
 	}

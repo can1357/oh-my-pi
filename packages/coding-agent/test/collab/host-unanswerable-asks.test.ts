@@ -477,3 +477,67 @@ it("does not answer a transcript request in a room the relay recreated", async (
 	expect(verdicts).toEqual([false]);
 	expect(received.filter(frame => frame.t === "transcript")).toEqual([]);
 }, 30_000);
+
+it("ignores an answer from a writer the ask was never delivered to", async () => {
+	const relay = installInMemoryRelay();
+	instrumentRelay(relay, { throttle: false });
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	const joinWriter = (name: string): { socket: CollabSocket; received: CollabFrame[] } => {
+		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+		cleanups.push(() => socket.close());
+		const received: CollabFrame[] = [];
+		socket.onFrame = frame => received.push(frame);
+		socket.onOpen = () => socket.send({ t: "hello", proto: COLLAB_PROTO, name, writeToken });
+		socket.connect();
+		return { socket, received };
+	};
+	const holder = joinWriter("holder");
+	await waitFor(() => seen.notices.some(notice => notice.includes("holder joined")), "holder never joined");
+	const outsider = joinWriter("outsider");
+	await waitFor(() => seen.notices.some(notice => notice.includes("outsider joined")), "outsider never joined");
+
+	// The queue refuses the outsider's copy: peers are served in join order, so
+	// the second `ui-request` addressed is the outsider's.
+	const real = CollabSocket.prototype.send;
+	let uiRequests = 0;
+	const spy = spyOn(CollabSocket.prototype, "send").mockImplementation(
+		function (this: CollabSocket, frame, targetPeer) {
+			if (typeof frame === "object" && frame.t === "ui-request" && ++uiRequests === 2) return false;
+			return real.call(this, frame, targetPeer);
+		},
+	);
+	cleanups.push(() => spy.mockRestore());
+
+	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }, { label: "b" }] });
+	if (!ask) throw new Error("host did not offer the ask");
+	await waitFor(() => holder.received.some(frame => frame.t === "ui-request"), "holder never received the dialog");
+	const request = holder.received.find(frame => frame.t === "ui-request");
+	if (request?.t !== "ui-request") throw new Error("expected a ui-request");
+	expect(outsider.received.some(frame => frame.t === "ui-request")).toBe(false);
+
+	let settled: unknown;
+	void ask.then(result => {
+		settled = result;
+	});
+	outsider.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "b" });
+	// Ordered barrier: the host acknowledges an unknown reqId with `ui-request-end`.
+	const sentinel = request.request.reqId + 1_000;
+	outsider.socket.send({ t: "ui-response", reqId: sentinel, value: undefined });
+	await waitFor(
+		() => outsider.received.some(frame => frame.t === "ui-request-end" && frame.reqId === sentinel),
+		"host never processed the outsider's answers",
+	);
+	await Bun.sleep(0);
+	expect(settled).toBeUndefined();
+
+	holder.socket.send({ t: "ui-response", reqId: request.request.reqId, value: "a" });
+	expect(await ask).toEqual({ kind: "answered", value: "a" });
+}, 30_000);
