@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed `EpisodicGraph.extractFacts` truncating multi-word objects, dropping numeric objects, matching cross-line or stopword subjects (`This`, `That`, `It`), and missing Unicode names and CJK entity triples, and updated `findFactsBySubject` to match case-insensitively ([#17240](https://github.com/can1357/oh-my-pi/pull/17240) by [@GTanger](https://github.com/GTanger)).
 
 - Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
 - Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
