@@ -251,10 +251,14 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 			return;
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
-		// Where each tab of this section ends: after each loose field, the last one at the section's end.
+		// Where each tab of this section ends: after each loose field (and the text between a group's
+		// options), but never past the next field; the last one at the section's end.
+		const fieldBlocks = section.blocks.flatMap((block, at) =>
+			block.kind === "field" ? [{ at, through: Math.max(at + 1, block.optionsEnd ?? 0) }] : [],
+		);
 		const cuts =
 			tabbed && !section.fieldset
-				? section.blocks.flatMap((block, at) => (block.kind === "field" ? [at + 1] : []))
+				? fieldBlocks.map(({ through }, nth) => Math.min(through, fieldBlocks[nth + 1]?.at ?? through))
 				: [end];
 		cuts[cuts.length - 1] = end;
 		let start = 0;

@@ -45,6 +45,13 @@ function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, pa
 	return undefined;
 }
 
+/** The text of every `text` node under `root`, in order. */
+function textsOf(root: NativeNode): string[] {
+	const spans = root.k === "text" && root.p && "spans" in root.p ? root.p.spans : undefined;
+	const own = spans ? [spans.map(item => item.t).join("")] : [];
+	return [...own, ...(root.c ?? []).flatMap(child => (isNode(child) ? textsOf(child) : []))];
+}
+
 const DB_FORM = `<form>
 <fieldset><legend>Database</legend>
 <p>Which store should <code>ledger</code> use?</p>
@@ -448,18 +455,6 @@ describe("html form", () => {
 				<p>How urgent is it?</p>
 				<label>Priority <input type="number" name="priority" value="3"></label>
 			</form>`);
-			/** Texts of the shown tab; `<priority>` marks the Priority input's well. */
-			const shownTexts = (): string[] => {
-				const texts: string[] = [];
-				const visit = (node: NativeNode): void => {
-					const p = node.p as { spans?: { t: string }[]; actions?: { click?: string } } | undefined;
-					if (node.k === "text" && p?.spans) texts.push(p.spans.map(item => item.t).join(""));
-					if (p?.actions?.click === "edit:3") texts.push("<priority>");
-					for (const child of node.c ?? []) if (isNode(child)) visit(child);
-				};
-				visit(form.describe(CX));
-				return texts;
-			};
 			const root = form.describe(CX);
 			const tabs = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
@@ -467,14 +462,33 @@ describe("html form", () => {
 			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
 			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
 			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			const editorTab = shownTexts();
-			expect(editorTab).toContain("Editor");
-			expect(editorTab).not.toContain("<priority>");
-			expect(editorTab).not.toContain("How urgent is it?");
+			const editorTab = form.describe(CX);
+			expect(textsOf(editorTab)).toContain("Editor");
+			expect(textsOf(editorTab)).not.toContain("How urgent is it?");
+			// The Priority input's well, clickable while another field has focus.
+			expect(
+				findPath(editorTab, node => !!node.p && "actions" in node.p && node.p.actions?.click === "edit:3"),
+			).toBeUndefined();
 			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
-			const priorityTab = shownTexts();
+			const priorityTab = textsOf(form.describe(CX));
 			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
 			expect(priorityTab).not.toContain("Editor");
+		});
+
+		it("natively: text between a loose group's options stays on the group's tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Premium includes backups</p>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+				<label>Notes <input name="notes"></label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).toContain("Premium includes backups");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Notes"]));
+			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
 		});
 
 		it("natively: a fieldset without a legend stays one tab", () => {
