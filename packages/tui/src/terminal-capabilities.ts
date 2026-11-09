@@ -10,6 +10,7 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
+import { ensureSixelRasterWidth } from "./sixel";
 import {
 	isInsideTerminalMultiplexer,
 	isTerminalBackgroundQueryTrusted,
@@ -66,6 +67,7 @@ export type TerminalId =
 	| "rio"
 	| "tern"
 	| "monstar"
+	| "rex"
 	| "base"
 	| "trueColor";
 
@@ -403,7 +405,11 @@ export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS
 			// render. Enable only on a confirmed major.minor >= 3.5; an absent or
 			// unparseable version keeps the flat fallback so only proven terminals
 			// get the colon form.
-			const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
+			//
+			// `LC_TERMINAL_VERSION` carries the same version over SSH, where
+			// `TERM_PROGRAM_VERSION` is stripped, so it is the fallback source.
+			const version =
+				parseMajorMinorVersion(env.TERM_PROGRAM_VERSION) ?? parseMajorMinorVersion(env.LC_TERMINAL_VERSION);
 			return version !== null && (version.major > 3 || (version.major === 3 && version.minor >= 5));
 		}
 		default:
@@ -621,10 +627,17 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
+	// Rex (Superlogical's terminal) identifies via TERM_PROGRAM=rex, or
+	// TERM=xterm-rex over SSH. It renders Kitty graphics and OSC 8
+	// hyperlinks — a link opens on command-click, and
+	// Settings > Terminal > Links only decides whether an `ssh://`-style link
+	// that launches another app asks first — so links are on. Notifications
+	// keep the BEL default.
+	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, true),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
-	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
-	// renders natively (Tern Surface Protocol) is decided by the `hello`
-	// handshake alone, never by this identity.
+	// implements Kitty graphics (Unicode placeholders included), OSC 8 and
+	// OSC 9/99 notifications. Whether omp renders natively (Tern Surface
+	// Protocol) is decided by the `hello` handshake alone, never by this identity.
 	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
 	// Monstar (rockorager/monstar) is a Wayland terminal built on libghostty. It
 	// sets TERM=monstar and answers XTVERSION with `monstar <version>`. It
@@ -661,6 +674,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		if (caseEq(program, "rio")) return "rio";
 		if (caseEq(program, "tern")) return "tern";
 		if (caseEq(program, "monstar")) return "monstar";
+		if (caseEq(program, "rex")) return "rex";
 		return null;
 	}
 
@@ -672,6 +686,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		VSCODE_PID,
 		ALACRITTY_WINDOW_ID,
 		TERM_PROGRAM,
+		LC_TERMINAL,
 		TERM,
 		COLORTERM,
 	} = env;
@@ -686,6 +701,22 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	const programId = fromProgram(TERM_PROGRAM);
 	if (programId) return programId;
 
+	// iTerm2 sets `LC_TERMINAL=iTerm2` (plus `LC_TERMINAL_VERSION`) in the local
+	// session precisely so it survives SSH: openssh/mosh forward `LC_*` to the
+	// remote host, while `ITERM_SESSION_ID` and `TERM_PROGRAM` are stripped. Its
+	// own shell integration says the same: "TERM_PROGRAM is set by the local
+	// terminal but not forwarded over SSH. LC_TERMINAL is set by iTerm2 and may
+	// be forwarded over SSH." Without this branch the remote session falls to
+	// the true-color profile and loses the iTerm2 inline-image protocol, OSC 8
+	// hyperlinks and OSC 9 notifications.
+	//
+	// Gated on the absence of a multiplexer: iTerm2's OSC 1337 encoder is the
+	// only image encoder that does not wrap its payload in a tmux passthrough
+	// envelope, so inside a multiplexer the sequence would be swallowed by the
+	// multiplexer instead of reaching the outer terminal. The multiplexer path
+	// resolves the outer client on its own.
+	if (LC_TERMINAL && caseEq(LC_TERMINAL, "iTerm2") && !isInsideTerminalMultiplexer(env)) return "iterm2";
+
 	// tmux >= 3.2 replaces the pane's identity with `TERM_PROGRAM=tmux`.
 	// Its server still holds the attached client's terminal-type reply and TERM.
 	for (const clientProgram of resolveTmuxClientTerminalNames(env)) {
@@ -695,6 +726,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
+	if (TERM && caseEq(TERM, "xterm-rex")) return "rex";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";
@@ -998,6 +1030,16 @@ export function directPlacementLift(line: string): number {
 }
 
 /**
+ * Re-anchor an {@link Image} direct-placement line `lift` rows above its own
+ * row instead of its encoded `CUU(rows-1)`. The renderer lowers the lift when
+ * the block's top is clipped by the frame: the cursor-up would otherwise climb
+ * past the frame's first row into whatever the terminal shows above it.
+ */
+export function withDirectPlacementLift(line: string, lift: number): string {
+	return line.replace(DIRECT_PLACEMENT_LIFT, lift > 0 ? `\x1b7\x1b[${lift}A` : "\x1b7");
+}
+
+/**
  * Rebuild an {@link Image} direct-placement line for the viewport row it is
  * written at. The component-rendered line encodes `CUU(rows-1)`, which clamps
  * at the viewport top once the block's leading rows have scrolled out — the
@@ -1085,6 +1127,19 @@ export function encodeITerm2(
 	}
 
 	return `\x1b]1337;File=${params.join(";")}:${base64Data}\x07`;
+}
+
+/**
+ * The encoded image `encodeITerm2` wrote into `line`, without the size
+ * parameters a rewrap changes; undefined for a line without one.
+ */
+export function iterm2ImagePayload(line: string): string | undefined {
+	const start = line.indexOf(ImageProtocol.Iterm2);
+	if (start === -1) return undefined;
+	const colon = line.indexOf(":", start + ImageProtocol.Iterm2.length);
+	if (colon === -1) return undefined;
+	const end = line.indexOf("\x07", colon + 1);
+	return line.slice(colon + 1, end === -1 ? undefined : end);
 }
 
 export function calculateImageRows(
@@ -1281,7 +1336,9 @@ export function encodeSixelNow(
 	backgroundRgb = getTerminalBackgroundColor(),
 ): string | null {
 	try {
-		return encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx, backgroundRgb);
+		return ensureSixelRasterWidth(
+			encodeSixel(new Uint8Array(Buffer.from(base64Data, "base64")), widthPx, heightPx, backgroundRgb),
+		);
 	} catch {
 		return null;
 	}
@@ -1354,9 +1411,12 @@ export function renderImage(
 		return { sequence, rows };
 	}
 	if (TERMINAL.imageProtocol === ImageProtocol.Iterm2) {
+		// The height is the rows reserved for the image, not `auto`: iTerm2
+		// resolves `auto` only for a session on screen, so an image written to a
+		// background tab is dropped, and its rows stay blank in scrollback too.
 		const sequence = encodeITerm2(base64Data, {
 			width: fit.columns,
-			height: "auto",
+			height: fit.rows,
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
 		});
 		return { sequence, rows: fit.rows };
@@ -1417,6 +1477,10 @@ function notificationToLine(n: TerminalNotification): string {
 const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
 const OSC99_APP_NAME = "omp";
+// Kitty matches notification ids across its whole process, not per window, so
+// a bare counter would collide between omp sessions sharing one kitty instance
+// and turn a new notification into a silent replacement of another session's.
+const OSC99_ID_PREFIX = `omp-${crypto.randomUUID().slice(0, 8)}`;
 let nextOsc99NotificationId = 1;
 
 function base64Utf8(value: string): string {
@@ -1430,7 +1494,7 @@ function sanitizeOsc99Id(id: string | undefined): string {
 }
 
 function osc99Id(id: string | undefined): string {
-	return sanitizeOsc99Id(id) || `omp-${nextOsc99NotificationId++}`;
+	return sanitizeOsc99Id(id) || `${OSC99_ID_PREFIX}-${nextOsc99NotificationId++}`;
 }
 
 function utf8CodePointBytes(char: string): number {

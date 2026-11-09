@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import {
 	type ModelWorkerMessage,
 	ModelWorkerHost,
@@ -225,7 +225,7 @@ export class TtsClient {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			const channel = new AudioChunkChannel();
-			channel.fail(error instanceof Error ? error : new Error(String(error)));
+			channel.fail(toError(error));
 			return { push: () => {}, end: () => {}, chunks: channel.iterator() };
 		}
 

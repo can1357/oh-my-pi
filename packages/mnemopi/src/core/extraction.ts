@@ -1,4 +1,4 @@
-import { withLoopPhase } from "@oh-my-pi/pi-utils";
+import { isRecord, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getDiagnostics, safeForLog } from "./extraction/diagnostics";
 import { callHostLlm, getHostLlmBackend } from "./llm-backends";
 import {
@@ -12,29 +12,14 @@ import {
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
 import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
-
-const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
-
-function env(name: string): string {
-	return process.env[name] ?? "";
-}
-
-function envBool(name: string, defaultValue: boolean): boolean {
-	const value = env(name).trim().toLowerCase();
-	return value === "" ? defaultValue : TRUE_VALUES[value] === true;
-}
-
-function envInt(name: string, defaultValue: number): number {
-	const parsed = Number.parseInt(env(name), 10);
-	return Number.isFinite(parsed) ? parsed : defaultValue;
-}
+import { envFlag, envInt, envString } from "../util/env";
 
 function llmEnabled(): boolean {
-	return envBool("MNEMOPI_LLM_ENABLED", true);
+	return envFlag("MNEMOPI_LLM_ENABLED", true);
 }
 
 function hostLlmEnabled(): boolean {
-	return envBool("MNEMOPI_HOST_LLM_ENABLED", false);
+	return envFlag("MNEMOPI_HOST_LLM_ENABLED", false);
 }
 
 function llmMaxTokens(): number {
@@ -42,7 +27,7 @@ function llmMaxTokens(): number {
 }
 
 export const EXTRACTION_PROMPT_TEMPLATE =
-	env("MNEMOPI_EXTRACTION_PROMPT") ||
+	envString("MNEMOPI_EXTRACTION_PROMPT") ||
 	`You are an expert structured memory extractor for Mnemopi v3.0+ MEMORIA tables.
 The user message below may be in English, German, Russian, or another language.
 First detect the language, then extract ONLY high-signal, long-term relevant items.
@@ -87,6 +72,8 @@ function stripFence(raw: string): string {
 const FLAT_FACT_LIMIT = 5;
 const STRUCTURED_CATEGORY_LIMIT = 5;
 const STRING_CATEGORY_KEYS = ["facts", "instructions", "preferences", "timelines"] as const;
+/** Plain-line output gets the same total as the JSON path's string categories. */
+const PLAIN_LINE_FACT_LIMIT = STRING_CATEGORY_KEYS.length * STRUCTURED_CATEGORY_LIMIT;
 const FACT_TEXT_FIELD_KEYS = ["fact", "text", "content", "value", "statement"] as const;
 const INSTRUCTION_TEXT_FIELD_KEYS = ["instruction", "rule", ...FACT_TEXT_FIELD_KEYS] as const;
 const PREFERENCE_TEXT_FIELD_KEYS = ["preference", ...FACT_TEXT_FIELD_KEYS] as const;
@@ -155,10 +142,6 @@ function normalizeFactArray(items: unknown, options: FactArrayOptions): string[]
 		}
 	}
 	return out;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function triplePart(value: unknown): string {
@@ -268,7 +251,7 @@ export function parseExtractedFactCategories(rawOutput: string | null | undefine
 					cleaned.push(normalized);
 				}
 			}
-			if (cleaned.length >= FLAT_FACT_LIMIT) break;
+			if (cleaned.length >= PLAIN_LINE_FACT_LIMIT) break;
 		}
 		return { ...emptyFactCategories(), facts: cleaned };
 	});
@@ -339,8 +322,8 @@ async function tryHostExtraction(prompt: string): Promise<[boolean, string | nul
 		maxTokens: llmMaxTokens(),
 		temperature: 0,
 		timeout: 15,
-		provider: env("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
-		model: env("MNEMOPI_HOST_LLM_MODEL").trim() || null,
+		provider: envString("MNEMOPI_HOST_LLM_PROVIDER").trim() || null,
+		model: envString("MNEMOPI_HOST_LLM_MODEL").trim() || null,
 	});
 	const text = typeof raw === "string" ? raw.trim() : "";
 	return [true, text === "" ? null : text];

@@ -65,7 +65,6 @@ export const OPENAI_HEADERS = {
 } as const;
 
 export const OPENAI_HEADER_VALUES = {
-	BETA_RESPONSES: "responses=experimental",
 	BETA_RESPONSES_WEBSOCKETS_V2: "responses_websockets=2026-02-06",
 	REMOTE_COMPACTION_V2: "remote_compaction_v2",
 	ORIGINATOR_CODEX: "omp",
@@ -105,6 +104,9 @@ export function getCodexAccountId(accessToken: string): string | undefined {
 	}
 }
 
+/** Residency claim value of an account that is not region-pinned. */
+const CODEX_UNCONSTRAINED_RESIDENCY = "no_constraint";
+
 /**
  * Extract the account's data residency from a Codex JWT access token.
  *
@@ -115,8 +117,10 @@ export function getCodexAccountId(accessToken: string): string | undefined {
  * needed: `chatgpt_data_residency` is the authoritative claim, with
  * `chatgpt_compute_residency` as the fallback for tokens that only carry that.
  *
- * Returns undefined for a non-JWT token, or for the (common) accounts whose
- * claims omit residency entirely — those workspaces are not region-pinned.
+ * Returns undefined for a non-JWT token, or for the (common) accounts that are
+ * not region-pinned: their claims omit residency or carry the
+ * {@link CODEX_UNCONSTRAINED_RESIDENCY} sentinel. The backend answers 404 to a
+ * declared `no_constraint`, and codex-rs never sends it.
  */
 export function getCodexResidency(accessToken: string): string | undefined {
 	try {
@@ -130,7 +134,10 @@ export function getCodexResidency(accessToken: string): string | undefined {
 		for (const claim of [auth?.chatgpt_data_residency, auth?.chatgpt_compute_residency]) {
 			if (typeof claim !== "string") continue;
 			const residency = claim.trim();
-			if (residency.length > 0) return residency;
+			if (residency.length === 0) continue;
+			// The first present claim is authoritative, so an unconstrained data
+			// residency is not overridden by a compute residency.
+			return residency.toLowerCase() === CODEX_UNCONSTRAINED_RESIDENCY ? undefined : residency;
 		}
 		return undefined;
 	} catch {

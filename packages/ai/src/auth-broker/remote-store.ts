@@ -41,21 +41,61 @@ import type {
 const REMOTE_CACHE_MAX_ENTRIES = 4096;
 const REMOTE_CACHE_MAX_CHARACTERS = 4 * 1024 * 1024;
 
+/** Visibility rule for one provider's broker credentials. */
+export interface AuthBrokerProviderPool {
+	/** OAuth `identityKey`s visible to this client; omitted = every OAuth account. */
+	readonly accounts?: ReadonlySet<string>;
+	/** Whether API-key credentials are visible. Default `true`. */
+	readonly apiKeys?: boolean;
+}
+
+/** Pool key whose rule applies to every provider without its own entry. */
+const AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY = "*";
+
 /**
- * Per-provider OAuth identities visible to this trusted broker client.
- * Missing providers are unrestricted; an empty set excludes that provider's
- * OAuth credentials. API keys are never filtered.
+ * Per-provider credential visibility for this trusted broker client. A set
+ * value lists the provider's visible OAuth identities and keeps its API keys
+ * (an empty set excludes every OAuth credential); a rule object can also hide
+ * API keys. Providers without an entry follow the `"*"` rule, which defaults
+ * to unrestricted.
  */
-export type AuthBrokerAccountPool = ReadonlyMap<string, ReadonlySet<string>>;
+export type AuthBrokerAccountPool = ReadonlyMap<string, ReadonlySet<string> | AuthBrokerProviderPool>;
+
+interface ResolvedProviderPool {
+	accounts: ReadonlySet<string> | undefined;
+	apiKeys: boolean;
+}
+
+/** Copies `pool` so later caller mutation cannot widen it, normalizing both value forms. */
+function resolveAccountPool(pool: AuthBrokerAccountPool): ReadonlyMap<string, ResolvedProviderPool> {
+	const resolved = new Map<string, ResolvedProviderPool>();
+	for (const [provider, value] of pool) {
+		resolved.set(
+			provider,
+			"has" in value
+				? { accounts: new Set(value), apiKeys: true }
+				: { accounts: value.accounts && new Set(value.accounts), apiKeys: value.apiKeys ?? true },
+		);
+	}
+	return resolved;
+}
+
+function providerPoolRule(
+	accountPool: ReadonlyMap<string, ResolvedProviderPool> | undefined,
+	provider: string,
+): ResolvedProviderPool | undefined {
+	return accountPool?.get(provider) ?? accountPool?.get(AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY);
+}
 
 function isCredentialInAccountPool(
 	entry: Pick<SnapshotEntry, "provider" | "credential" | "identityKey">,
-	accountPool: AuthBrokerAccountPool | undefined,
+	accountPool: ReadonlyMap<string, ResolvedProviderPool> | undefined,
 ): boolean {
-	if (entry.credential.type !== "oauth") return true;
-	const identities = accountPool?.get(entry.provider);
-	if (identities === undefined) return true;
-	return entry.identityKey !== null && identities.has(entry.identityKey);
+	const rule = providerPoolRule(accountPool, entry.provider);
+	if (!rule) return true;
+	if (entry.credential.type !== "oauth") return rule.apiKeys;
+	if (!rule.accounts) return true;
+	return entry.identityKey !== null && rule.accounts.has(entry.identityKey);
 }
 
 /**
@@ -245,8 +285,9 @@ export interface RemoteAuthCredentialStoreOptions {
 	 */
 	onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
 	/**
-	 * OAuth identities visible through this store. This is a trusted-client
-	 * routing policy, not broker authorization.
+	 * Broker credentials visible through this store (OAuth identities and API
+	 * keys per provider). This is a trusted-client routing policy, not broker
+	 * authorization.
 	 */
 	accountPool?: AuthBrokerAccountPool;
 	/** Flush cadence for batched observed-usage reports. Default 10s. */
@@ -265,7 +306,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #client: AuthBrokerClient;
 	readonly #streamSnapshots: boolean;
 	readonly #onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
-	readonly #accountPool?: AuthBrokerAccountPool;
+	readonly #accountPool?: ReadonlyMap<string, ResolvedProviderPool>;
 	#snapshot: SnapshotResponse = emptySnapshot();
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
@@ -295,8 +336,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#activityWakeup: PromiseWithResolvers<void> | null = null;
 	#cache: Map<string, CacheEntry> = new Map();
 	#cacheCharacters = 0;
-	#usageCache?: UsageCacheEntry;
-	#usageInflight?: Promise<UsageReport[] | null>;
+	/** `undefined` is the aggregate scope; provider scopes never stand in for it. */
+	#usageCache = new Map<Provider | undefined, UsageCacheEntry>();
+	#usageInflight = new Map<Provider | undefined, Promise<UsageReport[] | null>>();
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	/** Exact deleted rows suppressed until their old deadline, including snapshots racing the DELETE acknowledgement. */
 	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
@@ -336,9 +378,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#streamSnapshots = opts.streamSnapshots ?? true;
 		this.#observedUsageFlushMs = opts.observedUsageFlushMs ?? 10_000;
 		this.#backgroundIdleMs = opts.backgroundIdleMs ?? BACKGROUND_IDLE_MS;
-		this.#accountPool = opts.accountPool
-			? new Map([...opts.accountPool].map(([provider, identities]) => [provider, new Set(identities)]))
-			: undefined;
+		this.#accountPool = opts.accountPool ? resolveAccountPool(opts.accountPool) : undefined;
 		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
 		this.#acknowledgedRevision = this.#credentialRevision;
 		this.#onSnapshot = opts.onSnapshot;
@@ -1244,7 +1284,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// Snapshot/block updates invalidate quota evidence, not a failed broker
 		// connection's cooldown. Keep the flight too: its completion will queue
 		// one current-generation successor instead of overlapping broker calls.
-		if (this.#usageCache?.reports !== null) this.#usageCache = undefined;
+		for (const [provider, cached] of this.#usageCache) {
+			if (cached.reports !== null) this.#usageCache.delete(provider);
+		}
 		this.#usageCacheEpoch += 1;
 	}
 
@@ -1316,17 +1358,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 	 * cooldowns keep separate clients from multiplying provider probes.
 	 */
-	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
+	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
 		if (!reports) return null;
-		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
+		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
+		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
 	}
 
 	/**
 	 * Per-credential usage hook consumed by `UsageService.report`. Pulls
-	 * the aggregate broker `/v1/usage` once and serves all callers from the
-	 * same response (coalesced + cached), then overlays any client-observed
+	 * provider-scoped broker `/v1/usage` once and serves that provider's callers
+	 * from the same response (coalesced + cached), then overlays any client-observed
 	 * header hints for the matching credential.
 	 *
 	 * The broker caches each credential independently; the short client TTL
@@ -1338,7 +1381,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1372,7 +1415,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (memo && memo.input === reports && memo.byProvider === lookup.byProvider) return memo.output;
 		const byProvider = lookup.byProvider;
 		const output = reports.filter(report => {
-			if (!accountPool.has(report.provider)) return true;
+			// Unrestricted for this provider: every report stays. Otherwise a
+			// report must belong to a visible OAuth credential, so reports from
+			// hidden accounts or API keys fail closed.
+			const rule = providerPoolRule(accountPool, report.provider);
+			if (!rule || (rule.accounts === undefined && rule.apiKeys)) return true;
 			const credentials = byProvider.get(report.provider);
 			if (!credentials) return false;
 			return credentials.some(credential => usageReportMatchesCredential(report, credential));
@@ -1446,41 +1493,58 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		else this.#brokerUsageAccountCounts.set(provider, count - 1);
 	}
 
-	#maxBrokerUsageAccounts(): number {
+	#maxBrokerUsageAccounts(provider?: Provider): number {
+		if (provider !== undefined) return this.#brokerUsageAccountCounts.get(provider) ?? 1;
 		let maximum = 1;
 		for (const count of this.#brokerUsageAccountCounts.values()) maximum = Math.max(maximum, count);
 		return maximum;
 	}
 
-	#loadUsageReports(): Promise<UsageReport[] | null> {
-		const cached = this.#usageCache;
-		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) {
-			return Promise.resolve(cached.reports);
+	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
+		// An existing aggregate result covers a provider lookup too. The reverse
+		// is not true: a partial cache must never hide other providers from /usage.
+		const now = Date.now();
+		let cached = this.#usageCache.get(provider);
+		if (cached && now - cached.fetchedAt >= USAGE_CACHE_TTL_MS) cached = undefined;
+		const aggregate = provider === undefined ? undefined : this.#usageCache.get(undefined);
+		// Prefer the newest successful coverage over a failed fetch in another scope.
+		if (
+			aggregate &&
+			now - aggregate.fetchedAt < USAGE_CACHE_TTL_MS &&
+			(!cached ||
+				(aggregate.reports !== null && (cached.reports === null || aggregate.fetchedAt >= cached.fetchedAt)))
+		) {
+			cached = aggregate;
 		}
-		if (this.#usageInflight) return this.#usageInflight;
+		if (cached) return Promise.resolve(cached.reports);
+		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
+		if (existing) return existing;
 		const epoch = this.#usageCacheEpoch;
 		const inflight = this.#client
-			.fetchUsage({ maxAccountsPerProvider: this.#maxBrokerUsageAccounts() })
+			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
 			.then(body => {
 				if (epoch !== this.#usageCacheEpoch) {
-					if (this.#usageInflight === inflight) this.#usageInflight = undefined;
-					return this.#loadUsageReports();
+					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+					return this.#loadUsageReports(provider);
 				}
-				this.#usageCache = { reports: body.reports, fetchedAt: Date.now() };
-				return body.reports;
+				// Older brokers ignore the query and still return an aggregate.
+				// Keep it scoped locally; a scoped response is never an aggregate cache.
+				const reports =
+					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
+				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+				return reports;
 			})
 			.catch(error => {
 				logger.warn("auth-broker usage fetch failed", { error: String(error) });
-				// Documented 15s TTL fallback: cache the null so sequential callers
-				// don't re-hit the broker while it's still down. See
-				// docs/auth-broker-gateway.md § "Client-side single-flight".
-				this.#usageCache = { reports: null, fetchedAt: Date.now() };
+				// Documented 15s TTL fallback, isolated to the requested scope.
+				// Invalidation preserves this cooldown, as it does for aggregate polls.
+				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
 				return null;
 			})
 			.finally(() => {
-				if (this.#usageInflight === inflight) this.#usageInflight = undefined;
+				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
 			});
-		this.#usageInflight = inflight;
+		this.#usageInflight.set(provider, inflight);
 		return inflight;
 	}
 

@@ -113,6 +113,26 @@ describe("dialogs under a native surface", () => {
 		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
 	});
 
+	it("ask: Next after a cancelled Other moves on to the review instead of reopening the editor", async () => {
+		const onPrompt = vi.fn(async () => undefined);
+		const dialog = new AskDialogComponent(QUESTIONS, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
+		dialog.handleInput(ENTER);
+		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
+		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "other" });
+		// The dialog awaits this same promise first, so its cancel handling has run once it settles.
+		await onPrompt.mock.results[0]?.value;
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		const answers = find(dialog.describe(CX), node => node.p?.role === "omp.ask.answers")?.node.p as
+			| { items: { k: string; v: { t: string }[] }[] }
+			| undefined;
+		expect(answers?.items.map(entry => [entry.k, entry.v.map(part => part.t).join("")])).toEqual([
+			["policy", "Park them"],
+			["flag", "Unanswered"],
+		]);
+	});
+
 	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
 		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };
@@ -214,14 +234,15 @@ describe("dialogs under a native surface", () => {
 				inputGuard: {
 					isBlocked: () => draft.length > 0,
 					handleInput: key => routed.push(key),
-					hint: "Finish or clear the current prompt to answer",
+					hint: "typing edits your prompt",
 				},
 			},
 		);
 		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
 
 		dialog.handleInput("\x1bh");
-		expect(line()).toContain("Finish or clear the current prompt to answer");
+		// A Submit delivered after Hide is stale: it must not hand input to the question.
+		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(line()).not.toContain("/⏎ show");
 		dialog.handleInput(ENTER);
 		expect(routed).toEqual([ENTER]);
@@ -316,6 +337,47 @@ describe("dialogs under a native surface", () => {
 			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
 			pointed.handleNativeEvent({ type: "select", key: list.path, item: "deny" });
 			expect(clicked.onDeny).toHaveBeenCalledTimes(1);
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("approval: grants sit above Approve Once, the toggle keeps them across sessions, Enter or a Tern click takes one", () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+			const onGrant = vi.fn();
+			const folder = { label: "Approve Directory: ~/src", alwaysLabel: "Always Approve Directory: ~/src" };
+			const file = { label: "Approve File", alwaysLabel: "Always Approve File" };
+			const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant,
+			});
+			const rows = () =>
+				stripVTControlCharacters(dialog.render(80).join("\n"))
+					.split("\n")
+					.filter(line => /Approve|Deny|Remember/.test(line))
+					.map(line => line.replace(/[│❯>\s]+/g, " ").trim());
+			expect(rows().slice(1)).toEqual(["Approve Directory: ~/src", "Approve File", "Approve Once", "Deny"]);
+			now.mockReturnValue(1_000 + APPROVE_ARM_MS);
+			// Approve Once is highlighted on mount: the least the call can be granted.
+			for (let step = 0; step < 3; step++) dialog.handleInput(UP);
+			dialog.handleInput(ENTER);
+			expect(rows().slice(1, 3)).toEqual(["Always Approve Directory: ~/src", "Always Approve File"]);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			dialog.handleInput(ENTER);
+			expect(onGrant).toHaveBeenCalledWith(file, true);
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+
+			const clicked = vi.fn();
+			const pointed = new ApprovalDialogComponent("Allow tool: write\nPath: a.ts", callbacks, {
+				grants: [folder, file],
+				onGrant: clicked,
+			});
+			const list = find(pointed.describe(), node => node.p?.role === "omp.approval.choices")!;
+			pointed.handleNativeEvent({ type: "select", key: list.path, item: "grant0" });
+			expect(clicked).toHaveBeenCalledWith(folder, false);
 		} finally {
 			now.mockRestore();
 		}

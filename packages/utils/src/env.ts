@@ -3,7 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
+import { isBunTestRuntime } from "./test-runtime";
 
+export * from "./test-runtime";
 export * from "./worker-host";
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -297,9 +299,92 @@ for (const key of Object.keys(Bun.env)) {
 	}
 }
 
+/**
+ * `OTEL_*` values from OMP's own (non-project) dotenv files: the agent dir,
+ * config root, and home `.env`. Those files configure OMP's exporter (endpoint,
+ * auth headers, GenAI content capture), so the values are kept here instead of
+ * in `Bun.env`/`process.env`: no child process or in-process extension
+ * inherits them. Read through {@link $otelEnv}; {@link withOmpOtelEnv} exposes
+ * them to the OpenTelemetry SDK for the synchronous span of its construction.
+ *
+ * Keys are folded with {@link foldOtelEnvName}.
+ */
+const ompOtelEnvFileValues = new Map<string, string>();
+
+/**
+ * Environment names compare case-insensitively on Windows, so a file that spells
+ * `otel_exporter_otlp_headers` configures the same variable as the upper-case
+ * name; match and key them folded there, exactly on POSIX (names are
+ * case-sensitive).
+ */
+function foldOtelEnvName(name: string, platform: NodeJS.Platform): string {
+	return platform === "win32" ? name.toUpperCase() : name;
+}
+
+/**
+ * @internal Loader seam, exported for tests only. Claims an `OTEL_*` entry from one of OMP's own dotenv files: the value is
+ * kept in a private map, never in the process environment. Returns `false` for
+ * any other name, which the caller handles as usual.
+ *
+ * Precedence matches the process-environment loader: a non-empty live value
+ * (shell export, project `.env`) wins, and an earlier non-empty file value wins
+ * over a later file.
+ *
+ * @param platform - Name-folding semantics; injectable for tests.
+ */
+export function claimOmpOtelEnvFileEntry(
+	name: string,
+	value: string,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	const key = foldOtelEnvName(name, platform);
+	if (!key.startsWith("OTEL_")) return false;
+	if (!Bun.env[name] && !ompOtelEnvFileValues.get(key)) ompOtelEnvFileValues.set(key, value);
+	return true;
+}
+
+/**
+ * `OTEL_*` lookup for OMP's own telemetry: the live environment wins (a shell
+ * export or project `.env`), then OMP's own `.env` files. Use this instead of
+ * `process.env` for any `OTEL_*` setting OMP reads itself.
+ */
+export function $otelEnv(name: string): string | undefined {
+	const live = Bun.env[name];
+	if (live) return live;
+	return ompOtelEnvFileValues.get(foldOtelEnvName(name, process.platform)) ?? live;
+}
+
+/**
+ * Runs `fn` with OMP's `.env`-sourced `OTEL_*` values temporarily present in
+ * `process.env` (only for names with no live value), then removes them again in
+ * a `finally`. For code that reads the environment itself, such as the
+ * OpenTelemetry SDK constructors.
+ *
+ * Synchronous only: awaiting inside would let other code, including child
+ * process spawns, run while the values are set.
+ */
+export function withOmpOtelEnv<T>(fn: () => T): T {
+	const previous = new Map<string, string | undefined>();
+	for (const [name, value] of ompOtelEnvFileValues) {
+		if (process.env[name]) continue;
+		previous.set(name, process.env[name]);
+		process.env[name] = value;
+	}
+	try {
+		return fn();
+	} finally {
+		for (const [name, prior] of previous) {
+			if (prior === undefined) delete process.env[name];
+			else process.env[name] = prior;
+		}
+	}
+}
+
 for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {
-		if (!isMacosMallocStackLoggingEnvName(key) && !Bun.env[key]) {
+		if (isMacosMallocStackLoggingEnvName(key)) continue;
+		if (file !== projectEnv && claimOmpOtelEnvFileEntry(key, file[key])) continue;
+		if (!Bun.env[key]) {
 			Bun.env[key] = file[key];
 			if (file === projectEnv) projectEnvNamesLoadedByOmp.add(key);
 		}
@@ -376,15 +461,6 @@ export function $envpos(name: string, defaultValue: number): number {
 	const parsed = Number.parseInt(raw, 10);
 	if (Number.isNaN(parsed) || parsed <= 0) return defaultValue;
 	return parsed;
-}
-
-const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
-
-/** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
-export function isBunTestRuntime(): boolean {
-	if (Bun.env.PI_TEST_RUNTIME === "1") return true;
-	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
 }
 
 let terminalHeadless = isBunTestRuntime();

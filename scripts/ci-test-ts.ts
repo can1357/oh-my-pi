@@ -105,6 +105,13 @@ const nativeAndIntegrationPackages = [
 	"packages/typescript-edit-benchmark",
 ];
 
+const projectToolTestCommand: TestCommand = {
+	label: ".omp/tests (project-local TUI debug tool)",
+	cwd: ".",
+	command: ["bun", "test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"],
+	parallel: 1,
+};
+
 // Packages the CI buckets deliberately skip but a local full run should still
 // cover. robomp-web lives under python/robomp and is outside every CI TS bucket.
 const localOnlyWorkspacePackages = ["python/robomp/web"];
@@ -212,8 +219,9 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 
 // The Rust suite as one pooled command, so root `bun run test` reports TS and
 // Rust under the same progress stream / failure report. Delegates to
-// run-rs-task.ts, which self-skips when no Rust-affecting files changed locally
-// (printing a one-line notice) and resolves the cargo/nextest invocation.
+// run-rs-task.ts, which self-skips when the branch changed no Rust-affecting file
+// since its merge base with main, committed or not (printing a one-line notice),
+// and resolves the cargo/nextest invocation.
 function rustTestCommand(): TestCommand {
 	return {
 		label: "rust (cargo nextest; skipped if no Rust changes)",
@@ -327,7 +335,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		case "workspace":
 			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
 		case "native":
-			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
+			return [...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)), projectToolTestCommand];
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":
@@ -358,6 +366,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 			return [
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
 				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
+				projectToolTestCommand,
 				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...(await commandsForMode("coding-agent-heavy")),
 			];
@@ -369,8 +378,8 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	}
 }
 
-// The omp-kata runner pods may inject cloud credentials (`AWS_*`) pod-wide via
-// `envFrom`, GitHub Actions injects `GITHUB_TOKEN`,
+// Self-hosted runners may carry cloud credentials (`AWS_*`) in their
+// environment, GitHub Actions injects `GITHUB_TOKEN`,
 // and a host may carry provider API keys. Any of these make env-sensitive code
 // non-deterministic in tests — e.g. leaked AWS creds make `amazon-bedrock` look
 // authenticated and win the provider startup fallback over `anthropic`. Run the
@@ -443,7 +452,9 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 
 // Child env shared by every spawned test process: the parent env with the
 // private test-runtime marker set, all CI credential / cloud-config variables
-// scrubbed (see SCRUBBED_ENV_* above), and GITHUB_ACTIONS cleared.
+// scrubbed (see SCRUBBED_ENV_* above), and GITHUB_ACTIONS cleared. Clearing it
+// would also clear run-rs-task.ts's "always run in GitHub Actions" rule for the
+// Rust child, so under GitHub Actions OMP_FORCE_RUST_TASKS carries it instead.
 //
 // GC knobs (both needed — they gate different JSC mechanisms):
 // - `BUN_JSC_useConcurrentGC=0` stops the collector from marking concurrently
@@ -467,6 +478,7 @@ function buildChildEnv(): Record<string, string | undefined> {
 	const env: Record<string, string | undefined> = {
 		...Bun.env,
 		GITHUB_ACTIONS: "",
+		...(Bun.env.GITHUB_ACTIONS === "true" ? { OMP_FORCE_RUST_TASKS: "1" } : {}),
 		PI_TEST_RUNTIME: "1",
 		BUN_JSC_useConcurrentGC: "0",
 		BUN_JSC_numberOfGCMarkers: "1",

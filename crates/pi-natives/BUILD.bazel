@@ -7,6 +7,14 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
+# Only Darwin links need an SDK. The env file is empty on mac hosts so rustc
+# keeps native Xcode discovery; Linux cross links get an absolute SDKROOT
+# before rustc could fall back to the unavailable xcrun.
+_DARWIN_RUSTC_ENV_FILES = select({
+    "@platforms//os:macos": ["//bazel/toolchains/darwin:rustc_sdk_env"],
+    "//conditions:default": [],
+})
+
 rust_binary(
     name = "generate_syntax_set",
     srcs = [
@@ -16,6 +24,7 @@ rust_binary(
     compile_data = glob(["src/syntaxes/*.sublime-syntax"]),
     crate_root = "src/syntaxes/generate.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     deps = ["@crates//:syntect"],
 )
 
@@ -36,6 +45,12 @@ darwin_helper(
     src = "src/desktop/macos/capture/helper.m",
     frameworks = ["AppKit", "ScreenCaptureKit", "CoreGraphics"],
     minimum_macos = "14.0",
+)
+
+darwin_helper(
+    name = "keymap_darwin_helper",
+    src = "src/desktop/macos/keymap-helper.m",
+    frameworks = ["Carbon"],
 )
 
 # Apple Foundation Models bridge (src/applefm/build-bridge.sh): a bridge.swift
@@ -61,6 +76,7 @@ rust_binary(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = [
         "-Ccodegen-units=1",
         "-Copt-level=z",
@@ -77,6 +93,29 @@ rust_binary(
         "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
+)
+
+# Posts the releases of keys and buttons an input request still holds when
+# the host dies (src/desktop/macos/release_guard.rs). Shares release.rs and
+# route.rs with the addon.
+rust_binary(
+    name = "input_release_helper",
+    srcs = [
+        "src/desktop/macos/release.rs",
+        "src/desktop/macos/release_helper.rs",
+        "src/desktop/macos/route.rs",
+    ],
+    crate_root = "src/desktop/macos/release_helper.rs",
+    edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
+    rustc_flags = [
+        "-Ccodegen-units=1",
+        "-Copt-level=z",
+        "-Cpanic=abort",
+        "-Cstrip=symbols",
+        "-Clink-arg=-Wl,-adhoc_codesign",
+    ],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 # The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
@@ -102,6 +141,8 @@ rust_shared_library(
             ":applefm_bridge",
             ":oauth_callback_darwin_helper",
             ":capture_darwin_helper",
+            ":keymap_darwin_helper",
+            ":input_release_helper",
         ],
         "//conditions:default": [":oauth_callback_relay"],
     }),
@@ -114,12 +155,15 @@ rust_shared_library(
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
             "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
+            "OMP_KEYMAP_DARWIN_HELPER": "$(execpath :keymap_darwin_helper)",
+            "OMP_INPUT_RELEASE_HELPER": "$(execpath :input_release_helper)",
         },
         "//conditions:default": {
             "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
         },
     }),
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = select({
         "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
         "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
@@ -159,13 +203,13 @@ rust_shared_library(
         "//crates/pi-builtins",
         "//crates/pi-diff",
         "//crates/pi-edit",
+        "//crates/pi-walker",
         "//crates/pi-iso",
         "//crates/pi-predict",
         "//crates/pi-shell",
         "//crates/pi-vcs",
         "//crates/pi-vfs",
         "//crates/pi-voice",
-        "//crates/pi-walker",
         "//crates/vendor/napi",
     ],
 )
@@ -178,6 +222,7 @@ rust_test(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
 )
 
 rust_test(

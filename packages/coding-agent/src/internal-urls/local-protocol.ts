@@ -250,6 +250,48 @@ export function resolveLocalRoot(options: LocalProtocolOptions, platform: NodeJS
 	return path.join(os.tmpdir(), "omp-local", safeSessionId(options));
 }
 
+export interface LocalFileEntry {
+	/** Root-relative, `/`-separated name, e.g. `plans/x-plan.md`. */
+	name: string;
+	/** `local://${name}` */
+	url: string;
+	/** Absolute path under the resolved local root. */
+	path: string;
+	size: number;
+	mtimeMs: number;
+}
+
+/**
+ * Every regular file under the session's local:// root, newest first (ties by name); missing root → [].
+ * Uncached, unlike completion listings, so pickers see files written moments ago. The walker skips
+ * symlinks, so each entry is a real file inside the root.
+ */
+export async function listLocalFiles(options: LocalProtocolOptions): Promise<LocalFileEntry[]> {
+	const root = path.resolve(resolveLocalRoot(options));
+	let names: string[];
+	try {
+		names = await listFilesRecursively(root);
+	} catch (err) {
+		if (isEnoent(err)) return [];
+		throw err;
+	}
+	const entries = await Promise.all(
+		names.map(async (name): Promise<LocalFileEntry | null> => {
+			const filePath = path.join(root, name);
+			try {
+				const stat = await fs.stat(filePath);
+				return { name, url: `local://${name}`, path: filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+			} catch (err) {
+				if (isEnoent(err)) return null;
+				throw err;
+			}
+		}),
+	);
+	return entries
+		.filter((entry): entry is LocalFileEntry => entry !== null)
+		.sort((a, b) => b.mtimeMs - a.mtimeMs || a.name.localeCompare(b.name));
+}
+
 /**
  * Recursively copy every local:// artifact from one session-scoped root to
  * another. Used when a session transition mints a fresh local root (plan

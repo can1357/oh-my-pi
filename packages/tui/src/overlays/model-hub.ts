@@ -161,6 +161,10 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
+	onCatalogRefreshed?: (
+		providerId?: string,
+	) => ReadonlyArray<ScopedModelItem> | undefined | Promise<ReadonlyArray<ScopedModelItem> | undefined>;
 	/** Save the current role assignments and default thinking level as a named model preset. */
 	onSavePreset?: (name: string) => void;
 	/**
@@ -550,7 +554,7 @@ export class ModelHubComponent implements Component {
 			this.#catalogRefreshing = true;
 			this.#registry
 				.refresh("online")
-				.then(() => this.#syncFromRegistryState())
+				.then(() => this.#afterRegistryRefresh())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})
@@ -1139,6 +1143,12 @@ export class ModelHubComponent implements Component {
 		this.#scheduledProviderRefreshes.set(providerId, timer);
 	}
 
+	async #afterRegistryRefresh(providerId?: string): Promise<void> {
+		const scope = await this.#callbacks.onCatalogRefreshed?.(providerId);
+		if (scope) this.#scopedModels = scope;
+		this.#syncFromRegistryState();
+	}
+
 	async #refreshProviderInBackground(providerId: string, refreshCommandCredentials = false): Promise<void> {
 		try {
 			if (refreshCommandCredentials) {
@@ -1148,7 +1158,7 @@ export class ModelHubComponent implements Component {
 			}
 			// The provider refresh already updated the registry snapshot;
 			// re-reading it here stays purely in-memory.
-			this.#syncFromRegistryState();
+			await this.#afterRegistryRefresh(providerId);
 		} catch (error) {
 			this.#configError = error instanceof Error ? error.message : String(error);
 		} finally {
@@ -3046,7 +3056,8 @@ export class ModelHubComponent implements Component {
 				this.#browser,
 			);
 		}
-		return node("col", { gap: "sm", grow: 1 }, children, "body");
+		// Zero basis: the body takes the space left of the sidebar instead of sizing to its widest line.
+		return node("col", { gap: "sm", grow: 1, basis: 0, min: { w: 0 } }, children, "body");
 	}
 
 	#describeStatus(): NativeNode {
@@ -3369,13 +3380,7 @@ export class ModelHubComponent implements Component {
 				...props,
 				tabs: this.#pickerKindTabs(),
 				tab: this.#modelKindTab,
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: view.order,
-				...(view.hits ? { hits: view.hits } : {}),
-				selected: this.#browser.pickerSelected,
-				...(current ? { current } : {}),
-				total: this.#browser.baseCount,
+				...this.#browser.pickerRows(catalogue, view, this.#currentSelector),
 				state,
 				...(state === "error" && this.#configError ? { message: this.#configError } : {}),
 				empty:

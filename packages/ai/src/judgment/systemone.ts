@@ -20,7 +20,14 @@ import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
 import type { ImageContent } from "../types";
-import { type JsonValue, type JudgmentRequest, tokenUsage } from "./types";
+import {
+	type BoxQuestion,
+	type JsonValue,
+	type JudgmentRequest,
+	type Question,
+	type Questions,
+	tokenUsage,
+} from "./types";
 import { type DecodedJudgment, finiteNumber, type JudgmentImageAssets, type JudgmentWire } from "./wire";
 
 function decodeSystemOne(payload: unknown): DecodedJudgment | undefined {
@@ -70,7 +77,7 @@ export function referencedImageAssets(request: JudgmentRequest, assets: Judgment
 	for (const id in request.questions) {
 		const question = request.questions[id];
 		visit(question.instructions);
-		visit(question.criteria);
+		if (question.type !== "box") visit(question.criteria);
 	}
 	// `fromEntries` defines own properties, so a `__proto__` reference stays an ordinary key.
 	return Object.fromEntries(Object.entries(assets).filter(([reference]) => !pending.has(reference)));
@@ -91,11 +98,23 @@ function encodeSystemOneImage(image: ImageContent): SystemOneImageAsset {
 	};
 }
 
+type WireQuestion = Exclude<Question, BoxQuestion> | Omit<BoxQuestion, "image">;
+
+/** `questions` as System One takes them: a box question's `image` only names the image its edges measure locally. */
+function wireQuestions(questions: Questions): Record<string, WireQuestion> {
+	const wire: Record<string, WireQuestion> = {};
+	for (const id in questions) {
+		const question = questions[id];
+		wire[id] = question.type === "box" ? { type: "box", instructions: question.instructions } : question;
+	}
+	return wire;
+}
+
 /** A System One dialect posting the verbatim request to `path` under the base URL with the key as bearer. */
 function systemOneWire(path: string): JudgmentWire {
 	return {
 		target: (baseUrl, _model, key) => ({ url: `${baseUrl}${path}`, token: key }),
-		encode: (request, model) => ({ state: request.state, model, questions: request.questions }),
+		encode: (request, model) => ({ state: request.state, model, questions: wireQuestions(request.questions) }),
 		decode: decodeSystemOne,
 	};
 }
@@ -108,11 +127,12 @@ export const typesafeWire: JudgmentWire = {
 	imagesRequireOptIn: true,
 	imageHeaders: { "TypeSafe-Danger-Zone-Images": "true" },
 	ignoresImageDetail: true,
+	boxes: true,
 	encode(request, model, imageAssets) {
 		const suppliedAssets = Object.entries(imageAssets ?? {});
 		const images = request.images ?? [];
 		if (suppliedAssets.length === 0 && images.length === 0) {
-			return { state: request.state, model, questions: request.questions };
+			return { state: request.state, model, questions: wireQuestions(request.questions) };
 		}
 
 		const assets: Record<string, SystemOneImageAsset> = Object.fromEntries(
@@ -129,7 +149,7 @@ export const typesafeWire: JudgmentWire = {
 		return {
 			state: references.length ? stateWithImages(request.state, references) : request.state,
 			model,
-			questions: request.questions,
+			questions: wireQuestions(request.questions),
 			assets,
 		};
 	},
@@ -140,6 +160,7 @@ export const openrouterDecisionsWire: JudgmentWire = {
 	...systemOneWire("/decisions"),
 	images: {},
 	imagesRequireOptIn: true,
+	boxes: true,
 	encode(request, model) {
 		const imageParts: JsonValue[] = (request.images ?? []).map(image => ({
 			type: "image_url",
@@ -151,7 +172,7 @@ export const openrouterDecisionsWire: JudgmentWire = {
 		return {
 			state: imageParts.length ? stateWithImages(request.state, imageParts) : request.state,
 			model,
-			questions: request.questions,
+			questions: wireQuestions(request.questions),
 		};
 	},
 };

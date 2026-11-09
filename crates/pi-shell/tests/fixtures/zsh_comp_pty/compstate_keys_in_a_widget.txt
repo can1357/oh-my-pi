@@ -1,0 +1,25 @@
+### "echo x fo\u{14}"
+% echo x foo
+@ 0,12
+### "\u{15}cat ~/cs.out\r"
+% cat ~/cs.out
+all_quotes=\
+context=command
+ignored=0
+insert=automenu-unambiguous
+insert_positions=
+last_prompt=yes
+list=ambiguous
+list_lines=0
+list_max=100
+nmatches=0
+pattern_insert=menu
+restore=auto
+to_end=match
+unambiguous=
+unambiguous_cursor=1
+unambiguous_positions=
+vared=
+after: 2 <foo> 4 ambiguous automenu-unambiguous
+%
+@ 19,2

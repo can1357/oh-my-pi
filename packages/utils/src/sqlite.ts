@@ -2,14 +2,42 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
+import { toError } from "./type-guards";
 import * as logger from "./logger";
 
 const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
+
+let sqliteLockShimInstalled: boolean | undefined;
+
+/**
+ * Moves this process's SQLite locks onto open-file-description locks (Linux), once.
+ *
+ * SQLite's POSIX record locks belong to the process, so any close of another
+ * descriptor of a database or its `-shm` released them, including Bun's own file
+ * APIs and the bash tool's builtins; a peer omp then unlinked the WAL under the live
+ * connection (issue #15586). Call before the process opens its first database: a
+ * connection opened earlier keeps POSIX locks. Returns whether the shim is active; a
+ * Linux build where it cannot be installed (Bun's SQLite layout changed) logs a warning
+ * once, and callers with a UI surface it.
+ */
+export function ensureSqliteLockShim(): boolean {
+	if (sqliteLockShimInstalled === undefined) {
+		sqliteLockShimInstalled = installSqliteLockShim();
+		if (!sqliteLockShimInstalled && process.platform === "linux") {
+			logger.warn("SQLite OFD lock shim unavailable; in-process reads of a live store can release its locks", {
+				bun: Bun.version,
+				issue: "https://github.com/can1357/oh-my-pi/issues/15586",
+			});
+		}
+	}
+	return sqliteLockShimInstalled;
+}
 
 /**
  * A store's identity as `dev:ino:birthtimeMs`, `null` when the path holds no
@@ -100,7 +128,7 @@ function closeFailedDatabase(db: Database | undefined, error: unknown, identity:
 	try {
 		db?.close();
 	} catch (closeError) {
-		const original = error instanceof Error ? error : new Error(String(error));
+		const original = toError(error);
 		const detail = closeError instanceof Error ? closeError.message : String(closeError);
 		original.message += `; failed to close the SQLite handle: ${detail}`;
 		throw new SqliteAttemptFailure(original, identity, { canRecover: false });
@@ -152,6 +180,7 @@ async function openWithBusyRetries<T>(
 		let db: Database | undefined;
 		const identity = sqliteFileIdentity(dbPath);
 		try {
+			ensureSqliteLockShim();
 			db = new Database(dbPath);
 			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
 			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
@@ -175,6 +204,7 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 	let db: Database | undefined;
 	const identity = sqliteFileIdentity(dbPath);
 	try {
+		ensureSqliteLockShim();
 		db = new Database(dbPath);
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		return initialize(db);
@@ -333,7 +363,7 @@ export function openSqliteDatabaseSync<T>(
 
 /** Adds the failing store's path to an error without losing SQLite result codes or its original stack. */
 export function annotateSqliteError(error: unknown, dbPath: string): Error {
-	const annotated = error instanceof Error ? error : new Error(String(error));
+	const annotated = toError(error);
 	annotated.message = `Database "${dbPath}": ${annotated.message}`;
 	return annotated;
 }

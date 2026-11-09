@@ -10,6 +10,7 @@ import type { MarkdownTheme } from "../components/markdown";
 import type { SelectListTheme } from "../components/select-list";
 import type { SettingsListTheme } from "../components/settings-list";
 import type { SymbolTheme } from "../symbols";
+import type { AnsiColor } from "./schema";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { resolveMermaidAscii } from "./mermaid-cache";
@@ -96,12 +97,17 @@ function highlightCached(code: string, validLang: string | undefined, highlightT
 	return highlighted;
 }
 
+/** Whether {@link highlightCode} colors `lang`; text in any other language comes back unstyled. */
+export function isHighlightLanguage(lang: string | undefined): lang is string {
+	return lang !== undefined && nativeSupportsLanguage(lang);
+}
+
 /**
  * Highlight code with syntax coloring based on file extension or language.
  * Returns array of highlighted lines.
  */
 export function highlightCode(code: string, lang?: string, highlightTheme: Theme = theme): string[] {
-	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+	const validLang = isHighlightLanguage(lang) ? lang : undefined;
 	const highlighted = highlightCached(code, validLang, highlightTheme);
 	// Always return a fresh array: callers (e.g. renderCodeCell) push extra lines
 	// onto the result, which would corrupt the cached string otherwise.
@@ -110,7 +116,7 @@ export function highlightCode(code: string, lang?: string, highlightTheme: Theme
 
 /** Create a stateful highlighter for progressive terminal rendering. */
 export function createHighlightStream(lang?: string, highlightTheme: Theme = theme): NativeHighlightStream | null {
-	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+	const validLang = isHighlightLanguage(lang) ? lang : undefined;
 	if (!validLang) return null;
 	// Workspace loads skip the natives version sentinel, so a stale local
 	// `.node` can omit `HighlightStream` after a pull. Napi constructors can
@@ -194,6 +200,7 @@ const cacheableMarkdownThemes = new WeakMap<
 >();
 const linkTargetSnapshots = new WeakMap<ReadonlyMap<string, string>, ReadonlyMap<string, string>>();
 let markdownMermaidRendering = true;
+let markdownColorful = true;
 
 function ownFields(object: object): ReadonlyArray<readonly [PropertyKey, unknown]> {
 	return Reflect.ownKeys(object).map(key => [key, Object.getOwnPropertyDescriptor(object, key)?.value]);
@@ -258,6 +265,35 @@ export function setMarkdownMermaidRendering(enabled: boolean): void {
 	cachedMarkdownTheme = undefined;
 }
 
+/**
+ * Toggle colorful Markdown (`tui.colorfulMarkdown`): headings, emphasis, inline
+ * code and table headers take distinct hues from the theme's `terminal.ansi`
+ * palette instead of one heading color and plain bold/italic. Components built
+ * afterwards pick it up; callers rebuild existing transcript rows.
+ */
+export function setMarkdownColorful(enabled: boolean): void {
+	if (markdownColorful === enabled) return;
+	markdownColorful = enabled;
+	cachedMarkdownTheme = undefined;
+}
+
+/** Palette slot per heading depth under colorful Markdown; index 0 is H1, deeper levels reuse the last. */
+const COLORFUL_HEADING_COLORS: readonly AnsiColor[] = ["magenta", "yellow", "blue"];
+
+/**
+ * Roles colorful Markdown overrides. Every hue comes from one palette so the
+ * roles stay distinct; mixing in `md*` tokens collides in themes that alias
+ * those tokens to the same palette entries (Dracula's `mdCode` is its magenta).
+ */
+const colorfulMarkdownRoles = {
+	heading: (text: string, depth: number) =>
+		theme.ansiFg(COLORFUL_HEADING_COLORS[Math.min(depth, COLORFUL_HEADING_COLORS.length) - 1], text),
+	code: (text: string) => theme.ansiFg("green", text),
+	strong: (text: string) => theme.ansiFg("magenta", theme.bold(text)),
+	emphasis: (text: string) => theme.ansiFg("magenta", theme.italic(text)),
+	tableHeader: (text: string) => theme.ansiFg("yellow", theme.bold(text)),
+} satisfies Partial<MarkdownTheme>;
+
 export function getMarkdownTheme(): MarkdownTheme {
 	ensureThemeSync();
 	if (cachedMarkdownTheme !== undefined && cachedMarkdownThemeRef === theme) {
@@ -282,9 +318,10 @@ export function getMarkdownTheme(): MarkdownTheme {
 		: undefined;
 	const markdownTheme: MarkdownTheme = {
 		heading: (text: string) => theme.fg("mdHeading", text),
+		code: (text: string) => theme.fg("mdCode", text),
+		...(markdownColorful ? colorfulMarkdownRoles : {}),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
-		code: (text: string) => theme.fg("mdCode", text),
 		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
 		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),
 		quote: (text: string) => theme.fg("mdQuote", text),
@@ -305,7 +342,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 					})
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
-			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
+			const validLang = isHighlightLanguage(lang) ? lang : undefined;
 			const highlighted = highlightCached(code, validLang, theme);
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));

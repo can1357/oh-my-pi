@@ -5,12 +5,14 @@ import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, ChoiceQuestion, ImageContent, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
+import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
@@ -113,6 +115,104 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	// Return the supplied fixtures directly; getAvailable's normal auth filtering is intentionally bypassed.
 	vi.spyOn(registry, "getAvailable").mockReturnValue(models);
 	return registry;
+}
+
+/** Native judges on a loopback server; the primary hangs until `recover()`. Attempts get a 200 ms deadline. */
+function nativeLoopback({
+	hangBody = false,
+	delayPrimaryMs = 0,
+	configuredFallback = true,
+}: { hangBody?: boolean; delayPrimaryMs?: number; configuredFallback?: boolean } = {}) {
+	const attempted: string[] = [];
+	const started = Promise.withResolvers<void>();
+	const pending = Promise.withResolvers<Response>();
+	let healthy = false;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		idleTimeout: 0,
+		async fetch(request) {
+			const { model } = (await request.json()) as { model: string };
+			attempted.push(model);
+			if (model === "loopback-primary" && !healthy) {
+				started.resolve();
+				return hangBody
+					? new Response(new ReadableStream(), { headers: { "Content-Type": "application/json" } })
+					: pending.promise;
+			}
+			if (model === "loopback-primary" && delayPrimaryMs > 0) {
+				// Exercise the real HTTP/platform deadline, not a simulated timer.
+				await Bun.sleep(delayPrimaryMs);
+			}
+			return Response.json({
+				model,
+				answers: { level: { type: "choice", choice: "high", probabilities: { low: 0, high: 1 }, confidence: 1 } },
+				usage: { input_tokens: 4, output_tokens: 1 },
+			});
+		},
+	});
+	const models = ["loopback-primary", "loopback-backup"].map(
+		id =>
+			({
+				...ONLINE,
+				id,
+				name: id,
+				api: "openrouter-decisions",
+				provider: "openrouter",
+				baseUrl: `http://127.0.0.1:${server.port}`,
+				kind: "judge",
+				reasoning: false,
+				input: ["text", "image"],
+			}) as Model,
+	);
+	const settings = Settings.isolated({
+		modelRoles: { judge: "openrouter/loopback-primary" },
+		...(configuredFallback ? { "retry.fallbackChains": { judge: ["openrouter/loopback-backup"] } } : {}),
+	});
+	cfgJudgmentAttemptTimeoutMs.override(settings, 200);
+	const registry = makeRegistry(models, { openrouter: "loopback-key" });
+	return {
+		deps: { settings, registry, purpose: "test", sessionId: "loopback-session" },
+		attempted,
+		started: started.promise,
+		recover: () => {
+			healthy = true;
+		},
+		[Symbol.dispose]() {
+			pending.resolve(new Response("fixture stopped", { status: 503 }));
+			server.stop(true);
+		},
+	};
+}
+
+function hangNativeSetup(registry: ModelRegistry, stage: "credentials" | "headers") {
+	const started = Promise.withResolvers<void>();
+	const pending = Promise.withResolvers<undefined>();
+	const state: { signal?: AbortSignal } = {};
+	if (stage === "credentials") {
+		const getApiKey = registry.getApiKey.bind(registry);
+		vi.spyOn(registry, "getApiKey").mockImplementation((model, sessionId, options) => {
+			if (model.id !== "loopback-primary") return getApiKey(model, sessionId, options);
+			state.signal = options?.signal;
+			started.resolve();
+			return pending.promise;
+		});
+	} else {
+		const resolveHeaders = registry.resolveModelHeaders.bind(registry);
+		vi.spyOn(registry, "resolveModelHeaders").mockImplementation((model, signal) => {
+			if (model.id !== "loopback-primary") return resolveHeaders(model, signal);
+			state.signal = signal;
+			started.resolve();
+			return pending.promise;
+		});
+	}
+	return {
+		started: started.promise,
+		state,
+		[Symbol.dispose]() {
+			pending.resolve(undefined);
+		},
+	};
 }
 
 function reply(model: Model<Api>, text: string, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
@@ -404,7 +504,7 @@ describe("ChainJudge", () => {
 		expect(chat).not.toHaveBeenCalled();
 	});
 
-	it("uses vision chat when the image falls outside the native judge's size bounds", async () => {
+	it("fits an image outside the native judge's size bounds instead of falling back", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
 			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
@@ -413,12 +513,18 @@ describe("ChainJudge", () => {
 			openrouter: "or-key",
 			[VISION_CHAT.provider]: "vision-key",
 		});
-		const native = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => Response.json({})));
-		const chat = vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {
-			const response = reply(model, "visible: yes");
-			options?.onAttempt?.(response);
-			return response;
-		});
+		let state: unknown;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				state = JSON.parse(String(init?.body)).state;
+				return Response.json({
+					model: OPENROUTER_JEV.id,
+					answers: { visible: { type: "noul", noul: 0.75 } },
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
 
 		// IMAGE_ONE is 1x1, below Jev's 280 px minimum side, which Jev rejects rather than resizes.
 		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
@@ -427,9 +533,93 @@ describe("ChainJudge", () => {
 			images: [IMAGE_ONE],
 		});
 
-		expect(result.answers.visible.noul).toBe(1);
-		expect(native).not.toHaveBeenCalled();
-		expect(chat).toHaveBeenCalledTimes(1);
+		expect(result.answers.visible.noul).toBe(0.75);
+		expect(chat).not.toHaveBeenCalled();
+		const [, part] = state as [string, { image_url: { url: string } }];
+		const sent = await new Bun.Image(Buffer.from(part.image_url.url.split(",")[1], "base64")).metadata();
+		expect([sent.width, sent.height]).toEqual([280, 280]);
+	});
+
+	it("measures box answers on the source image its question names, not the padded fit sent", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENROUTER_JEV, VISION_CHAT], {
+			openrouter: "or-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		let questions: unknown;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				questions = JSON.parse(String(init?.body)).questions;
+				return Response.json({
+					model: OPENROUTER_JEV.id,
+					answers: {
+						toolbar: { type: "box", box: { top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 }, confidence: 0.8 },
+						photo: { type: "box", box: { top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 }, confidence: 0.7 },
+					},
+					usage: { input_tokens: 8, output_tokens: 0 },
+				});
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
+		// 401x41 fits as 1568x160 centered on a 1568x280 canvas: source rows span canvas 60–220.
+		const strip: ImageContent = {
+			type: "image",
+			data: encodeRawPng(new Uint8Array(401 * 41 * 4).fill(255), 401, 41, 4).toBase64(),
+			mimeType: "image/png",
+		};
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "look at these",
+			questions: {
+				toolbar: { type: "box", instructions: "the save button in the first image", image: 0 },
+				photo: { type: "box", instructions: "the save button in the second image", image: 1 },
+			},
+			images: [strip, JEV_IMAGE],
+		});
+
+		expect(chat).not.toHaveBeenCalled();
+		// `image` is local: the wire carries System One's two Box fields only.
+		expect(questions).toEqual({
+			toolbar: { type: "box", instructions: "the save button in the first image" },
+			photo: { type: "box", instructions: "the save button in the second image" },
+		});
+		const toolbar = result.answers.toolbar;
+		expect(toolbar.box.top).toBeCloseTo((70 - 60) / 160, 10);
+		// Canvas row 252 lies in the bottom padding, so the edge clamps onto the source.
+		expect(toolbar.box.bottom).toBe(1);
+		expect(toolbar.box.left).toBeCloseTo(0.1, 10);
+		expect(toolbar.box.right).toBeCloseTo(0.5, 10);
+		expect(toolbar.confidence).toBe(0.8);
+		// JEV_IMAGE was sent as is, so its box already measures the source.
+		expect(result.answers.photo.box).toEqual({ top: 0.25, bottom: 0.9, left: 0.1, right: 0.5 });
+	});
+
+	it("routes box questions only to natives that forward them, and rejects a dangling image index first", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${OPENAI_DECISIONS.provider}/${OPENAI_DECISIONS.id}` },
+			"retry.fallbackChains": { judge: [`${VISION_CHAT.provider}/${VISION_CHAT.id}`] },
+		});
+		const registry = makeRegistry([OPENAI_DECISIONS, VISION_CHAT], {
+			[OPENAI_DECISIONS.provider]: "openai-key",
+			[VISION_CHAT.provider]: "vision-key",
+		});
+		const fetch = vi.spyOn(globalThis, "fetch");
+		const chat = vi.spyOn(ai, "completeSimple");
+		const judge = new ChainJudge({ settings, registry, purpose: "test" });
+		const ask = (image: number) =>
+			judge.judge({
+				state: "look at this",
+				questions: { button: { type: "box", instructions: "the save button", image } },
+				images: [JEV_IMAGE],
+			});
+
+		await expect(ask(1)).rejects.toThrow('box question "button" names image 1, but the request has 1 images');
+		await expect(ask(0)).rejects.toThrow("judgment: no judge candidate answers box questions");
+		expect(fetch).not.toHaveBeenCalled();
+		expect(chat).not.toHaveBeenCalled();
 	});
 
 	it("reports an explicit error when no candidate supports image judgments", async () => {
@@ -699,6 +889,125 @@ describe("ChainJudge", () => {
 
 		expect(native).not.toHaveBeenCalled();
 		expect(chat).not.toHaveBeenCalled();
+	});
+
+	it("fails over within the native attempt bound and skips the timed-out route until its cooldown expires", async () => {
+		using fixture = nativeLoopback();
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const result = await new ChainJudge(fixture.deps).judge(request, { signal: AbortSignal.timeout(4_500) });
+		expect(result.model).toBe("loopback-backup");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+
+		fixture.recover();
+		await new ChainJudge(fixture.deps).judge(request);
+		expect(fixture.attempted.at(-1)).toBe("loopback-backup");
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+		const recovered = await new ChainJudge(fixture.deps).judge(request);
+		expect(recovered.model).toBe("loopback-primary");
+	});
+
+	it("never cuts off a slow native judge for an implicit candidate when no fallback is configured", async () => {
+		using fixture = nativeLoopback({ configuredFallback: false, delayPrimaryMs: 400 });
+		fixture.recover();
+		const result = await new ChainJudge(fixture.deps).judge({
+			state: "locate the scheduler",
+			questions: { level: TIER_QUESTION },
+		});
+		expect(result.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	});
+
+	it("bounds native response bodies that stop arriving after the headers", async () => {
+		using fixture = nativeLoopback({ hangBody: true });
+		const result = await new ChainJudge(fixture.deps).judge(
+			{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
+			{ signal: AbortSignal.timeout(4_500) },
+		);
+		expect(result.answers.level.choice).toBe("high");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+	}, 7_000);
+
+	it("bounds native attempts through withCandidate even when the callback omits options", async () => {
+		using fixture = nativeLoopback();
+		const result = await new ChainJudge(fixture.deps).withCandidate(candidate =>
+			candidate.judge({ state: "locate the scheduler", questions: { level: TIER_QUESTION } }),
+		);
+		expect(result.model).toBe("loopback-backup");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-backup"]);
+	}, 7_000);
+
+	it("propagates caller cancellation of a hung native attempt without failover or a cooldown", async () => {
+		using fixture = nativeLoopback();
+		const controller = new AbortController();
+		const request = { state: "locate the scheduler", questions: { level: TIER_QUESTION } };
+		const pending = new ChainJudge(fixture.deps).withCandidate(candidate => candidate.judge(request), {
+			signal: controller.signal,
+		});
+		await fixture.started;
+		const reason = new Error("caller stopped");
+		controller.abort(reason);
+		await expect(pending).rejects.toBe(reason);
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+		fixture.recover();
+		const recovered = await new ChainJudge(fixture.deps).judge(request);
+		expect(recovered.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary", "loopback-primary"]);
+	});
+
+	it.each(["credentials", "headers"] as const)(
+		"fails over when native %s resolution hangs and cancels that attempt",
+		async stage => {
+			using fixture = nativeLoopback();
+			using setup = hangNativeSetup(fixture.deps.registry, stage);
+			const result = await new ChainJudge(fixture.deps).judge(
+				{ state: "locate the scheduler", questions: { level: TIER_QUESTION } },
+				{ signal: AbortSignal.timeout(4_500) },
+			);
+			expect(result.model).toBe("loopback-backup");
+			expect(setup.state.signal?.aborted).toBe(true);
+			expect(fixture.attempted).toEqual(["loopback-backup"]);
+		},
+		7_000,
+	);
+
+	it("does not charge local image preparation to a native candidate's deadline", async () => {
+		using fixture = nativeLoopback();
+		fixture.recover();
+		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(imageResize, "fitImage").mockImplementation(async image => {
+			// AbortSignal.timeout uses the platform clock; image work must outlast that real deadline.
+			await Bun.sleep(400);
+			return { image, content: { top: 0, left: 0, bottom: 1, right: 1 } };
+		});
+		const result = await new ChainJudge(fixture.deps).judge({
+			state: "locate the scheduler",
+			questions: { level: TIER_QUESTION },
+			images: [IMAGE_ONE],
+		});
+		expect(result.model).toBe("loopback-primary");
+		expect(fixture.attempted).toEqual(["loopback-primary"]);
+	}, 7_000);
+
+	it("cancels local image preparation without starting a native request", async () => {
+		using fixture = nativeLoopback();
+		const started = Promise.withResolvers<void>();
+		const fitted = Promise.withResolvers<imageResize.FittedImage>();
+		vi.spyOn(ai, "nativeJudgmentAcceptsImages").mockReturnValue(false);
+		vi.spyOn(imageResize, "fitImage").mockImplementation(() => {
+			started.resolve();
+			return fitted.promise;
+		});
+		const controller = new AbortController();
+		const pending = new ChainJudge(fixture.deps).judge(
+			{ state: "locate the scheduler", questions: { level: TIER_QUESTION }, images: [IMAGE_ONE] },
+			{ signal: controller.signal },
+		);
+		await started.promise;
+		const reason = new Error("caller stopped");
+		controller.abort(reason);
+		await expect(pending).rejects.toBe(reason);
+		fitted.resolve({ image: IMAGE_ONE, content: { top: 0, left: 0, bottom: 1, right: 1 } });
+		expect(fixture.attempted).toEqual([]);
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {

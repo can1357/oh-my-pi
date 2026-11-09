@@ -1,7 +1,7 @@
-import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { CwdLookupMemo } from "../utils/forge-cli";
 import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
@@ -213,6 +213,8 @@ export function githubRepoSlugEquals(left: string | undefined, right: string): b
  * `--repo` against `GH_HOST` (github.com by default) — so an enterprise
  * checkout would silently be looked up on github.com. The repo URL carries
  * the host `gh` itself resolved from the remote.
+ *
+ * `gh`'s pick is corrected by {@link unrelatedOrigin}.
  */
 async function resolveRepoFromCwd(cwd: string, signal?: AbortSignal): Promise<string> {
 	const url = requireNonEmpty(await github.text(cwd, ["repo", "view", "--json", "url", "-q", ".url"], signal), "repo");
@@ -220,7 +222,57 @@ async function resolveRepoFromCwd(cwd: string, signal?: AbortSignal): Promise<st
 	if (!repo) {
 		throw new ToolError(`GitHub CLI returned an unrecognized repository URL: ${url}`);
 	}
-	return repo;
+	const origin = await unrelatedOrigin(cwd, repo, signal).catch(err => {
+		logger.debug("gh: origin remote check failed; keeping gh's repo pick", { cwd, repo, err: String(err) });
+		return undefined;
+	});
+	return origin ?? repo;
+}
+
+/** Whether `gh` ranks remote `name` above `origin` when no default repo is set. */
+function outranksOrigin(name: string): boolean {
+	const lower = name.toLowerCase();
+	return lower === "upstream" || lower === "github";
+}
+
+/** `gh repo view <origin> --json url,parent`. */
+interface GhOriginView {
+	url: string;
+	parent: { name: string; owner: { login: string } } | null;
+}
+
+/**
+ * The `origin` repository when `gh` picked an unrelated remote over it, else
+ * undefined.
+ *
+ * Without `gh repo set-default`, `gh` takes the first remote ranked
+ * `upstream` > `github` > `origin`, assuming `upstream` is the parent of an
+ * `origin` fork. When `origin` is not a fork of that pick — `upstream` is a
+ * project merged from, not contributed to — PRs and issues live on `origin`.
+ * Rejects when git or `gh` cannot answer (e.g. an `origin` on a non-GitHub
+ * host or behind an SSH alias); the caller then keeps the pick.
+ */
+async function unrelatedOrigin(cwd: string, picked: string, signal?: AbortSignal): Promise<string | undefined> {
+	const repository = vcs.git(cwd);
+	if (!repository) return undefined;
+	const remotes = await repository.remoteList(signal);
+	if (!remotes.includes("origin") || !remotes.some(outranksOrigin)) {
+		return undefined;
+	}
+	// `gh repo set-default` marks the chosen remote `gh-resolved`.
+	for (const name of remotes) {
+		if (await repository.configGet(`remote.${name}.gh-resolved`, signal)) return undefined;
+	}
+	const originUrl = await repository.remoteUrl("origin", signal);
+	if (!originUrl) return undefined;
+	const view = await github.json<GhOriginView>(cwd, ["repo", "view", originUrl, "--json", "url,parent"], signal);
+	const origin = repoFromUrl(view.url);
+	if (!origin || githubRepoSlugEquals(origin, picked)) return undefined;
+	if (view.parent) {
+		const parent = formatRepoRef(parseRepoRef(origin).host, `${view.parent.owner.login}/${view.parent.name}`);
+		if (githubRepoSlugEquals(parent, picked)) return undefined;
+	}
+	return origin;
 }
 
 export async function resolveGitHubRepo(
@@ -244,42 +296,11 @@ export async function resolveGitHubRepo(
 	return resolveRepoFromCwd(cwd, signal);
 }
 
-/**
- * Process-lifetime cache of `gh repo view` lookups keyed by absolute cwd.
- * Avoids repeated `gh` chatter when the same protocol handler or tool call
- * resolves the default repo many times in a row.
- *
- * The shared lookup is intentionally **not** bound to any caller's
- * AbortSignal. Cancelling one caller would otherwise kill the underlying
- * `gh repo view` for every concurrent waiter on the same cwd. Each caller's
- * signal is honored at the wait point via `untilAborted` instead, so an abort
- * unwinds only that caller.
- */
-export const DEFAULT_REPO_RESOLVED = new Map<string, string>();
-export const DEFAULT_REPO_INFLIGHT = new Map<string, Promise<string>>();
+const defaultRepoMemo = new CwdLookupMemo(cwd => resolveRepoFromCwd(cwd));
 
-export async function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
-	const key = path.resolve(cwd);
-	const ready = DEFAULT_REPO_RESOLVED.get(key);
-	if (ready) return ready;
-	let pending = DEFAULT_REPO_INFLIGHT.get(key);
-	if (!pending) {
-		pending = (async () => {
-			// No caller signal: this lookup is shared across every concurrent
-			// waiter on the same cwd.
-			const value = await resolveRepoFromCwd(cwd);
-			DEFAULT_REPO_RESOLVED.set(key, value);
-			return value;
-		})();
-		// Drop the in-flight slot on settle so failures don't poison the cache
-		// and so a successful resolution survives only in `DEFAULT_REPO_RESOLVED`.
-		void pending.then(
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-			() => DEFAULT_REPO_INFLIGHT.delete(key),
-		);
-		DEFAULT_REPO_INFLIGHT.set(key, pending);
-	}
-	return untilAborted(signal, pending);
+/** `gh repo view` for `cwd`, memoized per absolute cwd (see {@link CwdLookupMemo}). */
+export function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSignal): Promise<string> {
+	return defaultRepoMemo.get(cwd, signal);
 }
 
 /**

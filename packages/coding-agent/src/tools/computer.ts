@@ -23,6 +23,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
 import {
+	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
 	cfgComputerMaxHeight,
@@ -151,6 +152,7 @@ export function createComputerPrelude(
 	return {
 		name: "computer",
 		documentation: computerPreludeAssets.documentation,
+		inlineDocumentation: true,
 		javascript: computerPreludeAssets.javascript,
 		python: computerPreludeAssets.python,
 		exports: ["computer"],
@@ -258,6 +260,7 @@ function buildComputerSnapshot(session: ToolSession, readOnly: boolean): Compute
 			: configuredMaxHeight,
 		display: cfgComputerDisplay.get(session.settings),
 		readOnly,
+		backgroundFallback: cfgComputerBackgroundFallback.get(session.settings),
 		displayTurn: computerTurnInFlight(session.getEvalKernelOwnerId?.() ?? undefined),
 	};
 }

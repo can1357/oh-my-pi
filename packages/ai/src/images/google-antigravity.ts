@@ -4,7 +4,7 @@ import {
 	fetchAntigravityImageModel,
 } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
-import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
+import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { readSseJson } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -59,6 +59,7 @@ async function resolveTarget(
 	const endpoints = antigravityEndpoints(model);
 	const advertised = await fetchAntigravityImageModel({
 		token: credentials.accessToken,
+		projectId: credentials.projectId,
 		endpoint: endpoints.length === 1 ? endpoints[0] : undefined,
 		signal,
 		fetcher: fetchImpl,
@@ -99,7 +100,6 @@ function buildRequest(request: ImageGenerationRequest, model: string, projectId:
 				{ category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_ONLY_HIGH" },
 			],
 		},
-		requestType: "agent",
 		requestId: `agent-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
 		userAgent: "antigravity",
 	};
@@ -156,8 +156,7 @@ export async function generateAntigravityImage(
 					headers: {
 						Authorization: `Bearer ${credentials.accessToken}`,
 						"Content-Type": "application/json",
-						Accept: "text/event-stream",
-						"User-Agent": getAntigravityUserAgent(),
+						...getAntigravityHeaders(),
 					},
 					body: JSON.stringify(body),
 					signal: options.signal,

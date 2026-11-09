@@ -57,6 +57,14 @@ without applying alpha twice. Fully transparent pixels remain transparent;
 unscaled images retain their existing blending path. Re-encode when the terminal
 background RGB changes.
 
+### PTY dimensions
+
+`normalizePtyDimensions(cols, rows)` returns `{ cols, rows }` with fractional
+values truncated toward zero and dimensions clamped to 20–400 columns and
+5–200 rows. It shares the native bounds used by `PtySession.start`,
+`startArgv`, and `resize`. Use the returned dimensions when sizing a screen
+emulator so its viewport matches the native PTY.
+
 ### Lazy Windows path helpers
 
 Import `expandWindowsLongPath` and `getWindowsShortPath` from

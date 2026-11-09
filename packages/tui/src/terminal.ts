@@ -17,7 +17,7 @@ import {
 	parseGlyphProtocolReply,
 } from "./glyph-protocol";
 import { setKittyProtocolActive } from "./keys";
-import { encodeTspHelloQuery, parseTspMessage, TSP_PREFIX, type TspHello } from "./native/encode";
+import { encodeTspHelloQuery, parseTspMessage, TSP_OSC_PREFIX, TSP_PREFIX, type TspHello } from "./native/encode";
 import { StdinBuffer } from "./stdin-buffer";
 import {
 	isInsideTerminalMultiplexer,
@@ -45,13 +45,13 @@ const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
-
 /**
- * Terminal → program TSP messages through a Windows ConPTY: its input parser
- * discards APC strings but passes OSC through, so Tern writes
- * `ESC ] 877 ; tsp;… ESC \` there instead of `ESC _ tsp;… ESC \`.
+ * How long a relayed OSC/DCS/APC string waits for its terminator. Far longer
+ * than a lone ESC: a TSP event split across console-host reads must not be
+ * released mid-string (its tail would be typed into the composer), and a stall
+ * of the event loop longer than 75 ms fires the timer before the queued tail is read.
  */
-const TSP_OSC_PREFIX = `\x1b]877;${TSP_PREFIX.slice(2)}`;
+const WIN32_RELAYED_STRING_TIMEOUT_MS = 5000;
 
 /** How long a TSP hello waits for its reply inside tmux, which answers DA1 itself. */
 const TSP_TMUX_HELLO_TIMEOUT_MS = 1000;
@@ -774,7 +774,8 @@ type Da1SentinelOwner =
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
-	| { kind: "tsp" };
+	| { kind: "tsp" }
+	| { kind: "drain"; answered: () => void };
 
 let nextOsc99ProbeId = 1;
 
@@ -812,6 +813,22 @@ function isPrivateModeSupported(status: string): boolean {
 	return status !== "0" && status !== "4";
 }
 
+/**
+ * Restore the submit Enter of keystrokes the kernel buffered in cooked mode
+ * before raw input attached (#17820). The tty's ICRNL folds Enter into LF,
+ * which the editor reads as Shift+Enter, so a prompt typed or written during
+ * startup never submitted. The line break ending the typeahead (its ESC-free
+ * prefix; probe replies may follow in the same read) is the Enter that
+ * submits it; earlier breaks stay line breaks of the draft. CRLF (a Windows
+ * console line) is left alone.
+ */
+function restoreCookedEnter(data: string): string {
+	const escape = data.indexOf("\x1b");
+	const end = escape === -1 ? data.length : escape;
+	if (end === 0 || data.charCodeAt(end - 1) !== 0x0a || data.charCodeAt(end - 2) === 0x0d) return data;
+	return `${data.slice(0, end - 1)}\r${data.slice(end)}`;
+}
+
 /** Construction-time overrides for {@link ProcessTerminal}. */
 export interface ProcessTerminalOptions {
 	/**
@@ -838,6 +855,9 @@ export interface ProcessTerminalOptions {
  */
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
+	// Set when raw input attaches over a cooked tty: the next read starts with
+	// whatever the kernel line-buffered meanwhile. See restoreCookedEnter.
+	#cookedTypeahead = false;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
@@ -856,6 +876,8 @@ export class ProcessTerminal implements Terminal {
 	// Releases a relayed lone ESC the decoder held for a sequence tail that never came.
 	#win32PendingFlushTimer?: Timer;
 	#stdinBuffer?: StdinBuffer;
+	/** Parsed input path shared by direct VT and win32-input-mode relayed text. */
+	#stdinSequenceHandler?: (sequence: string) => void;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
@@ -1199,6 +1221,7 @@ export class ProcessTerminal implements Terminal {
 				this.#markTerminalDisconnected("stdin raw mode setup failed", err);
 				return;
 			}
+			this.#cookedTypeahead = !this.#wasRaw;
 		}
 		process.stdin.setEncoding("utf8");
 		process.stdin.on("end", this.#stdinEndHandler);
@@ -1387,7 +1410,30 @@ export class ProcessTerminal implements Terminal {
 		// skip the subparameter tail instead of dropping the whole report.
 		const inBandResizePattern = /^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?t$/;
 
-		this.#stdinBuffer.on("data", (sequence: string) => {
+		this.#stdinSequenceHandler = (sequence: string) => {
+			const decoder = this.#win32InputDecoder;
+			const win32Keys = decoder?.decode(sequence);
+			if (decoder && win32Keys !== undefined) {
+				clearTimeout(this.#win32PendingFlushTimer);
+				this.#win32PendingFlushTimer = undefined;
+				// The record is ESC-led, so it interrupts any direct reply still being
+				// reassembled, just as a raw escape does below. Decoded keys carry no ESC
+				// of their own and would otherwise be appended to that fragment.
+				this.#privateCsiResponseBuffer = "";
+				this.#inBandResizeBuffer = "";
+				this.#osc11ResponseBuffer = "";
+				this.#osc99ResponseBuffer = "";
+				this.#glyphProtocolReplyBuffer = "";
+				this.#tspReplyBuffer = "";
+				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
+				if (decoder.hasPendingSequence) {
+					this.#win32PendingFlushTimer = setTimeout(
+						() => this.#releaseWin32PendingSequence(),
+						decoder.hasPendingString ? WIN32_RELAYED_STRING_TIMEOUT_MS : WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
+					);
+				}
+				return;
+			}
 			// Fast path for plain-text bytes: every escape-probe regex below
 			// anchors on `^\x1b…`, so a byte that is not ESC can never match. A
 			// non-bracketed paste of N printable chars arrives as N per-scalar
@@ -1582,6 +1628,10 @@ export class ProcessTerminal implements Terminal {
 						if (owner.phase === this.#glyphProtocolPhase) this.#resolveGlyphProtocolSupport(false);
 						break;
 					}
+					case "drain": {
+						owner.answered();
+						break;
+					}
 					case "tsp": {
 						// DA1 before any `tsp;r` reply: the terminal doesn't speak TSP.
 						this.#resolveTspSupport(
@@ -1719,20 +1769,6 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
-				const decoder = this.#win32InputDecoder;
-				const win32Keys = decoder?.decode(sequence);
-				if (decoder && win32Keys !== undefined) {
-					clearTimeout(this.#win32PendingFlushTimer);
-					this.#win32PendingFlushTimer = undefined;
-					for (const key of win32Keys) this.#inputHandler(key);
-					if (decoder.hasPendingSequence) {
-						this.#win32PendingFlushTimer = setTimeout(
-							() => this.#releaseWin32PendingSequence(),
-							WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
-						);
-					}
-					return;
-				}
 				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
 				// recover it from the active layout before any keybinding sees an Alt chord.
 				const altGrText =
@@ -1741,7 +1777,8 @@ export class ProcessTerminal implements Terminal {
 						: undefined;
 				this.#inputHandler(altGrText ?? sequence);
 			}
-		});
+		};
+		this.#stdinBuffer.on("data", this.#stdinSequenceHandler);
 
 		// Re-wrap paste content with bracketed paste markers for existing editor
 		// handling. An Enter that shared the paste's stdin read rides along so
@@ -1757,6 +1794,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			if (this.#cookedTypeahead && data) {
+				this.#cookedTypeahead = false;
+				data = restoreCookedEnter(data);
+			}
 			// Recover modes reset by the host before the user's next paste. Not
 			// mid-paste: the host is plainly in 2004 then, and per-key reads would
 			// turn one paste into thousands of writes (#15757).
@@ -2083,10 +2124,13 @@ export class ProcessTerminal implements Terminal {
 			this.#safeWrite("\x1b[?9001h");
 			this.#win32InputDecoder = new Win32InputModeDecoder();
 			// The normalizer's expiry already spent the ESC wait; release the decoder's hold
-			// at once instead of starting a second window.
+			// at once instead of starting a second window. A held string keeps its own
+			// longer timer: releasing it here would type the rest of it as text.
 			this.#win32PasteNormalizer = new Win32PasteMarkerNormalizer(
 				data => this.#stdinBuffer?.process(data),
-				() => this.#releaseWin32PendingSequence(),
+				() => {
+					if (!this.#win32InputDecoder?.hasPendingString) this.#releaseWin32PendingSequence();
+				},
 			);
 			// A WSL pty is not always relayed by a console host (tmux, VS Code
 			// Remote-WSL, WSLg terminals). Those ignore 9001 and keep sending plain
@@ -2104,7 +2148,7 @@ export class ProcessTerminal implements Terminal {
 		clearTimeout(this.#win32PendingFlushTimer);
 		this.#win32PendingFlushTimer = undefined;
 		const pending = this.#win32InputDecoder?.flushPendingSequence() ?? [];
-		for (const key of pending) this.#inputHandler?.(key);
+		for (const key of pending) this.#stdinSequenceHandler?.(key);
 	}
 
 	#disableWin32InputMode(): void {
@@ -2302,12 +2346,29 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.on("data", onData);
 		const endTime = Date.now() + maxMs;
 
+		// A terminal that answers DA1 (`#sixelSupport` is set from its first
+		// reply) answers this one after everything it sent before reading it:
+		// replies to output already written (TSP acks for the last frames, which
+		// a terminal may send well after the idle window) are read here instead
+		// of reaching the shell as typed text.
+		let sentinelAnswered = true;
+		if (this.#sixelSupport !== undefined && !this.#dead) {
+			sentinelAnswered = false;
+			this.#da1SentinelOwners.push({
+				kind: "drain",
+				answered: () => {
+					sentinelAnswered = true;
+				},
+			});
+			this.#safeWrite("\x1b[c");
+		}
+
 		try {
 			while (true) {
 				const now = Date.now();
 				const timeLeft = endTime - now;
 				if (timeLeft <= 0) break;
-				if (now - lastDataTime >= idleMs) break;
+				if (sentinelAnswered && now - lastDataTime >= idleMs) break;
 				await new Promise(resolve => setTimeout(resolve, Math.min(idleMs, timeLeft)));
 			}
 		} finally {
@@ -2442,6 +2503,7 @@ export class ProcessTerminal implements Terminal {
 			this.#stdinBuffer.destroy();
 			this.#stdinBuffer = undefined;
 		}
+		this.#stdinSequenceHandler = undefined;
 
 		// Remove event handlers
 		if (this.#stdinDataHandler) {
@@ -2497,6 +2559,10 @@ export class ProcessTerminal implements Terminal {
 	#markTerminalDisconnected(reason: string, err?: unknown): void {
 		if (this.#dead) return;
 		this.#dead = true;
+		// The SIGHUP raised below is this instance's own disconnect, so postmortem
+		// must not write a report to fd 2 afterwards: a stalled stdout leaves that
+		// descriptor a full, blocking pty, and the write would hang before the exit.
+		postmortem.declareTerminalDead();
 		this.#disarmStdoutStallWatchdog();
 		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
 

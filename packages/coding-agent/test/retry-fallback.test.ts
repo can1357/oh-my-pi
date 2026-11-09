@@ -6,6 +6,7 @@ import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	type RetryFallbackResolutionContext,
+	parseRetryFallbackSelector,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
@@ -129,6 +130,31 @@ describe("retry fallback selector resolution", () => {
 		expect(candidates[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
 		// Bare entries carry no level so the failing turn's effort applies at switch time.
 		expect(candidates[1]?.thinkingLevel).toBeUndefined();
+	});
+
+	it("keeps the auto sentinel on parsed selectors instead of collapsing it to no suffix", () => {
+		const context = createContext({ default: ["openai/gpt-4o-mini:auto", "google/gemini-3.5-flash"] });
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini:auto", context.modelLookup)?.thinkingLevel).toBe("auto");
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini", context.modelLookup)?.thinkingLevel).toBeUndefined();
+		expect(parseRetryFallbackSelector("openai/gpt-4o-mini:low", context.modelLookup)?.thinkingLevel).toBe(
+			ThinkingLevel.Low,
+		);
+		const candidates = findRetryFallbackCandidates(context, "default", "xai-oauth/grok-4.7:high");
+		expect(candidates.map(candidate => candidate.thinkingLevel)).toEqual(["auto", undefined]);
+	});
+
+	it("matches an auto-keyed primary at any effort without demoting it behind a fixed effort", () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model claude-sonnet-4-5");
+		const auto = "anthropic/claude-sonnet-4-5:auto";
+		const low = "anthropic/claude-sonnet-4-5:low";
+		const context = createContext({
+			[auto]: ["openai/gpt-4o-mini"],
+			[low]: ["google/gemini-3.5-flash"],
+		});
+		expect(resolveRetryFallbackChainKey(context, auto, model)).toBe(auto);
+		expect(resolveRetryFallbackChainKey(context, low, model)).toBe(low);
+		expect(resolveRetryFallbackChainKey(context, "anthropic/claude-sonnet-4-5:high", model)).toBe(auto);
 	});
 
 	it("inherits the default chain only for chat roles and preserves explicit empty kind chains", () => {
@@ -258,6 +284,39 @@ describe("retry fallback selector resolution", () => {
 		// Model-selector keys stay effort-exact.
 		const modelKey = createContext({ [high]: ["openai/gpt-4o-mini"] });
 		expect(resolveRetryFallbackChainKey(modelKey, xhigh, model)).toBeUndefined();
+	});
+
+	it("does not adopt a model-kind role's chain for a chat session on the same model", () => {
+		const model = getBundledModel("google-antigravity", "gemini-3.8-flash");
+		const webModel = getBundledModel("web", "parallel");
+		if (!model || !webModel) throw new Error("Expected bundled Gemini and web-search test models");
+		const live = "google-antigravity/gemini-3.8-flash:medium";
+		const models = [model, webModel];
+		const roleModels: Record<string, string> = {
+			web: "google-antigravity/gemini-3.8-flash:minimal",
+			task: live,
+		};
+		const withWebChain = (chains: RetryFallbackResolutionContext["chains"]): RetryFallbackResolutionContext => ({
+			chains,
+			getModelRole: role => roleModels[role],
+			modelLookup: {
+				find: (provider, id) => models.find(m => m.provider === provider && m.id === id),
+				hasProvider: provider => models.some(m => m.provider === provider),
+			},
+		});
+
+		// `web` owns the live model at a different effort; its chain is search providers.
+		const webOnly = withWebChain({ web: ["web/parallel"] });
+		expect(resolveRetryFallbackChainKey(webOnly, live, model)).toBeUndefined();
+
+		// A matching chat role or `default` is still found past the kind role.
+		const withTask = withWebChain({ web: ["web/parallel"], task: ["google/gemini-3.5-flash"] });
+		expect(resolveRetryFallbackChainKey(withTask, live, model)).toBe("task");
+		const withDefault = withWebChain({ web: ["web/parallel"], default: ["google/gemini-3.5-flash"] });
+		expect(resolveRetryFallbackChainKey(withDefault, live, model)).toBe("default");
+
+		// A web-search caller names its role explicitly and keeps its own chain.
+		expect(resolveRetryFallbackChainKey(webOnly, live, model, "web")).toBe("web");
 	});
 });
 

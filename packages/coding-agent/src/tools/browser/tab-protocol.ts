@@ -42,6 +42,18 @@ export interface SessionSnapshot {
 	excludeWebP?: boolean;
 }
 
+/**
+ * The page an attach worker drives. `create`: open and own a background tab in a
+ * spawned browser or relay; `nearTargetId` selects the relay browser when given.
+ * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed.
+ */
+export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
+
+/** omp created the payload's page: closing the tab closes the page. */
+export function ownsPage(payload: WorkerInitPayload): boolean {
+	return payload.mode === "headless" || payload.page.kind !== "borrowed";
+}
+
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
@@ -70,7 +82,8 @@ export type WorkerInitPayload =
 			safeDir: string;
 			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
 			uploadDir: string;
-			targetId: string;
+			page: AttachPage;
+			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -88,18 +101,13 @@ export type WorkerInitPayload =
 			 * previously force-killed the tab). Never set for first-time Electron attach.
 			 */
 			recover?: boolean;
-			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
-			emulateFocus?: boolean;
-			/**
-			 * Whether the worker may raise this tab before capturing a screenshot. Unset
-			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
-			 */
-			activateForScreenshot?: boolean;
 			/**
 			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
 			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
 			 */
 			userDriven?: boolean;
+			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
+			relay?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -110,7 +118,8 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
-	| { type: "close" };
+	/** `keepPage` leaves a page omp created open in its browser; only the worker's hold on it goes. */
+	| { type: "close"; keepPage?: boolean };
 
 export interface ReadyInfo {
 	url: string;

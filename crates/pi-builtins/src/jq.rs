@@ -15,12 +15,12 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{ArgMatches, Command, CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 use jaq_json::Val;
 use pi_vfs::{BlockingFs, File, TempOptions};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, Utility};
 
 use cli::Cli;
 use filter::{FileReports, OnError};
@@ -278,7 +278,6 @@ mod filter {
 		Ctx, DataT, Error as CoreError, Exn, RunPtr, ValT as _, Vars, box_iter::box_once, compile,
 		data, load, native,
 	};
-	use jaq_fmts::write::tabular::Row;
 	use jaq_std::{
 		ValT as _,
 		input::{self, Inputs, RcIter},
@@ -296,6 +295,12 @@ mod filter {
 	impl DataT for Kind {
 		type Data<'a> = &'a Data<'a>;
 		type V<'a> = Val;
+
+		const CHECK_CANCELLATION: bool = true;
+
+		fn cancelled(data: &Self::Data<'_>) -> bool {
+			data.session.cancelled()
+		}
 	}
 
 	/// What natives see while a filter runs.
@@ -382,8 +387,8 @@ def tonumber: tonumber_;
 				box_once(Ok(Val::from(cv.0.data().session.input.lines.get())))
 			}),
 			("tonumber_", native::v(0), |cv| box_once(tonumber(cv.1).map_err(Exn::from))),
-			("@csv", native::v(0), |cv| box_once(table_row(&cv.1, "CSV", Row::write_csv))),
-			("@tsv", native::v(0), |cv| box_once(table_row(&cv.1, "TSV", Row::write_tsv))),
+			("@csv", native::v(0), |cv| box_once(table_row(&cv.1, true))),
+			("@tsv", native::v(0), |cv| box_once(table_row(&cv.1, false))),
 		]
 	}
 
@@ -423,16 +428,52 @@ def tonumber: tonumber_;
 		num.map(Val::Num).ok_or_else(|| CoreError::typ(v, "number"))
 	}
 
-	/// An array of scalars as one CSV or TSV row.
-	fn table_row<'a>(
-		v: &Val,
-		format: &str,
-		write: fn(&Row, &mut dyn io::Write) -> io::Result<()>,
-	) -> jaq_core::ValX<'a, Val> {
-		let fail = |e| CoreError::str(format_args!("cannot serialise {v} as {format}: {e}"));
-		let row = Row::try_from(v).map_err(fail)?;
+	/// jq's tabular formats accept only arrays of scalars; null is an empty field.
+	fn table_row<'a>(v: &Val, csv: bool) -> jaq_core::ValX<'a, Val> {
+		let format = if csv { "CSV" } else { "TSV" };
+		let fail = |message| CoreError::str(format_args!("cannot serialise {v} as {format}: {message}"));
+		let Val::Arr(row) = v else {
+			return Err(fail("expected an array").into());
+		};
 		let mut buf = Vec::new();
-		write(&row, &mut buf).expect("writing to memory cannot fail");
+		for (i, field) in row.iter().enumerate() {
+			if i != 0 {
+				buf.push(if csv { b',' } else { b'\t' });
+			}
+			match field {
+				Val::Null => {},
+				Val::Num(jaq_json::Num::Float(x)) if x.is_nan() => {},
+				Val::TStr(s) | Val::BStr(s) if csv => {
+					buf.push(b'"');
+					let mut start = 0;
+					for quote in memchr::memchr_iter(b'"', s) {
+						buf.extend_from_slice(&s[start..quote]);
+						buf.extend_from_slice(b"\"\"");
+						start = quote + 1;
+					}
+					buf.extend_from_slice(&s[start..]);
+					buf.push(b'"');
+				},
+				Val::TStr(s) | Val::BStr(s) => {
+					for byte in s.iter() {
+						match byte {
+							b'\t' => buf.extend_from_slice(b"\\t"),
+							b'\n' => buf.extend_from_slice(b"\\n"),
+							b'\r' => buf.extend_from_slice(b"\\r"),
+							b'\\' => buf.extend_from_slice(b"\\\\"),
+							byte => buf.push(*byte),
+						}
+					}
+				},
+				Val::Bool(_) | Val::Num(_) => {
+					output::Printer::compact().write(&mut buf, field).map_err(|e| match e {
+						output::WriteError::Key(key) => CoreError::typ(key, "object key"),
+						output::WriteError::Io(e) => CoreError::str(e),
+					})?;
+				},
+				Val::Arr(_) | Val::Obj(_) => return Err(fail("expected a scalar field").into()),
+			}
+		}
 		Ok(Val::utf8_str(buf))
 	}
 
@@ -470,7 +511,7 @@ def tonumber: tonumber_;
 		let read = |import: load::Import<&str, PathBuf>| -> Result<File<String, PathBuf>, String> {
 			let path = find_import(fs, &import, paths, "jq")?;
 			let code = fs.read_to_string(&path).map_err(|e| e.to_string())?;
-			counts_lines.set(counts_lines.get() || code.contains("input_line_number"));
+			counts_lines.update(|v| v || code.contains("input_line_number"));
 			Ok(File { code, path })
 		};
 		let loader = Loader::new(defs).with_read(read);
@@ -589,10 +630,7 @@ def tonumber: tonumber_;
 	/// A plain string literal without interpolation or format.
 	fn term_str<'t, 's>(term: &'t load::parse::Term<&'s str>) -> Option<&'t &'s str> {
 		match term {
-			load::parse::Term::Str(None, parts) => match &parts[..] {
-				[load::lex::StrPart::Str(text)] => Some(text),
-				_ => None,
-			},
+			load::parse::Term::Str(None, parts) if let [load::lex::StrPart::Str(text)] = &parts[..] => Some(text),
 			_ => None,
 		}
 	}
@@ -645,8 +683,8 @@ def tonumber: tonumber_;
 		// next input arrives
 		let mut failed = None;
 		for item in inputs {
-			// host abort/timeout: stdin reads observe the cancel flag themselves,
-			// but file/slurped inputs and long-running filters do not
+			// Stdin reads observe cancellation; file/slurped inputs need this
+			// check, and the patched jaq-core polls during filter evaluation.
 			if session.cancelled() {
 				break;
 			}
@@ -687,13 +725,18 @@ def tonumber: tonumber_;
 	impl Display for FileReports {
 		fn fmt(&self, f: &mut Formatter) -> fmt::Result {
 			let Self(file, reports) = self;
-			let idx = codesnake::LineIndex::new(&file.code);
-			reports.iter().try_for_each(|e| {
-				writeln!(f, "Error: {}", e.message)?;
-				let block = e.to_block(&idx);
-				writeln!(f, "{}[{}]", block.prologue(), file.path.display())?;
-				writeln!(f, "{}{}", block, block.epilogue())
-			})
+			for report in reports {
+				writeln!(f, "Error: {}", report.message)?;
+				for (range, text) in &report.labels {
+					let offset = range.start.min(file.code.len());
+					let prefix = &file.code.as_bytes()[..offset];
+					let line = memchr::memchr_iter(b'\n', prefix).count() + 1;
+					let start = memchr::memrchr(b'\n', prefix).map_or(0, |newline| newline + 1);
+					let column = String::from_utf8_lossy(&prefix[start..]).chars().count() + 1;
+					writeln!(f, "{}:{line}:{column}: {text}", file.path.display())?;
+				}
+			}
+			Ok(())
 		}
 	}
 
@@ -721,57 +764,35 @@ def tonumber: tonumber_;
 		errs.collect()
 	}
 
-	type StringColors = Vec<(String, Option<Color>)>;
-
 	#[derive(Debug)]
 	struct Report {
 		message: String,
-		labels:  Vec<(core::ops::Range<usize>, StringColors, Color)>,
-	}
-
-	#[derive(Clone, Debug)]
-	enum Color {
-		Yellow,
-		Red,
-	}
-
-	impl Color {
-		fn apply(&self, d: impl Display) -> String {
-			use yansi::{Color, Paint};
-			let color = match self {
-				Self::Yellow => Color::Yellow,
-				Self::Red => Color::Red,
-			};
-			d.fg(color).to_string()
-		}
+		labels:  Vec<(core::ops::Range<usize>, String)>,
 	}
 
 	fn report_io(code: &str, (path, error): (&str, String)) -> Report {
 		let path_range = load::span(code, path);
 		Report {
 			message: format!("could not load file {}: {}", path, error),
-			labels:  [(path_range, [(error, None)].into(), Color::Red)].into(),
+			labels:  [(path_range, error)].into(),
 		}
 	}
 
 	fn report_lex(code: &str, (expected, found): load::lex::Error<&str>) -> Report {
 		// truncate found string to its first character
-		let found = &found[..found.char_indices().nth(1).map_or(found.len(), |(i, _)| i)];
+		let found = &found[..found.ceil_char_boundary(1)];
 
 		let found_range = load::span(code, found);
 		let found = match found {
-			"" => [("unexpected end of input".to_string(), None)].into(),
-			c => [("unexpected character ", None), (c, Some(Color::Red))]
-				.map(|(s, c)| (s.into(), c))
-				.into(),
+			"" => "unexpected end of input".to_string(),
+			c => format!("unexpected character {c}"),
 		};
-		let label = (found_range, found, Color::Red);
+		let label = (found_range, found);
 
 		let labels = match expected {
 			load::lex::Expect::Delim(open) => {
-				let text = [("unclosed delimiter ", None), (open, Some(Color::Yellow))]
-					.map(|(s, c)| (s.into(), c));
-				Vec::from([(load::span(code, open), text.into(), Color::Yellow), label])
+				let text = format!("unclosed delimiter {open}");
+				Vec::from([(load::span(code, open), text), label])
 			},
 			_ => Vec::from([label]),
 		};
@@ -787,11 +808,9 @@ def tonumber: tonumber_;
 		} else {
 			"unexpected token"
 		};
-		let found = [(found.to_string(), None)].into();
-
 		Report {
 			message: format!("expected {}", expected.as_str()),
-			labels:  Vec::from([(found_range, found, Color::Red)]),
+			labels:  Vec::from([(found_range, found.to_string())]),
 		}
 	}
 
@@ -804,38 +823,8 @@ def tonumber: tonumber_;
 			("foreach", Filter(arity)) => wnoa("2 or 3", arity),
 			(_, undefined) => format!("undefined {}", undefined.as_str()),
 		};
-		let found = [(message.clone(), None)].into();
-
-		Report { message, labels: Vec::from([(found_range, found, Color::Red)]) }
-	}
-
-	type CodeBlock = codesnake::Block<codesnake::CodeWidth<String>, String, Option<Color>>;
-
-	impl Report {
-		fn to_block(&self, idx: &codesnake::LineIndex) -> CodeBlock {
-			use codesnake::{Block, CodeWidth, Label};
-			let color_maybe = |(text, color): (_, Option<Color>)| match color {
-				None => text,
-				Some(color) => color.apply(text).to_string(),
-			};
-			let labels = self.labels.iter().cloned().map(|(range, text, color)| {
-				let text = text.into_iter().map(color_maybe).collect::<Vec<_>>();
-				Label::new(range)
-					.with_text(text.join(""))
-					.with_style(Some(color))
-			});
-			Block::new(idx, labels)
-				.unwrap()
-				.map_code(|c| {
-					let c = c.replace('\t', "    ");
-					let w = xutf::width_str(&c);
-					CodeWidth::new(c, core::cmp::max(w, 1))
-				})
-				.with_paint(|f, color, value| match color {
-					Some(color) => write!(f, "{}", color.apply(value)),
-					None => write!(f, "{value}"),
-				})
-		}
+		let labels = Vec::from([(found_range, message.clone())]);
+		Report { message, labels }
 	}
 
 }
@@ -869,7 +858,33 @@ mod read {
 	}
 
 	pub fn json_array(fs: &BlockingFs, path: &Path) -> io::Result<Val> {
-		parse_many(&load_file(fs, path)?).map(|r| r.map_err(invalid_data)).collect()
+		parse_many(json_bytes(&load_file(fs, path)?)).map(|r| r.map_err(invalid_data)).collect()
+	}
+
+	/// Ignore one UTF-8 BOM at the start of each JSON input, never within a value.
+	fn json_bytes(bytes: &[u8]) -> &[u8] {
+		bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
+	}
+
+	/// Peek at most three bytes, including across short buffers, without copying the input.
+	fn json_reader(mut read: impl BufRead) -> io::Result<impl BufRead> {
+		let mut prefix = [0; 3];
+		let mut len = 0;
+		while len < prefix.len() {
+			let available = read.fill_buf()?;
+			let n = available.len().min(prefix.len() - len);
+			if n == 0 {
+				break;
+			}
+			prefix[len..len + n].copy_from_slice(&available[..n]);
+			read.consume(n);
+			len += n;
+			if prefix[..len] != b"\xef\xbb\xbf"[..len] {
+				break;
+			}
+		}
+		let keep = if prefix == *b"\xef\xbb\xbf" { 0 } else { len };
+		Ok(io::Cursor::new(prefix).take(keep as u64).chain(read))
 	}
 
 	pub type Vals<'a> = Box<dyn Iterator<Item = io::Result<Val>> + 'a>;
@@ -909,7 +924,7 @@ mod read {
 				enter();
 				let mut buf = Vec::new();
 				read.read_to_end(&mut buf)?;
-				pos.lines.set(bytecount::count(&buf, b'\n'));
+				pos.lines.set(memchr::memchr_iter(b'\n', &buf).count());
 				Ok(Val::utf8_str(buf))
 			}));
 		}
@@ -937,7 +952,7 @@ mod read {
 				for (name, bytes) in files {
 					pos.enter(name);
 					all.extend_from_slice(&bytes);
-					pos.lines.set(bytecount::count(&bytes, b'\n'));
+					pos.lines.set(memchr::memchr_iter(b'\n', &bytes).count());
 				}
 				Ok(Val::utf8_str(all))
 			}));
@@ -950,7 +965,7 @@ mod read {
 				if raw || count_lines {
 					values(raw, &bytes[..], lines, count_lines)
 				} else {
-					Box::new(parse_many(bytes).map(|r| r.map_err(invalid_data)))
+					Box::new(parse_many(json_bytes(bytes)).map(|r| r.map_err(invalid_data)))
 				}
 			})
 		});
@@ -984,10 +999,14 @@ mod read {
 	) -> Vals<'a> {
 		if raw {
 			Box::new(RawLines { read, lines })
-		} else if count_lines {
-			Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
 		} else {
-			Box::new(read_many(read))
+			match json_reader(read) {
+				Ok(read) if count_lines => {
+					Box::new(read_many(LineFeed { read, line: Vec::new(), pos: 0, lines }))
+				},
+				Ok(read) => Box::new(read_many(read)),
+				Err(error) => Box::new(core::iter::once(Err(error))),
+			}
 		}
 	}
 
@@ -1005,12 +1024,9 @@ mod read {
 			match self.read.read_until(b'\n', &mut line) {
 				Ok(0) => None,
 				Ok(_) => {
-					if line.last() == Some(&b'\n') {
-						line.pop();
-						if line.last() == Some(&b'\r') {
-							line.pop();
-						}
-						self.lines.set(self.lines.get() + 1);
+					if line.pop_if(|byte| *byte == b'\n').is_some() {
+						line.pop_if(|byte| *byte == b'\r');
+						self.lines.update(|v| v + 1);
 					}
 					Some(Ok(Val::utf8_str(line)))
 				},
@@ -1046,7 +1062,7 @@ mod read {
 				self.pos = 0;
 				self.read.read_until(b'\n', &mut self.line)?;
 				if self.line.last() == Some(&b'\n') {
-					self.lines.set(self.lines.get() + 1);
+					self.lines.update(|v| v + 1);
 				}
 			}
 			Ok(&self.line[self.pos..])
@@ -1067,6 +1083,27 @@ mod read {
 			Box::new(core::iter::once_with(move || iter.collect()))
 		} else {
 			Box::new(iter)
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::io::{BufReader, Cursor, Read};
+
+		#[test]
+		fn json_bom_can_span_input_buffers_without_losing_other_prefixes() {
+			for input in [
+				&b"\xef\xbb\xbf{\"ok\":true}"[..],
+				&b"123"[..],
+				&b"\xef"[..],
+				&b"\xef\xbb"[..],
+				&b"\xef\xbb\xbf\xef\xbb\xbf1"[..],
+			] {
+				let mut read = super::json_reader(BufReader::with_capacity(1, Cursor::new(input))).unwrap();
+				let mut output = Vec::new();
+				read.read_to_end(&mut output).unwrap();
+				assert_eq!(output, super::json_bytes(input));
+			}
 		}
 	}
 }
@@ -1375,9 +1412,6 @@ impl Utility for Jq {
 	const USAGE_ERROR: u8 = 2;
 
 	fn run(self, host: &mut Host) -> i32 {
-		color::init();
-		color::set(false);
-
 		let mut cli = self.cli;
 		resolve_cli_paths(&mut cli, host);
 		let stdout_is_terminal = host.stdout.is_terminal();
@@ -1387,7 +1421,6 @@ impl Utility for Jq {
 		match real_main(&cli, host, &mut stdout, color) {
 			Ok(exit) => exit,
 			Err(error) => {
-				color::set(cli.color_if(|| stdout_is_terminal));
 				let _ = write!(host.stderr, "{error}");
 				error.report()
 			},
@@ -1450,23 +1483,6 @@ impl Session {
 		if let Some(flag) = &self.reported_error {
 			flag.store(true, Ordering::Relaxed);
 		}
-	}
-}
-
-mod color {
-	use std::{cell::Cell, sync::Once};
-
-	thread_local! {
-		static COLOR: Cell<bool> = const { Cell::new(false) };
-	}
-
-	pub fn init() {
-		static ONCE: Once = Once::new();
-		ONCE.call_once(|| yansi::whenever(yansi::Condition(|| COLOR.with(Cell::get))));
-	}
-
-	pub fn set(on: bool) {
-		COLOR.with(|color| color.set(on));
 	}
 }
 
@@ -1795,14 +1811,17 @@ fn run_tests(
 }
 
 
-/// Creates the `jq` builtin registration.
-pub(crate) fn jq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Jq, SE>()
-}
-
 #[cfg(test)]
 mod tests {
-	use std::{collections::HashMap, io, io::Write, path::PathBuf};
+	use std::{
+		collections::HashMap,
+		io,
+		io::Write,
+		path::PathBuf,
+		sync::{atomic::Ordering, mpsc},
+		thread,
+		time::{Duration, Instant},
+	};
 
 	use clap::Parser as _;
 
@@ -1901,6 +1920,32 @@ mod tests {
 	}
 
 	#[test]
+	fn cancellation_stops_a_filter_before_its_first_output() {
+		let (mut host, capture) = Host::for_test("jq", "", ".");
+		let cancel = host.cancel_flag_for_test();
+		let stdout = capture.stdout_buffer();
+		let (tx, rx) = mpsc::channel();
+		let worker = thread::spawn(move || {
+			let jq = Jq::try_parse_from([
+				"jq", "-n", "--unbuffered", "0, ([range(0; 1000000000)] | length)",
+			])
+			.expect("valid filter");
+			let code = jq.run(&mut host);
+			tx.send((code, capture.out())).expect("test receiver");
+		});
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while stdout.lock().is_empty() && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(5));
+		}
+		assert_eq!(&*stdout.lock(), b"0\n", "filter did not begin evaluation");
+		cancel.store(true, Ordering::Relaxed);
+		let (code, output) = rx.recv_timeout(Duration::from_secs(2)).expect("cancelled filter still running");
+		worker.join().expect("jq worker");
+		assert_eq!(code, 0);
+		assert_eq!(output, "0\n", "cancelled filter must not publish a partial array length");
+	}
+
+	#[test]
 	fn slurp_collects_documents() {
 		let (code, out, _) = run_jq(&["-s", "length"], "{\"a\":1}\n{\"b\":2}\n");
 		assert_eq!(code, 0);
@@ -1979,6 +2024,65 @@ mod tests {
 		] {
 			let (code, out, err) = run_jq(&["-c", filter], input);
 			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{filter} on {input}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_scalar_fields() {
+		let input = r#"[null,true,false,0,-12,1.5,9007199254740993,"","text"]"#;
+		for (format, expected) in [
+			("@csv", ",true,false,0,-12,1.5,9007199254740993,\"\",\"text\"\n"),
+			("@tsv", "\ttrue\tfalse\t0\t-12\t1.5\t9007199254740993\t\ttext\n"),
+		] {
+			let (code, out, err) = run_jq(&["-r", format], input);
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn csv_quotes_strings_and_doubles_inner_quotes() {
+		let input = r#"["a,\"b\"\r\n\\z","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@csv"], input);
+		assert_eq!((code, out.as_str(), err.as_str()), (0, "\"a,\"\"b\"\"\r\n\\z\",\"é\"\n", ""));
+	}
+
+	#[test]
+	fn tsv_escapes_only_tab_newline_carriage_return_and_backslash() {
+		let input = r#"["\t\n\r\\","literal\\t","a,\"b\"","é"]"#;
+		let (code, out, err) = run_jq(&["-r", "@tsv"], input);
+		let expected = "\\t\\n\\r\\\\\tliteral\\\\t\ta,\"b\"\té\n";
+		assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""));
+	}
+
+	#[test]
+	fn tabular_formats_accept_empty_rows() {
+		for format in ["@csv", "@tsv"] {
+			let (code, out, err) = run_jq(&["-r", format], "[]");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, "\n", ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_render_nan_as_empty_and_clamp_infinity() {
+		for (format, expected) in [
+			("@csv", ",1.7976931348623157e+308,-1.7976931348623157e+308\n"),
+			("@tsv", "\t1.7976931348623157e+308\t-1.7976931348623157e+308\n"),
+		] {
+			let filter = format!("[nan, infinite, -infinite] | {format}");
+			let (code, out, err) = run_jq(&["-nr", &filter], "");
+			assert_eq!((code, out.as_str(), err.as_str()), (0, expected, ""), "{format}");
+		}
+	}
+
+	#[test]
+	fn tabular_formats_reject_nonarrays_and_nested_containers() {
+		for format in ["@csv", "@tsv"] {
+			for input in ["null", "true", "1", "\"text\"", "{}", "[[]]", "[{}]", "[1,[]]", "[1,{}]"] {
+				let (code, out, err) = run_jq(&["-r", format], input);
+				assert_eq!(code, 5, "{format} on {input}: {err}");
+				assert!(out.is_empty(), "{format} on {input}: {out:?}");
+				assert!(err.contains("cannot serialise"), "{format} on {input}: {err}");
+			}
 		}
 	}
 

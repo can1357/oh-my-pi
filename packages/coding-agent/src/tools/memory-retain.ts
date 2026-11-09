@@ -6,8 +6,8 @@ import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config"
 import retainDescription from "../prompts/tools/retain.md" with { type: "text" };
 import type { ToolSession } from ".";
 
+import { isGlobalMemoryScopeAvailable } from "../memory-backend/global-scope";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { isGlobalMemoryScopeAvailable } from "../mnemopi/settings";
 
 const memoryRetainSchemaBase = type({
 	items: type({
@@ -19,7 +19,7 @@ const memoryRetainSchemaBase = type({
 		.describe("memories to retain"),
 });
 
-/** Offered only where a shared bank exists; see {@link isGlobalMemoryScopeAvailable}. */
+/** Offered only where every project recalls a global item; see {@link isGlobalMemoryScopeAvailable}. */
 const memoryRetainSchemaWithScope = type({
 	items: type({
 		content: type("string").describe("information to remember"),
@@ -43,10 +43,10 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		(args as Partial<MemoryRetainParams>).items?.some(item => item.scope === "global") ? "write" : "read";
 	readonly label = "Retain";
 	get description(): string {
-		return prompt.render(retainDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session.settings) });
+		return prompt.render(retainDescription, { globalScope: isGlobalMemoryScopeAvailable(this.session) });
 	}
 	get parameters(): MemoryRetainSchema {
-		return isGlobalMemoryScopeAvailable(this.session.settings) ? memoryRetainSchemaWithScope : memoryRetainSchemaBase;
+		return isGlobalMemoryScopeAvailable(this.session) ? memoryRetainSchemaWithScope : memoryRetainSchemaBase;
 	}
 	readonly strict = true;
 	readonly loadMode = "discoverable";
@@ -61,7 +61,7 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		return new MemoryRetainTool(session);
 	}
 
-	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
+	async execute(toolCallId: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = cfgMemoryBackend.get(this.session.settings);
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();
@@ -128,17 +128,13 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 		if (!state) {
 			throw new Error("Hindsight backend is not initialised for this session.");
 		}
+		// Check before queueing anything, so a disabled or unsupported global scope rejects the whole batch.
 		if (params.items.some(item => item.scope === "global")) {
-			throw new Error("Global memory scope is only available with the Mnemopi backend.");
+			state.assertGlobalRetainAvailable();
 		}
 
-		// Push every item onto the session-owned queue and return immediately.
-		// The queue flushes either when it reaches its batch threshold or when
-		// its debounce timer fires. If the eventual batch fails, the queue
-		// surfaces a UI-only warning notice — the LLM is not informed.
-		for (const item of params.items) {
-			state.enqueueRetain(item.content, item.context);
-		}
+		// Acknowledge only once the whole call is on disk; delivery happens on a later flush.
+		await state.enqueueRetain(toolCallId, params.items);
 
 		const count = params.items.length;
 		const noun = count === 1 ? "memory" : "memories";

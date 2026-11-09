@@ -20,6 +20,7 @@
  * tokens only, so cost is priced from the catalog model.
  */
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import * as AIError from "../error";
 import { embeddedImageDataUrl } from "../images/shared";
 import predicateTemplate from "./openai-decisions-predicate.md" with { type: "text" };
 import { type Answer, type Question, tokenUsage } from "./types";
@@ -60,6 +61,8 @@ function encodeQuestion(name: string, question: Question): DecisionQuestion {
 				instructions: question.instructions,
 				levels: question.criteria.map(label => ({ label })),
 			};
+		case "box":
+			throw new AIError.ValidationError(`OpenAI Decisions has no box question type (question "${name}")`);
 	}
 }
 

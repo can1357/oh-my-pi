@@ -9,6 +9,7 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import { $env, asRecord } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
+import { normalizeMcpToolPayload } from "../../../exa/mcp-client";
 import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -154,49 +155,6 @@ function isSearchResponse(data: unknown): data is ExaSearchResponse {
 		data !== null &&
 		("results" in data || "statuses" in data || "costDollars" in data || "searchTime" in data)
 	);
-}
-
-function parseJsonContent(text: string): unknown | null {
-	try {
-		const parsed: unknown = JSON.parse(text);
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-function normalizeExaMcpPayload(payload: unknown): unknown {
-	const candidates: unknown[] = [];
-	const root = asRecord(payload);
-
-	if (root) {
-		if (root.structuredContent !== undefined) candidates.push(root.structuredContent);
-		if (root.data !== undefined) candidates.push(root.data);
-		if (root.result !== undefined) candidates.push(root.result);
-		candidates.push(root);
-
-		const content = root.content;
-		if (Array.isArray(content)) {
-			for (const item of content) {
-				const part = asRecord(item);
-				if (!part) continue;
-				const text = part.text;
-				if (typeof text !== "string" || text.trim().length === 0) continue;
-				const parsed = parseJsonContent(text);
-				if (parsed !== null) candidates.push(parsed);
-			}
-		}
-	} else {
-		candidates.push(payload);
-	}
-
-	for (const candidate of candidates) {
-		if (isSearchResponse(candidate)) {
-			return candidate;
-		}
-	}
-
-	return payload;
 }
 
 function parseOptionalField(section: string, label: string): string | null | undefined {
@@ -418,7 +376,7 @@ async function callExaMcpSearch(params: ExaSearchParams): Promise<ExaSearchRespo
 		}
 		throw new SearchProviderError("exa", message || "Exa MCP returned an error");
 	}
-	const responsePayload = normalizeExaMcpPayload(mcpResponse.result);
+	const responsePayload = normalizeMcpToolPayload(mcpResponse.result);
 	if (isSearchResponse(responsePayload)) {
 		return responsePayload;
 	}

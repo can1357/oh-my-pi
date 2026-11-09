@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,11 +9,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { RACY_STAMP_WINDOW_MS } from "@oh-my-pi/pi-coding-agent/tools/racy-stamp";
 import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -39,6 +41,15 @@ function writeFileWithMtime(filePath: string, content: string, mtimeMs: number):
 	fs.writeFileSync(filePath, content);
 	const mtime = new Date(mtimeMs);
 	fs.utimesSync(filePath, mtime, mtime);
+}
+
+/** Makes `Bun.file(filePath).stat()` answer `stat()`, as a filesystem whose timestamps the test picks. */
+function reportStat(filePath: string, stat: () => fs.Stats): void {
+	const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(filePath));
+	const realStat = prototype.stat;
+	vi.spyOn(prototype, "stat").mockImplementation(function (this: Bun.BunFile) {
+		return this.name === filePath ? Promise.resolve(stat()) : realStat.call(this);
+	});
 }
 
 function shellEscape(value: string): string {
@@ -982,7 +993,11 @@ describe("Coding Agent Tools", () => {
 			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
 			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
 
-			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			// With the column cap on, the line's cut display fits the page; only an uncapped read hits this branch.
+			const uncappedReadTool = wrapToolWithMetaNotice(
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }))),
+			);
+			const result = await uncappedReadTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Hashline output requires full lines");
@@ -1021,7 +1036,8 @@ describe("Coding Agent Tools", () => {
 			const artifactsDir = path.join(testDir, "artifact-limit-session");
 			fs.mkdirSync(artifactsDir, { recursive: true });
 			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
-			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+			// Uncapped, so the 60KB line is charged its full size rather than its cut display.
+			const artifactSession = createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }), {
 				localProtocolOptions: {
 					getArtifactsDir: () => artifactsDir,
 					getSessionId: () => "artifact-limit-session",
@@ -1039,28 +1055,26 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("Use :3 to continue");
 		});
 
-		it("should spill oversized read output to an artifact", async () => {
+		it("pages oversized file reads at the spill threshold instead of eliding their middle (#16277)", async () => {
 			const testFile = path.join(testDir, "oversized-read.txt");
-			const line = "0123456789".repeat(20);
-			fs.writeFileSync(testFile, `${Array.from({ length: 3500 }, () => line).join("\n")}\n`);
+			const row = (n: number) => `row-${String(n).padStart(4, "0")} ${"0123456789".repeat(20)}`;
+			fs.writeFileSync(testFile, `${Array.from({ length: 3500 }, (_, i) => row(i + 1)).join("\n")}\n`);
 			const spillSettings = Settings.isolated({
 				"tools.artifactSpillThreshold": 20,
 				"tools.artifactTailBytes": 1,
 				"tools.artifactTailLines": 10,
 				"tools.artifactHeadBytes": 1,
 			});
-			const defaultLimit = cfgReadDefaultLimit.get(spillSettings);
 			const spillManager = SessionManager.create(testDir, path.join(testDir, "spill-sessions"));
 			await spillManager.ensureOnDisk();
-			const spillSession = createTestToolSession(testDir, spillSettings, {
-				getSessionFile: () => spillManager.getSessionFile() ?? null,
-				getArtifactsDir: () => spillManager.getArtifactsDir(),
-				localProtocolOptions: {
-					getArtifactsDir: () => spillManager.getArtifactsDir(),
-					getSessionId: () => spillManager.getSessionId(),
-				},
-			});
-			const spillReadTool = wrapToolWithMetaNotice(new ReadTool(spillSession));
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => spillManager.getArtifactsDir(),
+					}),
+				),
+			);
 			const context = {
 				...createTestToolContext(["read"]),
 				settings: spillSettings,
@@ -1068,38 +1082,97 @@ describe("Coding Agent Tools", () => {
 			};
 
 			try {
-				const result = await spillReadTool.execute(
-					"test-call-read-spill",
-					{ path: testFile },
-					undefined,
-					undefined,
-					context,
-				);
-				const truncation = result.details?.meta?.truncation;
-				const output = getTextOutput(result);
+				for (const [selector, firstRow] of [
+					["", 1],
+					[":1000-1400", 1000],
+				] as const) {
+					const result = await spillReadTool.execute(
+						`test-call-read-page${selector}`,
+						{ path: `${testFile}${selector}` },
+						undefined,
+						undefined,
+						context,
+					);
+					const truncation = result.details?.meta?.truncation;
+					const output = getTextOutput(result);
+					if (!truncation?.nextOffset) throw new Error("expected a continuation offset");
+					const lastRow = truncation.nextOffset - 1;
 
-				expect(truncation?.artifactId).toBeDefined();
-				expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
-				expect(output).toContain("artifact://");
-				expect(truncation?.nextOffset).toBe(defaultLimit + 1);
-				expect(output).toContain(`Use :${defaultLimit + 1} to continue`);
+					// Every row of the page is delivered: nothing between its first and last row is cut.
+					expect(truncation.artifactId).toBeUndefined();
+					expect(output).not.toContain("elided");
+					expect(truncation.outputBytes).toBeLessThanOrEqual(20 * 1024);
+					for (let n = firstRow; n <= lastRow; n++) expect(output).toContain(row(n));
+					expect(output).not.toContain(row(lastRow + 1));
+					expect(output).toContain(`Use :${truncation.nextOffset} to continue`);
 
-				const saveArtifact = vi.spyOn(spillManager, "saveArtifact");
-				const artifactResult = await spillReadTool.execute(
-					"test-call-read-spilled-artifact",
-					{ path: `artifact://${truncation?.artifactId}` },
-					undefined,
-					undefined,
-					context,
-				);
-				expect(getTextOutput(artifactResult)).toContain(line);
-				expect(saveArtifact).not.toHaveBeenCalled();
+					// The named continuation picks up exactly where the page stopped.
+					const next = getTextOutput(
+						await spillReadTool.execute(
+							"test-call-read-next-page",
+							{ path: `${testFile}:${truncation.nextOffset}` },
+							undefined,
+							undefined,
+							context,
+						),
+					);
+					expect(next).toContain(row(lastRow + 1));
+				}
 			} finally {
 				await spillManager.close();
 			}
 		});
 
-		it("spills oversized URL reads like plain files, except pages of artifact storage", async () => {
+		it("keeps prefixed short-row pages unelided but spills pages that block context pushes past the threshold", async () => {
+			const shortRows = path.join(testDir, "short-rows.ts");
+			fs.writeFileSync(shortRows, `${Array.from({ length: 6000 }, (_, i) => `let v${i} = ${i};`).join("\n")}\n`);
+			// Every closer on the page pulls its off-window opener in as block context.
+			const depth = 200;
+			const nested = path.join(testDir, "deep-nesting.ts");
+			const openers = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}if (c${i} && ${"y".repeat(1000)}) {`);
+			const closers = Array.from({ length: depth }, (_, i) => `${" ".repeat(depth - 1 - i)}}`);
+			fs.writeFileSync(nested, `${[...openers, ...closers].join("\n")}\n`);
+			const spillSettings = Settings.isolated({
+				"tools.artifactSpillThreshold": 20,
+				"tools.artifactHeadBytes": 8,
+				"tools.artifactTailBytes": 8,
+			});
+			const spillManager = SessionManager.create(testDir, path.join(testDir, "prefix-spill-sessions"));
+			await spillManager.ensureOnDisk();
+			const spillReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, spillSettings, {
+						getSessionFile: () => spillManager.getSessionFile() ?? null,
+						getArtifactsDir: () => spillManager.getArtifactsDir(),
+					}),
+				),
+			);
+			const context = {
+				...createTestToolContext(["read"]),
+				settings: spillSettings,
+				sessionManager: spillManager,
+			};
+			const read = (target: string) =>
+				spillReadTool.execute(target, { path: target }, undefined, undefined, context);
+
+			try {
+				// Row prefixes on thousands of short rows must not tip the page into middle elision.
+				const page = await read(`${shortRows}:1-3000`);
+				const nextOffset = page.details?.meta?.truncation?.nextOffset;
+				expect(page.details?.meta?.truncation?.artifactId).toBeUndefined();
+				expect(getTextOutput(page)).not.toContain("elided");
+				expect(getTextOutput(page)).toContain(`Use :${nextOffset} to continue`);
+
+				// Block context is unbounded by the line budget, so that page still spills.
+				const closers = await read(`${nested}:${depth + 1}-${depth * 2}`);
+				expect(closers.details?.meta?.truncation?.artifactId).toBeDefined();
+				expect(Buffer.byteLength(getTextOutput(closers), "utf-8")).toBeLessThan(20 * 1024);
+			} finally {
+				await spillManager.close();
+			}
+		});
+
+		it("bounds oversized URL reads like plain files, except pages of artifact storage", async () => {
 			const payload = Array.from({ length: 3000 }, (_, index) => `payload line ${index}`).join("\n");
 			const skillDir = path.join(testDir, "skills", "demo");
 			fs.mkdirSync(skillDir, { recursive: true });
@@ -1148,16 +1221,19 @@ describe("Coding Agent Tools", () => {
 			};
 
 			try {
-				for (const url of [
-					"skill://demo/ref.md",
-					"agent://Worker/report",
-					"local://big.md:1-3000",
-					"agent://Lines:1-3000",
-				]) {
+				for (const url of ["skill://demo/ref.md", "agent://Worker/report"]) {
 					const result = await spillReadTool.execute(`spill-${url}`, { path: url }, undefined, undefined, context);
 					const output = getTextOutput(result);
 					expect(result.details?.meta?.truncation?.artifactId).toBeDefined();
 					expect(Buffer.byteLength(output, "utf-8")).toBeLessThan(20 * 1024);
+				}
+				// Line pages of a URL-located file stop at the threshold and name their continuation.
+				for (const url of ["local://big.md:1-3000", "agent://Lines:1-3000"]) {
+					const result = await spillReadTool.execute(`page-${url}`, { path: url }, undefined, undefined, context);
+					const truncation = result.details?.meta?.truncation;
+					expect(truncation?.artifactId).toBeUndefined();
+					expect(truncation?.outputBytes).toBeLessThanOrEqual(20 * 1024);
+					expect(getTextOutput(result)).toContain(`Use :${truncation?.nextOffset} to continue`);
 				}
 
 				const artifactId = await spillManager.saveArtifact(payload, "read");
@@ -1309,7 +1385,7 @@ describe("Coding Agent Tools", () => {
 			fs.mkdirSync(childDir, { recursive: true });
 			writeFileWithMtime(path.join(testDir, ".hidden-root"), "hidden", base + 20_000);
 			writeFileWithMtime(path.join(testDir, ".DS_Store"), "mac metadata", base + 25_000);
-			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "ignored", base + 24_000);
+			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "dependency", base + 24_000);
 			for (let i = 0; i < 13; i += 1) {
 				const fileName = `root-${String(i).padStart(2, "0")}.txt`;
 				writeFileWithMtime(path.join(testDir, fileName), fileName, base + i);
@@ -1327,7 +1403,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".");
 			expect(output).toContain(".hidden-root");
 			expect(output).not.toContain(".DS_Store");
-			expect(output).not.toContain("node_modules");
+			expect(output).toContain("node_modules/");
+			expect(output).toContain("pkg/");
+			expect(output).not.toContain("index.js");
 			expect(output).toContain("root-00.txt");
 			expect(output).toContain("root-01.txt");
 			expect(output).toContain("root-12.txt");
@@ -1781,16 +1859,53 @@ describe("Coding Agent Tools", () => {
 			const pinnedMtime = new Date("2024-01-01T00:00:00Z");
 			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
 			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
-				"alpha.txt",
-			);
+			const settled = await Bun.file(archivePath).stat();
+			let reported = settled;
+			reportStat(archivePath, () => reported);
+			// The archive is older than the racy window when first read, so its index is cached
+			// (the clock ticks in whole milliseconds; ctime carries a fraction).
+			setSystemTime(new Date(Math.ceil(settled.ctimeMs) + RACY_STAMP_WINDOW_MS));
+			try {
+				expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
+					"alpha.txt",
+				);
 
-			// Same-length name and content: the rewrite keeps the size; the mtime is put back.
-			fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
-			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
-			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
-			expect(output).toContain("bravo.txt");
-			expect(output).not.toContain("alpha.txt");
+				// Same-length name and content: the rewrite keeps the size; the mtime is put back.
+				fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+				// Only the change time tells it apart, moved on by the next timestamp granule.
+				reported = Object.assign(Object.create(Object.getPrototypeOf(settled)), settled, {
+					ctimeMs: settled.ctimeMs + 1,
+				});
+				const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
+		});
+
+		it("re-reads an archive rewritten in place within one timestamp granule", async () => {
+			const archivePath = path.join(testDir, "granule.zip");
+			await Bun.write(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			// A coarse-timestamp filesystem: the same-size rewrite below lands in this
+			// write's granule, so it leaves the archive's whole stat unchanged.
+			const granuleStat = await Bun.file(archivePath).stat();
+			reportStat(archivePath, () => granuleStat);
+			// Both reads run inside the granule.
+			setSystemTime(granuleStat.ctime);
+			try {
+				expect(
+					getTextOutput(await readTool.execute("test-call-zip-granule-before", { path: archivePath })),
+				).toContain("alpha.txt");
+
+				await Bun.write(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+				const output = getTextOutput(await readTool.execute("test-call-zip-granule-after", { path: archivePath }));
+				expect(output).toContain("bravo.txt");
+				expect(output).not.toContain("alpha.txt");
+			} finally {
+				setSystemTime();
+			}
 		});
 
 		it("should list zip archives without inflating member payloads", async () => {
@@ -2790,6 +2905,26 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
+		});
+
+		it("hoists a leading `cd <dir>;` into cwd only when the directory exists", async () => {
+			fs.mkdirSync(path.join(testDir, "sub-dir"));
+			const executeBash = vi.spyOn(bashExecutor, "executeBash");
+
+			const hoistedResult = await bashTool.execute("cd-semicolon-hoist", { command: "cd sub-dir; pwd" });
+			const [hoisted, options] = executeBash.mock.calls[0]!;
+			expect(hoisted).toBe("pwd");
+			expect(options?.cwd).toBe(path.join(testDir, "sub-dir"));
+			// Renderers draw the executed `pwd` under the directory it ran in.
+			expect(hoistedResult.details?.cwd).toBe(path.join(testDir, "sub-dir"));
+			expect(hoistedResult.details?.cdSeparator).toBe(";");
+
+			// A missing directory stays with the shell, which runs the rest anyway.
+			const missing = "cd does-not-exist; echo still-executed";
+			const result = await bashTool.execute("cd-semicolon-missing", { command: missing });
+			expect(executeBash.mock.calls[1]![0]).toBe(missing);
+			expect(getTextOutput(result)).toContain("still-executed");
+			expect(result.details?.cwd).toBeUndefined();
 		});
 	});
 

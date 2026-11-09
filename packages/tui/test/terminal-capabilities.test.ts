@@ -124,6 +124,10 @@ describe("detectTerminalId", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
 	});
 
+	it("recognizes tern via TERM_PROGRAM despite its plain xterm TERM", () => {
+		expect(detectTerminalId({ TERM_PROGRAM: "tern", TERM: "xterm-256color", COLORTERM: "truecolor" })).toBe("tern");
+	});
+
 	it("maps rio to kitty graphics with verified hyperlink capability", () => {
 		// Reporter-verified (#12205): kitty graphics + true color. Hyperlinks
 		// verified against rio 0.5.28's published escape sequence support plus a
@@ -152,10 +156,112 @@ describe("detectTerminalId", () => {
 		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
 	});
 
+	it("does not treat an inherited REX_SESSION as Rex", () => {
+		// Any program launched from a Rex pane inherits REX_SESSION, including
+		// emulators omp does not recognize (VTE, Zed, JetBrains). Rex itself
+		// sets TERM_PROGRAM=rex, so the session ID must not pick the profile.
+		const env = { REX_SESSION: "s1", TERM: "xterm-256color", COLORTERM: "truecolor", VTE_VERSION: "8400" };
+		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+
 	it("falls back to trueColor on VTE/Ptyxis environments — VTE OSC 9 is ConEmu progress, not a notification protocol", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
 		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+});
+
+it("selects Kitty graphics for Rex via TERM_PROGRAM or TERM=xterm-rex (over SSH)", () => {
+	for (const env of [
+		{ TERM_PROGRAM: "rex", TERM: "xterm-256color", COLORTERM: "truecolor" },
+		{ TERM: "xterm-rex", COLORTERM: "truecolor", SSH_CONNECTION: "client 1 server 22" },
+	]) {
+		const id = detectTerminalId(env);
+		expect(id).toBe("rex");
+		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
+		// Rex renders OSC 8 and opens the link on command-click. With the
+		// hyperlink capability off, every path and URL in the transcript is
+		// plain text instead of a link the terminal would open.
+		expect(shouldEnableHyperlinksByDefault(env, id)).toBe(true);
+	}
+});
+
+describe("iTerm2 over SSH", () => {
+	// Env as reported in #12419: an iTerm2 session reached over SSH keeps only
+	// LC_TERMINAL/LC_TERMINAL_VERSION — ITERM_SESSION_ID and TERM_PROGRAM are
+	// stripped by the hop, so detection landed on the true-color profile and
+	// every image degraded to the `[Image: image/webp]` text fallback.
+	const sshEnv = {
+		TERM: "xterm-256color",
+		COLORTERM: "truecolor",
+		LC_TERMINAL: "iTerm2",
+		LC_TERMINAL_VERSION: "3.6.11",
+		SSH_CONNECTION: "client 1 server 22",
+	};
+
+	it("detects iTerm2 from the forwarded LC_TERMINAL and keeps the inline image protocol", () => {
+		const id = detectTerminalId(sshEnv);
+		expect(id).toBe("iterm2");
+		// The observable payoff: OSC 1337 inline images instead of the text
+		// fallback, plus OSC 8 hyperlinks and OSC 9 notifications.
+		expect(resolveImageProtocol(id, sshEnv, true)).toBe(ImageProtocol.Iterm2);
+		expect(shouldEnableHyperlinksByDefault(sshEnv, id)).toBe(true);
+		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
+	});
+
+	it("keeps the flat underline until LC_TERMINAL_VERSION proves iTerm2 3.5 or newer", () => {
+		// The colon-form underline needs iTerm2 >= 3.5; over SSH the version
+		// arrives as LC_TERMINAL_VERSION, so an old or unknown version must keep
+		// the flat underline the terminal can actually render.
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.6.11" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { LC_TERMINAL_VERSION: "3.4.0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", {})).toBe(false);
+	});
+
+	it("does not claim iTerm2 inside a multiplexer, where the OSC 1337 payload has no passthrough", () => {
+		// iTerm2's image encoder is the only one that does not wrap its payload
+		// in a tmux passthrough envelope, so a forwarded LC_TERMINAL must not
+		// re-enable the protocol inside a pane: the sequence would be swallowed
+		// by the multiplexer instead of reaching the outer terminal.
+		const env = { ...sshEnv, TMUX: "/tmp/tmux-1000/default,4242,0", TERM: "tmux-256color" };
+		const id = detectTerminalId(env);
+		expect(id).not.toBe("iterm2");
+		expect(resolveImageProtocol(id, env, true)).not.toBe(ImageProtocol.Iterm2);
+	});
+
+	it("resolves the process-wide terminal id and image protocol from the forwarded LC_TERMINAL", async () => {
+		const env = subprocessEnv({
+			TERM: "xterm-256color",
+			COLORTERM: "truecolor",
+			// TERM_PROGRAM/TERM_PROGRAM_VERSION are stripped by the SSH hop too,
+			// so they must not leak in from the runner's own terminal.
+			TERM_PROGRAM: "",
+			TERM_PROGRAM_VERSION: undefined,
+			LC_TERMINAL: "iTerm2",
+			LC_TERMINAL_VERSION: "3.6.11",
+			SSH_CONNECTION: "client 1 server 22",
+		});
+
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"--eval",
+				`import { TERMINAL, TERMINAL_ID } from "@oh-my-pi/pi-tui/terminal-capabilities";
+console.log(JSON.stringify({ id: TERMINAL_ID, imageProtocol: TERMINAL.imageProtocol }));`,
+			],
+			env,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		expect(JSON.parse(stdout)).toMatchObject({ id: "iterm2", imageProtocol: ImageProtocol.Iterm2 });
 	});
 });
 
@@ -231,6 +337,11 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 			expect(JSON.parse(stdout)).toMatchObject({ id: "kitty", imageProtocol: ImageProtocol.Kitty });
 		},
 	);
+
+	it.skipIf(process.platform === "win32")("recognizes a Rex client from tmux client_termname", async () => {
+		const stdout = await resolveInsideFakeTmux("tmux 3.4\txterm-rex");
+		expect(JSON.parse(stdout)).toMatchObject({ id: "rex", imageProtocol: ImageProtocol.Kitty });
+	});
 });
 
 describe("synchronizedOutputUserOverride", () => {
@@ -457,6 +568,8 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 		"ITERM_SESSION_ID",
 		"VSCODE_PID",
 		"ALACRITTY_WINDOW_ID",
+		"LC_TERMINAL",
+		"LC_TERMINAL_VERSION",
 	]) {
 		delete env[key];
 	}

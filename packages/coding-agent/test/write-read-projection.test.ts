@@ -1,8 +1,9 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import * as capability from "@oh-my-pi/pi-coding-agent/capability";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type { ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,8 +13,14 @@ import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-m
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { fakeSshTransport } from "./helpers/fake-ssh-transport";
+import { rejectionOf } from "./helpers/rejection";
 
-import { cfgReadDefaultLimit } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import {
+	cfgReadDefaultLimit,
+	cfgReadLineNumbers,
+	cfgToolsOutputMaxColumns,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function createSession(cwd: string, bridge?: ClientBridge, editMode: "replace" | "hashline" = "replace"): ToolSession {
 	return {
@@ -45,6 +52,7 @@ describe("write tool read projection guard", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		InternalUrlRouter.resetForTests();
 		await fs.rm(tmpDir, { recursive: true, force: true });
 	});
@@ -142,6 +150,8 @@ describe("write tool read projection guard", () => {
 		const original = `${"x".repeat(50 * 1024 + 10)}\n`;
 		await Bun.write(filePath, original);
 		const session = createSession(tmpDir);
+		// Uncapped: with the column cap on, the line is shown cut instead (next test).
+		cfgToolsOutputMaxColumns.set(session.settings, 0);
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-line", { path: `${filePath}:1-1` }),
 		);
@@ -152,6 +162,75 @@ describe("write tool read projection guard", () => {
 			new WriteTool(session).execute("write-line", { path: filePath, content: projection }),
 		).rejects.toThrow("incomplete read projection");
 		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a projection whose long line was shown cut to the column cap", async () => {
+		const filePath = path.join(tmpDir, "wide.txt");
+		const original = `short\n${"x".repeat(60 * 1024)}\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-wide", { path: filePath }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-wide", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a column-cut projection as long as its source", async () => {
+		const filePath = path.join(tmpDir, "edge.txt");
+		// One unterminated line a column past the 768 cap: its cut shows 768 chars plus `…`, so the
+		// shown payload is exactly as long as the source, yet the last character is gone.
+		const original = "x".repeat(769);
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-edge", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toContain("Some lines truncated to 768 chars");
+
+		await expect(
+			new WriteTool(session).execute("write-edge", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("rejects a numbered column-cut projection whose notice also says where to continue", async () => {
+		const filePath = path.join(tmpDir, "numbered.txt");
+		// `:1-1` pages on through the short lines after the cut one and stops one line short; the
+		// line-number prefixes make the shown payload longer than the source it misses.
+		const original = `${"x".repeat(769)}\nb\nc\nd\ne\n`;
+		await Bun.write(filePath, original);
+		const session = createSession(tmpDir);
+		cfgReadLineNumbers.set(session.settings, true);
+		const projection = resultText(
+			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-numbered", { path: `${filePath}:1-1` }),
+		);
+		expect(projection).toMatch(/\[Showing lines .*\. Some lines truncated to 768 chars/);
+
+		await expect(
+			new WriteTool(session).execute("write-numbered", { path: filePath, content: projection }),
+		).rejects.toThrow("incomplete read projection");
+		expect(await Bun.file(filePath).text()).toBe(original);
+	});
+
+	it("writes a file whose last line only starts like the column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "notes.txt");
+		await Bun.write(filePath, "header\nbody line\n");
+		const content = "header\n[Some lines truncated to explain the format\n";
+		await new WriteTool(createSession(tmpDir)).execute("write-notes", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
+	it("rewrites a file whose last line only reads like a bracketed column-cap notice", async () => {
+		const filePath = path.join(tmpDir, "format.txt");
+		const content = "header\n[Some lines truncated to explain the format]\n";
+		await Bun.write(filePath, content);
+		await new WriteTool(createSession(tmpDir)).execute("write-format", { path: filePath, content });
+		expect(await Bun.file(filePath).text()).toBe(content);
 	});
 
 	it("rejects actual bounded archive-member output without changing the archive", async () => {
@@ -212,6 +291,48 @@ describe("write tool read projection guard", () => {
 		expect(resourceContent).toContain("resource 60");
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"writes a bounded projection to a new ssh:// file and still guards existing ones",
+		async () => {
+			vi.spyOn(capability, "loadCapability").mockResolvedValue({ items: [], all: [], warnings: [], providers: [] });
+			fakeSshTransport(() => tmpDir);
+			const session = createSession(tmpDir);
+			cfgReadDefaultLimit.set(session.settings, 20);
+			const sourcePath = path.join(tmpDir, "source.txt");
+			const original = `${Array.from({ length: 60 }, (_, index) => `line ${index + 1}`).join("\n")}\n`;
+			await Bun.write(sourcePath, original);
+			const projection = resultText(
+				await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-src", { path: sourcePath }),
+			);
+			expect(projection).toContain("[Showing lines 1-20 of 60. Use :21 to continue]");
+
+			// No remote file yet: nothing to discard, so the write lands as it does for a new disk file.
+			const newPath = path.join(tmpDir, "new.txt");
+			await new WriteTool(session).execute("write-new", { path: `ssh://fixture${newPath}`, content: projection });
+			expect(await Bun.file(newPath).text()).toBe(projection);
+
+			const longer = await rejectionOf(
+				new WriteTool(session).execute("write-existing", {
+					path: `ssh://fixture${sourcePath}`,
+					content: projection,
+				}),
+			);
+			expect(longer).toMatchObject({ message: expect.stringContaining("incomplete read projection") });
+			expect(await Bun.file(sourcePath).text()).toBe(original);
+
+			// An existing file the read cannot open is not "missing": its read error still fails the write.
+			const lockedPath = path.join(tmpDir, "locked.txt");
+			await Bun.write(lockedPath, original);
+			await fs.chmod(lockedPath, 0o200);
+			const locked = await rejectionOf(
+				new WriteTool(session).execute("write-locked", { path: `ssh://fixture${lockedPath}`, content: projection }),
+			);
+			expect(locked).toMatchObject({ message: expect.stringContaining("Permission denied") });
+			await fs.chmod(lockedPath, 0o600);
+			expect(await Bun.file(lockedPath).text()).toBe(original);
+		},
+	);
+
 	it("rejects write-back of a summarized read of a large local:// code file", async () => {
 		const localRoot = path.join(tmpDir, "artifacts", "local");
 		await fs.mkdir(localRoot, { recursive: true });
@@ -241,7 +362,12 @@ describe("write tool read projection guard", () => {
 		const filePath = path.join(localRoot, "notes.txt");
 		const original = `${Array.from({ length: 250 }, (_, index) => `note ${index + 1} ${"x".repeat(250)}`).join("\n")}\n`;
 		await Bun.write(filePath, original);
-		const session = createSession(tmpDir);
+		// The file exceeds the raw-inline cap but must still read as one page, so lift the
+		// spill threshold that `read` pages at above the file size.
+		const session = {
+			...createSession(tmpDir),
+			settings: Settings.isolated({ "edit.blockAutoGenerated": false, "tools.artifactSpillThreshold": 128 }),
+		};
 
 		const projection = resultText(
 			await wrapToolWithMetaNotice(new ReadTool(session)).execute("read-local", { path: "local://notes.txt" }),

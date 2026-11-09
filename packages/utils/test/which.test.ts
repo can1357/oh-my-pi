@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, WhichCachePolicy } from "../src/which";
+import { $which, $whichAll, WhichCachePolicy } from "../src/which";
 
 describe("$which", () => {
 	const originalPath = process.env.PATH;
@@ -80,5 +80,32 @@ describe("$which", () => {
 		expect($which("cmd", { cwd: "ab", PATH: "c" })).toBe(first);
 		expect($which("cmd", { cwd: "a", PATH: "bc" })).toBe(second);
 		expect(whichSpy).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("$whichAll", () => {
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0)) {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("returns every PATH match in PATH order, skipping misses", () => {
+		const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-all-shim-"));
+		const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-all-empty-"));
+		const realDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-all-real-"));
+		tempDirs.push(shimDir, emptyDir, realDir);
+
+		const command = `omp-which-all-${process.pid}`;
+		for (const dir of [shimDir, realDir]) {
+			fs.writeFileSync(path.join(dir, command), "#!/bin/sh\n");
+			fs.chmodSync(path.join(dir, command), 0o755);
+		}
+
+		const PATH = [shimDir, emptyDir, realDir, shimDir].join(path.delimiter);
+		expect($whichAll(command, { PATH })).toEqual([path.join(shimDir, command), path.join(realDir, command)]);
+		expect($which(command, { PATH, cache: WhichCachePolicy.Bypass })).toBe(path.join(shimDir, command));
 	});
 });

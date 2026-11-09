@@ -1,5 +1,34 @@
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import { hasFsCode, isEexist, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+
+const RENAME_RETRY_BUDGET_MS = 2_000;
+const RENAME_RETRY_INITIAL_MS = 5;
+const RENAME_RETRY_MAX_MS = 100;
+
+/**
+ * Publish a staged sibling without moving the old destination aside, so readers
+ * never observe a missing file while transient Windows replacement denials clear.
+ */
+export async function replaceFileWithRetry(tempPath: string, targetPath: string): Promise<void> {
+	const deadline = Date.now() + RENAME_RETRY_BUDGET_MS;
+	for (let failures = 0; ; failures++) {
+		try {
+			await fsAsync.rename(tempPath, targetPath);
+			return;
+		} catch (error) {
+			if (
+				process.platform !== "win32" ||
+				(!hasFsCode(error, "EPERM") && !hasFsCode(error, "EACCES") && !isEexist(error))
+			) {
+				throw error;
+			}
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw error;
+			await Bun.sleep(Math.min(remaining, RENAME_RETRY_MAX_MS, RENAME_RETRY_INITIAL_MS * 2 ** failures));
+		}
+	}
+}
 
 /**
  * Publish a staged sibling file atomically, preserving an existing destination
@@ -57,6 +86,67 @@ async function replaceAfterWindowsRenameFailure(
 				error: toError(error).message,
 			});
 		}
+	}
+}
+
+/**
+ * Write a file through a private temp sibling and publish it with a single
+ * rename, so a reader never observes a half-written file and a failed write
+ * leaves the destination untouched.
+ *
+ * The staged file is created with `mode` (0600 by default) and published with
+ * that mode, so the destination stays readable only by its owner even when it
+ * carries a secret.
+ */
+export async function writeFileAtomically(filePath: string, content: string, mode: number = 0o600): Promise<void> {
+	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	let removeTemp = false;
+	try {
+		const handle = await fs.promises.open(tempPath, "wx", mode);
+		removeTemp = true;
+		try {
+			await handle.writeFile(content, "utf8");
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		// The umask narrows the mode passed to open(); restore it explicitly.
+		await fs.promises.chmod(tempPath, mode);
+		await replaceFileAtomically(tempPath, filePath);
+		removeTemp = false;
+	} finally {
+		if (removeTemp) {
+			await fs.promises.rm(tempPath, { force: true }).catch(() => {});
+		}
+	}
+}
+
+/**
+ * Synchronous sibling of {@link writeFileAtomically} for callers that cannot
+ * await, such as the boot-time config migration.
+ */
+export function writeFileAtomicallySync(filePath: string, content: string, mode: number = 0o600): void {
+	const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(tempPath, "wx", mode);
+		fs.writeFileSync(fd, content, "utf8");
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		// The umask narrows the mode passed to open(); restore it explicitly.
+		fs.chmodSync(tempPath, mode);
+		fs.renameSync(tempPath, filePath);
+	} catch (error) {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				// The descriptor is already gone.
+			}
+		}
+		fs.rmSync(tempPath, { force: true });
+		throw error;
 	}
 }
 

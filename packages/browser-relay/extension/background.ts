@@ -9,13 +9,31 @@
  * worker alive while connected (Chrome 116+); a chrome.alarms tick revives it
  * and re-dials after Chrome reaps it while disconnected.
  */
-import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
+import {
+	DOWNLOADS_PROTOCOL_VERSION,
+	EXTENSION_RELOAD_PROTOCOL_VERSION,
+	type ExtToRelayMessage,
+	type FoundDownload,
+	type RelayToExtMessage,
+	type TabSnapshot,
+} from "../../coding-agent/src/tools/browser/relay/protocol";
 import { ownedDebuggerTabs } from "./debugger-ownership";
+import { DownloadPairing } from "./download-pairing";
+import { pastForeignFrames } from "./foreign-frames";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
+const REMOVE_TAB_ATTEMPTS = 3;
+const REMOVE_TAB_RETRY_MS = 500;
+
+/**
+ * The omp version that installed this script, declared by the line the installer puts above it
+ * (`stampRelayExtensionScript`); undeclared in an unstamped build. Read from the script, not the manifest:
+ * after the files change, a Chrome restart re-reads manifest.json but keeps running the old service worker.
+ */
+declare const OMP_INSTALL_VERSION: string | undefined;
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
@@ -37,6 +55,25 @@ async function ensureInstanceId(): Promise<string> {
 	instanceId = typeof existing === "string" && existing.length > 0 ? existing : crypto.randomUUID();
 	await chrome.storage.local.set({ [key]: instanceId } as Record<string, string>);
 	return instanceId;
+}
+
+/**
+ * Identity of this browser run, in `chrome.storage.session`. Chrome clears it on restart, when it also reuses tab
+ * ids, so the relay retires the previous run's targets instead of resolving an old target id to a new tab. An
+ * extension reload clears it too: omp then loses its handles to the tabs it opened, which stay open.
+ */
+let browserSession: Promise<string> | null = null;
+function ensureBrowserSession(): Promise<string> {
+	browserSession ??= (async () => {
+		const key = "relayBrowserSession";
+		const stored = await chrome.storage.session.get({ [key]: "" });
+		const existing = stored[key];
+		if (typeof existing === "string" && existing.length > 0) return existing;
+		const created = crypto.randomUUID();
+		await chrome.storage.session.set({ [key]: created } as Record<string, string>);
+		return created;
+	})();
+	return browserSession;
 }
 
 interface RelaySettings {
@@ -141,6 +178,23 @@ function post(msg: ExtToRelayMessage): void {
 	if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/** Chrome can refuse a tab close for a moment (a tab being dragged, an unload in progress); try again before failing. */
+async function removeTab(tabId: number): Promise<void> {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			await chrome.tabs.remove(tabId);
+			return;
+		} catch (error) {
+			// Already closed: the close the relay asked for has happened.
+			if (/No tab with id/.test(String(error))) return;
+			if (attempt >= REMOVE_TAB_ATTEMPTS) throw error;
+			const pause = Promise.withResolvers<void>();
+			setTimeout(pause.resolve, REMOVE_TAB_RETRY_MS);
+			await pause.promise;
+		}
+	}
+}
+
 async function setBadge(connected: boolean): Promise<void> {
 	try {
 		await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
@@ -165,19 +219,26 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	return {
 		t: "hello",
 		instanceId: await ensureInstanceId(),
+		browserSession: await ensureBrowserSession(),
 		userAgent: navigator.userAgent,
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
+		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
+		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+		downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
 }
 
-async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<unknown> {
+/** Run one relay RPC; `origin` is the socket it came in on, which alone can carry its answer. */
+async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: WebSocket): Promise<unknown> {
 	switch (msg.op) {
-		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+		case "attach": {
+			const attach = () => chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, attach) : attach());
 			return {};
+		}
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
@@ -187,20 +248,25 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 				relayInitiatedDetachTabs.delete(msg.tabId);
 				throw error;
 			}
-		case "send":
-			return await chrome.debugger.sendCommand(
-				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
-				msg.method,
-				msg.params,
-			);
+		case "send": {
+			const send = () =>
+				chrome.debugger.sendCommand(
+					msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
+					msg.method,
+					msg.params,
+				);
+			return await (msg.clearForeignFrames ? pastForeignFrames(msg.tabId, send) : send());
+		}
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url, active: msg.active ?? true });
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
+			// The relay failed this call when its socket closed, so nobody learns this tab's id to close it later.
+			if (origin.readyState !== WebSocket.OPEN) void removeTab(snap.tabId).catch(() => {});
 			return { tab: snap };
 		}
 		case "removeTab":
-			await chrome.tabs.remove(msg.tabId);
+			await removeTab(msg.tabId);
 			return {};
 		case "activateTab": {
 			const tab = await chrome.tabs.get(msg.tabId);
@@ -213,10 +279,17 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
+		case "findDownload": {
+			const id = downloads.idFor(msg.guid);
+			const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+			if (item && item.state !== "in_progress") downloads.forget(msg.guid);
+			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
+			return found;
+		}
 	}
 }
 
-function handleRelayMessage(raw: string): void {
+function handleRelayMessage(socket: WebSocket, raw: string): void {
 	let msg: RelayToExtMessage;
 	try {
 		msg = JSON.parse(raw) as RelayToExtMessage;
@@ -224,10 +297,20 @@ function handleRelayMessage(raw: string): void {
 		return;
 	}
 	if (msg.t === "pong") return;
-	void runRpc(msg)
-		.then(result => post({ t: "rpcResult", id: msg.id, ok: true, result }))
+	if (msg.t === "reload") {
+		// The relay rewrote this extension's files; reloading re-reads them (a Chrome restart would not).
+		chrome.runtime.reload();
+		return;
+	}
+	// Answer only on the socket the RPC came in on: RPC ids are local to that connection, and the relay already
+	// failed the call when it closed.
+	const answer = (reply: ExtToRelayMessage): void => {
+		if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(reply));
+	};
+	void runRpc(msg, socket)
+		.then(result => answer({ t: "rpcResult", id: msg.id, ok: true, result }))
 		.catch((err: unknown) => {
-			post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+			answer({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
 		});
 }
 
@@ -251,7 +334,7 @@ async function connect(): Promise<void> {
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
 	socket.onmessage = event => {
-		if (typeof event.data === "string") handleRelayMessage(event.data);
+		if (typeof event.data === "string") handleRelayMessage(socket, event.data);
 	};
 	socket.onclose = () => {
 		if (ws !== socket) return;
@@ -269,10 +352,24 @@ async function connect(): Promise<void> {
 	};
 }
 
+// ---- downloads ----------------------------------------------------------------
+
+/** Pairs the downloads driven tabs' pages report with Chrome's download items. */
+const downloads = new DownloadPairing();
+
+chrome.downloads.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
+chrome.downloads.onChanged.addListener(delta => {
+	const state = delta.state?.current;
+	if (state === "complete" || state === "interrupted") downloads.finished(delta.id, state);
+});
+
 // ---- event streaming ---------------------------------------------------------
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
+	if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+		downloads.report(params.guid, params.url);
+	}
 	post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 

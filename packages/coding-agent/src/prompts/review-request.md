@@ -3,6 +3,12 @@
 ### Mode
 
 {{mode}}
+{{#if repository}}
+
+### Repository
+
+`{{repository}}` — not the session cwd. File paths are relative to it; reviewers MUST run version-control commands there and resolve `read` paths against it.
+{{/if}}
 
 ### Changed Files ({{len files}} files, +{{totalAdded}}/-{{totalRemoved}} lines)
 
@@ -32,7 +38,7 @@ _No files to review._
 
 ### Distribution Guidelines
 
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
+Use the `task` tool with a `tasks` array. Set `agent: "reviewer"` inside every `tasks[]` item (`tasks[].agent`), never at the top level or omitted.
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
 {{#if multiAgent}}
 Group files by locality, e.g.:
@@ -45,8 +51,8 @@ Group files by locality, e.g.:
 
 Reviewer MUST:
 1. Focus ONLY on assigned files
-2. {{#if skipDiff}}{{#if prDiffUrl}}MUST read assigned PR file diffs using the exact Diff URL in the Changed Files table or `{{prDiffUrl}}/all`; NEVER use local `git diff`/`git show` for PR diff content{{else}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
-3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if prDiffUrl}}MUST NOT read local workspace files for PR file context; use the fetched PR diff, the exact Diff URL in the Changed Files table, or `{{prDiffUrl}}/all` only{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}{{/if}}
+2. {{#if skipDiff}}{{#if prDiffUrl}}MUST read assigned PR file diffs using the exact Diff URL in the Changed Files table or `{{prDiffUrl}}/all{{prDiffQuery}}`; NEVER use local `git diff`/`git show` for PR diff content{{else}}{{#if diffInstruction}}{{diffInstruction}}{{else}}MUST run `git diff`/`git show` for assigned files{{/if}}{{/if}}{{else}}MUST use diff hunks below (NEVER re-run git diff){{/if}}
+3. {{#if suppliedPatch}}NEVER read local workspace files for file context; the supplied diff may not match the checkout{{else}}{{#if prDiffUrl}}NEVER read local workspace files for PR file context; use the fetched PR diff, the exact Diff URL in the Changed Files table, or `{{prDiffUrl}}/all{{prDiffQuery}}` only{{else}}{{#if contextInstruction}}{{contextInstruction}}{{else}}MAY read full file context as needed via `read`{{/if}}{{/if}}{{/if}}
 4. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
 
 {{#if skipDiff}}

@@ -444,6 +444,39 @@ describe("TodoTool operations", () => {
 });
 
 describe("TodoTool lenient init shapes", () => {
+	it("names an empty init phase Tasks so append can target it", async () => {
+		for (const args of [
+			{ op: "init" as const, phase: "", items: ["First"] },
+			{ op: "init" as const, list: [{ phase: "", items: ["First"] }] },
+		]) {
+			const tool = new TodoTool(createSession());
+			await tool.execute("init", args);
+			const appended = await tool.execute("append", { op: "append", phase: "Tasks", items: ["Second"] });
+			expect(appended.isError).toBeUndefined();
+			expect(appended.details?.phases.map(phase => [phase.name, phase.tasks.map(task => task.content)])).toEqual([
+				["Tasks", ["First", "Second"]],
+			]);
+		}
+	});
+
+	it("rejects normalized duplicate phases without replacing existing state", async () => {
+		const initial: TodoPhase[] = [{ name: "Existing", tasks: [{ content: "Keep", status: "in_progress" }] }];
+		const session = createSession(initial);
+		const tool = new TodoTool(session);
+		const result = await tool.execute("init", {
+			op: "init",
+			list: [
+				{ phase: "", items: ["A"] },
+				{ phase: "Tasks", items: ["B"] },
+			],
+		});
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining('Duplicate phase "Tasks"') }),
+		]);
+		expect(session.getTodoPhases?.()).toEqual(initial);
+	});
+
 	it("accepts a flattened init with bare items and no phase", async () => {
 		const tool = new TodoTool(createSession());
 		const result = await tool.execute("call-1", { op: "init", items: ["First", "Second"] });
@@ -464,6 +497,27 @@ describe("TodoTool lenient init shapes", () => {
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Cleanup"]);
 		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["Remove dead code"]);
+	});
+
+	it("uses flat items when list is an empty placeholder array (#17346)", async () => {
+		const tool = new TodoTool(createSession([{ name: "Old", tasks: [{ content: "Stale", status: "pending" }] }]));
+		const result = await tool.execute("call-1", { op: "init", list: [], items: ["First", "Second"] });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Tasks"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["First", "Second"]);
+	});
+
+	it("prefers a non-empty list over flat items", async () => {
+		const tool = new TodoTool(createSession());
+		const result = await tool.execute("call-1", {
+			op: "init",
+			list: [{ phase: "Work", items: ["From list"] }],
+			items: ["From items"],
+		});
+
+		expect(result.details?.phases.map(phase => phase.name)).toEqual(["Work"]);
+		expect(result.details?.phases[0]?.tasks.map(task => task.content)).toEqual(["From list"]);
 	});
 
 	it("still errors when init has neither list nor items", async () => {

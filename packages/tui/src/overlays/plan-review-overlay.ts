@@ -256,6 +256,8 @@ export interface PlanReviewOverlayOptions {
 	slider?: HookSelectorSlider;
 	/** Display label for the external-editor key, surfaced in the footer help. */
 	externalEditorLabel?: string;
+	/** The external editor's name ("Notepad", "nvim") for the native Edit button; `$EDITOR` when unset. */
+	externalEditorName?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
 }
@@ -286,6 +288,7 @@ export class PlanReviewOverlay implements Component {
 	#disabled: Set<number>;
 	#helpSuffix: string | undefined;
 	#externalEditorLabel: string | undefined;
+	#externalEditorName: string | undefined;
 	#promptTitle: string | undefined;
 	#selectedIndex: number;
 	#slider: HookSelectorSlider | undefined;
@@ -354,6 +357,7 @@ export class PlanReviewOverlay implements Component {
 		);
 		this.#helpSuffix = options.helpText;
 		this.#externalEditorLabel = options.externalEditorLabel;
+		this.#externalEditorName = options.externalEditorName;
 		this.#promptTitle = options.promptTitle;
 		this.#selectedIndex = this.#coerceIndex(options.initialIndex ?? 0);
 		if (options.slider && options.slider.segments.length > 0) {
@@ -1632,7 +1636,13 @@ export class PlanReviewOverlay implements Component {
 		// Unbound: the button still mirrors the callback, without a keycap.
 		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
 		if (this.callbacks.onExternalEditor) {
-			buttons.push(actionButton("Edit in $EDITOR", "externalEditor", editorKeyId ? { keys: editorKeyId } : {}));
+			buttons.push(
+				actionButton(
+					`Edit in ${this.#externalEditorName ?? "$EDITOR"}`,
+					"externalEditor",
+					editorKeyId ? { keys: editorKeyId } : {},
+				),
+			);
 		}
 		// Cancel the review the way the cancel key does; while annotating that key
 		// only leaves the draft/chooser, so the button is hidden there.
@@ -1754,7 +1764,8 @@ export class PlanReviewOverlay implements Component {
 			"tabs",
 		);
 		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
-		const out = [keyed(rowNode(track, { gap: "sm", align: "center" }), "slider")];
+		// A role of its own: Tern's sheet lets only the role-less split row (Contents + body) shrink and scroll.
+		const out = [keyed(rowNode(track, { role: "omp.plan.slider", gap: "sm", align: "center" }), "slider")];
 		const detail = slider.segments[this.#sliderIndex]?.detail;
 		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
 		return out;

@@ -133,56 +133,42 @@ describe("prefixed tool rows", () => {
 		expect(rows[branch + 1]).toContain("remaining details");
 	});
 
-	it("keeps long Ask answers beneath their markers after submission, including grouped questions", async () => {
+	it("keeps long Ask answers beneath their check after submission", async () => {
 		const theme = (await getThemeByName("dark"))!;
-		const chosen = "Choose the longer alternative because it contains information important at the end of its label";
-		const other = "Leave the other longer alternative visible so its ending still distinguishes the choices";
-		const answers = { question: "Pick?", options: [chosen, other], selectedOptions: [chosen] };
-		const cards = [
-			askToolRenderer.renderResult({ content: [], details: answers }, { expanded: false, isPartial: false }, theme),
-			askToolRenderer.renderResult(
-				{ content: [], details: { results: [{ id: "choice", multi: false, ...answers }] } },
-				{ expanded: false, isPartial: false },
-				theme,
-			),
-		];
-		for (const card of cards) {
-			const rows = plain(card.render(width));
-			const chosenRow = rows.findIndex(row => row.includes("◉ Choose"));
-			const otherRow = rows.findIndex(row => row.includes("○ Leave"));
-			expect(chosenRow).toBeGreaterThan(0);
-			expect(rows[chosenRow + 1]).toStartWith("│    ");
-			expect(rows[chosenRow + 1]).toContain("information important");
-			expect(otherRow).toBeGreaterThan(0);
-			expect(rows[otherRow + 1]).toStartWith("│    ");
-			expect(rows[otherRow + 1]).toContain("ending still");
-		}
+		const answer = "Choose the longer alternative because it contains information important at the end of its label";
+		const rows = plain(
+			askToolRenderer
+				.renderResult(
+					{ content: [], details: { answers: [{ name: "choice", question: "Pick?", answer }] } },
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(width),
+		);
+		const answerRow = rows.findIndex(row => row.includes("Choose the longer"));
+		expect(answerRow).toBeGreaterThan(0);
+		expect(rows[answerRow + 1]).toStartWith("│    ");
+		expect(rows[answerRow + 1]).toContain("information important");
 	});
 
-	it("hangs Ask option descriptions and LSP hover code beneath their prefix", async () => {
+	it("hangs Ask option labels beneath their marker and wraps LSP hover code", async () => {
 		const theme = (await getThemeByName("dark"))!;
+		const label = "This detailed option label is long enough to require a second row inside the narrow card.";
 		const ask = plain(
 			askToolRenderer
 				.renderCall(
 					{
-						question: "Pick?",
-						options: [
-							{
-								label: "A",
-								description:
-									"This detailed description is long enough to require a second row inside the narrow card.",
-							},
-						],
+						html: `<form><p>Pick?</p><label><input type="radio" name="pick" value="a" checked> ${label}</label></form>`,
 					},
 					{ expanded: false, isPartial: true },
 					theme,
 				)
 				.render(width),
 		);
-		const description = ask.findIndex(row => row.includes("↳"));
-		expect(description).toBeGreaterThan(0);
-		expect(ask[description + 1]).toStartWith("│     ");
-		expect(ask[description + 1]).toContain("card.");
+		const option = ask.findIndex(row => row.includes("◉ This detailed"));
+		expect(option).toBeGreaterThan(0);
+		expect(ask[option + 1]).toStartWith("│    ");
+		expect(ask[option + 1]).toContain("card.");
 
 		for (const expanded of [true, false]) {
 			const hover = plain(
@@ -192,9 +178,8 @@ describe("prefixed tool rows", () => {
 					theme,
 				).render(width),
 			);
-			const codeRow = hover.findIndex(row => row.startsWith("│  │ "));
+			const codeRow = hover.findIndex(row => row.startsWith("const note"));
 			expect(codeRow).toBeGreaterThan(0);
-			expect(hover[codeRow + 1]).toStartWith("│  │ ");
 			expect(hover[codeRow + 1]).toContain("long text");
 		}
 	});

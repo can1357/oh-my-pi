@@ -4,6 +4,7 @@ const REQUIRED_METHODS = [
 	"captureRegion",
 	"cancel",
 	"retire",
+	"setRunDeadline",
 	"observe",
 	"listApplications",
 	"openApplication",
@@ -20,10 +21,16 @@ const REQUIRED_METHODS = [
 	"releaseDisplayAwake",
 ];
 
+/** Getters the computer worker reads; without `escapeStops` it would read every run as stopped by the user's Escape. */
+const REQUIRED_GETTERS = ["escapeStops"];
+
 /** Require the current desktop ABI; partial legacy emulation cannot preserve input ownership. */
 export function adaptDesktopSession(NativeDesktopSession) {
 	const prototype = NativeDesktopSession?.prototype;
-	const missing = REQUIRED_METHODS.filter(method => typeof prototype?.[method] !== "function");
+	const missing = [
+		...REQUIRED_METHODS.filter(method => typeof prototype?.[method] !== "function"),
+		...REQUIRED_GETTERS.filter(getter => !prototype || !(getter in prototype)),
+	];
 	if (missing.length === 0) {
 		return NativeDesktopSession;
 	}

@@ -61,7 +61,8 @@ export const DISPLAY_METHODS: MethodPolicies = {
 /** Helpers callable on a window handle resolved through `desktop.window(id)`. */
 export const WINDOW_METHODS: MethodPolicies = {
 	observe: "read",
-	"menu.items": "read",
+	// Reading a macOS menu makes its window key first.
+	"menu.items": "exec",
 	"menu.select": "exec",
 	bringToCurrentSpace: "exec",
 	holdKeys: "exec",
@@ -91,6 +92,7 @@ export const ELEMENT_METHODS: MethodPolicies = {
 	actions: "read",
 	perform: "exec",
 	press: "exec",
+	type: "exec",
 	click: "exec",
 	doubleClick: "exec",
 	focus: "exec",

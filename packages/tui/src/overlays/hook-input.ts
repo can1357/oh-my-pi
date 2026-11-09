@@ -21,6 +21,7 @@ export interface HookInputOptions {
 	tui?: TUI;
 	timeout?: number;
 	onTimeout?: () => void;
+	secret?: boolean;
 }
 
 /** Terminal-only key legend under the field; a native terminal puts the keys in the buttons' tooltips. */
@@ -84,6 +85,7 @@ export class HookInputComponent extends OverlayPanel {
 
 		this.#field = new TextFormField({
 			theme: formTheme,
+			secret: opts?.secret ?? false,
 			empty: "submit",
 			onSubmit: value => this.#onSubmitCallback(value),
 			onCancel: () => this.#onCancelCallback(),

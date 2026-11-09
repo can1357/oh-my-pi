@@ -22,6 +22,7 @@ import {
 	McpArgsSchema,
 	ReadArgsSchema,
 	ShellArgsSchema,
+	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -921,6 +922,26 @@ describe("CursorExecHandlers error results", () => {
 		expect(end?.isError).toBe(true);
 	});
 
+	it("names the granted tools when a shell frame asks for an unavailable bash", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				["read", rewrittenErrorTool("read")],
+				["grep", rewrittenErrorTool("grep")],
+				["glob", rewrittenErrorTool("glob")],
+			]),
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-shell-missing", command: "echo hi" }),
+			{ onStdout: () => {}, onStderr: () => {} },
+		);
+		expect(result.isError).toBe(true);
+		const text = result.content.map(c => (c.type === "text" ? c.text : "")).join("");
+		expect(text).toContain('Tool "bash" not available to this agent');
+		expect(text).toContain("read, grep, glob");
+	});
+
 	it("omits unset optional kwargs from shellStream start events and execute args", async () => {
 		// shellStream bypasses executeTool(), so omitUndefinedArgs must be
 		// applied here directly — otherwise absent cwd/timeout become
@@ -983,6 +1004,96 @@ describe("CursorExecHandlers error results", () => {
 		if (keepStart?.type !== "tool_execution_start") throw new Error("expected tool_execution_start");
 		expect(keepStart.args).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
 		expect(executeArgs[0]).toEqual({ command: "pwd", cwd: "/tmp", timeout: 12 });
+	});
+});
+
+describe("CursorExecHandlers native StrReplace materialization", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-edit-materialize-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	const readSchema = type({ path: "string" });
+	const readTool: AgentTool<typeof readSchema> = {
+		name: "read",
+		label: "read",
+		description: "reads a file",
+		parameters: readSchema,
+		execute: async (_id, args) => ({
+			content: [{ type: "text", text: await Bun.file(args.path).text() }],
+			details: {},
+		}),
+	};
+	const writeSchema = type({ path: "string", content: "string" });
+	const writeTool: AgentTool<typeof writeSchema> = {
+		name: "write",
+		label: "write",
+		description: "writes a file",
+		parameters: writeSchema,
+		execute: async (_id, args) => {
+			await Bun.write(args.path, args.content);
+			return { content: [{ type: "text", text: "Successfully wrote" }], details: { resolvedPath: args.path } };
+		},
+	};
+	const fileTools = new Map<string, AgentTool>([
+		["read", readTool as AgentTool],
+		["write", writeTool as AgentTool],
+	]);
+
+	it("lands the write as the edit card's diff without surfacing read or write calls", async () => {
+		const target = path.join(cwd, "user.lua");
+		await Bun.write(target, "float  = true,\ncenter = true,\n");
+		const events: AgentEvent[] = [];
+		// The provider reaches the handlers through the glyph codec's Proxy, which calls them with the proxy as `this`.
+		const handlers = new Proxy(
+			new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: event => events.push(event) }),
+			{},
+		);
+
+		await handlers.read(create(ReadArgsSchema, { toolCallId: "edit-1", path: target }), {
+			editMaterialization: true,
+		});
+		const result = await handlers.write(
+			create(WriteArgsSchema, {
+				toolCallId: "edit-1",
+				path: target,
+				fileText: "float  = true,\nsize   = { 1033, 628 },\ncenter = true,\n",
+			}),
+			{ editMaterialization: true },
+		);
+
+		expect(await Bun.file(target).text()).toBe("float  = true,\nsize   = { 1033, 628 },\ncenter = true,\n");
+		expect(result.toolName).toBe("edit");
+		expect(result.isError).toBe(false);
+		const details = result.details as { diff?: string; firstChangedLine?: number };
+		expect(details.diff).toBe(" 1|float  = true,\n+2|size   = { 1033, 628 },\n 2|center = true,");
+		expect(details.firstChangedLine).toBe(2);
+		expect(events).toHaveLength(1);
+		const end = events[0];
+		if (end?.type !== "tool_execution_end") throw new Error("expected one tool_execution_end");
+		expect(end.toolCallId).toBe("edit-1");
+		expect(end.toolName).toBe("edit");
+		expect(end.result.details).toEqual(result.details);
+	});
+
+	it("diffs only the changed line of a CRLF file with a BOM", async () => {
+		const target = path.join(cwd, "win.txt");
+		await Bun.write(target, "\uFEFFa\r\nb\r\nc\r\n");
+		const handlers = new CursorExecHandlers({ cwd, tools: fileTools, emitEvent: () => {} });
+
+		const result = await handlers.write(
+			create(WriteArgsSchema, { toolCallId: "edit-2", path: target, fileText: "a\nB\nc\n" }),
+			{ editMaterialization: true },
+		);
+
+		const details = result.details as { diff?: string; firstChangedLine?: number };
+		expect(details.diff).toBe(" 1|a\n-2|b\n+2|B\n 3|c");
+		expect(details.firstChangedLine).toBe(2);
 	});
 });
 
@@ -1737,7 +1848,12 @@ describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 		const result = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "call-del", path: target }));
 
 		expect(result.isError).toBe(true);
-		expect(result.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'Tool "delete" not available to this agent; calling it again fails the same way. Use one of: none.',
+			},
+		]);
 		expect(await Bun.file(target).exists()).toBe(true);
 	});
 

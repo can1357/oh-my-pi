@@ -27,6 +27,8 @@ import { $env, isRecord, parseImageMetadata } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { validateImageInput } from "../images/shared";
+import { withInferenceUserAgent } from "../providers/inference-headers";
+import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
@@ -37,6 +39,7 @@ import {
 	type JudgeOptions,
 	type JudgmentRequest,
 	type JudgmentResult,
+	type JudgmentState,
 	type Questions,
 	tokenUsage,
 } from "./types";
@@ -66,16 +69,48 @@ export function nativeJudgmentSupportsImages(model: Model): boolean {
 	return isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].images !== undefined && model.input.includes("image");
 }
 
+/** Whether `model`'s native judgment takes images and its wire forwards box questions. The model itself may still refuse them (Box needs Jev 1.14+). */
+export function nativeJudgmentSupportsBoxes(model: Model): boolean {
+	return nativeJudgmentSupportsImages(model) && isJudgmentApi(model.api) && JUDGMENT_WIRES[model.api].boxes === true;
+}
+
 /**
- * Whether `model`'s native judgment API takes these exact images: image support plus every documented
- * transport and catalog bound. A judge chain skips a candidate that would refuse them instead of failing on it.
+ * Every image bound `model`'s native judgment enforces: its wire's transport limits tightened by the
+ * catalog's model bounds. `undefined` when it takes no images. Native APIs reject images outside these
+ * rather than resizing them, so callers size images to them first.
  */
+export function nativeJudgmentImageBounds(model: Model): JudgmentImageInput | undefined {
+	if (!isJudgmentApi(model.api) || !model.input.includes("image")) return undefined;
+	const wire = JUDGMENT_WIRES[model.api].images;
+	if (wire === undefined) return undefined;
+	const catalog = resolveJudgmentImageInput(model);
+	return catalog === undefined ? wire : intersectImageInput(wire, catalog);
+}
+
+/** Whether `model`'s native judgment API takes these exact images: image support within every {@link nativeJudgmentImageBounds}. */
 export function nativeJudgmentAcceptsImages(model: Model, images: readonly ImageContent[]): boolean {
-	if (!isJudgmentApi(model.api) || !model.input.includes("image")) return false;
-	const wireLimits = JUDGMENT_WIRES[model.api].images;
-	if (wireLimits === undefined || imageLimitViolation(images, wireLimits) !== undefined) return false;
-	const modelLimits = resolveJudgmentImageInput(model);
-	return modelLimits === undefined || imageLimitViolation(images, modelLimits) === undefined;
+	const bounds = nativeJudgmentImageBounds(model);
+	return bounds !== undefined && imageLimitViolation(images, bounds) === undefined;
+}
+
+/** The bounds both `a` and `b` allow: shared MIME types, the lower of each cap, the higher of each floor. */
+function intersectImageInput(a: JudgmentImageInput, b: JudgmentImageInput): JudgmentImageInput {
+	const bounds: JudgmentImageInput = {};
+	const mimeTypes =
+		a.mimeTypes && b.mimeTypes
+			? a.mimeTypes.filter(type => b.mimeTypes?.includes(type))
+			: (a.mimeTypes ?? b.mimeTypes);
+	if (mimeTypes !== undefined) bounds.mimeTypes = mimeTypes;
+	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide"] as const) {
+		const limit = a[cap] === undefined ? b[cap] : b[cap] === undefined ? a[cap] : Math.min(a[cap], b[cap]);
+		if (limit !== undefined) bounds[cap] = limit;
+	}
+	for (const floor of ["minPixels", "minSide"] as const) {
+		const limit =
+			a[floor] === undefined ? b[floor] : b[floor] === undefined ? a[floor] : Math.max(a[floor], b[floor]);
+		if (limit !== undefined) bounds[floor] = limit;
+	}
+	return bounds;
 }
 
 /**
@@ -100,6 +135,23 @@ export function checkNativeJudgmentImages(
 		);
 	} else if ((request.images?.length ?? 0) > 0 || Object.keys(imageAssets ?? {}).length > 0) {
 		throw new AIError.ValidationError(`Native judgment backend ${label} does not support image inputs`);
+	}
+}
+
+/**
+ * Reject box questions whose `image` is not an index into `request.images`: nothing would say which
+ * image their edges measure.
+ * @throws {AIError.ValidationError} naming the question.
+ */
+export function checkBoxQuestions(request: JudgmentRequest): void {
+	const count = request.images?.length ?? 0;
+	for (const id in request.questions) {
+		const question = request.questions[id];
+		if (question.type !== "box") continue;
+		if (Number.isInteger(question.image) && question.image >= 0 && question.image < count) continue;
+		throw new AIError.ValidationError(
+			`judgment: box question "${id}" names image ${question.image}, but the request has ${count} images`,
+		);
 	}
 }
 
@@ -144,6 +196,8 @@ export interface NativeJudgeOptions extends NativeJudgeConnection {
 	supportsImages?: boolean;
 	/** Catalog-selected image bounds, applied in addition to the wire's transport constraints. */
 	imageInput?: JudgmentImageInput;
+	/** Fields merged over every encoded request body (e.g. OpenRouter `provider` routing preferences). */
+	extraBody?: Record<string, unknown>;
 }
 
 /** Per-call options for {@link NativeJudge.judge}. */
@@ -282,6 +336,7 @@ export class NativeJudge implements Judge {
 	readonly #timeoutMs: number;
 	readonly #maxQuestions: number | undefined;
 	readonly #imageInput: JudgmentImageInput | undefined;
+	readonly #extraBody: Record<string, unknown> | undefined;
 
 	constructor(options: NativeJudgeOptions) {
 		this.#apiKey = options.apiKey;
@@ -298,6 +353,7 @@ export class NativeJudge implements Judge {
 		}
 		this.#maxQuestions = options.maxQuestions;
 		this.#imageInput = options.imageInput;
+		this.#extraBody = options.extraBody;
 		const optedIntoImages = options.supportsImages ?? this.#wire.imagesRequireOptIn !== true;
 		if (this.#wire.images !== undefined && optedIntoImages) this.supportsImages = true;
 		this.label = `${this.provider}/${this.model}`;
@@ -307,6 +363,9 @@ export class NativeJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options?: NativeJudgeCallOptions,
 	): Promise<JudgmentResult<Q>> {
+		// The state goes to the wire as is, past the message transforms that redact chat requests.
+		const redacted = redactSensitiveInObject(request.state);
+		if (redacted.changed) request = { ...request, state: redacted.result as JudgmentState };
 		checkJudgmentImages(
 			this.label,
 			this.#wire,
@@ -315,6 +374,13 @@ export class NativeJudge implements Judge {
 			options?.imageAssets,
 			this.#imageInput,
 		);
+		checkBoxQuestions(request);
+		if (this.#wire.boxes !== true) {
+			for (const id in request.questions) {
+				if (request.questions[id].type !== "box") continue;
+				throw new AIError.ValidationError(`Native judgment backend ${this.label} does not answer box questions`);
+			}
+		}
 		const ids = Object.keys(request.questions);
 		const cap = this.#maxQuestions;
 		if (cap !== undefined && ids.length > cap) return this.#judgeChunked(request, ids, cap, options);
@@ -396,7 +462,8 @@ export class NativeJudge implements Judge {
 		request: JudgmentRequest<Q>,
 		options: NativeJudgeCallOptions | undefined,
 	): Promise<JudgmentResult<Q>> {
-		const body = JSON.stringify(this.#wire.encode(request, this.model, options?.imageAssets));
+		const encoded = this.#wire.encode(request, this.model, options?.imageAssets);
+		const body = JSON.stringify(this.#extraBody ? { ...encoded, ...this.#extraBody } : encoded);
 		const hasImages = (request.images?.length ?? 0) > 0 || Object.keys(options?.imageAssets ?? {}).length > 0;
 		const requestHeaders = hasImages ? this.#wire.imageHeaders : undefined;
 		const signal = options?.signal;
@@ -455,12 +522,15 @@ export class NativeJudge implements Judge {
 			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
 			try {
-				response = await this.#fetch(target.url, {
-					method: "POST",
-					headers,
-					body,
-					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				});
+				response = await this.#fetch(
+					target.url,
+					withInferenceUserAgent(target.url, {
+						method: "POST",
+						headers,
+						body,
+						signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+					}),
+				);
 			} catch (error) {
 				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
 				await Bun.sleep(backoffMs(attempt, undefined));
@@ -480,9 +550,11 @@ export class NativeJudge implements Judge {
 
 /**
  * The {@link NativeJudge} for a catalog judge model: its API's dialect, wire id
- * (`requestModelId ?? id`), base URL, and catalog question cap
- * (`judgment-questions-max`). Shared by the coding agent's judge chain and the
- * auth-gateway System One route so both address a model the same way.
+ * (`requestModelId ?? id`), base URL, catalog question cap
+ * (`judgment-questions-max`), and, for OpenRouter Decisions, the compat
+ * `openRouterRouting` (sent as `provider`) and `extraBody` request controls.
+ * Shared by the coding agent's judge chain and the auth-gateway System One
+ * route so both address a model the same way.
  *
  * @throws ConfigurationError when the model's API is not a judgment API.
  */
@@ -499,5 +571,21 @@ export function createNativeJudge(model: Model, connection: NativeJudgeConnectio
 		maxQuestions: resolveJudgmentQuestionsMax(model),
 		supportsImages: nativeJudgmentSupportsImages(model),
 		imageInput: resolveJudgmentImageInput(model),
+		extraBody: openRouterDecisionsBody(model),
 	});
+}
+
+/**
+ * OpenRouter Decisions request controls from the model's configured compat, in the chat vocabulary:
+ * `openRouterRouting` becomes `provider`, then `extraBody` overlays the body as on chat requests.
+ * Judgment APIs resolve no compat, so the sparse user `compatConfig` is the source. Applied under any
+ * base URL: the Decisions API is OpenRouter's own, and relays forward the body to it.
+ */
+function openRouterDecisionsBody(model: Model): Record<string, unknown> | undefined {
+	const config = model.compatConfig;
+	if (model.api !== "openrouter-decisions" || !config) return undefined;
+	const routing = "openRouterRouting" in config ? config.openRouterRouting : undefined;
+	const extraBody = "extraBody" in config ? config.extraBody : undefined;
+	if (!routing && !extraBody) return undefined;
+	return { ...(routing && { provider: routing }), ...extraBody };
 }

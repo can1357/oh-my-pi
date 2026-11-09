@@ -35,7 +35,7 @@ export interface JudgmentWire {
 	 */
 	target(baseUrl: string, model: string, key: string): JudgmentTarget;
 	/** Request body for `model`, with optional asset context for dialects that preserve references. */
-	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): unknown;
+	encode(request: JudgmentRequest, model: string, imageAssets?: JudgmentImageAssets): Record<string, unknown>;
 	/** Headers this dialect adds to requests that carry images. */
 	imageHeaders?: Readonly<Record<string, string>>;
 	/** Image input this dialect accepts; absent means text-only. */
@@ -46,6 +46,8 @@ export interface JudgmentWire {
 	imagesRequireOptIn?: boolean;
 	/** Whether this wire drops per-image detail metadata. */
 	ignoresImageDetail?: boolean;
+	/** Whether this dialect forwards `box` questions; others reject them before sending. */
+	boxes?: boolean;
 	/** The response's answers and usage; `undefined` when the payload is not this API's response shape. */
 	decode(payload: unknown): DecodedJudgment | undefined;
 }
