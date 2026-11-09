@@ -5,9 +5,7 @@
 ### Fixed
 
 - Fixed the bash tool and the `!` terminal sometimes returning a command's exit status with none of its output, or without its last bytes, when the machine was busy or the output was read slowly; a run now returns only after every byte already written to its output has been delivered, and fails with "Command output was not all delivered" when its output callback fails or stops taking output, instead of waiting for it forever or reporting success or cancellation ([#17858](https://github.com/can1357/oh-my-pi/pull/17858) by [@sjawhar](https://github.com/sjawhar))
-- The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
-- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
-- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
