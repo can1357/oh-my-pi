@@ -384,6 +384,18 @@ describe("html form", () => {
 			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" });
 		});
 
+		it("natively: Submit shows only on the last question tab (and Review) and sends from there", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			// First question tab: Next only.
+			expect(findPath(form.describe(CX), node => node.key === "submit")).toBeUndefined();
+			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
+			const root = form.describe(CX);
+			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // last question tab, not Review
+			expect(findPath(root, node => node.key === "submit")).toBeDefined();
+			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+			expect(onSubmit).toHaveBeenCalledWith({ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" });
+		});
+
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
 			const { form } = dialog(DB_FORM);
 			const checked = () => {
