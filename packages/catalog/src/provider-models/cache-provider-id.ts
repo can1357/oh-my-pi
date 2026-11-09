@@ -29,6 +29,10 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// Kimi Code's roster is plan-gated and discovery is authoritative, so a
 	// shared namespace would serve one plan's ids to another plan's credential.
 	"kimi-code": true,
+	// Otari's roster is the set of models one workspace enables, and discovery
+	// is authoritative, so a shared namespace would serve one workspace's ids,
+	// prices, and limits to another workspace's key for the full TTL.
+	otari: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -49,6 +53,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "otari":
+			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
 		case "opencode-go":
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
@@ -148,10 +154,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
-		case "muse-code": {
+		// Per-key rosters (Otari: one workspace's enabled models) behind a
+		// configurable endpoint: scope by both so switching either re-runs discovery.
+		case "muse-code":
+		case "otari": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "singularityapi-dev":
 		case "singularityapi-tech": {

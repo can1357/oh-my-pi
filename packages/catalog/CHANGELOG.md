@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Otari gateway provider: `/login otari` with `OTARI_API_KEY`, models discovered live per workspace ([#17841](https://github.com/can1357/oh-my-pi/pull/17841) by [@tbille](https://github.com/tbille))
+
 ## [18.18.3] - 2026-11-09
 
 ### Changed
