@@ -1853,7 +1853,10 @@ export class HtmlFormDialog implements Component, Focusable {
 					id: `r${index}`,
 					cells: Object.fromEntries(cols.map((column, cell) => [column.id, nativeSpans(row[cell] ?? [])])),
 				}));
-				return node("table", { cols, rows, role: "omp.ask.table" });
+				// Framed like the context card, so a table reads as one block beside the controls.
+				return node("card", { tone: "neutral", inset: true, role: "omp.ask.table" }, [
+					node("table", { cols, rows }),
+				]);
 			}
 			case "field":
 				return this.#describeField(block.field);
