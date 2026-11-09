@@ -7,14 +7,17 @@
  * allows ({@link DIALOG_HEIGHT_RATIO} of the terminal), it splits into pages
  * ({@link paginate}) at section boundaries where possible; focus drives the
  * visible page, so moving past a page's last control turns the page. A native
- * (Tern) terminal gets the same form described semantically instead — one
- * scrolling column of sections, option lists, inputs and a Submit/Cancel bar —
- * and reports clicks back through {@link HtmlFormDialog.handleNativeEvent}.
+ * (Tern) terminal gets the form described semantically instead: one tab per
+ * question (a top-level `<fieldset>`; context before it rides along) plus a
+ * Review tab, the tab's content in a column the terminal scrolls, and an
+ * action bar that stays in view below it. Clicks come back through
+ * {@link HtmlFormDialog.handleNativeEvent}.
  *
  * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
  * radio (or leaves a field) and moves on, Enter on Submit validates and
- * submits, PgUp/PgDn (←/→ on choices) turn pages, Esc cancels. With a
+ * submits, PgUp/PgDn (←/→ on choices) turn pages (question tabs natively),
+ * `app.ask.hide` collapses the form to one row, Esc cancels. With a
  * `timeout`, inactivity submits the current values through `onTimeout`.
  *
  * @example
@@ -41,7 +44,7 @@ import {
 } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, matchesKey } from "../keys";
-import { code, col, item, keyed, list, node, span, text } from "../native/describe";
+import { code, col, item, keyed, list, node, row, span, text } from "../native/describe";
 import { nativeImageNode } from "../native/blobs";
 import {
 	type DescribeContext,
@@ -52,13 +55,23 @@ import {
 	type TspSpan,
 } from "../native/node";
 import { actionBar, actionButton, itemIndex } from "../native/overlay";
+import { isNativeRendering } from "../native/state";
 import type { AskDialogInputGuard } from "../overlays/ask-dialog";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
 import { getEditorTheme, type ThemeColor, theme } from "../theme/theme";
 import { optionMarker } from "../tools/ask";
 import type { Component, Focusable } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
-import { choiceValue, fieldError, type HtmlFormData, type HtmlFormValue, OTHER_LABEL, textValue } from "./data";
+import {
+	choiceValue,
+	fieldError,
+	fieldQuestions,
+	formAnswers,
+	type HtmlFormData,
+	type HtmlFormValue,
+	OTHER_LABEL,
+	textValue,
+} from "./data";
 import { type FormMedia, isSvgMedia, loadFormImage, svgMedia } from "./media";
 import { BreakRank, type Page, type PageAtom, pageHeight, paginate } from "./paginate";
 import {
@@ -117,6 +130,11 @@ const EDIT_ACT = "edit:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
 const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
+/** Widest a question tab's label grows before it is clipped. */
+const TAB_LABEL_WIDTH = 28;
+const REVIEW_TAB = "Review";
+/** Tab id of the Review tab (question tabs are `t<index>`). */
+const REVIEW_ID = "review";
 
 /** A picture block's state: still loading, failed (with why), or drawn by `rows` and described by `native`. */
 type MediaSlot =
@@ -141,6 +159,13 @@ interface Layout {
 	stopAtoms: number[];
 	/** Where the open dropdown hangs from: its field's atom and the value row inside it. */
 	dropdown?: { atom: number; row: number };
+}
+
+/** A native question tab: indices of the sections it shows, and the fields in them. */
+interface FormTab {
+	label: string;
+	sections: number[];
+	fields: FormField[];
 }
 
 /** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
@@ -198,6 +223,37 @@ function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
 	});
 }
 
+/**
+ * Native question tabs: one per section holding fields, labeled by its legend
+ * (else its first field's question). Sections of context alone join the next
+ * tab, or the last one when nothing follows.
+ */
+function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): FormTab[] {
+	const tabs: FormTab[] = [];
+	let lead: number[] = [];
+	form.sections.forEach((section, index) => {
+		const fields = section.blocks.flatMap(block => (block.kind === "field" ? [block.field] : []));
+		if (fields.length === 0) {
+			lead.push(index);
+			return;
+		}
+		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
+		const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
+		tabs.push({
+			label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
+			sections: [...lead, index],
+			fields,
+		});
+		lead = [];
+	});
+	if (lead.length > 0) {
+		const last = tabs.at(-1);
+		if (last) last.sections.push(...lead);
+		else tabs.push({ label: "", sections: lead, fields: [] });
+	}
+	return tabs;
+}
+
 /** Interactive pager over an {@link HtmlForm}; see the module docs for layout and keys. */
 export class HtmlFormDialog implements Component, Focusable {
 	readonly #form: HtmlForm;
@@ -240,11 +296,27 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #mediaAbort = new AbortController();
 	/** Bumped when a picture loads, fails or rasterizes: its rows change the panel's natural height. */
 	#mediaVersion = 0;
+	/** Each field's question ({@link fieldQuestions}): Review keys and the hidden row's summary. */
+	readonly #questions: Map<FormField, string>;
+	/** Native question tabs; drawn only when there are two or more. */
+	readonly #tabs: FormTab[];
+	readonly #fieldTab = new Map<FormField, number>();
+	/** The tab the native form shows: a question tab, or `#tabs.length` for Review. */
+	#tab = 0;
+	/** Question tabs the user has moved off; only these get a check, so preselected answers on unseen tabs stay unmarked. */
+	readonly #leftTabs = new Set<number>();
+	/** Collapsed to one row (`app.ask.hide` / Hide) while the form stays pending. */
+	#hidden = false;
 
 	constructor(form: HtmlForm, options: HtmlFormDialogOptions) {
 		this.#form = form;
 		this.#options = options;
 		form.fields.forEach((field, index) => this.#fieldIndex.set(field, index));
+		this.#questions = fieldQuestions(form);
+		this.#tabs = buildTabs(form, this.#questions);
+		this.#tabs.forEach((tab, index) => {
+			for (const field of tab.fields) this.#fieldTab.set(field, index);
+		});
 		for (const section of form.sections) {
 			for (const block of section.blocks) {
 				if (block.kind === "image" || block.kind === "svg") this.#initMedia(block);
@@ -335,6 +407,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	handleInput(data: string): void {
 		this.#resetCountdown();
 		this.#changed();
+		if (getKeybindings().matches(data, "app.ask.hide")) {
+			this.#setHidden(!this.#hidden);
+			return;
+		}
 		if (this.#open) {
 			this.#dropdownInput(this.#open, data);
 			return;
@@ -348,6 +424,10 @@ export class HtmlFormDialog implements Component, Focusable {
 			else this.#options.inputGuard?.handleInput(data);
 			return;
 		}
+		if (this.#hidden) {
+			if (getKeybindings().matches(data, "tui.select.confirm")) this.#setHidden(false);
+			return;
+		}
 		if (matchesSelectPageDown(data) || matchesSelectPageUp(data)) {
 			this.#turnPage(matchesSelectPageDown(data) ? 1 : -1);
 			return;
@@ -358,7 +438,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		const stop = this.#stops[this.#focus]!;
 		// Only paged rows can hide focus; native terminals and an unrendered form never do.
-		if (!this.#followFocus && this.#pages.length > 1) {
+		if (!isNativeRendering() && !this.#followFocus && this.#pages.length > 1) {
 			// Focus sits on another page: ←/→ keep paging, and the keys that would act on
 			// it bring it into view instead of acting unseen. Anything else is ignored.
 			if (matchesKey(data, "left") || matchesKey(data, "right")) {
@@ -408,13 +488,16 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 	}
 
-	/** Clicks on option rows and the Submit/Cancel bar of the native description. */
+	/** Clicks on tabs, option rows and the action bar of the native description. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		this.#resetCountdown();
 		this.#changed();
 		if (event.type === "action") {
-			if (event.act === "submit") this.#submit();
-			else if (event.act === "cancel") this.#cancel();
+			if (event.act === "cancel") this.#cancel();
+			else if (event.act === "hide" || event.act === "show") this.#setHidden(event.act === "hide");
+			else if (this.#hidden) return;
+			else if (event.act === "submit") this.#submit();
+			else if (event.act === "next") this.#showTab(this.#tab + 1);
 			else if (event.act.startsWith(EDIT_ACT)) {
 				const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
 				const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
@@ -422,8 +505,13 @@ export class HtmlFormDialog implements Component, Focusable {
 			}
 			return;
 		}
-		if (event.type !== "select" && event.type !== "activate") return;
+		if (this.#hidden || (event.type !== "select" && event.type !== "activate")) return;
 		const leaf = leafKey(event.key);
+		if (leaf === "tabs") {
+			const index = event.item === REVIEW_ID ? this.#tabs.length : itemIndex(event.item, "t");
+			if (this.#tabbed() && index >= 0) this.#showTab(index);
+			return;
+		}
 		const field = leaf.startsWith("f") ? this.#form.fields[Number(leaf.slice(1))] : undefined;
 		if (field?.kind === "choice" && field.other && event.item === OTHER_ITEM) {
 			// The Other row takes the keyboard (its input becomes the live editor); a radio
@@ -447,6 +535,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	render(width: number): readonly string[] {
 		this.#options.inputGuard?.syncPresentation?.(this.#guardBlocks());
+		if (this.#hidden) return this.#renderHidden(width);
 		const innerWidth = Math.max(1, width - 4);
 		const layout = this.#layout(innerWidth);
 		const rows = this.#bodyRows(innerWidth, layout.atoms);
@@ -465,49 +554,20 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * The form as one native column: sections with their context, option lists
-	 * (`select` focuses/picks, a checkbox `select` toggles), the field `Input`s and
-	 * `Editor`s as their own described children, and a Cancel/Submit bar.
-	 *
-	 * The column rides in an item-less `omp.ask.options` list: the composer-place
-	 * ask frame caps its height and scrolls only that list among its children, so
-	 * a tall form scrolls (focused option lists reveal themselves) and the bar stays put.
+	 * The form natively: question tabs and a Review tab (two or more questions),
+	 * the shown tab's sections in a height-capped column the terminal scrolls,
+	 * then the action bar, which stays in view however long the form is. Option
+	 * lists `select` to focus/pick (a checkbox `select` toggles); the focused text
+	 * field is its live `Input`/`Editor`. Hidden, it is one summary row.
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		const blocked = this.#guardBlocks();
 		this.#options.inputGuard?.syncPresentation?.(blocked);
 		// Other answers are typed into the terminal's own inputs, which don't pass through handleInput.
-		const key = `${this.#version}\0${[...this.#others.values()].map(input => input.getValue()).join("\0")}`;
+		const others = [...this.#others.values()].map(input => input.getValue()).join("\0");
+		const key = `${this.#version}\0${blocked}\0${others}`;
 		if (this.#native?.key === key) return this.#native.node;
-		const sections = this.#form.sections.map((section, sectionIndex) => {
-			const blocks = section.blocks.map(block => this.#describeBlock(block));
-			return section.title.length > 0
-				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, `s${sectionIndex}`)
-				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), `s${sectionIndex}`);
-		});
-		const guard = this.#options.inputGuard;
-		const lead =
-			blocked && guard
-				? this.#guardHint(guard)
-				: this.#remaining !== undefined
-					? `Submits these answers in ${this.#remaining}s`
-					: undefined;
-		const described = col(
-			[
-				list(
-					[keyed(col(sections, { gap: "lg", role: "omp.ask.form" }), "body")],
-					{ role: "omp.ask.options" },
-					"form",
-				),
-				actionBar([
-					lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
-					...(lead ? [null] : []),
-					actionButton("Cancel", "cancel", { keys: "escape" }),
-					actionButton(SUBMIT_LABEL, "submit", { keys: "enter", tone: "accent" }),
-				]),
-			],
-			{ role: "omp.editor.ask", gap: "md" },
-		);
+		const described = this.#hidden ? this.#describeHidden() : this.#describeForm(blocked);
 		this.#native = { key, node: described };
 		return described;
 	}
@@ -887,6 +947,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#focus = Math.max(0, Math.min(this.#stops.length - 1, index));
 		this.#followFocus = true;
 		this.#syncControlFocus();
+		if (this.#tabbed()) this.#enterTab(this.#tabOfStop(this.#focus));
 	}
 
 	#moveStop(delta: number): void {
@@ -908,6 +969,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#turnPage(delta: number): void {
+		if (isNativeRendering()) {
+			if (this.#tabbed()) this.#showTab(this.#tab + delta);
+			return;
+		}
 		if (this.#pages.length < 2) return;
 		const target = Math.max(0, Math.min(this.#pages.length - 1, this.#page + delta));
 		const page = this.#pages[target]!;
@@ -927,11 +992,74 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	#syncControlFocus(): void {
 		const stop = this.#stops[this.#focus];
+		const live = this.#focused && !this.#hidden;
 		const active = stop?.kind === "text" ? stop.field : undefined;
 		const other = stop?.kind === "other" ? stop.field : undefined;
-		for (const [field, input] of this.#inputs) input.focused = this.#focused && field === active;
-		for (const [field, input] of this.#others) input.focused = this.#focused && field === other;
-		for (const [field, editor] of this.#editors) editor.focused = this.#focused && field === active;
+		for (const [field, input] of this.#inputs) input.focused = live && field === active;
+		for (const [field, input] of this.#others) input.focused = live && field === other;
+		for (const [field, editor] of this.#editors) editor.focused = live && field === active;
+	}
+
+	// ── Tabs and hiding ──────────────────────────────────────────────────────
+
+	/** Question tabs (and Review) show natively only for two or more questions. */
+	#tabbed(): boolean {
+		return this.#tabs.length > 1;
+	}
+
+	/** The tab holding stop `index`: its field's question tab, or Review for Submit. */
+	#tabOfStop(index: number): number {
+		const stop = this.#stops[index];
+		if (!stop || stop.kind === "submit") return this.#tabs.length;
+		return this.#fieldTab.get(stop.field) ?? 0;
+	}
+
+	/** Show tab `index` (`#tabs.length` is Review), focusing its first stop. */
+	#showTab(index: number): void {
+		const tab = Math.max(0, Math.min(this.#tabs.length, index));
+		const stop = this.#stops.findIndex((_, stopIndex) => this.#tabOfStop(stopIndex) === tab);
+		if (stop !== -1) this.#setFocus(stop);
+		this.#enterTab(tab);
+	}
+
+	#enterTab(tab: number): void {
+		if (tab !== this.#tab) this.#leftTabs.add(this.#tab);
+		this.#tab = tab;
+	}
+
+	#setHidden(hidden: boolean): void {
+		if (this.#hidden === hidden) return;
+		this.#hidden = hidden;
+		this.#open = undefined;
+		this.#syncControlFocus();
+	}
+
+	/** The question in focus (else the first) for the hidden row, with how many more there are. */
+	#hiddenSummary(): string {
+		const stop = this.#stops[this.#focus];
+		const field = stop && stop.kind !== "submit" ? stop.field : this.#form.fields[0];
+		const question = field ? sanitize(this.#questions.get(field) ?? "").replace(/\s+/g, " ") : "";
+		const more = this.#form.fields.length - 1;
+		return more > 0 ? `${question} (+${more} more)` : question;
+	}
+
+	/** Hidden: one row in the composer's place, the title, the question clipped to fit, and how to bring it back. */
+	#renderHidden(width: number): readonly string[] {
+		const hideKey = editorKey("app.ask.hide");
+		const enter = formatKeyHint("enter");
+		const guard = this.#options.inputGuard;
+		const blocked = this.#guardBlocks();
+		// While a draft owns input, Enter goes to the draft, so only the hide key restores.
+		const show = blocked ? hideKey : hideKey ? `${hideKey}/${enter}` : enter;
+		const hints: string[] = [];
+		if (blocked && guard) hints.push(this.#guardHint(guard));
+		if (show) hints.push(`${show} show`);
+		hints.push(`${editorKey("tui.select.cancel")} cancel`);
+		const hint = theme.fg("dim", ` · ${hints.join(" · ")}`);
+		const label = theme.fg("accent", `${this.#titleText()} hidden:`);
+		const room = Math.max(1, width - visibleWidth(label) - visibleWidth(hint) - 1);
+		const summary = truncateToWidth(this.#hiddenSummary(), room, Ellipsis.Unicode);
+		return [truncateToWidth(`${label} ${theme.fg("muted", summary)}${hint}`, width, Ellipsis.Unicode)];
 	}
 
 	// ── Rows ─────────────────────────────────────────────────────────────────
@@ -1030,7 +1158,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#footerText(): string {
-		const cancel = `${editorKey("tui.select.cancel")} cancel`;
+		const hideKey = editorKey("app.ask.hide");
+		const cancel = `${editorKey("tui.select.cancel")} cancel${hideKey ? ` · ${hideKey} hide` : ""}`;
 		const guard = this.#options.inputGuard;
 		if (guard && this.#guardBlocks()) return `${this.#guardHint(guard)} · ${cancel}`;
 		const stop = this.#stops[this.#focus]!;
@@ -1332,6 +1461,134 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	// ── Native ───────────────────────────────────────────────────────────────
+
+	/**
+	 * Tern's stylesheet caps the ask card at 60vh, clips what overflows, and lets only a few of
+	 * its direct children shrink and scroll: a `list` in the `omp.ask.options` role and a `kv` in
+	 * `omp.ask.answers`. A tab's content therefore sits in one such list (a `col` capped by `max`
+	 * only clips), so it scrolls inside the card and the action bar below stays in view.
+	 */
+	#describeForm(blocked: boolean): NativeNode {
+		const tabbed = this.#tabbed();
+		const review = tabbed && this.#tab === this.#tabs.length;
+		const children: NativeChild[] = [];
+		if (tabbed) children.push(this.#describeTabs());
+		if (review) {
+			children.push(...this.#describeReview());
+		} else {
+			const form = col(this.#describeSections(this.#tabs[this.#tab]?.sections ?? []), {
+				gap: "lg",
+				role: "omp.ask.form",
+			});
+			// Keyed per tab, so a tab switch mounts a fresh scroller that opens at its top. The key
+			// stays clear of `f<index>`, the option lists' keys `handleNativeEvent` reads.
+			children.push(list([form], { role: "omp.ask.options" }, `body${this.#tab}`));
+		}
+		children.push(this.#describeActions(blocked, tabbed && !review));
+		return col(children, { role: "omp.editor.ask", gap: "md" });
+	}
+
+	/** One tab per question, checked once the user has left it with no field failing validation, then Review. */
+	#describeTabs(): NativeNode {
+		const items = this.#tabs.map((tab, index) => ({
+			id: `t${index}`,
+			label:
+				this.#leftTabs.has(index) &&
+				tab.fields.length > 0 &&
+				tab.fields.every(field => fieldError(field, this.#value(field)) === undefined)
+					? [span("✓ ", "success"), span(tab.label)]
+					: [span(tab.label)],
+		}));
+		items.push({ id: REVIEW_ID, label: [span(REVIEW_TAB)] });
+		const active = this.#tab === this.#tabs.length ? REVIEW_ID : `t${this.#tab}`;
+		const tabs = node(
+			"tabs",
+			{
+				items,
+				active,
+				role: "omp.ask.questions",
+				title: "Previous/next question  ←/→",
+				actions: { click: "select" },
+			},
+			undefined,
+			"tabs",
+		);
+		return keyed(row([tabs], { role: "omp.ask.head", align: "center" }), "head");
+	}
+
+	#describeSections(sections: readonly number[]): NativeChild[] {
+		return sections.map(index => {
+			const section = this.#form.sections[index]!;
+			const blocks = section.blocks.map(block => this.#describeBlock(block));
+			return section.title.length > 0
+				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, `s${index}`)
+				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), `s${index}`);
+		});
+	}
+
+	/**
+	 * Review tab: whether anything still needs fixing, then every answer under its question. The
+	 * answers sit straight in the card as `omp.ask.answers`, the list Tern's stylesheet lets shrink
+	 * and scroll inside the card.
+	 */
+	#describeReview(): NativeChild[] {
+		const problems = this.#form.fields.filter(field => fieldError(field, this.#value(field)) !== undefined).length;
+		const notice =
+			problems > 0
+				? [
+						span(`${problems} ${problems === 1 ? "answer needs" : "answers need"} a fix`, "warning"),
+						span(" · Submit opens the first"),
+					]
+				: [span("All set · Submit sends these answers")];
+		const named = this.#form.fields.filter(field => field.name);
+		const items = formAnswers(this.#form, this.data()).map((answer, index) => {
+			const field = named[index]!;
+			const shown =
+				field.kind === "text" && field.type === "password"
+					? "•".repeat(answer.answer.length)
+					: sanitize(answer.answer).replace(/\s+/g, " ");
+			return { k: sanitize(answer.question), v: shown ? [span(shown)] : [span("—", "dim")] };
+		});
+		return [
+			text(notice, { wrap: "word", role: "omp.ask.notice" }),
+			node("kv", { items, role: "omp.ask.answers" }, undefined, REVIEW_ID),
+		];
+	}
+
+	/** Hide, the countdown or draft hint, then Cancel and the primary action: Next on a question tab, else Submit. */
+	#describeActions(blocked: boolean, next: boolean): NativeNode {
+		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
+		const guard = this.#options.inputGuard;
+		const lead =
+			blocked && guard
+				? this.#guardHint(guard)
+				: this.#remaining !== undefined
+					? `Submits these answers in ${this.#remaining}s`
+					: undefined;
+		return actionBar([
+			actionButton("Hide", "hide", hideKey ? { keys: hideKey } : {}),
+			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
+			...(lead ? [null] : []),
+			actionButton("Cancel", "cancel", { keys: "escape" }),
+			next
+				? actionButton("Next", "next", { tone: "accent" })
+				: actionButton(SUBMIT_LABEL, "submit", { keys: "enter", tone: "accent" }),
+		]);
+	}
+
+	/** Hidden: one row in the composer's place, the countdown, the question clipped to a line, Cancel and Show. */
+	#describeHidden(): NativeNode {
+		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
+		const items: NativeNode[] = [];
+		if (this.#remaining !== undefined) items.push(text([span(`${this.#remaining}s`, "muted")]));
+		items.push(
+			// The summary grows (`omp.ask.summary`), end-aligning Cancel and Show.
+			text([span("Question  ", "muted"), span(this.#hiddenSummary())], { truncate: "end", role: "omp.ask.summary" }),
+			actionButton("Cancel", "cancel", { keys: "escape" }),
+			actionButton("Show", "show", { tone: "accent", ...(hideKey ? { keys: hideKey } : {}) }),
+		);
+		return col([actionBar(items)], { role: "omp.editor.ask.hidden", gap: "md" });
+	}
 
 	#describeBlock(block: FormBlock): NativeChild {
 		switch (block.kind) {

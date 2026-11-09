@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+
 ### Fixed
 
 - Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).

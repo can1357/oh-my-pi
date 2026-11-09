@@ -12,6 +12,7 @@ import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { BreakRank, type PageAtom, paginate } from "@oh-my-pi/pi-tui/html-form/paginate";
 import { parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 
@@ -364,17 +365,98 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("natively: clicking options changes the answers and the Submit action submits them", () => {
+		it("natively: one tab per question with Next, and Submit on the Review tab sends the answers", () => {
 			const { form, onSubmit } = dialog(DB_FORM);
-			const root = form.describe(CX);
+			let root = form.describe(CX);
 			expect(root.p).toMatchObject({ role: "omp.editor.ask" });
+			const tabs = findPath(root, node => node.k === "tabs")!;
+			// The Database tab shows only its own question.
+			expect(findPath(root, node => node.k === "list" && node.key === "f1")).toBeUndefined();
 			const radios = findPath(root, node => node.k === "list" && node.key === "f0")!;
-			const checks = findPath(root, node => node.k === "list" && node.key === "f1")!;
 			form.handleNativeEvent({ type: "select", key: radios, item: "o1" });
+			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
+			root = form.describe(CX);
+			const checks = findPath(root, node => node.k === "list" && node.key === "f1")!;
 			form.handleNativeEvent({ type: "select", key: checks, item: "o0" }); // un-check CI
+			form.handleNativeEvent({ type: "select", key: tabs, item: "review" });
+			expect(findPath(form.describe(CX), node => node.k === "kv")).toBeDefined();
 			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
 			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" });
-			expect(form.describe(CX)).not.toBe(root);
+		});
+
+		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
+			const { form } = dialog(DB_FORM);
+			const checked = () => {
+				const root = form.describe(CX);
+				const path = findPath(root, node => node.k === "tabs")!;
+				let tabs: NativeNode = root;
+				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
+				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
+				return items.flatMap(tab =>
+					"id" in tab && typeof tab.label !== "string" && tab.label[0]?.t === "✓ " ? [tab.id] : [],
+				);
+			};
+			// Both questions start with valid preselected answers, yet neither has been visited.
+			expect(checked()).toEqual([]);
+			form.handleInput(TAB); // Database → Extras
+			expect(checked()).toEqual(["t0"]);
+		});
+
+		it("natively: ↑/↓ cross into the next tab past its last stop; ←/→ turn tabs", () => {
+			const { form } = dialog(DB_FORM);
+			const activeTab = () => {
+				const root = form.describe(CX);
+				const path = findPath(root, node => node.k === "tabs")!;
+				let tabs: NativeNode = root;
+				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
+				return tabs.p && "active" in tabs.p ? tabs.p.active : undefined;
+			};
+			setNativeRendering(true);
+			try {
+				expect(activeTab()).toBe("t0");
+				for (let press = 0; press < 3; press++) form.handleInput(DOWN); // Postgres, Other, then CI
+				expect(activeTab()).toBe("t1");
+				form.handleInput("\x1b[D"); // ←
+				expect(activeTab()).toBe("t0");
+				form.handleInput(RIGHT);
+				form.handleInput(RIGHT);
+				expect(activeTab()).toBe("review");
+				form.handleInput("\x1b[D");
+				expect(activeTab()).toBe("t1");
+			} finally {
+				setNativeRendering(false);
+			}
+		});
+
+		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
+			const options = Array.from({ length: 40 }, (_, index) => `<option value="${index}">Option ${index}</option>`);
+			const { form } = dialog(
+				`<form><p>Context</p><select name="pick" multiple>${options.join("")}</select><textarea name="notes"></textarea></form>`,
+			);
+			const root = form.describe(CX);
+			const children = (root.c ?? []).filter(isNode);
+			expect(children.some(child => child.k === "tabs" || child.key === "head")).toBe(false);
+			// Tern's stylesheet lets an `omp.ask.options` list shrink and scroll inside the 60vh card;
+			// a capped `col` would only clip.
+			const scroller = children.find(child => child.k === "list" && child.p?.role === "omp.ask.options");
+			expect((scroller?.c ?? []).filter(isNode).map(child => child.p?.role)).toEqual(["omp.ask.form"]);
+			expect(children.at(-1)?.p).toMatchObject({ role: "omp.actions" });
+		});
+
+		it("hides to one row and back, by key in rows and by Hide/Show natively; answers survive", () => {
+			const { form, onCancel } = dialog(DB_FORM);
+			form.handleInput("\x1bh"); // Alt+H
+			expect(form.render(100)).toHaveLength(1);
+			form.handleInput(DOWN); // ignored while hidden
+			form.handleInput(ENTER); // shows it again
+			expect(form.render(100).length).toBeGreaterThan(1);
+			expect(form.data()).toMatchObject({ db: "sqlite" });
+			form.handleNativeEvent({ type: "action", key: "actions/hide", act: "hide", mods: [] });
+			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask.hidden" });
+			form.handleNativeEvent({ type: "action", key: "actions/show", act: "show", mods: [] });
+			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask" });
+			form.handleInput(ESC);
+			expect(onCancel).toHaveBeenCalled();
 		});
 
 		it("natively: docks in the composer's place, and only the focused text field is a live editor", async () => {
@@ -397,15 +479,12 @@ describe("html form", () => {
 				expect(harness.errors).toEqual([]);
 				const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask");
 				expect(root).toBeDefined();
-				// The form scrolls: Tern's ask frame caps its height and scrolls only a direct `omp.ask.options` list.
-				const scroller = root!.c?.find(node => node.k === "list" && node.p?.role === "omp.ask.options");
-				expect(scroller?.c?.[0]?.p?.role).toBe("omp.ask.form");
-				// Its three field option lists sit inside it.
-				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(4);
+				// The tab's scroller and the Database radios inside it.
+				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(2);
 				// Focus is on a radio: no editor node, so the terminal keeps sending keys to the form.
 				expect(harness.findAll(node => node.k === "input" || node.k === "editor")).toEqual([]);
-				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toHaveLength(1);
-				// Clicking the workers well (field 3) focuses it: it becomes the one live input.
+				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toEqual([]);
+				// Clicking the workers well (field 3) focuses it: its tab opens and it becomes the one live input.
 				form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
 				await harness.render();
 				const inputs = harness.findAll(node => node.k === "input");
