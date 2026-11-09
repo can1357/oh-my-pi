@@ -40,7 +40,8 @@ export default class Bench extends Command {
 		}),
 		json: Flags.boolean({ description: "Output JSON" }),
 		par: Flags.integer({
-			description: "Execute runs with N parallel queries/requests (default: 4); --detailed's parallel phase width",
+			description:
+				"Execute runs with N parallel queries/requests (default: 4; 1 for runs entirely on local providers like llama.cpp and ollama); --detailed's parallel phase width",
 		}),
 		cache: Flags.boolean({
 			description: "Run independent cold/warm prompt-cache pairs (not supported for openai-codex-responses)",

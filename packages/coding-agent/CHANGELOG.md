@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bench detects local OpenAI-compatible backends (llama.cpp, Ollama, LM Studio, vLLM, plus loopback/private-baseUrl endpoints) and runs benches that are entirely on them at `--par 1` — `--detailed` included, whose headers and summary now report the measured concurrency — when `--par` is not explicitly provided, since a single local server thrashes its KV cache under parallel load; mixed runs keep the requested `--par` with a note on stderr, and an explicit `--par` is respected as given. ([#13614](https://github.com/can1357/oh-my-pi/pull/13614) by [@yomgui1](https://github.com/yomgui1))
+
 ### Changed
 
 - Browser `role/` selectors in Chrome tabs now match the role and name Chrome's accessibility tree reports, so they reach open shadow roots and skip hidden elements; in Tern every name `observe()` reports selects its element again ([#18632](https://github.com/can1357/oh-my-pi/pull/18632) by [@will-bogusz](https://github.com/will-bogusz))
