@@ -2635,10 +2635,15 @@ export class SessionManager {
 		}
 	}
 
-	#recordEntry(entry: SessionEntry): void {
+	/**
+	 * Record `entry` and return the id of the session it was written to, read before append observers run:
+	 * persistence can move this manager to a sibling session, and an observer can switch it to another one.
+	 * `undefined` when the entry is dropped after release.
+	 */
+	#recordEntry(entry: SessionEntry): string | undefined {
 		if (this.#released) {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
-			return;
+			return undefined;
 		}
 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
 			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
@@ -2653,8 +2658,10 @@ export class SessionManager {
 			batch.externalLeafId = sessionEntryLeafId(entry);
 		}
 		this.#appendToSessionFile(entry);
+		const sessionId = this.#sessionId;
 		if (batch) batch.deferredNotifications.push(entry);
 		else this.#notifyEntryAppended(entry);
+		return sessionId;
 	}
 
 	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
@@ -4138,16 +4145,15 @@ export class SessionManager {
 		};
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
-		// Journal titles in the same physical order as every other entry.
-		this.#recordEntry(entry);
-		// Recording can move this manager to a sibling session when another process owns the file; the title
-		// belongs to the session that took it, and a switch after this point is not this rename's.
-		const sessionId = this.#sessionId;
+		// Journal titles in the same physical order as every other entry. The title belongs to the session the
+		// entry was written to (a sibling, when another process owns the file); a switch after that is not this
+		// rename's.
+		const sessionId = this.#recordEntry(entry);
 		await this.flush();
 		// Keep the recent-sessions title index current so welcome-screen lookups
 		// never have to content-scan this session's file. A line the full volume
 		// held back is indexed where it lands (#indexDurableTitle).
-		if (this.#persist && this.#storage instanceof FileSessionStorage) {
+		if (sessionId && this.#persist && this.#storage instanceof FileSessionStorage) {
 			recordSessionTitle(sessionId, title);
 		}
 

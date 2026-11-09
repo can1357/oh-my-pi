@@ -385,6 +385,36 @@ describe("deferred writer callbacks belong to their session state", () => {
 			await owner.close();
 		}
 	});
+	it("records a File title under the renamed session when an entry observer switches sessions", async () => {
+		const sessionDir = path.join(dir.path(), "sessions");
+		const manager = SessionManager.create(dir.path(), sessionDir);
+		const other = SessionManager.create(dir.path(), sessionDir);
+		manager.appendMessage(user("first"));
+		manager.appendMessage(assistant("first reply"));
+		await manager.setSessionName("Original title", "user");
+		const originalId = manager.getSessionId();
+		other.appendMessage(user("other"));
+		other.appendMessage(assistant("other reply"));
+		await other.setSessionName("Other title", "user");
+		const otherId = other.getSessionId();
+		const otherState = other.captureState();
+		await other.close();
+		const notifications: string[] = [];
+		manager.onSessionNameChanged(() => notifications.push(manager.getSessionId()));
+		manager.onEntryAppended = entry => {
+			if (entry.type === "title_change") manager.restoreState(otherState);
+		};
+		try {
+			await manager.setSessionName("Original renamed", "user");
+			expect(manager.getSessionId()).toBe(otherId);
+			expect(lookupSessionTitle(originalId)).toBe("Original renamed");
+			expect(lookupSessionTitle(otherId)).toBe("Other title");
+			expect(notifications).toEqual([]);
+		} finally {
+			manager.onEntryAppended = undefined;
+			await manager.close();
+		}
+	});
 });
 
 describe("real Indexed persistent clones reconcile on the async disk queue", () => {
