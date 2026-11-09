@@ -4,6 +4,7 @@ import * as stream from "node:stream";
 import * as tls from "node:tls";
 import * as zlib from "node:zlib";
 import { logger } from "@oh-my-pi/pi-utils";
+import { ConnectionLostBeforeResponseError } from "../error";
 import type { FetchImpl } from "../types";
 
 /** `host/path` for logging; query strings can carry keys. */
@@ -193,6 +194,9 @@ async function sendCoworkRequest(
 	const tlsOptions = resolveTlsOptions(url, init.tls);
 	const headers = buildOrderedHeaders(url, sourceHeaders, body);
 	const result = Promise.withResolvers<Response>();
+	const startedAt = performance.now();
+	let connected = false;
+	let bodySent = false;
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
 	};
@@ -241,9 +245,22 @@ async function sendCoworkRequest(
 			}
 		},
 	);
+	request.once("socket", socket => {
+		// A pooled keep-alive socket is already connected; a fresh one counts once TLS is up.
+		if (socket.connecting) socket.once("secureConnect", () => (connected = true));
+		else connected = true;
+	});
+	request.once("finish", () => (bodySent = true));
 	request.once("error", error => {
 		release();
-		result.reject(error);
+		// Failures before the connection is up keep their own error (DNS, refused, TLS), and
+		// an abort keeps its reason; after a response arrived the promise is already settled.
+		if (!connected || signal?.aborted) {
+			result.reject(error);
+			return;
+		}
+		const bodyBytes = body === undefined ? 0 : typeof body === "string" ? Buffer.byteLength(body) : body.byteLength;
+		result.reject(new ConnectionLostBeforeResponseError(error, bodyBytes, bodySent, performance.now() - startedAt));
 	});
 	request.end(body);
 	return result.promise;

@@ -1,3 +1,4 @@
+import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 import { AbortError } from "./abort";
 import { networkFailureMessage } from "./network-cause";
@@ -201,10 +202,39 @@ export class AnthropicApiError extends ProviderHttpError {
 	}
 }
 
+/**
+ * An established connection that failed before any response headers arrived,
+ * naming how far the request body got. "Sent" means the whole body was handed
+ * to the OS socket; while part of it is still queued in the process, it is
+ * "uploading".
+ */
+export class ConnectionLostBeforeResponseError extends Error {
+	constructor(cause: unknown, bodyBytes: number, bodySent: boolean, elapsedMs: number) {
+		const after = `connection lost after ${formatDuration(elapsedMs)}`;
+		const code =
+			typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
+				? ` (${cause.code})`
+				: "";
+		const progress =
+			bodyBytes === 0
+				? `${after}, before any response${code}`
+				: bodySent
+					? `${after}, after the ${formatBytes(bodyBytes)} request body was sent and before any response${code}`
+					: `${after} while uploading the ${formatBytes(bodyBytes)} request body; no response received${code}`;
+		super(progress, { cause });
+		this.name = "ConnectionLostBeforeResponseError";
+	}
+}
+
 /** Network-level failure (DNS, TLS, socket reset) after retries were exhausted. */
 export class AnthropicConnectionError extends Error {
 	constructor(cause: unknown, requestUrl?: string) {
-		super(networkFailureMessage(cause, requestUrl) ?? "Connection error.", { cause });
+		super(
+			cause instanceof ConnectionLostBeforeResponseError
+				? `Connection error: ${cause.message}.`
+				: (networkFailureMessage(cause, requestUrl) ?? "Connection error."),
+			{ cause },
+		);
 		this.name = "AnthropicConnectionError";
 	}
 }
