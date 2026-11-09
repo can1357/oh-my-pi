@@ -1,7 +1,7 @@
 # Changelog
 
 ## [Unreleased]
-- Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#16131](https://github.com/can1357/oh-my-pi/pull/16131) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.4] - 2026-11-09
 
