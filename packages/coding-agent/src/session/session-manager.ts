@@ -4861,6 +4861,27 @@ export class SessionManager {
 		}
 
 		const keptEntries = [...entriesToKeep, ...labels];
+		// The title is session-wide, but the kept path can end before a later rename. Journal the title the
+		// header carries after it, so the newest title change a reload folds over the header is that one.
+		const keptTitle = entriesToKeep.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
+		if (
+			keptTitle?.type === TITLE_CHANGE_ENTRY_TYPE &&
+			this.#sessionName &&
+			this.#titleSource &&
+			(keptTitle.title !== this.#sessionName || keptTitle.source !== this.#titleSource)
+		) {
+			const titleEntry: TitleChangeEntry = {
+				type: TITLE_CHANGE_ENTRY_TYPE,
+				id: generateId(new Set(keptEntries.map(entry => entry.id))),
+				parentId,
+				timestamp,
+				runtime: currentRuntimeIdentity(),
+				title: this.#sessionName,
+				previousTitle: keptTitle.title,
+				source: this.#titleSource,
+			};
+			keptEntries.push(titleEntry);
+		}
 		const branchSize = this.#estimateBodyBytes(header, keptEntries);
 		if (this.#persist) this.#assertRoomForRewrite(newSessionFile, branchSize);
 

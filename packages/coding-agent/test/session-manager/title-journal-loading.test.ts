@@ -220,3 +220,31 @@ it("loads a streamed large journal without letting its stale slot win", async ()
 	}
 	expect(await storage.readText(file)).toBe(content);
 });
+
+for (const kind of ["file", "memory"] as const) {
+	it(`reopens a branched copy under the session's current title on ${kind}, past an older title on its path`, async () => {
+		using dir = TempDir.createSync("@title-journal-branch-");
+		const storage = kind === "file" ? new FileSessionStorage() : new MemorySessionStorage();
+		const session = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"), storage);
+		let reopened: SessionManager | undefined;
+		try {
+			session.appendMessage(makeAssistantMessage());
+			await session.setSessionName("Earlier auto title", "auto");
+			const branchPoint = session.appendMessage({ role: "user", content: "branch here", timestamp: 1 });
+			await session.setSessionName("Current user title", "user");
+			const branched = session.createBranchedSession(branchPoint);
+			if (!branched) throw new Error("Expected a branched session file");
+			await session.close();
+			reopened = await SessionManager.open(branched, undefined, storage, { suppressBreadcrumb: true });
+			expect({ title: reopened.getSessionName(), source: reopened.titleSource }).toEqual({
+				title: "Current user title",
+				source: "user",
+			});
+			// The user title still refuses an automatic one after the reload.
+			expect(await reopened.setSessionName("Later auto title", "auto")).toBe(false);
+		} finally {
+			await reopened?.close();
+			await session.close();
+		}
+	});
+}
