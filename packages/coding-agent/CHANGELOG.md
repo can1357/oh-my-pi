@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/settings` → Appearance → Status Line now exposes the Custom preset's `leftSegments` and `rightSegments` as ordered editors with every segment id described, shown only while `preset: custom` is active ([#18588](https://github.com/can1357/oh-my-pi/pull/18588) by [@nakamotosai](https://github.com/nakamotosai))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

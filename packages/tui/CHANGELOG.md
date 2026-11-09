@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Custom status-line preset's left/right segment lists are editable in `/settings`: both are ordered multiselects listing every accepted segment id with a label and description, and the editor shows the real status line above the list so toggling or reordering a segment previews the result. Hovering `custom` in the preset picker now previews the saved lists instead of the preset's baseline defaults ([#18588](https://github.com/can1357/oh-my-pi/pull/18588) by [@nakamotosai](https://github.com/nakamotosai))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
