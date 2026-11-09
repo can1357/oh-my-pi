@@ -11769,11 +11769,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Journal ownership follows the session manager, not the provider-side id
 		// titles request under (`sessionId` above is an isolated side identity).
 		const usageOwner = { sessionId: this.sessionManager.getSessionId(), parentId: this.sessionManager.getLeafId() };
+		// The tiny model is called directly, outside the session's metered stream, so its spend
+		// is charged here, to the gate of the session that started the request.
+		const costGate = this.#costGate;
 		const titleSignal = signal
 			? AbortSignal.any([signal, this.#titleGenerationAbortController.signal])
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
-		if (titleSignal.aborted || this.#costGate.check()) return null;
+		if (titleSignal.aborted || costGate.check()) return null;
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
@@ -11787,7 +11790,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
-				message => this.#reportTitleUsage(usageOwner, message),
+				message => {
+					costGate.record(message.usage.cost.total);
+					this.#reportTitleUsage(usageOwner, message);
+				},
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
@@ -13625,6 +13631,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
+		// Reported where the provider settles the request, before any later step can throw it away.
+		const reportUsage = (message: AssistantMessage) => {
+			try {
+				args.onUsage?.(message);
+			} catch (error) {
+				logger.debug("ephemeral-turn: usage reporter failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 		assertEphemeralTurnReady();
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);
@@ -13653,12 +13669,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					assistantMessage = this.#obfuscator?.hasSecrets()
 						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
 						: { ...event.message, content: rawContent };
+					reportUsage(assistantMessage);
 					break;
 				}
 				if (event.type === "error") {
-					// The terminal error message still carries the tokens the provider
-					// billed, so report it before the throw discards the turn's result.
-					args.onUsage?.(event.error);
+					reportUsage(event.error);
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
 			}
@@ -13688,7 +13703,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			...assistantMessage,
 			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
 		};
-		args.onUsage?.(sanitizedMessage);
 		return {
 			replyText:
 				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),

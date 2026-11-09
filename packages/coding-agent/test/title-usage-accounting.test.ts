@@ -190,9 +190,11 @@ describe("title usage accounting", () => {
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.usage).toEqual(TITLE_USAGE);
 		expect(target.sessionManager.getUsageStatistics().totalTokens).toBe(TITLE_USAGE.totalTokens);
+		// The tiny model bypasses the metered session stream, so the title charges the cost gate itself.
+		expect(target.costGate.spent).toBeCloseTo(TITLE_USAGE.cost.total, 10);
 	});
 
-	it("drops a stale session's title usage without failing the title", async () => {
+	it("drops a stale session's title usage and charges only the session that started it", async () => {
 		const main = createMockModel({ responses: [{ content: ["unused"] }] });
 		const side = createMockModel({ handler: { content: ["unused"] } });
 		const target = await createSession(main, side, { "title.generator": "tiny" }, { autoTitle: false });
@@ -206,6 +208,7 @@ describe("title usage accounting", () => {
 		const generation = target.generateTitle(FIRST_MESSAGE);
 		await started.promise;
 		const staleSessionId = target.sessionManager.getSessionId();
+		const staleGate = target.costGate;
 		expect(await target.newSession()).toBe(true);
 		expect(target.sessionManager.getSessionId()).not.toBe(staleSessionId);
 		response.resolve(titleCompletion("<title>Fix flaky park tests</title>", TITLE_USAGE));
@@ -213,6 +216,8 @@ describe("title usage accounting", () => {
 		expect(await generation).toBeNull();
 		expect(titleUsageEntries(target.sessionManager)).toHaveLength(0);
 		expect(target.sessionManager.getUsageStatistics().totalTokens).toBe(0);
+		expect(staleGate.spent).toBeCloseTo(TITLE_USAGE.cost.total, 10);
+		expect(target.costGate.spent).toBe(0);
 	});
 
 	it("journals every billed attempt of a retried title request exactly once", async () => {
@@ -236,6 +241,7 @@ describe("title usage accounting", () => {
 		expect(target.sessionManager.getUsageStatistics().totalTokens).toBe(
 			RETRY_USAGE.totalTokens + TITLE_USAGE.totalTokens,
 		);
+		expect(target.costGate.spent).toBeCloseTo(RETRY_USAGE.cost.total + TITLE_USAGE.cost.total, 10);
 	});
 
 	it("journals a failed fork stream's billed usage before falling back", async () => {

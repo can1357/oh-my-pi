@@ -654,9 +654,9 @@ export interface EphemeralTurnOptions {
 	/** Awaited in order; a delivery failure rejects the side turn and aborts the request. */
 	onTextDelta?: (delta: string) => void | Promise<void>;
 	/**
-	 * Receives the provider's message for every side turn it billed, including one
-	 * that ends in an error event and never returns a reply, so off-transcript
-	 * callers can journal the spend. Must not throw.
+	 * Receives the provider's message for every side turn it billed, as soon as the
+	 * provider settles it (including an error event that never returns a reply), so
+	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
 	 */
 	onUsage?: (message: AssistantMessage) => void;
 	signal?: AbortSignal;
