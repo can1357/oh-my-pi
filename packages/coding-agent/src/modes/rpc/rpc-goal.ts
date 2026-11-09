@@ -45,6 +45,7 @@ export type RpcGoalSession = Pick<
 	| "sendGoalModeContext"
 	| "getTodoPhases"
 	| "promptCustomMessage"
+	| "prompt"
 	| "waitForIdle"
 	| "isStreaming"
 	| "isDisposed"
@@ -121,7 +122,9 @@ export class RpcGoalController {
 		this.#suppressContinuation = true;
 		this.#continuationScheduled = false;
 		this.#continuationGeneration++;
-		if (!this.#session.getGoalModeState()) this.#queueExit(() => this.#exit());
+		this.#queueExit(async () => {
+			if (!this.#session.getGoalModeState()) await this.#exit();
+		});
 	}
 
 	get #state(): RpcGoalResult {
@@ -229,22 +232,27 @@ export class RpcGoalController {
 			}
 			case "guided": {
 				const admitted = Promise.withResolvers<void>();
+				let started = false;
 				void this.promptGuided(command.objective, content =>
-					this.#session.promptCustomMessage(
-						{ customType: "guided-goal", content, display: false },
-						{ streamingBehavior: "followUp", onPromptAdmitted: admitted.resolve },
-					),
-				)
-					.then(
-						() => {
+					this.#session.prompt(content, {
+						synthetic: true,
+						throwOnDrop: true,
+						streamingBehavior: "followUp",
+						onPromptAdmitted: () => {
+							started = true;
 							admitted.resolve();
 						},
-						async error => {
-							admitted.reject(error);
-							reportControllerError(error);
-						},
-					)
-					.catch(reportControllerError);
+					}),
+				).then(
+					dispatched => {
+						if (dispatched) admitted.resolve();
+						else admitted.reject(new Error("Guided interview was not started."));
+					},
+					error => {
+						if (started) reportControllerError(error);
+						else admitted.reject(error);
+					},
+				);
 				await admitted.promise;
 				return this.#state;
 			}

@@ -335,6 +335,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "goal",
 		icon: "goal",
 		description: "Toggle goal mode (persistent autonomous objective for this session)",
+		acpDescription: "Adjust the active goal's token budget",
+		acpInputHint: "budget <N|off>",
 		subcommands: [
 			{ name: "set", description: "Set or replace the goal", usage: "<objective>" },
 			{ name: "show", description: "Show current goal details" },
@@ -362,6 +364,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "compass",
 		description: "Have the agent interview you in chat, then set up goal mode",
 		inlineHint: "[rough objective]",
+		acpDescription: "Have the agent interview you in chat, then set up goal mode",
+		acpInputHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			await runWithDetachedDraft(command, runtime, () =>

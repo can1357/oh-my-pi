@@ -92,7 +92,11 @@ describe("RPC goal command", () => {
 		expect(updated.goal).toMatchObject({ objective: "bounded work", tokenBudget: 2000 });
 		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: -1 }))).toMatchObject({ command: "goal" });
 		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(2000);
-		await rpc.promptAndWait("/goal budget 3000");
+		expect(await rejectionOf(rpc.promptAndWait("/goal budget nope"))).toMatchObject({
+			message: "Usage: /goal budget <positive integer|off>",
+		});
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(2000);
+		await rpc.promptAndWait("/goal budget 03000");
 		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(3000);
 		await rpc.promptAndWait("/goal budget off");
 		expect((await rpc.goal("get")).goal?.tokenBudget).toBeUndefined();
@@ -116,13 +120,7 @@ describe("RPC goal command", () => {
 		}
 		expect((await rpc.goal("get")).goal).toBeNull();
 		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
-		expect(await rpc.getMessages()).toContainEqual(
-			expect.objectContaining({
-				role: "custom",
-				customType: "guided-goal",
-				display: false,
-			}),
-		);
+		expect(await rpc.getMessages()).toContainEqual(expect.objectContaining({ role: "developer", synthetic: true }));
 		await rpc.abort();
 		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
 	}, 30_000);
@@ -134,6 +132,10 @@ describe("RPC goal command", () => {
 		expect((await rpc.goal("get")).goal).toMatchObject({ objective: "interviewed objective", status: "active" });
 		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
 		expect(await rejectionOf(rpc.goal("guided"))).toMatchObject({ command: "goal" });
+		expect(await rpc.getMessages()).toContainEqual(expect.objectContaining({ role: "developer", synthetic: true }));
+		expect(await rejectionOf(rpc.promptAndWait("/guided-goal another"))).toMatchObject({
+			message: "A goal is already active. Drop it before starting an interview.",
+		});
 		await rpc.goal("drop");
 		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
 	}, 30_000);
@@ -561,6 +563,7 @@ describe("RpcGoalController continuation gate", () => {
 				}),
 			},
 			promptCustomMessage: (message: { customType: string }) => admit(message.customType),
+			prompt: () => admit("guided-goal"),
 			waitForIdle: () => idle.promise,
 		};
 		let dropped = 0;
@@ -590,6 +593,34 @@ describe("RpcGoalController continuation gate", () => {
 			release: () => idle.resolve(),
 		};
 	}
+
+	test("a refused structured interview rejects and restores the tools", async () => {
+		const { controller, session, tools } = fakeSession(async () => false);
+		session.setGoalModeState(undefined);
+		expect(await rejectionOf(controller.handle({ op: "guided" }))).toMatchObject({
+			message: "Guided interview was not started.",
+		});
+		expect(tools()).toEqual(["read"]);
+		expect(session.getGoalModeState()).toBeUndefined();
+	});
+
+	test("an abort queued before goal creation preserves the active goal's tool and original tools", async () => {
+		const { controller, session, tools } = fakeSession(async () => true);
+		const activeGoal = session.getGoalModeState();
+		session.setGoalModeState(undefined);
+		await controller.promptGuided(undefined, async () => true);
+		controller.stopForHostAbort();
+		// A goal tool commits before the queued exit gets its turn.
+		session.setGoalModeState(activeGoal);
+		controller.observe({ type: "goal_updated", state: activeGoal } as AgentSessionEvent);
+		await controller.settled();
+		expect(tools()).toEqual(["read", "goal"]);
+		expect(session.getGoalModeState()).toBe(activeGoal);
+		session.setGoalModeState(undefined);
+		controller.stopForHostAbort();
+		await controller.settled();
+		expect(tools()).toEqual(["read"]);
+	});
 
 	test("a continuation decided before the session closes is never admitted after it", async () => {
 		const admitted: string[] = [];

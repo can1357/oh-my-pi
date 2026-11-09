@@ -607,10 +607,16 @@ including those made by the agent's `goal` tool.
   budget makes the goal active again.
 - `guided` starts the `/guided-goal` chat interview with an optional rough
   `objective`. It exposes the `goal` tool without creating a goal record; the agent
-  creates the goal after the interview. The hidden kickoff starts a turn even when
-  RPC continuation is disabled, or queues behind a running turn.
+  creates the goal after the interview. Both RPC entry points send the kickoff as a
+  hidden synthetic developer message, as the TUI does. It starts a turn even when
+  RPC continuation is disabled, or queues behind a running turn. If the kickoff
+  is cancelled before admission, the request fails and restores the interview's
+  tool set. In RPC, a host `abort` ends an interview that has no goal record and
+  restores the tools; in the TUI, Esc leaves the interview armed.
 - RPC `prompt` also accepts `/goal budget <N|off>`.
 - RPC `prompt` also accepts `/guided-goal [rough objective]`.
+  User file, custom, extension, and skill commands with these names keep precedence
+  over the RPC-only builtins.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`

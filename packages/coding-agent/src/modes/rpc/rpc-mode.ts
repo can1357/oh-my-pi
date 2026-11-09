@@ -41,6 +41,7 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { parseGoalBudget } from "../../goals/commands";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -60,10 +61,10 @@ import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import {
-	buildAvailableSlashCommands,
+	buildRpcAvailableSlashCommands,
 	type InternalAvailableSlashCommand,
+	RPC_ONLY_BUILTIN_SLASH_COMMANDS,
 } from "../../slash-commands/available-commands";
-import { lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { cfgSttEnabled } from "../../stt/settings";
@@ -1875,22 +1876,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		process.exit(0);
 	};
 
+	let availableCommands: InternalAvailableSlashCommand[] = [];
 	const getAvailableCommands = async () => {
-		const commands = await buildAvailableSlashCommands(session);
-		for (const name of ["goal", "guided-goal"]) {
-			const builtin = lookupBuiltinSlashCommand(name)!;
-			const entry: InternalAvailableSlashCommand = {
-				name,
-				description: name === "goal" ? "Adjust the active goal's token budget" : builtin.description,
-				input: { hint: name === "goal" ? "budget <N|off>" : builtin.inlineHint! },
-				subcommands: name === "goal" ? builtin.subcommands?.filter(sub => sub.name === "budget") : undefined,
-				source: "builtin",
-			};
-			const index = commands.findIndex(command => command.name === name);
-			if (index === -1) commands.push(entry);
-			else commands[index] = entry;
-		}
-		return commands;
+		availableCommands = await buildRpcAvailableSlashCommands(session);
+		return availableCommands;
 	};
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
@@ -1955,22 +1944,21 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (skillResult === "cancelled") return "cancelled";
 				if (skillResult) return "admitted";
 				const goalSlash = parseSlashCommand(text);
-				if (goalSlash?.name === "goal" && /^budget(?:\s|$)/i.test(goalSlash.args)) {
+				const isRpcGoalBuiltin =
+					goalSlash !== null &&
+					Object.hasOwn(RPC_ONLY_BUILTIN_SLASH_COMMANDS, goalSlash.name) &&
+					availableCommands.some(entry => entry.name === goalSlash.name && entry.source === "builtin");
+				if (isRpcGoalBuiltin && goalSlash?.name === "goal" && /^budget(?:\s|$)/i.test(goalSlash.args)) {
 					const raw = goalSlash.args.slice("budget".length).trim();
-					if (!raw || (raw.toLowerCase() !== "off" && !/^[1-9]\d*$/.test(raw))) {
-						throw new Error("Usage: /goal budget <positive integer|off>");
-					}
-					await goalController.handle({
-						op: "budget",
-						token_budget: raw.toLowerCase() === "off" ? undefined : Number(raw),
-					});
+					const tokenBudget = parseGoalBudget(raw);
+					await goalController.handle({ op: "budget", token_budget: tokenBudget });
 					output({
 						type: "command_output",
-						text: raw.toLowerCase() === "off" ? "Goal budget cleared." : `Goal budget set to ${raw}.`,
+						text: tokenBudget === undefined ? "Goal budget cleared." : `Goal budget set to ${tokenBudget}.`,
 					});
 					return "local";
 				}
-				if (goalSlash?.name === "guided-goal") {
+				if (isRpcGoalBuiltin && goalSlash?.name === "guided-goal") {
 					await watchAndReportPromptResult({
 						ticket,
 						startPrompt: onPromptAdmitted =>
@@ -1978,6 +1966,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 								if (!isCurrent()) return Promise.resolve(false);
 								return session.prompt(content, {
 									synthetic: true,
+									throwOnDrop: true,
 									images,
 									streamingBehavior: "followUp",
 									onPromptAdmitted,
