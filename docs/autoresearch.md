@@ -73,7 +73,7 @@ All four are declared `defaultInactive`, so they are invisible until the mode is
 | Tool | Contract |
 | ---- | -------- |
 | `init_experiment` | Opens the session, or reconfigures the open one. Requires `./autoresearch.sh` to exist on the first call and on any `new_segment: true` call. On an `autoresearch/*` branch it auto-commits a dirty tree as the harness commit, then records `HEAD` as the baseline commit. Takes the metric name, unit, direction (`lower` default), secondary metrics, scope and off-limits paths, constraints, and `max_iterations`. |
-| `run_experiment` | Runs the harness. The command is fixed at `bash autoresearch.sh` and cannot be overridden; only `timeout_seconds` (default 600) is a parameter. Abandons an earlier unlogged run first, inserts a pending row, streams output to the run log, and parses `METRIC`/`ASI` lines out of it. |
+| `run_experiment` | Runs the harness. The command is fixed at `bash autoresearch.sh` and cannot be overridden; only `timeout_seconds` (default 600; a non-positive value means effectively unbounded) is a parameter. Abandons an earlier unlogged run first, inserts a pending row, streams output to the run log, and parses `METRIC`/`ASI` lines out of it. |
 | `log_experiment` | Finalizes the one pending run. Requires `metric`, `status` (`keep`, `discard`, `crash`, `checks_failed`) and `description`. Records modified paths, scope deviations, optional `justification`, and `flag_runs` entries that exclude earlier runs from baseline and best-metric arithmetic. Recomputes a confidence figure (distance from baseline in multiples of the median absolute deviation; `null` with fewer than three usable runs in the segment). |
 | `update_notes` | Replaces the session notes (`body`) or appends one bullet under an `## Ideas` heading (`append_idea`). The notes are injected into the system prompt every iteration. |
 
@@ -91,7 +91,7 @@ ASI <key>=<value>
 - A `METRIC` name matches `[\w.µ-]+` and its value must parse as a finite number; the line must otherwise be the whole line. The metric whose name equals the session's primary metric becomes the run's parsed primary; the rest are secondary metrics. `log_experiment` warns when the metric the model reports differs from the parsed one, and stores both.
 - An `ASI` value is free-form metadata: `true`, `false`, `null`, a number, a JSON object/array/string, or otherwise the raw text.
 - `__proto__`, `constructor` and `prototype` are rejected as names in both.
-- Exit code 0 and no timeout is `passed`; a timeout kills the process group and marks the run `timed_out`.
+- Exit code 0 with no timeout is a passing run. A run cancelled by its timeout is recorded with `timed_out` set, whatever it printed before.
 
 ## The results store
 
