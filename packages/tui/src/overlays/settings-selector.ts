@@ -560,9 +560,6 @@ function getSettingsTabs(): Tab[] {
 	];
 }
 
-/** Supplies the live choices of a submenu setting whose options are only known at runtime. */
-export type RuntimeSettingOptionsProvider = () => readonly SubmenuOption[];
-
 /**
  * Dynamic context for settings that need runtime data.
  * Some settings (like thinking level) are managed by the session, not Settings.
@@ -577,7 +574,7 @@ export interface SettingsRuntimeContext {
 	/** Available themes */
 	availableThemes: string[];
 	/** Runtime choices for submenu settings without built-in ones, keyed by setting path. */
-	runtimeOptions?: ReadonlyMap<string, RuntimeSettingOptionsProvider>;
+	runtimeOptions?: ReadonlyMap<string, () => readonly SubmenuOption[]>;
 	/** Provider/source ids shown in /model. */
 	providers: string[];
 	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */

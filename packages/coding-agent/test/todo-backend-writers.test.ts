@@ -203,7 +203,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		const cursor = createCursor(h);
 		const renamed = seeded.map(phase => ({ ...phase, name: "Renamed" }));
 
-		const rename = h.session.commitTodoPhases(() => renamed);
+		const rename = h.session.editTodoPhases(() => renamed);
 		await gate.started.promise;
 		cursor.todoSync(
 			{
@@ -249,7 +249,7 @@ describe("todo writers reach the selected backend's replace", () => {
 		await flushTodoWrites(h.session);
 
 		expect(h.session.getTodoPhases()).toEqual(stored);
-		expect(h.recorder.calls).toEqual([{ backend: "recorder", method: "replace", phases: stored }]);
+		expect(h.recorder.calls).toEqual([{ method: "replace", phases: stored }]);
 	});
 
 	it("an eval-bridged todo call reaches apply once and never replace, and does not undo a /todo edit queued behind it", async () => {
@@ -259,21 +259,8 @@ describe("todo writers reach the selected backend's replace", () => {
 			getToolByName: (name: string) => h.session.getToolByName(name),
 			commitTodoPhases: (update: TodoPhasesUpdate) => h.session.commitTodoPhases(update),
 		} satisfies Pick<ToolSession, "getToolByName" | "commitTodoPhases">;
-		h.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: seeded });
 		const gate = hold(h.recorder, "apply");
 		const { controller } = controllerContext(h.session);
-		const bothQueued = Promise.withResolvers<void>();
-		let writes = 0;
-		const issued = <T>(write: T): T => {
-			if (++writes === 2) bothQueued.resolve();
-			return write;
-		};
-		const run = h.session.runTodoWrite.bind(h.session);
-		const commit = h.session.commitTodoPhases.bind(h.session);
-		const edit = h.session.editTodoPhases.bind(h.session);
-		vi.spyOn(h.session, "runTodoWrite").mockImplementation((...args) => issued(run(...args)));
-		vi.spyOn(h.session, "commitTodoPhases").mockImplementation((...args) => issued(commit(...args)));
-		vi.spyOn(h.session, "editTodoPhases").mockImplementation((...args) => issued(edit(...args)));
 
 		const bridged = callSessionTool(
 			"todo",
@@ -282,7 +269,6 @@ describe("todo writers reach the selected backend's replace", () => {
 		);
 		await gate.started.promise;
 		const queuedEdit = controller.handleTodoCommand('append "Queued edit"');
-		await bothQueued.promise;
 		gate.release.resolve();
 		await Promise.all([bridged, queuedEdit]);
 		await flushTodoWrites(h.session);

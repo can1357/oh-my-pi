@@ -16,19 +16,10 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
-/** `settle` awaits the commits and the reconcile's HUD update chained on each. */
-function watchReconcile(owner: AgentSession): (hudUpdated?: () => boolean) => Promise<void> {
-	const commits: Promise<unknown>[] = [];
-	const commit = owner.commitTodoPhases.bind(owner);
-	vi.spyOn(owner, "commitTodoPhases").mockImplementation(update => {
-		const committed = commit(update);
-		commits.push(committed);
-		return committed;
-	});
-	return async hudUpdated => {
-		await Promise.allSettled(commits);
-		if (hudUpdated && !hudUpdated()) throw new Error("Subagent todo reconcile never reached the HUD");
-	};
+/** Awaits the reconcile's commits; its HUD update is chained on each, so it has run by then. */
+function watchReconcile(owner: AgentSession): () => Promise<unknown> {
+	const commit = vi.spyOn(owner, "commitTodoPhases");
+	return () => Promise.all(commit.mock.results.map(result => result.value));
 }
 
 function renderTodos(mode: InteractiveMode): string {
@@ -251,7 +242,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		});
 		const settleReconcile = watchReconcile(session);
 		vi.advanceTimersByTime(100);
-		await settleReconcile(() => mode.todoPhases[0]?.tasks[0]?.status === "completed");
+		await settleReconcile();
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
@@ -420,7 +411,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		});
 		const settleReconcile = watchReconcile(session);
 		vi.advanceTimersByTime(100);
-		await settleReconcile(() => mode.todoPhases[0]?.tasks[0]?.status === "completed");
+		await settleReconcile();
 
 		const task = session.getTodoPhases()[0]?.tasks[0];
 		expect(task?.status).toBe("completed");

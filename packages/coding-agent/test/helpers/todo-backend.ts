@@ -12,8 +12,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./agent-session-setup";
 
-export interface RecordedTodoBackendCall {
-	backend: string;
+interface RecordedTodoBackendCall {
 	method: "apply" | "replace";
 	op?: TodoOp;
 	params?: TodoBackendParams;
@@ -21,10 +20,8 @@ export interface RecordedTodoBackendCall {
 }
 
 export interface TodoBackendRecorder {
-	/** Every recorded call, in arrival order. Shared between recorders when `options.calls` is passed. */
 	readonly calls: RecordedTodoBackendCall[];
 	created: number;
-	/** `create` throws this when set. */
 	createError?: Error;
 	/** Awaited at the start of `apply` with the call's signal, before the error check and before the call is recorded. */
 	beforeApply?: (signal: AbortSignal) => void | Promise<void>;
@@ -37,15 +34,8 @@ export interface TodoBackendRecorder {
 	extension(): ExtensionFactory;
 }
 
-interface TodoBackendRecorderOptions {
-	label?: string;
-	/** Append to this array instead of a private one, to see the order of calls across several backends. */
-	calls?: RecordedTodoBackendCall[];
-}
-
-export function createTodoBackendRecorder(id: string, options: TodoBackendRecorderOptions = {}): TodoBackendRecorder {
-	const label = options.label ?? `Tracker ${id}`;
-	const calls = options.calls ?? [];
+export function createTodoBackendRecorder(id: string, label = `Tracker ${id}`): TodoBackendRecorder {
+	const calls: RecordedTodoBackendCall[] = [];
 	const recorder: TodoBackendRecorder = {
 		calls,
 		created: 0,
@@ -62,7 +52,6 @@ export function createTodoBackendRecorder(id: string, options: TodoBackendRecord
 								await recorder.beforeApply?.(signal);
 								if (recorder.applyError) throw recorder.applyError;
 								calls.push({
-									backend: id,
 									method: "apply",
 									op,
 									params: structuredClone(params),
@@ -70,7 +59,7 @@ export function createTodoBackendRecorder(id: string, options: TodoBackendRecord
 								});
 							},
 							async replace(phases, signal) {
-								calls.push({ backend: id, method: "replace", phases: structuredClone(phases) });
+								calls.push({ method: "replace", phases: structuredClone(phases) });
 								await recorder.beforeReplace?.(signal);
 								if (recorder.replaceError) throw recorder.replaceError;
 							},

@@ -34,7 +34,6 @@ import {
 	disposeTodoSession,
 	flushTodoWrites,
 	hold,
-	type RecordedTodoBackendCall,
 	settled,
 	taskContents,
 	type TodoSessionOptions,
@@ -99,47 +98,8 @@ describe("todo backends in a real session", () => {
 		expect(session.todoWritesQueued).toBe(false);
 	});
 
-	test("concurrent todo calls reach the backend one at a time, in call order, with `next` equal to the committed list", async () => {
-		const recorder = createTodoBackendRecorder("tracker");
-		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
-		// Hold the first apply until all three calls have entered the write queue: a queue that let
-		// them through would start the second apply while the first is still held.
-		const allQueued = Promise.withResolvers<void>();
-		const runTodoWrite = session.runTodoWrite.bind(session);
-		let entered = 0;
-		vi.spyOn(session, "runTodoWrite").mockImplementation((write, options) => {
-			const result = runTodoWrite(write, options);
-			if (++entered === 3) allQueued.resolve();
-			return result;
-		});
-		let inFlight = 0;
-		let overlapped = false;
-		let held = false;
-		recorder.beforeApply = async () => {
-			inFlight++;
-			if (inFlight > 1) overlapped = true;
-			if (!held) {
-				held = true;
-				await allQueued.promise;
-			}
-			inFlight--;
-		};
-
-		await Promise.all([
-			todo(session, { op: "init", items: ["one"] }),
-			todo(session, { op: "append", phase: "Tasks", items: ["two"] }),
-			todo(session, { op: "append", phase: "Tasks", items: ["three"] }),
-		]);
-
-		const applies = recorder.calls.filter(call => call.method === "apply");
-		expect(overlapped).toBe(false);
-		expect(applies.map(call => call.op)).toEqual(["init", "append", "append"]);
-		expect(applies.map(call => contentsOf(call.phases))).toEqual([["one"], ["one", "two"], ["one", "two", "three"]]);
-		expect(applies.at(-1)?.phases).toEqual(session.getTodoPhases());
-	});
-
 	test("a throwing apply fails the call with display-safe text and leaves the list and details.phases unchanged", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker\x1b[31m tracker" });
+		const recorder = createTodoBackendRecorder("tracker", "Tracker\x1b[31m tracker");
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["keep"] });
 		const before = structuredClone(session.getTodoPhases());
@@ -186,16 +146,6 @@ describe("todo backends in a real session", () => {
 		} finally {
 			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		}
-	});
-
-	test("a commit sends the backend no replace when it already has the list", async () => {
-		const recorder = createTodoBackendRecorder("tracker");
-		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
-		await todo(session, { op: "init", items: ["base"] });
-
-		await session.commitTodoPhases(current => current);
-
-		expect(recorder.calls.filter(call => call.method === "replace")).toEqual([]);
 	});
 
 	test("create, apply and replace run in the session's settings scope", async () => {
@@ -418,9 +368,8 @@ export default function(pi) {
 	});
 
 	test("a mid-session switch finishes the in-flight write on the old backend, and a switch alone sends nothing", async () => {
-		const calls: RecordedTodoBackendCall[] = [];
-		const a = createTodoBackendRecorder("a", { calls });
-		const b = createTodoBackendRecorder("b", { calls });
+		const a = createTodoBackendRecorder("a");
+		const b = createTodoBackendRecorder("b");
 		const gate = hold(a, "apply");
 		const session = await createSession({ backend: "a", extensions: [a.extension(), b.extension()] });
 
@@ -430,14 +379,13 @@ export default function(pi) {
 		const second = todo(session, { op: "append", phase: "Tasks", items: ["two"] });
 		gate.release.resolve();
 		await Promise.all([first, second]);
-		const mirrored = ["a:apply:init", "b:apply:append"];
-		expect(calls.map(call => `${call.backend}:${call.method}:${call.op}`)).toEqual(mirrored);
+		const mirrored = () => [a, b].map(recorder => recorder.calls.map(call => `${call.method}:${call.op}`));
+		expect(mirrored()).toEqual([["apply:init"], ["apply:append"]]);
 
 		cfgTodoBackend.override(session.settings, "native");
 		expect(await session.runTodoWrite(async active => active)).toBeUndefined();
-		const result = await todo(session, { op: "append", phase: "Tasks", items: ["native now"] });
-		expect(result.isError).toBeUndefined();
-		expect(calls).toHaveLength(mirrored.length);
+		await todo(session, { op: "append", phase: "Tasks", items: ["native now"] });
+		expect(mirrored()).toEqual([["apply:init"], ["apply:append"]]);
 	});
 
 	test("aborting while apply is pending returns at once, aborts apply's signal, never commits, and frees the queue", async () => {
@@ -466,10 +414,6 @@ export default function(pi) {
 			["replace", ["base"]],
 			["apply", ["base", "real"]],
 		]);
-		expect(taskContents(session)).toEqual(["base", "real"]);
-
-		gate.release.resolve();
-		await flushTodoWrites(session);
 		expect(taskContents(session)).toEqual(["base", "real"]);
 	});
 

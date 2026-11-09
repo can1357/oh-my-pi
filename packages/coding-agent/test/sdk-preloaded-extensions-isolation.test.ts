@@ -17,7 +17,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -45,7 +44,13 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 		const preloaded: LoadExtensionsResult = {
 			extensions: [],
 			errors: [],
-			runtime: new ExtensionRuntime(),
+			runtime: {
+				flagValues: new Map(),
+				pendingProviderRegistrations: [],
+				todoBackends: [],
+				// Cast: only the fields we touch matter; the SDK happily accepts a
+				// minimal runtime when no extension hooks fire.
+			} as unknown as LoadExtensionsResult["runtime"],
 		};
 		const beforeLength = preloaded.extensions.length;
 		const beforeArrayRef = preloaded.extensions;

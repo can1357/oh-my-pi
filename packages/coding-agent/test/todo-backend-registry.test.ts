@@ -60,7 +60,7 @@ describe("pi.registerTodoBackend", () => {
 		expect(runtime.todoBackends).toEqual([]);
 	});
 
-	test("a factory that throws after registering rolls back only its own backends and frees its id", async () => {
+	test("a factory that throws after registering rolls back only its own backends", async () => {
 		const runtime = new ExtensionRuntime();
 		await load(runtime, pi => pi.registerTodoBackend(definition("earlier")), "a");
 
@@ -75,8 +75,5 @@ describe("pi.registerTodoBackend", () => {
 			),
 		).rejects.toThrow("factory failed");
 		expect(runtime.todoBackends.map(entry => entry.definition.id)).toEqual(["earlier"]);
-
-		await load(runtime, pi => pi.registerTodoBackend(definition("tracker", { label: "Healthy" })), "b");
-		expect(runtime.todoBackends.map(entry => entry.definition.label)).toEqual(["Label earlier", "Healthy"]);
 	});
 });

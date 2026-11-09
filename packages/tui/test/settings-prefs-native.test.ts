@@ -3,10 +3,7 @@ import type { TspPrefsProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { PluginSettingsHost } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
 import type { SettingsDisplayEntry, SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
-import {
-	type RuntimeSettingOptionsProvider,
-	SettingsSelectorComponent,
-} from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -99,7 +96,7 @@ interface Harness {
 	previews: string[];
 }
 
-const BACKENDS: RuntimeSettingOptionsProvider = () => [
+const BACKENDS = () => [
 	{ value: "native", label: "Native" },
 	{ value: "ext", label: "Ext\x1b[31m Backend\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
 ];
