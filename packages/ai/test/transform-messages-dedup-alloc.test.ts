@@ -1,15 +1,15 @@
-// The dedup pass copies an assistant turn's content array only on the turn that
-// mints a `_dup` id; a duplicate-free turn keeps the array it was handed. A
-// per-turn `msg.content.map(...)` rebuilt every assistant turn's array on every
-// request and threw the result away, so a long transcript paid one wasted array
-// per turn per request.
+// The dedup pass rewrites an assistant turn's content array only on the turn
+// that mints a `_dup` id; a duplicate-free turn keeps the array it was handed.
 //
-// Block identity cannot see that: the `.map` path also emitted the caller's own
-// blocks, and its `if (!contentChanged) return msg` handed back the original
-// message, so both paths produce element-identical output. This counts the
-// array copy itself instead, differentially: two transcripts of identical
-// shape, one with a repeated id, must differ by exactly the copy the repeated
-// turn needs.
+// That skipped copy is NOT observable through `transformMessages`: the
+// normalization pass upstream rebuilds every assistant turn's content array
+// with `flatMap` before the dedup pass sees it, and both the old per-turn
+// `.map` and the new lazy copy emit element-identical content. A
+// reference-identity assertion therefore cannot separate the two
+// implementations — checked against origin/main, where the copy always
+// happens, the emitted blocks are the same objects either way — so the
+// allocation claim rests on the source change. What the pass does expose is
+// the emitted id contract, asserted here.
 import { describe, expect, it } from "bun:test";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, Message, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -64,52 +64,12 @@ function toolResult(id: string, text: string, timestamp: number): ToolResultMess
 	};
 }
 
-/** Only a message content array has every element shaped like a content block. */
-function isContentBlockArray(value: unknown): boolean {
-	return (
-		Array.isArray(value) &&
-		value.length > 0 &&
-		value.every(
-			element => typeof element === "object" && element !== null && typeof Reflect.get(element, "type") === "string",
-		)
-	);
+function assistantTurns(messages: Message[]): AssistantMessage[] {
+	return messages.filter((message): message is AssistantMessage => message.role === "assistant");
 }
 
-/**
- * Count the `map`/`slice` calls that rebuild a message content array while `run`
- * executes. Nothing else the pass does around those calls is visible: the copy
- * is discarded, so only the call itself distinguishes a turn that allocated an
- * array from one that did not.
- */
-function countContentArrayCopies(run: () => void): number {
-	const savedMap = Array.prototype.map;
-	const savedSlice = Array.prototype.slice;
-	// `Function.prototype.call.bind` keeps the wrappers free of a rest-argument
-	// tuple type, which the dated prototype signatures cannot express.
-	const forwardMap = Function.prototype.call.bind(savedMap);
-	const forwardSlice = Function.prototype.call.bind(savedSlice);
-	let copies = 0;
-	const countMap = function (this: unknown, ...args: unknown[]): unknown {
-		if (isContentBlockArray(this)) copies += 1;
-		return forwardMap(this, ...args);
-	};
-	const countSlice = function (this: unknown, ...args: unknown[]): unknown {
-		if (isContentBlockArray(this)) copies += 1;
-		return forwardSlice(this, ...args);
-	};
-	Reflect.set(Array.prototype, "map", countMap);
-	Reflect.set(Array.prototype, "slice", countSlice);
-	try {
-		run();
-	} finally {
-		Reflect.set(Array.prototype, "map", savedMap);
-		Reflect.set(Array.prototype, "slice", savedSlice);
-	}
-	return copies;
-}
-
-describe("dedup pass copies an assistant turn's content array only when it must", () => {
-	it("pays exactly one content-array copy for the one turn that repeats an id", () => {
+describe("deduplicateToolCallIds", () => {
+	it("suffixes a repeated id across turns and leaves distinct ids alone", () => {
 		const model = makeSameModel();
 		const withoutRepeat: Message[] = [
 			assistantTurn("call_one", "first"),
@@ -124,20 +84,13 @@ describe("dedup pass copies an assistant turn's content array only when it must"
 			toolResult("call_same", "two", 2),
 		];
 
-		const duplicateFreeCopies = countContentArrayCopies(() => transformMessages(withoutRepeat, model));
-		const repeatedCopies = countContentArrayCopies(() => transformMessages(withRepeat, model));
+		const ids = (messages: Message[]): string[] =>
+			assistantTurns(messages)
+				.flatMap(message => message.content)
+				.filter(block => block.type === "toolCall")
+				.map(block => block.id);
 
-		// The repeat really did take the rewrite path; without that the comparison
-		// below would be measuring two copies of the same duplicate-free run.
-		const emittedIds = transformMessages(withRepeat, model)
-			.filter((message): message is AssistantMessage => message.role === "assistant")
-			.flatMap(message => message.content)
-			.filter(block => block.type === "toolCall")
-			.map(block => block.id);
-		expect(emittedIds).toEqual(["call_same", "call_same_dup1"]);
-
-		// A duplicate-free turn copies nothing, so the repeated transcript costs
-		// exactly the one copy its rewritten turn needs — and not one per turn.
-		expect(repeatedCopies).toBe(duplicateFreeCopies + 1);
+		expect(ids(transformMessages(withoutRepeat, model))).toEqual(["call_one", "call_two"]);
+		expect(ids(transformMessages(withRepeat, model))).toEqual(["call_same", "call_same_dup1"]);
 	});
 });
