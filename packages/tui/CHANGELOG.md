@@ -16,6 +16,9 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 
+- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#17093](https://github.com/can1357/oh-my-pi/pull/17093) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
@@ -46,7 +49,6 @@
 ### Changed
 
 - Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
-- The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#17093](https://github.com/can1357/oh-my-pi/pull/17093) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
