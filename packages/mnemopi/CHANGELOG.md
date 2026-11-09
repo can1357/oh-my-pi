@@ -10,7 +10,7 @@
 - Fixed model-change embedding rebuilds overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18441](https://github.com/can1357/oh-my-pi/pull/18441) by [@eggpeat](https://github.com/eggpeat))
 ### Fixed
 
-- Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.18.0] - 2026-11-07
 
