@@ -106,3 +106,65 @@ test("a dismissed review cannot inject an approved plan after /plan pauses", asy
 		resetSettingsForTest();
 	}
 });
+
+test("pausing plan mode closes an open review so it cannot approve the paused plan", async () => {
+	resetSettingsForTest();
+	initTheme();
+	const dir = TempDir.createSync("@pi-18610-open-review-");
+	await Settings.init({ inMemory: true, cwd: dir.path() });
+	const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+	auth.keys.setRuntime("anthropic", "test-key");
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled test model");
+	const manager = SessionManager.inMemory(dir.path());
+	const session = new AgentSession({
+		agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+		sessionManager: manager,
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: new ModelRegistry(auth),
+	});
+	const mode = new InteractiveMode(session, "test");
+	try {
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath;
+		if (!planFilePath) throw new Error("Plan mode did not set a plan path");
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => manager.getArtifactsDir(),
+				getSessionId: () => manager.getSessionId(),
+			}),
+			"# Plan\n\nEdit files.",
+		);
+		let overlay: PlanReviewOverlay | undefined;
+		const show = mode.ui.showOverlay.bind(mode.ui);
+		vi.spyOn(mode.ui, "showOverlay").mockImplementation((component, options) => {
+			if (component instanceof PlanReviewOverlay) overlay = component;
+			return show(component, options);
+		});
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		const opened = Promise.withResolvers<void>();
+		const review = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Plan" },
+			{ abortTurn: false, onOpened: () => opened.resolve() },
+		);
+		await opened.promise;
+		if (!overlay) throw new Error("Plan review did not open");
+
+		await mode.handlePlanModeCommand();
+		// A late Enter on the stale review would otherwise pick "Approve and execute".
+		overlay.handleInput("\r");
+		await review;
+
+		expect(mode.planModePaused).toBe(true);
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(prompt).not.toHaveBeenCalled();
+	} finally {
+		mode.stop();
+		await session.dispose();
+		auth.close();
+		dir.removeSync();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	}
+});

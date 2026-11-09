@@ -7081,6 +7081,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 				if (!confirmed) return false;
 			}
+			// An open review must not outlive the plan mode it approves: a later pick
+			// would autosave and dispatch the plan while plan mode is paused.
+			this.#hidePlanReview();
 			await this.#exitPlanMode({ paused: true, interruptActiveTurn: true });
 			return false;
 		}
