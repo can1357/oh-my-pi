@@ -8,7 +8,9 @@ import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
+import reviewerTeamMd from "../prompts/agents/reviewer-team.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
+import scoutTeamMd from "../prompts/agents/scout-team.md" with { type: "text" };
 import scoutMd from "../prompts/agents/scout.md" with { type: "text" };
 import securityReviewerMd from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import seanceMd from "../prompts/agents/seance.md" with { type: "text" };
@@ -74,6 +76,11 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	},
 ];
 
+const EMBEDDED_TEAM_PROMPTS: Record<string, string> = {
+	"scout-team.md": scoutTeamMd,
+	"reviewer-team.md": reviewerTeamMd,
+};
+
 // Computed lazily on first loadBundledAgents() call to avoid eager prompt.render at module load.
 
 export class AgentParsingError extends Error {
@@ -135,9 +142,15 @@ export function loadBundledAgents(): AgentDefinition[] {
 	if (bundledAgentsCache !== null) {
 		return bundledAgentsCache;
 	}
-	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def =>
-		parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled"),
-	);
+	bundledAgentsCache = EMBEDDED_AGENT_DEFS.map(def => {
+		const agent = parseAgent(`embedded:${def.fileName}`, buildAgentContent(def), "bundled");
+		if (agent.teamPromptPath !== undefined) {
+			const teamPrompt = EMBEDDED_TEAM_PROMPTS[agent.teamPromptPath];
+			if (teamPrompt === undefined) throw new Error(`Missing embedded team prompt: ${agent.teamPromptPath}`);
+			agent.teamSystemPrompt = prompt.render(teamPrompt);
+		}
+		return agent;
+	});
 	return bundledAgentsCache;
 }
 

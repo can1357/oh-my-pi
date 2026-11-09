@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { prompt } from "@oh-my-pi/pi-utils";
+import subagentTemplate from "../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -15,7 +17,6 @@ import * as spawnSubagent from "@oh-my-pi/pi-coding-agent/task/spawn-subagent";
 import {
 	releaseStructuredSubagentId,
 	reserveStructuredSubagentId,
-	withTeamIrcTools,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
@@ -193,6 +194,20 @@ describe("sanitizeTeamHandle", () => {
 	});
 });
 
+describe("team subagent instructions", () => {
+	it("directs team coordination to the actual lead without changing ordinary subagents", () => {
+		const common = { agent: "role", ircSelfId: "worker", ircPeers: [], structured: true };
+		const team = prompt.render(subagentTemplate, { ...common, team: true, teamLeadId: "Lead-2" });
+		const ordinary = prompt.render(subagentTemplate, common);
+		expect(team).toContain("Lead-2");
+		expect(team).toContain("Message teammates and the lead directly");
+		expect(team).not.toContain("NEVER send FYI");
+		expect(team).toContain("Yield protocol");
+		expect(ordinary).toContain("NEVER send FYI");
+		expect(ordinary).not.toContain("Lead-2");
+	});
+});
+
 describe("team handle through the spawn seam", () => {
 	it("reserves the sanitized handle as the spawn id and passes the team workspace", async () => {
 		const { spawnSubagentViaExecutor } = await import("@oh-my-pi/pi-coding-agent/task/spawn-subagent");
@@ -349,10 +364,19 @@ async function teamFixture(options: { workspace?: boolean; handles?: string[] } 
 	return { team, root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
 
-function mockTeamDiscovery(team: TeamDefinition): void {
+function mockTeamDiscovery(team: TeamDefinition, agents?: AgentDefinition[]): void {
 	vi.spyOn(teamsModule, "discoverTeams").mockResolvedValue([team]);
 	vi.spyOn(discovery, "discoverAgents").mockResolvedValue({
-		agents: [{ name: "scout" }, { name: "reviewer" }],
+		agents: agents ?? [
+			{
+				name: "scout",
+				description: "Scout",
+				systemPrompt: "Read-only scouting",
+				teamSystemPrompt: "Coordinate scouting with the lead",
+				source: "bundled",
+				tools: ["read", "grep"],
+			},
+		],
 	} as never);
 }
 
@@ -373,6 +397,71 @@ function teamRuntime(root: string): { runtime: unknown; outputs: string[] } {
 }
 
 describe("/team start and stop", () => {
+	for (const definition of [
+		{ name: "scout", tools: ["read"], team: undefined, reason: "read-only" },
+		{ name: "scout", tools: [], team: undefined, reason: "read-only" },
+		{ name: "scout", tools: ["write"], team: false, reason: "team" },
+	]) {
+		it(`rejects ${definition.reason} members without a team prompt before side effects`, async () => {
+			const { team, root, cleanup } = await teamFixture({ workspace: true, handles: ["Scout"] });
+			try {
+				mockTeamDiscovery(team, [
+					{
+						...definition,
+						description: "d",
+						systemPrompt: "s",
+						source: "project",
+					},
+				]);
+				const spawn = vi.spyOn(spawnSubagent, "spawnSubagentForSession");
+				const { runtime, outputs } = teamRuntime(root);
+				await TEAM_HANDLE({ args: "start audit" }, runtime);
+				expect(outputs.join("\n")).toContain("Scout");
+				expect(outputs.join("\n")).toContain(definition.reason);
+				expect(spawn).not.toHaveBeenCalled();
+				expect(
+					await fs.stat(team.workspace!).then(
+						() => true,
+						() => false,
+					),
+				).toBe(false);
+				const session = (runtime as { session: { toolSession: ToolSession } }).session.toolSession;
+				const id = await reserveStructuredSubagentId(session, { label: "Scout" });
+				expect(id).toBe("Scout");
+				releaseStructuredSubagentId(session, id);
+			} finally {
+				await cleanup();
+			}
+		});
+	}
+
+	for (const definition of [
+		{ name: "scout", tools: ["write"] },
+		{ name: "scout", tools: ["read"], team: false, teamSystemPrompt: "Coordinate with lead" },
+	]) {
+		it("starts compatible writable or explicitly team-prompted members", async () => {
+			const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
+			try {
+				mockTeamDiscovery(team, [
+					{
+						...definition,
+						description: "d",
+						systemPrompt: "s",
+						source: "project",
+					},
+				]);
+				const spawn = vi
+					.spyOn(spawnSubagent, "spawnSubagentForSession")
+					.mockResolvedValue({ id: "Scout" } as never);
+				const { runtime } = teamRuntime(root);
+				await TEAM_HANDLE({ args: "start audit" }, runtime);
+				expect(spawn).toHaveBeenCalledTimes(1);
+			} finally {
+				await cleanup();
+			}
+		});
+	}
+
 	it("stop releases only the recorded member id, leaving an unrelated same-handle ref running", async () => {
 		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
 		try {
@@ -587,21 +676,5 @@ describe("/team start and stop", () => {
 		} finally {
 			await cleanup();
 		}
-	});
-});
-
-describe("team-only IRC capability", () => {
-	it("grants write to a read-only member only when teamIrc is set, leaving the definition untouched", () => {
-		const readOnly: AgentDefinition = {
-			name: "scout",
-			description: "d",
-			systemPrompt: "s",
-			source: "bundled",
-			tools: ["read", "grep"],
-		};
-		expect(withTeamIrcTools(readOnly, true).tools).toEqual(["read", "grep", "write"]);
-		expect(withTeamIrcTools(readOnly, false)).toBe(readOnly);
-		expect(withTeamIrcTools(readOnly, true, true)).toBe(readOnly);
-		expect(readOnly.tools).toEqual(["read", "grep"]);
 	});
 });

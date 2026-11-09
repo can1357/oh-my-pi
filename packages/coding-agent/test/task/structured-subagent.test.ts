@@ -146,6 +146,44 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("keeps full write grants distinct from team coordination-only grants", async () => {
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		mockDiscovery({ ...AGENT, tools: ["read", "write"] });
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const team = await runStructuredSubagent(request({ teamIrc: true, retainArtifacts: true }));
+		const normal = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(dispatched.map(options => options.coordinationOnlyWrite)).toEqual([false, false]);
+		expect(dispatched.map(options => options.agent.tools)).toEqual([
+			["read", "write"],
+			["read", "write"],
+		]);
+		await fs.rm(team.artifactsDir, { recursive: true, force: true });
+		await fs.rm(normal.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("selects a discovered relative team prompt only for team members", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-team-role-"));
+		try {
+			const dir = path.join(root, ".omp", "agents");
+			await fs.mkdir(path.join(dir, "prompts"), { recursive: true });
+			await fs.writeFile(
+				path.join(dir, "worker.md"),
+				"---\nname: worker\ndescription: test\nteam-prompt: prompts/team.md\n---\nNormal role",
+			);
+			await fs.writeFile(path.join(dir, "prompts", "team.md"), "Team role");
+			const caller = session({ cwd: root });
+			const team = await resolveEffectiveSubagentPolicy(request({ session: caller, teamIrc: true }));
+			const normal = await resolveEffectiveSubagentPolicy(request({ session: caller }));
+			expect(team.effectiveAgent.systemPrompt).toBe("Team role");
+			expect(normal.effectiveAgent.systemPrompt.trim()).toBe("Normal role");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
 		mockDiscovery();
 		const taggedSession = session();

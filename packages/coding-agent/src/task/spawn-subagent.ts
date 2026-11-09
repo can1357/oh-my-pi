@@ -61,11 +61,8 @@ export interface SpawnSubagentHost {
 	toolSession?: ToolSession;
 }
 
-/**
- * `/team start` opts a child into peer messaging: the executor grants the
- * `write` tool (needed for `agent://` sends) even when the agent definition
- * is read-only. Non-team spawns never set it.
- */
+/** Team metadata is forwarded unchanged; the resolved definition determines
+ * whether its write capability needs to be coordination-only. */
 export interface TeamSpawnSubagentOptions extends SpawnSubagentOptions {
 	teamIrc?: boolean;
 	/** An ID reserved for this team before contexts were rendered. */

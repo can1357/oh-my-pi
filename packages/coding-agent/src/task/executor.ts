@@ -477,6 +477,9 @@ export interface ExecutorOptions {
 	a2aPeers?: readonly string[];
 	worktree?: string;
 	agent: AgentDefinition;
+	/** Team prompt metadata and its separate, restricted write grant. */
+	team?: boolean;
+	coordinationOnlyWrite?: boolean;
 	task: string;
 	assignment?: string;
 	preparedSession?: PreparedSeanceSession;
@@ -4213,6 +4216,8 @@ interface SubagentPromptInputs {
 	id: string;
 	model?: string;
 	agentSystemPrompt: string;
+	team: boolean;
+	teamLeadId: string;
 	context: string;
 	planReference: string;
 	planReferencePath: string;
@@ -4302,6 +4307,8 @@ function buildSubagentSessionOptions(
 						collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile));
 			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 				agent: inputs.agentSystemPrompt,
+				team: inputs.team,
+				teamLeadId: inputs.teamLeadId,
 				context: inputs.context,
 				planReference: inputs.planReference,
 				planReferencePath: inputs.planReferencePath,
@@ -4709,6 +4716,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
 		}
+	}
+	if (options.coordinationOnlyWrite && toolNames && !toolNames.includes("write")) {
+		toolNames = [...toolNames, "write"];
 	}
 
 	if (atMaxDepth && toolNames?.includes("task")) {
@@ -5137,6 +5147,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					// Subagents are short-lived; never schedule background warm requests.
 					cacheWarming: false,
 					toolNames,
+					coordinationOnlyWrite: options.coordinationOnlyWrite,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
@@ -5186,6 +5197,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					id,
 					model: progress.resolvedModel,
 					agentSystemPrompt: agent.systemPrompt,
+					team: options.team === true,
+					teamLeadId: options.parentAgentId ?? MAIN_AGENT_ID,
 					context: options.context?.trim() ?? "",
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
@@ -5372,6 +5385,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				// so read it back from the settings both install paths write.
 				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
 				readOnly: isReadOnlyAgent(agent),
+				coordinationOnlyWrite: options.coordinationOnlyWrite || undefined,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,

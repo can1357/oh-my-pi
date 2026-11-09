@@ -24,13 +24,18 @@ unrelated ref that happens to share a handle.
   its registry id. The handle is normalized by the same `sanitizeAgentId` the
   registry uses (48-character cap), so `agent://<handle>` always addresses the
   real id, and status, stop and the rendered context/peer list agree on it;
-- **direct messaging**: team spawns grant the full `write` tool for `agent://`
-  sends even when the agent definition is read-only. This grant is **not
-  restricted to `agent://`**: it also permits ordinary file writes subject to
-  the applicable tool and access policies. In plan mode the grant is withheld:
-  members started there can receive peer messages but not send them, and keep
-  the read-only plan-mode tools. Bundled scout/reviewer spawns outside teams
-  are unchanged. Messages use the existing IrcBus and ingress guard;
+- **direct messaging**: team members without full `write` access receive a
+  coordination-only write capability limited to `agent://` and `team://`.
+  It does not grant disk, `local://`, `xd://`, or other writes. Definitions
+  that already grant `write` keep that access. In plan mode the team grant is
+  withheld, preserving plan-mode restrictions. Bundled scout/reviewer spawns
+  outside teams are unchanged. Messages use the existing IrcBus and ingress
+  guard;
+- **team role prompts**: read-only definitions and definitions with
+  `team: false` require a `team-prompt` to join a team. The path is relative
+  to the agent definition. A team prompt replaces the normal role body for team
+  spawns only. Writable definitions need no team prompt unless `team: false`;
+  bundled scout and reviewer include team variants;
 - an optional **shared workspace**: `workspace:` is resolved relative to the
   team file and added to each child's additional directories, not substituted
   for its working directory. `/team start` creates the directory and `TASKS.md`
@@ -91,9 +96,9 @@ Audit covers services X and Y; the lead collects the final report.
 `task/teams.ts` discovers and parses team files, normalizes handles, renders
 the per-member context/prompt, and creates `TASKS.md` in the workspace.
 `slash-commands/builtin-teams.ts` implements `/team` and records team
-membership. `task/spawn-subagent.ts` forwards `handle`, `teamWorkspace` and
-the team-only `teamIrc` grant into `task/structured-subagent.ts`, which adds
-`write` to the effective agent tools for team spawns only. Settings:
+membership. `task/spawn-subagent.ts` forwards team spawn metadata through
+`task/structured-subagent.ts` and the session/tool creation path, where a
+coordination-only write capability is enforced. Settings:
 `team.enabled` / `team.maxTeammates`. The design contract is
 [`docs/specs/2026-11-06-agent-teams-design.md`](./specs/2026-11-06-agent-teams-design.md).
 

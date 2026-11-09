@@ -294,6 +294,8 @@ export function parseModelList(value: unknown): string[] | undefined {
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	team?: boolean;
+	teamPromptPath?: string;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -395,6 +397,8 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	return {
 		name,
 		description,
+		team: parseBoolean(frontmatter.team),
+		teamPromptPath: typeof frontmatter.teamPrompt === "string" ? frontmatter.teamPrompt : undefined,
 		tools,
 		spawns,
 		model,

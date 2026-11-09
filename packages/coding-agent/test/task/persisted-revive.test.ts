@@ -180,6 +180,7 @@ async function createPersistedSession(
 	contract?: {
 		tools?: string[];
 		readOnly?: boolean;
+		coordinationOnlyWrite?: boolean;
 		agent?: string;
 		isolated?: boolean;
 		retryFallback?: RetryFallbackRole;
@@ -202,6 +203,7 @@ async function createPersistedSession(
 		resolvedModel: contract?.resolvedModel ?? (modelRole ? "anthropic/claude-sonnet-4-5" : undefined),
 		advisor,
 		readOnly: contract?.readOnly,
+		coordinationOnlyWrite: contract?.coordinationOnlyWrite,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
 		retryFallback: contract?.retryFallback,
@@ -502,6 +504,59 @@ describe("persisted subagent revival", () => {
 		expect(attemptedDiscovery).toEqual([]);
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
+
+	it("revives a coordination-only writer without granting filesystem or xd writes", async () => {
+		const cwd = makeTempDir("@pi-coordination-real-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "default", undefined, {
+			tools: ["read", "bash", "write", "yield"],
+			readOnly: false,
+			coordinationOnlyWrite: true,
+		});
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		MCPManager.setInstance(new MCPManager(cwd));
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, { authStorage, modelRegistry })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		let revived: AgentSession | undefined;
+		try {
+			revived = localSession(await reviver(ref));
+			const write = revived.getToolByName("write");
+			if (!write) throw new Error("Missing coordination write");
+			for (const target of [path.join(cwd, "blocked"), "local://blocked", "xd://anything"]) {
+				await expect(write.execute("blocked", { path: target, content: "x" })).rejects.toThrow("coordination-only");
+			}
+			expect(await Bun.file(path.join(cwd, "blocked")).exists()).toBe(false);
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+		}
+	});
+
+	for (const readOnly of [false, true]) {
+		it(`preserves coordination-only write on cold revival with readOnly ${readOnly}`, async () => {
+			const cwd = makeTempDir("@pi-coordination-revive-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				tools: ["read", "write", "yield"],
+				readOnly,
+				coordinationOnlyWrite: true,
+			});
+			const activeToolNames: string[][] = [];
+			let capturedOptions: CreateAgentSessionOptions | undefined;
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				capturedOptions = options;
+				return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd)(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+			expect(capturedOptions?.coordinationOnlyWrite).toBe(true);
+			expect(capturedOptions?.toolNames).toContain("write");
+			expect(activeToolNames[0]).toContain("write");
+		});
+	}
 
 	it("strips synthetic write from legacy read-only cold revival", async () => {
 		const cwd = makeTempDir("@pi-read-only-revive-");

@@ -416,7 +416,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	// so remove that transport name before replaying tools as explicit grants.
 	const revivedToolNames = restoredSeance
 		? restoredSeance.toolNames
-		: init.readOnly === true && init.tools.includes("write")
+		: init.readOnly === true && init.coordinationOnlyWrite !== true && init.tools.includes("write")
 			? init.tools.filter(name => name !== "write")
 			: init.tools;
 	const artifactManager = spec.artifactManager;
@@ -470,6 +470,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			expectedAgentRef: expectedRef,
 			taskDepth,
 			toolNames: revivedToolNames,
+			coordinationOnlyWrite: init.coordinationOnlyWrite === true,
 			// `revivedToolNames` is the enabled set, devices included: keep those devices,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: restoredSeance ? undefined : init.mountedTools,

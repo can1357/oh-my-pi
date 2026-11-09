@@ -17,6 +17,9 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { localSession } from "../helpers/local-session";
@@ -48,6 +51,7 @@ beforeEach(async () => {
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
 	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	registerMockApi(MOCK_API_SOURCE);
 });
@@ -56,6 +60,7 @@ afterEach(async () => {
 	await AgentLifecycleManager.global().dispose();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
 	unregisterCustomApis(MOCK_API_SOURCE);
 	vi.restoreAllMocks();
 	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
@@ -161,3 +166,146 @@ it.each([
 	},
 	30_000,
 );
+
+for (const xdev of [false, true]) {
+	it(`restricts a spawned team child's write tool after rebuild with xdev ${xdev}`, async () => {
+		const cwd = path.join(root, "home", "work");
+		const artifactsDir = path.join(root, "artifacts");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(artifactsDir, { recursive: true });
+		const router = InternalUrlRouter.instance();
+		const prior = router.getHandler("team");
+		const teamMessages: string[] = [];
+		// Temporary Task 1 handler: remove when Task 2 registers the real team protocol.
+		router.register({
+			scheme: "team",
+			spec: {
+				backing: "virtual",
+				selectors: "lines",
+				immutable: false,
+				singleSlashAlias: true,
+				write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "write" },
+			},
+			resolve: async () => ({ url: "team://ops", content: "", contentType: "text/plain" }),
+			write: async (_url, content) => {
+				teamMessages.push(content);
+			},
+		});
+		const peerMessages: IrcMessage[] = [];
+		AgentRegistry.global().register({
+			id: "SiblingScout",
+			displayName: "SiblingScout",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			status: "running",
+			session: {
+				deliverIrcMessage: async (message: IrcMessage) => {
+					peerMessages.push(message);
+					return "injected";
+				},
+			} as never,
+		});
+		const startup = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const slowStart: ExtensionFactory = pi => {
+			pi.on("session_start", async () => {
+				entered.resolve();
+				await startup.promise;
+			});
+		};
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("mock", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const available = modelRegistry.getAvailable.bind(modelRegistry);
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(kind => [mock, ...available(kind)]);
+		const settings = Settings.isolated({
+			"tools.xdev": xdev,
+			"task.agentIdleTtlMs": 0,
+			"async.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+			"advisor.enabled": false,
+			modelRoles: { default: "mock/mock-model" },
+		});
+		const running = runSubprocess({
+			cwd,
+			artifactsDir,
+			agent: { name: "scout", description: "test", systemPrompt: "test", source: "bundled", tools: ["read"] },
+			task: "Inspect",
+			index: 0,
+			id: AGENT_ID,
+			team: true,
+			coordinationOnlyWrite: true,
+			modelOverride: "mock/mock-model",
+			parentAgentId: MAIN_AGENT_ID,
+			authStorage,
+			modelRegistry,
+			settings,
+			preloadedPreparedExtensions: [
+				{ path: "<inline-0>", resolvedPath: "<inline-0>", factory: slowStart, error: null },
+			],
+			enableLsp: false,
+			enableMCP: false,
+			enableIrc: true,
+		});
+		try {
+			await entered.promise;
+			const child = localSession(AgentRegistry.global().get(AGENT_ID)?.session);
+			let write = child.agent.state.tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			await write!.execute(
+				"peer",
+				{ path: "agent://SiblingScout", content: "hello peer" },
+				undefined,
+				undefined as never,
+				undefined as never,
+			);
+			await write!.execute(
+				"team",
+				{ path: "[team:/ops:raw#ABCD]", content: "hello team" },
+				undefined,
+				undefined as never,
+				undefined as never,
+			);
+			expect(peerMessages.map(message => message.body)).toEqual(["hello peer"]);
+			expect(teamMessages).toEqual(["hello team"]);
+			for (const target of [path.join(cwd, "blocked"), "local://blocked", "xd://anything", "proc://anything/kill"]) {
+				await expect(
+					write!.execute(
+						"blocked",
+						{ path: target, content: "x" },
+						undefined,
+						undefined as never,
+						undefined as never,
+					),
+				).rejects.toThrow("coordination-only");
+			}
+			await child.setActiveToolsByName(["read", "write"]);
+			write = child.agent.state.tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			await expect(
+				write!.execute(
+					"rebuilt",
+					{ path: path.join(cwd, "blocked"), content: "x" },
+					undefined,
+					undefined as never,
+					undefined as never,
+				),
+			).rejects.toThrow("coordination-only");
+			startup.resolve();
+			await running;
+			const init = child.sessionManager.getEntries().find(entry => entry.type === "session_init");
+			expect(init?.coordinationOnlyWrite).toBe(true);
+			expect(init?.tools).toContain("write");
+		} finally {
+			startup.resolve();
+			await running;
+			authStorage.close();
+			if (prior) router.register(prior);
+			else router.unregister("team");
+		}
+	}, 30_000);
+}

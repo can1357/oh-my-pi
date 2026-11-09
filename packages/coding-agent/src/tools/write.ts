@@ -623,6 +623,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	};
 	readonly label = "Write";
 	get description(): string {
+		if (this.session.coordinationOnlyWrite) {
+			return "Send coordination messages using agent:// or team://. Other write targets are unavailable.";
+		}
 		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
 		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
 	}
@@ -950,6 +953,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
 		const path = recovered.path;
 		const target = router.writeTarget(path);
+		if (
+			this.session.coordinationOnlyWrite === true &&
+			target?.url.protocol !== "agent:" &&
+			target?.url.protocol !== "team:"
+		) {
+			throw new ToolError("This session has coordination-only write access to agent:// and team://.");
+		}
 		const policy = target?.spec.write;
 		if (rawContent === undefined && !(target && policy?.contentOptional?.(target.url))) {
 			throw new ToolError(`content is required for ${path}.`);

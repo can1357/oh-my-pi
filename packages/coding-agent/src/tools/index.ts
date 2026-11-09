@@ -404,6 +404,8 @@ export interface ToolSession {
 	 * working-tree writes.
 	 */
 	deviceOnlyWrite?: boolean;
+	/** Write is limited to agent:// and team:// coordination for the lifetime of this session. */
+	coordinationOnlyWrite?: boolean;
 	/**
 	 * Prompt-only preview used while a full-write activation rebuilds. It changes
 	 * the advertised schema without relaxing {@link deviceOnlyWrite}; execution
@@ -897,6 +899,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const baseEntries = names.map(name => [name, allTools[name]] as const);
 
 	const activeToolNames = new Set(names);
+	if (session.coordinationOnlyWrite) activeToolNames.add("write");
 	if (session.setActiveToolNames) {
 		session.setActiveToolNames(activeToolNames);
 	} else {
@@ -910,12 +913,17 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}),
 	);
 	let tools = baseResults.filter((r): r is Tool => r !== null);
+	if (session.coordinationOnlyWrite && !tools.some(tool => tool.name === "write")) {
+		const writeTool = await BUILTIN_TOOLS.write(session);
+		if (writeTool) tools.push(wrapToolWithMetaNotice(writeTool));
+	}
 	const toolRegistry = session.toolRegistry ?? new Map<string, Tool>();
 	session.toolRegistry = toolRegistry;
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
-	const xdevRequested = !restrictToolNames && cfgToolsXdev.get(session.settings);
+	// Coordination-only write cannot dispatch xd:// calls, so keep eligible tools top-level.
+	const xdevRequested = !restrictToolNames && !session.coordinationOnlyWrite && cfgToolsXdev.get(session.settings);
 	// xd:// mounting rides the write tool as its execution transport, so a
 	// session whose explicit tool list grants `read` but omits `write` would
 	// allocate no xd:// state and expose every later-registered MCP/extension

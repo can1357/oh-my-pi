@@ -202,6 +202,53 @@ describe("discoverAgents", () => {
 		expect(collide?.filePath).toBe(path.join(cliExt, "agents", "collide.md"));
 	});
 
+	test("ignores missing team prompts on shadowed definitions while preserving precedence", async () => {
+		const projectAgents = path.join(projectDir, ".omp", "agents");
+		const extension = path.join(tempHome, "shadowed-extension");
+		await fs.mkdir(projectAgents, { recursive: true });
+		await fs.mkdir(path.join(extension, "agents"), { recursive: true });
+		await fs.writeFile(
+			path.join(projectAgents, "a-winner.md"),
+			"---\nname: collision\ndescription: project winner\nteam-prompt: winner.txt\n---\nProject body\n",
+		);
+		await fs.writeFile(path.join(projectAgents, "winner.txt"), "Winning prompt");
+		await fs.writeFile(
+			path.join(projectAgents, "z-shadowed.md"),
+			"---\nname: collision\ndescription: same-directory loser\nteam-prompt: missing-local.txt\n---\nLoser\n",
+		);
+		await fs.writeFile(
+			path.join(extension, "agents", "collision.md"),
+			"---\nname: collision\ndescription: extension loser\nteam-prompt: missing-extension.txt\n---\nLoser\n",
+		);
+		injectOmpExtensionCliRoots([extension], tempHome, projectDir);
+
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const matches = agents.filter(agent => agent.name === "collision");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].description).toBe("project winner");
+		expect(matches[0].filePath).toBe(path.join(projectAgents, "a-winner.md"));
+		expect(matches[0].teamSystemPrompt).toBe("Winning prompt");
+	});
+
+	test("reports the winning definition and missing prompt rather than falling back to a valid shadowed definition", async () => {
+		const projectAgents = path.join(projectDir, ".omp", "agents");
+		const extension = path.join(tempHome, "fallback-extension");
+		const winner = path.join(projectAgents, "winner.md");
+		const missing = path.join(projectAgents, "missing.txt");
+		await fs.mkdir(projectAgents, { recursive: true });
+		await fs.mkdir(path.join(extension, "agents"), { recursive: true });
+		await fs.writeFile(winner, "---\nname: collision\ndescription: winner\nteam-prompt: missing.txt\n---\nWinner\n");
+		await fs.writeFile(
+			path.join(extension, "agents", "collision.md"),
+			"---\nname: collision\ndescription: loser\n---\nLoser\n",
+		);
+		injectOmpExtensionCliRoots([extension], tempHome, projectDir);
+
+		await expect(discoverAgents(projectDir, tempHome)).rejects.toThrow(
+			`Failed to read team prompt ${missing} referenced by ${winner}`,
+		);
+	});
+
 	test("explicit-only CLI roots expose only explicitly named package agents", async () => {
 		const staleExt = path.join(tempHome, "stale-ext");
 		const explicitExt = path.join(tempHome, "explicit-ext");

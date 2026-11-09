@@ -161,6 +161,35 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("generate_image");
 	});
 
+	it("keeps ambient tools callable in a coordination-only session after rebuilding", async () => {
+		const ambientTool = customTool("ambient_search");
+		const { session } = await createAgentSession({
+			...startupShortcuts(),
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.xdev": true, "plan.enabled": false }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			toolNames: ["read"],
+			customTools: [ambientTool],
+			coordinationOnlyWrite: true,
+		});
+		sessions.push(session);
+		await session.setActiveToolsByName(session.getEnabledToolNames());
+		expect(session.getActiveToolNames()).toContain(ambientTool.name);
+		expect(session.getXdevToolEntries()).toEqual([]);
+		const tool = session.getToolByName(ambientTool.name);
+		expect(tool).toBeDefined();
+		expect((await tool!.execute("ambient", {})).isError).not.toBe(true);
+		const write = session.getToolByName("write");
+		expect(write).toBeDefined();
+		await expect(write!.execute("blocked", { path: "xd://ambient_search", content: "{}" })).rejects.toThrow(
+			"coordination-only",
+		);
+	});
+
 	it("mounts ambient tools across runtime selection with a device-only write", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["read"], [ambientTool]);

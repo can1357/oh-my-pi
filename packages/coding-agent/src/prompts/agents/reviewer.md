@@ -4,6 +4,7 @@ description: "Code review specialist for quality/security analysis"
 tools: read, find, grep, glob, bash, lsp, web_search, ast_grep
 spawns: scout
 model: "@slow"
+team-prompt: reviewer-team.md
 output:
   properties:
     overall_correctness:

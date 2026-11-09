@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -779,6 +780,98 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 		// A genuinely unmounted name still misses, prefixed or not.
 		expect(resolveMountedXdevTool(xdev, "xd://no_such_tool")).toBeUndefined();
 	});
+});
+
+describe("coordination-only write", () => {
+	it("preserves a full write grant to a file", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "full-team-write-"));
+		try {
+			const tools = await createTools(xdevSession(dir), ["write"]);
+			const write = tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			await write!.execute("write", { path: path.join(dir, "allowed.txt"), content: "allowed" });
+			expect(await fs.readFile(path.join(dir, "allowed.txt"), "utf8")).toBe("allowed");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+
+	it("keeps eligible built-ins top-level instead of mounting them behind forbidden xd writes", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "coordination-xdev-"));
+		try {
+			const session = xdevSession(tempDir, {
+				settings: Settings.isolated({ "tools.xdev": true }),
+				coordinationOnlyWrite: true,
+			});
+			const tools = await createTools(session);
+			expect(session.xdev).toBeUndefined();
+			expect(tools.some(tool => tool.name === "grep")).toBe(true);
+			const write = tools.find(tool => tool.name === "write");
+			expect(write).toBeDefined();
+			await expect(write!.execute("blocked", { path: "xd://grep", content: "{}" })).rejects.toThrow(
+				"coordination-only",
+			);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	for (const xdev of [false, true]) {
+		it(`restricts normalized targets and rebuilds with xdev ${xdev}`, async () => {
+			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "coordination-write-"));
+			const router = InternalUrlRouter.instance();
+			const previousTeamHandler = router.getHandler("team");
+			const messages: string[] = [];
+			// Temporary Task 1 handler: remove when Task 2 registers the real team protocol.
+			router.register({
+				scheme: "team",
+				spec: {
+					backing: "virtual",
+					selectors: "lines",
+					immutable: false,
+					singleSlashAlias: true,
+					write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "write" },
+				},
+				resolve: async () => ({ url: "team://ops", content: "", contentType: "text/plain" }),
+				write: async (_url, content) => {
+					messages.push(content);
+				},
+			});
+			try {
+				const session = xdevSession(tempDir, {
+					settings: Settings.isolated({ "tools.xdev": xdev }),
+					coordinationOnlyWrite: true,
+				});
+				let tools = await createTools(session, ["read"]);
+				let write = tools.find(tool => tool.name === "write");
+				expect(write).toBeDefined();
+				await write!.execute("team", { path: "[team:/ops:raw#ABCD]", content: "hello" });
+				expect(messages).toEqual(["hello"]);
+				for (const target of [
+					path.join(tempDir, "blocked.txt"),
+					"local://blocked",
+					"[local:/blocked:raw#ABCD]",
+					"xd://anything",
+					"proc://anything/kill",
+					"unknown://anything",
+				]) {
+					await expect(write!.execute("blocked", { path: target, content: "x" })).rejects.toThrow(
+						"coordination-only",
+					);
+				}
+				tools = await createTools(session, ["write"]);
+				write = tools.find(tool => tool.name === "write");
+				await expect(
+					write!.execute("rebuild", { path: path.join(tempDir, "blocked.txt"), content: "x" }),
+				).rejects.toThrow("coordination-only");
+				expect(await Bun.file(path.join(tempDir, "blocked.txt")).exists()).toBe(false);
+			} finally {
+				if (previousTeamHandler) router.register(previousTeamHandler);
+				else router.unregister("team");
+				await removeWithRetries(tempDir);
+			}
+		});
+	}
 });
 
 describe("device-only write transport for explicit lists omitting write", () => {

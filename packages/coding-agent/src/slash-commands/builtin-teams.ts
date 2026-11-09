@@ -7,6 +7,7 @@
 import { AgentRegistry, type AgentRef } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { discoverAgents } from "../task/discovery";
+import { isReadOnlyAgent } from "../task/read-only-policy";
 import {
 	discoverTeams,
 	ensureTeamTasksFile,
@@ -134,6 +135,21 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const max = cfgTeamMaxTeammates.get(runtime.settings);
 				const members = team.members.slice(0, Math.max(1, max));
+				for (const member of members) {
+					const agent = discovery.agents.find(candidate => candidate.name === member.agent)!;
+					if (
+						!agent.teamSystemPrompt &&
+						(agent.team === false || agent.tools?.length === 0 || isReadOnlyAgent(agent))
+					) {
+						const reason = agent.team === false ? "team: false" : "read-only";
+						await runtime.output(
+							teamRuntimeError(
+								`member "${member.handle}" (${member.agent}) is ${reason} and has no team prompt`,
+							),
+						);
+						return commandConsumed();
+					}
+				}
 				const handles = members.map(member => sanitizeTeamHandle(member.handle));
 				if (new Set(handles).size !== handles.length) {
 					await runtime.output(teamRuntimeError("team member handles collide after normalization"));

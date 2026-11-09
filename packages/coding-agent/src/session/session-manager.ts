@@ -3709,6 +3709,7 @@ export class SessionManager {
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
+		coordinationOnlyWrite?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
@@ -4780,6 +4781,7 @@ export interface PersistedSessionInit {
 	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
+	coordinationOnlyWrite?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	restrictToolNames?: boolean;
@@ -4812,6 +4814,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			perCallThinkingLevel: entry.perCallThinkingLevel,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
+			coordinationOnlyWrite: entry.coordinationOnlyWrite,
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
 			restrictToolNames: entry.restrictToolNames,

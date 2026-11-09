@@ -849,6 +849,8 @@ export interface CreateAgentSessionOptions {
 	mountedToolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
+	/** Restrict the built-in write tool to agent:// and team:// coordination. */
+	coordinationOnlyWrite?: boolean;
 	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
@@ -2599,6 +2601,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			},
 			restrictToolNames,
+			coordinationOnlyWrite: options.coordinationOnlyWrite,
 			get seanceSourceArtifactsDir() {
 				return sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
 			},
@@ -4009,6 +4012,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const syncXdevState = (): void => {
 			const wanted =
 				!restrictToolNames &&
+				!toolSession.coordinationOnlyWrite &&
 				cfgToolsXdev.get(settings) &&
 				toolRegistry.has("write") &&
 				builtInRegistryToolNames.has("write");
@@ -4455,6 +4459,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
 		const explicitlyRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		if (
+			options.coordinationOnlyWrite &&
+			explicitlyRequestedToolNames &&
+			!explicitlyRequestedToolNames.includes("write")
+		) {
+			explicitlyRequestedToolNames.push("write");
+		}
 		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
 		// `yield` call to terminate. The tool registry already includes `yield` (see
 		// `createTools`), but an explicit `toolNames` list (agent frontmatter `tools` omits

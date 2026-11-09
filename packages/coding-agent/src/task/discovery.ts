@@ -50,27 +50,30 @@ interface AgentDirectory {
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): Promise<AgentDefinition[]> {
+async function loadAgentsFromDir({
+	dir,
+	source,
+	ignoreModel,
+}: AgentDirectory): Promise<{ agent: AgentDefinition; filePath: string }[]> {
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
+		.map(async file => {
 			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(content => {
-					const agent = parseAgent(filePath, content, source, "warn");
-					if (ignoreModel) agent.model = undefined;
-					return agent;
-				})
-				.catch(error => {
-					logger.warn("Failed to read agent file", { filePath, error });
-					return null;
-				});
+			let agent: AgentDefinition;
+			try {
+				const content = await fs.readFile(filePath, "utf-8");
+				agent = parseAgent(filePath, content, source, "warn");
+			} catch (error) {
+				logger.warn("Failed to read agent file", { filePath, error });
+				return null;
+			}
+			if (ignoreModel) agent.model = undefined;
+			return { agent, filePath };
 		});
 
-	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+	return (await Promise.all(files)).filter(entry => entry !== null);
 }
 
 /**
@@ -155,11 +158,24 @@ export async function discoverAgents(
 	});
 
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(loadAgentsFromDir))).flat().filter(agent => {
+	const selected = (await Promise.all(orderedDirs.map(loadAgentsFromDir))).flat().filter(({ agent }) => {
 		if (seen.has(agent.name)) return false;
 		seen.add(agent.name);
 		return true;
 	});
+	const loadedAgents = await Promise.all(
+		selected.map(async ({ agent, filePath }) => {
+			if (agent.teamPromptPath !== undefined) {
+				const promptPath = path.resolve(path.dirname(filePath), agent.teamPromptPath);
+				try {
+					agent.teamSystemPrompt = await fs.readFile(promptPath, "utf-8");
+				} catch (error) {
+					throw new Error(`Failed to read team prompt ${promptPath} referenced by ${filePath}`, { cause: error });
+				}
+			}
+			return agent;
+		}),
+	);
 
 	const bundledAgents = loadBundledAgents().filter(agent => {
 		if (seen.has(agent.name)) return false;

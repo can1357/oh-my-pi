@@ -322,6 +322,10 @@ export interface AgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;
+	/** Team-specific system prompt, loaded from the definition's team-prompt path. */
+	teamSystemPrompt?: string;
+	team?: boolean;
+	teamPromptPath?: string;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];

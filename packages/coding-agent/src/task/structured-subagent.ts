@@ -38,6 +38,7 @@ import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" 
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
+import { normalizeToolNames } from "../tools/builtin-names";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -168,7 +169,7 @@ export interface StructuredSubagentRequest {
 	detached?: boolean;
 	/** Team workspace root added to the child's additionalDirectories. */
 	teamWorkspace?: string;
-	/** `/team start` grants the `write` tool for `agent://` peer messaging; see {@link withTeamIrcTools}. */
+	/** Marks a team spawn for prompt selection and coordination capability. */
 	teamIrc?: boolean;
 	invokedAt?: number;
 	acquiredAt?: number;
@@ -486,18 +487,6 @@ function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRo
 }
 
 /**
- * Team members need `write` for `agent://` peer messaging even when their
- * agent definition is read-only (scout/reviewer). The grant is team-only:
- * outside a team the definition is returned untouched and unmodified. Plan mode
- * withholds it: the child session carries no plan-mode state, so its `write`
- * would not be held to the read-only working tree.
- */
-export function withTeamIrcTools(agent: AgentDefinition, teamIrc: boolean, planMode = false): AgentDefinition {
-	if (!teamIrc || planMode || agent.tools === undefined || agent.tools.includes("write")) return agent;
-	return { ...agent, tools: [...agent.tools, "write"] };
-}
-
-/**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
@@ -584,11 +573,11 @@ export async function resolveEffectiveSubagentPolicy(
 		}
 	}
 
-	const effectiveAgent = withTeamIrcTools(
-		planMode ? createPlanModeAgent(agent) : agent,
-		request.teamIrc === true,
-		planMode,
-	);
+	const selectedAgent =
+		request.teamIrc && agent.teamSystemPrompt !== undefined
+			? { ...agent, systemPrompt: agent.teamSystemPrompt }
+			: agent;
+	const effectiveAgent = planMode ? createPlanModeAgent(selectedAgent) : selectedAgent;
 	// An agent declaring `structured: true` keeps its result contract when the caller opts out (`task.structured` off).
 	const structured = request.structured !== false || effectiveAgent.structured === true;
 	const schema = resolveSchema(request, effectiveAgent, structured);
@@ -855,6 +844,12 @@ function buildExecutorOptions(
 				.getA2aBridge?.()
 				?.list()
 				.map(agent => agent.name) ?? [],
+		team: request.teamIrc === true,
+		coordinationOnlyWrite:
+			request.teamIrc === true &&
+			!policy.planMode &&
+			policy.agent.tools !== undefined &&
+			!normalizeToolNames(policy.agent.tools).includes("write"),
 		agent: policy.effectiveAgent,
 		task: renderSubagentUserPrompt(request.assignment),
 		assignment: request.assignment.trim(),

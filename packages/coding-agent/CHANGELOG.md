@@ -36,6 +36,8 @@
 
 ### Fixed
 
+- Coordination-only teammates retain their restricted write capability after cold revival, and eligible tools remain directly callable when xdev is enabled rather than being mounted behind forbidden `xd://` writes.
+
 - Addressed A2A requests return an owned reply job after delivery, even when the recipient's previous run has finished; `wait` receives the peer- and message-correlated answer. `a2a.replyTimeoutMs` sets its deadline (30 minutes by default; `0` disables it), independently of the client transport budget.
 - Incoming A2A requests share a process-wide ledger across Main, subagents and worker links. Explicit replies and automatic Main/subagent replies claim only the addressed request; successful subagent wake turns relay their published output or final text without blocking settlement.
 - Interrupting an addressed A2A task before its delivery receipt cancels its local reply job, and delivery failures are reported once rather than repeated as asynchronous job results.

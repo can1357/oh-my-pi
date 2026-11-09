@@ -300,6 +300,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */
 	readOnly?: boolean;
+	/** Whether write was granted only for agent:// and team:// coordination. */
+	coordinationOnlyWrite?: boolean;
 	/** Output schema if structured output was requested. */
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */
