@@ -294,6 +294,27 @@ describe("html form", () => {
 			});
 		});
 
+		it("opens a long prefilled input at its start, and End reveals the tail", () => {
+			const value = "Colorful Markdown: per-role theme tokens and calmer defaults";
+			const { form } = dialog(`<form><label>Title <input name="title" value="${value}"></label>
+				<label>Other <input name="other"></label></form>`);
+			const titleRow = () =>
+				form
+					.render(42)
+					.map(row => Bun.stripANSI(row))
+					.find(row => row.includes("│   │")) ?? "";
+
+			expect(titleRow()).toContain("Colorful Markdown");
+			form.handleInput(TAB);
+			expect(titleRow()).toContain("Colorful Markdown");
+			form.handleInput("\x1b[Z"); // Shift+Tab
+			expect(titleRow()).toContain("Colorful Markdown");
+			form.handleInput("\x05"); // End
+			expect(titleRow()).toContain("calmer defaults");
+			expect(titleRow()).not.toContain("Colorful Markdown");
+			expect(form.data()).toMatchObject({ title: value });
+		});
+
 		it("Other: typed text becomes a radio's value or joins a checkbox group; picking an option sets it aside", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput(DOWN); // Postgres
