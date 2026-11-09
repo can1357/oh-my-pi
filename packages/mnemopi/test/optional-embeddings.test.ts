@@ -4,9 +4,11 @@ import {
 	embed,
 	embedQuery,
 	getEmbeddingApiCallCountForTests,
+	type LocalModelInitializer,
 	resetEmbeddingProviderForTests,
 	setEmbeddingProviderForTests,
 	setLocalModelInitializerForTests,
+	type StandardEmbeddingModel,
 } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
@@ -80,6 +82,37 @@ function streamRows(
 ): (texts: readonly string[]) => AsyncGenerator<number[][]> {
 	return async function* (texts) {
 		yield rows(texts);
+	};
+}
+
+// Fastembed model ids `fastembedModelName` resolves the test model names to. Typed as
+// `StandardEmbeddingModel` here (same inlined-string cast `fastembedModelName` uses)
+// instead of value-importing fastembed's `EmbeddingModel` enum, whose module eagerly
+// loads the onnxruntime-node native addon.
+const FAST_BGE_SMALL_EN_V15 = "fast-bge-small-en-v1.5" as StandardEmbeddingModel;
+const FAST_BGE_BASE_EN_V15 = "fast-bge-base-en-v1.5" as StandardEmbeddingModel;
+const FAST_MULTILINGUAL_E5_LARGE = "fast-multilingual-e5-large" as StandardEmbeddingModel;
+
+/**
+ * Local-model initializer that records each requested model in `inits` and returns an
+ * encoder whose rows identify it: `[1, 0]` for the small English model, `[0, 1, len]`
+ * for any other model. `shouldFail` runs after the init is recorded, so it can fail a
+ * specific attempt (e.g. the first load of one model) while later retries succeed.
+ */
+function modelTaggedInitializer(
+	inits: StandardEmbeddingModel[],
+	shouldFail?: (model: StandardEmbeddingModel) => boolean,
+): LocalModelInitializer {
+	return async options => {
+		inits.push(options.model);
+		if (shouldFail?.(options.model)) {
+			throw new Error(`${options.model} init failure`);
+		}
+		return {
+			embed: streamRows(texts =>
+				texts.map(text => (options.model === FAST_BGE_SMALL_EN_V15 ? [1, 0] : [0, 1, text.length])),
+			),
+		};
 	};
 }
 
@@ -247,17 +280,8 @@ describe("optional embeddings", () => {
 				OPENAI_API_KEY: undefined,
 			},
 			async () => {
-				const inits: string[] = [];
-				setLocalModelInitializerForTests(async options => {
-					inits.push(options.model as string);
-					return {
-						embed: streamRows(texts =>
-							texts.map(text =>
-								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
-							),
-						),
-					};
-				});
+				const inits: StandardEmbeddingModel[] = [];
+				setLocalModelInitializerForTests(modelTaggedInitializer(inits));
 
 				// Same query text, two runtime scopes with different local models: each
 				// scope must embed through its own encoder, not the first-loaded one.
@@ -267,7 +291,7 @@ describe("optional embeddings", () => {
 					() => embed(["shared text"]),
 				);
 				expect(scoped).toEqual([new Float32Array([0, 1, 11])]);
-				expect([...inits].sort()).toEqual(["fast-bge-small-en-v1.5", "fast-multilingual-e5-large"]);
+				expect([...inits].sort()).toEqual([FAST_BGE_SMALL_EN_V15, FAST_MULTILINGUAL_E5_LARGE]);
 
 				// Switching back reuses the first encoder instead of re-initializing it.
 				expect(await embed(["again"])).toEqual([new Float32Array([1, 0])]);
@@ -289,20 +313,10 @@ describe("optional embeddings", () => {
 				OPENAI_API_KEY: undefined,
 			},
 			async () => {
-				const inits: string[] = [];
-				setLocalModelInitializerForTests(async options => {
-					inits.push(options.model as string);
-					if ((options.model as string) === "fast-multilingual-e5-large" && inits.length === 2) {
-						throw new Error("multilingual init failure");
-					}
-					return {
-						embed: streamRows(texts =>
-							texts.map(text =>
-								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
-							),
-						),
-					};
-				});
+				const inits: StandardEmbeddingModel[] = [];
+				setLocalModelInitializerForTests(
+					modelTaggedInitializer(inits, model => model === FAST_MULTILINGUAL_E5_LARGE && inits.length === 2),
+				);
 				const multilingualScope = { embeddings: { model: "intfloat/multilingual-e5-large" } } as const;
 
 				expect(await embed(["alpha"])).toEqual([new Float32Array([1, 0])]);
@@ -314,9 +328,9 @@ describe("optional embeddings", () => {
 				]);
 				expect(await embed(["gamma"])).toEqual([new Float32Array([1, 0])]);
 				expect([...inits].sort()).toEqual([
-					"fast-bge-small-en-v1.5",
-					"fast-multilingual-e5-large",
-					"fast-multilingual-e5-large",
+					FAST_BGE_SMALL_EN_V15,
+					FAST_MULTILINGUAL_E5_LARGE,
+					FAST_MULTILINGUAL_E5_LARGE,
 				]);
 			},
 		);
@@ -335,17 +349,8 @@ describe("optional embeddings", () => {
 				OPENAI_API_KEY: undefined,
 			},
 			async () => {
-				const inits: string[] = [];
-				setLocalModelInitializerForTests(async options => {
-					inits.push(options.model as string);
-					return {
-						embed: streamRows(texts =>
-							texts.map(text =>
-								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
-							),
-						),
-					};
-				});
+				const inits: StandardEmbeddingModel[] = [];
+				setLocalModelInitializerForTests(modelTaggedInitializer(inits));
 				const multilingualScope = { embeddings: { model: "intfloat/multilingual-e5-large" } } as const;
 
 				const [defaultVector, scopedVector] = await Promise.all([
@@ -354,7 +359,7 @@ describe("optional embeddings", () => {
 				]);
 				expect(defaultVector).toEqual([new Float32Array([1, 0])]);
 				expect(scopedVector).toEqual([new Float32Array([0, 1, 3])]);
-				expect([...inits].sort()).toEqual(["fast-bge-small-en-v1.5", "fast-multilingual-e5-large"]);
+				expect([...inits].sort()).toEqual([FAST_BGE_SMALL_EN_V15, FAST_MULTILINGUAL_E5_LARGE]);
 
 				// Concurrent calls for the SAME model share one initialization.
 				const baseScope = { embeddings: { model: "BAAI/bge-base-en-v1.5" } } as const;
@@ -364,7 +369,7 @@ describe("optional embeddings", () => {
 				]);
 				expect(first).toEqual([new Float32Array([0, 1, 5])]);
 				expect(second).toEqual([new Float32Array([0, 1, 4])]);
-				expect(inits.filter(name => name === "fast-bge-base-en-v1.5")).toHaveLength(1);
+				expect(inits.filter(name => name === FAST_BGE_BASE_EN_V15)).toHaveLength(1);
 			},
 		);
 	});
