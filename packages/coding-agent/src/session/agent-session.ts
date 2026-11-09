@@ -5780,13 +5780,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 		} catch (error) {
-			// Only a former ungated teammate may outlive its team authority.
-			// Transport failures and live member/ref mismatches still fail closed.
+			// Only a former ungated teammate may outlive its team authority. The
+			// runtime codes its own refusals (`TeamRuntimeError.code`, preserved
+			// across worker RPC); transport failures, live member/ref mismatches,
+			// and any same-text error from another source still fail closed.
 			if (
 				identity.planApproval === false &&
-				error instanceof Error &&
-				(error.message === "Unknown or stale team generation" ||
-					error.message === "Team lead is no longer registered")
+				isRecord(error) &&
+				(error.code === "TEAM_STALE_GENERATION" || error.code === "TEAM_LEAD_GONE")
 			)
 				return undefined;
 		}

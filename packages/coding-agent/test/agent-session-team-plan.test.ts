@@ -588,4 +588,13 @@ describe("AgentSession authoritative team plan gate", () => {
 			reason: required,
 		});
 	});
+	it("blocks a plain same-text error from a stub: only coded runtime errors open the cold-revival fallback", async () => {
+		// Same message text as the runtime's TEAM_LEAD_GONE error, but thrown by
+		// a plain Error with no `code`: the fallback must match the coded class,
+		// never the text, so a spoofed stub cannot unlock the gate.
+		const { session, client, toolSession } = await fixture();
+		toolSession.teamIdentity = { ...toolSession.teamIdentity!, planApproval: false };
+		vi.spyOn(client, "planPending").mockRejectedValue(new Error("Team lead is no longer registered"));
+		expect(await before(session, "read")).toMatchObject({ block: true, reason: required });
+	});
 });

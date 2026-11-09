@@ -22,6 +22,10 @@ import { identityThreadService } from "../../src/thread/services/identity";
 import { teamThreadService } from "../../src/thread/services/team";
 import { getTeamClient } from "../../src/thread/services/team-client";
 import { BUILTIN_TEAMS_SLASH_COMMANDS } from "../../src/slash-commands/builtin-teams";
+import type { ToolSession } from "../../src/tools";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { type } from "@oh-my-pi/omptype";
 
 export interface TeamProbe {
 	open(id: string): Promise<string>;
@@ -36,6 +40,21 @@ export interface TeamProbe {
 	beforeInstall(): Promise<string>;
 	/** Settle a worker-hosted member's finished turn through the worker→main registry RPC. */
 	runTurn(id: string): Promise<boolean>;
+	/**
+	 * Open a gated member session in this worker: `identity` is installed on
+	 * its tool session, and `gate(name)` drives the real AgentSession gate
+	 * (worker-local `beforeToolCall` → `getTeamClient().planPending` over the
+	 * worker→main RPC link). Returns `{ blocked, error }`: `error` is the
+	 * serialized rejection `planPending` threw across RPC, if any.
+	 */
+	openGated(id: string, identity: TeamIdentity): Promise<string>;
+	gate(
+		key: string,
+		name: string,
+	): Promise<{
+		blocked: boolean;
+		error?: { message: string; code?: unknown };
+	}>;
 }
 export interface TeamProbeGlobals {
 	ready(probe: TeamProbe): void;
@@ -45,6 +64,8 @@ const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 const sessions = new Map<string, AgentSession>();
 let beforeInstall = "";
+const gated = new Map<string, { session: AgentSession; toolSession: { teamIdentity?: TeamIdentity } }>();
+let lastGateError: Error | undefined;
 const probe: TeamProbe = {
 	async beforeInstall() {
 		return beforeInstall;
@@ -70,6 +91,103 @@ const probe: TeamProbe = {
 		sessions.set(id, session);
 		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session });
 		return session.instanceKey;
+	},
+	async openGated(id, identity) {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("bundled model missing");
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const auth = await AuthStorage.create(":memory:");
+		const toolSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			teamIdentity: identity,
+		} as unknown as ToolSession;
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(auth),
+			agentId: id,
+			evalToolSession: toolSession,
+			toolRegistry: new Map(),
+		});
+		gated.set(session.instanceKey, { session, toolSession });
+		sessions.set(id, session);
+		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session });
+		return session.instanceKey;
+	},
+	async gate(key, name) {
+		const entry = gated.get(key);
+		if (!entry) throw new Error("gated session missing");
+		const { session } = entry;
+		// Record the rejection that crosses the worker→main RPC while the real
+		// gate runs: the pass-through wrapper sees exactly what #teamPlanGate sees.
+		const client = getTeamClient();
+		const inner = client.planPending.bind(client);
+		lastGateError = undefined;
+		client.planPending = async (sessionKey, identity) => {
+			try {
+				return await inner(sessionKey, identity);
+			} catch (error) {
+				lastGateError = error instanceof Error ? error : new Error(String(error));
+				throw error;
+			}
+		};
+		try {
+			const model = session.agent.state.model!;
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			const tool: AgentTool = {
+				name,
+				label: name,
+				description: name,
+				parameters: type({}),
+				async execute() {
+					return { content: [{ type: "text", text: name }] };
+				},
+			};
+			const args: Record<string, unknown> = {};
+			const result = await session.agent.beforeToolCall!({
+				tool,
+				args,
+				assistantMessage,
+				context: session.agent.state,
+				toolCall: { type: "toolCall", id: crypto.randomUUID(), name, arguments: args },
+			});
+			const captured = lastGateError as Error | undefined;
+			return {
+				blocked: result?.block === true,
+				error: captured && {
+					message: captured.message,
+					code: Reflect.get(captured, "code"),
+				},
+			};
+		} finally {
+			client.planPending = inner;
+		}
 	},
 	start: (key, team) => getTeamClient().start(key, team),
 	claim: (key, identity, id) => getTeamClient().claim(key, identity, id),

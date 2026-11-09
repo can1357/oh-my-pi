@@ -1414,6 +1414,50 @@ describe("team plan approval", () => {
 			await worker.terminate("test end");
 		}
 	});
+	it("carries the coded lead-gone error across worker RPC and opens the cold-revival fallback", async () => {
+		// A worker-hosted member with planApproval: false outlives its team: the
+		// lead is unregistered, so planPending's worker→main RPC rejects. The
+		// rejection must arrive as a coded TeamRuntimeError (code survives
+		// #encodeError's own-field props), and #teamPlanGate's cold-revival
+		// fallback — keyed on the code, never the message text — allows the call.
+		const registry = AgentRegistry.global();
+		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		const leadRef = registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const started = await teamRuntime.start(lead, { ...team, planApproval: false, members: [] });
+		started.members.set("worker-member", { id: "worker-member", reservation: "worker-test" });
+		const ready = Promise.withResolvers<TeamProbe>();
+		const probeService: ThreadService = {
+			name: "team-probe",
+			globals: (): TeamProbeGlobals => ({ ready: ready.resolve }),
+		};
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/team-runtime-worker.ts", import.meta.url),
+			services: [identityThreadService, agentsThreadService, teamThreadService, probeService],
+			initTimeoutMs: 60_000,
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			const identity = { team: "audit", generation: started.generation, memberId: "worker-member" };
+			const key = await probe.openGated("worker-member", { ...identity, planApproval: false });
+			// The member registers; then its lead disappears (the generation's
+			// authority is gone), the cold-revival shape.
+			const ref = registry.get("worker-member");
+			if (!ref) throw new Error("worker member did not register");
+			started.members.set("worker-member", { id: "worker-member", reservation: "worker-test", ref });
+			expect(registry.unregister("lead", leadRef)).toBe(true);
+			const gate = await probe.gate(key, "bash");
+			// The RPC rejection carries the coded class, not just its message.
+			expect(gate.error?.message).toBe("Team lead is no longer registered");
+			expect(gate.error?.code).toBe("TEAM_LEAD_GONE");
+			// Coded + planApproval false: the fallback opens; the call is allowed.
+			expect(gate.blocked).toBe(false);
+			// Sanity: the member is still an ungated teammate in the runtime's
+			// eyes; only the lead's authority is gone.
+		} finally {
+			await worker.terminate("test end");
+		}
+	});
 });
 
 describe("team runtime authorization", () => {

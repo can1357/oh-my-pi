@@ -22,6 +22,25 @@ export interface TeamStopResponse {
 	requestId: string;
 	outcome: "acknowledged" | "declined";
 }
+/** Machine-readable reason a team runtime call refused a member's authority. */
+export type TeamRuntimeErrorCode = "TEAM_STALE_GENERATION" | "TEAM_LEAD_GONE";
+
+/**
+ * Team runtime refusal with a machine-readable `code`. Callers gate on the
+ * code, never the message text: the same text from any other error source
+ * must not grant authority (see AgentSession's `#teamPlanGate` fallback).
+ * Survives worker RPC: `thread/rpc.ts` transfers own fields, so `code` arrives
+ * on the worker side of a `planPending` rejection.
+ */
+export class TeamRuntimeError extends Error {
+	readonly code: TeamRuntimeErrorCode;
+	constructor(code: TeamRuntimeErrorCode, message: string) {
+		super(message);
+		this.name = "TeamRuntimeError";
+		this.code = code;
+	}
+}
+
 /** Bun/Node `setTimeout` overflows past 2^31-1 ms (firing in 1 ms), so clamp stop deadlines into the timer range. */
 const STOP_ACK_TIMEOUT_MAX_MS = 2_147_483_647;
 const STOP_ACK_TIMEOUT_MIN_MS = 1000;
@@ -186,7 +205,7 @@ export class TeamRuntime {
 		const existing = this.#sessions.get(lead)?.get(team.name);
 		if (existing) {
 			if (!this.isCurrentLead(lead, team.name, existing.generation))
-				throw new Error("Team lead is no longer registered");
+				throw new TeamRuntimeError("TEAM_LEAD_GONE", "Team lead is no longer registered");
 			return existing;
 		}
 		let starts = this.#starts.get(lead);
@@ -323,7 +342,8 @@ export class TeamRuntime {
 	/** Main-issued spawn identity; derive requirements from the live generation, never re-read config. */
 	memberIdentity(lead: object, name: string, generation: number, handle: string): TeamIdentity {
 		const state = this.#sessions.get(lead)?.get(name);
-		if (!state || !this.isCurrentLead(lead, name, generation)) throw new Error("Team lead is no longer registered");
+		if (!state || !this.isCurrentLead(lead, name, generation))
+			throw new TeamRuntimeError("TEAM_LEAD_GONE", "Team lead is no longer registered");
 		const member = state.members.get(handle);
 		if (!member || member.failure !== undefined) throw new Error("Team member reservation is no longer active");
 		return {
@@ -641,7 +661,8 @@ export class TeamRuntime {
 
 	#authorize(session: object, identity: TeamIdentity): { state: RuntimeTeam; lead: boolean } {
 		const state = this.#generations.get(identity.generation);
-		if (!state || state.name !== identity.team) throw new Error("Unknown or stale team generation");
+		if (!state || state.name !== identity.team)
+			throw new TeamRuntimeError("TEAM_STALE_GENERATION", "Unknown or stale team generation");
 		const registry = AgentRegistry.global();
 		const leadRef = registry.get(state.leadId);
 		if (
@@ -650,7 +671,7 @@ export class TeamRuntime {
 			leadRef.generation !== state.leadRef.generation ||
 			leadRef.session !== state.lead
 		) {
-			throw new Error("Team lead is no longer registered");
+			throw new TeamRuntimeError("TEAM_LEAD_GONE", "Team lead is no longer registered");
 		}
 		if (identity.memberId === state.leadId && session === state.lead) return { state, lead: true };
 		const entry = [...state.members.values()].find(member => member.id === identity.memberId);
@@ -736,7 +757,8 @@ export class TeamRuntime {
 		const target = matches[0];
 		if (!target) throw new Error(`No live team member named "${handle}" owned by this lead`);
 		const { state, name, member } = target;
-		if (!this.isCurrentLead(lead, state.name, state.generation)) throw new Error("Team lead is no longer registered");
+		if (!this.isCurrentLead(lead, state.name, state.generation))
+			throw new TeamRuntimeError("TEAM_LEAD_GONE", "Team lead is no longer registered");
 		if (member.failure !== undefined) throw new Error("Team member failed to register");
 		const ref = AgentRegistry.global().get(member.id);
 		if (!member.ref || !ref || member.ref.id !== ref.id || member.ref.generation !== ref.generation)
