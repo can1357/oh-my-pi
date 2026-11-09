@@ -1,13 +1,15 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { getDocsDiskRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
+import { getDocsDiskRoot, getEmbeddedDoc } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
 
 describe("OmpProtocolHandler", () => {
 	// `locate` materializes docs into the docs cache, so point it at a throwaway
-	// root — never the real ~/.omp/cache/docs.
+	// root — never the real ~/.omp/cache/docs. The override is set and restored
+	// per test: a file-wide `beforeAll` override leaves a process-global path
+	// active for sibling suites that run interleaved in the same worker.
 	let root: string;
 	let cacheDir: string;
 	let originalCacheDir: string | undefined;
@@ -16,7 +18,18 @@ describe("OmpProtocolHandler", () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-docs-"));
 		cacheDir = path.join(root, "cache");
 		originalCacheDir = process.env.OMP_DOCS_CACHE_DIR;
+	});
+
+	beforeEach(async () => {
 		process.env.OMP_DOCS_CACHE_DIR = cacheDir;
+		// Each test starts from an empty cache: the containment tests leave a
+		// symlinked digest dir behind, and a cache hit must not leak across tests.
+		await fs.rm(cacheDir, { recursive: true, force: true });
+	});
+
+	afterEach(() => {
+		if (originalCacheDir === undefined) delete process.env.OMP_DOCS_CACHE_DIR;
+		else process.env.OMP_DOCS_CACHE_DIR = originalCacheDir;
 	});
 
 	afterAll(() => {
@@ -70,6 +83,40 @@ describe("OmpProtocolHandler", () => {
 		await fs.symlink(outside, path.dirname(located!));
 
 		expect(await InternalUrlRouter.instance().locate("omp://tui.md")).toBeNull();
+	});
+
+	it("refuses to write a missing doc through a symlinked cache parent", async () => {
+		// The digest dir stands in for the cache entry as a symlink outside the
+		// root, and the outside leaf is absent: containment must resolve the
+		// existing parent chain and refuse, not follow the link with mkdir.
+		const router = InternalUrlRouter.instance();
+		const located = await router.locate("omp://tui.md");
+		expect(located).toBeString();
+
+		const outside = path.join(root, "outside-missing");
+		await fs.mkdir(outside, { recursive: true });
+		await fs.rm(path.dirname(located!), { recursive: true, force: true });
+		await fs.symlink(outside, path.dirname(located!));
+
+		expect(await router.locate("omp://tui.md")).toBeNull();
+		await expect(fs.stat(path.join(outside, "tui.md"))).rejects.toThrow();
+	});
+
+	it("regenerates a cache entry whose bytes no longer match the embedded doc", async () => {
+		const router = InternalUrlRouter.instance();
+		const located = await router.locate("omp://tui.md");
+		expect(located).toBeString();
+		const embedded = (await getEmbeddedDoc("tui.md"))!;
+		expect(await Bun.file(located!).text()).toBe(embedded);
+
+		// Replace the body in place: the path still names the old digest, but the
+		// bytes are no longer the embedded doc.
+		await fs.chmod(located!, 0o644);
+		await Bun.write(located!, "# Forged documentation");
+
+		const again = await router.locate("omp://tui.md");
+		expect(again).toBeString();
+		expect(await Bun.file(again!).text()).toBe(embedded);
 	});
 
 	it("keeps the link when the docs cache root is a symlink", async () => {

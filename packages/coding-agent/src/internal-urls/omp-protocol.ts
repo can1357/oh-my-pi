@@ -7,11 +7,15 @@
  * - omp:// - Lists all available documentation files
  * - omp://<file>.md - Reads a specific documentation file
  */
-import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getDocsCacheDir, logger } from "@oh-my-pi/pi-utils";
-import { realpathIfExists, resolveContainedPath, resolveContainedPathSync } from "../discovery/contained-path";
+import {
+	realpathIfExists,
+	resolveContainedPath,
+	resolveContainedPathForWrite,
+	resolveContainedPathSync,
+} from "../discovery/contained-path";
 import ompDoc from "../prompts/internal-urls/omp.md" with { type: "text" };
 import { getDocFilenames, getDocsDiskRoot, getEmbeddedDoc } from "./docs-index";
 import { ompDocFilename, ompDocRel, ompDocsScopeEntries } from "./omp-scope";
@@ -177,24 +181,28 @@ async function materializeOmpDoc(docPath: string, content: string): Promise<stri
 	// resolved one, which would drop every cache hit and make the link vanish
 	// on the second render.
 	const realRoot = (await realpathIfExists(root)) ?? root;
-	const digest = createHash("sha256").update(content).digest("hex").slice(0, 16);
+	const digest = new Bun.CryptoHasher("sha256").update(content).digest("hex").slice(0, 16);
 	const target = path.resolve(realRoot, digest, docPath);
-	// The doc path is joined into the cache root, so containment is proven
-	// before the write: a URL escaping the root (an absolute or `..` path)
-	// degrades to a plain-text link instead of writing outside the cache.
-	// `missing` is the ordinary cache miss, which the write below fills.
-	if ((await resolveContainedPath(realRoot, target)).status === "outside") return null;
-	try {
-		await fs.access(target);
-		return target;
-	} catch {
-		// Cache miss (or an unreadable entry): write it below.
+	// Write-path containment: a missing leaf is only safe when every existing
+	// ancestor resolves inside the cache root, so a symlinked digest dir (or
+	// any symlinked prefix) is refused instead of being followed by mkdir and
+	// the write. `missing` is the ordinary cache miss, which the write fills.
+	const resolution = await resolveContainedPathForWrite(realRoot, target);
+	if (resolution.status === "outside") return null;
+	if (resolution.status === "ok") {
+		// The path is content-addressed: a hit is only valid while the bytes
+		// still hash to the digest that names the directory. A replaced file
+		// (same path, different body) fails the check and is regenerated below.
+		if ((await hashFileDigest(target)) === digest) return target;
 	}
 	// The random suffix keeps concurrent writers of the same doc from colliding
 	// on one temp path before the atomic rename.
 	const tempPath = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	try {
 		await fs.mkdir(path.dirname(target), { recursive: true });
+		// Recheck the now-existing parent: a component could have been swapped
+		// for a symlink between the pre-check and the mkdir.
+		if ((await resolveContainedPath(realRoot, path.dirname(target))).status !== "ok") return null;
 		await Bun.write(tempPath, content, { mode: 0o444 });
 		await fs.rename(tempPath, target);
 	} catch (error) {
@@ -203,4 +211,16 @@ async function materializeOmpDoc(docPath: string, content: string): Promise<stri
 		return null;
 	}
 	return target;
+}
+
+/** SHA-256 prefix of a file's bytes, or `null` when it cannot be read. */
+async function hashFileDigest(file: string): Promise<string | null> {
+	try {
+		return new Bun.CryptoHasher("sha256")
+			.update(await fs.readFile(file))
+			.digest("hex")
+			.slice(0, 16);
+	} catch {
+		return null;
+	}
 }
