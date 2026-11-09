@@ -2456,11 +2456,8 @@ fn pointer_owner(
 	prepare: impl FnOnce() -> CoreResult<bool>,
 	owner: impl FnOnce() -> CoreResult<(libc::pid_t, u32)>,
 ) -> CoreResult<(bool, (libc::pid_t, u32))> {
-	let prepared = if matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) {
-		prepare()?
-	} else {
-		false
-	};
+	let prepared =
+		matches!(event, PointerEvent::Click { button: MouseButton::Left, .. }) && prepare()?;
 	Ok((prepared, owner()?))
 }
 

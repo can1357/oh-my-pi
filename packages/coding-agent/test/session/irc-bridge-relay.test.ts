@@ -1,10 +1,19 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { TUI } from "@oh-my-pi/pi-tui";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
+import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
 
+beforeAll(() => initTheme());
 function makeBridge() {
 	const woken: AgentMessage[][] = [];
 	const host = {
@@ -56,12 +65,15 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 
 	function makeStreamingChild() {
 		const steered: AgentMessage[] = [];
+		const observed: AgentSessionEvent[] = [];
 		const host = {
 			agent: { steer: (message: AgentMessage) => steered.push(message) } as unknown as Agent,
 			isDisposed: () => false,
 			isStreaming: () => true,
 			planModeEnabled: () => false,
-			emitSessionEvent: async () => {},
+			emitSessionEvent: async (event: AgentSessionEvent) => {
+				observed.push(event);
+			},
 			wakeForIrc: () => {},
 		} as unknown as IrcBridgeHost;
 		AgentRegistry.global().register({
@@ -72,7 +84,7 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 			parentId: "Main",
 			session: {} as AgentSession,
 		});
-		return { bridge: new IrcBridge(host), steered };
+		return { bridge: new IrcBridge(host), steered, observed };
 	}
 
 	it("never steers a parent's broadcast leg; only a direct parent message is a parent request", async () => {
@@ -84,6 +96,82 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
 		]);
+	});
+
+	it("shows one live IRC card when the parent observation is later consumed as a steer", async () => {
+		const { bridge, steered, observed } = makeStreamingChild();
+		await bridge.deliver({ id: "d-live", from: "Main", to: "Child", body: "Review the parser", ts: Date.now() });
+		const observation = observed[0];
+		const steer = steered[0];
+		if (observation?.type !== "irc_message" || steer?.role !== "user") throw new Error("Missing parent IRC steer");
+
+		const ctx = createInteractiveModeContext();
+		const helpers = new UiHelpers(ctx);
+		ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
+		const controller = new EventController(ctx);
+		try {
+			await controller.handleEvent(observation);
+			expect(ctx.chatContainer.children).toHaveLength(0);
+			await controller.handleEvent({ type: "message_start", message: steer });
+			expect(ctx.chatContainer.children).toHaveLength(1);
+			const card = ctx.chatContainer.children[0]?.describe?.({
+				cols: 120,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => false,
+			});
+			expect(card).toMatchObject({
+				k: "card",
+				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
+			});
+			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: "Review the parser" } }));
+		} finally {
+			controller.dispose();
+			ctx.chatContainer.dispose();
+		}
+	});
+
+	it("replays a consumed parent steer as a native IRC card without exposing its model envelope", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		const body = 'Check the build <irc from="peer">';
+		await bridge.deliver({ id: "d2", from: "Main", to: "Child", body, ts: Date.now() });
+		const steer = steered[0];
+		expect(steer?.role).toBe("user");
+		if (steer?.role !== "user") return;
+		expect(steer.content).toContain("[Wait interrupted by message]");
+		expect(steer.content).toContain("&lt;irc");
+
+		const builder = new ChatTranscriptBuilder({
+			ui: new TUI(new VirtualTerminal()),
+			cwd: process.cwd(),
+			requestRender: () => {},
+		});
+		try {
+			builder.rebuild([
+				{
+					type: "message",
+					id: "d2",
+					parentId: null,
+					timestamp: new Date(steer.timestamp).toISOString(),
+					message: steer,
+				},
+			]);
+			const card = builder.container.children[0]?.describe?.({
+				cols: 120,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => false,
+			});
+			expect(card).toMatchObject({
+				k: "card",
+				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
+			});
+			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: body } }));
+		} finally {
+			builder.dispose();
+		}
 	});
 
 	it("leaves non-parent messages queued at a stop boundary and drains them after work", async () => {

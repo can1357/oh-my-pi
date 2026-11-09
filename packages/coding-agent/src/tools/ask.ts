@@ -1,583 +1,365 @@
-import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask";
 /**
- * Ask Tool - Interactive user prompting during execution
+ * Ask Tool - the model asks the user to fill in one HTML `<form>`.
  *
- * Use this tool when you need to ask the user questions during execution.
- * This allows you to:
- *   1. Gather user preferences or requirements
- *   2. Clarify ambiguous instructions
- *   3. Get decisions on implementation choices as you work
- *   4. Offer choices to the user about what direction to take
- *
- * Usage notes:
- *   - Users will always be able to select "Other" to provide custom text input
- *   - Use multi: true to allow multiple answers to be selected for a question
- *   - Use recommended: <index> to mark the default option; "(Recommended)" suffix is added automatically
- *   - Questions may time out and auto-select the recommended option (configurable, disabled in plan mode)
+ * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP) render
+ * the form whole; every other host walks its named fields one prompt at a time
+ * through `select`/`input`/`editor`. The model receives the submitted form data
+ * as JSON. Outside plan mode a configurable timeout submits the form's
+ * preselected values.
  */
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
-import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-
-import type { ExtensionUISelectItem } from "../extensibility/extensions";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { ToolExample } from "@oh-my-pi/pi-ai";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import {
+	choiceValue,
+	defaultFormData,
+	fieldQuestions,
+	fieldError,
+	formAnswers,
+	type HtmlFormData,
+	OTHER_LABEL,
+	textValue,
+} from "@oh-my-pi/pi-tui/html-form/data";
+import {
+	type ChoiceField,
+	type HtmlForm,
+	parseHtmlForm,
+	spansText,
+	type TextField,
+} from "@oh-my-pi/pi-tui/html-form/parse";
+import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
+import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
-import { vocalizer } from "../tts/vocalizer";
-
-import type { ToolSession } from ".";
-import {
-	disambiguateDisplayLabels,
-	sanitizeCarriageReturns,
-	TRUNCATE_LENGTHS,
-} from "@oh-my-pi/pi-tui/render/render-utils";
-import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { ToolAbortError } from "./tool-errors";
-
-import { sessionLocalProtocolOptions } from "../internal-urls/context";
-import { cfgAskNotify, askTimeoutMs } from "../modes/settings";
-import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
-import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
-
-// =============================================================================
-// Types
-// =============================================================================
+import { vocalizer } from "../tts/vocalizer";
+import type { ToolSession } from ".";
+import { ToolAbortError } from "./tool-errors";
 
 /** Returned to a headless fork's model instead of aborting its run. */
 const HEADLESS_FORK_ASK_ERROR = prompt.render(askHeadlessForkMessage);
 
-export const OTHER_OPTION = "Other (type your own)";
-const CHAT_ABOUT_THIS_OPTION = "Chat about this";
-const NEXT_OPTION = "Next →";
-const RESERVED_OPTION_LABELS: Record<string, true> = {
-	[OTHER_OPTION]: true,
-	[CHAT_ABOUT_THIS_OPTION]: true,
-	[NEXT_OPTION]: true,
-};
+const NO_NAMED_CONTROLS_ERROR =
+	"Error: the form has no named controls. Put at least one <input>, <select> or <textarea> with a `name` attribute inside the <form>.";
 
-const OptionItem = arkType({
-	label: arkType("string"),
-	"description?": arkType("string"),
-	"preview?": arkType("string").describe("rich preview"),
-});
-
-const QuestionItem = arkType({
-	id: arkType("string"),
-	question: arkType("string"),
-	"header?": arkType("string").describe("display chip"),
-	options: OptionItem.array(),
-	"multi?": arkType("boolean"),
-	"recommended?": arkType("number").describe("0-based default index"),
-}).narrow((question, ctx) => {
-	const reserved = question.options.find(option => RESERVED_OPTION_LABELS[option.label] === true);
-	return (
-		reserved === undefined ||
-		ctx.mustBe(`defined with option labels that do not collide with reserved runtime labels: ${reserved.label}`)
-	);
-});
-
-const askSchema = arkType({
-	questions: QuestionItem.array().atLeastLength(1),
-});
-
-const askRecoveryTool = { name: "ask", description: "", parameters: askSchema };
-
-export type AskToolInput = typeof askSchema.infer;
-
-/**
- * Recover valid questions from a persisted `ask` tool call for `/tree` re-answer.
- * Apply live tool-call normalization first so optional null placeholders in saved
- * arguments do not prevent reopening; malformed questions still fail closed.
- */
-export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["questions"] | undefined {
-	if (!isRecord(toolCallArguments)) return undefined;
-	let normalized: Record<string, unknown>;
-	try {
-		normalized = validateToolArguments(askRecoveryTool, {
-			type: "toolCall",
-			id: "",
-			name: "ask",
-			arguments: toolCallArguments,
-		});
-	} catch {
-		return undefined;
-	}
-	const parsed = askSchema(normalized);
-	if (parsed instanceof arkType.errors) return undefined;
-	return parsed.questions;
-}
-
-interface AskOption {
-	label: string;
-	description?: string;
-}
-
-function getAskOptionLabel(option: AskOption): string {
-	return option.label;
-}
-
-function getSelectOptionLabel(option: ExtensionUISelectItem): string {
-	return typeof option === "string" ? option : option.label;
-}
-
-function toSelectOption(option: AskOption, label = option.label): ExtensionUISelectItem {
-	return option.description ? { label, description: option.description } : label;
-}
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const RECOMMENDED_SUFFIX = " (Recommended)";
-// Window after the timeout deadline within which an `undefined` selection is
+// Window after the timeout deadline within which an `undefined` answer is
 // attributed to a UI-enforced timeout (for surfaces that close the dialog at
 // the deadline but never invoke `onTimeout`). Cancels beyond it are user Esc.
 const TIMEOUT_DETECTION_TOLERANCE_MS = 1_000;
 
-function getDoneOptionLabel(): string {
-	return `${theme.status.success} Done selecting`;
-}
+const askSchema = arkType({
+	html: arkType("string").describe("one HTML <form>"),
+});
 
-/** Add "(Recommended)" suffix to the option at the given index if not already present */
-function addRecommendedSuffix(options: AskOption[], recommendedIndex?: number): ExtensionUISelectItem[] {
-	if (recommendedIndex === undefined || recommendedIndex < 0 || recommendedIndex >= options.length) {
-		return options.map(option => toSelectOption(option));
-	}
-	return options.map((option, i) => {
-		const label =
-			i === recommendedIndex && !option.label.endsWith(RECOMMENDED_SUFFIX)
-				? option.label + RECOMMENDED_SUFFIX
-				: option.label;
-		return toSelectOption(option, label);
-	});
-}
+export type AskParams = typeof askSchema.infer;
 
-function getAutoSelectionOnTimeout(options: AskOption[], recommended?: number): string[] {
-	if (options.length === 0) return [];
-	if (typeof recommended === "number" && recommended >= 0 && recommended < options.length) {
-		return [options[recommended]!.label];
-	}
-	return [options[0]!.label];
-}
-
-/** Strip "(Recommended)" suffix from a label */
-function stripRecommendedSuffix(label: string): string {
-	return label.endsWith(RECOMMENDED_SUFFIX) ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label;
+/** The `html` of a persisted or streamed `ask` call, for `/tree` re-answer and status lines. */
+export function recoverAskHtml(toolCallArguments: unknown): string | undefined {
+	if (!isRecord(toolCallArguments)) return undefined;
+	const html = toolCallArguments.html;
+	return typeof html === "string" ? html : undefined;
 }
 
 // =============================================================================
-// Question Selection Logic
+// Field-by-field fallback
 // =============================================================================
 
-interface SelectionResult {
-	selectedOptions: string[];
-	customInput?: string;
-	note?: string;
+/** The dialog primitives the fallback walks a form with. */
+type FallbackUI = Pick<ExtensionUIContext, "select" | "input" | "editor" | "timeoutStartsOnPresentation">;
+
+/** One prompt's outcome: the answer, or undefined with `timedOut` telling a deadline from a cancel. */
+interface PromptOutcome<T> {
+	value: T | undefined;
 	timedOut: boolean;
-	navigation?: "back" | "forward";
-	cancelled?: boolean;
 }
 
-interface NavigationControls {
-	allowBack: boolean;
-	allowForward: boolean;
-	progressText?: string;
-}
-interface AskSingleQuestionOptions {
-	recommended?: number;
-	timeout?: number;
-	signal?: AbortSignal;
-	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput" | "note">;
-	navigation?: NavigationControls;
+/** A choice field's answer: its checked option indices and, when the user chose "Other", that text. */
+interface ChoiceAnswer {
+	checked: Set<number>;
+	other?: string;
 }
 
-interface UIContext {
-	timeoutStartsOnPresentation?: boolean;
-	select(
-		prompt: string,
-		options: ExtensionUISelectItem[],
-		options_?: {
-			initialIndex?: number;
-			timeout?: number;
-			signal?: AbortSignal;
-			outline?: boolean;
-			onTimeout?: () => void;
-			onTimeoutStart?: () => void;
-			onTimeoutReset?: () => void;
-			onLeft?: () => void;
-			onRight?: () => void;
-			helpText?: string;
-			selectionMarker?: "radio" | "checkbox";
-			checkedIndices?: readonly number[];
-			markableCount?: number;
-		},
-	): Promise<string | undefined>;
-	editor(
-		title: string,
-		prefill?: string,
-		dialogOptions?: { signal?: AbortSignal },
-		editorOptions?: { promptStyle?: boolean },
-	): Promise<string | undefined>;
-}
+/** Row a radio or checkbox group's free-text "Other" answer takes in the fallback select. */
+const OTHER_ROW = `${OTHER_LABEL} (type your own)`;
 
-async function askSingleQuestion(
-	ui: UIContext,
-	question: string,
-	questionOptions: AskOption[],
-	multi: boolean,
-	options: AskSingleQuestionOptions = {},
-): Promise<SelectionResult> {
-	const { recommended, timeout, signal, initialSelection, navigation } = options;
-	const doneLabel = getDoneOptionLabel();
-	let selectedOptions = [...(initialSelection?.selectedOptions ?? [])];
-	let customInput = initialSelection?.customInput;
-	const note = initialSelection?.note;
+/**
+ * Show one deadline-bound prompt. Surfaces that run the countdown report it via
+ * `onTimeout`/`onTimeoutStart`/`onTimeoutReset`; for the rest a local timer
+ * aborts the prompt at the deadline.
+ */
+async function promptWithTimeout<T>(
+	ui: FallbackUI,
+	timeout: number | undefined,
+	signal: AbortSignal,
+	show: (dialogOptions: ExtensionUIDialogOptions) => Promise<T | undefined>,
+): Promise<PromptOutcome<T>> {
 	let timedOut = false;
-
-	const selectOption = async (
-		prompt: string,
-		optionsToShow: ExtensionUISelectItem[],
-		initialIndex?: number,
-		marker?: { selectionMarker: "radio" | "checkbox"; checkedIndices?: readonly number[]; markableCount: number },
-	): Promise<{ choice: string | undefined; timedOut: boolean; navigation?: "back" | "forward" }> => {
-		let timeoutTriggered = false;
-		const onTimeout = () => {
-			timeoutTriggered = true;
-		};
-		let navigationAction: "back" | "forward" | undefined;
-		const questionHint = navigation ? `${formatKeyHints(["left", "right"])} question  ` : "";
-		const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${questionHint}${editorKey("tui.select.cancel")} cancel`;
-		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
-		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
-		const dialogSignal =
-			signal && timeoutController
-				? AbortSignal.any([signal, timeoutController.signal])
-				: (timeoutController?.signal ?? signal);
-		let timeoutId: NodeJS.Timeout | undefined;
-		let timeoutStartedMs = Date.now();
-		const armFallbackTimeout = (durationMs: number) => {
-			clearTimeout(timeoutId);
-			timeoutStartedMs = Date.now();
-			timeoutId = setTimeout(() => {
-				timeoutTriggered = true;
-				timeoutController?.abort();
-			}, durationMs);
-		};
-		const dialogOptions = {
-			initialIndex,
-			timeout,
-			signal: dialogSignal,
-			outline: true,
-			onTimeout,
-			onTimeoutStart: timeoutMs === undefined ? undefined : () => armFallbackTimeout(timeoutMs),
-			onTimeoutReset: timeoutMs === undefined ? undefined : () => armFallbackTimeout(timeoutMs),
-			helpText,
-			selectionMarker: marker?.selectionMarker,
-			checkedIndices: marker?.checkedIndices,
-			markableCount: marker?.markableCount,
-			onLeft: navigation?.allowBack
-				? () => {
-						navigationAction = "back";
-					}
-				: undefined,
-			onRight: navigation?.allowForward
-				? () => {
-						navigationAction = "forward";
-					}
-				: undefined,
-		};
-		try {
-			const runSelect = () => {
-				const selection = ui.select(prompt, optionsToShow, dialogOptions);
-				if (timeoutMs !== undefined && !ui.timeoutStartsOnPresentation) {
-					armFallbackTimeout(timeoutMs);
-				}
-				return selection;
-			};
-			const choice = dialogSignal ? await untilAborted(dialogSignal, runSelect) : await runSelect();
-			if (!timeoutTriggered && choice === undefined && typeof timeout === "number") {
-				// Fallback for UI surfaces that enforce `timeout` without invoking
-				// `onTimeout`: their auto-cancel resolves right at the deadline. A
-				// cancel arriving well past the deadline is a deliberate user Esc on
-				// a surface that kept the dialog open — keep treating it as a cancel.
-				const elapsed = Date.now() - timeoutStartedMs;
-				timeoutTriggered = elapsed >= timeout && elapsed <= timeout + TIMEOUT_DETECTION_TOLERANCE_MS;
-			}
-			return { choice, timedOut: timeoutTriggered, navigation: navigationAction };
-		} catch (error) {
-			if (timeoutTriggered && error instanceof Error && error.name === "AbortError") {
-				return { choice: undefined, timedOut: true, navigation: navigationAction };
-			}
-			throw error;
-		} finally {
-			clearTimeout(timeoutId);
-		}
+	const timeoutController = timeout === undefined ? undefined : new AbortController();
+	const dialogSignal = timeoutController ? AbortSignal.any([signal, timeoutController.signal]) : signal;
+	let timeoutId: NodeJS.Timeout | undefined;
+	let timeoutStartedMs = Date.now();
+	const armFallbackTimeout = (durationMs: number) => {
+		clearTimeout(timeoutId);
+		timeoutStartedMs = Date.now();
+		timeoutId = setTimeout(() => {
+			timedOut = true;
+			timeoutController?.abort();
+		}, durationMs);
 	};
-
-	const promptForCustomInput = async (title: string): Promise<{ input: string | undefined }> => {
-		const dialogOptions = signal ? { signal } : undefined;
-		const showCustomInput = () => ui.editor(title, undefined, dialogOptions, { promptStyle: true });
-		const input = signal ? await untilAborted(signal, showCustomInput) : await showCustomInput();
-		return { input };
+	const dialogOptions: ExtensionUIDialogOptions = {
+		timeout,
+		signal: dialogSignal,
+		onTimeout: () => {
+			timedOut = true;
+		},
+		onTimeoutStart: timeout === undefined ? undefined : () => armFallbackTimeout(timeout),
+		onTimeoutReset: timeout === undefined ? undefined : () => armFallbackTimeout(timeout),
 	};
-
-	const promptWithProgress = navigation?.progressText ? `${question} (${navigation.progressText})` : question;
-	if (multi) {
-		const selected = new Set<string>(selectedOptions);
-		let cursorIndex = Math.min(Math.max(recommended ?? 0, 0), Math.max(questionOptions.length - 1, 0));
-		const firstSelected = selectedOptions[0];
-		if (firstSelected) {
-			const selectedIndex = questionOptions.findIndex(option => option.label === firstSelected);
-			if (selectedIndex >= 0) cursorIndex = selectedIndex;
+	try {
+		const value = await untilAborted(dialogSignal, () => {
+			const shown = show(dialogOptions);
+			if (timeout !== undefined && !ui.timeoutStartsOnPresentation) armFallbackTimeout(timeout);
+			return shown;
+		});
+		if (!timedOut && value === undefined && timeout !== undefined) {
+			// Fallback for surfaces that enforce `timeout` without invoking
+			// `onTimeout`: their auto-cancel resolves right at the deadline. A
+			// cancel arriving well past it is a deliberate user Esc.
+			const elapsed = Date.now() - timeoutStartedMs;
+			timedOut = elapsed >= timeout && elapsed <= timeout + TIMEOUT_DETECTION_TOLERANCE_MS;
 		}
+		return { value, timedOut };
+	} catch (error) {
+		if (timedOut && error instanceof Error && error.name === "AbortError")
+			return { value: undefined, timedOut: true };
+		throw error;
+	} finally {
+		clearTimeout(timeoutId);
+	}
+}
+
+/**
+ * Checked option indices for a choice field. Radios and single selects take
+ * one pick, opening on the preselected option; checkbox groups, lone
+ * checkboxes and multi-selects toggle rows until a Done row. Radio and
+ * checkbox groups end with an "Other" row that asks for free text; a blank
+ * or cancelled answer returns to the options.
+ */
+async function askChoice(
+	ui: FallbackUI,
+	field: ChoiceField,
+	question: string,
+	timeout: number | undefined,
+	signal: AbortSignal,
+): Promise<PromptOutcome<ChoiceAnswer>> {
+	// The options the user can pick, by index, with one-line labels.
+	const options = field.options.flatMap((option, index) =>
+		option.disabled ? [] : [{ index, label: spansText(option.label).replace(/\s+/g, " ").trim() || option.value }],
+	);
+	const labels = disambiguateDisplayLabels(
+		options.map(option => option.label),
+		[],
+	);
+	const preselected = new Set(field.options.flatMap((option, index) => (option.checked ? [index] : [])));
+	const helpText = `${editorKeys("tui.select.up", "tui.select.down")} navigate  ${formatKeyHint("enter")} select  ${editorKey("tui.select.cancel")} cancel`;
+	const otherRow = field.other ? disambiguateDisplayLabels([OTHER_ROW], labels)[0] : undefined;
+	const choiceRows = otherRow === undefined ? labels : [...labels, otherRow];
+
+	if (!field.multi) {
+		let initialIndex = Math.max(
+			0,
+			options.findIndex(option => preselected.has(option.index)),
+		);
 		while (true) {
-			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
-
-			// Arrow-key forward navigation is TUI-only; RPC clients need the Done row to advance.
-			if (selected.size > 0) {
-				opts.push(doneLabel);
+			const outcome = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
+				ui.select(question, choiceRows, {
+					...dialogOptions,
+					initialIndex,
+					outline: true,
+					helpText,
+					selectionMarker: "radio",
+				}),
+			);
+			if (otherRow !== undefined && outcome.value === otherRow) {
+				const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
+					ui.input(question, undefined, dialogOptions),
+				);
+				if (typed.timedOut) return { value: undefined, timedOut: true };
+				initialIndex = labels.length;
+				if (!typed.value?.trim()) continue;
+				return { value: { checked: new Set(), other: typed.value }, timedOut: false };
 			}
-			opts.push(OTHER_OPTION);
+			const picked = outcome.value === undefined ? -1 : labels.indexOf(outcome.value);
+			const option = options[picked];
+			return { value: option ? { checked: new Set([option.index]) } : undefined, timedOut: outcome.timedOut };
+		}
+	}
 
-			const checkedIndices: number[] = [];
-			for (let i = 0; i < questionOptions.length; i++) {
-				if (selected.has(questionOptions[i]!.label)) checkedIndices.push(i);
-			}
-			const prefix = selected.size > 0 ? `(${selected.size} selected) ` : "";
-			const {
-				choice,
-				timedOut: selectTimedOut,
-				navigation: arrowNavigation,
-			} = await selectOption(`${prefix}${promptWithProgress}`, opts, cursorIndex, {
+	const doneLabel = disambiguateDisplayLabels([`${theme.status.success} Done selecting`], choiceRows)[0]!;
+	const checked = new Set(preselected);
+	let other: string | undefined;
+	let cursor = Math.max(
+		0,
+		options.findIndex(option => checked.has(option.index)),
+	);
+	while (true) {
+		const answered = checked.size + (other === undefined ? 0 : 1);
+		const canFinish = !field.required || answered > 0;
+		const rows: ExtensionUISelectItem[] = canFinish ? [...choiceRows, doneLabel] : [...choiceRows];
+		const checkedIndices = options.flatMap((option, row) => (checked.has(option.index) ? [row] : []));
+		if (other !== undefined) checkedIndices.push(labels.length);
+		const prefix = answered > 0 ? `(${answered} selected) ` : "";
+		const outcome = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
+			ui.select(`${prefix}${question}`, rows, {
+				...dialogOptions,
+				initialIndex: cursor,
+				outline: true,
+				helpText,
 				selectionMarker: "checkbox",
 				checkedIndices,
-				markableCount: questionOptions.length,
-			});
-
-			if (arrowNavigation) {
-				return { selectedOptions: Array.from(selected), customInput, note, timedOut, navigation: arrowNavigation };
+				markableCount: choiceRows.length,
+			}),
+		);
+		// A deadline keeps whatever the user had checked so far.
+		if (outcome.timedOut) return { value: { checked, other }, timedOut: true };
+		if (outcome.value === undefined) return { value: undefined, timedOut: false };
+		if (outcome.value === doneLabel) return { value: { checked, other }, timedOut: false };
+		if (otherRow !== undefined && outcome.value === otherRow) {
+			cursor = labels.length;
+			if (other !== undefined) {
+				other = undefined;
+				continue;
 			}
-			if (choice === undefined) {
-				if (selectTimedOut) {
-					timedOut = true;
-					break;
-				}
-				return { selectedOptions: Array.from(selected), customInput, note, timedOut, cancelled: true };
-			}
-			if (choice === doneLabel) break;
-
-			if (choice === OTHER_OPTION) {
-				if (selectTimedOut) {
-					timedOut = true;
-					break;
-				}
-				const customResult = await promptForCustomInput(`${prefix}${promptWithProgress}`);
-				if (customResult.input === undefined) {
-					continue;
-				}
-				customInput = customResult.input;
-				break;
-			}
-
-			const selectedIdx = opts.findIndex(opt => getSelectOptionLabel(opt) === choice);
-			if (selectedIdx >= 0) {
-				cursorIndex = selectedIdx;
-			}
-
-			if (selected.has(choice)) {
-				selected.delete(choice);
-			} else {
-				selected.add(choice);
-			}
-
-			if (selectTimedOut) {
-				timedOut = true;
-				break;
-			}
-		}
-		selectedOptions = Array.from(selected);
-	} else {
-		while (true) {
-			const baseDisplay = addRecommendedSuffix(questionOptions, recommended);
-			// Badging can collide rows (recommended `Retry now` vs a literal
-			// `Retry now (Recommended)`); disambiguate display copies like
-			// the rich dialog and map the choice back by identity below.
-			const displayLabels = disambiguateDisplayLabels(baseDisplay.map(getSelectOptionLabel), [OTHER_OPTION]);
-			const displayOptions: ExtensionUISelectItem[] = baseDisplay.map((option, index) =>
-				typeof option === "string" ? displayLabels[index]! : { ...option, label: displayLabels[index]! },
+			const typed = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
+				ui.input(question, undefined, dialogOptions),
 			);
-			const optionsWithNavigation: ExtensionUISelectItem[] = [...displayOptions, OTHER_OPTION];
-
-			let initialIndex = recommended;
-			const previouslySelected = selectedOptions[0];
-			if (previouslySelected) {
-				const selectedIndex = questionOptions.findIndex(option => option.label === previouslySelected);
-				if (selectedIndex >= 0) initialIndex = selectedIndex;
-			} else if (customInput !== undefined) {
-				initialIndex = displayOptions.length;
-			}
-			if (initialIndex !== undefined) {
-				const maxIndex = Math.max(optionsWithNavigation.length - 1, 0);
-				initialIndex = Math.max(0, Math.min(initialIndex, maxIndex));
-			}
-
-			const {
-				choice,
-				timedOut: selectTimedOut,
-				navigation: arrowNavigation,
-			} = await selectOption(promptWithProgress, optionsWithNavigation, initialIndex, {
-				selectionMarker: "radio",
-				markableCount: displayOptions.length,
-			});
-			timedOut = selectTimedOut;
-
-			if (arrowNavigation) {
-				return { selectedOptions, customInput, note, timedOut, navigation: arrowNavigation };
-			}
-			if (choice === undefined) {
-				if (!timedOut) {
-					return { selectedOptions, customInput, note, timedOut, cancelled: true };
-				}
-				break;
-			}
-			if (choice === OTHER_OPTION) {
-				if (selectTimedOut) {
-					break;
-				}
-				const customResult = await promptForCustomInput(promptWithProgress);
-				if (customResult.input === undefined) {
-					continue;
-				}
-				customInput = customResult.input;
-				selectedOptions = [];
-				break;
-			}
-			// Map the displayed choice back to the offered option by identity:
-			// the label itself may end with the recommendation suffix
-			// (intrinsic or via `\r` normalization), so stripping would
-			// corrupt it. First display match wins on identical rows.
-			const pickedIndex = displayOptions.findIndex(option => getSelectOptionLabel(option) === choice);
-			selectedOptions = [pickedIndex >= 0 ? questionOptions[pickedIndex]!.label : stripRecommendedSuffix(choice)];
-			customInput = undefined;
-			break;
+			if (typed.timedOut) return { value: { checked }, timedOut: true };
+			// A blank or cancelled answer leaves Other unchecked.
+			if (typed.value?.trim()) other = typed.value;
+			continue;
 		}
-		if (timedOut && selectedOptions.length === 0 && customInput === undefined) {
-			selectedOptions = getAutoSelectionOnTimeout(questionOptions, recommended);
-		}
-		if (navigation?.allowForward) {
-			return { selectedOptions, customInput, note, timedOut, navigation: "forward" };
-		}
+		const row = labels.indexOf(outcome.value);
+		const option = options[row];
+		if (!option) continue;
+		cursor = row;
+		if (checked.has(option.index)) checked.delete(option.index);
+		else checked.add(option.index);
 	}
-
-	if (timedOut && selectedOptions.length === 0 && customInput === undefined) {
-		selectedOptions = getAutoSelectionOnTimeout(questionOptions, recommended);
-	}
-
-	return { selectedOptions, customInput, note, timedOut };
 }
 
-function formatQuestionResult(result: QuestionResult): string {
-	const noteOn = result.noteOption === undefined ? "" : ` on ${result.noteOption}`;
-	const noteSuffix = result.note ? ` (note${noteOn}: ${result.note})` : "";
-	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
-	if (result.selectedOptions.length === 0) {
-		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
-		return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
+/**
+ * Text for a text field, re-asking with the validation error until it is
+ * valid. Textareas and prefilled inputs open the editor on their current
+ * value (a re-ask keeps the rejected text); empty inputs prompt with their
+ * placeholder.
+ */
+async function askText(
+	ui: FallbackUI,
+	field: TextField,
+	question: string,
+	timeout: number | undefined,
+	signal: AbortSignal,
+): Promise<PromptOutcome<string>> {
+	const useEditor = field.multiline || field.value !== "";
+	let error: string | undefined;
+	let current = field.value;
+	while (true) {
+		const title = error ? `${question} (${error})` : question;
+		let outcome: PromptOutcome<string>;
+		if (useEditor) {
+			// The editor has no countdown: typing a long answer must not race a deadline.
+			const prefill = current;
+			const value = await untilAborted(signal, () =>
+				ui.editor(title, prefill, { signal }, field.multiline ? undefined : { promptStyle: true }),
+			);
+			outcome = { value, timedOut: false };
+		} else {
+			outcome = await promptWithTimeout(ui, timeout, signal, dialogOptions =>
+				ui.input(title, field.placeholder || undefined, dialogOptions),
+			);
+		}
+		if (outcome.value === undefined) return outcome;
+		error = fieldError(field, outcome.value);
+		if (!error) return outcome;
+		current = outcome.value;
 	}
-	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0];
-	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
-	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
-	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
 }
 
-function formatSingleQuestionResponse(result: {
-	selectedOptions: string[];
-	customInput?: string;
-	note?: string;
-	noteOption?: string;
-	timedOut?: boolean;
-	multi: boolean;
-}): string {
-	const responseParts: string[] = [];
-	if (result.selectedOptions.length > 0) {
-		const selectedText = result.multi
-			? `User selected: ${result.selectedOptions.join(", ")}`
-			: `User selected: ${result.selectedOptions[0]}`;
-		responseParts.push(result.timedOut ? `${selectedText} (auto-selected after timeout)` : selectedText);
+/**
+ * Walk the form's named fields in order. Undefined when the user cancels; a
+ * deadline stops the walk and leaves the remaining fields at their defaults.
+ */
+async function askFieldByField(
+	ui: FallbackUI,
+	form: HtmlForm,
+	timeout: number | undefined,
+	signal: AbortSignal,
+): Promise<{ data: HtmlFormData; timedOut: boolean } | undefined> {
+	const data = defaultFormData(form);
+	const questions = fieldQuestions(form);
+	for (const field of form.fields) {
+		if (!field.name) continue;
+		const question = questions.get(field) ?? field.name;
+		if (field.kind === "choice") {
+			const outcome = await askChoice(ui, field, question, timeout, signal);
+			if (outcome.value !== undefined) {
+				const value = choiceValue(field, outcome.value.checked, outcome.value.other);
+				if (value === undefined) delete data[field.name];
+				else data[field.name] = value;
+			}
+			if (outcome.timedOut) return { data, timedOut: true };
+			if (outcome.value === undefined) return undefined;
+			continue;
+		}
+		const outcome = await askText(ui, field, question, timeout, signal);
+		if (outcome.timedOut) return { data, timedOut: true };
+		if (outcome.value === undefined) return undefined;
+		data[field.name] = textValue(field, outcome.value);
 	}
-	if (result.customInput !== undefined) {
-		responseParts.push(
-			result.customInput.includes("\n")
-				? `User provided custom input:\n${result.customInput
-						.split("\n")
-						.map(line => `  ${line}`)
-						.join("\n")}`
-				: `User provided custom input: ${result.customInput}`,
-		);
-	}
-	if (result.note) {
-		const label = `User added note${result.noteOption === undefined ? "" : ` on ${result.noteOption}`}:`;
-		responseParts.push(
-			result.note.includes("\n")
-				? `${label}\n${result.note
-						.split("\n")
-						.map(line => `  ${line}`)
-						.join("\n")}`
-				: `${label} ${result.note}`,
-		);
-	}
-	if (responseParts.length > 0) return responseParts.join("\n");
-	return result.multi ? "User did not select any options" : "User cancelled the selection";
+	return { data, timedOut: false };
 }
 
 // =============================================================================
 // Tool Class
 // =============================================================================
 
-type AskParams = AskToolInput;
+const EXAMPLE_FORM = `<form>
+  <p>Sessions live in memory and are lost on restart.</p>
+  <fieldset>
+    <legend>Session store</legend>
+    <label><input type="radio" name="store" value="sqlite" checked> SQLite: one file, no new service</label>
+    <label><input type="radio" name="store" value="redis"> Redis: shared across instances, needs ops</label>
+  </fieldset>
+  <label>Session lifetime (days) <input type="number" name="ttl_days" value="30" min="1"></label>
+</form>`;
 
-/**
- * Ask tool for interactive user prompting during execution.
- *
- * Allows gathering user preferences, clarifying instructions, and getting decisions
- * on implementation choices as the agent works.
- */
+/** Asks the user to fill in one HTML form and returns the submitted form data. */
 export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly name = "ask";
 	readonly approval = "read" as const;
 	readonly label = "Ask";
-	readonly summary = "Ask the user a clarifying question";
+	readonly summary = "Ask the user to fill in a form";
 	readonly description: string;
 	readonly parameters = askSchema;
 	readonly strict = true;
 
 	readonly examples: readonly ToolExample<typeof askSchema.infer>[] = [
-		{
-			caption: "Choice",
-			call: {
-				questions: [
-					{
-						id: "storage",
-						question: "Database?",
-						options: [{ label: "SQLite" }, { label: "Postgres" }],
-						recommended: 0,
-					},
-				],
-			},
-		},
+		{ caption: "Choice with context and a number", call: { html: EXAMPLE_FORM } },
 	];
-	// Run alone in its tool batch. The interactive selector/editor is a single
-	// shared UI surface (`ExtensionUiController.showHookSelector` has no queue and
-	// overwrites `ctx.hookSelector` on each call), so two concurrent `ask` calls
-	// would clobber each other: the second steals focus and orphans the first,
-	// whose promise then hangs until the user aborts the whole turn.
+	// Run alone in its tool batch. The interactive dialog is a single shared UI
+	// surface (`ExtensionUiController` has no queue and overwrites the active
+	// dialog on each call), so two concurrent `ask` calls would clobber each
+	// other: the second steals focus and orphans the first, whose promise then
+	// hangs until the user aborts the whole turn.
 	readonly concurrency = "exclusive";
 	readonly loadMode = "discoverable";
 
@@ -603,52 +385,6 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		});
 	}
 
-	/**
-	 * Blocks for answer images: each image with its source-path notice and, for a text-only model,
-	 * the vision description a pasted prompt image gets (best effort).
-	 */
-	async #answerImageBlocks(
-		images: ImageContent[],
-		signal: AbortSignal | undefined,
-	): Promise<Array<TextContent | ImageContent>> {
-		if (images.length === 0) return [];
-		let descriptions: TextContent[] | undefined;
-		const model = this.session.getActiveModel?.();
-		const modelRegistry = this.session.modelRegistry;
-		if (modelRegistry && shouldDescribeImagesForTextModel(model, this.session.settings)) {
-			try {
-				descriptions = await describeAttachedImagesForTextModel(
-					images,
-					{
-						activeModel: model,
-						modelRegistry,
-						settings: this.session.settings,
-						localProtocolOptions: sessionLocalProtocolOptions(this.session),
-						activeModelString: this.session.getActiveModelString?.(),
-						telemetryConfig: this.session.getTelemetry?.(),
-						sessionId: this.session.getSessionId?.() ?? undefined,
-						costGate: this.session.costGate,
-					},
-					signal,
-				);
-			} catch (error) {
-				logger.warn("ask answer image description failed; image left undescribed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
-		const blocks: Array<TextContent | ImageContent> = [];
-		for (const [index, image] of images.entries()) {
-			const notice = renderAttachmentSourceNotice(image, index + 1, { askAnswer: true });
-			if (notice) blocks.push({ type: "text", text: notice.content });
-			// Keep the source tag: `attachment://N` resolves this result's images to their files.
-			blocks.push(image);
-			const description = descriptions?.[index];
-			if (description) blocks.push(description);
-		}
-		return blocks;
-	}
-
 	async execute(
 		_toolCallId: string,
 		params: AskParams,
@@ -665,101 +401,23 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
 		}
-		// Models occasionally inject `\r` runs into string values (observed with
-		// GLM via OpenRouter); sanitize before the dialog renders or the answer
-		// echoes back into session history.
-		params = sanitizeAskParams(params);
-		// Sanitizing `\r` runs can collapse a crafted label into a reserved
-		// runtime label (`Other\r(type your own)` → `Other (type your own)`),
-		// which would hijack the custom-input branch and duplicate the rich
-		// dialog row — fail closed like schema validation does.
-		const reservedCollision = params.questions
-			.flatMap(question => question.options)
-			.find(option => RESERVED_OPTION_LABELS[option.label] === true);
-		if (reservedCollision !== undefined) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(reservedCollision.label)}`,
-					},
-				],
-				details: {},
-			};
-		}
-		// The degraded multi-select completion row is theme-labeled and only
-		// appended after an answer exists, but the choice handler matches it
-		// unconditionally — a sanitized model label would exit instead of
-		// selecting. Fail closed like the other sentinels (multi-select only;
-		// single-select has no Done row).
-		const doneActionLabel = getDoneOptionLabel();
-		const doneCollision = params.questions
-			.filter(question => question.multi === true)
-			.flatMap(question => question.options)
-			.find(option => option.label === doneActionLabel);
-		if (doneCollision !== undefined) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Error: option labels must not collide with reserved runtime labels: ${formatErrorValue(doneCollision.label)}`,
-					},
-				],
-				details: {},
-			};
-		}
-		// Sanitizing `\r` runs can also merge distinct labels (`Retry\rnow` and
-		// `Retry now` become one); dialog selection is label-keyed, so one row
-		// would check both — fail closed like schema validation does. The same
-		// holds for question ids (`deploy\rmode`/`deploy mode`), which the
-		// model uses to correlate multi-question answers.
-		const seenIds = new Set<string>();
-		for (const question of params.questions) {
-			if (seenIds.has(question.id)) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `Error: question ids must be unique: ${formatErrorValue(question.id)}`,
-						},
-					],
-					details: {},
-				};
-			}
-			seenIds.add(question.id);
-			const seenLabels = new Set<string>();
-			for (const option of question.options) {
-				if (seenLabels.has(option.label)) {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Error: option labels must be unique within a question: ${formatErrorValue(option.label)}`,
-							},
-						],
-						details: {},
-					};
-				}
-				seenLabels.add(option.label);
-			}
+
+		const form = parseHtmlForm(params.html);
+		const questions = fieldQuestions(form);
+		const named = form.fields.filter(field => field.name);
+		if (named.length === 0) {
+			return { content: [{ type: "text", text: NO_NAMED_CONTROLS_ERROR }], details: { answers: [] } };
 		}
 
 		const extensionUi = context.ui;
-		const ui: UIContext = {
-			timeoutStartsOnPresentation: extensionUi.timeoutStartsOnPresentation,
-			select: (prompt, options, dialogOptions) => extensionUi.select(prompt, options, dialogOptions),
-			editor: (title, prefill, dialogOptions, editorOptions) =>
-				extensionUi.editor(title, prefill, dialogOptions, editorOptions),
-		};
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
-		const settingsTimeout = askTimeoutMs(this.session.settings) ?? null;
-		const timeout = planModeEnabled ? null : settingsTimeout;
+		const timeout = planModeEnabled ? undefined : askTimeoutMs(this.session.settings);
 		// A message the user queues closes the dialog without cancelling the turn: they moved on, and the
 		// message reaches the agent at the batch boundary. Peer IRC, asides and finished background jobs are
 		// not the user's answer, so the dialog stays open for it.
-		const steeringSignal = context?.toolCall?.steeringSignal;
+		const steeringSignal = context.toolCall?.steeringSignal;
 		const userSteering = new AbortController();
 		const onSteer = () => {
 			if (steeringSignal?.reason === "user") userSteering.abort();
@@ -778,267 +436,40 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
 
-		if (params.questions.length === 0) {
-			return {
-				content: [{ type: "text" as const, text: "Error: questions must not be empty" }],
-				details: {},
-			};
-		}
-
-		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
+		// Speak the questions aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
 		if (cfgSpeechEnabled.get(this.session.settings)) {
-			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
+			vocalizer.speak(named.map(field => questions.get(field) ?? field.name).join("\n"));
 		}
 
-		const richAskDialog = extensionUi.askDialog;
-		if (richAskDialog) {
-			try {
-				const showRichDialog = () =>
-					richAskDialog(
-						params.questions.map(q => ({
-							id: q.id,
-							question: q.question,
-							...(q.header?.trim() ? { header: q.header } : {}),
-							options: q.options.map(option => ({
-								label: option.label,
-								...(option.description?.trim() ? { description: option.description.trim() } : {}),
-								...(option.preview?.trim() ? { preview: option.preview } : {}),
-							})),
-							...(q.multi !== undefined ? { multi: q.multi } : {}),
-							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
-						})),
-						{ timeout: timeout ?? undefined, signal: dialogSignal, acceptImages: true },
-					);
-				const richResult = await untilAborted(dialogSignal, showRichDialog);
-				if (!richResult) return cancelAsk();
-				if (richResult.kind === "chat") {
-					const questionText = params.questions.map(q => q.question).join("\n");
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
-							},
-						],
-						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
-					};
-				}
-				if (richResult.results.length !== params.questions.length) {
-					throw new Error("Ask dialog returned a result count that does not match the requested questions");
-				}
-				const results: QuestionResult[] = [];
-				// Each prompt numbers markers from 1; shift them so `[Image #N]` indexes all result images.
-				const answerImages: ImageContent[] = [];
-				for (let index = 0; index < params.questions.length; index++) {
-					const question = params.questions[index];
-					const result = richResult.results[index];
-					if (!question || !result || result.id !== question.id) {
-						throw new Error("Ask dialog returned results that do not match the requested question order");
-					}
-					const customOffset = answerImages.length;
-					if (result.customInputImages) answerImages.push(...result.customInputImages);
-					const noteOffset = answerImages.length;
-					if (result.noteImages) answerImages.push(...result.noteImages);
-					results.push({
-						id: question.id,
-						question: question.question,
-						options: question.options.map(option => option.label),
-						multi: question.multi ?? false,
-						selectedOptions: result.selectedOptions,
-						customInput:
-							result.customInput === undefined
-								? undefined
-								: shiftImageMarkers(result.customInput, customOffset, result.customInputImages?.length ?? 0),
-						note:
-							result.note === undefined
-								? undefined
-								: shiftImageMarkers(result.note, noteOffset, result.noteImages?.length ?? 0),
-						noteOption: result.noteOption,
-						timedOut: result.timedOut,
-					});
-				}
-				if (params.questions.length === 1) {
-					const result = results[0];
-					// An empty multi-select submission is a valid "select none"
-					// answer (#8265 review); only a truly empty single-select
-					// result counts as cancellation.
-					if (
-						!result ||
-						(!result.timedOut &&
-							!result.multi &&
-							result.selectedOptions.length === 0 &&
-							result.customInput === undefined)
-					)
-						cancelAsk();
-					const details: AskToolDetails = {
-						question: result.question,
-						options: result.options,
-						multi: result.multi,
-						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
-						noteOption: result.noteOption,
-						timedOut: result.timedOut,
-					};
-					const responseText = formatSingleQuestionResponse(result);
-					const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
-					return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
-				}
-				const details: AskToolDetails = { results };
-				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
-				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") throw abortError();
-				throw error;
-			}
-		}
-
-		const askQuestion = async (
-			q: AskParams["questions"][number],
-			options?: { previous?: QuestionResult; navigation?: NavigationControls },
-		) => {
-			const questionOptions = q.options.map(option => ({
-				label: option.label,
-				...(option.description?.trim() ? { description: option.description.trim() } : {}),
-			}));
-			const optionLabels = questionOptions.map(getAskOptionLabel);
-			try {
-				const { selectedOptions, customInput, note, navigation, cancelled, timedOut } = await askSingleQuestion(
-					ui,
-					q.question,
-					questionOptions,
-					q.multi ?? false,
-					{
-						recommended: q.recommended,
-						timeout: timeout ?? undefined,
-						signal: dialogSignal,
-						initialSelection: options?.previous,
-						navigation: options?.navigation,
-					},
+		let answered: { data: HtmlFormData; timedOut?: boolean } | undefined;
+		try {
+			if (extensionUi.formDialog) {
+				const formDialog = extensionUi.formDialog.bind(extensionUi);
+				answered = await untilAborted(dialogSignal, () =>
+					formDialog(params.html, { timeout, signal: dialogSignal }),
 				);
-				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") throw abortError();
-				throw error;
+			} else {
+				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
 			}
-		};
-
-		if (params.questions.length === 1) {
-			const [q] = params.questions;
-			const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut } = await askQuestion(q);
-
-			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) cancelAsk();
-			const details: AskToolDetails = {
-				question: q.question,
-				options: optionLabels,
-				multi: q.multi ?? false,
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
-			};
-
-			const responseText = formatSingleQuestionResponse({
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
-				multi: q.multi ?? false,
-			});
-
-			return { content: [{ type: "text" as const, text: responseText }], details };
+		} catch (error) {
+			if (error instanceof Error && error.name === "AbortError") throw abortError();
+			throw error;
 		}
+		if (!answered) return cancelAsk();
 
-		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
-		let questionIndex = 0;
-		while (questionIndex < params.questions.length) {
-			const q = params.questions[questionIndex];
-			if (!q) throw new Error("Ask question index exceeded the requested question list");
-			const previous = resultsByIndex[questionIndex];
-			const navigation: NavigationControls = {
-				allowBack: questionIndex > 0,
-				allowForward: true,
-				progressText: `${questionIndex + 1}/${params.questions.length}`,
-			};
-			const {
-				optionLabels,
-				selectedOptions,
-				customInput,
-				note,
-				navigation: navAction,
-				cancelled,
-				timedOut,
-			} = await askQuestion(q, { previous, navigation });
-
-			if (cancelled && !timedOut) cancelAsk();
-
-			resultsByIndex[questionIndex] = {
-				id: q.id,
-				question: q.question,
-				options: optionLabels,
-				multi: q.multi ?? false,
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
-			};
-
-			if (navAction === "back") {
-				questionIndex = Math.max(0, questionIndex - 1);
-				continue;
-			}
-
-			questionIndex += 1;
-		}
-
-		const results = params.questions.map((q, index) => {
-			const result = resultsByIndex[index];
-			if (result) return result;
+		const json = JSON.stringify(answered.data, null, 2);
+		const details: AskToolDetails = { answers: formAnswers(form, answered.data) };
+		if (answered.timedOut) {
+			details.timedOut = true;
 			return {
-				id: q.id,
-				question: q.question,
-				options: q.options.map(o => o.label),
-				multi: q.multi ?? false,
-				selectedOptions: [],
+				content: [
+					{ type: "text", text: `No answer before the timeout; submitted the form's current values:\n${json}` },
+				],
+				details,
 			};
-		});
-
-		const details: AskToolDetails = { results };
-		const responseLines = results.map(formatQuestionResult);
-		const responseText = `User answers:\n${responseLines.join("\n")}`;
-
-		return { content: [{ type: "text" as const, text: responseText }], details };
+		}
+		return { content: [{ type: "text", text: `User answers:\n${json}` }], details };
 	}
-}
-
-/**
- * Format a model-provided id/label for a validation error. Degenerate input
- * can carry tabs or kilobytes of text, and the error echoes through the
- * plain `Text` fallback renderer — expand tabs FIRST so the width bound
- * applies to displayed cells, then clamp like every other error display
- * path (`formatErrorMessage`).
- */
-function formatErrorValue(value: string): string {
-	return truncateToWidth(replaceTabs(value), TRUNCATE_LENGTHS.LINE);
-}
-/** Strip the `\r` runs degenerate models inject, so persisted call args render as prose. */
-function sanitizeAskParams(params: AskParams): AskParams {
-	return {
-		...params,
-		questions: params.questions.map(question => ({
-			...question,
-			id: sanitizeCarriageReturns(question.id),
-			question: sanitizeCarriageReturns(question.question),
-			...(question.header !== undefined ? { header: sanitizeCarriageReturns(question.header) } : {}),
-			options: question.options.map(option => ({
-				...option,
-				label: sanitizeCarriageReturns(option.label),
-				...(option.description !== undefined ? { description: sanitizeCarriageReturns(option.description) } : {}),
-				...(option.preview !== undefined ? { preview: sanitizeCarriageReturns(option.preview) } : {}),
-			})),
-		})),
-	};
 }

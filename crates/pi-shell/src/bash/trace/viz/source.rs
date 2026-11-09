@@ -70,16 +70,19 @@ pub fn script_map(source: &impl VizSource, at: usize, len: usize) -> SourceMap {
 pub fn unit_map(source: &impl VizSource, unit: &SourceUnit<'_>) -> SourceMap {
 	build(source, unit, 0)
 }
+/// `unit`'s canonical byte coordinates without original-source positions:
+/// enough to slice its own bytes, and built without the presentation cache.
+pub fn unit_bytes(unit: &SourceUnit<'_>) -> SourceMap {
+	SourceMap {
+		offset:     unit.syntax.map_or(0, |s| s.offset),
+		projection: unit.projection,
+		len:        unit.source.len(),
+		outer:      None,
+	}
+}
 fn build(source: &impl VizSource, unit: &SourceUnit<'_>, depth: usize) -> SourceMap {
-	let projection = unit.projection;
-	let bytes: &[u8] = unit.source.as_ref();
-	let body = bytes;
-	let mut result = SourceMap {
-		offset: unit.syntax.map_or(0, |s| s.offset),
-		projection,
-		len: body.len(),
-		outer: None,
-	};
+	let body: &[u8] = unit.source.as_ref();
+	let mut result = unit_bytes(unit);
 	if depth > source.unit_count() {
 		return result;
 	}

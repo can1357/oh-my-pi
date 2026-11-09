@@ -317,19 +317,28 @@ function isInternalUrlPath(filePath: string): boolean {
  *
  * A bare root slash is treated as a workspace-root alias for tool inputs. Users
  * often pass `/` to mean “search from here”, and letting tools escape to the
- * filesystem root is almost never what they intended.
+ * filesystem root is almost never what they intended. A shell `cd` target is
+ * not a tool input: use {@link resolveShellDirectory}.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, true);
+}
+
+/**
+ * Resolve a directory a shell command named (`cd <path>`), relative to `cwd`.
+ *
+ * Same expansion as {@link resolveToCwd}, except a bare root (`/`, `//`, `///`)
+ * is the filesystem root. Explicit tool path inputs keep the workspace alias.
+ */
+export function resolveShellDirectory(filePath: string, cwd: string): string {
+	return resolveDirectory(filePath, cwd, false);
+}
+
+function resolveDirectory(filePath: string, cwd: string, aliasWorkspaceRoot: boolean): string {
 	const expanded = normalizeWindowsDriveAliasPath(expandPath(filePath));
-
 	assertNotInternalUrl(expanded, filePath);
-
-	if (/^\/+$/.test(expanded)) {
-		return cwd;
-	}
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
+	if (aliasWorkspaceRoot && /^\/+$/.test(expanded)) return cwd;
+	if (path.isAbsolute(expanded)) return expanded;
 	return path.resolve(cwd, expanded);
 }
 

@@ -255,7 +255,7 @@ export const cfgTaskEager = register({
 		tab: "tasks",
 		group: "Subagents",
 		label: "Prefer Task Delegation",
-		description: "How strongly to push delegating work to subagents",
+		description: "How strongly to push the main agent to delegate work; subagents keep the model's own policy",
 		options: [
 			{
 				value: "default",

@@ -22,7 +22,7 @@ const MAX_ONLINE_DISPLAYS: u32 = 32;
 pub(in super::super) fn screen_state(selector: &DisplaySelector) -> ScreenState {
 	ScreenState {
 		locked:         screen_locked(),
-		display_asleep: displays_asleep(selector, &online_displays(), |id| CGDisplayIsAsleep(id)),
+		display_asleep: displays_asleep(selector, &online_displays(), CGDisplayIsAsleep),
 	}
 }
 

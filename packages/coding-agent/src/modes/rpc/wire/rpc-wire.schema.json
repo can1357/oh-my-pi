@@ -1170,6 +1170,25 @@
 			],
 			"x-open": true
 		},
+		"ParentIrc": {
+			"type": "object",
+			"properties": {
+				"from": {
+					"type": "string",
+					"description": "Sending parent agent id."
+				},
+				"body": {
+					"type": "string",
+					"description": "Message body as the parent wrote it."
+				}
+			},
+			"required": [
+				"from",
+				"body"
+			],
+			"description": "Parent-agent IRC message carried by a steer; render it instead of the model-facing `content` envelope.",
+			"x-open": true
+		},
 		"UserMessage": {
 			"type": "object",
 			"properties": {
@@ -1181,6 +1200,9 @@
 				},
 				"timestamp": {
 					"type": "number"
+				},
+				"parentIrc": {
+					"$ref": "#/$defs/ParentIrc"
 				},
 				"synthetic": {
 					"type": "boolean"

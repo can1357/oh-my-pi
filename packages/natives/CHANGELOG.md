@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `grep` no longer searches the file its own output is redirected into, nor standard input redirected from that same file: both are refused with `input file is also the output`, as GNU grep does ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
+
+### Fixed
+
+- Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
+- Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
+- Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
+- Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
+
 ## [18.18.1] - 2026-11-08
 
 ### Added

@@ -44,6 +44,7 @@ import {
 	describeJobWidgetMiniSpark,
 	describeJobWidgetsHovercard,
 	type JobWidgetEntry,
+	type JobWidgetView,
 	jobWidgetGlance,
 	jobWidgetGlanceSpans,
 	jobWidgetSummary,
@@ -159,6 +160,7 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { formatQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import { loadPinnedSessionIds } from "../session/session-pins";
@@ -257,6 +259,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	settleStartupRun,
 } from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
@@ -858,9 +861,10 @@ const JOBS_SEGMENT: RunningSegmentSpec = {
 	act: "jobs.open",
 };
 
-/** The jobs segment with the widgets it was described from (`id:updatedAt:state` per widget). */
+/** The jobs segment with the widgets it was described from (`id:updatedAt:state` per widget) and their view refs. */
 interface JobsSegment extends RunningSegment {
 	readonly widgets: string;
+	readonly views: readonly JobWidgetView[];
 }
 
 /**
@@ -875,10 +879,13 @@ function jobsSegment(
 	if (running === 0) return undefined;
 	let widgets = "";
 	for (const entry of entries) widgets += `${entry.id}:${entry.view.updatedAt}:${entry.view.state};`;
-	if (prev?.running === running && prev.widgets === widgets) return prev;
+	// A refresh recomputes the view from the wall clock (rate decay) even when no data moved, swapping each
+	// `view` for a fresh object; the refs see that, the fields above do not.
+	const views = entries.map(entry => entry.view);
+	if (prev?.running === running && prev.widgets === widgets && sameItems(prev.views, views)) return prev;
 	const described =
 		entries.length > 0 ? describeJobsSegment(running, entries) : describeRunningSegment(JOBS_SEGMENT, running);
-	return { running, widgets, node: described };
+	return { running, widgets, views, node: described };
 }
 
 /**
@@ -1372,7 +1379,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
-	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: Agent;
@@ -1404,6 +1410,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	editorContainer: Container;
 	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
 	attachmentChipsContainer: Container;
+	/** The margin above the editor: its top gap, which tracks the status row, or a spacer over hook widgets. */
+	editorTopGapContainer: Container;
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
@@ -2097,9 +2105,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		eventBus?: EventBus,
 		composer?: Composer,
 		subagentEventBus?: EventBus,
-		refreshScopedModelsAfterLogin?: () => Promise<void>,
 	) {
-		this.refreshScopedModelsAfterLogin = refreshScopedModelsAfterLogin;
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
@@ -2261,8 +2267,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
+		this.editorTopGapContainer = new Container();
+		this.editorTopGapContainer.addChild(new EditorTopGap(() => this.statusRowOccupied));
 		this.hookWidgetContainerAbove = new Container();
-		this.hookWidgetContainerAbove.addChild(new EditorTopGap(() => this.statusRowOccupied));
 		this.hookWidgetContainerBelow = new Container();
 		this.attachmentChipsContainer = new Container();
 		const attachmentChips = new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender());
@@ -2343,7 +2350,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
-		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
+		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
@@ -2552,6 +2559,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// composer collapses that gap so its status band sits flush).
 				this.statusContainer,
 				this.attachmentChipsContainer,
+				this.editorTopGapContainer,
 				this.hookWidgetContainerAbove,
 				this.editorContainer,
 				this.hookWidgetContainerBelow,
@@ -2584,6 +2592,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.modelCycleContainer,
 					this.progressHudContainer,
 				],
+				// The working row, the idle status line that replaces it, and the
+				// margin above the editor (the band composer's gap opens when that
+				// row empties; a spacer replaces it over hook widgets): billed at
+				// their current height so streamed rows reach native history as
+				// they leave the screen.
+				billedChrome: [this.statusContainer, this.editorTopGapContainer],
 				// Natively the HUD pills lead the dock, queued messages sit between
 				// the working row and the composer, and the attachment chips live
 				// inside the composer.
@@ -2598,6 +2612,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.progressHudContainer,
 					this.statusContainer,
 					this.pendingMessagesContainer,
+					this.editorTopGapContainer,
 					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
@@ -2624,6 +2639,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				case "rewind":
 					this.showUserMessageSelector();
+					return;
+				case "turn":
+					void this.#selectorController.runTurnAction(action.turn, action.message);
 					return;
 				case "resume":
 					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
@@ -2687,7 +2705,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
-		initProgramStatus();
+		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
@@ -4008,6 +4026,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
+			followUps?: string[];
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput {
@@ -4018,6 +4037,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType: input.customType,
 			display: input.display,
 			streamingBehavior: input.streamingBehavior,
+			followUps: input.followUps,
 			cancelled: false,
 			started: false,
 		};
@@ -4082,9 +4102,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			const laterText = this.editor.getExpandedText();
 			const submittedImages = submission.images ?? [];
 			const laterImages = this.editor.pendingImages;
-			const recoveredText = laterText
-				? `${submission.text}\n${shiftImageMarkers(laterText, submittedImages.length)}`
+			const submittedText = submission.followUps
+				? formatQueueShorthand([submission.text, ...submission.followUps])
 				: submission.text;
+			const recoveredText = laterText
+				? `${submittedText}\n${shiftImageMarkers(laterText, submittedImages.length)}`
+				: submittedText;
 			this.editor.pendingImages = [...submittedImages, ...laterImages];
 			this.editor.pendingImageLinks = [
 				...(submission.imageLinks ?? submittedImages.map(() => undefined)),
@@ -4104,8 +4127,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * usage preflight denial or the cost cap raced turn setup). The message was
 	 * never persisted, so the tree/branch selectors cannot offer it — remove the
 	 * optimistic transcript row and put the typed text back in the editor for editing.
+	 * A prompt with unsent follow-ups comes back as one `=>` list.
 	 */
-	#restoreDroppedPrompt(prompt: DroppedPrompt): void {
+	restoreDroppedPrompt(prompt: DroppedPrompt): void {
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
@@ -4126,7 +4150,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.pendingImages = prompt.images ? [...prompt.images] : [];
 			this.editor.pendingImageLinks = prompt.images ? prompt.images.map(() => undefined) : [];
 			this.editor.imageLinks = this.editor.pendingImageLinks;
-			this.editor.setText(prompt.text);
+			this.editor.setText(prompt.followUps ? formatQueueShorthand([prompt.text, ...prompt.followUps]) : prompt.text);
 		}
 		this.ui.requestRender();
 	}
@@ -6900,12 +6924,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				// so it reaches native summarization without leaking into the public
 				// `customInstructions` channel on `session_before_compact` — extensions
 				// there treat that field as user focus and would query-bias the
-				// summary toward the plan boilerplate (issue #4359).
+				// summary toward the plan boilerplate (issue #4359). The model the
+				// transition below restores reads the summary.
+				const readerModel =
+					options.executionModel?.model ?? this.#planModePreviousModelState?.model ?? this.session.model;
 				compactOutcome = await this.handleCompactCommand(
 					undefined,
 					undefined,
 					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
-					compactionPrompt,
+					{ internalGuidance: compactionPrompt, readerModel },
 				);
 			}
 		} finally {
@@ -6927,6 +6954,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			previousPresentation.registered,
 		);
 		this.session.setPlanReferencePath(options.planFilePath);
+		this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
 		try {
 			const autosaved = await autosaveApprovedPlan({
 				settings: this.session.settings,
@@ -7075,6 +7103,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 				if (!confirmed) return false;
 			}
+			// An open review must not outlive the plan mode it approves: a later pick
+			// would autosave and dispatch the plan while plan mode is paused.
+			this.#hidePlanReview();
 			await this.#exitPlanMode({ paused: true, interruptActiveTurn: true });
 			return false;
 		}
@@ -7606,6 +7637,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.goalModeEnabled) return;
 		this.#resetGoalContinuationSuppression();
 		await this.session.prompt(objective, { streamingBehavior: "steer" });
+	}
+
+	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
+	settleStartupRun(): void {
+		settleStartupRun();
 	}
 
 	async #startGoalFromObjective(
@@ -8211,6 +8247,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
+		setWordPredictionHost(undefined);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
@@ -9287,16 +9324,28 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * Whether {@link maybeAutoCreateWorktree} may stop to ask the user (`worktree.onStart: ask`).
+	 * It answers before the async git check, so it also says yes in a folder where the question
+	 * never shows.
+	 */
+	mayAskForStartupWorktree(): boolean {
+		return cfgWorktreeOnStart.get(this.settings) === "ask";
+	}
+
+	/**
 	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
 	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
 	 * failures become a warning so startup continues.
 	 */
 	async maybeAutoCreateWorktree(): Promise<void> {
 		try {
-			const policy = cfgWorktreeOnStart.get(this.settings);
-			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
 			if (
-				policy === "ask" &&
+				cfgWorktreeOnStart.get(this.settings) === "off" ||
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+			)
+				return;
+			if (
+				this.mayAskForStartupWorktree() &&
 				!(await this.showHookConfirm(
 					"Create a worktree for this session?",
 					"Work happens on a new wt/* branch; this checkout stays untouched.",
@@ -9489,9 +9538,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
-		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, internalGuidance);
+		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
 	}
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {
@@ -9553,8 +9602,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(): void {
-		this.#selectorController.showUserMessageSelector();
+	showUserMessageSelector(startAt?: string): void {
+		this.#selectorController.showUserMessageSelector(startAt);
 	}
 
 	showCopySelector(): void {
