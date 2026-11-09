@@ -4,8 +4,7 @@
 
 ### Added
 
-- RPC supports changing or clearing goal budgets through the `goal` command's `budget` operation and `/goal budget` prompts.
-- RPC supports guided-goal interviews through the `goal` command's `guided` operation and `/guided-goal` prompts.
+- RPC supports `/goal budget <N|off>` and `/guided-goal [objective]`, plus the structured `goal` operations `budget` and `guided` ([#18607](https://github.com/can1357/oh-my-pi/pull/18607) by [@BizerNotNull](https://github.com/BizerNotNull)).
 
 ## [18.18.3] - 2026-11-09
 
