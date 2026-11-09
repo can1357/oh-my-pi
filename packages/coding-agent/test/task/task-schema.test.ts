@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import { isJsonSchemaValueValid, tryEnforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
@@ -43,7 +42,7 @@ function createSession(
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
+// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
@@ -56,7 +55,13 @@ describe("task schema (single-spawn)", () => {
 	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
 		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
 		for (const file of [true, false]) {
-			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
+			const schema = getTaskSchema({
+				batchEnabled,
+				isolationEnabled: false,
+				structured: false,
+				file,
+				perCallModel: true,
+			});
 			const item = {
 				taskFile: "local://assignment.md",
 				model: "mock/file-worker",
@@ -176,19 +181,24 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				const item = { task: "work", solutionSpace: "bounded", model: [] };
-				expect(schema(batchEnabled ? { context: "shared", tasks: [item] } : item) instanceof type.errors).toBe(
-					false,
+				expect(wireSchema).not.toContain('"model"');
+				// Per-call model alone advertises one string, never the seance selector list.
+				const perCall = JSON.stringify(
+					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true }).toJsonSchema(),
 				);
-				expect(
-					schema(
-						batchEnabled
-							? { context: "shared", tasks: [{ ...item, model: ["p/m"] }] }
-							: { ...item, model: ["p/m"] },
-					) instanceof type.errors,
-				).toBe(true);
+				expect(perCall).toContain('"model":{"type":"string"}');
 			}
 		}
+	});
+
+	it.each([
+		["off", false],
+		["eval", false],
+		["on", true],
+	] as const)("advertises model only when task.perCallModel allows task calls (%s)", async (mode, advertised) => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }));
+		expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"')).toBe(advertised);
 	});
 
 	it("advertises fields only when bundled seance is spawnable", async () => {
@@ -235,56 +245,18 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		const baseItem = { task: "work", solutionSpace: "bounded" };
-		expect(planMode.parameters({ ...baseItem, model: [] }) instanceof type.errors).toBe(false);
-		expect(planMode.parameters({ ...baseItem, model: ["p/m"] }) instanceof type.errors).toBe(true);
+		expect(planSchema).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 
 		const ordinary = await TaskTool.create(createSession({ parentSpawns: "task,seance" }));
 		const ordinarySchema = JSON.stringify(ordinary.parameters.toJsonSchema());
 		expect(ordinarySchema).toContain('"sourceSession"');
-		expect(ordinary.parameters({ ...baseItem, model: [] }) instanceof type.errors).toBe(false);
-		expect(ordinary.parameters({ ...baseItem, model: ["p/m"] }) instanceof type.errors).toBe(false);
+		expect(ordinarySchema).toContain('"model"');
 		expect(ordinary.description).toContain("`seance`");
 		expect(ordinary.description).toContain("Historical consults");
 	});
 	afterEach(() => vi.restoreAllMocks());
-});
-
-describe("ordinary model wire schema", () => {
-	it("accepts only strings or empty arrays in static and dynamic provider schemas", () => {
-		for (const batchEnabled of [false, true]) {
-			for (const isolationEnabled of [false, true]) {
-				for (const structured of [false, true]) {
-					const schema = getTaskSchema({ batchEnabled, isolationEnabled, structured });
-					const wire = schema.toJsonSchema();
-					const properties = wire.properties;
-					if (!isRecord(properties)) throw new Error("missing schema properties");
-					let itemProperties = properties;
-					if (batchEnabled) {
-						const tasks = properties.tasks;
-						if (!isRecord(tasks) || !isRecord(tasks.items) || !isRecord(tasks.items.properties)) {
-							throw new Error("missing batch item properties");
-						}
-						itemProperties = tasks.items.properties;
-					}
-					const model = itemProperties.model;
-					expect(isJsonSchemaValueValid(model, "p/m")).toBe(true);
-					expect(isJsonSchemaValueValid(model, [])).toBe(true);
-					expect(isJsonSchemaValueValid(model, ["p/m"])).toBe(false);
-					expect(
-						tryEnforceStrictSchema({
-							type: "object",
-							properties: { model },
-							required: ["model"],
-							additionalProperties: false,
-						}).strict,
-					).toBe(true);
-				}
-			}
-		}
-	});
 });
 
 describe("task spawn validation", () => {

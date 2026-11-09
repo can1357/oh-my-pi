@@ -509,23 +509,30 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
+/** An exact `""` or `[]` model: a placeholder for "use the agent's routing", not a selector. */
+function isEmptyModelPlaceholder(model: unknown): boolean {
+	return model === "" || (Array.isArray(model) && model.length === 0);
+}
+
+/**
+ * Drop empty `model` placeholders from the call and its batch items so they
+ * route like an omitted model. Copy-on-write: the submitted arguments are
+ * never mutated, and the same reference is returned when nothing changed.
+ */
 function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
 	const originalTasks = params.tasks;
 	let normalizedTasks: TaskItem[] | undefined;
 	if (Array.isArray(originalTasks)) {
 		for (let i = 0; i < originalTasks.length; i++) {
 			const item = originalTasks[i];
-			if (!isRecord(item)) continue;
-			const model = item.model;
-			if (model !== "" && !(Array.isArray(model) && model.length === 0)) continue;
+			if (!isRecord(item) || !isEmptyModelPlaceholder(item.model)) continue;
 			normalizedTasks ??= originalTasks.slice();
 			const copy = { ...item };
 			delete copy.model;
 			normalizedTasks[i] = copy;
 		}
 	}
-	const model = params.model;
-	const emptyRootModel = model === "" || (Array.isArray(model) && model.length === 0);
+	const emptyRootModel = isEmptyModelPlaceholder(params.model);
 	if (!emptyRootModel && !normalizedTasks) return params;
 	const copy = { ...params };
 	if (emptyRootModel) delete copy.model;
@@ -925,6 +932,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
 		});
