@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.3] - 2026-11-09
+
 ### Changed
 
 - Added a `balanced` delegation bias between `eager` and `restrained`; models without a `delegation-bias` rule now resolve to it instead of `eager`
