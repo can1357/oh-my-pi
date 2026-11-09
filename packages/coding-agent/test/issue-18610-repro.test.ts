@@ -8,7 +8,7 @@ import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
-import { Settings } from "../src/config/settings";
+import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode } from "../src/modes/interactive-mode";
 import { AgentSession } from "../src/session/agent-session";
@@ -17,6 +17,7 @@ import { convertToLlm } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 
 test("a dismissed review cannot inject an approved plan after /plan pauses", async () => {
+	resetSettingsForTest();
 	initTheme();
 	const dir = TempDir.createSync("@pi-18610-");
 	const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
@@ -102,5 +103,6 @@ test("a dismissed review cannot inject an approved plan after /plan pauses", asy
 		auth.close();
 		dir.removeSync();
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 	}
 });
