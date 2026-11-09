@@ -106,6 +106,8 @@ export interface LoadOptions<T = unknown> {
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
 	excludeProviders?: string[];
+	/** Read providers regardless of their switch; settings discovery resolves switches from the discovered items. */
+	includeDisabledProviders?: boolean;
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
 	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */

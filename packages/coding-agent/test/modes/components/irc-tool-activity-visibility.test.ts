@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -105,6 +106,37 @@ describe("IRC tool activity visibility", () => {
 			expectCoordination(render(), true);
 		} finally {
 			builder.dispose();
+		}
+	});
+	it("shows a parent steer as an IRC card in the live transcript even when tool activity is hidden", () => {
+		const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
+		const helpers = new UiHelpers(ctx);
+		const body = "Please check the build";
+		const steer: UserMessage = {
+			role: "user",
+			content: '[Wait interrupted by message]\n<irc from="parent" agent="Main">\nPlease check the build\n</irc>',
+			parentIrc: { from: "Main", body },
+			attribution: "agent",
+			steering: true,
+			timestamp: Date.now(),
+		};
+		try {
+			ctx.chatContainer.setToolActivityVisible(false);
+			helpers.addMessageToChat(steer);
+			const card = ctx.chatContainer.children[0]?.describe?.({
+				cols: 120,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => false,
+			});
+			expect(card).toMatchObject({
+				k: "card",
+				p: { role: "omp.irc.incoming", head: [{ t: expect.stringContaining("Main") }] },
+			});
+			expect(card?.c).toContainEqual(expect.objectContaining({ k: "md", p: { text: body } }));
+		} finally {
+			ctx.chatContainer.dispose();
 		}
 	});
 });

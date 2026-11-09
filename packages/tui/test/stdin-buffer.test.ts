@@ -703,6 +703,34 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual(["\x1b[A", "\r", "x"]);
 		});
 
+		describe("Enter batched after the burst (issue #17820)", () => {
+			let enters: (string | undefined)[];
+
+			beforeEach(() => {
+				enters = [];
+				buffer.on("paste", (_data: string, enter?: string) => {
+					enters.push(enter);
+				});
+			});
+
+			it("submits a CR that follows LF-delimited text instead of pasting it as a newline", () => {
+				// An automation write plus its Enter, drained in one read by a
+				// startup stall before bracketed paste is confirmed.
+				processInput("line1\nline2\n\n- bullet a\n- bullet b\r");
+				expect(emittedPaste).toEqual(["line1\nline2\n\n- bullet a\n- bullet b"]);
+				expect(enters).toEqual(["\r"]);
+				expect(emittedSequences).toEqual([]);
+			});
+
+			it("keeps the final break of a CR-delimited paste inside the paste", () => {
+				// Terminals send every pasted newline as CR; a paste ending in a
+				// newline must not submit itself.
+				processInput("line 1\rline 2\rline 3\r");
+				expect(emittedPaste).toEqual(["line 1\rline 2\rline 3\r"]);
+				expect(enters).toEqual([undefined]);
+			});
+		});
+
 		describe("stall probe (issues #12540, #13344)", () => {
 			it("replays a stall-batched burst split across same-tick reads as keys", () => {
 				// A stalled loop can drain the pty backlog as several reads before the

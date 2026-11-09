@@ -105,7 +105,7 @@ pub enum Zp {
 }
 
 /// The names [`lookup`] knows.
-const NAMES: &[&[u8]] = &[
+pub(crate) const NAMES: &[&[u8]] = &[
 	b"BUFFER",
 	b"BUFFERLINES",
 	b"CONTEXT",

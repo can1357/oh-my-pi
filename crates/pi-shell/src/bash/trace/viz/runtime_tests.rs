@@ -852,3 +852,68 @@ async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
 	assert_eq!(running, pending, "running");
 	assert_eq!(chain_rows(&present(&trace, &Options::default())), pending, "finished");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn running_command_keeps_the_script_it_runs_active() {
+	// What a command runs is part of the command: while it runs, its heredoc
+	// and its untraced `sh -c` script must not dim like inactive rows.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = format!("while [ ! -e \"{}\" ]; do sleep 0.01; done", gate.display());
+	for command in [
+		format!("/bin/sh <<'EOF'\n{wait}\necho done\nEOF\necho after"),
+		format!("/bin/sh -c '{wait}\necho done'\necho after"),
+	] {
+		let _ = std::fs::remove_file(&gate);
+		let trace = Arc::new(RunTrace::new(command.as_str()));
+		let shell = Shell::new(None);
+		let run = shell.run(
+			ShellRunOptions {
+				command: command.clone(),
+				trace: Some(Arc::clone(&trace)),
+				..Default::default()
+			},
+			None,
+			().into(),
+		);
+		let probe = async {
+			loop {
+				let p = present(&trace, &Options::default());
+				if p["running"] == true {
+					let raw = present(&trace, &Options { view: View::Raw, ..Options::default() });
+					std::fs::write(&gate, []).unwrap();
+					return (p, raw);
+				}
+				tokio::task::yield_now().await;
+			}
+		};
+		let (result, (running, raw)) =
+			tokio::time::timeout(std::time::Duration::from_secs(10), async {
+				tokio::join!(run, probe)
+			})
+			.await
+			.unwrap();
+		assert_eq!(result.unwrap().exit_code, Some(0));
+		let shown = rows(&running);
+		let script: Vec<&(String, &Value)> = shown
+			.iter()
+			.filter(|(_, row)| row["depth"].as_u64() > Some(0))
+			.collect();
+		assert!(script.len() >= 3, "{command:?}: {running}");
+		assert!(script.iter().all(|(_, row)| row["active"] == true), "{command:?}: {running}");
+		let (_, after) = shown.last().unwrap();
+		assert_ne!(after["active"], true, "{command:?}: {running}");
+		// Raw: every source line of the command, through a heredoc's
+		// delimiter, runs; the next command does not.
+		let lines = rows(&raw);
+		let (after, command_lines) = lines.split_last().unwrap();
+		assert!(command_lines.iter().all(|(_, row)| row["active"] == true), "{command:?}: {raw}");
+		assert_ne!(after.1["active"], true, "{command:?}: {raw}");
+		let finished = present(&trace, &Options::default());
+		assert!(
+			rows(&finished).iter().all(|(_, row)| row["active"] != true),
+			"{command:?}: {finished}"
+		);
+	}
+}

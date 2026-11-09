@@ -1,4 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../../config/settings";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
 import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
@@ -8,7 +9,19 @@ import type { ToolSession } from "../../sdk";
 import browserJavascript from "./prelude.js" with { type: "text" };
 import browserPython from "./prelude.py" with { type: "text" };
 import type { BrowserKind } from "./registry";
-import { cfgBrowserEnabled } from "./settings";
+import { isLoopbackRelayUrl } from "./relay/daemon";
+import { cfgBrowserCdpUrl, cfgBrowserEnabled, cfgBrowserRelayUrl } from "./settings";
+
+/**
+ * The browser eval documentation. Its Linux X11 notes follow the browser's host: they reach agents on Linux, and
+ * elsewhere when a configured browser (`browser.cdpUrl`, `browser.relayUrl`) is on another machine, which may be Linux.
+ */
+export function browserDocumentation(settings: Settings, platform: NodeJS.Platform = process.platform): string {
+	const remoteBrowser = [cfgBrowserCdpUrl.get(settings), cfgBrowserRelayUrl.get(settings)].some(
+		url => typeof url === "string" && url.trim() !== "" && !isLoopbackRelayUrl(url.trim()),
+	);
+	return prompt.render(browserDescription, { linux: platform === "linux" || remoteBrowser });
+}
 
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
@@ -21,7 +34,10 @@ export function createBrowserPreludeDefinition(
 	const fallback = host.relayFallback;
 	return {
 		name: "browser",
-		documentation: browserDescription,
+		// Read per use: the definition is built once per session, while the browser settings it follows can change.
+		get documentation() {
+			return browserDocumentation(session.settings);
+		},
 		guidance: fallback
 			? prompt.render(relayGuidance, {
 					// The block reaches the model provider: never echo userinfo or token params.

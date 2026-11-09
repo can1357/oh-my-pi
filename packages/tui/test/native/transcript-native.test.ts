@@ -13,6 +13,7 @@ import { LateDiagnosticsMessageComponent } from "@oh-my-pi/pi-tui/chat/late-diag
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { setInternalUrlSchemeHost } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { buildAsyncResultBlock, buildFileMentionBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
@@ -87,6 +88,96 @@ function toolTranscript(): TranscriptEntryLike[] {
 				toolCallId: "call-1",
 				toolName: "lookup_thing",
 				content: [{ type: "text", text: Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n") }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: a tool call whose wire name aliases a canonical registry entry. */
+function aliasToolTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([{ type: "toolCall", id: "call-1", name: "shell", arguments: { command: "ls -la" } }]),
+		},
+		{
+			type: "message",
+			id: "r1",
+			parentId: "a1",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "shell",
+				content: [{ type: "text", text: "file-a\nfile-b" }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: an aliased write call whose target is a reply-scoped out:// URL. */
+function aliasReplyWriteTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([
+				{
+					type: "toolCall",
+					id: "call-1",
+					name: "xd://write",
+					arguments: { path: "out://final", content: "Rebuild answer: 42" },
+				},
+			]),
+		},
+		{
+			type: "message",
+			id: "r1",
+			parentId: "a1",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "xd://write",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: an aliased read call plus its result as a separate message. */
+function aliasReadTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a2",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([
+				{ type: "toolCall", id: "call-2", name: "xd://read", arguments: { path: "/tmp/rebuild-target.ts" } },
+			]),
+		},
+		{
+			type: "message",
+			id: "r2",
+			parentId: "a2",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-2",
+				toolName: "xd://read",
+				content: [{ type: "text", text: "const rebuilt = true;\n" }],
 				isError: false,
 				timestamp: 2,
 			},
@@ -420,6 +511,91 @@ describe("native transcript", () => {
 		const h = await startWith(h => h.tui.addChild(new PresentedBlock(new PaintedRows(), messageBlock(message))));
 		const rows = h.find(node => node.k === "rows");
 		expect(JSON.stringify(rows?.p)).toContain("PAINTED-ROW");
+	});
+
+	it("renders an aliased wire-named tool call through the canonical renderer", async () => {
+		const bashTool = {
+			name: "bash",
+			label: "Bash",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "shell" ? bashTool : undefined),
+				isBuiltInTool: name => name === "bash",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasToolTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The wire name never keys the card; the canonical registry name does.
+		expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.shell")).toBeUndefined();
+		const card = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.bash");
+		expect(card?.p).toMatchObject({ name: "bash", status: "done" });
+		// The canonical bash renderer described the call; the generic fallback would not.
+		expect(h.find(node => node.k === "code" && node.p?.role === "omp.tool.bash.command")?.p).toMatchObject({
+			text: "ls -la",
+		});
+		expect(h.errors).toEqual([]);
+	});
+
+	it("rebuilds an aliased reply-scoped write as prose, not a tool card", async () => {
+		setInternalUrlSchemeHost({
+			spec: scheme => (scheme === "out" ? { selectors: "none", write: { scope: "reply" } } : undefined),
+			specs: () => new Map([["out", { selectors: "none", write: { scope: "reply" } }]]),
+		});
+		const writeTool = {
+			name: "write",
+			label: "Write",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "xd://write" ? writeTool : undefined),
+				isBuiltInTool: name => name === "write",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasReplyWriteTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The wire name resolves to canonical `write`, so the reply-scoped target
+		// draws as assistant prose; a tool card would mean the reply-write check
+		// never saw the canonical name.
+		expect(h.find(node => node.k === "tool")).toBeUndefined();
+		expect(h.find(node => node.k === "md")?.p).toMatchObject({ text: "Rebuild answer: 42" });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps an aliased read result in the collapsed read group", async () => {
+		const readTool = {
+			name: "read",
+			label: "Read",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "xd://read" ? readTool : undefined),
+				isBuiltInTool: name => name === "read",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasReadTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The result resolved to canonical `read`, so the group materializes and
+		// settles (one file renders as the group's inline read row); a wire-name
+		// check would discard the result with no read node at all.
+		const group = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.read");
+		expect(group?.p).toMatchObject({ status: "done", collapsible: false });
+		expect(h.errors).toEqual([]);
 	});
 
 	it("mirrors a native toggle into the tool card and re-collapses it on a transcript-wide collapse", async () => {

@@ -82,6 +82,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.rm"] "rm" rm::Rm;
 			utility [feature = "util.rmdir"] "rmdir" rmdir::Rmdir;
 			utility [all(feature = "util.rsync", any(unix, windows))] "rsync" rsync::Rsync;
+			utility [feature = "util.sd"] "sd" sd::Sd;
 			utility [feature = "util.sed"] "sed" sed::Sed;
 			utility [feature = "util.seq"] "seq" seq::Seq;
 			utility [feature = "util.sha1sum"] "sha1sum" sha1sum::Sha1sum;
