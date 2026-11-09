@@ -352,6 +352,7 @@ export class EventController {
 	#dispatchTail: Promise<void> = Promise.resolve();
 	/** Whether a chained run is currently in flight (awaiting its own awaits). */
 	#dispatchInFlight = false;
+	#dispatchGeneration = 0;
 	// Deltas already fed to speech at arrival by the coalescer. `#handleMessageUpdate`
 	// also vocalizes so the direct `handleEvent` path (tests, session focus replay)
 	// keeps working — the WeakSet makes the coalesced path speak each delta exactly
@@ -907,9 +908,21 @@ export class EventController {
 			this.#enqueueMessageUpdate(event);
 			return;
 		}
+		await this.runSerialized(async () => {
+			await this.handleEvent(event);
+		});
+	}
+
+	/**
+	 * Run `run` in the serialized session-event dispatch pipeline, flushing any
+	 * pending coalesced `message_update` first. This does not drop work when the
+	 * viewed session changes: a caller that queues across that change must skip
+	 * the stale work itself.
+	 */
+	async runSerialized(run: () => Promise<void>): Promise<void> {
 		await this.#runSerialized(async () => {
 			await this.#flushPendingMessageUpdate();
-			await this.handleEvent(event);
+			await run();
 		});
 	}
 
@@ -1046,6 +1059,7 @@ export class EventController {
 		}
 		this.#pendingMessageUpdate = undefined;
 		this.#pendingMessageRestart = false;
+		this.#dispatchGeneration++;
 		this.#resetReadGroup();
 		this.#lastVisibleBlockCount = 0;
 		this.#renderedCustomMessages.clear();
@@ -1090,6 +1104,9 @@ export class EventController {
 	#seedHeldCompletionsFromPendingResults(): void {
 		const pending = this.ctx.viewSession.agent.getPendingToolResults();
 		for (const result of pending) {
+			if (this.#toolTimelineComponents.has(result.toolCallId) && !this.ctx.pendingTools.has(result.toolCallId)) {
+				continue;
+			}
 			this.#orphanedToolCompletions.set(result.toolCallId, {
 				type: "tool_execution_end",
 				toolCallId: result.toolCallId,
@@ -1859,6 +1876,7 @@ export class EventController {
 			}
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			const generation = this.#dispatchGeneration;
 			this.ctx.streamingMessage = event.message;
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();
@@ -1888,6 +1906,7 @@ export class EventController {
 				: this.ctx.streamingMessage;
 			const displayTimeline = splitAssistantMessageToolTimeline(displayMessage);
 			const linkTargets = await refreshAssistantMessageLinkTargets(this.ctx, [displayMessage]);
+			if (generation !== this.#dispatchGeneration || !this.ctx.streamingComponent) return;
 			if (!this.ctx.streamingComponent.isTranscriptBlockFinalized()) {
 				this.ctx.streamingComponent.setLinkTargets(
 					assistantMessageLinkTargets(displayTimeline.beforeTools, linkTargets),
@@ -2038,7 +2057,7 @@ export class EventController {
 			setRunStatus(blocked);
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
-		if (!this.ctx.pendingTools.has(event.toolCallId)) {
+		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
 			if (stale) {
 				this.#priorTurnToolComponents.delete(event.toolCallId);
@@ -2049,13 +2068,11 @@ export class EventController {
 			}
 			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
-				if (!this.#toolTimelineComponents.has(event.toolCallId)) {
-					const group = this.#getReadGroup();
-					group.updateArgs(event.args, event.toolCallId);
-					this.ctx.pendingTools.set(event.toolCallId, group);
-					this.#toolTimelineComponents.set(event.toolCallId, group);
-					this.#settleHeldCompletionIfPresent(event.toolCallId, group);
-				}
+				const group = this.#getReadGroup();
+				group.updateArgs(event.args, event.toolCallId);
+				this.ctx.pendingTools.set(event.toolCallId, group);
+				this.#toolTimelineComponents.set(event.toolCallId, group);
+				this.#settleHeldCompletionIfPresent(event.toolCallId, group);
 				this.#startToolApprovalPreview(event.toolCallId);
 				this.ctx.ui.requestRender();
 				return;
@@ -2094,8 +2111,15 @@ export class EventController {
 			// authoritative args here and drop any live reveal so a late tick can't
 			// re-truncate them: tool_execution_start is the one event every
 			// execution path emits with the full args immediately before the result.
+			// Also reuses a card already settled in `#toolTimelineComponents` (when
+			// `restoreAssistant` consumed a buffered result ahead of a queued start).
 			this.#toolArgsReveal.finish(event.toolCallId);
-			const component = this.ctx.pendingTools.get(event.toolCallId);
+			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
+				this.#trackReadToolCall(event.toolCallId, event.args);
+			}
+			const component =
+				this.ctx.pendingTools.get(event.toolCallId) ??
+				(this.#toolTimelineComponents.get(event.toolCallId) as ToolExecutionHandle | undefined);
 			if (component && typeof component.updateArgs === "function") {
 				component.updateArgs(renderArgsWithIntent(event.args, event.intent), event.toolCallId);
 				if (typeof component.setArgsComplete === "function") {

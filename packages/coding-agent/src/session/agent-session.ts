@@ -10602,6 +10602,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			normalizedAppMessage.display,
 			normalizedAppMessage.details,
 			normalizedAppMessage.attribution,
+			// Its own timestamp, as `#persistMessageEnd` keeps one: a view rebuilt while its events are
+			// queued matches the entry to them by it.
+			normalizedAppMessage.timestamp,
 		);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive

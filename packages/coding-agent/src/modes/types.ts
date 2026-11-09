@@ -138,6 +138,16 @@ export interface RenderSessionContextOptions {
 	preservedLiveToolCallIds?: ReadonlySet<string>;
 }
 
+export interface RenderInitialMessagesOptions {
+	preserveExistingChat?: boolean;
+	clearTerminalHistory?: boolean;
+	/**
+	 * Called synchronously, once, with the session context the committed transcript was built from.
+	 * Not called when a newer replay supersedes this one.
+	 */
+	onCommit?: (context: SessionContext) => void;
+}
+
 /** How {@link InteractiveModeContext.showStatus} shows a notice. */
 export interface ShowStatusOptions {
 	/** Dims the ANSI line (default true). */
@@ -536,7 +546,7 @@ export interface InteractiveModeContext {
 		options: RenderSessionContextOptions,
 		renderChunk?: () => void,
 	): Promise<void>;
-	renderInitialMessages(options?: { preserveExistingChat?: boolean; clearTerminalHistory?: boolean }): Promise<void>;
+	renderInitialMessages(options?: RenderInitialMessagesOptions): Promise<void>;
 	/**
 	 * In-place transcript rewind: drop the rendered components at/after
 	 * `message` when none of their rows reached native scrollback. Returns

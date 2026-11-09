@@ -71,6 +71,7 @@ import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
 	CompactionQueuedMessage,
 	InteractiveModeContext,
+	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
 } from "../../modes/types";
@@ -115,11 +116,6 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
-
-interface RenderInitialMessagesOptions {
-	preserveExistingChat?: boolean;
-	clearTerminalHistory?: boolean;
-}
 
 const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
 const TRANSCRIPT_RENDER_CHUNK_MS = 8;
@@ -1239,6 +1235,7 @@ export class UiHelpers {
 				}
 			}
 			committed = true;
+			options.onCommit?.(context);
 
 			// Show compaction info if session was compacted.
 			const allEntries = this.ctx.viewSession.sessionManager.getEntries();
