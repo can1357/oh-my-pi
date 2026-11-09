@@ -94,6 +94,8 @@ export type FormBlock =
 export interface FormSection {
 	title: FormSpan[];
 	blocks: FormBlock[];
+	/** A top-level `<fieldset>`, legend or not; `false` for loose content between fieldsets. */
+	fieldset: boolean;
 }
 
 /** A parsed form: what to draw, the fields in document order, and `<input type="hidden">` pairs. */
@@ -214,7 +216,7 @@ class FormBuilder {
 	readonly #groups = new Map<string, ChoiceField>();
 	/** `<label for>` elements by the id of the control they name. */
 	readonly #labelFor = new Map<string, Element>();
-	#section: FormSection = { title: [], blocks: [] };
+	#section: FormSection = { title: [], blocks: [], fieldset: false };
 	#inline: FormSpan[] = [];
 	#fieldsetDepth = 0;
 
@@ -374,7 +376,7 @@ class FormBuilder {
 			// Nested fieldsets stay in the outer section; their legend becomes a heading.
 			if (legend) this.#walk(legend, undefined);
 		} else {
-			this.#startSection(legend ? this.#spansOf(legend) : []);
+			this.#startSection(legend ? this.#spansOf(legend) : [], true);
 		}
 		this.#fieldsetDepth++;
 		for (const child of fieldset.childNodes) {
@@ -382,15 +384,16 @@ class FormBuilder {
 		}
 		this.#flush(false);
 		this.#fieldsetDepth--;
-		if (this.#fieldsetDepth === 0) this.#startSection([]);
+		if (this.#fieldsetDepth === 0) this.#startSection([], false);
 	}
 
-	#startSection(title: FormSpan[]): void {
+	#startSection(title: FormSpan[], fieldset: boolean): void {
 		if (this.#section.blocks.length === 0 && this.#section.title.length === 0) {
 			this.#section.title = title;
+			this.#section.fieldset = fieldset;
 			return;
 		}
-		this.#section = { title, blocks: [] };
+		this.#section = { title, blocks: [], fieldset };
 		this.#sections.push(this.#section);
 	}
 

@@ -440,6 +440,56 @@ describe("html form", () => {
 			}
 		});
 
+		it("natively: each question after the fieldsets gets its own tab, with the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label><label><input type="radio" name="length" value="long"> Long</label></fieldset>
+				<fieldset><legend>Languages</legend><label><input type="checkbox" name="languages" value="ts"> TypeScript</label><label><input type="checkbox" name="languages" value="py"> Python</label></fieldset>
+				<label>Editor <select name="editor"><option value="vscode">VS Code</option><option value="zed">Zed</option></select></label>
+				<p>How urgent is it?</p>
+				<label>Priority <input type="number" name="priority" value="3"></label>
+			</form>`);
+			/** Texts of the shown tab; `<priority>` marks the Priority input's well. */
+			const shownTexts = (): string[] => {
+				const texts: string[] = [];
+				const visit = (node: NativeNode): void => {
+					const p = node.p as { spans?: { t: string }[]; actions?: { click?: string } } | undefined;
+					if (node.k === "text" && p?.spans) texts.push(p.spans.map(item => item.t).join(""));
+					if (p?.actions?.click === "edit:3") texts.push("<priority>");
+					for (const child of node.c ?? []) if (isNode(child)) visit(child);
+				};
+				visit(form.describe(CX));
+				return texts;
+			};
+			const root = form.describe(CX);
+			const tabs = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			const editorTab = shownTexts();
+			expect(editorTab).toContain("Editor");
+			expect(editorTab).not.toContain("<priority>");
+			expect(editorTab).not.toContain("How urgent is it?");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
+			const priorityTab = shownTexts();
+			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
+			expect(priorityTab).not.toContain("Editor");
+		});
+
+		it("natively: a fieldset without a legend stays one tab", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<fieldset><label>Name <input name="name"></label><label>Email <input name="email"></label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+		});
+
 		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
 			const options = Array.from({ length: 40 }, (_, index) => `<option value="${index}">Option ${index}</option>`);
 			const { form } = dialog(

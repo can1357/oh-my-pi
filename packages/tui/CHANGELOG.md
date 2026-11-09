@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

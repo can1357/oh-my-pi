@@ -8,8 +8,9 @@
  * ({@link paginate}) at section boundaries where possible; focus drives the
  * visible page, so moving past a page's last control turns the page. A native
  * (Tern) terminal gets the form described semantically instead: one tab per
- * question (a top-level `<fieldset>`; context before it rides along) plus a
- * Review tab, the tab's content in a column the terminal scrolls, and an
+ * question (a top-level `<fieldset>`, or a field of loose content between
+ * fieldsets; context before it rides along) plus a Review tab, the tab's
+ * content in a column the terminal scrolls, and an
  * action bar that stays in view below it, with Submit on the last question
  * tab and on Review. Clicks come back through
  * {@link HtmlFormDialog.handleNativeEvent}.
@@ -162,10 +163,17 @@ interface Layout {
 	dropdown?: { atom: number; row: number };
 }
 
-/** A native question tab: indices of the sections it shows, and the fields in them. */
+/** Blocks `start` up to `end` (exclusive) of one form section. */
+interface TabPart {
+	section: number;
+	start: number;
+	end: number;
+}
+
+/** A native question tab: the section parts it shows, and the fields in them. */
 interface FormTab {
 	label: string;
-	sections: number[];
+	parts: TabPart[];
 	fields: FormField[];
 }
 
@@ -227,30 +235,47 @@ function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
 /**
  * Native question tabs: one per section holding fields, labeled by its legend
  * (else its first field's question). Sections of context alone join the next
- * tab, or the last one when nothing follows.
+ * tab, or the last one when nothing follows. In a form with two or more such
+ * tabs, loose content between fieldsets gets one tab per field, each with the
+ * context before it, so a question outside a `<fieldset>` does not share the
+ * tab of the question before it.
  */
 function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): FormTab[] {
+	const tabbed = form.sections.filter(section => section.blocks.some(block => block.kind === "field")).length > 1;
 	const tabs: FormTab[] = [];
-	let lead: number[] = [];
+	let lead: TabPart[] = [];
 	form.sections.forEach((section, index) => {
-		const fields = section.blocks.flatMap(block => (block.kind === "field" ? [block.field] : []));
-		if (fields.length === 0) {
-			lead.push(index);
+		const end = section.blocks.length;
+		if (!section.blocks.some(block => block.kind === "field")) {
+			lead.push({ section: index, start: 0, end });
 			return;
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
-		const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
-		tabs.push({
-			label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
-			sections: [...lead, index],
-			fields,
-		});
-		lead = [];
+		// Where each tab of this section ends: after each loose field, the last one at the section's end.
+		const cuts =
+			tabbed && !section.fieldset
+				? section.blocks.flatMap((block, at) => (block.kind === "field" ? [at + 1] : []))
+				: [end];
+		cuts[cuts.length - 1] = end;
+		let start = 0;
+		for (const cut of cuts) {
+			const fields = section.blocks
+				.slice(start, cut)
+				.flatMap(block => (block.kind === "field" ? [block.field] : []));
+			const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
+			tabs.push({
+				label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
+				parts: [...lead, { section: index, start, end: cut }],
+				fields,
+			});
+			lead = [];
+			start = cut;
+		}
 	});
 	if (lead.length > 0) {
 		const last = tabs.at(-1);
-		if (last) last.sections.push(...lead);
-		else tabs.push({ label: "", sections: lead, fields: [] });
+		if (last) last.parts.push(...lead);
+		else tabs.push({ label: "", parts: lead, fields: [] });
 	}
 	return tabs;
 }
@@ -1477,7 +1502,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (review) {
 			children.push(...this.#describeReview());
 		} else {
-			const form = col(this.#describeSections(this.#tabs[this.#tab]?.sections ?? []), {
+			const form = col(this.#describeParts(this.#tabs[this.#tab]?.parts ?? []), {
 				gap: "lg",
 				role: "omp.ask.form",
 			});
@@ -1519,13 +1544,14 @@ export class HtmlFormDialog implements Component, Focusable {
 		return keyed(row([tabs], { role: "omp.ask.head", align: "center" }), "head");
 	}
 
-	#describeSections(sections: readonly number[]): NativeChild[] {
-		return sections.map(index => {
+	#describeParts(parts: readonly TabPart[]): NativeChild[] {
+		return parts.map(({ section: index, start, end }) => {
 			const section = this.#form.sections[index]!;
-			const blocks = section.blocks.map(block => this.#describeBlock(block));
+			const blocks = section.blocks.slice(start, end).map(block => this.#describeBlock(block));
+			const key = start === 0 ? `s${index}` : `s${index}.${start}`;
 			return section.title.length > 0
-				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, `s${index}`)
-				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), `s${index}`);
+				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, key)
+				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), key);
 		});
 	}
 
