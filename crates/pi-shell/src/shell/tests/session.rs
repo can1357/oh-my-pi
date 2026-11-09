@@ -1014,6 +1014,80 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	assert!(shell.pids().is_empty(), "pids cleared once the run returns");
 }
 
+/// A fork taken while a command runs starts from the state that command
+/// started from (variables, functions, cwd), without waiting for it; what the
+/// fork sets stays in the fork; sibling forks draw different `$RANDOM`s.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_starts_from_the_state_before_the_running_command() {
+	async fn run(shell: &Shell, command: &str) -> String {
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		rx.drain().collect()
+	}
+
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("scratch directory");
+	let dir_path = dir.path().canonicalize().expect("canonical dir");
+	let started = dir_path.join("started");
+	let gate = dir_path.join("gate");
+	let shell = Arc::new(Shell::new(None));
+	run(
+		&shell,
+		&format!(
+			"PI_FORK_VAR=before; pi_fork_fn() {{ printf 'fn:%s' \"$1\"; }}; cd {}; RANDOM=7",
+			quote_arg(&dir_path.to_string_lossy())
+		),
+	)
+	.await;
+
+	let owner = tokio::spawn({
+		let shell = shell.clone();
+		let command = format!(
+			"PI_FORK_VAR=during; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
+			quote_arg(&started.to_string_lossy()),
+			quote_arg(&gate.to_string_lossy())
+		);
+		async move { run(&shell, &command).await }
+	});
+	time::timeout(Duration::from_secs(5), async {
+		while !started.exists() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("owner command never started");
+
+	let fork = shell.fork();
+	let seen = time::timeout(
+		Duration::from_secs(5),
+		run(
+			&fork,
+			"printf '%s|%s|%s' \"$PI_FORK_VAR\" \"$(pi_fork_fn x)\" \"$PWD\"; PI_FORK_VAR=fork",
+		),
+	)
+	.await
+	.expect("fork waited for the running command");
+	assert_eq!(seen, format!("before|fn:x|{}", dir_path.display()));
+	let random = "echo $RANDOM $RANDOM $RANDOM";
+	assert_ne!(run(&shell.fork(), random).await, run(&shell.fork(), random).await);
+
+	fs::write(&gate, "").expect("open gate");
+	time::timeout(Duration::from_secs(5), owner)
+		.await
+		.expect("owner finishes")
+		.expect("owner task");
+	assert_eq!(run(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn segmented_minimizer_trace_spans_submissions_without_early_completion() {

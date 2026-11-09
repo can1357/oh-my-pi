@@ -531,9 +531,8 @@ interface BashProgressDetails extends BashToolDetails {
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
 
-/** Shown when a call overlapped another one (parallel or backgrounded) and could not use the session's shell. */
-const SESSION_SHELL_BUSY_NOTICE =
-	"Ran in a temporary shell while the session shell is busy with another command: session variables and functions were unavailable, and nothing set here persists.";
+/** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
+const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";

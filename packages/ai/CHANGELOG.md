@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.

@@ -9,8 +9,9 @@ pub mod types;
 pub use types::{InlineSloppyRegion, SloppySection};
 
 use self::{
-	apply::{ApplyContext, apply_sloppy},
+	apply::{Applied, ApplyContext, apply_sloppy, join_failures, remessage},
 	parse::split_sloppy_sections,
+	types::PARTIAL_NOTICE,
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
@@ -109,7 +110,7 @@ impl ModeEngine for SloppyEngine {
 					canonical: &read.canonical,
 					streaming,
 				}) {
-					Ok(after) => {
+					Ok(Applied::Changed { text: after, .. }) => {
 						let output =
 							generate_diff_string(&read.text, &after, None, &BlockContextSource {
 								path: Some(&read.resolved.display),
@@ -124,8 +125,8 @@ impl ModeEngine for SloppyEngine {
 							..PreviewFile::default()
 						})
 					},
-					Err(_) if streaming => None,
-					Err(error) => Some(PreviewFile {
+					Ok(Applied::Unchanged(_)) | Err(_) if streaming => None,
+					Ok(Applied::Unchanged(error)) | Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
 						error: Some(error.to_string()),
 						op: Some(FileOp::Update),
@@ -152,6 +153,7 @@ impl ModeEngine for SloppyEngine {
 		}
 		let multi_file = sections.len() > 1;
 		let mut staged = Vec::with_capacity(sections.len());
+		let mut unchanged = Vec::new();
 		for section in sections {
 			let read = files.read(&section.path).map_err(|error| {
 				// An unresolved internal URL stays typed so the host can
@@ -163,7 +165,8 @@ impl ModeEngine for SloppyEngine {
 				}
 			})?;
 			let mut notes = Vec::new();
-			let after = apply_sloppy(&read.text, &section.body, ApplyContext {
+			// A section that does not parse fails the whole payload.
+			let applied = apply_sloppy(&read.text, &section.body, ApplyContext {
 				path: &read.resolved.display,
 				notes: &mut notes,
 				store,
@@ -177,12 +180,6 @@ impl ModeEngine for SloppyEngine {
 					error
 				}
 			})?;
-			let persisted = read.persist(&after)?;
-			let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
-				path:      Some(&read.resolved.display),
-				lang:      None,
-				streaming: false,
-			});
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),
 				read.resolved.absolute.clone(),
@@ -190,14 +187,43 @@ impl ModeEngine for SloppyEngine {
 			);
 			file.before_raw = Some(read.raw.clone());
 			file.before.clone_from(&read.text);
-			file.after = after;
-			file.persisted = Some(persisted);
-			file.diff = output.diff;
-			file.first_changed_line = output.first_changed_line;
-			file.after_preview = notes;
+			match applied {
+				Applied::Changed { text, rejected } => {
+					let output = generate_diff_string(&read.text, &text, None, &BlockContextSource {
+						path:      Some(&read.resolved.display),
+						lang:      None,
+						streaming: false,
+					});
+					file.persisted = Some(read.persist(&text)?);
+					file.after = text;
+					file.diff = output.diff;
+					file.first_changed_line = output.first_changed_line;
+					file.after_preview = notes;
+					file
+						.after_preview
+						.extend(rejected.map(|error| format!("{PARTIAL_NOTICE}\n{error}")));
+				},
+				Applied::Unchanged(error) => {
+					file.op = FileOp::Noop;
+					file.after.clone_from(&read.text);
+					file
+						.after_preview
+						.push(format!("{PARTIAL_NOTICE}\n{error}"));
+					unchanged.push(if multi_file {
+						remessage(error, |message| format!("[{}]: {message}", read.resolved.display))
+					} else {
+						error
+					});
+				},
+			}
 			staged.push(file);
 		}
-		Ok(staged)
+		let changed = staged.iter().any(|file| file.op != FileOp::Noop);
+		match join_failures(unchanged) {
+			// No file changed: the call fails with every file's rejections.
+			Some(error) if !changed => Err(error),
+			_ => Ok(staged),
+		}
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {

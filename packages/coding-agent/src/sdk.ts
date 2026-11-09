@@ -4408,8 +4408,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,
 				// Spotlight ranks output against the call's intent: experiment sessions ask what each call's output is for.
 				intentGuidance: spotlightExperiment ? SPOTLIGHT_INTENT_GUIDANCE : undefined,
-				eagerTasks: cfgTaskEager.get(settings) !== "default",
-				eagerTasksAlways: cfgTaskEager.get(settings) === "always",
+				// task.eager steers the top-level agent only; subagents keep the model's own delegation policy.
+				eagerTasks: agentKind === "main" && cfgTaskEager.get(settings) !== "default",
+				eagerTasksAlways: agentKind === "main" && cfgTaskEager.get(settings) === "always",
 				taskBatch: cfgTaskBatch.get(settings),
 				taskMaxConcurrency: cfgTaskMaxConcurrency.get(settings),
 				scoutAvailable: isScoutSpawnable(cfgTaskDisabledAgents.get(settings), options.spawns ?? "*"),

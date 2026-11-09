@@ -259,6 +259,10 @@ impl File for StreamFile {
 		self.with(None, |f| f.os_handle())
 	}
 
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.with(None, |f| f.os_output_handle())
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		// Share the generation, not a duplicate OS handle: clear closes the
 		// run's pipe even while a background job retains this file.
@@ -707,7 +711,7 @@ impl crate::bash::Host for PiHost {
 	}
 
 	fn user(&self) -> UserInfo {
-		self.user.get_or_init(read_user).clone()
+		self.user.get_or_init(crate::sys::user::read_user).clone()
 	}
 
 	fn umask(&self) -> u32 {
@@ -929,48 +933,4 @@ impl Drop for RuntimeTimer {
 	fn drop(&mut self) {
 		self.task.abort();
 	}
-}
-
-/// The current user: ids, groups, and `USER`/`HOME` (`USERNAME`/
-/// `USERPROFILE` on Windows) of the process environment.
-fn read_user() -> UserInfo {
-	let var = |k: &str| {
-		std::env::var_os(k).map_or_else(BString::default, |v| BString::from(v.as_encoded_bytes()))
-	};
-	#[cfg(unix)]
-	// SAFETY: getuid/geteuid/getgid have no preconditions.
-	let (uid, euid, gid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getgid()) };
-	#[cfg(not(unix))]
-	let (uid, euid, gid) = (0, 0, 0);
-	let (name, home) = if cfg!(windows) {
-		(var("USERNAME"), var("USERPROFILE"))
-	} else {
-		(var("USER"), var("HOME"))
-	};
-	UserInfo { uid, euid, gid, groups: groups(), name, home }
-}
-
-/// The process's supplementary group ids (`GROUPS`); empty where the
-/// platform has none or `getgroups` fails.
-#[cfg_attr(
-	not(unix),
-	expect(clippy::missing_const_for_fn, reason = "the unix body calls getgroups")
-)]
-fn groups() -> Vec<u32> {
-	#[cfg(unix)]
-	{
-		// SAFETY: a zero count with a null pointer only asks for the count.
-		let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-		let Ok(len) = usize::try_from(n) else {
-			return Vec::new();
-		};
-		let mut ids: Vec<libc::gid_t> = vec![0; len];
-		// SAFETY: `ids` has room for `n` entries; getgroups writes at most
-		// that many and returns how many it wrote.
-		let got = unsafe { libc::getgroups(n, ids.as_mut_ptr()) };
-		ids.truncate(usize::try_from(got).unwrap_or(0));
-		ids
-	}
-	#[cfg(not(unix))]
-	Vec::new()
 }

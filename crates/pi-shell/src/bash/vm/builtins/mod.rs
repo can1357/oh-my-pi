@@ -31,7 +31,7 @@ mod test;
 pub mod trap;
 mod vars;
 pub mod zsh_args;
-mod zsh_dir;
+pub(crate) mod zsh_dir;
 pub mod zsh_jobs;
 mod zsh_kill;
 mod zsh_mod_attr;

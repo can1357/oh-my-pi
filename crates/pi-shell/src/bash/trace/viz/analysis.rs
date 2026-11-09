@@ -963,6 +963,52 @@ fn secret_name(name: &str) -> bool {
 		.any(|suffix| upper.ends_with(suffix))
 }
 
+/// Whether an `sd` command line rewrites files in place: it names files after
+/// `FIND` and `REPLACE_WITH` and does not ask for `-p`/`--preview`. `words` is
+/// the argv after `sd`, `None` where a word expands at run time; such a word
+/// counts as an operand, so a dynamic file list still reads as a write.
+fn sd_edits_files(words: impl IntoIterator<Item = Option<String>>) -> bool {
+	let mut words = words.into_iter();
+	let mut operands = 0;
+	let mut options = true;
+	while let Some(word) = words.next() {
+		let Some(word) = word.filter(|word| options && word.len() > 1 && word.starts_with('-'))
+		else {
+			operands += 1;
+			continue;
+		};
+		if word == "--" {
+			options = false;
+		} else if let Some(long) = word.strip_prefix("--") {
+			match long {
+				"preview" => return false,
+				// `--flags=i` carries its value; the bare form takes the next word.
+				"max-replacements" | "flags" => {
+					words.next();
+				},
+				_ => {},
+			}
+		} else {
+			// A short cluster (`-pF`, `-n1`, `-fi`): `-n`/`-f` take the rest of
+			// the cluster as their value, or the next word when nothing is left.
+			let cluster = &word[1..];
+			for (at, flag) in cluster.char_indices() {
+				match flag {
+					'p' => return false,
+					'n' | 'f' => {
+						if at + 1 == cluster.len() {
+							words.next();
+						}
+						break;
+					},
+					_ => {},
+				}
+			}
+		}
+	}
+	operands > 2
+}
+
 fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>) -> Vec<Effect> {
 	let mut result = Vec::new();
 	let simple = match call.command.kind() {
@@ -1019,6 +1065,8 @@ fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>)
 	}
 	if matches!(name.as_str(), "mkdir" | "touch" | "cp" | "mv" | "ln" | "tee" | "install")
 		|| (name == "sed" && args.iter().any(|arg| arg.starts_with("-i")))
+		|| (name == "sd"
+			&& simple.is_some_and(|simple| sd_edits_files(simple.words().iter().skip(1).map(literal))))
 		|| (name == "git"
 			&& has(&[
 				"add",

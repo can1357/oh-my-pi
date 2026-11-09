@@ -1173,7 +1173,10 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 		return Ok(0);
 	}
 	let fpath = ctx.scalar(b"FPATH")?;
-	let fpath = crate::bash::vm::command::fpath_dirs(fpath.as_ref().map(|s| s.as_slice()));
+	let fpath = crate::bash::vm::command::fpath_dirs(
+		fpath.as_ref().map(|s| s.as_slice()),
+		ctx.k.engine.config().platform,
+	);
 	let cwd = ctx.vp.cwd.clone();
 	let not_found = |ctx: &mut Ctx<'_, '_>| {
 		ctx.diag(Diag::Usage {
@@ -1246,7 +1249,10 @@ fn load_stub(
 		},
 	};
 	let fpath = ctx.scalar(b"FPATH")?;
-	let fpath = crate::bash::vm::command::fpath_dirs(fpath.as_ref().map(|s| s.as_slice()));
+	let fpath = crate::bash::vm::command::fpath_dirs(
+		fpath.as_ref().map(|s| s.as_slice()),
+		ctx.k.engine.config().platform,
+	);
 	let cwd = ctx.vp.cwd.clone();
 	let found = {
 		let mut ask = |p: Probe| ctx.probe(p);
