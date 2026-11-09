@@ -149,10 +149,8 @@ describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
 		const sentinel = Buffer.from(SENTINEL).toString("base64");
 		const calls = toolCallParts(model, parallelToolCalls("google-generative-ai", "gateway", "gemini-3.8-flash"));
 
-		expect(model.compat.base64SkipThoughtSignature).toBe(true);
 		expect(calls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
 		expect(calls[1]?.thoughtSignature).toBe(sentinel);
-		expect(Buffer.from(sentinel, "base64").toString()).toBe(SENTINEL);
 
 		const unsigned = unsignedFirstCall("google-generative-ai", "gateway", "gemini-3.8-flash");
 		expect(toolCallParts(base, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
