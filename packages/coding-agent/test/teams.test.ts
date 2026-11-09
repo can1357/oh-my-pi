@@ -1208,7 +1208,7 @@ describe("/team start and stop", () => {
 			registration.reject(new Error("model unavailable"));
 			await registration.promise.catch(() => {});
 			expect(outputs.join("\n")).toContain("failed to register: model unavailable");
-			expect(notices.join("\n")).toContain("failed during registration: model unavailable");
+			expect(notices.join("\n")).toContain("never registered (model unavailable)");
 			await TEAM_HANDLE({ args: "status audit" }, runtime);
 			expect(outputs.at(-1)).toContain("failed: model unavailable");
 
@@ -1232,6 +1232,72 @@ describe("/team start and stop", () => {
 			await cleanup();
 		}
 	});
+
+	it.each(["rejects", "aborts"])(
+		"a stop requested while the member is pending resolves when its spawn %s before registration",
+		async outcome => {
+			const { team, root, cleanup } = await teamFixture({ handles: ["Scout", "Reviewer"] });
+			try {
+				mockTeamDiscovery(team);
+				const notices: string[] = [];
+				const registry = AgentRegistry.global();
+				const registration = Promise.withResolvers<AgentRef>();
+				const spawning = Promise.withResolvers<void>();
+				vi.spyOn(spawnSubagent, "spawnSubagentForSession").mockImplementation((_session, options) => {
+					if (options.handle === "Reviewer") {
+						return Promise.resolve(
+							registry.register({
+								id: options.teamReservedId!,
+								displayName: "Reviewer",
+								kind: "sub",
+								session: null,
+							}),
+						);
+					}
+					spawning.resolve();
+					// Pending forever until the test settles it: like a real spawn whose
+					// registration is still in flight when /team stop arrives.
+					return registration.promise;
+				});
+				const { runtime, outputs } = teamRuntime(root);
+				const lead = (runtime as { session: object }).session;
+				Reflect.set(lead, "deliverIrcMessage", async (message: { body: string }) => {
+					notices.push(message.body);
+					return "injected";
+				});
+				const starting = TEAM_HANDLE({ args: "start audit" }, runtime);
+				await spawning.promise;
+				await TEAM_HANDLE({ args: "stop Scout" }, runtime);
+				expect(outputs.at(-1)).toContain("stop pending registration");
+				// Terminal spawn outcome without a registered ref: the promise rejects,
+				// or the registration it stands for fails like an aborted run.
+				registration.reject(new Error(outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"));
+				await starting;
+				await registration.promise.catch(() => {});
+				// Without advancing timers to the ack timeout, the intent is gone and
+				// exactly one "never registered" notice reached the lead.
+				const members = teamRuntimeState.members(lead, "audit");
+				expect(members?.get("Scout")?.failure).toBe(
+					outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed",
+				);
+				expect(members?.has("Reviewer")).toBe(true);
+				const neverRegistered = notices.filter(body => body.includes("never registered"));
+				expect(neverRegistered).toHaveLength(1);
+				expect(neverRegistered[0]).toContain("Stop request for Scout released: never registered");
+				await TEAM_HANDLE({ args: "status audit" }, runtime);
+				expect(outputs.at(-1)).toContain("failed:");
+				expect(outputs.at(-1)).not.toContain("Scout - pending");
+				// The intent is gone: a later stop reports the recorded failure instead of
+				// staying pending, and the lead is not notified a second time.
+				await TEAM_HANDLE({ args: "stop Scout" }, runtime);
+				expect(outputs.at(-1)).toContain(`failed before registering: ${outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"}`);
+				expect(notices.filter(body => body.includes("never registered"))).toHaveLength(1);
+				expect(teamRuntimeState.listTeams(lead)).toEqual(["audit"]);
+			} finally {
+				await cleanup();
+			}
+		},
+	);
 
 	it("reserves distinct ids for the same handle across sessions sharing a registry", async () => {
 		const session = () => ({ getArtifactsDir: () => null }) as unknown as ToolSession;

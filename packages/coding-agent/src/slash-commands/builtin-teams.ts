@@ -343,10 +343,28 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							lines.push(`${handle} → pending (${error.agentId}); the run is still starting`);
 							continue;
 						}
-						await updateMember(key, team.name, started.generation, handle, entry, () => undefined);
+						const message = error instanceof Error ? error.message : String(error);
+						// The spawn ended without registering a ref: resolve any pending stop
+						// through the same failure branch as a pending registration, so the
+						// member is marked failed, the intent clears, and the lead is notified
+						// instead of the stop waiting out the ack timeout.
+						const resolved = await client.resolvePendingStop(
+							key,
+							team.name,
+							started.generation,
+							handle,
+							entry,
+							undefined,
+							message,
+						);
+						if (!resolved) {
+							// The member registered after all, was replaced, or the generation
+							// ended: drop the stale membership rather than marking it failed.
+							await updateMember(key, team.name, started.generation, handle, entry, () => undefined);
+						}
 						releaseStructuredSubagentId(toolSession, entry.id);
 						failures += 1;
-						lines.push(`${handle} → FAILED: ${error instanceof Error ? error.message : String(error)}`);
+						lines.push(`${handle} → FAILED: ${message}`);
 					}
 				}
 				if (skipped > 0) {

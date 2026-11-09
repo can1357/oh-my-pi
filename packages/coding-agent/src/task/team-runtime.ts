@@ -483,7 +483,7 @@ export class TeamRuntime {
 		if (intent && this.#matches(state, intent)) {
 			if (failure !== undefined) {
 				this.#clearStop(state, intent);
-				this.#notifyLead(state, intent, `Stop request for ${member.id} failed during registration: ${failure}`);
+				this.#notifyLead(state, intent, `Stop request for ${member.id} released: never registered (${failure})`);
 			} else if (ref && !intent.ref) {
 				const result = await this.#dispatchStop(state, intent, ref);
 				if (result === "release refused" || result === "member changed")

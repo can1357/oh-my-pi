@@ -85,8 +85,9 @@ ID; use the actual ID shown by startup/status and in the rendered peer list for
 cap and reports skipped members. Repeating start skips already recorded live or
 pending members rather than duplicating them. A spawn that has not registered
 within the spawn wait is **pending**, with its reserved ID, not failed merely
-because time elapsed. Registration makes it live; a rejected registration (a run
-ending without registering) is reported as failed by status/stop, and the next
+because time elapsed. Registration makes it live; a rejected registration (a
+run ending without registering, a spawn that fails before it, or a worker lost
+before its ref appears) is reported as failed by status/stop, and the next
 start can retry it.
 
 ## Role prompts and permissions
@@ -250,8 +251,11 @@ also released immediately by an ordinary stop: it cannot acknowledge. A release
 already in flight reports `stop already pending` instead of releasing twice.
 For a still-registering spawn, cooperative or forced stop intent is retained
 against its reservation and generation. On registration, the request is sent or
-the exact ref is force-released; registration failure clears the intent and is
-reported. A replacement generation does not inherit old stop intent.
+the exact ref is force-released; a spawn that ends without registering — a
+rejected spawn, an aborted run or a worker lost before its ref appears —
+resolves the intent at once, marks the member failed, and notifies the lead
+(`Stop request for <id> released: never registered (<failure>)`). A
+replacement generation does not inherit old stop intent.
 
 A whole-team stop (by name or `all`) retires that generation when its members
 have been removed, including final acknowledgements and pending force releases.

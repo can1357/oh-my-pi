@@ -653,6 +653,47 @@ describe("team cooperative stop", () => {
 		},
 	);
 
+	it("handle-only stop of a member already aborted outside /team stop releases it and keeps the team", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const workerRef = registry.register({
+			id: "worker",
+			displayName: "worker",
+			kind: "sub",
+			session: session(),
+		});
+		const reviewerRef = registry.register({
+			id: "reviewer",
+			displayName: "reviewer",
+			kind: "sub",
+			session: session(),
+		});
+		// Cancelled/killed/crashed outside /team stop, with no release in flight.
+		registry.setStatus("worker", "aborted", workerRef);
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const workerEntry = { id: "worker", reservation: "worker-reservation", ref: workerRef };
+		const reviewerEntry = { id: "reviewer", reservation: "reviewer-reservation", ref: reviewerRef };
+		started.members.set("worker", workerEntry);
+		started.members.set("reviewer", reviewerEntry);
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+		try {
+			expect(
+				await runtime.requestStop(lead, "audit", started.generation, "worker", workerEntry, false, 120000),
+			).toBe("released");
+			expect(release).toHaveBeenCalledTimes(1);
+			expect(release).toHaveBeenCalledWith("worker", workerRef, { tombstone: true });
+			expect(started.members.has("worker")).toBe(false);
+			expect(started.members.get("reviewer")).toBe(reviewerEntry);
+			expect(reviewerRef.status).toBe("running");
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+		} finally {
+			release.mockRestore();
+			await runtime.stop(lead, "audit");
+		}
+	});
+
 	it.each([0, -10, Number.NaN, 1])("clamps a short or invalid stop timeout (%s) to one second", async timeout => {
 		const registry = AgentRegistry.global();
 		const notices: string[] = [];
