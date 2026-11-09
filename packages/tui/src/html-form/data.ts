@@ -106,7 +106,8 @@ function compilePattern(pattern: string): RegExp | undefined {
 
 /** Data the form submits untouched: hidden inputs, preselected options and prefilled text. */
 export function defaultFormData(form: HtmlForm): HtmlFormData {
-	const data: HtmlFormData = {};
+	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
+	const data: HtmlFormData = Object.create(null);
 	for (const [name, value] of form.hidden) data[name] = value;
 	for (const field of form.fields) {
 		if (!field.name) continue;
