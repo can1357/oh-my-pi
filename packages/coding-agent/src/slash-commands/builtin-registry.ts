@@ -38,6 +38,7 @@ export interface TuiBuiltinSlashCommand extends BuiltinSlashCommand {
 	getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
 	getInlineHint?: (argumentText: string) => string | null;
 	getAutocompleteDescription?: () => string | undefined;
+	isAvailable?: () => boolean;
 }
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
@@ -75,6 +76,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		subcommandOptional: command.subcommandOptional,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
+		isTuiAvailable: command.isTuiAvailable,
 	}),
 );
 
@@ -112,6 +114,9 @@ function materializeTuiBuiltinSlashCommand(
 	}
 	if (runtime && cmd.getTuiAutocompleteDescription) {
 		materialized.getAutocompleteDescription = () => cmd.getTuiAutocompleteDescription?.(runtime);
+	}
+	if (runtime && cmd.isTuiAvailable) {
+		materialized.isAvailable = () => cmd.isTuiAvailable?.(runtime) ?? true;
 	}
 	return materialized;
 }

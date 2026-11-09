@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PlanReviewOverlayCallbacks.onPickExecutionModel` (`m` key) and `PlanReviewOverlay.setExecutionNotice()` to show a host-pinned execution model under the tier slider ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+- Added `SlashCommand.isAvailable`: a live gate that hides a command from the name list while it returns `false` ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+
 ### Fixed
 
 - Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).

@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Choose any execution model with `/exec-model` or `m` in Plan Review; the pin applies on approval and overrides the tier slider ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
+
 ### Changed
 
+- `/plan-review` and `/exec-model` appear in autocomplete only during plan mode ([#16358](https://github.com/can1357/oh-my-pi/pull/16358) by [@Shadorain](https://github.com/Shadorain))
 - The `task` tool no longer advertises a per-call `model` field unless `task.perCallModel` is `on` or the bundled seance is spawnable; a `model` sent anyway is still refused before dispatch ([#18554](https://github.com/can1357/oh-my-pi/pull/18554) by [@xiangnan0811](https://github.com/xiangnan0811))
 
 ### Fixed
