@@ -37,12 +37,15 @@
 //! Restore queues `Diag::AmbiguousProcOwnership` on stderr and emits its
 //! diagnostic event for a self-parent; the comparison selects only the
 //! warning, not ownership. A genuinely disowned legacy child therefore
-//! retains its real completion instead of deleting it. Plain `disown PID`
-//! still keeps status 0 and `wait PID` still returns 0; it is not affected.
-//! Without a retained status, the real completion can become visible:
-//! a legacy `disown -a` image whose child exits 7 gives `wait PID` status
-//! 7, where the older reader and Bash give 127. This accepts a wrong status
-//! instead of a potentially unbounded wait for an owned child.
+//! retains its real completion instead of deleting it. Normal plain Bash
+//! `disown PID` keeps status 0, so its first `wait PID` still returns 0.
+//! The divergence covers genuinely disowned legacy children with no retained
+//! status, not just one disown spelling. Measured examples include Bash
+//! `disown -a`, `disown -r`, `disown -ar` and zsh-mode `disown %1`: when the
+//! child exits 7, restoring it as owned exposes `wait PID` status 7 where the
+//! older reader gives 127 (also Bash's result for the three Bash forms).
+//! This accepts a wrong status for that ambiguous legacy class instead of a
+//! potentially unbounded wait for a real owned child.
 //!
 //! A successful restore atomically replaces every legacy `Proc` with an
 //! explicit `OwnedProc`, after selecting diagnostics. Subsequent saves

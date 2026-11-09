@@ -1047,13 +1047,18 @@ impl Kernel {
 	/// spawned process prints for a redirection it applies itself
 	/// ([`crate::bash::ChildRedir`]).
 	pub fn render_quiet(&mut self, cx: &mut Cx<'_>, vp: &Vproc, line: u32, diag: &Diag) -> Vec<u8> {
+		// A diagnostic's locale is best effort, like its name and options:
+		// failing to read it must not abandon otherwise restored execution.
 		if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 			let (mut prefix, mut zline) = self.zsh_site(cx, vp, line);
 			if self.zsh_shinstdin(cx, vp) {
 				prefix.clear();
 				zline = 0;
 			}
-			let utf8 = zsh::params::mb_in(self, cx.store, vp).unwrap_or(false);
+			let opt = crate::bash::zshopt::ZshOpt::Multibyte;
+			let utf8 = state::zsh_option(&mut self.root, cx.store, vp, opt).unwrap_or(false)
+				&& locale::charset_root(&mut self.root, cx.store, vp)
+					.is_ok_and(|cs| cs == locale::Charset::Utf8);
 			return crate::bash::diag::render_zsh(diag, crate::bash::diag::ZshSite {
 				prefix: &prefix,
 				line: zline,
@@ -1066,7 +1071,8 @@ impl Kernel {
 			.front()
 			.and_then(|r| r.chain.links.first())
 			.map_or(&COMMAND, |l| &l.origin);
-		let utf8 = locale::is_utf8(self, cx.store, vp);
+		let utf8 = locale::charset_root(&mut self.root, cx.store, vp)
+			.is_ok_and(|cs| cs == locale::Charset::Utf8);
 		// An in-engine nested shell names itself (its `$0`).
 		let shell_name = match vp
 			.overlay
