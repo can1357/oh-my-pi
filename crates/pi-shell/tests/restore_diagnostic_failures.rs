@@ -40,7 +40,7 @@ fn assert_post_commit_diagnostics(zsh: bool) {
 			inner
 				.apply(Change::Put(
 					Key::Misc(pi_shell::bash::store::MiscKey::Mode),
-					Record::Misc(b"z".as_slice().into()),
+					Record::Misc(b"zsh".as_slice().into()),
 				))
 				.unwrap();
 			inner
@@ -56,12 +56,15 @@ fn assert_post_commit_diagnostics(zsh: bool) {
 		.expect("diagnostic metadata must not turn a committed restore into an error");
 		assert_eq!(store.commits, 1);
 		assert_eq!(store.failures, usize::from(refused.is_some()), "zsh={zsh}, refused={refused:?}");
-		assert!(
-			host
-				.events
-				.iter()
-				.any(|event| event.to_string().contains("restoring as owned")),
-			"the diagnostic event must survive the metadata failure"
+		let diagnostic = host
+			.events
+			.iter()
+			.find(|event| event.to_string().contains("restoring as owned"))
+			.expect("the diagnostic event must survive the metadata failure");
+		assert_eq!(
+			diagnostic["mode"],
+			if zsh { "zsh" } else { "bash" },
+			"the restored diagnostic must exercise the requested dialect"
 		);
 		assert!(
 			!matches!(store.get(Key::Proc(Vpid(9))).unwrap(), Some(Record::Proc { .. })),
