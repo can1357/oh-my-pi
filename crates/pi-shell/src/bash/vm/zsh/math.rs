@@ -2020,7 +2020,9 @@ fn mathevall<E: Env + ?Sized>(
 		expr: &expr,
 		opts,
 		noeval,
-		stack: Vec::new(),
+		// Each instruction pushes at most one operand: one allocation, not
+		// a regrowth per doubling on every evaluation.
+		stack: Vec::with_capacity(expr.prog.len().min(STACKSZ)),
 		saved: Vec::new(),
 		quest: Vec::new(),
 	}

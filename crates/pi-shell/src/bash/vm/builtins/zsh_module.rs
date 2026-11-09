@@ -1948,13 +1948,33 @@ pub fn call_math(
 }
 
 /// Whether module `name` is loaded (zsh `module_loaded`), for modules
-/// whose effect is not a feature (`zsh/nearcolor`).
+/// whose effect is not a feature (`zsh/nearcolor`). Asked on every
+/// `local`: the default tables are read in place, and a stored record is
+/// decoded once per change ([`DECODED`]).
 ///
 /// # Errors
 /// A store failure.
 pub fn loaded(store: &mut dyn StateStore, vp: &Vproc, name: &[u8]) -> Result<bool, StoreError> {
-	let t = tables(store, vp)?;
-	Ok(t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i)))
+	let has = |t: &Tables| t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i));
+	let Some(Record::Misc(bytes)) = state::record(store, vp, Key::Misc(MiscKey::ZshModules))? else {
+		return Ok(has(&DEFAULT));
+	};
+	Ok(DECODED.with_borrow_mut(|cache| {
+		if cache
+			.as_ref()
+			.is_none_or(|(b, _)| b.as_slice() != bytes.as_slice())
+		{
+			let t = postcard::from_bytes(bytes).unwrap_or_else(|_| DEFAULT.clone());
+			*cache = Some((bytes.to_vec(), t));
+		}
+		cache.as_ref().is_some_and(|(_, t)| has(t))
+	}))
+}
+
+thread_local! {
+	/// The module tables [`loaded`] last decoded, with the record bytes they
+	/// came from.
+	static DECODED: std::cell::RefCell<Option<(Vec<u8>, Tables)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// `$modules` (zsh `scanpmmodules`): every module loaded, aliased or

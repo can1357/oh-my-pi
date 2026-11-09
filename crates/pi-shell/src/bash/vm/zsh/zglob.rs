@@ -183,14 +183,17 @@ struct Comp {
 #[derive(Clone, Debug)]
 struct Gmatch {
 	/// Metafied path.
-	name: Vec<u8>,
+	name:  Vec<u8>,
 	/// `lstat`.
-	st:   Option<Stat>,
+	st:    Option<Stat>,
 	/// `stat` (links followed).
-	st2:  Option<Stat>,
+	st2:   Option<Stat>,
 	/// The name's collation key (`strxfrm`) when names sort in a locale's
 	/// order; empty otherwise.
-	ckey: Vec<u8>,
+	ckey:  Vec<u8>,
+	/// The name unmetafied when names sort, so each comparison does not
+	/// unmetafy both sides again; empty otherwise.
+	plain: Vec<u8>,
 }
 
 /// The `zerr` of a glob error.
@@ -1134,12 +1137,12 @@ impl Run<'_> {
 				for w in words {
 					self
 						.matches
-						.push(Gmatch { name: w, st, st2, ckey: Vec::new() });
+						.push(Gmatch { name: w, st, st2, ckey: Vec::new(), plain: Vec::new() });
 				}
 			},
 			None => self
 				.matches
-				.push(Gmatch { name, st, st2, ckey: Vec::new() }),
+				.push(Gmatch { name, st, st2, ckey: Vec::new(), plain: Vec::new() }),
 		}
 	}
 
@@ -1287,9 +1290,8 @@ fn gmatchcmp(a: &Gmatch, b: &Gmatch, sorts: &[Sort], numsort: bool) -> std::cmp:
 			SortKey::Name => {
 				// zsh `zstrcmp`: `strcoll` (the collation keys; bytes when
 				// equal or without a collation), then the numeric rules.
-				let (ua, ub) = (unmetafy(&a.name), unmetafy(&b.name));
-				let base = a.ckey.cmp(&b.ckey).then_with(|| ua.cmp(&ub));
-				super::subst::eltpcmp_coll(&ua, &ub, i32::from(numsort), base)
+				let base = a.ckey.cmp(&b.ckey).then_with(|| a.plain.cmp(&b.plain));
+				super::subst::eltpcmp_coll(&a.plain, &b.plain, i32::from(numsort), base)
 			},
 			SortKey::Depth => {
 				#[allow(
@@ -1408,11 +1410,13 @@ fn zglob_one(
 	let unsorted = spec.sorts.first().is_some_and(|s| s.key == SortKey::None);
 	if !unsorted {
 		// zsh compares names with `strcoll`: their collation keys, once.
-		if spec.sorts.iter().any(|s| s.key == SortKey::Name)
-			&& let Some(coll) = params::collator(ex)
-		{
+		if spec.sorts.iter().any(|s| s.key == SortKey::Name) {
+			let coll = params::collator(ex);
 			for m in &mut matches {
-				m.ckey = coll.key(&unmetafy(&m.name));
+				m.plain = unmetafy(&m.name);
+				if let Some(coll) = &coll {
+					m.ckey = coll.key(&m.plain);
+				}
 			}
 		}
 		matches.sort_by(|a, b| gmatchcmp(a, b, &spec.sorts, spec.numsort));

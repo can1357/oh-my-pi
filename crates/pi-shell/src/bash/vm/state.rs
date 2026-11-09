@@ -1274,16 +1274,16 @@ pub enum VarEdit<'e> {
 	/// Append unkeyed elements after the highest index of an indexed array
 	/// (`a+=(x y)`); clears [`Attrs::INVISIBLE`].
 	Push(Vec<BString>),
-	/// Insert `key` into an associative array at position `at` of its
-	/// entries ([`AssocArray::insert_at`]: zsh's hash order); clears
-	/// [`Attrs::INVISIBLE`].
+	/// Insert `key` into an associative array at the front of its bucket
+	/// among `buckets` ([`AssocArray::insert_front`]: zsh's hash order);
+	/// clears [`Attrs::INVISIBLE`].
 	Insert {
 		/// The key (absent; a present one takes the value in place).
-		key:   &'e [u8],
+		key:     &'e [u8],
 		/// Its value.
-		value: &'e [u8],
-		/// Its position.
-		at:    usize,
+		value:   &'e [u8],
+		/// The zsh hash table's bucket count.
+		buckets: usize,
 	},
 }
 
@@ -1325,10 +1325,10 @@ impl VarEdit<'_> {
 					items.extend((first..).zip(elems));
 				}
 			},
-			Self::Insert { key, value, at } => {
+			Self::Insert { key, value, buckets } => {
 				var.attrs = var.attrs.without(Attrs::INVISIBLE);
 				if let VarValue::Assoc(items) = &mut var.value {
-					items.insert_at(at, BString::from(key), BString::from(value));
+					items.insert_front(buckets, BString::from(key), BString::from(value));
 				}
 			},
 		}
@@ -1416,9 +1416,9 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
-		VarEdit::Insert { key, value, at } => {
+		VarEdit::Insert { key, value, buckets } => {
 			return match &cur.value {
-				VarValue::Assoc(_) => Some(Fast::Insert(key, value, at)),
+				VarValue::Assoc(_) => Some(Fast::Insert(key, value, buckets)),
 				_ => Some(Fast::Nothing),
 			};
 		},
@@ -1492,9 +1492,9 @@ const fn seen_edit<'e>(edit: &VarEdit<'e>, seen: Seen) -> Option<Fast<'e>> {
 			};
 		},
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
-		VarEdit::Insert { key, value, at } => {
+		VarEdit::Insert { key, value, buckets } => {
 			return match seen {
-				Seen::Assoc => Some(Fast::Insert(key, value, at)),
+				Seen::Assoc => Some(Fast::Insert(key, value, buckets)),
 				Seen::Scalar | Seen::Indexed { .. } => None,
 			};
 		},
@@ -1547,8 +1547,8 @@ fn store_edit(
 			}
 		},
 		Ok(Fast::Remove(elem)) => root.write(store, Change::DelElem(key, elem)),
-		Ok(Fast::Insert(k, v, at)) => {
-			root.write(store, Change::InsertElem(key, at, BStr::new(k), BStr::new(v)));
+		Ok(Fast::Insert(k, v, buckets)) => {
+			root.write(store, Change::InsertElem(key, buckets, BStr::new(k), BStr::new(v)));
 		},
 		Ok(Fast::Nothing) => {},
 		Err(mut var) => {

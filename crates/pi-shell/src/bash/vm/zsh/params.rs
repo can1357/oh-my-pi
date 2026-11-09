@@ -534,6 +534,10 @@ pub const SCANPM_DQUOTED: u32 = 1 << 8;
 pub const SCANPM_ARRONLY: u32 = 1 << 9;
 /// `SCANPM_CHECKING`.
 pub const SCANPM_CHECKING: u32 = 1 << 10;
+/// Not zsh's: a reader that only needs the text of one array element
+/// (`paramsubst`) lets [`fetchvalue`] read just that element of a stored
+/// array instead of the whole array ([`window_elem`]).
+pub const SCANPM_WINDOW: u32 = 1 << 11;
 /// `SCANPM_ISVAR_AT`: every bit from 15 up.
 pub const SCANPM_ISVAR_AT: u32 = !0 << 15;
 
@@ -1583,6 +1587,8 @@ pub fn fetchvalue(
 	bracks: i32,
 	flags: u32,
 ) -> X<Option<Value>> {
+	let window = flags & SCANPM_WINDOW != 0;
+	let flags = flags & !SCANPM_WINDOW;
 	let t = *pos;
 	let mut i = t;
 	let c = s.get(i).copied().unwrap_or(0);
@@ -1638,7 +1644,9 @@ pub fn fetchvalue(
 		// alone; an assignment rewrites the whole value, so it needs it.
 		let keyed =
 			bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
-		let pm = if keyed {
+		let pm = if keyed && window && plain_subscript(s, i) && specials::lookup(lookup).is_none() {
+			getparam_window(ex, lookup)?
+		} else if keyed {
 			getparam_lazy(ex, lookup)?
 		} else {
 			getparam(ex, lookup)?
@@ -1660,6 +1668,9 @@ pub fn fetchvalue(
 		}
 		if bracks > 0 && matches!(s.get(i), Some(&(b'[' | INBRACK))) {
 			subscript::getindex(ex, s, &mut i, &mut v, flags)?;
+			if v.pm.lazy && v.elem.is_none() && v.pm.special.is_none() {
+				window_elem(ex, &mut v)?;
+			}
 			if v.elem.is_none() {
 				v.pm.materialize(ex)?;
 			}
@@ -1683,6 +1694,67 @@ pub fn fetchvalue(
 	}
 	*pos = i;
 	Ok(Some(v))
+}
+
+/// Whether the subscript opening at `s[open]` is a plain one (no `(flags)`,
+/// not `*` or `@`): one that resolves to positions, not by searching or
+/// taking the whole value.
+fn plain_subscript(s: &[u8], open: usize) -> bool {
+	!matches!(
+		s.get(open + 1),
+		Some(&(b'(' | crate::bash::syntax::zsh::tok::INPAR | b'*' | b'@' | STAR))
+	)
+}
+
+/// [`getparam`] for a [`SCANPM_WINDOW`] read through a plain subscript:
+/// an ordinary stored dense array comes without its value
+/// ([`Param::lazy`]), for [`window_elem`] to load what the subscript
+/// selects; any other parameter comes whole.
+fn getparam_window(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
+	if let Some(mut pm) = getparam_in(ex, name, Defer::Stored)?
+		&& pm.flags.type_bits() == PmFlags::ARRAY
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.contains(PmFlags::UNSET)
+		&& matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		pm.lazy = true;
+		pm.value = PValue::Array(Vec::new());
+		return Ok(Some(pm));
+	}
+	getparam(ex, name)
+}
+
+/// Load what the subscripted view `v` of a [`getparam_window`] array
+/// reads. A single element (`$a[i]`) is loaded alone, as a one-element
+/// array `v` starts at; an index outside the array leaves it empty, which
+/// `paramsubst` reads as unset, as it does that index of the whole array.
+/// Any other view loads the whole array.
+///
+/// # Errors
+/// A store failure.
+fn window_elem(ex: &mut Expander<'_, '_>, v: &mut Value) -> X<()> {
+	let single = v.isarr == 0 && v.flags & VALFLAG_INV == 0 && v.end == v.start + 1;
+	if !single {
+		return v.pm.materialize(ex);
+	}
+	let name = v.pm.name.clone();
+	let elem = match read_var(ex, &name)?.0.map(|var| &var.value) {
+		Some(VarValue::Indexed(items)) if dense_from_zero(items) => {
+			let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+			let at = if v.start < 0 { v.start + len } else { v.start };
+			usize::try_from(at)
+				.ok()
+				.and_then(|at| items.get(at))
+				.map(|(_, e)| e.clone())
+		},
+		_ => return v.pm.materialize(ex),
+	};
+	v.pm.value = PValue::Array(elem.into_iter().collect());
+	v.pm.lazy = false;
+	v.start = 0;
+	v.end = 1;
+	Ok(())
 }
 
 // ---- writers
@@ -2543,20 +2615,7 @@ fn assign_elem_in_place(
 	val: &[u8],
 ) -> X<InPlace> {
 	let kind = pm.flags.type_bits();
-	let plain = (kind == PmFlags::HASHED
-		|| (kind == PmFlags::ARRAY && !opt(ex, ZshOpt::Ksharrays)?))
-		&& !pm.flags.intersects(
-			PmFlags::UNIQUE
-				.with(PmFlags::LOWER)
-				.with(PmFlags::UPPER)
-				.with(PmFlags::LEFT)
-				.with(PmFlags::RIGHT_B)
-				.with(PmFlags::RIGHT_Z),
-		)
-		&& pm.special.is_none()
-		&& pm.tied.is_none()
-		&& !pm.flags.intersects(PmFlags::UNSET.with(PmFlags::READONLY))
-		&& !pm.attrs.contains(Attrs::INVISIBLE);
+	let plain = (kind == PmFlags::HASHED || kind == PmFlags::ARRAY) && edits_in_place(ex, &pm)?;
 	// A plain subscript: `(flags)`, `*` and `@` read the whole parameter.
 	let body = s.get(name.len() + 1..).unwrap_or_default();
 	let plain_sub = !matches!(
@@ -2600,8 +2659,8 @@ fn assign_elem_in_place(
 				value:  &value,
 				append: false,
 			}
-		} else if let Some(at) = super::assoc_order::insert_position(items, var.attrs, &edit_key) {
-			state::VarEdit::Insert { key: &edit_key, value: &value, at }
+		} else if let Some(buckets) = super::assoc_order::insert_buckets(items.len(), var.attrs) {
+			state::VarEdit::Insert { key: &edit_key, value: &value, buckets }
 		} else {
 			// The table grows: zsh re-adds every entry.
 			let mut h = ZHash::from_stored(items, var.attrs);
@@ -2634,6 +2693,60 @@ fn dense_from_zero(items: &[(i64, BString)]) -> bool {
 		&& items
 			.last()
 			.is_none_or(|(i, _)| usize::try_from(*i).is_ok_and(|i| i + 1 == items.len()))
+}
+
+/// Whether stored array or association `pm` (read without its value) may
+/// be edited in place ([`assign_elem_in_place`], [`append_in_place`]):
+/// nothing about it rewrites the values (`-U`, case or padding flags, an
+/// indexed array under `KSH_ARRAYS`), it is neither special nor tied, and
+/// it is set, writable and visible.
+fn edits_in_place(ex: &mut Expander<'_, '_>, pm: &Param) -> X<bool> {
+	Ok((pm.flags.type_bits() != PmFlags::ARRAY || !opt(ex, ZshOpt::Ksharrays)?)
+		&& !pm.flags.intersects(
+			PmFlags::UNIQUE
+				.with(PmFlags::LOWER)
+				.with(PmFlags::UPPER)
+				.with(PmFlags::LEFT)
+				.with(PmFlags::RIGHT_B)
+				.with(PmFlags::RIGHT_Z),
+		)
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.intersects(PmFlags::UNSET.with(PmFlags::READONLY))
+		&& !pm.attrs.contains(Attrs::INVISIBLE))
+}
+
+/// zsh `assignaparam` of `name+=(val)` (metafied elements) when `name` is
+/// an ordinary stored array ([`edits_in_place`]): the elements go after
+/// its last one in place, without the copy of the whole array the general
+/// path reads and writes back (a loop appending one element at a time
+/// would cost the square of the array's length). `false`: not such an
+/// array, nothing done.
+fn append_in_place(ex: &mut Expander<'_, '_>, name: &[u8], val: &[Vec<u8>], flags: u32) -> X<bool> {
+	let Some(pm) = getparam_in(ex, name, Defer::Stored)? else {
+		return Ok(false);
+	};
+	if pm.flags.type_bits() != PmFlags::ARRAY || !edits_in_place(ex, &pm)? {
+		return Ok(false);
+	}
+	if !matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		return Ok(false);
+	}
+	check_restricted(ex, name)?;
+	if flags & ASSPM_WARN != 0 {
+		check_warn_pm(ex, &pm, "array", false, true)?;
+	}
+	let elems = val.iter().map(|e| BString::from(unmetafy(e))).collect();
+	state::edit_var(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Push(elems),
+	)?;
+	Ok(true)
 }
 
 /// [`assignsparam`] on metafied text.
@@ -2904,6 +3017,13 @@ pub(super) fn assignaparam_meta(
 	}
 	let (name, sub) = split_name(s);
 	revive_special(ex, name)?;
+	if flags & ASSPM_AUGMENT != 0
+		&& flags & ASSPM_KEY_VALUE == 0
+		&& !sub
+		&& append_in_place(ex, name, &val, flags)?
+	{
+		return Ok(());
+	}
 	let mut val = val;
 	let mut created = false;
 	let mut may_warn_nested = true;

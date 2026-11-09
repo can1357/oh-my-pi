@@ -2438,13 +2438,15 @@ fn paramsubst(
 		} else {
 			-1
 		};
+		// Only the text of a subscripted element is read here: a stored
+		// array need not be read whole for it.
 		let fv = if subexp {
 			let ov = metafy(&unmetafy(&ps.val));
 			let mut pos = 0;
-			params::fetchvalue(ex, &ov, &mut pos, bracks, scanflags)?
+			params::fetchvalue(ex, &ov, &mut pos, bracks, scanflags | params::SCANPM_WINDOW)?
 		} else {
 			let mut pos = sp;
-			let r = params::fetchvalue(ex, src, &mut pos, bracks, scanflags)?;
+			let r = params::fetchvalue(ex, src, &mut pos, bracks, scanflags | params::SCANPM_WINDOW)?;
 			if idbeg.is_empty() {
 				idbeg = span(src, sp, pos).to_vec();
 			}
