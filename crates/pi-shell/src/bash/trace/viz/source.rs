@@ -70,16 +70,19 @@ pub fn script_map(source: &impl VizSource, at: usize, len: usize) -> SourceMap {
 pub fn unit_map(source: &impl VizSource, unit: &SourceUnit<'_>) -> SourceMap {
 	build(source, unit, 0)
 }
+/// `unit`'s canonical byte coordinates without original-source positions:
+/// enough to slice its own bytes, and built without the presentation cache.
+pub fn unit_bytes(unit: &SourceUnit<'_>) -> SourceMap {
+	SourceMap {
+		offset:     unit.syntax.map_or(0, |s| s.offset),
+		projection: unit.projection,
+		len:        unit.source.len(),
+		outer:      None,
+	}
+}
 fn build(source: &impl VizSource, unit: &SourceUnit<'_>, depth: usize) -> SourceMap {
-	let projection = unit.projection;
-	let bytes: &[u8] = unit.source.as_ref();
-	let body = bytes;
-	let mut result = SourceMap {
-		offset: unit.syntax.map_or(0, |s| s.offset),
-		projection,
-		len: body.len(),
-		outer: None,
-	};
+	let body: &[u8] = unit.source.as_ref();
+	let mut result = unit_bytes(unit);
 	if depth > source.unit_count() {
 		return result;
 	}
@@ -293,9 +296,9 @@ fn decode_literal(raw: &[u8]) -> Option<(Vec<u8>, Vec<u32>)> {
 pub fn heredoc_spans(
 	map: &SourceMap,
 	unit_source: &[u8],
-	redirs: &[crate::bash::syntax::Redir],
+	redirs: crate::bash::syntax::tree::Seq<'_, crate::bash::syntax::tree::Redir<'_>>,
 ) -> Vec<Option<Span>> {
-	use crate::bash::syntax::{RedirOp, RedirTarget};
+	use crate::bash::syntax::{RedirOp, tree::RedirTarget};
 	let line_after = |at: usize| -> usize {
 		unit_source
 			.get(at..)
@@ -306,10 +309,10 @@ pub fn heredoc_spans(
 	redirs
 		.iter()
 		.map(|redir| {
-			let RedirTarget::HereDoc(document) = &redir.target else {
+			let RedirTarget::HereDoc(document) = redir.target() else {
 				return None;
 			};
-			let [_, header_end] = map.bytes(redir.span)?;
+			let [_, header_end] = map.bytes(redir.span())?;
 			let start = next_body.unwrap_or_else(|| line_after(header_end));
 			let mut line = start;
 			let mut body_end = unit_source.len();
@@ -319,12 +322,12 @@ pub fn heredoc_spans(
 					.position(|byte| *byte == b'\n')
 					.map_or(unit_source.len(), |distance| line + distance);
 				let mut delimiter_start = line;
-				if matches!(redir.op, RedirOp::HereDoc { strip_tabs: true }) {
+				if matches!(redir.op(), RedirOp::HereDoc { strip_tabs: true }) {
 					while delimiter_start < end && unit_source[delimiter_start] == b'\t' {
 						delimiter_start += 1;
 					}
 				}
-				if unit_source.get(delimiter_start..end) == Some(document.delim.as_slice()) {
+				if unit_source.get(delimiter_start..end) == Some(document.delim()) {
 					body_end = line;
 					next_body = Some(if end < unit_source.len() {
 						end + 1
@@ -354,25 +357,28 @@ mod tests {
 	use super::*;
 	#[test]
 	fn heredoc_boundaries_are_sequential_and_exact() {
-		use crate::bash::syntax::{HereDoc, Redir, RedirOp, RedirTarget};
+		use crate::bash::syntax::{Features, NO_ALIASES, Parser};
 		let bytes = b"cat <<A <<-B\nnot A\nA\n\tbody B\n\tB\n";
-		let doc = |span, delimiter: &[u8], strip| Redir {
-			span,
-			fd: None,
-			op: RedirOp::HereDoc { strip_tabs: strip },
-			target: RedirTarget::HereDoc(HereDoc {
-				delim:     delimiter.to_vec(),
-				delim_raw: delimiter.to_vec(),
-				quoted:    false,
-				text:      Vec::new(),
-			}),
-		};
 		let map =
 			SourceMap { offset: 10, projection: 3, len: bytes.len(), outer: None };
-		let spans = heredoc_spans(&map, bytes, &[
-			doc(Span::new(17, 20), b"A", false),
-			doc(Span::new(21, 25), b"B", true),
-		]);
+		// The unit starts at absolute offset 13: parse it there.
+		let mut script = b" ".repeat(13);
+		script.extend_from_slice(bytes);
+		let cc = Parser::new(&script, Features::NONE, NO_ALIASES)
+			.next_command()
+			.unwrap()
+			.unwrap();
+		let cmd = cc
+			.list()
+			.items()
+			.one()
+			.unwrap()
+			.and_or()
+			.first()
+			.stages()
+			.one()
+			.unwrap();
+		let spans = heredoc_spans(&map, bytes, cmd.redirs());
 		assert_eq!(spans.len(), 2);
 		assert_eq!(map.raw(bytes, spans[0].unwrap()), b"not A\n");
 		assert_eq!(map.raw(bytes, spans[1].unwrap()), b"\tbody B\n");

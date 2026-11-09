@@ -1,0 +1,22 @@
+[package]
+name = "jaq-core"
+version = "3.1.1"
+authors = ["Michael Färber <michael.faerber@gedenkt.at>"]
+edition = "2021"
+license = "MIT"
+readme = "README.md"
+description = "Interpreter for the jaq language"
+repository = "https://github.com/01mf02/jaq"
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+arbitrary = { version = "1.4", optional = true }
+dyn-clone = "1.0"
+once_cell = { version = "1.16.0", default-features = false }
+typed-arena = { version = "2.0.2", default-features = false }
+
+[lints]
+workspace = true

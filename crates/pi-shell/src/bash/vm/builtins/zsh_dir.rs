@@ -24,7 +24,8 @@ use super::{
 	zsh_typeset::PM_EXPORTED,
 };
 use crate::bash::{
-	fs::{Stat, StatKind},
+	fs::{Stat, StatKind, plain_windows_path},
+	ids::Platform,
 	store::{Key, MiscKey, Record},
 	syntax::zsh::tok::{head, tail},
 	vm::{
@@ -87,6 +88,61 @@ struct Cd {
 	pwd:        BString,
 	/// zsh's `dirstack` with the current directory pushed on top.
 	stack:      Vec<BString>,
+	/// Windows paths ([`on_windows`]).
+	windows:    bool,
+}
+
+/// Whether the shell runs on Windows, where `cd` takes drive (`C:\x`,
+/// `C:/x`) and UNC (`\\srv\share`) paths and keeps directories spelled
+/// with `/` ([`windows_spelling`]).
+fn on_windows(ctx: &Ctx<'_, '_>) -> bool {
+	ctx.k.engine.config().platform == Platform::Windows
+}
+
+/// `path` as zsh keeps directories on Windows (`$PWD`, `$HOME`, the
+/// directory stack): `/` separators (zsh's path code, `:h`/`:t` and `%~`
+/// split on `/`, and Windows takes either), the `\\?\` prefix of a
+/// resolved path dropped ([`plain_windows_path`]; a path that keeps it is
+/// left as is, `\` being its only separator), and a root-relative `/x` on
+/// the drive of `cwd`.
+pub(crate) fn windows_spelling(path: &[u8], cwd: &[u8]) -> BString {
+	let path = plain_windows_path(path);
+	if path.starts_with(br"\\?\") {
+		return BString::from(path.into_owned());
+	}
+	let mut out: Vec<u8> = path
+		.iter()
+		.map(|&c| if c == b'\\' { b'/' } else { c })
+		.collect();
+	if out.first() == Some(&b'/') && out.get(1) != Some(&b'/') && root_len(cwd, true) == 3 {
+		out.splice(0..0, cwd[..2].iter().copied());
+	}
+	out.into()
+}
+
+/// The length of the root of `path` (`/`; on Windows also `C:/` and
+/// `//server/share/`), 0 when it is relative.
+fn root_len(path: &[u8], windows: bool) -> usize {
+	if windows {
+		if let [drive, b':', b'/' | b'\\', ..] = path
+			&& drive.is_ascii_alphabetic()
+		{
+			return 3;
+		}
+		if let [b'/' | b'\\', b'/' | b'\\', rest @ ..] = path
+			&& !rest.is_empty()
+		{
+			// `//server/share/`: the root ends after the share.
+			let sep = |c: &u8| matches!(c, b'/' | b'\\');
+			let server = rest.iter().position(sep).map_or(rest.len(), |i| i + 1);
+			let share = rest[server..]
+				.iter()
+				.position(sep)
+				.map_or(rest.len(), |i| server + i + 1);
+			return 2 + share;
+		}
+	}
+	usize::from(path.first() == Some(&b'/'))
 }
 
 /// `stat`/`lstat` of the absolute `path`.
@@ -98,9 +154,10 @@ fn stat(ctx: &Ctx<'_, '_>, path: &[u8], follow: bool) -> Result<Option<Stat>, Ne
 }
 
 /// The canonical physical path of the absolute `path` (zsh `xsymlink`,
-/// `zgetcwd`).
+/// `zgetcwd`), spelled as `cd` keeps directories.
 fn realpath(ctx: &Ctx<'_, '_>, path: &[u8]) -> Result<Option<BString>, Need> {
 	Ok(match ctx.probe(Probe::RealPath { path: path.into() })? {
+		ProbeResult::Path(Some(p)) if on_windows(ctx) => Some(windows_spelling(&p, path)),
 		ProbeResult::Path(p) => p,
 		_ => None,
 	})
@@ -117,15 +174,24 @@ fn chdir_check(ctx: &Ctx<'_, '_>, path: &[u8]) -> Result<Result<(), BString>, Ne
 }
 
 /// zsh `fixdir` over the absolute `src`: `.` segments, repeated `/`es and
-/// `foo/..` pairs removed. A `foo` that is not a directory stops the
-/// normalisation (the rest stays as written); `CHASE_DOTS` keeps every
-/// `..`. Also whether links must be chased (`..` kept).
+/// `foo/..` pairs removed, never climbing above the root (`/`, or on
+/// Windows `C:/` and `//server/share/`). A `foo` that is not a directory
+/// stops the normalisation (the rest stays as written); `CHASE_DOTS` keeps
+/// every `..`. Also whether links must be chased (`..` kept).
 fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
 	let chasedots = isset(ctx, ZshOpt::Chasedots)?;
+	let root = root_len(src, on_windows(ctx));
 	let mut chase = false;
 	let mut out: Vec<u8> = Vec::with_capacity(src.len());
 	let at = |i: usize| src.get(i).copied().unwrap_or(0);
 	let mut i = 0;
+	if root > 1 {
+		out.extend_from_slice(&src[..root]);
+		i = root;
+		while at(i) == b'/' {
+			i += 1;
+		}
+	}
 	loop {
 		if at(i) == b'/' {
 			out.push(b'/');
@@ -135,13 +201,13 @@ fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
 			}
 		}
 		if i >= src.len() {
-			while out.len() > 1 && out.last() == Some(&b'/') {
+			while out.len() > root.max(1) && out.last() == Some(&b'/') {
 				out.pop();
 			}
 			return Ok((out.into(), chase));
 		}
 		if at(i) == b'.' && at(i + 1) == b'.' && matches!(at(i + 2), 0 | b'/') && !chasedots {
-			if out.len() > 1 {
+			if out.len() > root.max(1) {
 				// `dir/..` goes only when `dir` is a directory.
 				let parent = out.strip_suffix(b"/").unwrap_or(&out);
 				if !stat(ctx, parent, true)?.is_some_and(|s| s.kind == StatKind::Dir) {
@@ -149,10 +215,10 @@ fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
 					return Ok((out.into(), true));
 				}
 				let mut d = out.len() - 1;
-				while d > 1 && out[d - 1] != b'/' {
+				while d > root.max(1) && out[d - 1] != b'/' {
 					d -= 1;
 				}
-				if out[d - 1] != b'/' {
+				if d > 0 && out[d - 1] != b'/' {
 					d -= 1;
 				}
 				out.truncate(d);
@@ -185,22 +251,28 @@ fn fixdir(ctx: &mut Ctx<'_, '_>, src: &[u8]) -> Result<(BString, bool), Need> {
 /// directory) can be changed to; the path the engine changes to, or the
 /// error text. `hard` refuses symbolic links in any component.
 fn lchdir(ctx: &Ctx<'_, '_>, path: &[u8], hard: bool) -> Result<Result<BString, BString>, Need> {
-	let full: BString = if path.starts_with(b"/") {
+	let windows = on_windows(ctx);
+	let root = root_len(path, windows);
+	let full: BString = if root > 0 {
 		path.into()
 	} else {
-		let cwd = &ctx.vp.cwd;
-		[cwd.strip_suffix(b"/").unwrap_or(cwd), b"/", path]
+		let cwd = if windows {
+			windows_spelling(&ctx.vp.cwd, &ctx.vp.cwd)
+		} else {
+			ctx.vp.cwd.clone()
+		};
+		[cwd.strip_suffix(b"/").unwrap_or(&cwd), b"/", path]
 			.concat()
 			.into()
 	};
 	if hard {
-		let base_len = if path.starts_with(b"/") {
-			1
+		let base_len = if root > 0 {
+			root
 		} else {
 			full.len() - path.len()
 		};
 		let mut walked: Vec<u8> = full[..base_len].to_vec();
-		for comp in path.split(|&c| c == b'/').filter(|c| !c.is_empty()) {
+		for comp in path[root..].split(|&c| c == b'/').filter(|c| !c.is_empty()) {
 			if walked.last() != Some(&b'/') {
 				walked.push(b'/');
 			}
@@ -242,12 +314,12 @@ fn try_chdir(
 	let pwd = cd.pwd.clone();
 	let pwd = pwd.as_slice();
 	let buf: Vec<u8> = match pfix.filter(|p| !p.is_empty()) {
-		Some(p) if p.starts_with(b"/") => [p, b"/", dest].concat(),
+		Some(p) if root_len(p, cd.windows) > 0 => [p, b"/", dest].concat(),
 		Some(p) => {
 			let d: &[u8] = if pwd == b"/" { b"" } else { pwd };
 			[d, b"/", p, b"/", dest].concat()
 		},
-		None if dest.starts_with(b"/") => dest.to_vec(),
+		None if root_len(dest, cd.windows) > 0 => dest.to_vec(),
 		None => {
 			let d = pwd.strip_suffix(b"/").unwrap_or(pwd);
 			[d, b"/", dest].concat()
@@ -262,7 +334,7 @@ fn try_chdir(
 	// (useful when the current directory was renamed).
 	let reached = match lchdir(ctx, &path, cd.hard)? {
 		Ok(r) => r,
-		Err(msg) if pfix.is_some() || dest.starts_with(b"/") => return Ok(Err(msg)),
+		Err(msg) if pfix.is_some() || root_len(dest, cd.windows) > 0 => return Ok(Err(msg)),
 		Err(_) => match lchdir(ctx, dest, cd.hard)? {
 			Ok(r) => r,
 			Err(msg) => return Ok(Err(msg)),
@@ -299,23 +371,37 @@ fn cd_able_vars(ctx: &mut Ctx<'_, '_>, s: &[u8]) -> Result<Option<BString>, Need
 /// zsh `cd_do_chdir`: change to `dest` through `$cdpath` and
 /// `CDABLE_VARS`; the new directory, or `None` after `ERROR: dest`.
 fn do_chdir(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dest: &[u8]) -> Result<Option<BString>, Need> {
+	// Errors name the directory as given.
+	let shown = BString::from(dest);
+	let spelled;
+	let dest = if cd.windows {
+		spelled = windows_spelling(dest, &cd.pwd);
+		spelled.as_slice()
+	} else {
+		dest
+	};
 	let nocdpath = dest.first() == Some(&b'.')
 		&& (matches!(dest.get(1), None | Some(b'/'))
 			|| (dest.get(1) == Some(&b'.') && matches!(dest.get(2), None | Some(b'/'))));
-	if dest.starts_with(b"/") {
+	if root_len(dest, cd.windows) > 0 {
 		return Ok(match try_chdir(ctx, cd, None, dest)? {
 			Ok(p) => Some(p),
 			Err(msg) => {
-				ctx.usage(format!("{}: {}", errtext(&msg), dest.as_bstr()));
+				ctx.usage(format!("{}: {}", errtext(&msg), shown));
 				None
 			},
 		});
 	}
 	let posixcd = isset(ctx, ZshOpt::Posixcd)?;
-	let cdpath: Vec<BString> = zx(ctx, |ex| params::getaparam(ex, b"cdpath"))?
+	let mut cdpath: Vec<BString> = zx(ctx, |ex| params::getaparam(ex, b"cdpath"))?
 		.ok()
 		.flatten()
 		.unwrap_or_default();
+	if cd.windows {
+		for p in &mut cdpath {
+			*p = windows_spelling(p, &cd.pwd);
+		}
+	}
 	let hasdot =
 		!nocdpath && !posixcd && cdpath.iter().any(|p| p.is_empty() || p.as_slice() == b".");
 	let mut eno: Option<BString> = None;
@@ -363,7 +449,7 @@ fn do_chdir(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dest: &[u8]) -> Result<Option<BS
 		}
 	}
 	let msg = eno.unwrap_or_else(|| BString::from("No such file or directory"));
-	ctx.usage(format!("{}: {}", errtext(&msg), dest.as_bstr()));
+	ctx.usage(format!("{}: {}", errtext(&msg), shown));
 	Ok(None)
 }
 
@@ -501,7 +587,7 @@ fn new_pwd(ctx: &mut Ctx<'_, '_>, cd: &mut Cd, dir: usize, quiet: bool) -> R {
 	}
 	let logical = new.clone();
 	if cd.chasing
-		&& new.starts_with(b"/")
+		&& root_len(&new, cd.windows) > 0
 		&& let Some(real) = realpath(ctx, &new)?
 	{
 		// zsh `findpwd`.
@@ -630,7 +716,14 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString], func: Func) -> R {
 		return done(1);
 	}
 	let mut stack = dirstack::entries(ctx.cx.store, ctx.vp)?;
-	let pwd = ctx.vp.cwd.clone();
+	let windows = on_windows(ctx);
+	// The working directory as `cd` spells it (the process's own at
+	// startup has `\` on Windows).
+	let pwd = if windows {
+		windows_spelling(&ctx.vp.cwd, &ctx.vp.cwd)
+	} else {
+		ctx.vp.cwd.clone()
+	};
 	stack.insert(0, pwd.clone());
 	let chasing = ops.isset(b'P') || (isset(ctx, ZshOpt::Chaselinks)? && !ops.isset(b'L'));
 	let mut cd = Cd {
@@ -641,6 +734,7 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, ops: &Ops, argv: &[BString], func: Func) -> R {
 		doprintdir: 0,
 		pwd,
 		stack,
+		windows,
 	};
 	if let Some(dir) = get_dest(ctx, &mut cd, argv)? {
 		new_pwd(ctx, &mut cd, dir, ops.isset(b'q'))
@@ -717,5 +811,31 @@ mod tests {
 	fn error_text_lowercases_first_letter() {
 		assert_eq!(errtext(b"No such file or directory"), "no such file or directory");
 		assert!(is_enoent(b"No such file or directory"));
+	}
+
+	/// `cd` on Windows keeps `/`-separated directories: a resolved path's
+	/// `\\?\` prefix (once left in `$PWD`) goes, and `\x` lands on the
+	/// working directory's drive.
+	#[test]
+	fn windows_spelling_uses_slashes_and_drops_verbatim_prefixes() {
+		assert_eq!(windows_spelling(br"F:\Repos\x", b"F:/r"), "F:/Repos/x");
+		assert_eq!(windows_spelling(br"\\?\F:\Repos", b"F:/r"), "F:/Repos");
+		assert_eq!(windows_spelling(br"\\?\UNC\srv\share\d", b"F:/r"), "//srv/share/d");
+		assert_eq!(windows_spelling(br"\tools", b"F:/r"), "F:/tools");
+		assert_eq!(windows_spelling(b"sub\\dir", b"F:/r"), "sub/dir");
+	}
+
+	/// `..` never climbs above a drive or share root, and a Windows path
+	/// is absolute (it was joined onto the working directory).
+	#[test]
+	fn roots_cover_drives_and_shares_on_windows_only() {
+		assert_eq!(root_len(b"C:/x", true), 3);
+		assert_eq!(root_len(br"C:\x", true), 3);
+		assert_eq!(root_len(b"//srv/share/x", true), 12);
+		assert_eq!(root_len(b"//srv/share", true), 11);
+		assert_eq!(root_len(b"/x", true), 1);
+		assert_eq!(root_len(b"x", true), 0);
+		assert_eq!(root_len(b"C:/x", false), 0);
+		assert_eq!(root_len(b"/x", false), 1);
 	}
 }

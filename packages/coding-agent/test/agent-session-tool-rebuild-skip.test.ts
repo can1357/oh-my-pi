@@ -217,10 +217,10 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 						emit: async () => undefined,
 					} as unknown as ExtensionRunner)
 				: undefined,
-			rebuildSystemPrompt: async (toolNames, _tools) => {
+			rebuildSystemPrompt: async (toolNames, _tools, xdev) => {
 				const base = await rebuildSystemPrompt(toolNames);
 				if (!options.exposeXdevCatalog) return { systemPrompt: [base] };
-				const catalog = options.xdev ? [...options.xdev.mountedNames] : [];
+				const catalog = xdev ? [...xdev.mountedNames] : [];
 				return { systemPrompt: [`${base}\nxd:// catalog: ${catalog.join(",")}`], xdevCatalogNames: catalog };
 			},
 			getMcpServerInstructions: options.getMcpServerInstructions,
@@ -1378,6 +1378,37 @@ These tools became available:
 		expect(evalTool.description).toBe(boundDescription);
 		expect(session.systemPrompt).toEqual(boundPrompt);
 		expect(session.getToolForEvalBridge("mcp__nucleus_fetch")).toBeDefined();
+		expect(mountNoticesIn(contexts[1]).join("\n")).toContain("xd://mcp__nucleus_fetch");
+	});
+
+	it("keeps a held MCP mount out of a prefix-bound prompt across a rebuild that changes nothing else", async () => {
+		const { session, contexts, systemPrompts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
+			xdev: createTestXdevState(),
+			responses: [{ content: ["ok"] }, { content: ["ok"] }, { content: ["ok"] }],
+			prefixBound: true,
+			exposeXdevCatalog: true,
+		});
+		const evalTool = new EvalTool({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: session.settings,
+			getSessionFile: () => null,
+			getAdvertisedEvalToolNames: () => session.getAdvertisedEvalToolNames(),
+		} as ToolSession);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		await session.refreshMCPTools([search]);
+		await session.prompt("hi");
+		const boundDescription = evalTool.description;
+
+		await session.refreshMCPTools([search, fetch]);
+		await session.prompt("again");
+		// e.g. a body-only `manage_skill update`: nothing the prompt renders changed.
+		await session.refreshBaseSystemPrompt();
+		await session.prompt("third");
+
+		expect(evalTool.description).toBe(boundDescription);
+		expect(systemPrompts[2]).toEqual(systemPrompts[0]);
 		expect(mountNoticesIn(contexts[1]).join("\n")).toContain("xd://mcp__nucleus_fetch");
 	});
 

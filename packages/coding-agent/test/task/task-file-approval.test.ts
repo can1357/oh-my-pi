@@ -26,7 +26,10 @@ describe("taskFile approval binding", () => {
 	const executions: ExecutorOptions[] = [];
 
 	beforeEach(async () => {
-		directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-task-file-approval-"));
+		// Real path: macOS tmpdir is a symlink (/var → /private/var), and approval shows resolved targets.
+		directory = await fs.promises.realpath(
+			await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-task-file-approval-")),
+		);
 		executions.length = 0;
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();

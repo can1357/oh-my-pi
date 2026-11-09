@@ -47,6 +47,7 @@ postcard.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smallvec.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -58,7 +59,6 @@ xxhash-rust.workspace = true
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-smallvec.workspace = true
 windows-sys.workspace = true
 winreg.workspace = true
 

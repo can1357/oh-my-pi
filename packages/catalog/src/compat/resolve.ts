@@ -939,6 +939,7 @@ function resolveAnthropicPolicy(
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
+		disabledThinking: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyWireAxes(compat, axes.wire, "anthropic-messages");

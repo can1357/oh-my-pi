@@ -93,7 +93,6 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 - `language`: the backend used; `languages`: the distinct backend list. These retain the historical multi-cell-compatible shape, but a current call has one backend.
 - `cells[].views`: pretty views of printed values, in print order, as `{ text, view }` where `text` is the exact span of `output` the value printed and `view` is a `table` (data frames, `console.table`), `json` (dicts/lists/plain objects printing longer than 80 chars or multiple lines), or `markdown` (Python objects with `_repr_markdown_`). Renderers show the view in place of the matching text; the model only sees the text. At most 16 views per cell are kept, and a view whose JSON exceeds 32 KiB is dropped; dropped views show as their text.
 - `images`: present on live updates when images have arrived; final images are content blocks.
-- `statusEvents`: deduplicated helper/tool status events.
 - `notice`: optional backend notice.
 - `meta`: output truncation/artifact metadata supplied by `toolResult(...)`.
 - `async`: present when the cell was auto-backgrounded as an async job (`{ state, jobId, type: "eval" }`).
@@ -266,6 +265,7 @@ With `eval.tools.enabled` (default on), a cell can turn a function into a tool o
 - Eval subagent spawning obeys `task.maxRecursionDepth` (default `2`; negative values allow unlimited depth). Each `workpool()` caps its own live workers at `task.maxConcurrency` (default 32, `0` unbounded). `agent()` takes no `task.maxConcurrency` slot: every handle is a running background job counted against the session-wide `async.maxJobs` cap (default and maximum 100), which it shares with every other background job in the session, including async `bash`, async `task` spawns, `workpool()` pools and nested subagents' jobs. `agent()` fails with `Background job limit reached` once that cap is full. Completion/judgment requests have their own fixed 32-request cap.
 - Malformed params are schema errors; unavailable/disabled backends and missing session are `ToolError`s.
 - Runtime exceptions become backend output with nonzero exit. Interactive stdin is an error. Output truncation does not fail the call.
+- Unhandled JavaScript promise rejections fail the cell while it is running. A rejection attributed to a finished cell keeps the kernel state and appears once at the start of the next cell's output, with its originating cell and error stack; bridge-call errors include the tool name or prelude action (for example, `browser.call`). The next cell shows at most ten late errors and counts any additional rejections.
 - A dead retained managed kernel may be replaced and the invocation retried once by its executor.
 
 ## Notes

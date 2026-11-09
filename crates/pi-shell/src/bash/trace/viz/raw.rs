@@ -45,6 +45,14 @@ pub(super) fn prepare(source: &impl VizSource, analysis: &Analysis, color: bool)
 				}
 			}
 		}
+		for (key, span) in &analysis.heredocs {
+			if key.unit == unit.index
+				&& key.source == 0
+				&& let Some(range) = map.range(*span)
+			{
+				owners.push(Located { key: *key, range, style: None });
+			}
+		}
 		for (key, span, style) in &analysis.colors {
 			if key.unit != unit.index || key.source != 0 || style == "kw" {
 				continue;

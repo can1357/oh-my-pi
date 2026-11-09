@@ -43,7 +43,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		authStorage.keys.setRuntime("venice", "test-key");
+		authStorage.keys.setRuntime("deepseek", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -674,7 +674,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 
 	it("skips the frame rescue when the active model's wire strips image input", async () => {
 		// Declares image input, so only the wire predicate tells it apart from a vision model.
-		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("venice", "deepseek-v4-1-flash") });
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, model: getBundledModel("deepseek", "deepseek-v4-flash") });
 		vi.spyOn(session.agent, "prompt").mockResolvedValue();
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });

@@ -255,6 +255,9 @@ class RemoteCredentials implements CredentialsApi {
 	hasOAuth(provider: string): boolean {
 		return this.#remote.callSync("credentials.hasOAuth", provider);
 	}
+	hasSubscription(provider: string): boolean {
+		return this.#remote.callSync("credentials.hasSubscription", provider);
+	}
 	getOAuth(provider: string): OAuthCredential | undefined {
 		return this.#remote.callSync("credentials.getOAuth", provider);
 	}
