@@ -105,6 +105,7 @@ async fn session_env_short_temp_matches_pwd_after_cd() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 
@@ -273,6 +274,7 @@ async fn session_env_does_not_export_git_repo_location_overrides() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 

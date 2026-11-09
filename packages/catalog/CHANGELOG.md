@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [18.18.5] - 2026-11-09
+
+### Added
+
+- Added Claude Fable 5.2 and Claude Mythos 5.2 ($8/$40 per MTok, $0.20 cache reads, 1M context)
+
+### Fixed
+
+- Fixed newly discovered Anthropic Fable/Mythos models showing as text-only, non-reasoning, and mispriced before models.dev catalogs them
+- Fixed Claude Mythos 5.1 not using thinking prefix-binding controls, which it needs on every account
+
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- Added Otari gateway provider: `/login otari` with `OTARI_API_KEY`, models discovered live per workspace ([#17841](https://github.com/can1357/oh-my-pi/pull/17841) by [@tbille](https://github.com/tbille))
+- Added the `base64SkipThoughtSignature` Google compat flag, which sends the Gemini unsigned-tool-call bypass sentinel base64-encoded for gateways that decode `thoughtSignature` as bytes ([#18586](https://github.com/can1357/oh-my-pi/pull/18586) by [@tuandinh0801](https://github.com/tuandinh0801)).
+- Added a `disabled "<reason>"` auth rule that pauses a provider: no login offers it and nothing calls it, while its code and users' stored logins stay in place ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- Paused Google Antigravity, since Google may restrict accounts that use it outside its own apps ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+## [18.18.3] - 2026-11-09
+
+### Changed
+
+- Added a `balanced` delegation bias between `eager` and `restrained`; models without a `delegation-bias` rule now resolve to it instead of `eager`
+
+## [18.18.2] - 2026-11-08
+
 ### Fixed
 
 - Fixed model catalog pricing and output-limit metadata for Mistral alias IDs, including the Mistral Vibe CLI default model, by applying the metadata of their aliased models.

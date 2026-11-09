@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Added `canReplayRemoteCompactionFrom()` to determine whether a model can replay provider-native compaction produced by another model.

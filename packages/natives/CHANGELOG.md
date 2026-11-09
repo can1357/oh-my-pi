@@ -6,9 +6,12 @@
 
 - Fixed the bash tool's shell under a low open-file limit: a background command's own redirections no longer fail for want of descriptors the shell holds, a duplication of a descriptor the command lacks fails as in Bash, and process substitutions and coprocesses take descriptors the command can be given when the limit is 63 or less ([#18086](https://github.com/can1357/oh-my-pi/pull/18086) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.18.2] - 2026-11-08
+
 ### Added
 
 - Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
 
 ### Fixed
 

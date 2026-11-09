@@ -116,6 +116,19 @@ models use its `/api/alpha` sibling on the same host, e.g. a `.../api/v1` relay 
 
 `omitMaxOutputTokens` omits the model-derived output cap.
 
+`compat.base64SkipThoughtSignature` (Google APIs, default `false`): sends the unsigned-tool-call bypass sentinel base64-encoded. Set it on a `google-generative-ai` model behind a gateway that decodes `thoughtSignature` as base64 and answers the raw `skip_thought_signature_validator` literal with a 400, for example when Gemini replays another model's tool-call history:
+
+```yaml
+providers:
+   my-gemini-gateway:
+      baseUrl: https://gateway.example.com/gemini/v1beta
+      api: google-generative-ai
+      models:
+         - id: gemini-3.8-flash
+           compat:
+              base64SkipThoughtSignature: true
+```
+
 ### Standard Responses WebSockets
 
 Standard Responses uses HTTP/SSE by default, including at the official OpenAI

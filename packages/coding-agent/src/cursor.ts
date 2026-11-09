@@ -8,6 +8,7 @@ import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	joinAdditionalContext,
+	resolveToolConcurrency,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 	validateAgentToolArguments,
@@ -552,6 +553,33 @@ function decodeMcpArgs(rawArgs: Record<string, Uint8Array>): Record<string, unkn
 		}
 	}
 	return decoded;
+}
+
+/** The arguments an MCP call will execute with: the provider's decoded map, or the raw wire map decoded here. */
+function mcpCallArgs(call: CursorMcpCall): Record<string, unknown> {
+	return Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+}
+
+/**
+ * The tool an MCP call will actually run.
+ *
+ * One resolution for execution, approval preflight, and exec ordering: a
+ * replace-shaped edit (an injected StrReplace name, or `edit` carrying
+ * replacement fields) runs the replace-mode instance, and every other call
+ * runs its execution override or registry tool. Classifying or approving by
+ * the frame's name instead would judge a different tool than the one that
+ * executes.
+ */
+function resolveMcpTool(
+	options: CursorExecBridgeOptions,
+	toolName: string,
+	args: Record<string, unknown>,
+): { tool: CursorBridgeTool | undefined; preferReplace: boolean } {
+	const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
+	const tool = preferReplace
+		? options.getEditReplaceTool?.()
+		: (options.getExecutableTool?.(toolName) ?? options.tools.get(toolName));
+	return { tool, preferReplace };
 }
 
 function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): string {
@@ -1138,17 +1166,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
-			const replaceTool = this.options.getEditReplaceTool?.();
-			if (!replaceTool) {
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (preferReplace) {
+			if (!tool) {
 				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
-			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
+			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), tool);
 		}
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
@@ -1161,6 +1188,23 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	}
 
 	/**
+	 * Order an MCP call by the tool it will run.
+	 *
+	 * The bridge executes tools directly, bypassing the agent loop's batch
+	 * scheduler, so without this an exclusive tool (`edit`, `write`, …)
+	 * arriving as MCP races the frames around it: a later shell can read the
+	 * file before the edit lands, and the edit can start before an earlier
+	 * read finishes. An unknown tool executes nothing and stays shared.
+	 */
+	mcpConcurrency(call: CursorMcpCall): "shared" | "exclusive" {
+		const toolName = call.toolName || call.name;
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
+		if (!tool) return "shared";
+		return resolveToolConcurrency(tool, preferReplace ? normalizeCursorReplaceArgs(args) : args);
+	}
+
+	/**
 	 * Resolve an MCP call's approval without running it.
 	 *
 	 * Same resolution the wrapper applies at execution time, minus the
@@ -1170,11 +1214,8 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 */
 	async mcpApprovalPreflight(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
-		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const tool = preferReplace
-			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		const args = mcpCallArgs(call);
+		const { tool, preferReplace } = resolveMcpTool(this.options, toolName, args);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const { approvalMode, userPolicies } = resolveApprovalFromContext(context);

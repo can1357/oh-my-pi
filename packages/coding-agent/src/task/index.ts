@@ -75,6 +75,7 @@ import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/too
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
+	normalizeModelSelector,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -509,6 +510,37 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
+/** A present but blank `model` (see {@link normalizeModelSelector}): "use the agent's routing", not a selector. */
+function isEmptyModelPlaceholder(model: unknown): boolean {
+	return model !== undefined && normalizeModelSelector(model) === undefined;
+}
+
+/**
+ * Drop empty `model` placeholders from the call and its batch items so they
+ * route like an omitted model. Copy-on-write: the submitted arguments are
+ * never mutated, and the same reference is returned when nothing changed.
+ */
+function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
+	const originalTasks = params.tasks;
+	let normalizedTasks: TaskItem[] | undefined;
+	if (Array.isArray(originalTasks)) {
+		for (let i = 0; i < originalTasks.length; i++) {
+			const item = originalTasks[i];
+			if (!isRecord(item) || !isEmptyModelPlaceholder(item.model)) continue;
+			normalizedTasks ??= originalTasks.slice();
+			const copy = { ...item };
+			delete copy.model;
+			normalizedTasks[i] = copy;
+		}
+	}
+	const emptyRootModel = isEmptyModelPlaceholder(params.model);
+	if (!emptyRootModel && !normalizedTasks) return params;
+	const copy = { ...params };
+	if (emptyRootModel) delete copy.model;
+	if (normalizedTasks) copy.tasks = normalizedTasks;
+	return copy;
+}
+
 /**
  * Repair, validate, and normalize a call into its spawns. Returns the
  * validation error the call reports instead when the shape is rejected. Shared
@@ -522,7 +554,7 @@ function planSpawns(
 	seanceAdvertised: boolean,
 	settings: Settings,
 ): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams);
+	const params = normalizeTaskModelPlaceholders(repairTaskParams(rawParams as TaskParams));
 	const error =
 		validateShapeParams(batchEnabled, params) ??
 		validateSpawnParams(params, batchEnabled, fileEnabled, defaultAgent, settings) ??
@@ -901,6 +933,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
 		});

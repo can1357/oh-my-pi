@@ -343,8 +343,8 @@ pub struct BangOpts {
 	pub substpattern: bool,
 	/// The shell's working directory (`:a`, `:A`, `:P`).
 	pub cwd:          BString,
-	/// `$PATH` (`:c`).
-	pub path:         BString,
+	/// `$PATH`'s directories, split on the platform's separator (`:c`).
+	pub path:         Vec<BString>,
 	/// bash's `history_expand` (`history -p`): `!#` on an empty line is
 	/// empty.
 	pub bash:         bool,
@@ -1237,13 +1237,7 @@ impl Run<'_, '_> {
 		if name.contains(&b'/') {
 			return Ok(None);
 		}
-		let dirs: Vec<BString> = self
-			.o
-			.path
-			.split(|&c| c == b':')
-			.map(BString::from)
-			.collect();
-		for dir in dirs {
+		for dir in self.o.path.clone() {
 			let mut p = if dir.is_empty() {
 				self.o.cwd.clone()
 			} else {
