@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `ask` HTML forms in Tern set a question's leading prose (paragraphs, lists, preformatted text) as a Markdown context card that scrolls on its own, and its legend as the question heading, instead of one monospace column
+
 ### Fixed
 
 - Fixed the `ask` HTML form tab strip in Tern running off the card with long or many questions: tabs are numbered and their labels clipped to fit, fall back to numbers alone, and past that show a window around the current tab with arrows to the rest

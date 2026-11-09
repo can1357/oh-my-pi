@@ -175,11 +175,15 @@ interface Layout {
 	dropdown?: { atom: number; row: number };
 }
 
-/** A native question tab: indices of the sections it shows, and the fields in them. */
+/**
+ * A native question tab: indices of the sections it shows, the fields in them, and the
+ * section holding those fields (its legend is the tab's question).
+ */
 interface FormTab {
 	label: string;
 	sections: number[];
 	fields: FormField[];
+	question: number | undefined;
 }
 
 /** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
@@ -237,6 +241,54 @@ function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
 	});
 }
 
+/** Text escaped for Markdown: the terminal renders context as Markdown and must show it verbatim. */
+function markdownText(text: string): string {
+	return sanitize(text)
+		.replace(/[\\`*_[\]<>#|~]/g, "\\$&")
+		.replace(/^(\s*)(\d+)([.)])/gm, "$1$2\\$3")
+		.replace(/^(\s*)([-+])(\s)/gm, "$1\\$2$3");
+}
+
+/** Form spans as Markdown: bold, italic and code kept, hard breaks kept, everything else literal. */
+function spansMarkdown(spans: readonly FormSpan[]): string {
+	return spans
+		.map(item => {
+			if (item.style === "code") {
+				const body = sanitize(item.text).replace(/\n/g, " ");
+				const fence = "`".repeat(Math.max(0, ...(body.match(/`+/g) ?? []).map(run => run.length)) + 1);
+				return /^`|`$/.test(body) ? `${fence} ${body} ${fence}` : `${fence}${body}${fence}`;
+			}
+			const body = item.text.split("\n").map(markdownText).join("\\\n");
+			if (item.style === "strong") return `**${body}**`;
+			if (item.style === "em") return `*${body}*`;
+			return body;
+		})
+		.join("");
+}
+
+/** Context blocks the native form sets as Markdown prose (pictures, tables and fields stay native). */
+type ProseBlock = Extract<FormBlock, { kind: "text" | "list" | "pre" }>;
+
+function isProse(block: FormBlock): block is ProseBlock {
+	return block.kind === "text" || block.kind === "list" || block.kind === "pre";
+}
+
+function proseMarkdown(block: ProseBlock): string {
+	switch (block.kind) {
+		case "text":
+			return block.heading ? `#### ${spansMarkdown(block.spans)}` : spansMarkdown(block.spans);
+		case "list":
+			return block.items
+				.map((entry, index) => `${block.ordered ? `${index + 1}.` : "-"} ${spansMarkdown(entry)}`)
+				.join("\n");
+		case "pre": {
+			const body = sanitize(block.text);
+			const fence = "`".repeat(Math.max(3, ...(body.match(/`{3,}/g) ?? []).map(run => run.length + 1)));
+			return `${fence}\n${body}\n${fence}`;
+		}
+	}
+}
+
 /**
  * Native question tabs: one per section holding fields, labeled by its legend
  * (else its first field's question). Sections of context alone join the next
@@ -253,13 +305,13 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
 		const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
-		tabs.push({ label, sections: [...lead, index], fields });
+		tabs.push({ label, sections: [...lead, index], fields, question: index });
 		lead = [];
 	});
 	if (lead.length > 0) {
 		const last = tabs.at(-1);
 		if (last) last.sections.push(...lead);
-		else tabs.push({ label: "", sections: lead, fields: [] });
+		else tabs.push({ label: "", sections: lead, fields: [], question: undefined });
 	}
 	return tabs;
 }
@@ -1482,27 +1534,20 @@ export class HtmlFormDialog implements Component, Focusable {
 	// ── Native ───────────────────────────────────────────────────────────────
 
 	/**
-	 * Tern's stylesheet caps the ask card at 60vh, clips what overflows, and lets only a few of
-	 * its direct children shrink and scroll: a `list` in the `omp.ask.options` role and a `kv` in
-	 * `omp.ask.answers`. A tab's content therefore sits in one such list (a `col` capped by `max`
-	 * only clips), so it scrolls inside the card and the action bar below stays in view.
+	 * Tern's stylesheet caps the ask card at 60vh, clips what overflows, and lets only some of
+	 * its direct children shrink and scroll: an `omp.ask.preview` and an `omp.ask.question` `md`,
+	 * an `omp.ask.options` list and an `omp.ask.answers` kv. A question tab is laid out on those:
+	 * its leading prose as a Markdown context card, its question as a heading, and the rest of
+	 * the tab in a list (a `col` capped by `max` only clips), so each scrolls on its own and the
+	 * action bar below stays in view.
 	 */
 	#describeForm(blocked: boolean, cols: number): NativeNode {
 		const tabbed = this.#tabbed();
 		const review = tabbed && this.#tab === this.#tabs.length;
 		const children: NativeChild[] = [];
 		if (tabbed) children.push(this.#describeTabs(cols));
-		if (review) {
-			children.push(...this.#describeReview());
-		} else {
-			const form = col(this.#describeSections(this.#tabs[this.#tab]?.sections ?? []), {
-				gap: "lg",
-				role: "omp.ask.form",
-			});
-			// Keyed per tab, so a tab switch mounts a fresh scroller that opens at its top. The key
-			// stays clear of `f<index>`, the option lists' keys `handleNativeEvent` reads.
-			children.push(list([form], { role: "omp.ask.options" }, `body${this.#tab}`));
-		}
+		if (review) children.push(...this.#describeReview());
+		else children.push(...this.#describeTab(this.#tabs[this.#tab]));
 		children.push(this.#describeActions(blocked, tabbed && !review));
 		return col(children, { role: "omp.editor.ask", gap: "md" });
 	}
@@ -1511,7 +1556,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * Numbered tabs that fit the card: question labels clipped to share the strip, numbers alone
 	 * when even short labels overflow, and past that a window of numbers around the shown tab
 	 * with arrows paging to the hidden ones. A tab is checked once the user has left it with no
-	 * field failing validation.
+	 * field failing validation. The tab's whole question heads its page.
 	 */
 	#describeTabs(cols: number): NativeNode {
 		const count = this.#tabs.length;
@@ -1571,14 +1616,59 @@ export class HtmlFormDialog implements Component, Focusable {
 		return keyed(row([tabs], { role: "omp.ask.head", align: "center" }), "head");
 	}
 
-	#describeSections(sections: readonly number[]): NativeChild[] {
-		return sections.map(index => {
+	/**
+	 * One question tab: the prose leading into it (context sections and text before the first
+	 * picture, table or field) as a Markdown card, its legend (else the text right before its
+	 * first field) as the question heading, and everything else in the scrolling list. Each is
+	 * keyed per tab, so a tab switch mounts fresh scrollers that open at their tops; the list's
+	 * key stays clear of `f<index>`, the option lists' keys `handleNativeEvent` reads.
+	 */
+	#describeTab(tab: FormTab | undefined): NativeChild[] {
+		const context: string[] = [];
+		const body: NativeChild[] = [];
+		let question: readonly FormSpan[] = [];
+		let prose = true;
+		for (const index of tab?.sections ?? []) {
 			const section = this.#form.sections[index]!;
-			const blocks = section.blocks.map(block => this.#describeBlock(block));
-			return section.title.length > 0
-				? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, blocks, `s${index}`)
-				: keyed(col(blocks, { gap: "md", role: "omp.ask.section" }), `s${index}`);
-		});
+			const blocks = [...section.blocks];
+			const asked = index === tab!.question;
+			if (asked && section.title.length > 0) question = section.title;
+			else if (prose && section.title.length > 0) context.push(`**${spansMarkdown(section.title)}**`);
+			let lead = 0;
+			for (let block = blocks[0]; prose && block && isProse(block); block = blocks[++lead]) {
+				// Without a legend, the text right before the first field is the question.
+				if (asked && question.length === 0 && block.kind === "text" && blocks[lead + 1]?.kind === "field") {
+					question = block.spans;
+				} else {
+					context.push(proseMarkdown(block));
+				}
+			}
+			blocks.splice(0, lead);
+			if (blocks.length === 0) continue;
+			// A section whose legend went to the context card or the heading keeps no head of its own.
+			const head = !asked && !prose && section.title.length > 0;
+			prose = false;
+			const described = blocks.map(block => this.#describeBlock(block));
+			body.push(
+				head
+					? node("section", { head: nativeSpans(section.title), role: "omp.ask.section" }, described, `s${index}`)
+					: keyed(col(described, { gap: "md", role: "omp.ask.section" }), `s${index}`),
+			);
+		}
+		const children: NativeChild[] = [];
+		if (context.length > 0) {
+			children.push(
+				node("md", { text: context.join("\n\n"), role: "omp.ask.preview" }, undefined, `context${this.#tab}`),
+			);
+		}
+		if (question.length > 0) {
+			children.push(
+				node("md", { text: spansMarkdown(question), role: "omp.ask.question" }, undefined, `question${this.#tab}`),
+			);
+		}
+		const form = col(body, { gap: "lg", role: "omp.ask.form" });
+		children.push(list([form], { role: "omp.ask.options" }, `body${this.#tab}`));
+		return children;
 	}
 
 	/**
@@ -1654,7 +1744,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	#describeBlock(block: FormBlock): NativeChild {
 		switch (block.kind) {
 			case "text":
-				return text(nativeSpans(block.spans), {
+				return text(nativeSpans(block.spans, block.heading ? "strong" : undefined), {
 					wrap: "word",
 					role: block.heading ? "omp.ask.heading" : "omp.ask.text",
 				});

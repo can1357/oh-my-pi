@@ -434,6 +434,26 @@ describe("html form", () => {
 			expect(tabItems(forty).some(entry => entry.id === "t20")).toBe(false);
 		});
 
+		it("natively: a tab's leading prose is a Markdown context card and its legend the question heading", () => {
+			const { form } = dialog(`<form>
+				<p>The ledger writes to <code>ledger.db</code> and *must* keep <strong>nightly</strong> reconciliation.</p>
+				<ul><li>2:00 slot</li><li>no third-party calls</li></ul>
+				<fieldset><legend>Which store?</legend>
+				<label><input type="radio" name="db" value="sqlite" checked> SQLite</label></fieldset>
+				<fieldset><legend>Owner</legend><label>Email <input type="email" name="email"></label></fieldset>
+			</form>`);
+			const children = (form.describe(CX).c ?? []).filter(isNode);
+			const context = children.find(child => child.p?.role === "omp.ask.preview");
+			expect(context?.k).toBe("md");
+			expect(context?.p && "text" in context.p ? context.p.text : "").toBe(
+				"The ledger writes to `ledger.db` and \\*must\\* keep **nightly** reconciliation.\n\n- 2:00 slot\n- no third-party calls",
+			);
+			const question = children.find(child => child.p?.role === "omp.ask.question");
+			expect(question?.p && "text" in question.p ? question.p.text : "").toBe("Which store?");
+			// The legend is not repeated as a section head inside the scrolling body.
+			expect(findPath(form.describe(CX), node => node.k === "section")).toBeUndefined();
+		});
+
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
 			const { form } = dialog(DB_FORM);
 			const checked = () => {
