@@ -84,6 +84,25 @@ describe("RPC goal command", () => {
 		expect(state.isStreaming).toBe(false);
 	}, 30_000);
 
+	test("budget changes and clears the total without starting a turn, and refuses invalid or paused edits", async () => {
+		const rpc = await start({ continuation: false });
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: 100 }))).toMatchObject({ command: "goal" });
+		await rpc.goal("create", { objective: "bounded work", tokenBudget: 5000 });
+		const updated = await rpc.goal("budget", { tokenBudget: 2000 });
+		expect(updated.goal).toMatchObject({ objective: "bounded work", tokenBudget: 2000 });
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: -1 }))).toMatchObject({ command: "goal" });
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(2000);
+		await rpc.promptAndWait("/goal budget 3000");
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(3000);
+		await rpc.promptAndWait("/goal budget off");
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBeUndefined();
+		await rpc.goal("budget", { tokenBudget: 4000 });
+		expect((await rpc.goal("budget")).goal?.tokenBudget).toBeUndefined();
+		expect((await rpc.getState()).messageCount).toBe(0);
+		await rpc.goal("pause");
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: 100 }))).toMatchObject({ command: "goal" });
+	}, 30_000);
+
 	test("plan mode refuses create and resume", async () => {
 		const rpc = await start({ continuation: true, plan: true });
 		const refused = await rejectionOf(rpc.goal("create", { objective: "not while planning" }));

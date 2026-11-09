@@ -869,6 +869,7 @@ export class RpcClient {
 	/**
 	 * Read or change goal mode. `get` never mutates or starts a turn; `create`/`resume`
 	 * start a turn only when the server enables `goal.continuationModes: ["rpc"]`.
+	 * `budget` sets the total budget (omit tokenBudget to clear it).
 	 */
 	async goal(op: RpcGoalOp, options?: { objective?: string; tokenBudget?: number }): Promise<RpcGoalResult> {
 		const response = await this.#send({

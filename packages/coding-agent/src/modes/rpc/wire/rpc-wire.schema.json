@@ -2307,7 +2307,8 @@
 				"create",
 				"resume",
 				"pause",
-				"drop"
+				"drop",
+				"budget"
 			],
 			"type": "string"
 		},

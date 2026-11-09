@@ -59,8 +59,13 @@ import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "..
 import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
-import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import {
+	buildAvailableSlashCommands,
+	type InternalAvailableSlashCommand,
+} from "../../slash-commands/available-commands";
+import { lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
@@ -1870,7 +1875,23 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		process.exit(0);
 	};
 
-	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const getAvailableCommands = async () => {
+		const commands = await buildAvailableSlashCommands(session);
+		for (const name of ["goal"]) {
+			const builtin = lookupBuiltinSlashCommand(name)!;
+			const entry: InternalAvailableSlashCommand = {
+				name,
+				description: "Adjust the active goal's token budget",
+				input: { hint: "budget <N|off>" },
+				subcommands: builtin.subcommands?.filter(sub => sub.name === "budget"),
+				source: "builtin",
+			};
+			const index = commands.findIndex(command => command.name === name);
+			if (index === -1) commands.push(entry);
+			else commands[index] = entry;
+		}
+		return commands;
+	};
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
@@ -1933,6 +1954,22 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				});
 				if (skillResult === "cancelled") return "cancelled";
 				if (skillResult) return "admitted";
+				const goalSlash = parseSlashCommand(text);
+				if (goalSlash?.name === "goal" && /^budget(?:\s|$)/i.test(goalSlash.args)) {
+					const raw = goalSlash.args.slice("budget".length).trim();
+					if (!raw || (raw.toLowerCase() !== "off" && !/^[1-9]\d*$/.test(raw))) {
+						throw new Error("Usage: /goal budget <positive integer|off>");
+					}
+					await goalController.handle({
+						op: "budget",
+						token_budget: raw.toLowerCase() === "off" ? undefined : Number(raw),
+					});
+					output({
+						type: "command_output",
+						text: raw.toLowerCase() === "off" ? "Goal budget cleared." : `Goal budget set to ${raw}.`,
+					});
+					return "local";
+				}
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;

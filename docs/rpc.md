@@ -148,7 +148,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "set_slow_mode", enabled: boolean }`
-- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
+- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop" | "budget", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
@@ -601,6 +601,11 @@ including those made by the agent's `goal` tool.
   It adds the `goal` tool to the active tools.
 - `resume` resumes a paused goal (refused in plan mode). `pause` and `drop` restore
   the active tools from before the goal started.
+- `budget` changes an active goal's total token budget. Supply a positive integer
+  `token_budget`, or omit it to remove the limit (`/goal budget off`). Paused goals
+  must be resumed first. Usage is preserved; increasing or clearing an exhausted
+  budget makes the goal active again.
+- RPC `prompt` also accepts `/goal budget <N|off>`.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`

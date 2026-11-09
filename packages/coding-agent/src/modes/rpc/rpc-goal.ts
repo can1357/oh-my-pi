@@ -18,7 +18,7 @@ import { nextActionableTask } from "../../tools/todo";
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
 
-export type RpcGoalOp = "get" | "create" | "resume" | "pause" | "drop";
+export type RpcGoalOp = "get" | "create" | "resume" | "pause" | "drop" | "budget";
 
 export interface RpcGoalCommand {
 	op: RpcGoalOp;
@@ -213,6 +213,18 @@ export class RpcGoalController {
 				return await this.#create(command);
 			case "resume":
 				return await this.#resume();
+			case "budget": {
+				const state = this.#session.getGoalModeState();
+				if (!state?.enabled || (state.goal.status !== "active" && state.goal.status !== "budget-limited")) {
+					throw new Error(
+						state?.goal.status === "paused" ? "Resume the goal before adjusting the budget." : "No active goal.",
+					);
+				}
+				await this.#session.goalRuntime.onBudgetMutated(command.token_budget);
+				this.#resetContinuation();
+				this.#scheduleContinuation();
+				return this.#state;
+			}
 			case "pause":
 				await this.#session.goalRuntime.pauseGoal();
 				await this.#exit();
