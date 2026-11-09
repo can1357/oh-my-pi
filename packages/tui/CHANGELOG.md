@@ -16,6 +16,9 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 
+- The Agent Hub footer names both section keys (`1:agents` / `2:activity`) in both section views, and a footer too narrow for the symbol preset's spelled-out key names drops hints instead of cutting off its tail ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#18618](https://github.com/can1357/oh-my-pi/pull/18618) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
@@ -59,7 +62,6 @@
 - Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
 - Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
 - Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
-- The Agent Hub footer names both section keys (`1:agents` / `2:activity`) in both section views, and a footer too narrow for the symbol preset's spelled-out key names drops hints instead of cutting off its tail ([#12432](https://github.com/can1357/oh-my-pi/issues/12432), [#16469](https://github.com/can1357/oh-my-pi/pull/16469) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
