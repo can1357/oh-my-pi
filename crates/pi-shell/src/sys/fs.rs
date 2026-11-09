@@ -493,6 +493,10 @@ impl File for StdFile {
 		self.file.metadata().map(|m| stat_of(&m))
 	}
 
+	fn on_filesystem(&self) -> bool {
+		true
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		self.hand_out();
 		Ok(Box::new(Self::with_kind(self.file.try_clone()?, self.kind, self.null)))
@@ -1116,6 +1120,10 @@ mod pipe {
 
 		fn kind(&self) -> FileKind {
 			FileKind::Pipe
+		}
+
+		fn on_filesystem(&self) -> bool {
+			false
 		}
 
 		fn os_handle(&self) -> Option<OsHandle> {

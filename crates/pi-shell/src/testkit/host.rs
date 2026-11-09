@@ -111,6 +111,10 @@ impl File for CaptureFile {
 		FileKind::Pipe
 	}
 
+	fn on_filesystem(&self) -> bool {
+		false
+	}
+
 	fn os_handle(&self) -> Option<OsHandle> {
 		None
 	}
@@ -147,6 +151,10 @@ impl File for Stdin {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Pipe
+	}
+
+	fn on_filesystem(&self) -> bool {
+		false
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {

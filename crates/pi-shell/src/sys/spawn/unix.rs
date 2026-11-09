@@ -1008,6 +1008,11 @@ fn child_fail(diag: &[u8], errno: i32, status: i32, texts: &[Vec<u8>]) -> ! {
 		.ok()
 		.and_then(|n| texts.get(n))
 		.map_or(&b"Unknown error"[..], Vec::as_slice);
+	child_fail_with(diag, text, status)
+}
+
+/// [`child_fail`] with the description `text`.
+fn child_fail_with(diag: &[u8], text: &[u8], status: i32) -> ! {
 	for part in [diag, text, b"\n"] {
 		// SAFETY: write(2) of a valid buffer; a failure is ignored (nowhere
 		// to report it).
@@ -1119,7 +1124,54 @@ fn fork_redirs(
 			for step in &steps {
 				match step {
 					ChildStep::Open { fds, path, flags, mode, diag } => {
-						let fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
+						let mut st = std::mem::zeroed::<libc::stat>();
+						// bash's `noclobber_open` stats the path and refuses an
+						// existing regular file without opening it, so nothing the
+						// file holds — a lease, a mode that forbids writing — can
+						// delay or colour the refusal. Anything else is opened, and
+						// the object opened is what decides.
+						if *flags & libc::O_EXCL != 0
+							&& libc::stat(path.as_ptr(), &raw mut st) == 0
+							&& st.st_mode & libc::S_IFMT == libc::S_IFREG
+						{
+							child_fail_with(diag, b"cannot overwrite existing file", 1);
+						}
+						let mut fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
+						if fd < 0 && errno() == libc::EEXIST && *flags & libc::O_EXCL != 0 {
+							// `noclobber`'s exclusive create met an existing file:
+							// open it as it is and refuse a regular one, judged on
+							// the object opened (bash's `noclobber_open`), in bash's
+							// words (`Diag::NoClobber`).
+							let plain = *flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC);
+							fd = libc::open(path.as_ptr(), plain);
+
+							if fd >= 0 {
+								// The object opened decides, and bash fails closed
+								// when it cannot establish what the object is: an
+								// `fstat` that reports an error is a refusal, not
+								// permission to write.
+								if libc::fstat(fd, &raw mut st) != 0
+									|| st.st_mode & libc::S_IFMT == libc::S_IFREG
+								{
+									libc::close(fd);
+									child_fail_with(diag, b"cannot overwrite existing file", 1);
+								}
+							} else {
+								// It cannot be opened at all. bash stats the path
+								// before it opens anything, so a regular file it may
+								// not write is refused, and so is a path whose
+								// metadata cannot be read — there bash's `O_EXCL`
+								// create reports `EEXIST` (a dangling symlink). A
+								// readable non-regular path keeps this open's error.
+								let err = errno();
+								if libc::stat(path.as_ptr(), &raw mut st) != 0
+									|| st.st_mode & libc::S_IFMT == libc::S_IFREG
+								{
+									child_fail_with(diag, b"cannot overwrite existing file", 1);
+								}
+								child_fail(diag, err, 1, texts);
+							}
+						}
 						if fd < 0 {
 							child_fail(diag, errno(), 1, texts);
 						}

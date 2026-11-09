@@ -180,7 +180,7 @@ impl Fs for VfsFs {
 					.open_with(&path, &open_options(flags, mode))
 					.await
 					.map_err(name_the_limit)?;
-				Ok(engine_file(file, rt, flags).await)
+				Ok(engine_file(file, rt, flags, &path).await)
 			},
 		)
 	}
@@ -614,16 +614,39 @@ fn stat_of(meta: &pi_vfs::Metadata, path: &Path) -> Stat {
 }
 
 /// The engine file for a file `open` returned: a host file as [`StdFile`],
-/// a provider file as [`VfsFile`] (its kind and position read now).
-async fn engine_file(file: pi_vfs::File, rt: Handle, flags: OpenFlags) -> Box<dyn File> {
+/// a provider file as [`VfsFile`] (its metadata, kind and position read
+/// now). [`FileKind`] says how the engine must drive the object, so a
+/// regular file the provider cannot seek is a [`FileKind::Device`] here;
+/// the metadata keeps what the object IS, which is what `fstat` answers
+/// and what a decision about the object (`noclobber`) must use.
+async fn engine_file(
+	file: pi_vfs::File,
+	rt: Handle,
+	flags: OpenFlags,
+	path: &Path,
+) -> Box<dyn File> {
 	let file = match file.into_native() {
 		Ok(native) => return Box::new(StdFile::new(native)),
 		Err(file) => file,
 	};
-	let mut kind = match file.metadata_async().await.map(|m| m.file_type().kind()) {
-		Ok(VfsKind::File) => FileKind::Regular,
-		Ok(VfsKind::Fifo) => FileKind::Pipe,
-		Ok(VfsKind::Socket) => FileKind::Socket,
+	// The failure is kept, not discarded: a decision about the object
+	// (`noclobber`) must tell "this object has no filesystem metadata" —
+	// which the trait spells `Unsupported` — from "asking for it failed".
+	// A provider that answers `Unknown` has not said what the object is;
+	// [`stat_kind`] would read that as a character device, which is an
+	// answer the provider did not give, so the look counts as failed.
+	let stat = file
+		.metadata_async()
+		.await
+		.map_err(|err| err.kind())
+		.and_then(|m| match m.file_type().kind() {
+			VfsKind::Unknown => Err(io::ErrorKind::InvalidData),
+			_ => Ok(stat_of(&m, path)),
+		});
+	let mut kind = match stat.map(|st| st.kind) {
+		Ok(StatKind::File) => FileKind::Regular,
+		Ok(StatKind::Fifo) => FileKind::Pipe,
+		Ok(StatKind::Socket) => FileKind::Socket,
 		_ => FileKind::Device,
 	};
 	let pos = if kind == FileKind::Regular {
@@ -638,6 +661,7 @@ async fn engine_file(file: pi_vfs::File, rt: Handle, flags: OpenFlags) -> Box<dy
 		file: Arc::new(file),
 		rt,
 		kind,
+		stat,
 		read: flags.contains(OpenFlags::READ),
 		write: flags.contains(OpenFlags::WRITE) || flags.contains(OpenFlags::APPEND),
 		append: flags.contains(OpenFlags::APPEND),
@@ -651,6 +675,10 @@ struct Description {
 	file:   Arc<pi_vfs::File>,
 	rt:     Handle,
 	kind:   FileKind,
+	/// What the provider said the object is when it was opened, as `fstat`
+	/// answers it, or how asking failed — `Unsupported` where the provider
+	/// has no metadata for the object at all.
+	stat:   Result<Stat, io::ErrorKind>,
 	/// Opened for reading.
 	read:   bool,
 	/// Opened for writing (or appending).
@@ -915,6 +943,14 @@ impl File for VfsFile {
 
 	fn kind(&self) -> FileKind {
 		self.desc.kind
+	}
+
+	fn stat(&self) -> io::Result<Stat> {
+		self.desc.stat.map_err(io::Error::from)
+	}
+
+	fn on_filesystem(&self) -> bool {
+		true
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {

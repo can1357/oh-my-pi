@@ -367,9 +367,17 @@ impl FdRef {
 	}
 
 	/// `fstat(2)` of the underlying object ([`File::stat`]); `None` when
-	/// closed, lost or an engine-memory object.
+	/// closed or lost.
 	pub fn stat(&self) -> Option<io::Result<crate::bash::fs::Stat>> {
 		self.0.state.lock().file_ref().map(File::stat)
+	}
+
+	/// Ask the underlying object `ask`, under one lock; `None` when closed
+	/// or lost. A caller that needs two answers about the same object
+	/// (`noclobber` needs [`File::on_filesystem`] and [`File::stat`]) asks
+	/// them here, of one object, instead of locking twice.
+	pub fn with_file<T>(&self, ask: impl FnOnce(&dyn File) -> T) -> Option<T> {
+		self.0.state.lock().file_ref().map(ask)
 	}
 
 	/// OS handle an external can inherit directly.
@@ -452,6 +460,13 @@ impl File for TaggedOutput {
 			.base
 			.stat()
 			.unwrap_or_else(|| Err(io::ErrorKind::Unsupported.into()))
+	}
+
+	fn on_filesystem(&self) -> bool {
+		self
+			.base
+			.with_file(|file| file.on_filesystem())
+			.unwrap_or(false)
 	}
 
 	fn dup(&self) -> io::Result<Box<dyn File>> {

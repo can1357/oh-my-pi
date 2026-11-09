@@ -24,8 +24,19 @@ use pi_vfs::{
 
 #[derive(Debug)]
 struct DelayedFilesystem {
-	root:     PathBuf,
-	seekable: bool,
+	root:                  PathBuf,
+	seekable:              bool,
+	/// Every open of `virtual://existing` reports that the file exists,
+	/// the creating one and the plain one alike.
+	always_eexist:         bool,
+	/// Asking an OPENED file for its metadata fails with this error, while
+	/// the path's own metadata still answers. The object's kind cannot be
+	/// established, which is not the same as the object having no metadata
+	/// at all — and a provider can report `ENOTSUP` for either.
+	metadata_errno:        Option<i32>,
+	/// An OPENED file's metadata answers, but says `Unknown` for what the
+	/// object is: the provider has made no claim about its kind.
+	metadata_kind_unknown: bool,
 }
 
 impl DelayedFilesystem {
@@ -89,8 +100,16 @@ impl FileSystem for DelayedFilesystem {
 		if path.to_str() == Some("virtual://stalled") {
 			return Ok(File::from_handle(StalledFile));
 		}
+		if self.always_eexist && path.to_str() == Some("virtual://existing") {
+			return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+		}
 		let file = Fs::native().open_with(self.path(path)?, options).await?;
-		Ok(File::from_handle(DelayedFile { file, seekable: self.seekable }))
+		Ok(File::from_handle(DelayedFile {
+			file,
+			seekable: self.seekable,
+			metadata_errno: self.metadata_errno,
+			metadata_kind_unknown: self.metadata_kind_unknown,
+		}))
 	}
 
 	async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
@@ -215,8 +234,10 @@ impl FileSystem for DelayedFilesystem {
 
 #[derive(Debug)]
 struct DelayedFile {
-	file:     File,
-	seekable: bool,
+	file:                  File,
+	seekable:              bool,
+	metadata_errno:        Option<i32>,
+	metadata_kind_unknown: bool,
 }
 
 #[async_trait]
@@ -241,7 +262,20 @@ impl FileHandle for DelayedFile {
 
 	async fn metadata(&self) -> io::Result<Metadata> {
 		delay().await;
-		self.file.metadata_async().await
+		if let Some(errno) = self.metadata_errno {
+			return Err(io::Error::from_raw_os_error(errno));
+		}
+		let real = self.file.metadata_async().await?;
+		if self.metadata_kind_unknown {
+			// The provider answers, but says nothing about what the object
+			// is: `Unknown` is not a claim that it is a device.
+			return Ok(pi_vfs::Metadata::new(
+				pi_vfs::FileType::from_kind(pi_vfs::FileKind::Unknown),
+				real.len(),
+				real.permissions(),
+			));
+		}
+		Ok(real)
 	}
 
 	async fn flush(&self) -> io::Result<()> {
@@ -257,7 +291,50 @@ impl FileHandle for DelayedFile {
 
 /// `virtual://` served from `root` by a [`DelayedFilesystem`].
 fn provider(root: &Path, seekable: bool) -> Fs {
-	Fs::new(Arc::new(DelayedFilesystem { root: root.to_path_buf(), seekable }))
+	Fs::new(Arc::new(DelayedFilesystem {
+		root: root.to_path_buf(),
+		seekable,
+		always_eexist: false,
+		metadata_errno: None,
+		metadata_kind_unknown: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] whose every
+/// open of `virtual://existing` reports that the file exists.
+fn provider_refusing_every_open(root: &Path) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         true,
+		metadata_errno:        None,
+		metadata_kind_unknown: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] that cannot
+/// answer what an OPENED file is, though the path's own metadata answers.
+fn provider_whose_open_file_has_no_answer(root: &Path, errno: i32) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         false,
+		metadata_errno:        Some(errno),
+		metadata_kind_unknown: false,
+	}))
+}
+
+/// `virtual://` served from `root` by a [`DelayedFilesystem`] whose OPENED
+/// files answer with a kind of `Unknown`, though the path's own metadata
+/// answers properly.
+fn provider_whose_open_file_says_unknown(root: &Path) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem {
+		root:                  root.to_path_buf(),
+		seekable:              true,
+		always_eexist:         false,
+		metadata_errno:        None,
+		metadata_kind_unknown: true,
+	}))
 }
 
 /// Options running `script` over `filesystem`, from the host directory `cwd`
@@ -897,4 +974,244 @@ async fn url_spawn_and_output_pumps_run_on_a_current_thread_runtime() {
 	.expect("a URL spawn and its output pump progress on the only runtime thread");
 	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	assert!(run.stdout.ends_with("a.txt\nlate\n"), "{}", run.stdout);
+}
+
+/// `noclobber` refuses only an existing regular file, judged on what the
+/// provider opens (its metadata is not ready at once): a FIFO it serves takes
+/// `>`, `&>` and `>&` output, and a regular file it serves is kept.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_judges_a_provider_file_by_what_it_opens() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		let fifo = directory.path().join("p");
+		let made = std::process::Command::new("mkfifo")
+			.arg(&fifo)
+			.status()
+			.expect("mkfifo");
+		assert!(made.success(), "mkfifo");
+		fs::write(directory.path().join("f"), b"KEEP").expect("regular provider file");
+		let got = directory.path().join("got");
+		let script = format!(
+			"set -C; /usr/bin/timeout 5 /bin/cat '{}' >'{}' & echo x {op}virtual://p; echo s=$?; \
+			 wait; echo y {op}virtual://f; echo t=$?",
+			fifo.display(),
+			got.display()
+		);
+		let run =
+			tokio::time::timeout(Duration::from_secs(20), run_virtual(directory.path(), &script))
+				.await
+				.expect("the run finishes");
+		assert_eq!(run.stdout, "s=0\nt=1\n", "`{op}`: {}", run.stderr);
+		assert!(
+			run.stderr
+				.contains("virtual://f: cannot overwrite existing file"),
+			"`{op}`: {}",
+			run.stderr
+		);
+		assert_eq!(fs::read_to_string(&got).expect("reader output"), "x\n", "`{op}`");
+		assert_eq!(fs::read_to_string(directory.path().join("f")).expect("kept"), "KEEP", "`{op}`");
+	}
+}
+
+/// A provider's regular file that cannot be seeked is driven as a device,
+/// because that is how the engine must read and write it; `noclobber` asks
+/// what the object IS, so it is still refused and its bytes are kept.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_a_provider_file_it_cannot_seek() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+		let script = format!("set -C; echo BAD {op}virtual://f; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider(directory.path(), false), None, &script),
+		)
+		.await
+		.expect("the run finishes");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(
+			run.stderr
+				.contains("virtual://f: cannot overwrite existing file"),
+			"`{op}`: {}",
+			run.stderr
+		);
+		assert_eq!(
+			fs::read_to_string(directory.path().join("f")).expect("kept"),
+			"ORIGINAL",
+			"`{op}`"
+		);
+	}
+}
+
+/// `noclobber`'s reopen of a file the exclusive create met may itself
+/// report that the file exists. That answer is the reopen's, not a second
+/// exclusive create to recover from: the redirection must settle on the
+/// path's own kind instead of opening again without end.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_settles_when_the_reopen_also_reports_the_file_exists() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::write(directory.path().join("existing"), b"ORIGINAL").expect("regular provider file");
+		let script = format!("set -C; echo BAD {op}virtual://existing; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider_refusing_every_open(directory.path()), None, &script),
+		)
+		.await
+		.expect("the run finishes");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(
+			run.stderr
+				.contains("virtual://existing: cannot overwrite existing file"),
+			"`{op}`: {}",
+			run.stderr
+		);
+		assert_eq!(
+			fs::read_to_string(directory.path().join("existing")).expect("kept"),
+			"ORIGINAL",
+			"`{op}`"
+		);
+	}
+}
+
+/// A descriptor the shell already holds is judged by what the object IS,
+/// exactly as an opened path is. A provider's regular file that cannot be
+/// seeked is driven as a device, so the driving category would let
+/// `>/dev/fd/3` overwrite it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_judges_a_held_provider_descriptor_by_what_it_is() {
+	for seekable in [true, false] {
+		for op in [">", "&>", ">&"] {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+			let script = format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?");
+			let run = tokio::time::timeout(
+				Duration::from_secs(20),
+				run_script(provider(directory.path(), seekable), None, &script),
+			)
+			.await
+			.expect("the run finishes");
+			assert_eq!(run.stdout, "s=1\n", "seekable={seekable} `{op}`: {}", run.stderr);
+			assert!(
+				run.stderr
+					.contains("/dev/fd/3: cannot overwrite existing file"),
+				"seekable={seekable} `{op}`: {}",
+				run.stderr
+			);
+			assert_eq!(
+				fs::read_to_string(directory.path().join("f")).expect("kept"),
+				"ORIGINAL",
+				"seekable={seekable} `{op}`"
+			);
+		}
+	}
+}
+
+/// The reopen of a path that is NOT a regular file may itself report that
+/// the file exists. The path's own kind then leaves the open's error in
+/// place, and that error must still end the redirection: taken for the
+/// exclusive create's own answer it would start the recovery again, and
+/// the open would repeat until the run's limit.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_settles_when_a_nonregular_reopen_reports_the_file_exists() {
+	for op in [">", "&>", ">&"] {
+		let directory = tempfile::tempdir().expect("isolated provider filesystem");
+		fs::create_dir(directory.path().join("existing")).expect("a directory, not a regular file");
+		let script = format!("set -C; echo BAD {op}virtual://existing; echo s=$?");
+		let run = tokio::time::timeout(
+			Duration::from_secs(20),
+			run_script(provider_refusing_every_open(directory.path()), None, &script),
+		)
+		.await
+		.expect("the redirection settles instead of opening without end");
+		assert_eq!(run.stdout, "s=1\n", "`{op}`: {}", run.stderr);
+		assert!(run.stderr.contains("virtual://existing: "), "`{op}`: {}", run.stderr);
+		assert!(
+			directory.path().join("existing").is_dir(),
+			"`{op}`: the directory is still a directory"
+		);
+	}
+}
+
+/// `noclobber` fails closed when it cannot establish what the object it
+/// opened is. Bash does: with the target's `fstat` made to report `EIO`,
+/// Bash 5.2.21 and 5.3.0 both refuse `>/dev/null`, which they otherwise
+/// write. `ENOTSUP` is the same answer, though it is also the errno a
+/// provider reports for an object that HAS no filesystem metadata — the
+/// object says which it is, not its errno. An object that really has none
+/// is still written (the here-document rows of
+/// `shell::tests::redirections`).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_an_object_whose_kind_it_cannot_establish() {
+	for errno in [libc::EIO, libc::ENOTSUP] {
+		for alias in [false, true] {
+			for op in [">", "&>", ">&"] {
+				let directory = tempfile::tempdir().expect("isolated provider filesystem");
+				fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+				let script = if alias {
+					format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
+				} else {
+					format!("set -C; printf BAD {op}virtual://f; echo s=$?")
+				};
+				let run = tokio::time::timeout(
+					Duration::from_secs(20),
+					run_script(
+						provider_whose_open_file_has_no_answer(directory.path(), errno),
+						None,
+						&script,
+					),
+				)
+				.await
+				.expect("the run finishes");
+				let row = format!("errno={errno} alias={alias} `{op}`");
+				assert_eq!(run.stdout, "s=1\n", "{row}: {}", run.stderr);
+				assert!(run.stderr.contains("cannot overwrite existing file"), "{row}: {}", run.stderr);
+				assert_eq!(
+					fs::read_to_string(directory.path().join("f")).expect("kept"),
+					"ORIGINAL",
+					"{row}"
+				);
+			}
+		}
+	}
+}
+
+/// A provider that answers `Unknown` has said nothing about what the
+/// object is. It must not be read as a claim that the object is a device:
+/// `noclobber` refuses an object whose kind the provider did not give,
+/// exactly as it refuses one whose metadata request failed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn noclobber_refuses_a_provider_object_of_an_unknown_kind() {
+	for alias in [false, true] {
+		for op in [">", "&>", ">&"] {
+			let directory = tempfile::tempdir().expect("isolated provider filesystem");
+			fs::write(directory.path().join("f"), b"ORIGINAL").expect("regular provider file");
+			let script = if alias {
+				format!("exec 3<>virtual://f; set -C; printf BAD {op}/dev/fd/3; echo s=$?")
+			} else {
+				format!("set -C; printf BAD {op}virtual://f; echo s=$?")
+			};
+			let run = tokio::time::timeout(
+				Duration::from_secs(20),
+				run_script(provider_whose_open_file_says_unknown(directory.path()), None, &script),
+			)
+			.await
+			.expect("the run finishes");
+			let row = format!("alias={alias} `{op}`");
+			assert_eq!(run.stdout, "s=1\n", "{row}: {}", run.stderr);
+			assert!(run.stderr.contains("cannot overwrite existing file"), "{row}: {}", run.stderr);
+			assert_eq!(
+				fs::read_to_string(directory.path().join("f")).expect("kept"),
+				"ORIGINAL",
+				"{row}"
+			);
+		}
+	}
 }
