@@ -25,6 +25,7 @@ import {
 	type ExtensionAskDialogQuestion,
 	type ExtensionAskDialogResult,
 	type ExtensionAskDialogSubmitResult,
+	type ExtensionFormDialogResult,
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
 	type ExtensionUISelectItem,
@@ -41,6 +42,16 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import {
+	choiceValue,
+	defaultFormData,
+	fieldError,
+	type HtmlFormData,
+	type HtmlFormValue,
+	isArrayChoice,
+	textValue,
+} from "@oh-my-pi/pi-tui/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -1191,6 +1202,105 @@ export async function requestRpcAskDialog(
 	return timedOut ? timedOutAskDialogResult(questions) : result;
 }
 
+/**
+ * Value a choice field's submitted entry gives: each string must be one of the
+ * field's enabled option values, except one free-text entry when the field
+ * offers "Other". Checkbox groups and multi-selects take an array; every other
+ * choice takes one string.
+ */
+function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
+	const label = JSON.stringify(field.name);
+	if (value === undefined) return undefined;
+	const entries = isArrayChoice(field) ? value : [value];
+	if (!Array.isArray(entries)) throw new Error(`Form field ${label} must carry an array of strings`);
+
+	// Map each entry to an option index, keeping at most one unmatched entry as the "Other" text.
+	const checked = new Set<number>();
+	let other: string | undefined;
+	for (const entry of entries) {
+		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry strings`);
+		const index = field.options.findIndex(option => !option.disabled && option.value === entry);
+		if (index >= 0 && !checked.has(index)) {
+			checked.add(index);
+		} else if (index < 0 && field.other && other === undefined) {
+			other = entry;
+		} else {
+			throw new Error(`Form field ${label} carries unexpected value ${JSON.stringify(entry)}`);
+		}
+	}
+	return choiceValue(field, checked, other);
+}
+
+/** Value a text field's submitted entry gives: a string, or a number for numeric inputs; absent counts as empty. */
+function parseFormText(field: TextField, value: unknown): HtmlFormValue {
+	if (value === undefined) return textValue(field, "");
+	if (typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) {
+		return textValue(field, String(value));
+	}
+	throw new Error(`Form field ${JSON.stringify(field.name)} must carry a string or a number`);
+}
+
+/** Validates submitted `form` data against the parsed form; any mismatch throws instead of guessing. */
+function parseFormDialogResponse(
+	response: RpcExtensionUIResponse,
+	form: HtmlForm,
+	dialogOptions: ExtensionUIDialogOptions,
+): ExtensionFormDialogResult | undefined {
+	if ("cancelled" in response && response.cancelled) {
+		if (response.timedOut) dialogOptions.onTimeout?.();
+		return undefined;
+	}
+	const submitted: unknown = "data" in response ? response.data : undefined;
+	if (!isRecord(submitted)) throw new Error("Form dialog response must carry a data object");
+
+	// Reject names the form does not have; hidden inputs may be echoed but keep the form's own values.
+	const fields = new Map(form.fields.flatMap(field => (field.name ? [[field.name, field] as const] : [])));
+	const hidden = new Set(form.hidden.map(([name]) => name));
+	for (const name of Object.keys(submitted)) {
+		if (!fields.has(name) && !hidden.has(name)) {
+			throw new Error(`Form dialog data carries unknown field ${JSON.stringify(name)}`);
+		}
+	}
+
+	// Rebuild the data field by field, enforcing the same rules the form dialogs apply on submit.
+	const data: HtmlFormData = Object.fromEntries(form.hidden);
+	for (const [name, field] of fields) {
+		const value =
+			field.kind === "choice" ? parseFormChoice(field, submitted[name]) : parseFormText(field, submitted[name]);
+		const problem = fieldError(field, value);
+		if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+		if (value !== undefined) data[name] = value;
+	}
+	return { data };
+}
+
+/** Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults. */
+export async function requestRpcFormDialog(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	html: string,
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<ExtensionFormDialogResult | undefined> {
+	const form = parseHtmlForm(html);
+	let timedOut = false;
+	const opts: ExtensionUIDialogOptions = {
+		...dialogOptions,
+		onTimeout: () => {
+			timedOut = true;
+			dialogOptions?.onTimeout?.();
+		},
+	};
+	const result = await requestRpcDialog(
+		pendingRequests,
+		output,
+		opts,
+		undefined,
+		{ method: "form", html, timeout: dialogOptions?.timeout },
+		response => parseFormDialogResponse(response, form, opts),
+	);
+	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
+}
+
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -1518,6 +1628,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		readonly supportsEditor = true;
 		/** Set by `set_ask_dialog`; hosts that never opt in keep the select/editor ask fallback. */
 		askDialogEnabled = false;
+		/** Set by `set_form_dialog`; hosts that never opt in answer the `ask` tool field by field. */
+		formDialogEnabled = false;
 
 		constructor(
 			private pendingRequests: Map<string, PendingExtensionRequest>,
@@ -1528,6 +1640,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			if (!this.askDialogEnabled) return undefined;
 			return (questions, dialogOptions) =>
 				requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions);
+		}
+
+		get formDialog(): ExtensionUIContext["formDialog"] {
+			if (!this.formDialogEnabled) return undefined;
+			return (html, dialogOptions) => requestRpcFormDialog(this.pendingRequests, this.output, html, dialogOptions);
 		}
 
 		select(
@@ -1724,12 +1841,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		rpcUiContext.askDialogEnabled = command.enabled === true;
 		return success(command.id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });
 	};
+	const setFormDialog = (command: RpcCommand & { type: "set_form_dialog" }): RpcResponse => {
+		rpcUiContext.formDialogEnabled = command.enabled === true;
+		return success(command.id, "set_form_dialog", { enabled: rpcUiContext.formDialogEnabled });
+	};
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
 
 	// Read stdin from now on: `session_start` may be waiting on a dialog only the client can answer. Until the
-	// command loop below exists, a dialog answer and the ask-dialog opt-in are handled at once and every other
-	// frame is held, in arrival order, for that loop.
+	// command loop below exists, a dialog answer and the ask- and form-dialog opt-ins are handled at once and every
+	// other frame is held, in arrival order, for that loop.
 	let heldFrames: unknown[] | undefined = [];
 	const receiveFrame = (parsed: unknown): void => {
 		if (!heldFrames) {
@@ -1738,6 +1859,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			pendingExtensionRequests.get(parsed.id)?.resolve(parsed);
 		} else if (isRecord(parsed) && parsed.type === "set_ask_dialog") {
 			output(setAskDialog(parsed as RpcCommand & { type: "set_ask_dialog" }));
+		} else if (isRecord(parsed) && parsed.type === "set_form_dialog") {
+			output(setFormDialog(parsed as RpcCommand & { type: "set_form_dialog" }));
 		} else {
 			heldFrames.push(parsed);
 		}
@@ -2333,6 +2456,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "set_ask_dialog":
 				return setAskDialog(command);
+
+			case "set_form_dialog":
+				return setFormDialog(command);
 
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });

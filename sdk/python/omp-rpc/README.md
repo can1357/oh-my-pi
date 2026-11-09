@@ -440,10 +440,10 @@ elif request.method in {"input", "editor"}:
     client.send_ui_value(request.id, "approved")
 ```
 
-After `client.set_ask_dialog(True)`, the agent's `ask` tool sends one `ask`
-request carrying every question (`request.questions`) instead of one `select`
-per question. Answer with one `AskAnswer` per question, in order; hosts always
-offer free text, sent as `custom_input`:
+After `client.set_ask_dialog(True)`, an extension's `ui.askDialog` sends one
+`ask` request carrying every question (`request.questions`) instead of one
+`select` per question. Answer with one `AskAnswer` per question, in order; hosts
+always offer free text, sent as `custom_input`:
 
 ```python
 from omp_rpc import AskAnswer
@@ -458,6 +458,19 @@ if request.method == "ask":
 
 Servers without the command raise `RpcCommandError` from `set_ask_dialog`, so
 keep handling `select` as the fallback.
+
+After `client.set_form_dialog(True)`, the `ask` tool sends one `form` request
+carrying the model's HTML form (`request.html`) instead of walking its fields.
+Answer with the submitted values by control `name`, as an HTML form would
+submit them (a checkbox group gives a list); omp checks them against the form:
+
+```python
+if request.method == "form":
+    client.send_ui_data(request.id, {"store": "sqlite", "ttl_days": 30})
+```
+
+Servers without the command raise `RpcCommandError` from `set_form_dialog`;
+keep the field-by-field fallback for them.
 
 For non-interactive scripts, you can install a default headless policy instead of
 handling every request manually:

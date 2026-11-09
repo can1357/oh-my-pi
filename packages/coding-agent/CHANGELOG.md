@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC hosts can render the `ask` tool's HTML form whole: after `set_form_dialog`, the tool sends one `form` UI request carrying the HTML, answered with the submitted `data` (checked against the form) or a cancel, instead of walking the fields through `select`/`input`/`editor`
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

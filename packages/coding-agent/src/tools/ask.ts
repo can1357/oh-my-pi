@@ -1,11 +1,11 @@
 /**
  * Ask Tool - the model asks the user to fill in one HTML `<form>`.
  *
- * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP) render
- * the form whole; every other host walks its named fields one prompt at a time
- * through `select`/`input`/`editor`. The model receives the submitted form data
- * as JSON. Outside plan mode a configurable timeout submits the form's
- * preselected values.
+ * Hosts with a form surface (`ui.formDialog`: the interactive TUI, ACP, RPC
+ * hosts that opt in) render the form whole; every other host walks its named
+ * fields one prompt at a time through `select`/`input`/`editor`. The model
+ * receives the submitted form data as JSON. Outside plan mode a configurable
+ * timeout submits the form's preselected values.
  */
 
 import { type as arkType } from "@oh-my-pi/omptype";

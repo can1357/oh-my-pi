@@ -915,7 +915,7 @@ class RpcClient(WireClient):
                 else:
                     self.cancel_ui_request(request.id)
                 return
-            if request.method == "ask":
+            if request.method in ("ask", "form"):
                 self.cancel_ui_request(request.id)
 
         return self.on_ui_request(handle)
@@ -951,6 +951,16 @@ class RpcClient(WireClient):
             wire_answers.append(entry)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "answers": wire_answers}
+        )
+
+    def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
+        """Answer a `form` request with the submitted values by control `name`."""
+        wire_data: JsonObject = {
+            name: value if isinstance(value, (str, int, float)) else list(value)
+            for name, value in data.items()
+        }
+        self._send_notification(
+            {"type": "extension_ui_response", "id": request_id, "data": wire_data}
         )
 
     def cancel_ui_request(self, request_id: str, *, timed_out: bool = False) -> None:
