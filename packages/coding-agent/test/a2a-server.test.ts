@@ -100,12 +100,13 @@ class FakeRegistry {
 	setStatus(id: string, status: AgentRef["status"]): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref) return false;
-		const leftRunning = ref.status === "running";
+		const previousStatus = ref.status;
+		const leftRunning = previousStatus === "running";
 		ref.status = status;
 		ref.lastActivity = Date.now();
 		if (status !== "running") ref.activity = undefined;
 		if (leftRunning) ref.lifecycle = { ...ref.lifecycle, terminalAt: ref.lastActivity };
-		this.#emit({ type: "status_changed", ref });
+		this.#emit({ type: "status_changed", ref, previousStatus });
 		return true;
 	}
 

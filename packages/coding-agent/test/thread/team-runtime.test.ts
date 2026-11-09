@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { IrcBus } from "../../src/irc/bus";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { TeamRuntime } from "../../src/task/team-runtime";
 import type { TeamDefinition } from "../../src/task/teams";
@@ -26,6 +27,82 @@ const team: TeamDefinition = {
 const session = () => ({}) as AgentSessionHandle;
 
 beforeEach(() => AgentRegistry.resetGlobalForTests());
+
+describe("team idle notifications", () => {
+	it("notifies the actual lead once per completed running turn and ignores replaced members", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const received: Array<{ from: string; body: string; progress?: boolean }> = [];
+		const lead = {
+			deliverIrcMessage: async (message: { from: string; body: string; progress?: boolean }) => {
+				received.push(message);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		const child = {
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: `First line\nSecond line\n${"x".repeat(600)}\nFourth line` }],
+				},
+			],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref: { ...ref } });
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		expect(received[0]).toMatchObject({ from: "worker", progress: true });
+		expect(received[0]!.body).toContain("worker");
+		expect(received[0]!.body).toContain("First line");
+		expect(received[0]!.body).toContain("agent://worker");
+		expect(received[0]!.body).not.toContain("Fourth line");
+		expect(received[0]!.body.length).toBeLessThan(550);
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		registry.setStatus("worker", "running", ref);
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(2);
+		const replacement = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		registry.setStatus("worker", "idle", replacement);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(2);
+		await runtime.stop(lead, "audit");
+		registry.setStatus("worker", "running", replacement);
+		registry.setStatus("worker", "idle", replacement);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(2);
+	});
+	it("notifies when a reserved member completes before its ref is recorded", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const received: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				received.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker" });
+		const worker = {
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Done" }] }],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: worker });
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		expect(received[0]).toContain("Done");
+		await runtime.stop(lead, "audit");
+	});
+});
 
 describe("team runtime authorization", () => {
 	it("rejects spoofed sessions and replaced registry refs without changing tasks", async () => {

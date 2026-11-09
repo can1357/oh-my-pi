@@ -2092,6 +2092,35 @@ describe("persisted subagent revival", () => {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		});
+		it("does not relay the output of a turn woken by a progress notice", async () => {
+			const cwd = makeTempDir("@pi-revive-relay-progress-");
+			const { handle } = await reviveWithWaker(cwd);
+			const delivered: IrcMessage[] = [];
+			AgentRegistry.global().register({
+				id: "Peer",
+				displayName: "Peer",
+				kind: "sub",
+				status: "idle",
+				session: {
+					deliverIrcMessage: async (msg: IrcMessage) => {
+						delivered.push(msg);
+						return "injected" as const;
+					},
+				} as unknown as AgentSession,
+			});
+			const record: CustomMessage = {
+				...wakeRecord("Peer"),
+				details: { id: "idle-1", from: "Peer", message: "Peer is idle", progress: true },
+			};
+			const finish = handle.observer()?.([record]);
+			handle.setLastAssistantText("Acknowledged");
+			await finish?.();
+			await handle.trackedReplies[0];
+			expect(delivered).toHaveLength(0);
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
 
 		it("reports the failure even after the agent sent a progress ping to the waker", async () => {
 			// `sentSince` cannot tell "already answered" from "pinged 'on it'".

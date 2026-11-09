@@ -105,7 +105,7 @@ export function isResumable(ref: AgentRef | undefined): boolean {
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
-	| { type: "status_changed"; ref: AgentRef }
+	| { type: "status_changed"; ref: AgentRef; previousStatus: AgentStatus; summary?: string }
 	| { type: "metadata_changed"; ref: AgentRef }
 	| { type: "removed"; ref: AgentRef };
 
@@ -313,7 +313,23 @@ export class AgentRegistry implements AgentRegistryApi {
 			return status === "aborted" || this.#rejectStatusUpdate(id, status, "aborted-is-terminal");
 		}
 		if (ref.status === status) return true;
-		const leftRunning = ref.status === "running";
+		const previousStatus = ref.status;
+		const assistant =
+			previousStatus === "running" && status === "idle"
+				? ref.session?.messages?.findLast(message => message.role === "assistant")
+				: undefined;
+		const summary =
+			assistant?.role === "assistant"
+				? assistant.content
+						.filter(part => part.type === "text")
+						.map(part => part.text)
+						.join("\n")
+						.split(/\r?\n/, 4)
+						.slice(0, 3)
+						.join("\n")
+						.slice(0, 500)
+				: undefined;
+		const leftRunning = previousStatus === "running";
 		ref.status = status;
 		// Activity describes current work; it is meaningless once the agent
 		// leaves `running`, so drop it to avoid showing stale work in rosters.
@@ -327,7 +343,7 @@ export class AgentRegistry implements AgentRegistryApi {
 		} else if (leftRunning) {
 			ref.lifecycle = { ...ref.lifecycle, terminalAt: ref.lastActivity };
 		}
-		this.#emit({ type: "status_changed", ref });
+		this.#emit({ type: "status_changed", ref, previousStatus, summary });
 		return true;
 	}
 

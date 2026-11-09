@@ -32,6 +32,9 @@ unrelated ref that happens to share a handle.
   withheld, preserving plan-mode restrictions. Bundled scout/reviewer spawns
   outside teams are unchanged. Messages use the existing IrcBus and ingress
   guard;
+- **idle notices**: when a member finishes a running turn and becomes idle,
+  the team's lead receives its id, a short excerpt and an `agent://` link.
+  The notice is not a request and does not require an automatic reply.
 - **team role prompts**: read-only definitions and definitions with
   `team: false` require a `team-prompt` to join a team. The path must be a
   non-empty relative path whose resolved real path stays inside the agent

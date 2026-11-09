@@ -87,6 +87,23 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
 	});
+	it("wakes an idle lead for a progress notice without asking it to reply", async () => {
+		const { bridge, woken } = makeBridge();
+		expect(
+			await bridge.deliver({
+				id: "idle-1",
+				from: "member",
+				to: "lead",
+				body: "member is idle",
+				ts: Date.now(),
+				progress: true,
+			}),
+		).toBe("woken");
+		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ from: "member", progress: true });
+		expect(record.content).not.toContain("If response expected");
+		expect(record.content).not.toContain("sent to the sender automatically");
+	});
 
 	it("routes a bridge request's reply through an a2a: spawn, not the pseudo-sender", async () => {
 		const { bridge, woken } = makeBridge();

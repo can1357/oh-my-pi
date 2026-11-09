@@ -1,4 +1,6 @@
 import { AgentRegistry, type AgentRef } from "../registry/agent-registry";
+import { IrcBus } from "../irc/bus";
+import { logger } from "@oh-my-pi/pi-utils";
 import { TeamLedger, type TeamClaimResult, type TeamTask } from "./team-ledger";
 import type { TeamDefinition } from "./teams";
 
@@ -26,6 +28,7 @@ interface RuntimeTeam extends StartedTeam {
 	lead: object;
 	leadRef: AgentRef;
 	ledger: TeamLedger;
+	pendingRefs: Map<string, { reservation: unknown; generation: number }>;
 }
 
 /** Main-owned membership and authority for all team generations. */
@@ -36,6 +39,61 @@ export class TeamRuntime {
 	#starts = new WeakMap<object, Map<string, Promise<StartedTeam>>>();
 	#closedSessions = new WeakSet<object>();
 	#observedSessions = new WeakSet<object>();
+	#unsubscribe: (() => void) | undefined;
+
+	#observeRegistry(): void {
+		if (this.#unsubscribe) return;
+		const registry = AgentRegistry.global();
+		this.#unsubscribe = registry.onChange(event => {
+			if (event.type === "registered") {
+				for (const state of this.#generations.values()) {
+					const member = [...state.members.values()].find(entry => entry.id === event.ref.id);
+					if (member && !member.ref && member.failure === undefined) {
+						const reservation = Reflect.get(member, "reservation");
+						const previous = state.pendingRefs.get(member.id);
+						if (!previous || previous.reservation !== reservation) {
+							state.pendingRefs.set(member.id, { reservation, generation: event.ref.generation });
+						}
+					}
+				}
+				return;
+			}
+			if (event.type !== "status_changed" || event.previousStatus !== "running" || event.ref.status !== "idle")
+				return;
+			const current = registry.get(event.ref.id);
+			if (!current || current.generation !== event.ref.generation) return;
+			for (const state of this.#generations.values()) {
+				const member = [...state.members.values()].find(entry => entry.id === event.ref.id);
+				const pending = member && state.pendingRefs.get(member.id);
+				const generation =
+					member?.ref?.generation ??
+					(pending?.reservation === (member && Reflect.get(member, "reservation"))
+						? pending?.generation
+						: undefined);
+				if (!member || member.failure !== undefined || generation !== event.ref.generation) continue;
+				const lead = registry.get(state.leadId);
+				if (!lead || lead.generation !== state.leadRef.generation || lead.session !== state.lead) continue;
+				void IrcBus.global()
+					.send({
+						from: event.ref.id,
+						to: state.leadId,
+						body: `${event.ref.id} is idle.\n${event.summary ?? ""}\nagent://${event.ref.id}`,
+						progress: true,
+					})
+					.then(receipt => {
+						if (receipt.outcome === "failed")
+							logger.warn("Team idle notification failed", { error: receipt.error });
+					})
+					.catch(error => logger.warn("Team idle notification failed", { error: String(error) }));
+			}
+		});
+	}
+
+	#unobserveIfEmpty(): void {
+		if (this.#generations.size !== 0) return;
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+	}
 
 	async start(lead: object, team: TeamDefinition): Promise<StartedTeam> {
 		const existing = this.#sessions.get(lead)?.get(team.name);
@@ -87,11 +145,13 @@ export class TeamRuntime {
 			ledger,
 			generation: ++this.#nextGeneration,
 			members: new Map(),
+			pendingRefs: new Map(),
 		};
 		let teams = this.#sessions.get(lead);
 		if (!teams) this.#sessions.set(lead, (teams = new Map()));
 		teams.set(team.name, state);
 		this.#generations.set(state.generation, state);
+		this.#observeRegistry();
 		return state;
 	}
 
@@ -117,6 +177,8 @@ export class TeamRuntime {
 
 	/** Clear test state without recycling generation numbers. */
 	resetForTests(): void {
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
 		this.#sessions = new WeakMap();
 		this.#generations.clear();
 		this.#starts = new WeakMap();
@@ -130,6 +192,7 @@ export class TeamRuntime {
 		if (!state) return;
 		teams?.delete(name);
 		this.#generations.delete(state.generation);
+		this.#unobserveIfEmpty();
 		await state.ledger.barrier();
 	}
 
@@ -139,6 +202,7 @@ export class TeamRuntime {
 		const teams = this.#sessions.get(session);
 		if (teams) for (const state of teams.values()) this.#generations.delete(state.generation);
 		this.#sessions.delete(session);
+		this.#unobserveIfEmpty();
 	}
 
 	#authorize(session: object, identity: TeamIdentity): { state: RuntimeTeam; lead: boolean } {
