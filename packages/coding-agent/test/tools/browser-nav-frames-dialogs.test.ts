@@ -1059,6 +1059,56 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
+	test.each(["setup", "call"] as const)("holds a navigation while %s frame arming is in flight", async phase => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				let hold = phase === "call" ? await PrintHold.install(page, "calls") : undefined;
+				if (hold) {
+					await hold.endCall();
+					await advancePrintClock(page, 1_500);
+					await page.evaluateOnNewDocument(`{ const real = Date.now; ${PRINT_HOLD_CLOCK} = () => real() + 3_000; }`);
+				}
+				const frames = page.frames.bind(page);
+				let navigate = true;
+				const bound = (object: object, key: string | symbol): unknown => {
+					const value: unknown = Reflect.get(object, key);
+					return typeof value === "function" ? value.bind(object) : value;
+				};
+				page.frames = () => frames().map(frame => new Proxy(frame, {
+					get: (target, key) => key === "mainRealm" ? () => {
+						const realm = target.mainRealm();
+						const evaluate = realm.evaluate.bind(realm);
+						return new Proxy(realm, {
+							get: (object, name) => name === "evaluate" ? async (...args: Parameters<typeof evaluate>) => {
+								const result = await evaluate(...args);
+								if (navigate) {
+									navigate = false;
+									await page.goto(`${baseUrl}/print-on-load`);
+								}
+								return result;
+							} : bound(object, name),
+						});
+					} : bound(target, key),
+				}));
+				try {
+					if (hold) await hold.beginCall(30_000);
+					else hold = await PrintHold.install(page, "calls");
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"afterprint", "load print returned",
+					]);
+				} finally {
+					page.frames = frames;
+					await hold?.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	});
+
 	test("arms loaded documents for a call before registering its new-document deadline", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });

@@ -295,9 +295,9 @@ export class PrintHold {
 		const printHold = new PrintHold(page, session, scope);
 		let bootstrap: Promise<string> | undefined;
 		try {
-			// Arm every loaded document before setup round trips let its timers run unheld.
+			// Start loaded-frame updates first, but register the preload before awaiting contexts that navigation can destroy.
 			printHold.#until = scope === "tab" ? null : Date.now() + SETUP_HOLD_MS;
-			await printHold.#setInFrames();
+			const frames = printHold.#setInFrames();
 			// Chrome runs the scripts of the page's own session before any other session's, each session's in the order
 			// they were added: one added there first wraps `print()` before the tab's init scripts can keep the native
 			// one. It never changes, so it stays first; it holds a new document until the task running the start scripts
@@ -311,6 +311,7 @@ export class PrintHold {
 				})
 				.then(result => result.identifier);
 			bootstrap.catch(() => undefined);
+			await frames;
 			await session.send("Page.enable");
 			await session.send("Runtime.enable");
 			await session.send("Runtime.addBinding", { name: printHold.#binding });
@@ -579,12 +580,13 @@ export class PrintHold {
 		}
 		this.#stale = false;
 		const applied = this.#applying.then(async () => {
-			await this.#setInFrames();
+			const frames = this.#setInFrames();
 			const previous = this.#scriptId;
 			const { identifier } = await this.#session.send("Page.addScriptToEvaluateOnNewDocument", {
 				source: this.#source(this.#remaining(), Date.now() + this.#clockOffset),
 			});
 			this.#scriptId = identifier;
+			await frames;
 			// Chrome may no longer have the previous script (a relay tab answered `Script not found` between two calls).
 			// It numbers a new script one past the highest it holds, so the new one can then carry the previous one's
 			// identifier, which must stay; a previous one that is gone needs no removal.
