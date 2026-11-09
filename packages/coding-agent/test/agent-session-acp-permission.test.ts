@@ -94,6 +94,7 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		extensionRunner?: ExtensionRunner;
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -126,6 +127,7 @@ async function createSession(
 		toolRegistry,
 		xdev: options?.xdev,
 		builtInToolNames: options?.builtInToolNames,
+		extensionRunner: options?.extensionRunner,
 	});
 
 	if (bridge) sess.setClientBridge(bridge);
@@ -399,6 +401,107 @@ it("always-ask: an ACP grant satisfies the inner wrapper's explicit prompt polic
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+/**
+ * Runner subscribed to the approval events whose `tool_approval_requested`
+ * handler holds like a gate-style extension until `releaseRequested` runs.
+ */
+function approvalEventRunner() {
+	const events: Array<{ type: string; toolCallId?: string; approved?: boolean; reason?: string }> = [];
+	const { promise: requestedHeld, resolve: releaseRequested } = Promise.withResolvers<void>();
+	const runner = {
+		...noUiRunner(),
+		hasHandlers: (type: string) => type === "tool_approval_requested" || type === "tool_approval_resolved",
+		async emit(event: { type: string; toolCallId?: string; approved?: boolean; reason?: string }) {
+			events.push({
+				type: event.type,
+				toolCallId: event.toolCallId,
+				approved: event.approved,
+				reason: event.reason,
+			});
+			if (event.type === "tool_approval_requested") await requestedHeld;
+		},
+	} as unknown as ExtensionRunner;
+	return { runner, events, releaseRequested };
+}
+
+it("ACP permission waits emit approval events to extensions without delaying the client dialog", async () => {
+	const approvalSettings: Record<string, unknown> = { "tools.approvalMode": "always-ask" };
+	const { runner, events, releaseRequested } = approvalEventRunner();
+	const bashTool = makeFakeTool("bash");
+	const wrapped = new ExtensionToolWrapper(bashTool, runner) as unknown as AgentTool;
+	const { promise: answer, resolve: answerPermission } = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const { promise: dialogOpened, resolve: openDialog } = Promise.withResolvers<string>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		requestPermission(toolCall) {
+			openDialog(toolCall.toolCallId);
+			return answer;
+		},
+	};
+	session = await createSession([wrapped], bridge, approvalSettings, { extensionRunner: runner });
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(t => t.name === "bash");
+	if (!gatedBash) throw new Error("Missing bash tool");
+	const ctx = { settings: Settings.isolated(approvalSettings) } as never;
+
+	const run = gatedBash.execute("call-1", { command: "echo hi" }, undefined, undefined as never, ctx);
+	// The client dialog opens while the extension's requested handler is still
+	// holding: it was not queued behind that handler.
+	expect(await dialogOpened).toBe("call-1");
+	expect(events).toEqual([{ type: "tool_approval_requested", toolCallId: "call-1" }]);
+
+	answerPermission({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	await withTimeout(run, 1_000, "ACP-approved call waited on a held extension handler");
+	expect(bashTool.executeCalls).toBe(1);
+	expect(events).toEqual([
+		{ type: "tool_approval_requested", toolCallId: "call-1" },
+		{ type: "tool_approval_resolved", toolCallId: "call-1", approved: true },
+	]);
+	releaseRequested();
+});
+
+it("ACP permission rejection and cancellation resolve the extension approval event as not approved", async () => {
+	const approvalSettings: Record<string, unknown> = { "tools.approvalMode": "always-ask" };
+	const { runner, events, releaseRequested } = approvalEventRunner();
+	releaseRequested();
+	const bashTool = makeFakeTool("bash");
+	const wrapped = new ExtensionToolWrapper(bashTool, runner) as unknown as AgentTool;
+	const outcomes: ClientBridgePermissionOutcome[] = [
+		{ outcome: "selected", optionId: "reject_once", kind: "reject_once" },
+		{ outcome: "cancelled" },
+	];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission() {
+			return outcomes.shift()!;
+		},
+	};
+	session = await createSession([wrapped], bridge, approvalSettings, { extensionRunner: runner });
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(t => t.name === "bash");
+	if (!gatedBash) throw new Error("Missing bash tool");
+	const ctx = { settings: Settings.isolated(approvalSettings) } as never;
+
+	await expect(gatedBash.execute("call-1", { command: "echo a" }, undefined, undefined as never, ctx)).rejects.toThrow(
+		/rejected by user/,
+	);
+	await expect(gatedBash.execute("call-2", { command: "echo b" }, undefined, undefined as never, ctx)).rejects.toThrow(
+		/cancelled/,
+	);
+	expect(bashTool.executeCalls).toBe(0);
+	expect(events).toEqual([
+		{ type: "tool_approval_requested", toolCallId: "call-1" },
+		{
+			type: "tool_approval_resolved",
+			toolCallId: "call-1",
+			approved: false,
+			reason: "Tool call rejected by user (bash)",
+		},
+		{ type: "tool_approval_requested", toolCallId: "call-2" },
+		{ type: "tool_approval_resolved", toolCallId: "call-2", approved: false, reason: "Permission request cancelled" },
+	]);
 });
 
 it("ACP bash uses pattern decisions and scopes persistent grants to noncritical commands", async () => {

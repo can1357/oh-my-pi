@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- ACP tool calls waiting on `session/request_permission` now emit `tool_approval_requested` / `tool_approval_resolved` to extensions, so status and hook extensions see the permission wait ([#18637](https://github.com/can1357/oh-my-pi/issues/18637))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
