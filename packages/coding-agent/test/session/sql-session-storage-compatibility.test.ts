@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { SQL } from "bun";
 import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import {
@@ -123,6 +124,34 @@ describe("SqlSessionStorage optional title authority compatibility", () => {
 				const rows = await client.unsafe("SELECT content FROM omp_session_files WHERE path = ?", [file]);
 				expect(rows[0]?.content).toBe(OLD_BODY + appended);
 			} finally {
+				await client.end();
+			}
+		});
+
+		it(`resumes a session under a newer metadata-only title in external ${columns}-column schemas`, async () => {
+			const client = new SQL("sqlite::memory:");
+			let session: SessionManager | undefined;
+			try {
+				await client.unsafe(
+					`CREATE TABLE omp_session_files (${SIX_COLUMNS}${columns === 7 ? ", title_indexed_size INTEGER" : ""})`,
+				);
+				const storage = await SqlSessionStorage.create({ client, createTable: false });
+				const file = "/sessions/p/resume-direct.jsonl";
+				await storage.writeText(
+					file,
+					serializeTitleSlot({ title: "Slot", updatedAt: "slot" }) +
+						'{"type":"session","id":"resume-direct","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo"}\n' +
+						'{"type":"title_change","id":"older","parentId":null,"title":"Older journal","source":"auto","timestamp":"2099-01-01"}\n',
+				);
+				await storage.updateSessionTitle(file, DIRECT_TITLE);
+				const reopened = await SqlSessionStorage.create({ client, createTable: false });
+				session = await SessionManager.open(file, undefined, reopened, { suppressBreadcrumb: true });
+				expect({ title: session.getSessionName(), source: session.titleSource }).toEqual({
+					title: DIRECT_TITLE.title,
+					source: DIRECT_TITLE.source,
+				});
+			} finally {
+				await session?.close();
 				await client.end();
 			}
 		});

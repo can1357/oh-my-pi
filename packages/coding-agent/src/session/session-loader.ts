@@ -651,6 +651,16 @@ export async function loadSessionFile(
 	try {
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
+		// An indexed backend's metadata may hold a title set without a journal line (updateSessionTitle), which
+		// then outranks the newest journal title. readText overlays that title on the slot only when the body
+		// has no journal title, so ask the backend here, exactly when a journal title would otherwise win.
+		if (loaded.latestTitle && storage.readLatestTitle && loaded.entries.length > 0) {
+			const authority = await storage.readLatestTitle(filePath);
+			if (authority) {
+				applySessionTitle(loaded.entries[0], authority);
+				return { ...loaded, latestTitle: authority, sourceSize };
+			}
+		}
 		return { ...loaded, sourceSize };
 	} catch (caught) {
 		// Windows reports ENOENT where POSIX reports ENOTDIR for a path running
