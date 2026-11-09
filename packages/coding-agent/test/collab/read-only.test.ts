@@ -9,16 +9,21 @@
  * in-memory transport, so the suite stays fast and time-independent.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
+import { importRoomKey, sealSerialized } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import {
+	COLLAB_PROTO,
+	type CollabFrame,
+	packEnvelope,
+	parseCollabLink,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
 // replace the real Bun.serve relay and loopback WebSocket with a zero-latency
@@ -28,7 +33,7 @@ import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memor
 
 interface HostHarness {
 	ctx: InteractiveModeContext;
-	prompts: { from?: string }[];
+	prompts: { from?: string; content?: unknown }[];
 	aborts: { count: number };
 	/** Resolves on the next promptCustomMessage call — no polling. */
 	nextPrompt(): Promise<{ from?: string }>;
@@ -36,7 +41,7 @@ interface HostHarness {
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): HostHarness {
-	const prompts: { from?: string }[] = [];
+	const prompts: { from?: string; content?: unknown }[] = [];
 	const aborts = { count: 0 };
 	const promptWaiters: ((details: { from?: string }) => void)[] = [];
 	const ctx = {
@@ -58,9 +63,9 @@ function makeHostContext(): HostHarness {
 			thinkingLevel: undefined,
 			subscribe: () => () => {},
 			emitNotice: () => {},
-			promptCustomMessage: (message: { details?: { from?: string } }) => {
+			promptCustomMessage: (message: { details?: { from?: string }; content?: unknown }) => {
 				const details = message.details ?? {};
-				prompts.push(details);
+				prompts.push({ ...details, content: message.content });
 				for (const waiter of promptWaiters.splice(0)) waiter(details);
 				return Promise.resolve();
 			},
@@ -140,6 +145,76 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 	return { socket, nextFrame };
 }
 
+type PromptOutcome = { kind: "error"; message: string } | { kind: "delivered" } | { kind: "other"; t: string };
+
+/**
+ * Send a prompt and settle on whichever of its two mutually exclusive outcomes
+ * happens: the host answers with an `error` frame and delivers nothing, or it
+ * delivers the prompt and answers nothing.
+ *
+ * Raced rather than awaited one at a time because there is no frame to wait for
+ * on the accepting path. Waiting on `nextFrame` alone turns "wrongly accepted"
+ * into a test timeout, which reports elapsed time rather than the behaviour that
+ * changed — and reports it five seconds late, per row.
+ */
+function promptOutcome(guest: TestGuest, harness: HostHarness, frame: unknown): Promise<PromptOutcome> {
+	const delivered = harness.nextPrompt().then((): PromptOutcome => ({ kind: "delivered" }));
+	const answered = guest
+		.nextFrame()
+		.then((reply): PromptOutcome =>
+			reply.t === "error" ? { kind: "error", message: reply.message } : { kind: "other", t: reply.t },
+		);
+	guest.socket.send(frame as CollabFrame);
+	return Promise.race([delivered, answered]);
+}
+
+async function joinWithRawHello(link: string, hello: Record<string, unknown>): Promise<TestGuest> {
+	const parsed = parseCollabLink(link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	const queue: CollabFrame[] = [];
+	const waiters: ((frame: CollabFrame) => void)[] = [];
+	socket.onFrame = frame => {
+		if (FILTERED_FRAME_TYPES[frame.t]) return;
+		const waiter = waiters.shift();
+		if (waiter) waiter(frame);
+		else queue.push(frame);
+	};
+	socket.onOpen = () => socket.send({ t: "hello", ...hello } as unknown as CollabFrame);
+	socket.connect();
+	const nextFrame = (): Promise<CollabFrame> => {
+		const queued = queue.shift();
+		if (queued) return Promise.resolve(queued);
+		const { promise, resolve } = Promise.withResolvers<CollabFrame>();
+		waiters.push(resolve);
+		return promise;
+	};
+	return { socket, nextFrame };
+}
+
+/** Guest transports the relay has seen, newest last, so a test can send raw bytes. */
+const guestTransports: FakeWebSocket[] = [];
+
+/**
+ * Deliver a frame to the host as bytes, skipping `CollabSocket.send`.
+ *
+ * `send` serializes with `JSON.stringify`, so anything routed through it can only
+ * carry what this library is able to produce. The host reads `JSON.parse` output,
+ * which is a strictly larger set — that gap is the reachability argument behind
+ * the image rebuild, and this is what lets a test stand on it instead of a
+ * comment.
+ */
+async function sendRawFrame(rawFrame: string): Promise<void> {
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const transport = guestTransports.at(-1);
+	if (!transport) throw new Error("no guest transport connected");
+	const sealed = await sealSerialized(key, rawFrame);
+	transport.send(packEnvelope(0, sealed));
+}
+
 // ── Shared host/relay, booted once ──────────────────────────────────────────
 // Booting the relay + host and connecting the host socket is the only heavy
 // step; it is identical across all three tests (none mutate host config), so it
@@ -150,7 +225,12 @@ let harness: HostHarness;
 let host: CollabHost;
 
 beforeAll(async () => {
-	installInMemoryRelay();
+	const relay = installInMemoryRelay();
+	const connect = relay.connect.bind(relay);
+	relay.connect = ws => {
+		connect(ws);
+		if (ws.role === "guest") guestTransports.push(ws);
+	};
 	harness = makeHostContext();
 	host = new CollabHost(harness.ctx);
 	// Port is irrelevant: the fake transport routes by the `role` query param.
@@ -168,6 +248,248 @@ afterAll(async () => {
 	// the host's socket holds its own FakeWebSocket/relay refs, so teardown still works.
 	uninstallInMemoryRelay();
 	await host.stop("test done");
+});
+
+describe("collab frames a guest can send that the host must still answer", () => {
+	it("treats a write token that is not a string as one that does not match", async () => {
+		// `Buffer.from({}, "base64url")` throws ERR_INVALID_ARG_TYPE, and the frame
+		// handler's catch would swallow it: no welcome, no error, nothing the guest
+		// can distinguish from a queue that refused the join.
+		const guest = await joinWithRawHello(host.link, {
+			proto: COLLAB_PROTO,
+			name: "malformed-token",
+			writeToken: {},
+		});
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+		// The same outcome a wrong token gets, and the same one the write-token
+		// tests above assert for a view link.
+		expect(welcome.readOnly).toBe(true);
+		expect(host.participants.find(p => p.name === "malformed-token")?.readOnly).toBe(true);
+
+		// And the permission it did not get is still enforced, not merely unset.
+		guest.socket.send({ t: "prompt", text: "do something" });
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("read-only");
+		expect(harness.prompts).toHaveLength(0);
+	});
+
+	it("reports a protocol version that is not a number instead of dropping the hello", async () => {
+		// A non-number is never equal to COLLAB_PROTO, so reaching the mismatch branch
+		// needs no narrowing. Quoting it back does: `String` is not total for
+		// everything JSON carries — a nested array throws out of it — which is why the
+		// reply runs the value through #label.
+		const guest = await joinWithRawHello(host.link, { proto: { evil: true }, name: "bad-proto" });
+		guestCleanups.push(() => guest.socket.close());
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("protocol mismatch");
+		expect(host.participants.find(p => p.name === "bad-proto")).toBeUndefined();
+	});
+
+	it("answers an agent command it does not recognize", async () => {
+		const guest = await joinAsGuest(host.link, "bad-cmd");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// The switch had no default, so a `cmd` matching none of the three fell out
+		// of it and the handler returned: nothing run, nothing sent, and nothing the
+		// guest can tell apart from a frame the send queue refused.
+		guest.socket.send({ t: "agent-cmd", cmd: 42, agentId: "nope" } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(reply.message).toContain("unknown agent command");
+	});
+
+	it("keeps a reply bounded when the agent id is not", async () => {
+		const guest = await joinAsGuest(host.link, "huge-id");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Quoted into the reply unbounded, the id below came back twice — once in the
+		// prefix, once inside the error — so the frame ran to about twice its length.
+		// The queue admits one oversized entry, so a large enough one closes the host
+		// socket on the relay's payload limit. An error path exists to be polite; it
+		// must not be a disconnect a guest sizes.
+		const huge = `long-agent-${"x".repeat(100_000)}`;
+		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: huge } as unknown as CollabFrame);
+		const reply = await guest.nextFrame();
+		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
+		// Bounded, and still about this agent.
+		expect(reply.message).toContain(huge.slice(0, 32));
+		expect(reply.message).not.toContain(huge);
+		expect(reply.message).not.toContain("(unnamed)");
+	});
+
+	it("refuses a prompt whose text is not a string, with or without images", async () => {
+		const guest = await joinAsGuest(host.link, "bad-text");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Without images this already failed, at `promptCustomMessage`'s first
+		// statement. With images nothing rejected it: the number went into a
+		// `TextContent`, was persisted as sent, and threw a turn later inside a
+		// provider serializer at `item.text.toWellFormed()`. Both refuse here now,
+		// identically, and neither reaches the session.
+		const images = [{ type: "image", data: "AAAA", mimeType: "image/png" }];
+		for (const frame of [
+			{ t: "prompt", text: 42 },
+			{ t: "prompt", text: 42, images },
+		]) {
+			guest.socket.send(frame as unknown as CollabFrame);
+			const reply = await guest.nextFrame();
+			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+			expect(reply.message).toContain("text must be a string");
+		}
+		expect(harness.prompts).toHaveLength(0);
+	});
+
+	it("refuses a prompt whose images are not image content", async () => {
+		const guest = await joinAsGuest(host.link, "bad-image-element");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// The text defect one field over. An element the host cannot represent is
+		// content the guest meant to send, so it is refused rather than dropped —
+		// accepted, it is persisted and throws a turn later inside a serializer.
+		for (const images of [
+			// The null arm of the element check, distinct from a non-object element.
+			[null],
+			[{ type: "text", text: 42 }],
+			[{ type: "image", data: 7, mimeType: "image/png" }],
+			[{ type: "image", data: "AAAA" }],
+		]) {
+			guest.socket.send({ t: "prompt", text: "carry me", images } as unknown as CollabFrame);
+			const reply = await guest.nextFrame();
+			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
+			expect(reply.message).toContain("every image must carry string data and a supported image type");
+		}
+		// Well-formed images still go through, so the guard rejects shape and not use.
+		const delivered = harness.nextPrompt();
+		guest.socket.send({
+			t: "prompt",
+			text: "carry me",
+			images: [{ type: "image", data: "AAAA", mimeType: "image/png" }],
+		} as unknown as CollabFrame);
+		await Promise.race([delivered, Bun.sleep(1_000)]);
+		expect(harness.prompts).toHaveLength(1);
+	});
+
+	it("refuses an image whose media type is not one this codebase can carry", async () => {
+		const guest = await joinAsGuest(host.link, "bad-mime");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Every row is a string, so the `typeof` check that used to be the whole test
+		// passes all of them. Each one is here for a different reason:
+		//
+		// - `text/html` becomes the response `content-type` the blob broker serves
+		//   the guest's own bytes back under (`blob-broker/store.ts`), on an origin
+		//   this process operates.
+		// - `__proto__` and `constructor` are looked up in `EXT_BY_MIME`, a plain
+		//   object, so they resolve to `Object.prototype` and `Object` instead of
+		//   `undefined`; the `?? "bin"` fallback never fires and the path the broker
+		//   publishes stops matching the `BLOB_PATH_PATTERN` it parses requests with.
+		// - a `,` ends the media type early in `data:${mimeType};base64,${data}`,
+		//   which the OpenAI, Cursor and completions converters build.
+		// - CRLF separates the parts of the multipart bodies the blob uploaders
+		//   compose (`blob-broker/uploaders-object-storage.ts`).
+		// - `IMAGE/PNG` is a case `providers/anthropic.ts` folds and `EXT_BY_MIME`
+		//   does not, so accepting it means two sinks disagreeing about the same
+		//   image. Nothing in this repo emits it.
+		// - `image/svg+xml` is the one image type that carries script, and no
+		//   provider converter accepts it — only `session/blob-store.ts` maps it, for
+		//   a local file extension.
+		for (const mimeType of [
+			"text/html",
+			"__proto__",
+			"constructor",
+			"image/png,text/html",
+			"image/png\r\nX-Injected: 1",
+			"IMAGE/PNG",
+			"image/svg+xml",
+		]) {
+			const outcome = await promptOutcome(guest, harness, {
+				t: "prompt",
+				text: "carry me",
+				images: [{ type: "image", data: "AAAA", mimeType }],
+			});
+			if (outcome.kind !== "error") {
+				throw new Error(`expected an error reply for ${JSON.stringify(mimeType)}, got ${outcome.kind}`);
+			}
+			expect(outcome.message).toContain("every image must carry string data and a supported image type");
+		}
+		expect(harness.prompts).toHaveLength(0);
+
+		// The accept side, so the guard is pinned as an allowlist and not as a ban on
+		// the rows above. `image/jpg` is in it because `providers/anthropic.ts` reads
+		// it as a spelling of `image/jpeg` and `providers/amazon-bedrock.ts` takes it
+		// outright; `EXT_BY_MIME` does not have it, which costs a `.bin` extension on
+		// a broker blob and nothing else.
+		for (const mimeType of ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]) {
+			const delivered = harness.nextPrompt();
+			guest.socket.send({
+				t: "prompt",
+				text: "carry me",
+				images: [{ type: "image", data: "AAAA", mimeType }],
+			} as unknown as CollabFrame);
+			await Promise.race([delivered, Bun.sleep(1_000)]);
+		}
+		expect(harness.prompts).toHaveLength(5);
+		expect(harness.prompts.map(prompt => (prompt.content as { mimeType?: string }[])[1]?.mimeType)).toEqual([
+			"image/jpeg",
+			"image/jpg",
+			"image/png",
+			"image/gif",
+			"image/webp",
+		]);
+	});
+
+	it("strips an image property it does not know instead of carrying it into the session", async () => {
+		const guest = await joinAsGuest(host.link, "unknown-prop");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		// Tolerating an unknown property was reasoned as safe because such a field is
+		// read and dropped. It is not: the image goes into a session message, is
+		// persisted, and is handed to shrinkForReplication, which measures it with
+		// `JSON.stringify` before walking it — both recurse, so a deep value can take
+		// either step down, and which one it reaches first is a property of the
+		// runtime rather than of the payload.
+		//
+		// Sent past `CollabSocket.send` deliberately, and the reason is structural
+		// rather than a matter of thresholds. `JSON.stringify` and `shrinkWalk` both
+		// recurse, so both are bounded by the stack; where each gives out, and which
+		// gives out first, depends on the runtime and its stack budget and has
+		// measured differently on different machines. `JSON.parse` does not recurse.
+		// That asymmetry is the durable part and the numbers are not: a client that
+		// serializes with this library cannot build a payload the host's own walk
+		// will refuse, and one that emits bytes directly can. This builds the frame
+		// the way the second client would.
+		const depth = 100_000;
+		const nested = `${"[".repeat(depth)}${"]".repeat(depth)}`;
+		const raw = `{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","somethingNewer":${nested}}]}`;
+		const delivered = harness.nextPrompt();
+		await sendRawFrame(raw);
+		await Promise.race([delivered, Bun.sleep(2_000)]);
+
+		// Delivered — the image is still the guest's — carrying only the fields
+		// ImageContent declares. Exact keys, not a shape check: a rebuild that spread
+		// the original would still satisfy `toEqual` on the declared ones.
+		expect(harness.prompts).toHaveLength(1);
+		const stored = harness.prompts[0]?.content as Record<string, unknown>[];
+		expect(Object.keys(stored?.[1] ?? {}).sort()).toEqual(["data", "mimeType", "type"]);
+		expect(stored?.[1]).toEqual({ type: "image", data: "AAAA", mimeType: "image/png" });
+	});
 });
 
 describe("collab read-only links", () => {
@@ -341,9 +663,20 @@ describe("collab read-only links", () => {
 		expect(abortReply.t).toBe("error");
 		expect(aborts.count).toBe(0);
 
+		// The message, not merely that one arrived: an unregistered id errors on the
+		// unknown-agent branch whether or not admission rejected it first, so
+		// `t === "error"` alone proves nothing about the guard under test.
 		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: "nope" });
 		const cmdReply = await guest.nextFrame();
-		expect(cmdReply.t).toBe("error");
+		if (cmdReply.t !== "error") throw new Error(`expected error, got ${cmdReply.t}`);
+		expect(cmdReply.message).toContain("agent control is disabled on a read-only link");
+
+		// Answering an ask is the fourth mutating frame. The guard has always been
+		// there; what was missing is a test that fails if it goes.
+		guest.socket.send({ t: "ui-response", reqId: 1, value: "yes" });
+		const uiReply = await guest.nextFrame();
+		if (uiReply.t !== "error") throw new Error(`expected error, got ${uiReply.t}`);
+		expect(uiReply.message).toContain("responding to ask is disabled on a read-only link");
 
 		expect(host.participants.find(p => p.name === "viewer")?.readOnly).toBe(true);
 	});

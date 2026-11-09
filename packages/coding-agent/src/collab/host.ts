@@ -11,8 +11,8 @@
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import type { ImageContent, ProviderFileReference, TextContent } from "@oh-my-pi/pi-ai";
+import { logger, truncate } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -40,6 +40,7 @@ import {
 	type CollabSessionState,
 	encodeEntryFrame,
 	encodeEventFrame,
+	encodeFrame,
 	encodeSnapshotChunk,
 	type EncodedFrame,
 	formatCollabLink,
@@ -134,6 +135,96 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const MAX_PENDING_UI_REQUESTS = 64;
 /**
+ * Longest guest-supplied label (agent id, peer name) the host quotes into a frame.
+ * Bounds the quote, never the lookup. Unbounded, a quoting reply can exceed the
+ * relay's payload limit and close the host socket.
+ */
+const GUEST_LABEL_MAX = 64;
+/**
+ * Ceiling, in UTF-16 code units, on an `error` frame's text, applied where the
+ * frame is sent: prose composed elsewhere (`AgentLifecycleManager#ensureLive`)
+ * embeds the untruncated guest id. This host's own longest message plus a full
+ * {@link GUEST_LABEL_MAX} label is 154 units, so the cut never lands on its wording.
+ */
+const ERROR_MESSAGE_MAX = 512;
+const RESYNC_MESSAGE = "the host discarded your backlog; rejoin to resync";
+
+/**
+ * Schemes a replicated image URL may use. `http:` is intentional: the blob broker
+ * emits `http://127.0.0.1:<port>` URLs (`blob-broker/exposure.ts`).
+ */
+const IMAGE_URL_PROTOCOLS = new Set(["http:", "https:"]);
+const IMAGE_DETAIL_VALUES = new Set(["auto", "low", "high", "original"]);
+/**
+ * Image media types every provider converter and the blob broker recognise; SVG is
+ * excluded because it carries script. An allowlist, not a grammar check, because
+ * well-formed values do the damage: this string becomes a broker `content-type`, a
+ * plain-object key (`__proto__`), and part of a `data:` URL, where a `,` ends it.
+ */
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]);
+const PROVIDER_FILE_PROVIDERS = new Set(["openai", "anthropic", "google"]);
+
+/**
+ * Image content off the wire, rebuilt from the fields {@link ImageContent} declares,
+ * or `null`. Rebuilt rather than checked so a deeply nested unknown property cannot
+ * reach the recursive serializers downstream. Assumes plain `JSON.parse` output.
+ */
+function toImageContent(value: unknown): ImageContent | null {
+	if (typeof value !== "object" || value === null) return null;
+	const candidate = value as Record<string, unknown>;
+	if (candidate.type !== "image") return null;
+	const { data, mimeType, detail, url, providerFile } = candidate;
+	// `data` is only type-checked: every sink JSON-escapes it or appends it after
+	// `;base64,`, and a scan would run over megabytes per prompt.
+	if (typeof data !== "string" || typeof mimeType !== "string") return null;
+	if (!IMAGE_MIME_TYPES.has(mimeType)) return null;
+	if (detail !== undefined && !IMAGE_DETAIL_VALUES.has(detail as string)) return null;
+	if (url !== undefined && !isReplicableImageUrl(url)) return null;
+	const image: ImageContent = { type: "image", data, mimeType };
+	if (detail !== undefined) image.detail = detail as ImageContent["detail"];
+	if (url !== undefined) image.url = url;
+	if (providerFile !== undefined) {
+		const reference = toProviderFileReference(providerFile);
+		if (!reference) return null;
+		image.providerFile = reference;
+	}
+	return image;
+}
+
+/**
+ * Whether a replicated image URL is one this host will hand to a provider. Both
+ * `ImageContent.url` and `ProviderFileReference.uri` reach provider fetches, so both
+ * take this predicate; `URL.canParse` alone accepts `javascript:`. Length is
+ * deliberately unbounded: no consumer states a ceiling.
+ */
+function isReplicableImageUrl(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0) return false;
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		return false;
+	}
+	return IMAGE_URL_PROTOCOLS.has(parsed.protocol);
+}
+
+function toProviderFileReference(value: unknown): ProviderFileReference | null {
+	if (typeof value !== "object" || value === null) return null;
+	const { provider, id, uri, expiresAt } = value as Record<string, unknown>;
+	if (!PROVIDER_FILE_PROVIDERS.has(provider as string)) return null;
+	if (id !== undefined && typeof id !== "string") return null;
+	// Unlike `id`, `uri` is dereferenced by providers, so it gets the scheme allowlist.
+	if (uri !== undefined && !isReplicableImageUrl(uri)) return null;
+	// Finite, not merely a number: `JSON.parse("1e999")` is `Infinity`, which
+	// serializes back out as `null`.
+	if (expiresAt !== undefined && (typeof expiresAt !== "number" || !Number.isFinite(expiresAt))) return null;
+	const reference: ProviderFileReference = { provider: provider as ProviderFileReference["provider"] };
+	if (id !== undefined) reference.id = id;
+	if (uri !== undefined) reference.uri = uri;
+	if (expiresAt !== undefined) reference.expiresAt = expiresAt;
+	return reference;
+}
+/**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
  * means the collab channel went away (teardown, relay drop) or the request was
@@ -146,6 +237,8 @@ interface PendingCollabUiRequest {
 	promise: Promise<CollabGuestUiResult>;
 	settle(result: CollabGuestUiResult): void;
 	responsePending?: boolean;
+	/** Peers that were handed this dialog and can still answer it. */
+	recipients: Set<number>;
 	retainOnReconnect?: boolean;
 }
 
@@ -375,21 +468,42 @@ export class CollabHost {
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
+		// The queue can refuse a targeted frame and the caller has no timeout, so track
+		// who actually holds the dialog. With no writer connected yet, the ask waits for
+		// the first one to join; writers that all refused it can never answer.
+		const hadWritable = [...this.#peers.values()].some(peer => peer.canWrite);
+		const recipients = new Set(this.#sendWritablePeers({ t: "ui-request", request: fullRequest }));
 		this.#pendingUi.set(reqId, {
 			request: fullRequest,
 			promise,
+			recipients,
 			settle,
 			retainOnReconnect: options?.retainOnReconnect,
 		});
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		if (hadWritable && recipients.size === 0) settle({ kind: "unavailable" });
 		return promise;
 	}
 
-	#sendWritablePeers(frame: CollabFrame): void {
+	/** @returns the writable peers the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame): number[] {
 		const socket = this.#socket;
-		if (!socket) return;
+		if (!socket || this.#sendSuppressed(frame)) return [];
+		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) this.#send(frame, peerId);
+			if (peer.canWrite && socket.send(frame, peerId)) admitted.push(peerId);
+		}
+		return admitted;
+	}
+
+	/**
+	 * Drop {@link peer} from every outstanding ask once it can no longer answer
+	 * (departure, shed, or demotion), so no caller waits on it. A departure retains an
+	 * emptied ask for the next writer; a shed or demotion settles it.
+	 */
+	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
+		for (const pending of this.#pendingUi.values()) {
+			if (!pending.recipients.delete(peer)) continue;
+			if (pending.recipients.size === 0 && !retainWhenEmpty) pending.settle({ kind: "unavailable" });
 		}
 	}
 
@@ -429,6 +543,7 @@ export class CollabHost {
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
 		};
+		socket.onPeerOverload = peer => this.#handlePeerOverload(peer);
 		socket.onClose = (reason, willReconnect) => {
 			this.#relayConnected = false;
 			if (this.#stopping || this.#stopped) return;
@@ -626,6 +741,12 @@ export class CollabHost {
 		}
 	}
 
+	/** @returns whether the queue admitted the frame. */
+	#broadcast(frame: CollabFrame, advisory = false): boolean {
+		if (this.#stopped || !this.#socket || this.#sendSuppressed(frame)) return false;
+		return advisory ? this.#socket.broadcastAdvisory(frame) : this.#socket.send(frame);
+	}
+
 	/**
 	 * The session this room mirrors is still the active one. Every path that
 	 * reads or mutates session state on a guest's behalf (broadcasts, joins,
@@ -693,11 +814,16 @@ export class CollabHost {
 	 * which applies the same liveness/session checks.
 	 */
 	#send(frame: CollabFrame, toPeer = 0): void {
-		// Ending an existing dialog contains only its old-room request ID, never
-		// current-session data. Do not strand guests if it settles during a
-		// provisional /resume that later rolls back. All other traffic stays gated.
-		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
+		if (this.#sendSuppressed(frame)) return;
 		this.#socket?.send(frame, toPeer);
+	}
+
+	/**
+	 * The outbound gate for every guest-bound frame. `ui-request-end` carries only an
+	 * old request id, so it alone may leave during a provisional `/resume`.
+	 */
+	#sendSuppressed(frame: CollabFrame): boolean {
+		return this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end");
 	}
 
 	/**
@@ -716,11 +842,13 @@ export class CollabHost {
 		if (event.type === "message_start") this.#messageSeq++;
 		if (!this.#broadcastAllowed()) return;
 		const frame = encodeEventFrame(serializeReplicatedEvent(event).json);
+		const socket = this.#socket;
+		if (event.type === "notice") socket?.broadcastAdvisory(frame);
 		// Each update carries the whole message so far, so a newer one supersedes
 		// any still queued for the same message (#16956). Keyed per message so the
 		// last update of one message is never superseded by the next one's.
-		if (event.type === "message_update") this.#socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
-		else this.#socket?.send(frame);
+		else if (event.type === "message_update") socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
+		else socket?.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -729,7 +857,16 @@ export class CollabHost {
 		// peer's lifetime at reception; re-read it here rather than acting on a
 		// sender that is already gone and registering a ghost participant.
 		if (!this.#socket?.isServing(fromPeer)) {
-			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			logger.debug("collab host ignoring frame from a peer it no longer serves", {
+				type: this.#label(frame.t),
+				fromPeer,
+			});
+			return;
+		}
+		// Served by the relay but not registered here: shed, or its welcome was
+		// refused. Its frames would otherwise be judged as a read-only peer's.
+		if (frame.t !== "hello" && !this.#peers.has(fromPeer)) {
+			this.#sendError(RESYNC_MESSAGE, fromPeer, true);
 			return;
 		}
 		// An old-room answer may wait for rollback, but cannot settle against
@@ -762,21 +899,55 @@ export class CollabHost {
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
 				break;
 			default:
-				logger.debug("collab host ignoring unexpected frame", { type: frame.t, fromPeer });
+				logger.debug("collab host ignoring unexpected frame", { type: this.#label(frame.t), fromPeer });
 		}
 	}
 
-	/** Timing-safe write-token check; peers without a valid token are read-only. */
-	#verifyWriteToken(token: string | undefined): boolean {
+	/**
+	 * Timing-safe write-token check; peers without a valid token are read-only. Takes
+	 * `unknown` because frame fields are a guest's claim: `Buffer.from` throws on a
+	 * non-string, which would silently lose the whole `hello`.
+	 */
+	#verifyWriteToken(token: unknown): boolean {
 		const expected = this.#writeToken;
-		if (!expected || !token) return false;
+		if (!expected || typeof token !== "string" || !token) return false;
 		const bytes = Buffer.from(token, "base64url");
 		return bytes.byteLength === expected.byteLength && timingSafeEqual(bytes, expected);
 	}
 
+	/**
+	 * Bounds the whole message to {@link ERROR_MESSAGE_MAX} units plus the ellipsis,
+	 * not its parts: errors raised elsewhere arrive already carrying guest input.
+	 * Frames of other types that echo guest values bound them at their own site.
+	 */
+	#sendError(message: string, toPeer: number, resync = false): boolean {
+		const bounded = truncate(message, ERROR_MESSAGE_MAX);
+		const frame: CollabFrame = resync
+			? { t: "error", message: bounded, resync: true }
+			: { t: "error", message: bounded };
+		if (this.#sendSuppressed(frame)) return false;
+		return this.#socket?.send(frame, toPeer) ?? false;
+	}
+
+	/** A foreign error, bounded: errors raised elsewhere embed guest input. */
+	#reason(err: unknown): string {
+		return truncate(err instanceof Error ? err.message : String(err), ERROR_MESSAGE_MAX);
+	}
+
+	/**
+	 * A guest value as a bounded label whose stringification cannot throw. Numbers and
+	 * booleans show as themselves (a stale `proto` must stay readable), strings are
+	 * truncated, and anything else is `(unnamed)` without being converted.
+	 */
+	#label(value: unknown): string {
+		if (typeof value === "number" || typeof value === "boolean") return String(value);
+		if (typeof value !== "string" || value.length === 0) return "(unnamed)";
+		return truncate(value, GUEST_LABEL_MAX);
+	}
+
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
 	#rejectReadOnly(action: string, fromPeer: number): void {
-		this.#send({ t: "error", message: `${action} is disabled on a read-only link` }, fromPeer);
+		this.#sendError(`${action} is disabled on a read-only link`, fromPeer);
 	}
 
 	/**
@@ -793,55 +964,80 @@ export class CollabHost {
 		return true;
 	}
 
-	#handleHello(name: string, proto: number, writeToken: string | undefined, fromPeer: number): void {
+	/**
+	 * Fields are `unknown`: the declared protocol types are a guest's claim. A
+	 * non-number `proto` takes the mismatch path and is quoted through {@link #label};
+	 * `name` must be narrowed before `.trim()`.
+	 */
+	#handleHello(name: unknown, proto: unknown, writeToken: unknown, fromPeer: number): void {
 		if (this.#ctx.session.isSessionTransitioning) {
-			this.#send({ t: "error", message: "Session transition in progress; join again when it completes" }, fromPeer);
+			this.#sendError("Session transition in progress; join again when it completes", fromPeer);
 			return;
 		}
 		if (proto !== COLLAB_PROTO) {
-			this.#send(
-				{ t: "error", message: `protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${proto}` },
+			// Guest-controlled: quoted through #label, and bounded by #sendError regardless.
+			this.#sendError(
+				`protocol mismatch: host speaks v${COLLAB_PROTO}, guest sent v${this.#label(proto)}`,
 				fromPeer,
 			);
 			return;
 		}
-		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
+		// A name that is not a string is a name this host cannot use, which is what
+		// a blank one already means: the guest gets the generated one either way.
+		const cleanName = (typeof name === "string" ? name.trim().slice(0, GUEST_LABEL_MAX) : "") || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
-		const firstPeer = this.#peers.size === 0;
-		this.#peers.set(fromPeer, { name: cleanName, canWrite });
-
 		const socket = this.#socket;
 		if (!socket) return;
-		// Serialize the snapshot synchronously: live traffic queued after this
-		// cannot overtake it, and host rewrites of an entry in place cannot leak
-		// into it later, so the live entries are read without a defensive deep
-		// copy. Chunk frames are assembled from these strings only as the
-		// transport drains.
+		// Registered before building the snapshot so the welcome's roster shows the
+		// joiner; undone below if the batch is refused.
+		const firstPeer = this.#peers.size === 0;
+		const registered = this.#peers.get(fromPeer);
+		this.#peers.set(fromPeer, { name: cleanName, canWrite });
+
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		const snapshotEntries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
+		const entries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
+		if (!this.#guestTrafficAllowed()) {
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			return;
+		}
 		const state = this.#buildState();
-		// State broadcasts pause while no guest is joined, so the dedupe baseline
-		// may predate this welcome; with no other peer to keep current, the welcome
-		// becomes the baseline.
+		const welcome: CollabFrame = {
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: snapshot.header,
+			state,
+			agents: this.#snapshotAgents(),
+			entryCount: entries.json.length,
+			readOnly: canWrite ? undefined : true,
+		};
+		// Retained asks ride in the welcome batch rather than as one queue entry
+		// each: up to MAX_PENDING_UI_REQUESTS of them are replayed to a joining
+		// writer, which is past the per-peer share on its own.
+		const replayed = canWrite ? [...this.#pendingUi.values()].filter(pending => !pending.responsePending) : [];
+		let replayBytes = 0;
+		for (const pending of replayed) {
+			replayBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
+		}
+		const snapshotBytes = entries.bytes.reduce((total, bytes) => total + bytes, 0);
+		const encodedWelcome = encodeFrame(welcome);
+		const retainedBytes = snapshotBytes + Buffer.byteLength(encodedWelcome) + replayBytes;
+		const batch = this.#welcomeWithSnapshot(encodedWelcome, entries.json, entries.bytes, replayed);
+		if (!socket.sendBatch(batch, fromPeer, retainedBytes)) {
+			// No welcome reached the guest, and it applies nothing before one: restore the
+			// prior registration so no roster entry or pending ask is recorded for it.
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			logger.debug("collab: welcome batch was not admitted; leaving the peer unregistered", { fromPeer });
+			return;
+		}
 		if (firstPeer) this.#lastStateJson = JSON.stringify(state);
-		this.#send(
-			{
-				t: "welcome",
-				proto: COLLAB_PROTO,
-				header: snapshot.header,
-				state,
-				agents: this.#snapshotAgents(),
-				entryCount: snapshotEntries.json.length,
-				readOnly: canWrite ? undefined : true,
-			},
-			fromPeer,
-		);
-		socket.sendBatch(this.#snapshotChunks(snapshotEntries.json, snapshotEntries.bytes), fromPeer);
 		if (canWrite) {
-			for (const pending of this.#pendingUi.values()) {
-				if (pending.responsePending) continue;
-				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
-			}
+			for (const pending of replayed) pending.recipients.add(fromPeer);
+		} else {
+			// A hello without the write token demotes the peer; it can no longer answer
+			// anything it was handed.
+			this.#dropAskRecipient(fromPeer);
 		}
 		this.#ctx.session.emitNotice(
 			"info",
@@ -850,6 +1046,22 @@ export class CollabHost {
 		);
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
+	}
+
+	/**
+	 * Welcome, chunks and replayed asks as one queue entry, so a partial admission
+	 * cannot be expressed and nothing queues ahead of a snapshot only the
+	 * empty-queue floor can admit.
+	 */
+	*#welcomeWithSnapshot(
+		welcome: EncodedFrame,
+		entries: string[],
+		bytes: number[],
+		replayed: readonly PendingCollabUiRequest[] = [],
+	): Generator<CollabFrame | EncodedFrame> {
+		yield welcome;
+		yield* this.#snapshotChunks(entries, bytes);
+		for (const pending of replayed) yield { t: "ui-request", request: pending.request };
 	}
 
 	/**
@@ -957,7 +1169,7 @@ export class CollabHost {
 		}
 		const pending = this.#pendingUi.get(reqId);
 		if (pending) {
-			if (pending.responsePending) return;
+			if (!pending.recipients.has(fromPeer) || pending.responsePending) return;
 			if (suspended) {
 				void this.#settleUiAfterTransition(pending, value, fromPeer);
 				return;
@@ -1001,21 +1213,42 @@ export class CollabHost {
 		}
 	}
 
-	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
+	/**
+	 * `images` is `unknown` (see {@link #verifyWriteToken}) and is spread, which a
+	 * truthy non-iterable throws out of. A non-string `text` is refused here: with
+	 * images it would be persisted as invalid session state and throw a turn later
+	 * inside a provider serializer, with nothing left to tell the guest.
+	 */
+	#handlePrompt(text: unknown, images: unknown, fromPeer: number): void {
 		const peer = this.#peers.get(fromPeer);
 		if (!peer?.canWrite) {
 			this.#rejectReadOnly("prompting", fromPeer);
 			return;
 		}
+		if (typeof text !== "string") {
+			this.#sendError("prompt failed: message text must be a string", fromPeer);
+			return;
+		}
+		// A malformed element is refused, not dropped: unchecked, `{type:"text",text:42}`
+		// is persisted and throws a turn later inside a provider serializer.
+		const offered = Array.isArray(images) ? images : [];
+		const supplied = offered.map(toImageContent);
+		if (supplied.some(image => image === null)) {
+			this.#sendError("prompt failed: every image must carry string data and a supported image type", fromPeer);
+			return;
+		}
+		const normalized = supplied as ImageContent[];
 		const name = peer.name;
 		const content: string | (TextContent | ImageContent)[] =
-			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
+			normalized.length > 0 ? [{ type: "text", text }, ...normalized] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
 			this.#ctx.updatePendingMessagesDisplay();
 			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
 		}
+		// A turn can outlast the guest by minutes; past a reconnect this id is somebody else's.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
 		this.#ctx.session
 			.promptCustomMessage(
 				{
@@ -1031,8 +1264,11 @@ export class CollabHost {
 				if (dispatched === false) return this.#notifyPromptDropped(fromPeer);
 			})
 			.catch(err => {
-				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				const reason = this.#reason(err);
+				logger.warn("collab guest prompt failed", { error: reason });
+				if (stillTheAsker?.()) {
+					this.#sendError(`prompt failed: ${reason}`, fromPeer);
+				}
 			});
 	}
 
@@ -1066,7 +1302,7 @@ export class CollabHost {
 				if (!this.#guestTrafficAllowed()) return;
 				this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab");
 			})
-			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+			.catch(err => logger.warn("collab guest abort failed", { error: this.#reason(err) }));
 	}
 
 	/**
@@ -1100,9 +1336,27 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
-		// Relay controls arrive outside the normal frame handler.
+		this.#dropAskRecipient(peer, true);
 		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
+
+	/** The socket discarded this peer's backlog to keep the room alive; drop it and tell it to rejoin. */
+	#handlePeerOverload(peer: number): void {
+		if (this.#stopped) return;
+		const name = this.#peers.get(peer)?.name;
+		this.#peers.delete(peer);
+		this.#dropAskRecipient(peer);
+		this.#sendError(RESYNC_MESSAGE, peer, true);
+		if (name) {
+			this.#ctx.session.emitNotice(
+				"warning",
+				`${name} fell too far behind and was dropped; they can rejoin`,
+				"collab",
+			);
+		}
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
@@ -1168,35 +1422,50 @@ export class CollabHost {
 		if (this.ending || this.#agentsDebounce || this.#peers.size === 0) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#send({ t: "agents", agents: this.#snapshotAgents() });
+			// Level-triggered like `state`, and re-sent on the next registry change.
+			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true);
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
-	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
+	/**
+	 * Fields are `unknown` (see {@link #verifyWriteToken}). Every malformed value must
+	 * still be answered, and no answer may quote a guest value unbounded.
+	 */
+	#handleAgentCmd(cmd: unknown, agentId: unknown, text: unknown, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
+		// The lookup takes the id whole: truncating would let a long id address the agent
+		// owning its prefix. The quoted copy is bounded by GUEST_LABEL_MAX and always a
+		// string, since interpolating a deeply nested array throws `RangeError`.
+		const id = typeof agentId === "string" ? agentId : "";
+		const quoted = this.#label(id);
 		// Advisor refs are excluded from snapshots, but reject control by id defensively:
 		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		if (AgentRegistry.global().get(id)?.kind === "advisor") {
+			this.#sendError(`agent ${quoted}: advisor transcripts are read-only`, fromPeer);
 			return;
 		}
+		// Agent work has no bound either; same check as a failed prompt.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
 		const fail = (err: unknown) => {
-			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			const reason = this.#reason(err);
+			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: reason });
+			if (!stillTheAsker?.()) return;
+			this.#sendError(`agent ${quoted}: ${reason}`, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
-				const trimmed = text?.trim();
+				// `.trim()` throws on a non-string; treat one as an empty message so it is answered.
+				const trimmed = typeof text === "string" ? text.trim() : "";
 				if (!trimmed) {
-					this.#send({ t: "error", message: `agent ${agentId}: empty chat message` }, fromPeer);
+					this.#sendError(`agent ${quoted}: empty chat message`, fromPeer);
 					return;
 				}
 				// Mirrors the hub's #submitChatMessage: revive if parked, steer if mid-turn.
 				AgentLifecycleManager.global()
-					.ensureLive(agentId)
+					.ensureLive(id)
 					.then(session => {
 						if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
 						return session.prompt(trimmed, { streamingBehavior: "steer" });
@@ -1206,28 +1475,52 @@ export class CollabHost {
 			}
 			case "kill": {
 				const kill = async () => {
-					const ref = AgentRegistry.global().get(agentId);
-					if (!ref || !this.#guestTrafficAllowed()) return;
+					const ref = AgentRegistry.global().get(id);
+					if (!ref) throw new Error(`unknown agent "${quoted}"`);
+					if (!this.#guestTrafficAllowed()) return;
 					if (ref.status === "running" && ref.session) {
 						await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 					}
 					if (!this.#guestTrafficAllowed() || !this.#guestActionsReady()) return;
-					await AgentLifecycleManager.global().release(agentId, ref, { tombstone: true });
+					await AgentLifecycleManager.global().release(id, ref, { tombstone: true });
 				};
 				kill().catch(fail);
 				break;
 			}
 			case "revive":
-				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
+				AgentLifecycleManager.global().ensureLive(id).catch(fail);
+				break;
+			default:
+				// An unknown `cmd` must still be answered. Not echoed: it is unvalidated guest input.
+				this.#sendError(`agent ${quoted}: unknown agent command`, fromPeer);
 				break;
 		}
 	}
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
-	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
-		const reply = (text: string, newSize: number, error?: string) =>
-			this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
-		const ref = AgentRegistry.global().get(agentId);
+	async #handleFetchTranscript(reqId: unknown, agentId: unknown, fromByte: unknown, fromPeer: number): Promise<void> {
+		// Both are echoed back and #sendError cannot bound this frame. Narrowed, not
+		// truncated: an altered correlation id matches nothing. Safe integers because
+		// `fromByte` is a `read` offset and `reqId` matches by identity.
+		if (!Number.isSafeInteger(reqId) || (reqId as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer reqId", fromPeer);
+			return;
+		}
+		if (!Number.isSafeInteger(fromByte) || (fromByte as number) < 0) {
+			this.#sendError("fetch-transcript needs a non-negative integer fromByte", fromPeer);
+			return;
+		}
+		return this.#fetchTranscript(reqId as number, agentId, fromByte as number, fromPeer);
+	}
+
+	async #fetchTranscript(reqId: number, agentId: unknown, fromByte: number, fromPeer: number): Promise<void> {
+		// The read is asynchronous, so the peer can leave — or the whole room can be
+		// recreated — before there is anything to reply with.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
+		const reply = (text: string, newSize: number, error?: string) => {
+			if (stillTheAsker?.()) this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
+		};
+		const ref = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "");
 		if (!ref?.sessionFile || ref.kind === "advisor") {
 			reply("", fromByte, "no transcript available");
 			return;
@@ -1261,8 +1554,9 @@ export class CollabHost {
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {
-			logger.debug("collab transcript read failed", { agentId, error: String(err) });
-			reply("", fromByte, String(err));
+			const reason = this.#reason(err);
+			logger.debug("collab transcript read failed", { agentId: this.#label(agentId), error: reason });
+			reply("", fromByte, reason);
 		}
 	}
 
@@ -1274,8 +1568,10 @@ export class CollabHost {
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
-			this.#lastStateJson = json;
-			this.#send({ t: "state", state });
+			// A guest can cause unbounded distinct `state` frames (a repeat hello under a new
+			// name), so they go advisory; recorded as sent only when admitted, or the dedupe
+			// pins a value guests never saw.
+			if (this.#broadcast({ t: "state", state }, true)) this.#lastStateJson = json;
 		}, STATE_DEBOUNCE_MS);
 	}
 

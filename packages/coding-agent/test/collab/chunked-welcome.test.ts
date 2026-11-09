@@ -88,7 +88,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 	return ctx as unknown as InteractiveModeContext;
 }
 
-function makeFailingGuestContext(failure: Error): InteractiveModeContext {
+function makeFailingGuestContext(failure: unknown): InteractiveModeContext {
 	const ctx = {
 		settings: Settings.isolated(),
 		sessionManager: {
