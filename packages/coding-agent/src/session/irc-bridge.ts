@@ -17,6 +17,7 @@ export interface IrcBridgeHost {
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
+	hasWakeRelay?(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
 }
@@ -306,6 +307,7 @@ export class IrcBridge {
 				progress: msg.progress === true,
 				interrupting: streaming && !quiet,
 				relayOnStop,
+				a2aAutoReply: msg.to === MAIN_AGENT_ID || this.#host.hasWakeRelay?.() === true,
 				// A bridge delivery comes from the `a2a` pseudo-sender, which no
 				// agent:// write reaches: the answer goes back through an a2a: spawn.
 				external: msg.external === true,

@@ -6,12 +6,13 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
-function makeBridge() {
+function makeBridge(hasWakeRelay = true) {
 	const woken: AgentMessage[][] = [];
 	const host = {
 		isDisposed: () => false,
 		isStreaming: () => false,
 		planModeEnabled: () => false,
+		hasWakeRelay: () => hasWakeRelay,
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => {
 			woken.push(records);
@@ -128,6 +129,22 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.content).toContain("sent to the sender automatically");
 		expect(record.content).not.toContain("never reaches the sender");
 		expect(record.content).toContain("with the `task` tool to the `a2a:` agent");
+	});
+
+	it("does not promise an automatic reply to a subagent without a wake relay", async () => {
+		const { bridge, woken } = makeBridge(false);
+		await bridge.deliver({
+			id: "irc-no-relay",
+			from: "a2a",
+			to: "Scout",
+			body: "review src/",
+			ts: Date.now(),
+			external: true,
+			a2aMessageId: "request-scout-2",
+		});
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain("with the `task` tool to the `a2a:` agent");
+		expect(record.content).not.toContain("sent to the sender automatically");
 	});
 
 	it("owes nothing back on an answer to this terminal's own A2A request", async () => {
