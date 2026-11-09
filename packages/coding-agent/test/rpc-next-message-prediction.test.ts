@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 import {
@@ -10,11 +13,13 @@ import {
 } from "@opentelemetry/sdk-metrics";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { RpcNextMessagePredictor } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-next-message-prediction";
 import type { RpcNextMessagePredictionFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const MODEL = { id: "claude-sonnet-4-5", provider: "anthropic", api: "anthropic-messages" } as Model;
 
@@ -29,7 +34,9 @@ interface PendingTurn {
 	promise: Promise<EphemeralTurnResult>;
 }
 
-function harness(options: { enabled?: boolean; alternatives?: boolean; meterProvider?: MeterProvider } = {}) {
+function harness(
+	options: { enabled?: boolean; alternatives?: boolean; handoff?: boolean; meterProvider?: MeterProvider } = {},
+) {
 	const turns: PendingTurn[] = [];
 	const frames: RpcNextMessagePredictionFrame[] = [];
 	const sessionManager = SessionManager.inMemory();
@@ -39,6 +46,7 @@ function harness(options: { enabled?: boolean; alternatives?: boolean; meterProv
 		model: MODEL,
 		isStreaming: false,
 		isCompacting: false,
+		isGeneratingHandoff: options.handoff ?? false,
 		messages,
 		sessionManager,
 		settings: Settings.isolated({
@@ -98,6 +106,12 @@ describe("RpcNextMessagePredictor", () => {
 		idle.advance("another message");
 		expect(idle.turns).toHaveLength(0);
 		expect(idle.frames).toEqual([]);
+	});
+
+	it("makes no request while a handoff is being generated", () => {
+		const { predictor, turns } = harness({ handoff: true });
+		expect(predictor.request()).toBeNull();
+		expect(turns).toHaveLength(0);
 	});
 
 	it("offers ordered choices under the request's id, then retires them once the conversation moves on", async () => {
@@ -263,4 +277,59 @@ describe("RpcNextMessagePredictor", () => {
 		);
 		await meterProvider.shutdown();
 	});
+});
+
+describe("RPC next-message prediction and host input", () => {
+	let client: RpcClient;
+	let directory: string;
+	let frames: RpcNextMessagePredictionFrame[];
+
+	beforeEach(async () => {
+		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-prediction-"));
+		client = new RpcClient({
+			command: [process.execPath, path.join(import.meta.dir, "fixtures", "prediction-rpc-agent.ts")],
+			cwd: directory,
+			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
+		});
+		frames = [];
+		client.onNextMessagePrediction(frame => frames.push(frame));
+		await client.start();
+	});
+
+	afterEach(async () => {
+		await client.stop();
+		await removeWithRetries(directory);
+	});
+
+	/** Request a prediction and wait for its offer (the fixture's side turn answers at once). */
+	async function offer(): Promise<string> {
+		const id = (await client.predictNextMessage())!;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const stop = client.onNextMessagePrediction(frame => {
+			if (frame.predictionId === id) resolve();
+		});
+		if (!frames.some(frame => frame.predictionId === id)) await promise;
+		stop();
+		expect(frames.at(-1)).toEqual({
+			type: "next_message_prediction",
+			predictionId: id,
+			status: "offered",
+			choices: ["ship it"],
+		});
+		return id;
+	}
+
+	it.each([
+		["a bash command", () => client.bash("printf done")],
+		["the handoff command", () => client.handoff().catch(() => null)],
+		["a /handoff prompt", () => client.prompt("/handoff")],
+	])(
+		"retires the offered prediction before answering %s",
+		async (_label, send) => {
+			const id = await offer();
+			await send();
+			expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: id, status: "retired" });
+		},
+		30_000,
+	);
 });

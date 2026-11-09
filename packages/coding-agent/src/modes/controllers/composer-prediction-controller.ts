@@ -207,10 +207,18 @@ export class ComposerPredictionController {
 		if (this.#ctx.focusedAgentId !== undefined) return undefined;
 		const session = this.#ctx.viewSession;
 		// Any draft, even whitespace, keeps the ghost hidden (it shows only over a prefix of the
-		// prediction), and a compaction would rewrite the history the prediction reads: skip the
-		// billed request either way.
+		// prediction), and a compaction or handoff would rewrite the history the prediction reads:
+		// skip the billed request either way.
 		const model = session.model;
-		if (!model || session.isStreaming || session.isCompacting || this.#ctx.editor.getText()) return undefined;
+		if (
+			!model ||
+			session.isStreaming ||
+			session.isCompacting ||
+			session.isGeneratingHandoff ||
+			this.#ctx.editor.getText()
+		) {
+			return undefined;
+		}
 		const abort = new AbortController();
 		const id = String(++this.#lastId);
 		this.#pending = { id, abort };

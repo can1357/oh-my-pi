@@ -442,6 +442,14 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"abort_branch_summary",
 ]);
 
+/** Host input that ends any next-message prediction before it runs; see `handleCommandImpl`. */
+const PREDICTION_RETIRING_COMMANDS: Partial<Record<RpcCommand["type"], true>> = {
+	prompt: true,
+	abort_and_prompt: true,
+	bash: true,
+	handoff: true,
+};
+
 /**
  * Dispatch a single parsed frame from the RPC input stream.
  *
@@ -2030,6 +2038,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Handle a single command
 	const handleCommandImpl = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		// The user acted from the composer, and these can rewrite the conversation without a session
+		// event (a contextual bash result, a handoff, a builtin): retire the prediction before any of it.
+		if (Object.hasOwn(PREDICTION_RETIRING_COMMANDS, command.type)) nextMessagePredictor.close();
 
 		switch (command.type) {
 			case "negotiate_protocol": {
