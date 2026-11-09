@@ -51,9 +51,10 @@ describe("AgentSession todo-error reminder", () => {
 		}
 	});
 
-	/** Runs two prompts and returns the first prompt's settle state and the delivered reminders. */
+	/** Runs two prompts and exposes delivered reminders and diagnostics from the actual failed calls. */
 	async function runTwoPrompts(firstRun: MockResponse[]): Promise<{
 		reminders: string[];
+		failureFor: (toolCallId: string) => string;
 		settledState: { isSettled: boolean; queuedMessageCount: number };
 	}> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -100,6 +101,18 @@ describe("AgentSession todo-error reminder", () => {
 		if (!lastCall) throw new Error("Expected the mock model to be called");
 		return {
 			settledState,
+			failureFor: toolCallId => {
+				const result = agent.state.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				if (result?.role !== "toolResult" || !result.isError) {
+					throw new Error(`Expected a failed tool result for ${toolCallId}`);
+				}
+				// The first line is the diagnostic; the following todo snapshot may be stale.
+				const diagnostic = result.content.find(part => part.type === "text")?.text.split("\n", 1)[0];
+				if (!diagnostic?.trim()) throw new Error(`Expected a diagnostic for ${toolCallId}`);
+				return diagnostic;
+			},
 			reminders: lastCall.context.messages.flatMap(message => {
 				if (message.role !== "developer") return [];
 				const content = message.content;
@@ -143,7 +156,7 @@ describe("AgentSession todo-error reminder", () => {
 	});
 
 	it("preserves an uncorrected failure after an unrelated mutation without a stale list", async () => {
-		const { reminders } = await runTwoPrompts([
+		const { reminders, failureFor } = await runTwoPrompts([
 			todoCall("todo-fail", { op: "append", phase: "Build" }),
 			todoCall("todo-unrelated", { op: "done", task: "Release" }),
 			{ content: ["Completed release"] },
@@ -151,11 +164,12 @@ describe("AgentSession todo-error reminder", () => {
 
 		expect(session?.getTodoPhases()[1]?.tasks[0]?.status).toBe("completed");
 		expect(reminders).toHaveLength(1);
+		expect(reminders[0]).toContain(failureFor("todo-fail"));
 		expect(reminders[0]).not.toContain("Release");
 	});
 
 	it("keeps only the failed operation that has not been retried", async () => {
-		const { reminders } = await runTwoPrompts([
+		const { reminders, failureFor } = await runTwoPrompts([
 			todoCall("todo-missing-items", { op: "append", phase: "Build" }),
 			todoCall("todo-duplicate", { op: "append", phase: "Ship", items: ["Write code"] }),
 			todoCall("todo-retry", { op: "append", phase: "Build", items: ["Add tests"] }),
@@ -163,13 +177,14 @@ describe("AgentSession todo-error reminder", () => {
 		]);
 
 		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).toContain("Write code");
+		expect(reminders[0]).toContain(failureFor("todo-duplicate"));
+		expect(reminders[0]).not.toContain(failureFor("todo-missing-items"));
 		expect(session?.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(["Write code", "Add tests"]);
 		expect(session?.getTodoPhases()[1]?.tasks.map(task => task.content)).toEqual(["Release"]);
 	});
 
 	it("clears every exact retry failure before considering an older failure of the same op", async () => {
-		const { reminders } = await runTwoPrompts([
+		const { reminders, failureFor } = await runTwoPrompts([
 			todoCall("todo-missing-items", { op: "append", phase: "Build" }),
 			todoCall("todo-duplicate", { op: "append", phase: "Ship", items: ["Write code"] }),
 			todoCall("todo-duplicate-again", { op: "append", phase: "Ship", items: ["Write code"] }),
@@ -181,7 +196,8 @@ describe("AgentSession todo-error reminder", () => {
 		expect(session?.getTodoPhases()[0]?.tasks).toEqual([]);
 		expect(session?.getTodoPhases()[1]?.tasks.map(task => task.content)).toEqual(["Release", "Write code"]);
 		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).not.toContain("Write code");
+		expect(reminders[0]).toContain(failureFor("todo-missing-items"));
+		expect(reminders[0]).not.toContain(failureFor("todo-duplicate"));
 	});
 
 	it("drops reminders when retries correct other invalid arguments", async () => {
