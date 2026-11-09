@@ -78,9 +78,6 @@ const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
-/** Mirrors the TUI guest's cap: each automatic rejoin costs the host a full snapshot. */
-const MAX_AUTO_REJOINS = 3;
-const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
 /** Commit delay when `requestAnimationFrame` is unavailable (tests, non-DOM hosts). */
@@ -128,7 +125,6 @@ export class GuestClient {
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
-	#autoRejoins: number[] = [];
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
 
@@ -269,39 +265,6 @@ export class GuestClient {
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
-	}
-
-	#takeAutoRejoin(now = Date.now()): boolean {
-		const history = this.#autoRejoins;
-		while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
-		if (history.length >= MAX_AUTO_REJOINS) return false;
-		history.push(now);
-		return true;
-	}
-
-	/**
-	 * Say hello again after the host dropped this guest, within the auto-rejoin
-	 * budget. A welcome that does not follow retries through the same budget.
-	 * @returns false, with an error notice, once the budget is spent.
-	 */
-	#rejoin(message: string): boolean {
-		if (!this.#takeAutoRejoin()) {
-			this.#pushNotice("error", message);
-			return false;
-		}
-		this.#clearSnapshotProgressTimer();
-		this.#pendingSnapshot = null;
-		this.#clearUiRequests();
-		this.#phase = "reconnecting";
-		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
-		this.#clearWelcomeTimer();
-		this.#welcomeTimer = setTimeout(() => {
-			this.#welcomeTimer = null;
-			if (this.#phase === "live" || this.#phase === "ended") return;
-			if (!this.#rejoin("timed out waiting for the host's welcome")) this.#commit();
-		}, WELCOME_TIMEOUT_MS);
-		this.#commit();
-		return true;
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
@@ -500,13 +463,6 @@ export class GuestClient {
 				this.#end(frame.reason);
 				return; // #end already committed
 			case "error":
-				if (frame.resync) {
-					// The host dropped this guest but the relay link is intact. A hello
-					// still awaiting its welcome is retried by the welcome timer.
-					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
-					if (this.#rejoin(frame.message)) return; // #rejoin already committed
-					break;
-				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our
 					// hello (e.g. protocol mismatch): no welcome will follow.

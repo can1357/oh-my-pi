@@ -204,22 +204,6 @@ function omittedStreamDeltas(
 	return omitted;
 }
 
-/**
- * Each automatic rejoin costs the host a full snapshot, and a guest on a link
- * too slow for the session is shed again after every one. Past the cap the
- * guest stops rejoining on its own and leaves the decision to the user.
- */
-export const MAX_AUTO_REJOINS = 3;
-export const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
-
-/** Records an automatic rejoin in {@link history} if the window has room for one. */
-export function takeAutoRejoin(history: number[], now = Date.now()): boolean {
-	while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
-	if (history.length >= MAX_AUTO_REJOINS) return false;
-	history.push(now);
-	return true;
-}
-
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -246,7 +230,6 @@ export class CollabGuestLink {
 	#applyChain: Promise<void> = Promise.resolve();
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
-	#autoRejoins: number[] = [];
 	#left = false;
 	#replicaActivated = false;
 	/** One owner spans cancellation, queued snapshot work, and local restoration. */
@@ -370,42 +353,22 @@ export class CollabGuestLink {
 			firstWelcome.resolve();
 		};
 
-		// Re-introduce ourselves; the host answers with a fresh welcome which
-		// (re)syncs the replica. Discard any partially-streamed snapshot: the host
-		// will resend the full chunk train.
-		const introduce = (): void => {
+		socket.onOpen = () => {
+			if (this.#left) return;
+			// (Re)connect: re-introduce ourselves; the host answers with a fresh
+			// welcome which (re)syncs the replica. Discard any partially-streamed
+			// snapshot from a prior connection: the host will resend the full
+			// chunk train.
 			this.#welcomed = false;
 			this.#pendingSnapshot = null;
 			this.#clearSnapshotProgressTimer();
-			this.#armWelcomeTimer(onWelcomeTimeout);
+			this.#armWelcomeTimer();
 			socket.send({
 				t: "hello",
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
 			});
-		};
-		// The host dropped us (or never answered) while the relay link stayed up: say
-		// hello again, within the auto-rejoin budget.
-		const rejoin = (message: string): void => {
-			if (this.#left) return;
-			if (!takeAutoRejoin(this.#autoRejoins)) {
-				this.#ctx.showError(`Collab host: ${message}`);
-				return;
-			}
-			this.#ctx.showStatus(`Collab host: ${message}; rejoining…`, { dim: true });
-			// The host no longer counts us as a recipient of its open dialogs.
-			this.#clearUiRequests();
-			introduce();
-		};
-		const onWelcomeTimeout = (): void => {
-			const message = "timed out waiting for the host's welcome";
-			if (joined) rejoin(message);
-			else firstWelcome.reject(new Error(message));
-		};
-		socket.onOpen = () => {
-			if (this.#left) return;
-			introduce();
 		};
 		socket.onFrame = frame => {
 			this.#applyChain = this.#applyChain
@@ -426,11 +389,6 @@ export class CollabGuestLink {
 							await this.#finalizeSnapshot();
 							finishJoin();
 						}
-						return;
-					}
-					if (frame.t === "error" && frame.resync) {
-						// A hello still awaiting its welcome is retried by the welcome timer.
-						if (this.#welcomeTimer === null) rejoin(frame.message);
 						return;
 					}
 					if (frame.t === "error" && !this.#welcomed && !this.#left) {
@@ -473,7 +431,7 @@ export class CollabGuestLink {
 		try {
 			socket.connect();
 			// Cover a blackholed WebSocket handshake too; onOpen resets the timer.
-			this.#armWelcomeTimer(onWelcomeTimeout);
+			this.#armWelcomeTimer();
 			await firstWelcome.promise;
 			if (this.#left) throw new Error("Collab join cancelled");
 		} catch (err) {
@@ -645,11 +603,12 @@ export class CollabGuestLink {
 		);
 	}
 
-	#armWelcomeTimer(onTimeout: () => void): void {
+	#armWelcomeTimer(): void {
+		if (this.#joinReject === null) return;
 		this.#clearWelcomeTimer();
 		this.#welcomeTimer = setTimeout(() => {
 			this.#welcomeTimer = null;
-			onTimeout();
+			this.#joinReject?.(new Error("timed out waiting for the host's welcome"));
 		}, WELCOME_TIMEOUT_MS);
 	}
 

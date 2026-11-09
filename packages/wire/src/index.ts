@@ -381,8 +381,7 @@ export type HostFrame =
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
-	| { t: "error"; message: string; resync?: true };
+	| { t: "error"; message: string };
 
 export type WireFrame = GuestFrame | HostFrame;
 

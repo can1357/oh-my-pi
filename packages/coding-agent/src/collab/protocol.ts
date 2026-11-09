@@ -99,8 +99,7 @@ export type CollabFrame =
 	/** Targeted reply to fetch-transcript; `error` marks a terminal read failure that guests must surface without hot retrying. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
-	| { t: "error"; message: string; resync?: true };
+	| { t: "error"; message: string };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pre-serialized frames: the host bounds replicated payloads by serializing
@@ -138,10 +137,6 @@ const SNAPSHOT_CHUNK_FINAL = `],"${SNAPSHOT_CHUNK_FIELDS.final}":`;
 /** The single construction point of {@link EncodedFrame}. */
 function encodedFrame(json: string): EncodedFrame {
 	return json as EncodedFrame;
-}
-
-export function encodeFrame(frame: CollabFrame): EncodedFrame {
-	return encodedFrame(JSON.stringify(frame));
 }
 
 /** `{ t: "entry", entry }` from the entry's JSON. */
