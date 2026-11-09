@@ -2318,7 +2318,7 @@ export class ProcessTerminal implements Terminal {
 		// a terminal may send well after the idle window) are read here instead
 		// of reaching the shell as typed text.
 		let sentinelAnswered = true;
-		if (this.#sixelSupport !== undefined && !this.#dead) {
+		if (this.#tspResult && this.#sixelSupport !== undefined && !this.#dead) {
 			sentinelAnswered = false;
 			this.#da1SentinelOwners.push({
 				kind: "drain",
@@ -2327,6 +2327,7 @@ export class ProcessTerminal implements Terminal {
 				},
 			});
 			this.#safeWrite("\x1b[c");
+			this.#outputPump?.flushSync(Math.min(idleMs, 50));
 		}
 
 		try {
@@ -2338,6 +2339,10 @@ export class ProcessTerminal implements Terminal {
 				await new Promise(resolve => setTimeout(resolve, Math.min(idleMs, timeLeft)));
 			}
 		} finally {
+			if (!sentinelAnswered) {
+				const drainIdx = this.#da1SentinelOwners.findIndex(o => o.kind === "drain");
+				if (drainIdx !== -1) this.#da1SentinelOwners.splice(drainIdx, 1);
+			}
 			process.stdin.removeListener("data", onData);
 			this.#inputHandler = previousHandler;
 		}
