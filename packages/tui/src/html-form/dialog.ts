@@ -10,8 +10,8 @@
  * (Tern) terminal gets the form described semantically instead: one tab per
  * question (a top-level `<fieldset>`; context before it rides along) plus a
  * Review tab, the tab's content in a column the terminal scrolls, and an
- * action bar that stays in view below it. Clicks come back through
- * {@link HtmlFormDialog.handleNativeEvent}.
+ * action bar that stays in view below it, with Submit on every tab. Clicks
+ * come back through {@link HtmlFormDialog.handleNativeEvent}.
  *
  * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
@@ -1555,7 +1555,11 @@ export class HtmlFormDialog implements Component, Focusable {
 		];
 	}
 
-	/** Hide, the countdown or draft hint, then Cancel and the primary action: Next on a question tab, else Submit. */
+	/**
+	 * Hide, the countdown or draft hint, then Cancel and Submit; a question tab adds Next before
+	 * Submit. Submit stays on every tab so answering never requires walking to Review; it
+	 * validates the whole form and opens the first answer that needs a fix.
+	 */
 	#describeActions(blocked: boolean, next: boolean): NativeNode {
 		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
 		const guard = this.#options.inputGuard;
@@ -1570,9 +1574,8 @@ export class HtmlFormDialog implements Component, Focusable {
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 			...(lead ? [null] : []),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
-			next
-				? actionButton("Next", "next", { tone: "accent" })
-				: actionButton(SUBMIT_LABEL, "submit", { keys: "enter", tone: "accent" }),
+			...(next ? [actionButton("Next", "next")] : []),
+			actionButton(SUBMIT_LABEL, "submit", { ...(next ? {} : { keys: "enter" }), tone: "accent" }),
 		]);
 	}
 
