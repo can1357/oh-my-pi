@@ -41,6 +41,13 @@ provider "devin" {
 	}
 
 
+	// Cascade rejects `temperature: 0` with an opaque `invalid_argument`
+	// ("an internal error occurred") while any positive value is accepted;
+	// 0.0001 is the smallest verified accepted. Local features that pin 0 for
+	// deterministic decoding (session titles, Mnemopi memory extraction) would
+	// otherwise fail and silently fall back to the next model (issue #18423).
+	temperature-floor 0.0001
+
 	// Enterprise (ACUs) fallback prices: https://docs.devin.ai/desktop/models
 	// (as of 2026-11-05). Seed only when upstream reports no token price.
 	// Self-serve SWE-2 Flash is free until 2026-12-04 18:00 UTC; SWE-2 in
