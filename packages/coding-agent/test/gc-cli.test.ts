@@ -16,6 +16,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as sessionContext from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
@@ -2947,7 +2948,22 @@ describe("runGcCommand replay data stripping", () => {
 				],
 				{ stopReason: "toolUse" },
 			),
-			toolResult("call_0"),
+			toolResult("call_0", [
+				{
+					type: "image",
+					data: "",
+					mimeType: "application/octet-stream",
+					providerFile: { provider: "openai", id: "file_ref" },
+				},
+			]),
+			// Replay state with no copy elsewhere: a reasoning source field, a text phase, a snapshot history.
+			assistant(
+				[
+					{ type: "thinking", thinking: "field", thinkingSignature: "reasoning_content" },
+					{ type: "text", text: "noted", textSignature: '{"v":1,"id":"msg_1","phase":"commentary"}' },
+				],
+				{ providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [] } },
+			),
 			prompt("keep going"),
 			assistant(
 				[
@@ -3014,14 +3030,16 @@ describe("runGcCommand replay data stripping", () => {
 			{ type: "thinking", thinking: "earlier" },
 			{ type: "toolCall", id: "call_0", name: "read", arguments: { path: "p" } },
 		]);
+		// Reference-only images and state with no copy elsewhere stay intact outside the kept turn.
 		expect(lines[2]).toBe(original[2]);
 		expect(lines[3]).toBe(original[3]);
+		expect(lines[4]).toBe(original[4]);
 		// The latest turn replays natively, so both of its signed responses keep
 		// their blocks, its tool result keeps its uploaded-file reference, and its
 		// request controls and cached history stay as they were.
-		for (const index of [4, 5, 6, 7]) expect(lines[index]).toBe(original[index]);
+		for (const index of [5, 6, 7, 8]) expect(lines[index]).toBe(original[index]);
 		// The aborted response after it never reaches a replay, so it is not kept.
-		expect(JSON.parse(lines[8]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+		expect(JSON.parse(lines[9]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
 	}
 
 	test("a trailing turn dropped on resume leaves the earlier turn latest", async () => {
@@ -3204,6 +3222,24 @@ describe("runGcCommand replay data stripping", () => {
 			{ type: "thinking", thinking: "abandoned" },
 			{ type: "text", text: "unused" },
 		]);
+	});
+
+	test("skips a transcript when a protected message loses its line index", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const before = await Bun.file(file).text();
+		const realBuild = sessionContext.buildSessionContext;
+		const spy = spyOn(sessionContext, "buildSessionContext").mockImplementation((...args) => {
+			const built = realBuild(...args);
+			return { ...built, messages: built.messages.map(message => structuredClone(message)) };
+		});
+		try {
+			const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+			expect(result.strip).toMatchObject({ scanned: 1, wouldStrip: 0, stripped: 0, records: 0, errors: [] });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await Bun.file(file).text()).toBe(before);
 	});
 
 	test("--apply strips idle transcripts except their latest replay turn, keeping mtimes and permissions", async () => {

@@ -31,16 +31,20 @@ import * as fs from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message, ProviderPayload } from "@oh-my-pi/pi-ai";
-import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import type { ProviderPayload } from "@oh-my-pi/pi-ai";
+import { isReplayTurnBoundary, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { isReasoningSourceSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
-import { isRecord, readLines } from "@oh-my-pi/pi-utils";
+import { isRecord, readLines, tryParseJson } from "@oh-my-pi/pi-utils";
 import { convertMessagesForContextView } from "../session/messages";
 import { buildSessionContext } from "../session/session-context";
-import type { CompactionEntry, SessionEntry } from "../session/session-entries";
+import type { FileEntry, RawFileEntry, SessionEntry } from "../session/session-entries";
+import { migrateToCurrentVersion } from "../session/session-migrations";
 import { type FileSessionStorage, sessionStagingPath } from "../session/session-storage";
 
 const GZIP_SUFFIX = ".gz";
+/** Keys only replay data uses: a line without one has nothing to strip. */
+const REPLAY_KEY_RE =
+	/"(?:providerPayload|requestControls|inputTransformations|thinkingSignature|itemId|redactedThinking|thoughtSignature|partialArgs|streamIndex|providerFile)"/;
 const NEWLINE = new Uint8Array([0x0a]);
 const WRITE_CHUNK_BYTES = 1 << 20;
 const FILE_PERMISSION_MASK = 0o7777n;
@@ -53,17 +57,8 @@ type TaggedMessage = AgentMessage & { [LINE_INDEX]?: number };
 export interface StripPlan {
 	file: string;
 	stat: BigIntStats;
-	/**
-	 * Line indices of the latest replay turn on the active branch, kept verbatim:
-	 * its first assistant record through its last surviving assistant and the tool
-	 * results of that turn.
-	 */
-	keep: ReadonlySet<number>;
 	/** Line indices whose replay data is removed. */
 	strip: ReadonlySet<number>;
-	/** First and last kept line index, or -1 when `keep` is empty. */
-	keepStart: number;
-	keepEnd: number;
 	/** Records that lose replay data. */
 	records: number;
 	/** JSONL bytes removed; uncompressed for an archived `.jsonl.gz`. */
@@ -99,6 +94,13 @@ function drop(target: Record<string, unknown>, keys: readonly string[]): boolean
 	return dropped;
 }
 
+function hasImageSource(block: Record<string, unknown>): boolean {
+	return (
+		(typeof block.data === "string" && block.data.length > 0) ||
+		(typeof block.url === "string" && block.url.length > 0)
+	);
+}
+
 function stripBlock(block: Record<string, unknown>): boolean {
 	switch (block.type) {
 		case "thinking": {
@@ -110,7 +112,7 @@ function stripBlock(block: Record<string, unknown>): boolean {
 			// `partialArgs`/`streamIndex`: streaming state an interrupted openai-completions stream left behind.
 			return drop(block, ["thoughtSignature", "partialArgs", "streamIndex"]);
 		case "image":
-			return drop(block, ["providerFile"]);
+			return hasImageSource(block) && drop(block, ["providerFile"]);
 		default:
 			return false;
 	}
@@ -150,319 +152,31 @@ function parseRecord(text: string): unknown {
 	}
 }
 
-/** Whether `message` emits a non-tool-result wire message that ends an assistant run. */
-function isBoundaryMessage(message: Message): boolean {
-	if (message.role === "assistant" || message.role === "toolResult") return false;
-	if (
-		message.role === "developer" &&
-		isRecord(message.providerPayload) &&
-		message.providerPayload.type === "anthropicMessage"
-	) {
-		const payload = message.providerPayload;
-		if (
-			payload.clearAt !== undefined ||
-			payload.effort !== undefined ||
-			(Array.isArray(payload.toolChanges) && payload.toolChanges.length > 0)
-		) {
-			return true;
-		}
-	}
-	if (typeof message.content === "string") return message.content.trim().length > 0;
-	if (!Array.isArray(message.content)) return false;
-	return message.content.some(
-		block =>
-			isRecord(block) &&
-			((block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0) ||
-				block.type === "image"),
-	);
-}
-
 /**
- * Normalize a parsed JSONL object into a {@link SessionEntry} for
- * {@link buildSessionContext} without mutating `record`. Entries that omit
- * `id` or `parentId` (legacy v1 sessions, minimal fixtures) chain in file
- * order; entries with explicit tree links keep them.
+ * Parse a JSONL line into a {@link FileEntry} tagged with its physical line
+ * index for {@link buildSessionContext}.
  */
-function toSessionEntry(
-	record: Record<string, unknown>,
-	index: number,
-	prevId: string | null,
-	v1Compactions: Array<{ entry: CompactionEntry; firstKeptEntryIndex: number }>,
-): SessionEntry {
-	const id = typeof record.id === "string" && record.id.length > 0 ? record.id : `\0line:${index}`;
-	const parentId =
-		record.parentId === null
-			? null
-			: typeof record.parentId === "string" && record.parentId.length > 0
-				? record.parentId
-				: prevId;
-	const activeLeafId =
-		record.activeLeafId === null || (typeof record.activeLeafId === "string" && record.activeLeafId.length > 0)
-			? record.activeLeafId
-			: undefined;
-	const timestamp = typeof record.timestamp === "string" ? record.timestamp : "1970-01-01T00:00:00.000Z";
-
-	switch (record.type) {
-		case "message": {
-			if (!isRecord(record.message) || typeof record.message.role !== "string") {
-				return { type: "custom", customType: "", id, parentId, activeLeafId, timestamp };
-			}
-			const rawMsg = record.message;
-			const role = rawMsg.role === "hookMessage" ? "custom" : rawMsg.role;
-			const msgTimestamp =
-				typeof rawMsg.timestamp === "number" && Number.isFinite(rawMsg.timestamp) ? rawMsg.timestamp : 0;
-			if (role === "assistant") {
-				if (!Array.isArray(rawMsg.content) || !rawMsg.content.every(isRecord)) {
-					return { type: "custom", customType: "", id, parentId, activeLeafId, timestamp };
-				}
-				const content = rawMsg.content.map(block => {
-					if (block.type === "text" && typeof block.text !== "string") return { ...block, text: "" };
-					if (block.type === "thinking") {
-						return {
-							...block,
-							thinking: typeof block.thinking === "string" ? block.thinking : "",
-							...(block.thinkingSignature !== undefined && typeof block.thinkingSignature !== "string"
-								? { thinkingSignature: undefined }
-								: {}),
-						};
-					}
-					if (block.type === "redactedThinking" && typeof block.data !== "string") return { ...block, data: "" };
-					if (block.type === "toolCall" && typeof block.name !== "string") return { ...block, name: "" };
-					return block;
-				});
-				const stopReason = typeof rawMsg.stopReason === "string" ? rawMsg.stopReason : "stop";
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "assistant",
-						stopReason,
-						content,
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (rawMsg.excludeFromContext === true) {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "bashExecution",
-						command: typeof rawMsg.command === "string" ? rawMsg.command : "",
-						output: typeof rawMsg.output === "string" ? rawMsg.output : "",
-						excludeFromContext: true,
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "toolResult") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "toolResult",
-						content: Array.isArray(rawMsg.content) ? rawMsg.content.filter(isRecord) : [],
-						toolName: typeof rawMsg.toolName === "string" ? rawMsg.toolName : "",
-						toolCallId: typeof rawMsg.toolCallId === "string" ? rawMsg.toolCallId : "",
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "bashExecution") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "bashExecution",
-						command: typeof rawMsg.command === "string" ? rawMsg.command : "",
-						output: typeof rawMsg.output === "string" ? rawMsg.output : "",
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "pythonExecution") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "pythonExecution",
-						code: typeof rawMsg.code === "string" ? rawMsg.code : "",
-						output: typeof rawMsg.output === "string" ? rawMsg.output : "",
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "fileMention") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role: "fileMention",
-						files: Array.isArray(rawMsg.files)
-							? rawMsg.files
-									.filter(isRecord)
-									.map(file => ({ ...file, path: typeof file.path === "string" ? file.path : "" }))
-							: [],
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "branchSummary" || role === "compactionSummary") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role,
-						summary: typeof rawMsg.summary === "string" ? rawMsg.summary : "",
-						fromId: typeof rawMsg.fromId === "string" ? rawMsg.fromId : "",
-						tokensBefore: typeof rawMsg.tokensBefore === "number" ? rawMsg.tokensBefore : 0,
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			if (role === "user" || role === "developer" || role === "custom") {
-				return {
-					...record,
-					type: "message",
-					id,
-					parentId,
-					activeLeafId,
-					timestamp,
-					message: {
-						...rawMsg,
-						role,
-						content: typeof rawMsg.content === "string" || Array.isArray(rawMsg.content) ? rawMsg.content : "",
-						customType: typeof rawMsg.customType === "string" ? rawMsg.customType : "",
-						timestamp: msgTimestamp,
-						[LINE_INDEX]: index,
-					},
-				} as unknown as SessionEntry;
-			}
-			return {
-				...record,
-				type: "message",
-				id,
-				parentId,
-				activeLeafId,
-				timestamp,
-				message: {
-					...rawMsg,
-					role: "user",
-					content:
-						typeof rawMsg.content === "string" || Array.isArray(rawMsg.content)
-							? rawMsg.content
-							: [{ type: "text", text: role }],
-					timestamp: msgTimestamp,
-					[LINE_INDEX]: index,
-				},
-			} as unknown as SessionEntry;
-		}
-		case "custom_message":
-			return {
-				...record,
-				type: "custom_message",
-				id,
-				parentId,
-				activeLeafId,
-				timestamp,
-				customType: typeof record.customType === "string" ? record.customType : "",
-				content: typeof record.content === "string" || Array.isArray(record.content) ? record.content : "",
-				display: typeof record.display === "boolean" ? record.display : false,
-			} as unknown as SessionEntry;
-		case "branch_summary":
-			return {
-				...record,
-				type: "branch_summary",
-				id,
-				parentId,
-				activeLeafId,
-				timestamp,
-				summary: typeof record.summary === "string" ? record.summary : "",
-				fromId: typeof record.fromId === "string" ? record.fromId : "",
-			} as unknown as SessionEntry;
-		case "compaction": {
-			const entry = {
-				...record,
-				type: "compaction",
-				id,
-				parentId,
-				activeLeafId,
-				timestamp,
-				summary: typeof record.summary === "string" ? record.summary : "Compacted",
-				firstKeptEntryId: typeof record.firstKeptEntryId === "string" ? record.firstKeptEntryId : "",
-				tokensBefore: typeof record.tokensBefore === "number" ? record.tokensBefore : 0,
-			} as unknown as CompactionEntry;
-			if (typeof record.firstKeptEntryId !== "string" && typeof record.firstKeptEntryIndex === "number") {
-				v1Compactions.push({ entry, firstKeptEntryIndex: record.firstKeptEntryIndex });
-			}
-			return entry;
-		}
-		case "ttsr_injection":
-			return {
-				...record,
-				type: "ttsr_injection",
-				id,
-				parentId,
-				activeLeafId,
-				timestamp,
-				injectedRules: Array.isArray(record.injectedRules)
-					? record.injectedRules.filter((rule): rule is string => typeof rule === "string")
-					: [],
-			} as unknown as SessionEntry;
-		default:
-			return { ...record, id, parentId, activeLeafId, timestamp } as unknown as SessionEntry;
+function parseFileEntry(text: string, index: number): FileEntry | undefined {
+	const entry = tryParseJson<RawFileEntry>(text);
+	if (!isRecord(entry) || typeof entry.type !== "string" || entry.type === "title") return undefined;
+	if (entry.type === "message") {
+		const message: unknown = entry.message;
+		if (!isRecord(message) || typeof message.role !== "string") return undefined;
+		if (message.role === "assistant" && !Array.isArray(message.content)) return undefined;
+		if (message.role === "toolResult" && typeof message.toolName !== "string") message.toolName = "";
+		(entry.message as TaggedMessage)[LINE_INDEX] = index;
 	}
+	return entry;
 }
 
 /**
  * Line indices belonging to the latest replay turn on the active branch, as
  * {@link buildSessionContext} and {@link convertMessagesForContextView} rebuild
  * it on resume: the run of surviving assistant responses joined only by tool
- * results that ends at the last surviving assistant response.
+ * results that ends at the last surviving assistant response. Undefined when a
+ * message in that run lost its physical line index, so the caller fails closed.
  */
-function protectedTurnLines(entries: SessionEntry[]): Set<number> {
+function protectedTurnLines(entries: SessionEntry[]): Set<number> | undefined {
 	const keep = new Set<number>();
 	if (entries.length === 0) return keep;
 	const context = buildSessionContext(entries, undefined, undefined, {
@@ -480,7 +194,7 @@ function protectedTurnLines(entries: SessionEntry[]): Set<number> {
 			if (isSurvivingAssistant(message)) firstAssistant = i;
 		} else if (message.role === "toolResult") {
 			continue;
-		} else if (isBoundaryMessage(message)) {
+		} else if (isReplayTurnBoundary(message)) {
 			break;
 		}
 	}
@@ -493,7 +207,8 @@ function protectedTurnLines(entries: SessionEntry[]): Set<number> {
 		if (message.role !== "assistant" && message.role !== "toolResult") continue;
 		if (message.role === "assistant" && !isSurvivingAssistant(message)) continue;
 		const lineIndex = (context.messages[sourceIndex] as TaggedMessage | undefined)?.[LINE_INDEX];
-		if (lineIndex !== undefined) keep.add(lineIndex);
+		if (lineIndex === undefined) return undefined;
+		keep.add(lineIndex);
 	}
 	return keep;
 }
@@ -514,48 +229,28 @@ async function* transcriptLines(file: string): AsyncGenerator<{ bytes: Uint8Arra
 export async function planStrip(file: string, idleBeforeMs: number): Promise<StripPlan | undefined> {
 	const stat = await fs.lstat(file, { bigint: true });
 	if (!stat.isFile() || stat.nlink !== 1n || Number(stat.mtimeMs) > idleBeforeMs) return undefined;
-	const entries: SessionEntry[] = [];
-	const fileEntries: Array<SessionEntry | { type: "session" }> = [];
-	const v1Compactions: Array<{ entry: CompactionEntry; firstKeptEntryIndex: number }> = [];
+	const fileEntries: FileEntry[] = [];
 	const candidates: Array<{ index: number; byteLength: number; record: Record<string, unknown> }> = [];
-	let prevId: string | null = null;
-
 	let index = -1;
+
 	for await (const { bytes, text } of transcriptLines(file)) {
 		index += 1;
-		const record = parseRecord(text);
-		if (!isRecord(record) || typeof record.type !== "string" || record.type === "title") continue;
-		if (record.type === "session") {
-			fileEntries.push({ type: "session" });
-			continue;
-		}
-		if (record.type === "message") {
-			candidates.push({ index, byteLength: bytes.length, record });
-		}
-		const entry = toSessionEntry(record, index, prevId, v1Compactions);
-		entries.push(entry);
+		const entry = parseFileEntry(text, index);
+		if (!entry) continue;
 		fileEntries.push(entry);
-		if (entry.activeLeafId === undefined || entry.activeLeafId === entry.id) {
-			prevId = entry.id;
+		if (entry.type === "message" && REPLAY_KEY_RE.test(text)) {
+			const record = parseRecord(text);
+			if (isRecord(record)) candidates.push({ index, byteLength: bytes.length, record });
 		}
 	}
 	if (candidates.length === 0) return undefined;
-	for (const { entry, firstKeptEntryIndex } of v1Compactions) {
-		const target = fileEntries[firstKeptEntryIndex] ?? entries[firstKeptEntryIndex];
-		if (target && target.type !== "session") {
-			entry.firstKeptEntryId = target.id;
-		}
-	}
-
+	migrateToCurrentVersion(fileEntries);
+	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
 	const keep = protectedTurnLines(entries);
-	let keepStart = -1;
-	let keepEnd = -1;
-	for (const lineIndex of keep) {
-		if (keepStart < 0 || lineIndex < keepStart) keepStart = lineIndex;
-		if (lineIndex > keepEnd) keepEnd = lineIndex;
-	}
+	if (!keep) return undefined;
+
 	const strip = new Set<number>();
-	const plan: StripPlan = { file, stat, keep, strip, keepStart, keepEnd, records: 0, bytes: 0 };
+	const plan: StripPlan = { file, stat, strip, records: 0, bytes: 0 };
 	for (const { index: lineIndex, byteLength, record } of candidates) {
 		if (keep.has(lineIndex) || !stripRecord(record)) continue;
 		strip.add(lineIndex);
