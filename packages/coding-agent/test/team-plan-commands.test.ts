@@ -65,8 +65,8 @@ describe("team plan commands", () => {
 		expect(names).toContain("reject");
 		for (const args of ["approve", "approve worker extra", "reject worker"]) {
 			const output = await command(args);
-			expect(output).toContain("/team approve <handle>");
-			expect(output).toContain("/team reject <handle> <reason>");
+			expect(output).toContain("/team approve <handle> [--rev N]");
+			expect(output).toContain("/team reject <handle> [--rev N] <reason>");
 		}
 	});
 
@@ -100,5 +100,66 @@ describe("team plan commands", () => {
 		expect(ircWaitAccepts({ directOnly: true }, approvals[0]!)).toBe(true);
 		expect(IrcBus.global().unansweredSends("lead", 0)).toEqual([]);
 		expect(IrcBus.global().unansweredSends("worker", 0)).toEqual([]);
+	});
+
+	it("parses --rev placement and validates its value", async () => {
+		const { command } = await fixture();
+		// Bad values are usage errors before any runtime call.
+		for (const args of [
+			"approve worker --rev",
+			"approve worker --rev 0",
+			"approve worker --rev -1",
+			"approve worker --rev x",
+			"approve worker --rev 1.5",
+			"approve worker --rev +2",
+			"approve worker --rev 02",
+			"approve worker --rev 1 2",
+			"approve --rev 1 worker",
+			"reject worker --rev Add tests",
+			"reject worker --rev 0 Add tests",
+			"reject worker Add tests --rev",
+		]) {
+			const output = await command(args);
+			expect(output).toContain("/team approve <handle> [--rev N]");
+			expect(output).toContain("/team reject <handle> [--rev N] <reason>");
+		}
+	});
+
+	it("approves and rejects against the revision shown in notices", async () => {
+		const { child, notices, identity, command } = await fixture();
+		await teamRuntime.submitPlan(child, identity, "First plan");
+		expect(notices.at(-1)!.body).toContain("rev 1");
+		await teamRuntime.submitPlan(child, identity, "Second plan");
+		expect(notices.at(-1)!.body).toContain("rev 2");
+		// Stale revision: the command names the current revision and changes nothing.
+		expect(await command("approve worker --rev 1")).toContain("Stale plan revision 1; current is 2");
+		expect(await teamRuntime.planPending(child, identity)).toBe(true);
+		expect(await command("reject worker --rev 1 Missing coverage")).toContain(
+			"Stale plan revision 1; current is 2",
+		);
+		expect(await teamRuntime.planPending(child, identity)).toBe(true);
+		// A matching revision approves; the notice names the revision.
+		expect(await command("approve worker --rev 2")).toContain("approved");
+		expect(notices.at(-1)!.body).toContain("rev 2");
+		expect(await teamRuntime.planPending(child, identity)).toBe(false);
+		// The reject path is symmetric: resubmit after the approval (rev 3),
+		// then a stale revision refuses, the matching revision rejects, and the
+		// resubmission after that reject shows rev 4 — submissions are the only
+		// counter, so the fourth submission is rev 4 regardless of the reject.
+		await teamRuntime.submitPlan(child, identity, "Third plan");
+		expect(notices.at(-1)!.body).toContain("rev 3");
+		expect(await command("reject worker --rev 2 Missing coverage")).toContain(
+			"Stale plan revision 2; current is 3",
+		);
+		expect(await teamRuntime.planPending(child, identity)).toBe(true);
+		expect(await command("reject worker --rev 3 Missing coverage")).toContain("rejected");
+		expect(notices.at(-1)!.body).toContain("rev 3");
+		expect(await teamRuntime.planPending(child, identity)).toBe(true);
+		// The resubmission after that reject is the fourth submission: rev 4.
+		await teamRuntime.submitPlan(child, identity, "Fourth plan");
+		expect(notices.at(-1)!.body).toContain("rev 4");
+		expect(await command("approve worker --rev 3")).toContain("Stale plan revision 3; current is 4");
+		expect(await command("approve worker --rev 4")).toContain("approved");
+		expect(await teamRuntime.planPending(child, identity)).toBe(false);
 	});
 });

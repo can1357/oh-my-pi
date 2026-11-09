@@ -320,19 +320,28 @@ as a grant.
 
 1. The member submits non-empty plan text as the content of
    `write team://audit/plan`. Its trusted session identifies the author; the
-   actual lead receives a non-request notification. Failed delivery does not
-   produce an approvable submission.
-2. The lead runs `/team reject Reviewer Explain how you will verify the result`.
-   The member receives the reason, the gate stays closed and the old submission
-   is cleared. It must revise and submit again through the same URL.
-3. The lead runs `/team approve Reviewer`. Approval requires a successfully
-   submitted plan; otherwise it is refused with instructions to submit one.
-   The member receives a non-request approval notice, with no reply required.
+   actual lead receives a non-request notification naming the submission's
+   revision (`rev N`). Failed delivery does not produce an approvable
+   submission.
+2. The lead runs `/team reject Reviewer [--rev N] Explain how you will verify
+   the result`. The member receives the reason (with `rev N`), the gate stays
+   closed and the old submission is cleared. It must revise and submit again
+   through the same URL.
+3. The lead runs `/team approve Reviewer [--rev N]`. Approval requires a
+   successfully submitted plan; otherwise it is refused with instructions to
+   submit one. The member receives a non-request approval notice naming the
+   approved revision, with no reply required.
 
 Only the current lead can approve/reject its members. Ambiguous handles,
-nonmembers, stale generations and replaced refs are refused. Approval applies to
-the current submitted plan, not a revision token selected by the command; if a
-member resubmits before approval, the command acts on that latest submission.
+nonmembers, stale generations and replaced refs are refused. The revision
+`N` counts accepted submissions in the member's current generation (1, 2, 3
+…); rejects do not advance it, so the resubmission after a rejected rev 2 is
+rev 3. With `--rev N` the decision is a compare-and-set: if the member has
+submitted a newer revision, the command is refused with
+`Stale plan revision N; current is M` and nothing changes — the gate stays as
+it was. Without `--rev` the command acts on the current submitted plan, not a
+revision token selected by the command; if a member resubmits before approval,
+the command acts on that latest submission.
 It removes only the team gate, not role restrictions: a writable member can then
 mutate within existing permissions; scout/reviewer remain read-only apart from
 coordination writes. Resubmission resets approval for a member that requires it.
@@ -350,8 +359,8 @@ All `/team` commands require `team.enabled: true`.
 /team start <name> [assignment]
 /team status [name]
 /team stop [--force] <name|handle|all>
-/team approve <handle>
-/team reject <handle> <reason>
+/team approve <handle> [--rev N]
+/team reject <handle> [--rev N] <reason>
 ```
 
 | Setting | Default | Purpose |

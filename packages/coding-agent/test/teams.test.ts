@@ -546,6 +546,16 @@ describe("team startup lifecycle", () => {
 	});
 });
 
+describe("/team approve and reject --rev usage", () => {
+	it("documents --rev in subcommand usage strings", () => {
+		const subcommands = TEAM_COMMAND.subcommands!;
+		const approve = subcommands.find(command => command.name === "approve");
+		const reject = subcommands.find(command => command.name === "reject");
+		expect(approve?.usage).toBe("<handle> [--rev N]");
+		expect(reject?.usage).toBe("<handle> [--rev N] <reason>");
+	});
+});
+
 describe("/team start and stop", () => {
 	for (const definition of [
 		{ name: "scout", tools: ["read"], team: undefined, reason: "read-only" },

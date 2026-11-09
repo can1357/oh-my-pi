@@ -35,6 +35,8 @@ export interface TeamProbe {
 	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string): Promise<TeamStopResponse>;
 	planPending(key: string, identity: TeamIdentity): Promise<boolean>;
 	submitPlan(key: string, identity: TeamIdentity, text: string): Promise<void>;
+	/** Approve a member plan through the worker→main team client, optionally pinned to a revision. */
+	approve(key: string, handle: string, revision?: number): Promise<void>;
 	memberIdentity(key: string, team: string, generation: number, handle: string): Promise<TeamIdentity>;
 	command(key: string, cwd: string, args: string): Promise<string>;
 	beforeInstall(): Promise<string>;
@@ -194,6 +196,7 @@ const probe: TeamProbe = {
 	respondStop: (key, identity, requestId, body) => getTeamClient().respondStop(key, identity, requestId, body),
 	planPending: (key, identity) => getTeamClient().planPending(key, identity),
 	submitPlan: (key, identity, text) => getTeamClient().submitPlan(key, identity, text),
+	approve: (key, handle, revision) => getTeamClient().approve(key, handle, revision),
 	memberIdentity: (key, team, generation, handle) => getTeamClient().memberIdentity(key, team, generation, handle),
 	async putMember(key, generation, memberId) {
 		const ref = AgentRegistry.global().get(memberId);

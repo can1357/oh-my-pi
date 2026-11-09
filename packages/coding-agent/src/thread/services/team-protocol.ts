@@ -61,8 +61,8 @@ export type TeamProtocol = {
 	memberIdentity: RpcMethod<[sessionKey: string, team: string, generation: number, handle: string], TeamIdentity>;
 	planPending: RpcMethod<[sessionKey: string, identity: TeamIdentity], boolean>;
 	submitPlan: RpcMethod<[sessionKey: string, identity: TeamIdentity, text: string], void>;
-	approve: RpcMethod<[sessionKey: string, handle: string], void>;
-	reject: RpcMethod<[sessionKey: string, handle: string, reason: string], void>;
+	approve: RpcMethod<[sessionKey: string, handle: string, revision?: number], void>;
+	reject: RpcMethod<[sessionKey: string, handle: string, reason: string, revision?: number], void>;
 	respondStop: RpcMethod<
 		[sessionKey: string, identity: TeamIdentity, requestId: string, body: string],
 		TeamStopResponse
@@ -119,8 +119,8 @@ export interface TeamClient {
 	memberIdentity(sessionKey: string, team: string, generation: number, handle: string): Promise<TeamIdentity>;
 	planPending(sessionKey: string, identity: TeamIdentity): Promise<boolean>;
 	submitPlan(sessionKey: string, identity: TeamIdentity, text: string): Promise<void>;
-	approve(sessionKey: string, handle: string): Promise<void>;
-	reject(sessionKey: string, handle: string, reason: string): Promise<void>;
+	approve(sessionKey: string, handle: string, revision?: number): Promise<void>;
+	reject(sessionKey: string, handle: string, reason: string, revision?: number): Promise<void>;
 	addTask(sessionKey: string, identity: TeamIdentity, title: string): Promise<TeamTask>;
 	claim(sessionKey: string, identity: TeamIdentity, id: string): Promise<TeamClaimResult>;
 	releaseTask(sessionKey: string, identity: TeamIdentity, id: string): Promise<TeamTask>;

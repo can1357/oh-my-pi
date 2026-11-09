@@ -76,7 +76,10 @@ interface MemberPlan {
 	refGeneration?: number;
 	submitted?: string;
 	approved: boolean;
-	revision: number;
+	/** User-visible revision: accepted submissions in this member's generation. */
+	submissions: number;
+	/** Internal compare-and-set counter, bumped on submit and reject. */
+	epoch: number;
 }
 
 interface RuntimeTeam extends StartedTeam {
@@ -702,7 +705,7 @@ export class TeamRuntime {
 			plan.reservation !== reservation ||
 			(plan.refGeneration !== undefined && plan.refGeneration !== member.ref?.generation)
 		) {
-			plan = { id: member.id, reservation, refGeneration: member.ref?.generation, approved: false, revision: 0 };
+			plan = { id: member.id, reservation, refGeneration: member.ref?.generation, approved: false, submissions: 0, epoch: 0 };
 			state.plans.set(handle, plan);
 		}
 		plan.refGeneration ??= member.ref?.generation;
@@ -731,20 +734,22 @@ export class TeamRuntime {
 		const plan = this.#memberPlan(state, handle, member);
 		plan.approved = false;
 		plan.submitted = undefined;
-		const revision = ++plan.revision;
+		const epoch = ++plan.epoch;
+		const submission = plan.submissions + 1;
 		const receipt = await IrcBus.global().send({
 			from: member.id,
 			to: state.leadId,
-			body: `Plan from ${handle} (${member.id}) for team ${state.name}:\n${text}`,
+			body: `Plan from ${handle} (${member.id}) for team ${state.name} (rev ${submission}):\n${text}`,
 			progress: true,
 			teamNotice: true,
 		});
 		this.#authorize(session, identity);
 		const current = state.members.get(handle);
-		if (!current || this.#memberPlan(state, handle, current) !== plan || plan.revision !== revision)
+		if (!current || this.#memberPlan(state, handle, current) !== plan || plan.epoch !== epoch)
 			throw new Error("Plan changed during submission; submit the current plan again");
 		if (receipt.outcome === "failed") throw new Error(`Plan delivery failed: ${receipt.error}; submit again`);
 		plan.submitted = text;
+		plan.submissions = submission;
 	}
 
 	#planTarget(lead: object, handle: string): { state: RuntimeTeam; member: TeamMembership; plan: MemberPlan } {
@@ -766,15 +771,17 @@ export class TeamRuntime {
 		return { state, member, plan: this.#memberPlan(state, name, member) };
 	}
 
-	async approve(lead: object, handle: string): Promise<void> {
+	async approve(lead: object, handle: string, revision?: number): Promise<void> {
 		const { state, member, plan } = this.#planTarget(lead, handle);
 		if (!plan.submitted)
 			throw new Error(`No submitted plan; ask the member to send it via write team://${state.name}/plan`);
+		if (revision !== undefined && revision !== plan.submissions)
+			throw new Error(`Stale plan revision ${revision}; current is ${plan.submissions}`);
 		plan.approved = true;
 		const receipt = await IrcBus.global().send({
 			from: state.leadId,
 			to: member.id,
-			body: `Plan approved for team ${state.name}; mutation tools are available within your existing permissions.`,
+			body: `Plan approved for team ${state.name} (rev ${plan.submissions}); mutation tools are available within your existing permissions.`,
 			progress: true,
 			teamControl: true,
 			teamNotice: true,
@@ -782,16 +789,20 @@ export class TeamRuntime {
 		if (receipt.outcome === "failed") throw new Error(`Plan approved, but notification failed: ${receipt.error}`);
 	}
 
-	async reject(lead: object, handle: string, reason: string): Promise<void> {
+	async reject(lead: object, handle: string, reason: string, revision?: number): Promise<void> {
 		const { state, member, plan } = this.#planTarget(lead, handle);
 		if (!reason.trim()) throw new Error("Rejection requires a reason");
+		if (!plan.submitted)
+			throw new Error(`No submitted plan; ask the member to send it via write team://${state.name}/plan`);
+		if (revision !== undefined && revision !== plan.submissions)
+			throw new Error(`Stale plan revision ${revision}; current is ${plan.submissions}`);
 		plan.approved = false;
 		plan.submitted = undefined;
-		plan.revision++;
+		plan.epoch++;
 		const receipt = await IrcBus.global().send({
 			from: state.leadId,
 			to: member.id,
-			body: `Plan rejected for team ${state.name}: ${reason}\nResubmit via write team://${state.name}/plan`,
+			body: `Plan rejected for team ${state.name} (rev ${plan.submissions}): ${reason}\nResubmit via write team://${state.name}/plan`,
 			progress: true,
 			teamControl: true,
 			teamNotice: true,

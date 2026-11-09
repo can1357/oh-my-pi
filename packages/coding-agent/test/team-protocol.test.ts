@@ -49,6 +49,7 @@ describe("team:// routing", () => {
 			await router.write(url, "Inspect and add tests", { session: tools(child) });
 			expect(plans.at(-1)).toMatchObject({ from: ref.id, progress: true });
 			expect(plans.at(-1)!.body).toContain("Inspect and add tests");
+			expect(plans.at(-1)!.body).toContain("rev 1");
 			expect(IrcBus.global().unansweredSends(ref.id, 0)).toEqual([]);
 			await expect(router.write(url, "spoofed", { session: tools(outsider) })).rejects.toThrow();
 			await expect(router.write(url, "   ", { session: tools(child) })).rejects.toThrow();

@@ -1280,6 +1280,53 @@ describe("team plan approval", () => {
 		await runtime.stop(lead, "audit");
 	});
 
+	it("counts plan revisions per submission and guards approve/reject compare-and-set", async () => {
+		const registry = AgentRegistry.global();
+		const notices: Array<{ from: string; to: string; body: string }> = [];
+		const receive = async (message: (typeof notices)[number]) => {
+			notices.push(message);
+			return "injected";
+		};
+		const lead = { deliverIrcMessage: receive } as unknown as AgentSessionHandle;
+		const child = { deliverIrcMessage: receive } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, { ...team, planApproval: true });
+		started.members.set("worker", { id: "worker", ref });
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		await runtime.submitPlan(child, identity, "First plan");
+		expect(notices.at(-1)!.body).toContain("rev 1");
+		await runtime.submitPlan(child, identity, "Second plan");
+		expect(notices.at(-1)!.body).toContain("rev 2");
+		// Stale revision: nothing changes — plan still pending, gate still closed.
+		await expect(runtime.approve(lead, "worker", 1)).rejects.toThrow("Stale plan revision 1; current is 2");
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await expect(runtime.reject(lead, "worker", "Nope", 1)).rejects.toThrow("Stale plan revision 1; current is 2");
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		// Matching revision approves.
+		await runtime.approve(lead, "worker", 2);
+		expect(notices.at(-1)!.body).toContain("rev 2");
+		expect(await runtime.planPending(child, identity)).toBe(false);
+		// Reject is symmetric: the brief's resubmission-after-reject check.
+		// Two submissions, then reject rev 2, then the next submission shows
+		// rev 3 (not 4) because rejects do not advance the user-visible
+		// revision — submissions are the only counter.
+		await runtime.reject(lead, "worker", "Start over", 2);
+		expect(notices.at(-1)!.body).toContain("rev 2");
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await runtime.submitPlan(child, identity, "Third plan");
+		expect(notices.at(-1)!.body).toContain("rev 3");
+		await expect(runtime.approve(lead, "worker", 2)).rejects.toThrow("Stale plan revision 2; current is 3");
+		await runtime.approve(lead, "worker", 3);
+		expect(await runtime.planPending(child, identity)).toBe(false);
+		// Without a revision the command keeps its current behavior.
+		await runtime.submitPlan(child, identity, "Fourth plan");
+		await runtime.approve(lead, "worker");
+		expect(await runtime.planPending(child, identity)).toBe(false);
+		await runtime.stop(lead, "audit");
+	});
+
 	it("rejects nonmembers, wrong leads, stale generations, replaced leads and ambiguous handles", async () => {
 		const registry = AgentRegistry.global();
 		const lead = session();
@@ -1411,6 +1458,60 @@ describe("team plan approval", () => {
 		} finally {
 			clock.mockRestore();
 			await teamRuntime.stop(lead, "audit");
+			await worker.terminate("test end");
+		}
+	});
+
+	it("carries the plan revision argument across worker RPC", async () => {
+		const registry = AgentRegistry.global();
+		const realNow = Date.now.bind(Date);
+		let elapsed = 0;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + elapsed);
+		const ready = Promise.withResolvers<TeamProbe>();
+		const probeService: ThreadService = {
+			name: "team-probe",
+			globals: (): TeamProbeGlobals => ({ ready: ready.resolve }),
+		};
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/team-runtime-worker.ts", import.meta.url),
+			services: [identityThreadService, agentsThreadService, teamThreadService, probeService],
+			initTimeoutMs: 60_000,
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			// A worker-hosted lead owns the team, so the approve call itself
+			// crosses the worker→main RPC with its revision argument.
+			const lead = await probe.open("worker-lead");
+			const member = await probe.open("worker-member");
+			const started = await probe.start(lead, { ...team, planApproval: true });
+			expect(await probe.putMember(lead, started.generation, "worker-member")).toBe(true);
+			const identity = { team: "audit", generation: started.generation, memberId: "worker-member" };
+			await probe.submitPlan(member, identity, "Worker plan");
+			elapsed += 500; // Submissions are rate-charged progress; begin a fresh window.
+			await probe.submitPlan(member, identity, "Worker revised plan");
+			// A stale revision number refuses without changing state.
+			let stale: unknown;
+			try {
+				await probe.approve(lead, "worker-member", 1);
+			} catch (caught) {
+				stale = caught;
+			}
+			expect(stale).toBeInstanceOf(Error);
+			expect((stale as Error).message).toBe("Stale plan revision 1; current is 2");
+			expect(await probe.planPending(member, identity)).toBe(true);
+			// The matching revision crosses RPC and approves.
+			await probe.approve(lead, "worker-member", 2);
+			expect(await probe.planPending(member, identity)).toBe(false);
+			// Omitting the revision still works.
+			elapsed += 500;
+			await probe.submitPlan(member, identity, "Worker third plan");
+			await probe.approve(lead, "worker-member");
+			expect(await probe.planPending(member, identity)).toBe(false);
+			const leadSession = registry.get("worker-lead")!.session!;
+			await teamRuntime.stop(leadSession, "audit");
+		} finally {
+			clock.mockRestore();
 			await worker.terminate("test end");
 		}
 	});
