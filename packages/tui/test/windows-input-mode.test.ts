@@ -300,57 +300,38 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(recorder.received).toEqual(["a"]);
 	});
 
-	it("keeps a relayed TSP event intact when a stalled Escape timer fires before its queued tail", async () => {
-		const delivered: string[] = [];
-		harness = createProcessTerminalRenderHarness(
-			100,
-			30,
-			{ conpty: true, nativeWindowsConsole: false },
-			undefined,
-			data => delivered.push(data),
-		);
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;0c");
+	it.each([
+		["Escape", 1, () => vi.advanceTimersToNextTimer()],
+		["string", 9, () => vi.advanceTimersByTime(5000)],
+	])(
+		"keeps a relayed TSP event intact when a stalled %s timer fires before its queued tail",
+		async (_, split, stall) => {
+			const delivered: string[] = [];
+			harness = createProcessTerminalRenderHarness(
+				100,
+				30,
+				{ conpty: true, nativeWindowsConsole: false },
+				undefined,
+				data => delivered.push(data),
+			);
+			const recorder = new InputRecorder();
+			harness.tui.addChild(recorder);
+			harness.tui.setFocus(recorder);
+			await harness.settle();
+			await harness.feed("\x1b[?1;0c");
 
-		const event = relayRecords('\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":12}\x07');
-		process.stdin.emit("data", event[0]);
-		vi.advanceTimersToNextTimer();
-		process.stdin.emit("data", event.slice(1).join(""));
-		await harness.settle();
-		await harness.feed("\x1b[65;30;97;1;0;1_");
+			const event = relayRecords('\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":12}\x07');
+			process.stdin.emit("data", event.slice(0, split).join(""));
+			// The flush timer comes due during the stall, before stdin delivers the rest of the record.
+			stall();
+			process.stdin.emit("data", event.slice(split).join(""));
+			await harness.settle();
+			await harness.feed("\x1b[65;30;97;1;0;1_");
 
-		expect(recorder.received).toEqual(["a"]);
-		expect(delivered).toEqual(['\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":12}\x1b\\', "a"]);
-	});
-
-	it("keeps a relayed TSP event intact when a stalled string timer fires before its queued tail", async () => {
-		const delivered: string[] = [];
-		harness = createProcessTerminalRenderHarness(
-			100,
-			30,
-			{ conpty: true, nativeWindowsConsole: false },
-			undefined,
-			data => delivered.push(data),
-		);
-		const recorder = new InputRecorder();
-		harness.tui.addChild(recorder);
-		harness.tui.setFocus(recorder);
-		await harness.settle();
-		await harness.feed("\x1b[?1;0c");
-
-		const event = relayRecords('\x1b]877;tsp;e;{"ev":"ack","sf":"s:1","s":12}\x07');
-		process.stdin.emit("data", event.slice(0, 9).join(""));
-		vi.advanceTimersByTime(5000);
-		process.stdin.emit("data", event.slice(9).join(""));
-		await harness.settle();
-		await harness.feed("\x1b[65;30;97;1;0;1_");
-
-		expect(recorder.received).toEqual(["a"]);
-		expect(delivered).toEqual(['\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":12}\x1b\\', "a"]);
-	});
+			expect(recorder.received).toEqual(["a"]);
+			expect(delivered).toEqual(['\x1b_tsp;e;{"ev":"ack","sf":"s:1","s":12}\x1b\\', "a"]);
+		},
+	);
 
 	it("keeps a relayed TSP event out of the composer when a stdin read splits one of its records", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: false });
