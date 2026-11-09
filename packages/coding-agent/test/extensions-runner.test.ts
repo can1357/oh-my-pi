@@ -4548,6 +4548,7 @@ describe("ExtensionRunner", () => {
 				),
 				tools: new Map(),
 				assistantThinkingRenderers: [],
+				assistantTextDisplayRenderers: [],
 				assistantTextRenderers: [],
 				transcriptPresenters: [],
 				linkSchemes: [],
