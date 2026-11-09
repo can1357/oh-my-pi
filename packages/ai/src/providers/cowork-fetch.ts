@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
@@ -182,6 +182,32 @@ function createResponse(message: IncomingMessage, method: string, signal: AbortS
 /** Response headers worth naming when a provider rejects a request; `cf-ray` names the edge PoP. */
 const DIAGNOSTIC_HEADERS = ["cf-ray", "cf-mitigated", "server", "request-id", "retry-after", "x-should-retry"];
 
+/** Request body write size; each write waits for the previous one to drain. */
+const BODY_CHUNK_BYTES = 64 * 1024;
+
+/**
+ * Writes `body` in chunks, each after the last has drained, then ends the request.
+ * Bun's shim reports `finish` for a single `end(body)` once the whole body sits in
+ * its own buffer, before the socket has taken it; written this way, the request
+ * ends, and `finish` fires, only after the socket has drained every chunk.
+ */
+function writeBody(request: ClientRequest, body: Uint8Array | undefined): void {
+	let offset = 0;
+	const writeNext = (): void => {
+		while (body !== undefined && offset < body.byteLength) {
+			if (request.destroyed) return;
+			const chunk = body.subarray(offset, offset + BODY_CHUNK_BYTES);
+			offset += chunk.byteLength;
+			if (!request.write(chunk)) {
+				request.once("drain", writeNext);
+				return;
+			}
+		}
+		request.end();
+	};
+	writeNext();
+}
+
 async function sendCoworkRequest(
 	url: URL,
 	init: CoworkRequestInit,
@@ -191,7 +217,8 @@ async function sendCoworkRequest(
 	const method = init.method ?? "GET";
 	const signal = init.signal ?? undefined;
 	const tlsOptions = resolveTlsOptions(url, init.tls);
-	const bodyBytes = typeof body === "string" ? Buffer.byteLength(body) : body?.byteLength;
+	const payload = typeof body === "string" ? Buffer.from(body) : body;
+	const bodyBytes = payload?.byteLength;
 	const headers = buildOrderedHeaders(url, sourceHeaders, bodyBytes);
 	const result = Promise.withResolvers<Response>();
 	const startedAt = performance.now();
@@ -267,7 +294,7 @@ async function sendCoworkRequest(
 			}),
 		);
 	});
-	request.end(body);
+	writeBody(request, payload);
 	return result.promise;
 }
 

@@ -206,7 +206,7 @@ export class AnthropicApiError extends ProviderHttpError {
 export interface RequestUploadProgress {
 	/** Request body size on the wire. */
 	bodyBytes: number;
-	/** Whether the whole body was handed to the OS socket. */
+	/** Whether the socket had taken the whole body; the OS may still hold some of it unsent. */
 	bodySent: boolean;
 	/** Time since the request started. */
 	elapsedMs: number;
@@ -214,9 +214,9 @@ export interface RequestUploadProgress {
 
 /**
  * An established connection that failed before any response headers arrived,
- * naming how far the request body got. "Sent" means the whole body was handed
- * to the OS socket; while part of it is still queued in the process, it is
- * "uploading".
+ * naming how far the request body got. While part of the body is still queued
+ * in the process, it is "uploading"; once the socket has taken all of it, it was
+ * "written to the socket", which does not say the server received it.
  */
 export class ConnectionLostBeforeResponseError extends Error {
 	constructor(cause: unknown, { bodyBytes, bodySent, elapsedMs }: RequestUploadProgress) {
@@ -229,7 +229,7 @@ export class ConnectionLostBeforeResponseError extends Error {
 			bodyBytes === 0
 				? `${after}, before any response${code}`
 				: bodySent
-					? `${after}, after the ${formatBytes(bodyBytes)} request body was sent and before any response${code}`
+					? `${after}, after the ${formatBytes(bodyBytes)} request body was written to the socket, before any response${code}`
 					: `${after} while uploading the ${formatBytes(bodyBytes)} request body; no response received${code}`;
 		super(progress, { cause });
 		this.name = "ConnectionLostBeforeResponseError";
