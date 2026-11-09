@@ -837,6 +837,7 @@ function withResolvedModelHeaders<TApi extends Api>(
 			let headerCommands: CommandConfigGeneration[] | undefined;
 			const commands = headers?.[modelHeaderCommandGenerations];
 			if (commands && headers) {
+				headerCommands = [];
 				const materializedNames = new Map<string, number>();
 				for (const key in headers) {
 					if (!Object.hasOwn(headers, key)) continue;
@@ -849,14 +850,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 					}
 				}
 				for (const key in commands) {
-					if (
-						Object.hasOwn(commands, key) &&
-						Object.hasOwn(headers, key) &&
-						materializedNames.get(key.toLowerCase()) === 1
-					) {
-						headerCommands ??= [];
-						headerCommands.push(commands[key]);
+					if (!Object.hasOwn(commands, key)) continue;
+					if (!Object.hasOwn(headers, key) || (materializedNames.get(key.toLowerCase()) ?? 0) > 1) {
+						headerCommands = undefined;
+						break;
 					}
+					if (materializedNames.get(key.toLowerCase()) === 1) headerCommands.push(commands[key]);
 				}
 			}
 			const inner = run(
@@ -1296,7 +1295,6 @@ function streamSimpleRequest<TApi extends Api>(
 				bufferedEvents.length = 0;
 			};
 
-			if (retryState) retryState.lastHeaderCommands = undefined;
 			try {
 				const inner = withResolvedModelHeaders(
 					model,

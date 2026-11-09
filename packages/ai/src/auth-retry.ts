@@ -38,8 +38,8 @@ export interface ApiKeyResolveContext {
 	 * which mint the provider refused, which the bytes cannot say.
 	 */
 	previousGeneration?: number;
-	/** Materialized command-header slots from the exhausted attempt, never reconstructed from live cache state. */
-	previousHeaderCommands?: readonly CommandConfigGeneration[];
+	/** Complete materialized slots after refresh-same; null is unknown, [] proves none were sent. */
+	previousHeaderCommands?: readonly CommandConfigGeneration[] | null;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
 }
@@ -252,7 +252,7 @@ export async function resolveRetryKey(
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
 	previousGeneration?: number,
-	previousHeaderCommands?: readonly CommandConfigGeneration[],
+	previousHeaderCommands?: readonly CommandConfigGeneration[] | null,
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
@@ -404,7 +404,7 @@ export async function resolveNextAuthRetryKey(
 			onResolved?.(resolved);
 		},
 		state.lastGeneration,
-		state.refreshedCurrent ? state.lastHeaderCommands : undefined,
+		state.refreshedCurrent ? (state.lastHeaderCommands ?? null) : undefined,
 	);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait, rotatedGeneration);

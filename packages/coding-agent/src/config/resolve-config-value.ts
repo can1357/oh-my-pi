@@ -72,10 +72,20 @@ function commandKey(valueConfig: string): string {
 }
 
 /** Invalidate a command's cache unless it is the selected API-key command being re-minted. */
-export function invalidateCommandConfig(valueConfig: string | undefined, preserveConfig?: string): void {
+export function invalidateCommandConfig(
+	valueConfig: string | undefined,
+	preserveConfig?: string,
+	materializedCommands?: readonly CommandConfigGeneration[],
+): void {
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
 	if (isCommandConfigValue(preserveConfig) && command === commandKey(preserveConfig)) return;
+	if (materializedCommands !== undefined) {
+		for (const slot of materializedCommands) {
+			if (slot.command === command) invalidateCommandGeneration(slot);
+		}
+		return;
+	}
 	invalidateCommand(command);
 }
 
@@ -324,6 +334,8 @@ export async function runShellCommand(
 	}
 }
 
+const NO_HEADER_COMMANDS: Readonly<Record<string, CommandConfigGeneration>> = Object.freeze(Object.create(null));
+
 /** Resolve one raw header record, preserving declaration order and omitting empty values. */
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
@@ -346,7 +358,7 @@ export async function resolveConfigHeaders(
 		}
 		hasResolved = true;
 	}
-	if (commands) Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands });
+	Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands ?? NO_HEADER_COMMANDS });
 	return hasResolved ? resolved : undefined;
 }
 
@@ -366,6 +378,7 @@ export function createConfigHeaderResolver(
 		const resolved: ModelHeaders = {};
 		let apiKeyCredential: ModelApiKeyCredential | undefined;
 		let commands: Record<string, CommandConfigGeneration> | undefined;
+		let complete = true;
 		let hasResolved = false;
 		for (const source of active) {
 			const next: ModelHeaders | undefined =
@@ -374,6 +387,7 @@ export function createConfigHeaderResolver(
 					: await resolveConfigHeaders(source, signal);
 			signal?.throwIfAborted();
 			if (!next) continue;
+			complete &&= next[modelHeaderCommandGenerations] !== undefined;
 			for (const key in next) {
 				resolved[key] = next[key];
 				if (key === "Authorization") apiKeyCredential = next[modelApiKeyCredential];
@@ -412,7 +426,8 @@ export function createConfigHeaderResolver(
 				Object.defineProperty(resolved, modelApiKeyCredential, { value: apiKeyCredential });
 			}
 		}
-		if (commands) Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands });
+		if (complete)
+			Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands ?? NO_HEADER_COMMANDS });
 		return hasResolved ? resolved : undefined;
 	};
 }

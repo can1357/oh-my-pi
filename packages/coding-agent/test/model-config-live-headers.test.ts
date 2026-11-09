@@ -200,17 +200,34 @@ describe("async config header materialization", () => {
 		expect(retained?.[modelHeaderCommandGenerations]?.["X-Test"].generation).toBe(2);
 	});
 
-	it("composes command generations with values and removes an opaque replacement's provenance", async () => {
+	it.each([false, true])("distinguishes unknown from complete empty snapshots: %s", async complete => {
+		const config = `!printf %s test-snapshot-${complete ? "complete" : "unknown"}`;
+		await resolveConfigHeaders({ "X-Test": config });
+		invalidateCommandConfig(config, undefined, complete ? [] : undefined);
+		const next = await resolveConfigHeaders({ "X-Test": config });
+		expect(next?.[modelHeaderCommandGenerations]?.["X-Test"].generation).toBe(complete ? 1 : 2);
+	});
+
+	it("does not invent command generations from prototype header names", async () => {
+		const literalHeaders = {
+			constructor: "test-constructor",
+			toString: "test-to-string",
+			hasOwnProperty: "test-own",
+		};
+		const inner = createConfigHeaderResolver([literalHeaders]);
+		const outer = createConfigHeaderResolver([inner]);
+		const headers = await outer?.();
+		expect(headers).toEqual(literalHeaders);
+		expect(Object.keys(headers?.[modelHeaderCommandGenerations] ?? {})).toEqual([]);
+	});
+
+	it("marks a composed snapshot unknown when an opaque layer contributes values", async () => {
 		const config = "!printf %s test-composed-header";
 		const inner = createConfigHeaderResolver([{ "X-Test": config, "X-Shared": config }]);
 		const outer = createConfigHeaderResolver([inner, async () => ({ "X-Test": "test-composed-header" })]);
 		const headers = await outer?.();
 		expect(headers?.["X-Test"]).toBe("test-composed-header");
-		expect(headers?.[modelHeaderCommandGenerations]?.["X-Test"]).toBeUndefined();
-		expect(headers?.[modelHeaderCommandGenerations]?.["X-Shared"]).toEqual({
-			command: "printf %s test-composed-header",
-			generation: 1,
-		});
+		expect(headers?.[modelHeaderCommandGenerations]).toBeUndefined();
 		expect(Object.keys(headers ?? {})).toEqual(["X-Test", "X-Shared"]);
 		expect(JSON.stringify(headers)).toBe('{"X-Test":"test-composed-header","X-Shared":"test-composed-header"}');
 	});
@@ -219,7 +236,7 @@ describe("async config header materialization", () => {
 		setEnv("OMP_TEST_HEADER_COMMAND_BYTES", "!printf %s test-not-a-command");
 		const headers = await resolveConfigHeaders({ "X-Test": "OMP_TEST_HEADER_COMMAND_BYTES" });
 		expect(headers?.["X-Test"]).toBe("!printf %s test-not-a-command");
-		expect(headers?.[modelHeaderCommandGenerations]).toBeUndefined();
+		expect(headers?.[modelHeaderCommandGenerations]).toEqual({});
 	});
 
 	it("records only the authHeader command that replaced an explicit Authorization command", async () => {

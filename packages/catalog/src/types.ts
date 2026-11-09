@@ -44,6 +44,7 @@ export const modelApiKeyCredential = Symbol("modelApiKeyCredential");
 export const modelHeaderCommandGenerations = Symbol("modelHeaderCommandGenerations");
 export type ModelHeaders = Record<string, string> & {
 	[modelApiKeyCredential]?: ModelApiKeyCredential;
+	/** Complete command provenance for these values; an empty map proves none, absence means unknown. */
 	[modelHeaderCommandGenerations]?: Readonly<Record<string, CommandConfigGeneration>>;
 };
 

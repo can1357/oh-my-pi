@@ -8,6 +8,7 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
+import { createAuthRetryKeyState, resolveNextAuthRetryKey } from "@oh-my-pi/pi-ai/auth-retry";
 import { MissingApiKeyError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 
 function authError(status = 401): Error & { status: number } {
@@ -23,6 +24,49 @@ function usageLimitError(): Error & { status: number } {
 function opaque429Error(): Error & { status: number } {
 	return Object.assign(new Error(""), { status: 429 });
 }
+
+describe("materialized header recovery evidence", () => {
+	it.each([false, true])("gates a direct rotation on prior refresh-same: %s", async refreshedCurrent => {
+		const state = createAuthRetryKeyState("test-key");
+		state.refreshedCurrent = refreshedCurrent;
+		state.lastHeaderCommands = [{ command: "printf %s test-header", generation: 1 }];
+		const contexts: ApiKeyResolveContext[] = [];
+		await resolveNextAuthRetryKey(
+			state,
+			ctx => {
+				contexts.push(ctx);
+				return undefined;
+			},
+			authError(403),
+		);
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0].lastChance).toBe(true);
+		expect(contexts[0].previousHeaderCommands).toEqual(refreshedCurrent ? state.lastHeaderCommands : undefined);
+	});
+
+	it("reports an unknown snapshot for public withAuth callbacks after refresh-same", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		let requests = 0;
+		await expect(
+			withAuth(
+				ctx => {
+					contexts.push(ctx);
+					if (ctx.lastChance) return undefined;
+					return ctx.error === undefined
+						? "test-not-a-secret"
+						: { apiKey: "test-not-a-secret", afterRemint: true };
+				},
+				async () => {
+					requests += 1;
+					throw authError();
+				},
+			),
+		).rejects.toThrow();
+		expect(requests).toBe(2);
+		expect(contexts.at(-1)?.lastChance).toBe(true);
+		expect(contexts.at(-1)?.previousHeaderCommands).toBeNull();
+	});
+});
 
 describe("isApiKeyResolver / resolveApiKeyOnce", () => {
 	it("narrows resolver vs static key and resolves the initial value", async () => {

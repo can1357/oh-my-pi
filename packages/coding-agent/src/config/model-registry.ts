@@ -46,7 +46,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { apiServesKind, type CommandConfigGeneration, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
@@ -74,7 +74,6 @@ import {
 	invalidateAllCommandConfigs,
 	hasUnrefusedCommandCredential,
 	invalidateCommandConfig,
-	invalidateCommandGeneration,
 	isCommandConfigValue,
 	refuseCommandGeneration,
 	remintCommandConfig,
@@ -592,16 +591,19 @@ export class ModelRegistry {
 		return hasUnrefusedCommandCredential(this.#selectedProviderApiKeyCommand(provider));
 	}
 
-	/** Invalidate provider commands, preserving only a selected API key's recovery state. */
-	#invalidateLocalProviderCommandConfigs(provider: string, preserveConfig?: string): void {
-		invalidateCommandConfig(this.#customProviderApiKeys.get(provider), preserveConfig);
+	#invalidateLocalProviderCommandConfigs(
+		provider: string,
+		preserveConfig?: string,
+		materializedCommands?: readonly CommandConfigGeneration[],
+	): void {
+		invalidateCommandConfig(this.#customProviderApiKeys.get(provider), preserveConfig, materializedCommands);
 		const configs = this.#commandConfigsByProvider.get(provider);
 		if (configs) {
-			for (const config of configs) invalidateCommandConfig(config, preserveConfig);
+			for (const config of configs) invalidateCommandConfig(config, preserveConfig, materializedCommands);
 		}
 		const runtimeConfigs = this.#runtimeCommandConfigsByProvider.get(provider);
 		if (!runtimeConfigs) return;
-		for (const config of runtimeConfigs) invalidateCommandConfig(config, preserveConfig);
+		for (const config of runtimeConfigs) invalidateCommandConfig(config, preserveConfig, materializedCommands);
 	}
 
 	#recordRuntimeCommandConfigs(providerName: string, config: ProviderConfigInput): void {
@@ -3806,9 +3808,13 @@ export class ModelRegistry {
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
-		if (!options?.forceRefresh && options?.rejectedHeaderCommands) {
-			// Header commands resolve locally; their generations do not identify the owner's separate cache slots.
-			for (const slot of options.rejectedHeaderCommands) invalidateCommandGeneration(slot);
+		if (options?.rejectedHeaderCommands !== undefined) {
+			// Header snapshots name local cache slots; the selected API key has its own rejection/remint channel.
+			this.#invalidateLocalProviderCommandConfigs(
+				provider,
+				this.#selectedProviderApiKeyCommand(provider),
+				options.rejectedHeaderCommands ?? undefined,
+			);
 		}
 		if (options?.forceRefresh) {
 			if (options.remintApiKeyCommand === false) {

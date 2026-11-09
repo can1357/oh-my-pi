@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { registerCustomApi, streamSimple, unregisterCustomApis } from "@oh-my-pi/pi-ai";
-import { type ApiKeyResolution, resolveApiKeyOnce, seedApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
+import { type ApiKeyResolution, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
@@ -101,6 +102,7 @@ interface Rig {
 	/** Bearer of every request the provider saw, in arrival order. */
 	seen: string[];
 	seenHeaders: Headers[];
+	fetch: FetchImpl;
 	/** How many times the mint ran. */
 	mints: () => number;
 	/** Resolve and seed a turn the way `agent-loop` does, without sending it. */
@@ -197,6 +199,7 @@ describe("a `!command` credential the provider refuses", () => {
 			model,
 			seen,
 			seenHeaders,
+			fetch: fetchImpl,
 			mints: () => fs.readFileSync(counterFile, "utf8").length,
 			prepare,
 			turn,
@@ -340,6 +343,121 @@ describe("a `!command` credential the provider refuses", () => {
 			"test-new-3",
 		]);
 	});
+
+	test.each(["callback", "opaque", "duplicate", "single-upper", "single-lower"] as const)(
+		"uses upstream fallback when materialized evidence is unavailable: %s",
+		async shape => {
+			const counters = ["a", "b", "c", "d"].map(name => path.join(tempDir, name));
+			const tokens = counters.map(counter => `${counter}-token`);
+			for (const counter of counters) fs.writeFileSync(counter, "");
+			for (let index = 0; index < tokens.length; index++) fs.writeFileSync(tokens[index], `test-old-${index}`);
+			const commands = counters.map((counter, index) => mintFromFile(counter, tokens[index]));
+			let following = false;
+			const rig = buildRig(
+				commands[0],
+				counters[0],
+				() =>
+					following &&
+					["X-B", "X-C", "X-D"].every(
+						(name, index) =>
+							rig.seenHeaders
+								.at(-1)
+								?.get(name)
+								?.split(",")
+								.every(value => value.trim() === `test-new-${index + 1}`) === true,
+					),
+				{
+					headers: {
+						[shape === "single-lower" ? "x-b" : "X-B"]: commands[1],
+						...(shape === "duplicate" ? { "x-b": commands[1] } : {}),
+						"X-D": commands[3],
+					},
+					models: [{ id: "gw-model", name: "GW Model", headers: { "X-C": commands[2] } }],
+				},
+				() =>
+					following
+						? new Response(
+								JSON.stringify({
+									error: { message: "Identity check refused.", type: "invalid_request_error", code: "401" },
+								}),
+								{ status: 401, headers: { "Content-Type": "application/json" } },
+							)
+						: gatewayRefusal(),
+			);
+			if (shape === "opaque") {
+				const resolve = rig.model.resolveHeaders;
+				if (!resolve) throw new Error("Expected configured headers");
+				rig.model.resolveHeaders = async signal => ({ ...(await resolve(signal)) });
+			}
+			const turn = async (): Promise<boolean> => {
+				if (shape !== "callback") return (await rig.turn()).stopReason !== "error";
+				const resolver = rig.registry.resolver(rig.model);
+				let seed: ApiKeyResolution;
+				await resolveApiKeyOnce(resolver, undefined, resolved => {
+					seed = resolved;
+				});
+				try {
+					await withAuth(seedApiKeyResolver(seed, resolver), async apiKey => {
+						const headers = new Headers(await rig.registry.resolveModelHeaders(rig.model));
+						headers.set("Authorization", `Bearer ${apiKey}`);
+						const response = await rig.fetch("https://gateway.invalid/v1", { method: "POST", headers });
+						if (!response.ok) throw new ProviderHttpError(await response.text(), response.status);
+					});
+					return true;
+				} catch {
+					return false;
+				}
+			};
+			await rig.model.resolveHeaders?.();
+			expect(await turn()).toBe(false);
+			expect(rig.seen).toHaveLength(2);
+			const before = counters.map(counter => fs.readFileSync(counter, "utf8").length);
+			for (let index = 1; index < tokens.length; index++) fs.writeFileSync(tokens[index], `test-new-${index}`);
+			following = true;
+			expect(await turn()).toBe(true);
+			expect(rig.seen).toHaveLength(3);
+			expect(
+				counters.slice(1).map((counter, index) => fs.readFileSync(counter, "utf8").length - before[index + 1]),
+			).toEqual([1, 1, 1]);
+		},
+	);
+
+	test.each(["plain", "authHeader", "Authorization", "same-command-alias"] as const)(
+		"does not bypass selected API-key rejection policy through %s headers",
+		async shape => {
+			const counter = path.join(tempDir, "mints");
+			const token = path.join(tempDir, "token");
+			fs.writeFileSync(counter, "");
+			fs.writeFileSync(token, "test-key-one");
+			const command = mintFromFile(counter, token);
+			const alias = `!  ${command.slice(1)}  `;
+			const extra =
+				shape === "plain"
+					? {}
+					: shape === "Authorization"
+						? { headers: { Authorization: alias } }
+						: { authHeader: true, ...(shape === "same-command-alias" ? { headers: { "X-API": alias } } : {}) };
+			const rig = buildRig(
+				command,
+				counter,
+				() => false,
+				extra,
+				() =>
+					new Response(
+						JSON.stringify({
+							error: { message: "Identity check refused.", type: "invalid_request_error", code: "401" },
+						}),
+						{ status: 401, headers: { "Content-Type": "application/json" } },
+					),
+			);
+			const send = await rig.prepare();
+			const before = rig.mints();
+			fs.writeFileSync(token, "test-key-two");
+			expect((await send()).errorStatus).toBe(401);
+			expect(rig.mints() - before).toBe(0);
+			expect(rig.seen).toEqual(["test-key-one"]);
+		},
+	);
 
 	test.each(["same", "changed"] as const)(
 		"a pure-header %s-byte refusal retains upstream's no-retry behavior",
