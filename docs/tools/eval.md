@@ -148,6 +148,7 @@ All enabled runtimes expose equivalent helpers where the language permits:
 - `print(...)` (Python) / `print(...)` and `console.*` (JS)
 - `read(path, offset?, limit?)`, `write(path, content)`, `env(...)`, `output(...)`
 - `tool.<name>(args)` for a normal session tool call (async in both runtimes: `await tool.read({...})`)
+- `sh(command, cwd?, timeout?)` (Python), `await sh(command, { cwd?, timeout? })` or tagged `` await sh`command ${value}` `` (JS)
 - `@tool` / `tool(fn, {...})` to define kernel-local tools for subagents (`eval.tools.enabled`, default on)
 - `judge(...)`, `judge_batch(...)` (Python) / `judgeBatch(...)` (JS), `completion(...)`
 - `wait(...)` for agent/completion handles
@@ -163,6 +164,16 @@ Bridge restrictions and bookkeeping use the resolved canonical tool, not the req
 Printing an image or figure attaches it to the result for both the model and the user. Printed data frames, `console.table`, Markdown objects, and large structured values also carry a pretty view for the user; the model sees the printed text.
 
 Enabled extension preludes add globals (such as `browser`) with documentation at `xd://eval/<name>`. Their host calls resolve approval and availability against the live session; disabling a prelude also prevents previously captured functions from retaining host access.
+
+### `sh()`
+
+Runs an embedded-shell command to completion without BashTool auto-backgrounding or output minimization. Commands use a separate persistent eval shell and start in the session cwd or the supplied cwd. JS template interpolations are shell-quoted. Success returns combined stdout/stderr; nonzero exits and timeouts raise `ShellError`.
+
+Before execution, the host checks the enabled Bash tool's command policy, including interception, explicit deny/prompt rules, per-tool policy and folder restrictions. Required approval uses the existing UI per call; without an interactive UI it fails closed and reports the blocking reason. Bash disablement, replacement or a session switch while awaiting approval invalidates the call. Bare SDK sessions without a tool registry use the built-in Bash policy and honor `bash.enabled: false`.
+
+In `always-ask`, `always-ask-cached` and `write` modes, an unmatched exec-tier command requires approval; configured allows still apply. In `yolo`, unmatched commands remain allowed unless interception, an explicit deny/prompt or a folder restriction applies. Waiting for approval counts against the cell timeout.
+
+This is policy enforcement, not eval sandboxing: general runtime code can still access host APIs. `sh()` uses the available approval UI rather than ACP's Bash `session/request_permission` gate, so it does not provide full normal-Bash ACP dispatch parity. It also does not run normal Bash's extension execution/approval events or remembered approval grants.
 
 ### `judge()` and judgment batches
 

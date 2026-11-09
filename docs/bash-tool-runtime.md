@@ -6,7 +6,7 @@ It also calls out where behavior diverges in interactive TUI, print mode, RPC mo
 
 ## Scope and runtime surfaces
 
-There are two different bash execution surfaces in coding-agent:
+The two Bash execution surfaces covered here are:
 
 1. **Tool-call surface** (`toolName: "bash"`): used when the model calls the bash tool.
    - Entry point: `BashTool.execute()`.
@@ -14,9 +14,9 @@ There are two different bash execution surfaces in coding-agent:
 2. **User bang-command surface** (`!cmd` from interactive input or RPC `bash` command): session-level helper path.
    - Entry point: `AgentSession.executeBash()`.
 
-Both eventually use `executeBash()` in `src/exec/bash-executor.ts` for non-PTY execution, but only the tool-call path runs normalization/interception, optional managed background-job handling, and tool renderer logic.
+Both eventually use `executeBash()` in `src/exec/bash-executor.ts` for non-PTY execution. The tool-call surface adds command normalization, optional managed background-job handling and tool rendering. Eval's separate [`sh()` helper](./tools/eval.md#sh) checks Bash approval policy, including interception, before invoking the executor.
 
-Set `bash.enabled: false` in settings to remove the model-facing `bash` tool from the active tool registry. This does not disable user-initiated bang commands or RPC `bash` requests.
+Set `bash.enabled: false` in settings to remove the model-facing `bash` tool from the active tool registry. `sh()` follows live Bash availability, or this flag in a bare SDK host. This does not disable arbitrary eval code, user-initiated bang commands or RPC `bash` requests.
 
 ## End-to-end tool-call pipeline
 
@@ -47,7 +47,7 @@ Literal quoted arguments are accepted, but expansions, assignments, other contro
 
 Pattern approval is not containment. Once approved, a process keeps the shell's ambient filesystem, network, and subprocess access. Interception and approval are also separate mechanisms: interception routes misuse toward dedicated tools; approval governs whether execution may proceed.
 
-These rules govern the **`bash` tool only**. They do not constrain shells started through other tools — notably `eval`, which can spawn a shell via subprocess (`subprocess.run(["bash", "-c", ...])`, `Bun.$`, etc.). A `bash.patterns` `deny` rule therefore does nothing when the same command is issued through `eval`. To harden against destructive commands across both surfaces, pair `bash.patterns` with a `tools.approval.eval` policy (`prompt` or `deny`); see [Tool approval mode](./approval-mode.md).
+The **`bash` tool** and eval's built-in [`sh()` helper](./tools/eval.md#sh) apply these rules. Arbitrary subprocess calls in eval (`subprocess.run(...)`, `Bun.$`, etc.) do not. Gate general eval access separately with `tools.approval.eval` (`prompt` or `deny`); see [Tool approval mode](./approval-mode.md).
 
 ## 2) Optional interception (blocked-command path)
 
