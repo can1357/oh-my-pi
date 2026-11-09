@@ -532,6 +532,154 @@ describe("RelayBridge child targets", () => {
 		expect(childTraffic(cdp)).toEqual(lifecycleOn(first));
 	});
 
+	it.each(["disconnect", "release"])(
+		"isolates opt-out and disarms Chrome when the final armed holder leaves by %s",
+		async leave => {
+			const bridge = new RelayBridge({});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const firstCdp = new FakeCdpSocket();
+			const first = bridge.cdpConnected(firstCdp);
+			const firstSession = await attachPage(bridge, ext, firstCdp, first, 1);
+			await armAutoAttach(bridge, ext, first, firstSession);
+			const secondCdp = new FakeCdpSocket();
+			const second = bridge.cdpConnected(secondCdp);
+			const secondSession = await attachPage(bridge, ext, secondCdp, second, 1);
+			await armAutoAttach(bridge, ext, second, secondSession);
+			emit(bridge, ext, ATTACH);
+			const thirdCdp = new FakeCdpSocket();
+			const third = bridge.cdpConnected(thirdCdp);
+			await armAutoAttach(bridge, ext, third, await attachPage(bridge, ext, thirdCdp, third, 1));
+			bridge.cdpClosed(third);
+			await flush();
+			expect(ext.pending("send")).toEqual([]);
+			emit(bridge, ext, NAVIGATE);
+			expect(childTraffic(secondCdp)).toContainEqual(["Page.frameNavigated", "CHILD1"]);
+
+			bridge.cdpMessage(
+				first,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId: firstSession,
+					method: "Target.setAutoAttach",
+					params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
+				}),
+			);
+			await flush();
+			expect(ext.pending("send")).toEqual([]);
+			expect(childTraffic(firstCdp)).toEqual([
+				["Target.attachedToTarget", firstSession],
+				["Page.frameNavigated", "CHILD1"],
+				["Target.detachedFromTarget", firstSession],
+			]);
+			const optedOut = firstCdp.messages.length;
+			emit(bridge, ext, NAVIGATE, NESTED_ATTACH);
+			expect(firstCdp.messages).toHaveLength(optedOut);
+			expect(childTraffic(secondCdp)).toContainEqual(["Page.frameNavigated", "CHILD1"]);
+			emit(bridge, ext, DETACH, ATTACH);
+			expect(firstCdp.messages).toHaveLength(optedOut);
+
+			// The opted-out connection still holds the tab, so releasing the last armed holder must disarm Chrome.
+			if (leave === "disconnect") bridge.cdpClosed(second);
+			else
+				bridge.cdpMessage(
+					second,
+					JSON.stringify({
+						id: ++msgSeq,
+						method: "Target.detachFromTarget",
+						params: { sessionId: secondSession },
+					}),
+				);
+			await flush();
+			expect(ext.pending("send").map(rpc => [rpc.method, rpc.params])).toEqual([
+				["Target.setAutoAttach", { autoAttach: false, waitForDebuggerOnStart: false, flatten: true }],
+			]);
+			ack(bridge, ext, "send");
+			await flush();
+		},
+	);
+
+	it("disarms Chrome after another holder's in-flight enable fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const firstCdp = new FakeCdpSocket();
+		const first = bridge.cdpConnected(firstCdp);
+		const session = await attachPage(bridge, ext, firstCdp, first, 1);
+		await armAutoAttach(bridge, ext, first, session);
+		const secondCdp = new FakeCdpSocket();
+		const second = bridge.cdpConnected(secondCdp);
+		const other = await attachPage(bridge, ext, secondCdp, second, 1);
+		bridge.cdpMessage(
+			second,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: other,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		bridge.cdpMessage(
+			first,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: session,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		nack(bridge, ext, "send");
+		await flush();
+		expect(ext.pending("send").map(rpc => [rpc.method, rpc.params?.autoAttach])).toEqual([
+			["Target.setAutoAttach", false],
+		]);
+		ack(bridge, ext, "send");
+		await flush();
+	});
+
+	it("rejects a queued auto-attach after its page session is released", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const first = await attachPage(bridge, ext, cdp, conn, 1);
+		const queued = await attachPage(bridge, ext, cdp, conn, 1);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: first,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		const queuedId = ++msgSeq;
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: queuedId,
+				sessionId: queued,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.detachFromTarget",
+				params: { sessionId: queued },
+			}),
+		);
+		ack(bridge, ext, "send");
+		await flush();
+		expect(cdp.messages.find(message => message.id === queuedId)).toMatchObject({
+			error: { message: `Unknown session id ${queued}` },
+		});
+		expect(ext.pending("send")).toEqual([]);
+	});
+
 	it("does not report children to a session whose Target.setAutoAttach failed", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

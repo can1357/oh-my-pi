@@ -907,7 +907,10 @@ export class RelayBridge {
 		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
 		const departed = [...conn.sessions.values()];
 		conn.sessions.clear();
-		for (const ref of departed) this.#releaseSwitches(ref);
+		for (const ref of departed) {
+			this.#releaseSwitches(ref);
+			if (ref.autoAttach) this.#releaseAutoAttach(ref.tabKey);
+		}
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
@@ -984,18 +987,28 @@ export class RelayBridge {
 		}
 		if (msg.method !== "Runtime.enable") {
 			if (msg.method === "Target.setAutoAttach") {
-				// Armed while in flight (Chrome reports existing children before it
-				// answers); a failed request restores the previous state.
-				const previous = ref.autoAttach;
-				ref.autoAttach = msg.params?.autoAttach === true;
-				const announce = () => {
-					const parent = conn.childTargetSessionForTab(ref.tabKey);
-					if (parent && conn.sessions.get(sessionId) === ref)
-						this.#announceChildren(conn, ref.tabKey, undefined, parent);
-				};
-				if (!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))) {
-					ref.autoAttach = previous;
-				}
+				await this.#serializeSwitches(ref.tabKey, "Target.setAutoAttach", async () => {
+					if (conn.sessions.get(sessionId) !== ref) {
+						this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+						return;
+					}
+					// Arm before sending: Chrome reports existing children before answering.
+					const previous = ref.autoAttach;
+					ref.autoAttach = msg.params?.autoAttach === true;
+					const announce = () => {
+						const parent = conn.childTargetSessionForTab(ref.tabKey);
+						if (parent) this.#announceChildren(conn, ref.tabKey, undefined, parent);
+					};
+					if (!ref.autoAttach && this.#autoAttaches(ref.tabKey)) {
+						this.#reply(conn, msg, {});
+					} else if (
+						!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))
+					) {
+						ref.autoAttach = previous;
+						return;
+					}
+					if (!conn.childTargetSessionForTab(ref.tabKey)) this.#forgetConnectionChildren(conn, ref.tabKey);
+				});
 				return;
 			}
 			if (isTabWideSwitch(msg.method)) {
@@ -1916,6 +1929,7 @@ export class RelayBridge {
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
 		this.#releaseSwitches(ref);
+		if (ref.autoAttach) this.#releaseAutoAttach(ref.tabKey);
 		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
@@ -1984,6 +1998,38 @@ export class RelayBridge {
 		}
 		return out;
 	}
+	#autoAttaches(tabKey: string): boolean {
+		for (const conn of this.#conns.values()) {
+			if (conn.childTargetSessionForTab(tabKey)) return true;
+		}
+		return false;
+	}
+
+	#forgetConnectionChildren(conn: CdpConnection, tabKey: string): void {
+		const tab = this.#tabs.get(tabKey);
+		if (!tab) return;
+		for (const child of [...tab.realSessions.keys()].reverse()) {
+			const parent = conn.childParents.get(child);
+			if (parent === undefined) continue;
+			conn.childParents.delete(child);
+			this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, parent);
+		}
+	}
+
+	/** A departed holder must not leave auto-attach enabled on a registry-held tab. */
+	#releaseAutoAttach(tabKey: string): void {
+		void this.#serializeSwitches(tabKey, "Target.setAutoAttach", async () => {
+			if (this.#autoAttaches(tabKey)) return;
+			const tab = this.#tabs.get(tabKey);
+			const inst = tab?.attached ? this.#instances.get(tab.instanceId) : undefined;
+			if (!tab || !inst) return;
+			await this.#send(tab, inst, "Target.setAutoAttach", {
+				autoAttach: false,
+				waitForDebuggerOnStart: false,
+				flatten: true,
+			}).catch(() => {});
+		});
+	}
 
 	/** Whether any live session on a tab, across connections, has `method` switched on. */
 	#switchWanted(tabKey: string, method: TabWideSwitch): boolean {
@@ -2029,7 +2075,11 @@ export class RelayBridge {
 	 * The extension starts RPCs independently, so overlapping transitions could settle out of order; a failed one's
 	 * rollback would then restore a state another transition had already changed on the tab.
 	 */
-	#serializeSwitches(tabKey: string, method: TabWideSwitch, run: () => Promise<void>): Promise<void> {
+	#serializeSwitches(
+		tabKey: string,
+		method: TabWideSwitch | "Target.setAutoAttach",
+		run: () => Promise<void>,
+	): Promise<void> {
 		const key = `${tabKey} ${method}`;
 		const pending = this.#switchTransitions.get(key);
 		const result = pending ? pending.then(run) : run();
