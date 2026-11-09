@@ -63,18 +63,19 @@ describe("xai-oauth bundled catalog (regression)", () => {
 	// SuperGrok's `grok-4.20-multi-agent-0309` mirrors the paid catalog's
 	// `grok-4.20-multi-agent-beta-latest` under a different ID; the price
 	// fallback must bridge the alias so the bundle carries its public rate card
-	// (including the inclusive 200K tier) instead of the subscription zero.
+	// (the 4.20-0309 generation's $1.25 / $0.20 / $2.50, doubled over the
+	// inclusive 200K tier) instead of the subscription zero.
 	it("prices the multi-agent SuperGrok alias from its public xAI equivalent", () => {
 		expect(bundled["grok-4.20-multi-agent-0309"]?.cost).toEqual({
-			input: 2,
-			output: 6,
+			input: 1.25,
+			output: 2.5,
 			cacheRead: 0.2,
 			cacheWrite: 0,
 			longContext: {
 				inputThreshold: 200_000,
 				inputThresholdInclusive: true,
-				input: 4,
-				output: 12,
+				input: 2.5,
+				output: 5,
 				cacheRead: 0.4,
 				cacheWrite: 0,
 			},

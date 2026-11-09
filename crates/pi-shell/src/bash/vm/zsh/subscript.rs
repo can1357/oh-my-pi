@@ -468,6 +468,8 @@ fn getarg(
 			let value = match v.pm.special {
 				// A keyed special's `getnode`: that one entry.
 				Some(sp) if sp.keyed() => super::specials::get_elem(ex, sp, &key)?,
+				// An association left in the store: that one entry.
+				None if v.pm.lazy => params::stored_elem(ex, &v.pm.name, &key)?,
 				_ => match &v.pm.value {
 					PValue::Hash(h) => h.iter().find(|e| e.0 == key).map(|e| e.1.clone()),
 					_ => None,

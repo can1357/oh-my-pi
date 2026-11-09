@@ -3,4 +3,24 @@
 # in sdk.bzl / cc.bzl (LLVM in //bazel/toolchains:llvm.bzl, instantiated from
 # MODULE.bazel); the toolchain() registrations live in //bazel/toolchains.
 
+load(":sdk.bzl", "rustc_sdk_env", "rustc_sdk_env_file")
+
+# The consuming Rust rules select this only for macOS targets. The forwarding
+# rule moves the file producer into the execution configuration, so its Linux
+# constraint selects the exec platform, not the Darwin target platform.
+rustc_sdk_env(
+    name = "rustc_sdk_env",
+    visibility = ["//visibility:public"],
+)
+
+# @macos_sdk is Linux-only. Native mac builds retain Xcode discovery without
+# fetching the cross SDK; Linux execution platforms get the hermetic SDK.
+rustc_sdk_env_file(
+    name = "rustc_sdk_env_file",
+    sdk_settings = select({
+        "@platforms//os:linux": "@macos_sdk//:settings",
+        "//conditions:default": None,
+    }),
+)
+
 exports_files(["extract_pkg.py"])

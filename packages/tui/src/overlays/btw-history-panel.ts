@@ -25,6 +25,7 @@ import { BtwInjectAnswer, type BtwInjectState, describeBtwInjectAnswer } from ".
 import { compactImageMarkers, formatVisionMarker } from "../prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../prompt/custom-editor";
 import { BracketedPasteHandler } from "../bracketed-paste";
+import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { getMarkdownTheme, type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -53,6 +54,11 @@ import { actionBar, actionButton } from "../native/overlay";
 function getDisplayTurns(record: BtwHistoryRecord): readonly BtwHistoryTurn[] {
 	const turns = getBtwTurns(record);
 	return record.title === undefined ? turns : [{ ...turns[0]!, question: record.title }, ...turns.slice(1)];
+}
+
+/** Whether two timestamps fall on the same calendar day in the local time zone. */
+function isSameLocalDay(a: number | Date, b: number | Date): boolean {
+	return new Date(a).toDateString() === new Date(b).toDateString();
 }
 
 interface BtwHistoryPanelOptions {
@@ -192,6 +198,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#native: BtwHistoryNativeMemo | undefined;
 	/** The last answer-pane scroll key, forwarded natively (see {@link NativeNode.scroll}). */
 	#scroll: NativeScroll | undefined;
+	/** Frame rows above the body and whether the last frame split into two panes; the wheel hit-tests against them. */
+	#bodyTop = 0;
+	#wide = false;
 	readonly #detail = new ScrollView([], {
 		height: 1,
 		scrollbar: "auto",
@@ -238,6 +247,15 @@ export class BtwHistoryPanel implements Component, Focusable {
 		minute: "2-digit",
 		hourCycle: "h23",
 	});
+	readonly #dayFormat = new Intl.DateTimeFormat("en", { month: "short", day: "numeric" });
+	readonly #yearDayFormat = new Intl.DateTimeFormat("en", { month: "short", day: "numeric", year: "numeric" });
+
+	/** A history row's stamp: the time for a question asked today, its date (and year, if not this one) before. */
+	#listStamp(timestamp: number, now: Date): string {
+		const date = new Date(timestamp);
+		if (isSameLocalDay(date, now)) return this.#timeFormat.format(date);
+		return (date.getFullYear() === now.getFullYear() ? this.#dayFormat : this.#yearDayFormat).format(date);
+	}
 
 	constructor(options: BtwHistoryPanelOptions) {
 		this.#options = options;
@@ -506,6 +524,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		// SGR reports arrive as input while this page holds focus; without this
+		// branch the wheel moved nothing here, although the other scrolling
+		// sheets follow it (and the composer would have typed the bytes).
+		if (routeSgrMouseInput(data, event => this.#routeWheel(event))) return;
 		if (this.#composer) {
 			const paste = this.#pasteHandler.process(data);
 			if (paste.handled) {
@@ -595,6 +617,32 @@ export class BtwHistoryPanel implements Component, Focusable {
 		else if (!this.#detail.handleScrollKey(data)) return false;
 		if (by) this.#scroll = { by, n: (this.#scroll?.n ?? 0) + 1 };
 		this.#followLatest = matchesKey(data, "end");
+		return true;
+	}
+
+	/**
+	 * A wheel notch over the body follows the pointer: over the history list it
+	 * moves the selection, over the reader it scrolls the answer three rows.
+	 * A narrow frame shows one pane, so the wheel follows that one. The pane
+	 * split decides by column because both panes share the body rows.
+	 */
+	#routeWheel(event: SgrMouseEvent): boolean {
+		if (event.wheel === null) return false;
+		const line = event.row - this.#bodyTop;
+		// A notch on the frame chrome or the rows below the body (navigation,
+		// actions, composer) belongs to no pane, in either layout.
+		if (line < 0 || line >= this.#bodyHeightLast) return false;
+		const overList = this.#wide ? this.#split.locate(line, event.col)?.pane === "left" : this.#focus === "list";
+		if (overList) {
+			// A follow-up composer holds the record it was opened for; moving the
+			// selection would show one topic while Enter submits to another.
+			if (this.#composer) return true;
+			this.#select(this.#selectedIndex() + event.wheel);
+		} else {
+			this.#detail.scroll(event.wheel * 3);
+			this.#followLatest = false;
+		}
+		this.#options.requestRender();
 		return true;
 	}
 
@@ -716,9 +764,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 	 * reader has the keys the selection rests (`omp.btw.list.idle`).
 	 */
 	#describeList(): NativeNode {
+		const now = new Date();
 		const items = this.#records.map(record => {
 			const followUps = record.followUps?.length ?? 0;
-			const detail: TspSpan[] = [span(this.#timeFormat.format(record.createdAt), "mono")];
+			const detail: TspSpan[] = [span(this.#listStamp(record.createdAt, now), "mono")];
 			if (followUps > 0) detail.push(span(` · ${followUps} follow-up${followUps === 1 ? "" : "s"}`));
 			const status = describeStatus(getBtwLatestTurn(record).status);
 			// The question is markdown: its `code` reads as mono, without the backticks.
@@ -740,7 +789,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#describeThread(record: BtwHistoryRecord): NativeNode {
 		const turns = getDisplayTurns(record);
 		const children: NativeChild[] = turns.map((turn, index) =>
-			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index)),
+			this.#describeTurn(turn, index, `turn-${index}`, this.#injectBlock(record, turn, index), record.createdAt),
 		);
 		if (this.#composer) children.push(this.#describeComposer(this.#composer));
 		return node("col", { role: "omp.btw.thread" }, children, "thread");
@@ -763,11 +812,25 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return state && { parts, state };
 	}
 
-	#describeTurn(turn: BtwHistoryTurn, index: number, key: string, block: InjectBlock | undefined): NativeNode {
+	#describeTurn(
+		turn: BtwHistoryTurn,
+		index: number,
+		key: string,
+		block: InjectBlock | undefined,
+		topicCreatedAt: number,
+	): NativeNode {
+		// A follow-up asked on the topic's day needs only its time; a later one needs its date too.
 		const meta: TspSpan[] =
 			index === 0
 				? [span(this.#dateFormat.format(turn.createdAt))]
-				: [span("Follow-up · "), span(this.#timeFormat.format(turn.createdAt))];
+				: [
+						span("Follow-up · "),
+						span(
+							(isSameLocalDay(turn.createdAt, topicCreatedAt) ? this.#timeFormat : this.#dateFormat).format(
+								turn.createdAt,
+							),
+						),
+					];
 		const status = describeStatus(turn.status);
 		if (status) meta.push(span("  ·  "), ...status);
 		// The question stays markdown so its inline code and links render.
@@ -875,6 +938,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#listScroll = Math.min(selection.scrollOffset, Math.max(0, this.#records.length - this.#listHeight));
 		const contentWidth = contentRowWidth(width, this.#records.length * rowSpan, height);
 		const lines: string[] = [];
+		const now = new Date();
 		for (
 			let index = this.#listScroll;
 			index < Math.min(this.#records.length, this.#listScroll + this.#listHeight);
@@ -884,7 +948,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 			const selected = index === selectedIndex;
 			const status = STATUS[getBtwLatestTurn(record).status];
 			const cursor = selected ? theme.fg(this.#focus === "list" ? "accent" : "muted", theme.nav.cursor) : " ";
-			const time = theme.fg("dim", this.#timeFormat.format(record.createdAt));
+			const time = theme.fg("dim", this.#listStamp(record.createdAt, now));
 			const badge = theme.fg(status.color, status.label);
 			const prefix = `${cursor} ${time} ${badge} `;
 			const question = sanitizeDisplayLine(getBtwTopicLabel(record));
@@ -1104,6 +1168,10 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#detail.scrollToBottom();
 			detail = this.#detail.render(detailWidth);
 		}
+		// Wheel hit-testing reads the geometry of the frame it already shows.
+		this.#bodyTop = framed ? 2 : height >= 3 ? 1 : 0;
+		this.#wide = wide;
+		this.#bodyHeightLast = bodyHeight;
 		const lines: string[] = [];
 		if (framed) {
 			lines.push(topBorder(width, "BTW history"));
@@ -1112,7 +1180,6 @@ export class BtwHistoryPanel implements Component, Focusable {
 			lines.push(truncateToWidth(this.#focusLabel(this.#focus), width));
 		}
 		if (framed) {
-			this.#bodyHeightLast = bodyHeight;
 			this.#detailCache = detail ?? [];
 			this.#listCache = wide || this.#focus === "list" ? this.#renderList(listWidth, bodyHeight) : [];
 			this.#split.setHeight(bodyHeight);

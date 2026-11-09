@@ -130,6 +130,9 @@ describe("MCP progress through the shared Eval tool bridge", () => {
 		const final = await pending;
 		expect(final.details?.cells?.[0]?.status).toBe("complete");
 		expect(final.details?.cells?.[0]?.output).toContain("complete");
+		// Status events are stored once, on the cell that produced them.
+		expect(progressEvents(final.details).length).toBeGreaterThan(0);
+		expect(final.details?.statusEvents).toBeUndefined();
 	});
 
 	it("keeps streaming MCP status into running job frames after auto-backgrounding", async () => {

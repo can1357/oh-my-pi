@@ -181,6 +181,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
 | `sambanova`                      | `SAMBANOVA_API_KEY`                                                                 |
 | `scaleway`                       | `SCW_SECRET_KEY`, then `SCW_API_KEY`                                                |
+| `otari`                          | `OTARI_API_KEY`                                                                     |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |

@@ -154,6 +154,54 @@ describe("Markdown tree-guide hanging wrap", () => {
 		expect(boldOpen).toBeLessThan(continuation.indexOf("hhhh"));
 	});
 
+	it("keeps a node's leading styled span off the continuation guides", () => {
+		// Colorful Markdown paints `**bold**` magenta; a tree node that opens
+		// with one (`├── **label**: …`) must not paint its `│` rail with it.
+		const chalk = new Chalk({ level: 3 });
+		const theme = { ...defaultMarkdownTheme, strong: (text: string) => chalk.magenta(chalk.bold(text)) };
+		const doc = "├── **alpha bravo**: charlie delta echo foxtrot golf hotel india";
+
+		const raw = new Markdown(doc, 0, 0, theme).render(WIDTH);
+		const plain = raw.map(line => stripVTControlCharacters(line).trimEnd());
+		expect(plain[0]).toBe("├── alpha bravo: charlie delta echo");
+		expect(plain[1]).toBe("│   foxtrot golf hotel india");
+		// The span's open codes stay on the node text, so the first row's rail
+		// is bare and the continuation row — rail and text, which lie outside
+		// the span — carries none of the span's styling.
+		expect(raw[0]!.startsWith("├── \x1b[35m\x1b[1malpha bravo")).toBeTruthy();
+		expect(raw[1]!.startsWith("│   ")).toBeTruthy();
+		expect(raw[1]).not.toContain("\x1b[35m");
+		expect(raw[1]).not.toContain("\x1b[1m");
+
+		// With a prose color the rails wear it, as on the first row, and only it.
+		const colored = new Markdown(doc, 0, 0, theme, {
+			color: text => chalk.red(text),
+			proseFg: true,
+		}).render(WIDTH);
+		const continuation = colored[1]!;
+		const hangAt = continuation.indexOf("│   ");
+		expect(continuation.slice(0, hangAt)).toBe("\x1b[31m");
+		expect(continuation).not.toContain("\x1b[35m");
+		expect(continuation).not.toContain("\x1b[1m");
+		expect(stripVTControlCharacters(continuation).trimEnd()).toBe("│   foxtrot golf hotel india");
+	});
+
+	it("ends guide-only styling before the continuation text, as the first row does", () => {
+		// Raw ANSI dims the guides and switches dim off right before the node
+		// text. The continuation rail is dim like the first row's, and the text
+		// after it is not — the close travels with the rail, the text's own
+		// styling with the text.
+		const raw = renderRaw("\x1b[2m├── \x1b[22malpha bravo charlie delta echo foxtrot golf hotel india");
+		const plain = raw.map(line => stripVTControlCharacters(line).trimEnd());
+		expect(plain[1]).toBe("│   foxtrot golf hotel india");
+
+		const continuation = raw[1]!;
+		expect(continuation.startsWith("\x1b[2m│   ")).toBeTruthy();
+		const textAt = continuation.indexOf("foxtrot");
+		expect(continuation.slice(0, textAt)).toContain("\x1b[22m");
+		expect(continuation.slice(textAt)).not.toContain("\x1b[2m");
+	});
+
 	it("hangs inside a blockquote, after the quote border", () => {
 		const plain = renderPlain("> ├── alpha bravo charlie delta echo foxtrot golf hotel india");
 

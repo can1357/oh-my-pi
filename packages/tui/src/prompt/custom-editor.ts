@@ -1116,7 +1116,8 @@ export class CustomEditor extends Editor {
 	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
-	 * `submit`, `interrupt` and `focus:<id>` actions.
+	 * `submit`, `interrupt` and `focus:<id>` actions; `thinking.set` (the level
+	 * as `value`) picks a thinking level directly (a phone's effort menu).
 	 */
 	override describeLayout = (input: NativeNode, cx: DescribeContext): NativeEditorLayout => {
 		const effortGlyph = cx.supports("effort");
@@ -1439,6 +1440,9 @@ export class CustomEditor extends Editor {
 			case "thinking.cycle":
 				this.onCycleThinkingLevel?.();
 				return;
+			case "thinking.set":
+				if (event.value) this.onSetThinkingLevel?.(event.value);
+				return;
 			case "dictation.toggle": {
 				const { dictation } = this.composerState();
 				if (dictation !== undefined && dictation !== "transcribing") this.onToggleDictation?.();
@@ -1461,6 +1465,8 @@ export class CustomEditor extends Editor {
 	onExit?: () => void;
 	onDisplayReset?: () => void;
 	onCycleThinkingLevel?: () => void;
+	/** A thinking level (`off`, `auto`, `minimal`…`max`) was picked by pointer. */
+	onSetThinkingLevel?: (level: string) => void;
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;

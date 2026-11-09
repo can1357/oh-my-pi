@@ -178,6 +178,33 @@ fn events_branch_reports_taken_and_status() {
 	assert_eq!(b, [("if".into(), false, 1), ("elif".into(), true, 0), ("or".into(), true, 1)]);
 }
 
+/// An `Assign` preview cut inside a multi-byte character keeps the text
+/// whole up to the character, so JSON consumers still read a string.
+#[test]
+fn events_assign_preview_cuts_on_a_char_boundary() {
+	let prefix = "a".repeat(255);
+	let src = format!("v={prefix}你; a=({prefix}你 b)\n");
+	let mut rig = Rig::new(FakeHost::new(), skeleton_init(&[]));
+	rig.shell().set_event_mask(EventMask::of(EventKind::Assign));
+	assert_eq!(rig.run(Script::command(src.into_bytes()), Fault::None), 0);
+	let previews: Vec<(&str, &str, u64)> = rig
+		.host
+		.events
+		.iter()
+		.map(|e| {
+			let d = &e["data"];
+			(
+				d["name"].as_str().unwrap(),
+				d["value"]
+					.as_str()
+					.unwrap_or_else(|| panic!("non-text preview: {d}")),
+				d["full_len"].as_u64().unwrap(),
+			)
+		})
+		.collect();
+	assert_eq!(previews, [("v", prefix.as_str(), 258), ("a", prefix.as_str(), 260)]);
+}
+
 /// `Verdict::Pause` from the host stops the shell at that safepoint; the
 /// rest of the run is unchanged after resume.
 #[test]

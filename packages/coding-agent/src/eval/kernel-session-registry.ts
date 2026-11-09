@@ -471,8 +471,10 @@ export function createKernelSessionRegistry<
 		} catch (err) {
 			if (
 				descriptor.isCancellation?.(err) ||
-				isCancellationError(err, descriptor.cancelledErrorClass) ||
-				options.signal?.aborted
+				isCancellationError(err, descriptor.cancelledErrorClass, {
+					signal: options.signal,
+					deadlineMs: options.deadlineMs,
+				})
 			)
 				throw err;
 			if (kernel.isAlive()) throw err;
