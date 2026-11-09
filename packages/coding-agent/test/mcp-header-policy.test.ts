@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { discoverOAuthEndpoints, fetchResourceMetadataScopes } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
+import { MCPOAuthFlow, refreshMCPOAuthToken } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { setGeneratedHeader } from "@oh-my-pi/pi-coding-agent/mcp/transports/header-policy";
 import { HttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/http";
 import * as fs from "node:fs/promises";
@@ -100,6 +102,63 @@ describe("MCP transport header policy", () => {
 			} finally {
 				await locked.close();
 			}
+		} finally {
+			server.stop(true);
+			if (originalCa === undefined) delete Bun.env.NODE_EXTRA_CA_CERTS;
+			else Bun.env.NODE_EXTRA_CA_CERTS = originalCa;
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("trusts a CA loaded after startup for OAuth discovery, token exchange, and refresh", async () => {
+		const originalCa = Bun.env.NODE_EXTRA_CA_CERTS;
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-oauth-ca-"));
+		const caFile = path.join(dir, "ca.pem");
+		const server = Bun.serve({
+			port: 0,
+			hostname: "127.0.0.1",
+			tls: { cert: LOCALHOST_CERT, key: LOCALHOST_KEY },
+			fetch(req) {
+				const url = new URL(req.url);
+				if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+					return Response.json({
+						resource: `${url.origin}/mcp`,
+						authorization_servers: [url.origin],
+						scopes_supported: ["mcp.read"],
+					});
+				}
+				if (url.pathname === "/.well-known/oauth-authorization-server") {
+					return Response.json({
+						issuer: url.origin,
+						authorization_endpoint: `${url.origin}/authorize`,
+						token_endpoint: `${url.origin}/token`,
+					});
+				}
+				if (url.pathname === "/token") {
+					return Response.json({ access_token: "access-token", refresh_token: "refresh-token", expires_in: 3600 });
+				}
+				return new Response("not found", { status: 404 });
+			},
+		});
+		try {
+			delete Bun.env.NODE_EXTRA_CA_CERTS;
+			await Bun.write(caFile, LOCALHOST_CERT);
+			Bun.env.NODE_EXTRA_CA_CERTS = caFile;
+			const origin = `https://127.0.0.1:${server.port}`;
+			const metadataUrl = `${origin}/.well-known/oauth-protected-resource/mcp`;
+			const endpoints = await discoverOAuthEndpoints(`${origin}/mcp`, undefined, metadataUrl);
+			expect(endpoints).toMatchObject({
+				authorizationUrl: `${origin}/authorize`,
+				tokenUrl: `${origin}/token`,
+				scopes: "mcp.read",
+			});
+			expect(await fetchResourceMetadataScopes(metadataUrl)).toBe("mcp.read");
+			const flow = new MCPOAuthFlow(
+				{ authorizationUrl: `${origin}/authorize`, tokenUrl: `${origin}/token`, clientId: "client" },
+				{},
+			);
+			expect((await flow.exchangeToken("code", "state", "http://127.0.0.1/callback")).access).toBe("access-token");
+			expect((await refreshMCPOAuthToken(`${origin}/token`, "refresh-token")).access).toBe("access-token");
 		} finally {
 			server.stop(true);
 			if (originalCa === undefined) delete Bun.env.NODE_EXTRA_CA_CERTS;
