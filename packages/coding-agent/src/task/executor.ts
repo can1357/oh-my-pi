@@ -4824,8 +4824,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const spawnEffortCeiling =
 				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
 			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
+			// A per-call `model`'s explicit `:level` comes from the same caller as
+			// `effort` and is the more precise of the two, so it wins; `:auto`
+			// names no level and leaves the hint in charge.
+			const perCallLevel =
+				options.perCallModelGrants !== undefined &&
+				explicitThinkingLevel &&
+				resolvedThinkingLevel !== AUTO_THINKING;
 			const effortLevel =
-				options.effort !== undefined
+				options.effort !== undefined && !perCallLevel
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
 			const explicitLevel =
@@ -4841,9 +4848,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
+			// Precedence: per-call `:level` > caller `effort` > explicit `:level`
+			// suffix on the resolved model pattern > agent-definition default
+			// (e.g. task's `auto`) > pattern-derived level.
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();

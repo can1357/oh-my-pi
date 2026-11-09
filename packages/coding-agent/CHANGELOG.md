@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A task's `effort` hint no longer overrides an explicit `:level` on the same spawn's per-call `model`; e.g. `model: "anthropic/claude-opus-5-5:xhigh"` with `effort: "hi"` now runs at `xhigh` instead of `max` ([#18597](https://github.com/can1357/oh-my-pi/issues/18597))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
