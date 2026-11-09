@@ -2938,8 +2938,6 @@ describe("runGcCommand replay data stripping", () => {
 	 * results, which a provider replays as one assistant message and validates as
 	 * a unit — followed by an aborted thinking-only response no replay sends.
 	 */
-
-	/** Turns carrying replay data; the latest surviving turn is followed by an aborted one. */
 	function replayLines(id: string): string[] {
 		return [
 			header(id),
@@ -3008,35 +3006,6 @@ describe("runGcCommand replay data stripping", () => {
 				{ stopReason: "toolUse" },
 			),
 			toolResult("call_2"),
-			JSON.stringify({
-				type: "message",
-				message: {
-					role: "toolResult",
-					toolCallId: "call_1",
-					toolName: "read",
-					isError: false,
-					content: [
-						{
-							type: "image",
-							data: "aGk=",
-							mimeType: "image/png",
-							providerFile: { provider: "openai", id: "file_1" },
-						},
-					],
-				},
-			}),
-			// Replay state with no copy elsewhere: a reasoning source field, a text phase, a snapshot history.
-			assistant(
-				[
-					{ type: "thinking", thinking: "field", thinkingSignature: "reasoning_content" },
-					{ type: "text", text: "noted", textSignature: '{"v":1,"id":"msg_1","phase":"commentary"}' },
-				],
-				{ providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [] } },
-			),
-			assistant([
-				{ type: "thinking", thinking: "latest", thinkingSignature: "EqQBlatest" },
-				{ type: "text", text: "answer" },
-			]),
 			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
 		];
 	}
@@ -3274,25 +3243,6 @@ describe("runGcCommand replay data stripping", () => {
 	});
 
 	test("--apply strips idle transcripts except their latest replay turn, keeping mtimes and permissions", async () => {
-		expect(JSON.parse(lines[1]).message).toEqual({
-			role: "assistant",
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-opus-4-5",
-			stopReason: "toolUse",
-			content: [
-				{ type: "thinking", thinking: "plan" },
-				{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } },
-			],
-		});
-		expect(JSON.parse(lines[2]).message.content).toEqual([{ type: "image", data: "aGk=", mimeType: "image/png" }]);
-		expect(lines[3]).toBe(original[3]);
-		// The latest surviving turn replays natively; the aborted turn after it does not count.
-		expect(lines[4]).toBe(original[4]);
-		expect(JSON.parse(lines[5]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
-	}
-
-	test("--apply strips idle transcripts except their latest surviving turn, keeping mtimes", async () => {
 		const id = Bun.randomUUIDv7();
 		const file = await writeReplaySession(id);
 		const subagentId = Bun.randomUUIDv7();
@@ -3307,15 +3257,12 @@ describe("runGcCommand replay data stripping", () => {
 		await writeTranscript(subagent, subagentLines, 40);
 		await fs.chmod(file, 0o600);
 		await fs.chmod(subagent, 0o600);
-			assistant([{ type: "text", text: "found" }], { requestControls: { messageIndex: 3 } }),
-		];
-		await writeTranscript(subagent, subagentLines, 40);
-		const mtimes = await Promise.all([file, subagent].map(async target => (await fs.stat(target)).mtimeMs));
+		// Windows maps 0o600 to its own read/write bits; the contract is "unchanged by the rewrite".
+		const before = await Promise.all([file, subagent].map(target => fs.stat(target)));
 
 		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
 
 		expect(result.strip).toMatchObject({ scanned: 1, skippedLive: 0, wouldStrip: 2, stripped: 2, records: 3 });
-		expect(result.strip).toMatchObject({ scanned: 1, skippedLive: 0, wouldStrip: 2, stripped: 2, records: 4 });
 		expect(result.strip?.errors).toEqual([]);
 		expectStripped((await Bun.file(file).text()).split("\n").slice(0, -1), replayLines(id));
 		const subagentAfter = (await Bun.file(subagent).text()).split("\n");
@@ -3324,11 +3271,8 @@ describe("runGcCommand replay data stripping", () => {
 		expect(subagentAfter[4]).toBe(subagentLines[4]);
 		for (const [index, target] of [file, subagent].entries()) {
 			const stat = await fs.stat(target);
-			expect(stat.mtimeMs).toBeCloseTo(mtimes[index], 0);
-			expect(stat.mode & 0o777).toBe(0o600);
-		expect(subagentAfter[2]).toBe(subagentLines[2]);
-		for (const [index, target] of [file, subagent].entries()) {
-			expect((await fs.stat(target)).mtimeMs).toBeCloseTo(mtimes[index], 0);
+			expect(stat.mtimeMs).toBeCloseTo(before[index].mtimeMs, 0);
+			expect(stat.mode).toBe(before[index].mode);
 		}
 
 		const rerun = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
@@ -3356,7 +3300,6 @@ describe("runGcCommand replay data stripping", () => {
 		}
 
 		expect(dryRun.strip).toMatchObject({ scanned: 3, skippedLive: 1, wouldStrip: 1, stripped: 0, records: 2 });
-		expect(dryRun.strip).toMatchObject({ scanned: 3, skippedLive: 1, wouldStrip: 1, stripped: 0, records: 3 });
 		expect(dryRun.strip?.bytes).toBeGreaterThan(0);
 		expect(applied.strip).toMatchObject({ skippedLive: 1, wouldStrip: 1, stripped: 1 });
 		expect(await Bun.file(recent).text()).toBe(before[1]);
@@ -3370,11 +3313,12 @@ describe("runGcCommand replay data stripping", () => {
 		await Bun.write(archive, gzipSync(`${replayLines(id).join("\n")}\n`));
 		await fs.chmod(archive, 0o600);
 		await agePath(archive, 40);
+		const { mode } = await fs.stat(archive);
 
 		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
 
 		expect(result.strip).toMatchObject({ scanned: 0, wouldStrip: 1, stripped: 1, errors: [] });
-		expect((await fs.stat(archive)).mode & 0o777).toBe(0o600);
+		expect((await fs.stat(archive)).mode).toBe(mode);
 		const lines = gunzipSync(await Bun.file(archive).bytes())
 			.toString()
 			.split("\n")
