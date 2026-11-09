@@ -13,7 +13,12 @@ import {
 	resolveWireModelId,
 	withoutUnverifiedThinking,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type ModelApiKeyCredential, modelApiKeyCredential } from "@oh-my-pi/pi-catalog/types";
+import {
+	type CommandConfigGeneration,
+	type ModelApiKeyCredential,
+	modelApiKeyCredential,
+	modelHeaderCommandGenerations,
+} from "@oh-my-pi/pi-catalog/types";
 import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import {
@@ -805,7 +810,11 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
-	run: (resolvedModel: Model<TApi>, apiKey?: ModelApiKeyCredential) => AssistantMessageEventStream,
+	run: (
+		resolvedModel: Model<TApi>,
+		apiKey?: ModelApiKeyCredential,
+		headerCommands?: readonly CommandConfigGeneration[],
+	) => AssistantMessageEventStream,
 	requestHeaders?: Record<string, string>,
 ): AssistantMessageEventStream {
 	const resolveHeaders = model.resolveHeaders;
@@ -825,9 +834,35 @@ function withResolvedModelHeaders<TApi extends Api>(
 					}
 				}
 			}
+			let headerCommands: CommandConfigGeneration[] | undefined;
+			const commands = headers?.[modelHeaderCommandGenerations];
+			if (commands && headers) {
+				const materializedNames = new Map<string, number>();
+				for (const key in headers) {
+					if (!Object.hasOwn(headers, key)) continue;
+					const name = key.toLowerCase();
+					materializedNames.set(name, (materializedNames.get(name) ?? 0) + 1);
+				}
+				if (requestHeaders) {
+					for (const key in requestHeaders) {
+						if (Object.hasOwn(requestHeaders, key)) materializedNames.set(key.toLowerCase(), 0);
+					}
+				}
+				for (const key in commands) {
+					if (
+						Object.hasOwn(commands, key) &&
+						Object.hasOwn(headers, key) &&
+						materializedNames.get(key.toLowerCase()) === 1
+					) {
+						headerCommands ??= [];
+						headerCommands.push(commands[key]);
+					}
+				}
+			}
 			const inner = run(
 				{ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined },
 				derivedKey,
+				headerCommands,
 			);
 			for await (const event of inner) {
 				outer.push(event);
@@ -1261,11 +1296,13 @@ function streamSimpleRequest<TApi extends Api>(
 				bufferedEvents.length = 0;
 			};
 
+			if (retryState) retryState.lastHeaderCommands = undefined;
 			try {
 				const inner = withResolvedModelHeaders(
 					model,
 					signal,
-					(resolvedModel, derivedKey) => {
+					(resolvedModel, derivedKey, headerCommands) => {
+						if (retryState) retryState.lastHeaderCommands = headerCommands;
 						// The lazy derivation carries the API-key value and mint provenance
 						// together. Record that exact pair, not a second read of live cache state.
 						// Runtime overrides and noncommand siblings have no command generation.

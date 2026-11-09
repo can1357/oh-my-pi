@@ -1,4 +1,10 @@
-import { type ModelApiKeyCredential, type ModelHeaders, modelApiKeyCredential } from "@oh-my-pi/pi-catalog/types";
+import {
+	type CommandConfigGeneration,
+	type ModelApiKeyCredential,
+	type ModelHeaders,
+	modelApiKeyCredential,
+	modelHeaderCommandGenerations,
+} from "@oh-my-pi/pi-catalog/types";
 import { executeShell } from "@oh-my-pi/pi-natives";
 import { $envExact, directoryIsEnterable, getProjectDir, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 
@@ -70,6 +76,15 @@ export function invalidateCommandConfig(valueConfig: string | undefined, preserv
 	if (!isCommandConfigValue(valueConfig)) return;
 	const command = commandKey(valueConfig);
 	if (isCommandConfigValue(preserveConfig) && command === commandKey(preserveConfig)) return;
+	invalidateCommand(command);
+}
+
+/** Discard only the exact completed command slot a refused request materialized. */
+export function invalidateCommandGeneration(slot: CommandConfigGeneration): void {
+	if (commandResultCache.get(slot.command)?.generation === slot.generation) invalidateCommand(slot.command);
+}
+
+function invalidateCommand(command: string): void {
 	commandResultCache.delete(command);
 	commandFailureRetryAt.delete(command);
 	commandInFlight.delete(command);
@@ -313,17 +328,25 @@ export async function runShellCommand(
 export async function resolveConfigHeaders(
 	headers: Record<string, string> | undefined,
 	signal?: AbortSignal,
-): Promise<Record<string, string> | undefined> {
+): Promise<ModelHeaders | undefined> {
 	signal?.throwIfAborted();
 	if (!headers) return undefined;
-	const resolved: Record<string, string> = {};
+	const resolved: ModelHeaders = {};
+	let commands: Record<string, CommandConfigGeneration> | undefined;
 	let hasResolved = false;
 	for (const key in headers) {
-		const next = await untilAborted(signal, () => resolveConfigValue(headers[key]));
+		const config = headers[key];
+		const credential = await untilAborted(signal, () => resolveConfigCredential(config));
+		const next = typeof credential === "string" ? credential : credential?.value;
 		if (!next) continue;
 		resolved[key] = next;
+		if (typeof credential === "object" && credential.generation !== undefined) {
+			commands ??= Object.create(null) as Record<string, CommandConfigGeneration>;
+			commands[key] = { command: commandKey(config), generation: credential.generation };
+		}
 		hasResolved = true;
 	}
+	if (commands) Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands });
 	return hasResolved ? resolved : undefined;
 }
 
@@ -342,6 +365,7 @@ export function createConfigHeaderResolver(
 		signal?.throwIfAborted();
 		const resolved: ModelHeaders = {};
 		let apiKeyCredential: ModelApiKeyCredential | undefined;
+		let commands: Record<string, CommandConfigGeneration> | undefined;
 		let hasResolved = false;
 		for (const source of active) {
 			const next: ModelHeaders | undefined =
@@ -353,6 +377,11 @@ export function createConfigHeaderResolver(
 			for (const key in next) {
 				resolved[key] = next[key];
 				if (key === "Authorization") apiKeyCredential = next[modelApiKeyCredential];
+				const command = next[modelHeaderCommandGenerations]?.[key];
+				if (command) {
+					commands ??= Object.create(null) as Record<string, CommandConfigGeneration>;
+					commands[key] = command;
+				} else if (commands) delete commands[key];
 				hasResolved = true;
 			}
 		}
@@ -366,6 +395,10 @@ export function createConfigHeaderResolver(
 						? undefined
 						: { apiKey: credential.value, credentialGeneration: credential.generation };
 				hasResolved = true;
+				if (typeof credential === "object" && credential.generation !== undefined) {
+					commands ??= Object.create(null) as Record<string, CommandConfigGeneration>;
+					commands.Authorization = { command: commandKey(keyConfig), generation: credential.generation };
+				} else if (commands) delete commands.Authorization;
 			}
 		}
 		if (apiKeyCredential) {
@@ -379,6 +412,7 @@ export function createConfigHeaderResolver(
 				Object.defineProperty(resolved, modelApiKeyCredential, { value: apiKeyCredential });
 			}
 		}
+		if (commands) Object.defineProperty(resolved, modelHeaderCommandGenerations, { value: commands });
 		return hasResolved ? resolved : undefined;
 	};
 }

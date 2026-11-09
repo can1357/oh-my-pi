@@ -6,6 +6,7 @@ import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { type ModelHeaders, modelHeaderCommandGenerations } from "@oh-my-pi/pi-catalog/types";
 
 const SOURCE_ID = "stream-auth-retry-test";
 const API = "stream-auth-retry-test" as Api;
@@ -101,6 +102,170 @@ function ok(stream: AssistantMessageEventStream): void {
 describe("streamSimple resolver auth retry", () => {
 	afterEach(() => {
 		unregisterCustomApis(SOURCE_ID);
+	});
+
+	it.each(["same", "changed"] as const)(
+		"passes the materialized %s-byte header snapshot, not later resolver state, on exhaustion",
+		async bytes => {
+			const contexts: ApiKeyResolveContext[] = [];
+			const headersSeen: string[] = [];
+			const wireSymbols: symbol[][] = [];
+			let liveGeneration = 1;
+			let materializations = 0;
+			const requestModel = model();
+			requestModel.resolveHeaders = async () => {
+				materializations += 1;
+				const generation = liveGeneration;
+				const headers: ModelHeaders = {
+					"X-Test": bytes === "same" ? "test-same-header" : `test-header-${generation}`,
+				};
+				Object.defineProperty(headers, modelHeaderCommandGenerations, {
+					value: {
+						"X-Test": { command: "printf %s test-header-command", generation },
+					},
+				});
+				return headers;
+			};
+			registerCustomApi(
+				API,
+				resolvedModel => {
+					headersSeen.push(resolvedModel.headers?.["X-Test"] ?? "");
+					wireSymbols.push(Object.getOwnPropertySymbols(resolvedModel.headers ?? {}));
+					liveGeneration = headersSeen.length === 1 ? 2 : 99;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError("401 authentication_error", 401),
+						});
+					});
+					return stream;
+				},
+				SOURCE_ID,
+			);
+			const stream = streamSimple(requestModel, context, {
+				apiKey: ctx => {
+					contexts.push(ctx);
+					return ctx.lastChance
+						? undefined
+						: {
+								apiKey: "test-not-a-secret",
+								credentialGeneration: ctx.error === undefined ? 41 : 42,
+								afterRemint: true,
+							};
+				},
+			});
+			for await (const _event of stream) {
+				// drain
+			}
+			expect((await stream.result()).stopReason).toBe("error");
+			expect(materializations).toBe(2);
+			expect(liveGeneration).toBe(99);
+			expect(headersSeen).toEqual(
+				bytes === "same" ? ["test-same-header", "test-same-header"] : ["test-header-1", "test-header-2"],
+			);
+			expect(wireSymbols).toEqual([[], []]);
+			expect(contexts.at(-1)?.previousGeneration).toBe(42);
+			expect(contexts.at(-1)?.previousHeaderCommands).toEqual([
+				{ command: "printf %s test-header-command", generation: 2 },
+			]);
+		},
+	);
+
+	it.each(["X-Test", "x-test", "X-TEST", "duplicate", "opaque"] as const)(
+		"does not manufacture sent-command evidence for %s header replacement",
+		async replacement => {
+			const contexts: ApiKeyResolveContext[] = [];
+			const requestModel = model();
+			requestModel.resolveHeaders = async () => {
+				const headers: ModelHeaders = { "X-Test": "test-header-value" };
+				if (replacement === "duplicate") headers["x-test"] = "test-second-header";
+				if (replacement !== "opaque") {
+					Object.defineProperty(headers, modelHeaderCommandGenerations, {
+						value: { "X-Test": { command: "printf %s test-overridden-command", generation: 1 } },
+					});
+				}
+				return headers;
+			};
+			let requests = 0;
+			registerCustomApi(
+				API,
+				() => {
+					requests += 1;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({
+							type: "error",
+							reason: "error",
+							error: assistantError("401 authentication_error", 401),
+						});
+					});
+					return stream;
+				},
+				SOURCE_ID,
+			);
+			const stream = streamSimple(requestModel, context, {
+				headers:
+					replacement === "duplicate" || replacement === "opaque" ? undefined : { [replacement]: "test-caller" },
+				apiKey: ctx => {
+					contexts.push(ctx);
+					return ctx.lastChance ? undefined : "test-not-a-secret";
+				},
+			});
+			for await (const _event of stream) {
+				// drain
+			}
+			expect((await stream.result()).stopReason).toBe("error");
+			expect(requests).toBe(1);
+			expect(contexts.at(-1)?.lastChance).toBe(true);
+			expect(contexts.at(-1)?.previousHeaderCommands).toBeUndefined();
+		},
+	);
+
+	it("clears the preceding header snapshot when the next attempt uses an opaque replacement resolver", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const requestModel = model();
+		let materializations = 0;
+		requestModel.resolveHeaders = async () => {
+			materializations += 1;
+			const headers: ModelHeaders = { "X-Test": "test-first-header" };
+			Object.defineProperty(headers, modelHeaderCommandGenerations, {
+				value: { "X-Test": { command: "printf %s test-first-command", generation: 1 } },
+			});
+			return headers;
+		};
+		let requests = 0;
+		registerCustomApi(
+			API,
+			() => {
+				requests += 1;
+				requestModel.resolveHeaders = async () => {
+					materializations += 1;
+					return { "X-Test": "test-opaque-header" };
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "error", reason: "error", error: assistantError("401 authentication_error", 401) });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(requestModel, context, {
+			apiKey: ctx => {
+				contexts.push(ctx);
+				return ctx.lastChance ? undefined : { apiKey: "test-not-a-secret", afterRemint: true };
+			},
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+		expect((await stream.result()).stopReason).toBe("error");
+		expect(requests).toBe(2);
+		expect(materializations).toBe(2);
+		expect(contexts.at(-1)?.lastChance).toBe(true);
+		expect(contexts.at(-1)?.previousHeaderCommands).toBeUndefined();
 	});
 
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {

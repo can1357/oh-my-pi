@@ -100,6 +100,7 @@ interface Rig {
 	model: Model<Api>;
 	/** Bearer of every request the provider saw, in arrival order. */
 	seen: string[];
+	seenHeaders: Headers[];
 	/** How many times the mint ran. */
 	mints: () => number;
 	/** Resolve and seed a turn the way `agent-loop` does, without sending it. */
@@ -159,8 +160,11 @@ describe("a `!command` credential the provider refuses", () => {
 		if (!model) throw new Error("probe model missing");
 
 		const seen: string[] = [];
+		const seenHeaders: Headers[] = [];
 		const fetchImpl: FetchImpl = async (_url, init) => {
-			const auth = new Headers(init?.headers).get("Authorization") ?? undefined;
+			const headers = new Headers(init?.headers);
+			seenHeaders.push(headers);
+			const auth = headers.get("Authorization") ?? undefined;
 			const bearer = auth?.startsWith("Bearer ") ? auth.slice(7) : auth;
 			seen.push(bearer ?? "<none>");
 			return accept(bearer) ? okStream() : refuse(bearer);
@@ -192,6 +196,7 @@ describe("a `!command` credential the provider refuses", () => {
 			registry,
 			model,
 			seen,
+			seenHeaders,
 			mints: () => fs.readFileSync(counterFile, "utf8").length,
 			prepare,
 			turn,
@@ -281,6 +286,60 @@ describe("a `!command` credential the provider refuses", () => {
 			expect(rig.seen.slice(requestsBefore)).toEqual(["test-renewed-header"]);
 		},
 	);
+
+	test("an exhausted same-byte API retry invalidates the exact provider and model header generations it sent", async () => {
+		const counters = ["api", "b", "c", "d"].map(name => path.join(tempDir, name));
+		const tokens = ["api-token", "b-token", "c-token", "d-token"].map(name => path.join(tempDir, name));
+		for (const counter of counters) fs.writeFileSync(counter, "");
+		for (let index = 0; index < tokens.length; index++) {
+			fs.writeFileSync(tokens[index], index === 0 ? "test-same-api" : `test-old-${index}`);
+		}
+		const commands = counters.map((counter, index) => mintFromFile(counter, tokens[index]));
+		let accepting = false;
+		const rig = buildRig(
+			commands[0],
+			counters[0],
+			() =>
+				accepting &&
+				rig.seenHeaders.at(-1)?.get("X-B") === "test-new-1" &&
+				rig.seenHeaders.at(-1)?.get("X-C") === "test-new-2" &&
+				rig.seenHeaders.at(-1)?.get("X-D") === "test-new-3",
+			{
+				headers: { "X-B": commands[1], "X-D": commands[3] },
+				models: [{ id: "gw-model", name: "GW Model", headers: { "X-C": commands[2] } }],
+			},
+			() =>
+				accepting
+					? new Response(
+							JSON.stringify({
+								error: { message: "Identity check refused.", type: "invalid_request_error", code: "401" },
+							}),
+							{ status: 401, headers: { "Content-Type": "application/json" } },
+						)
+					: gatewayRefusal(),
+		);
+		await rig.prepare();
+		await rig.model.resolveHeaders?.();
+		const before = counters.map(counter => fs.readFileSync(counter, "utf8").length);
+		expect((await rig.turn()).errorStatus).toBe(401);
+		expect(rig.seen).toEqual(["test-same-api", "test-same-api"]);
+		expect(counters.map((counter, index) => fs.readFileSync(counter, "utf8").length - before[index])).toEqual([
+			1, 1, 1, 1,
+		]);
+		const after = counters.map(counter => fs.readFileSync(counter, "utf8").length);
+		for (let index = 1; index < tokens.length; index++) fs.writeFileSync(tokens[index], `test-new-${index}`);
+		accepting = true;
+		expect((await rig.turn()).stopReason).not.toBe("error");
+		expect(rig.seen).toHaveLength(3);
+		expect(counters.map((counter, index) => fs.readFileSync(counter, "utf8").length - after[index])).toEqual([
+			1, 1, 1, 1,
+		]);
+		expect(["X-B", "X-C", "X-D"].map(name => rig.seenHeaders.at(-1)?.get(name))).toEqual([
+			"test-new-1",
+			"test-new-2",
+			"test-new-3",
+		]);
+	});
 
 	test.each(["same", "changed"] as const)(
 		"a pure-header %s-byte refusal retains upstream's no-retry behavior",

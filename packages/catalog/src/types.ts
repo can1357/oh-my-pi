@@ -32,10 +32,19 @@ export interface ModelApiKeyCredential {
 	credentialGeneration?: number;
 }
 
+/** One completed slot in this process's normalized-command cache, not a bearer or retry permission. */
+export interface CommandConfigGeneration {
+	readonly command: string;
+	readonly generation: number;
+}
+
 /** API-key-only provenance; independent header commands never create this metadata. */
 export const modelApiKeyCredential = Symbol("modelApiKeyCredential");
+/** Passive per-header evidence, retained only while the corresponding value survives composition. */
+export const modelHeaderCommandGenerations = Symbol("modelHeaderCommandGenerations");
 export type ModelHeaders = Record<string, string> & {
 	[modelApiKeyCredential]?: ModelApiKeyCredential;
+	[modelHeaderCommandGenerations]?: Readonly<Record<string, CommandConfigGeneration>>;
 };
 
 /** Catalog kinds used to isolate role-specific runners from session chat models. */
@@ -1771,7 +1780,7 @@ export interface Model<TApi extends Api = Api> {
 	 * Materialize config-backed headers immediately before a request. Catalog
 	 * inspection never invokes this hook; transports receive a cloned model
 	 * whose `headers` is a plain resolved record and whose hook is removed.
-	 * A derived API key retains its value and mint provenance in the returned result.
+	 * Derived API keys keep their provenance; command headers keep passive cache-generation evidence.
 	 */
 	resolveHeaders?: (signal?: AbortSignal) => Promise<ModelHeaders | undefined>;
 	/**

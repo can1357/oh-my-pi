@@ -74,6 +74,7 @@ import {
 	invalidateAllCommandConfigs,
 	hasUnrefusedCommandCredential,
 	invalidateCommandConfig,
+	invalidateCommandGeneration,
 	isCommandConfigValue,
 	refuseCommandGeneration,
 	remintCommandConfig,
@@ -3805,6 +3806,10 @@ export class ModelRegistry {
 	): Promise<ResolvedApiKey | undefined> {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
+		if (!options?.forceRefresh && options?.rejectedHeaderCommands) {
+			// Header commands resolve locally; their generations do not identify the owner's separate cache slots.
+			for (const slot of options.rejectedHeaderCommands) invalidateCommandGeneration(slot);
+		}
 		if (options?.forceRefresh) {
 			if (options.remintApiKeyCommand === false) {
 				this.#invalidateProviderCommandConfigs(provider, this.#selectedProviderApiKeyCommand(provider));

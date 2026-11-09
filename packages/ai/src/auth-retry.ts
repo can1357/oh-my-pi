@@ -1,3 +1,4 @@
+import type { CommandConfigGeneration } from "@oh-my-pi/pi-catalog/types";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
@@ -37,6 +38,8 @@ export interface ApiKeyResolveContext {
 	 * which mint the provider refused, which the bytes cannot say.
 	 */
 	previousGeneration?: number;
+	/** Materialized command-header slots from the exhausted attempt, never reconstructed from live cache state. */
+	previousHeaderCommands?: readonly CommandConfigGeneration[];
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
 }
@@ -249,6 +252,7 @@ export async function resolveRetryKey(
 	previousKey?: string,
 	onResolved?: (resolved: ApiKeyResolution) => void,
 	previousGeneration?: number,
+	previousHeaderCommands?: readonly CommandConfigGeneration[],
 ): Promise<string | undefined> {
 	try {
 		const rotateSibling = lastChance || (!lastChance && isDirectCredentialRotationError(error));
@@ -258,6 +262,7 @@ export async function resolveRetryKey(
 			signal,
 			previousKey,
 			previousGeneration,
+			previousHeaderCommands,
 		});
 		onResolved?.(resolved);
 		return resolvedApiKeyBearer(resolved);
@@ -277,6 +282,8 @@ export interface AuthRetryKeyState {
 	 * this request sent from the one that replaced it.
 	 */
 	lastGeneration?: number;
+	/** Passive snapshot taken when the most recent request's headers were materialized. */
+	lastHeaderCommands?: readonly CommandConfigGeneration[];
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;
 	/** Whether this operation already replayed once after an explicit token-refresh request. */
@@ -397,6 +404,7 @@ export async function resolveNextAuthRetryKey(
 			onResolved?.(resolved);
 		},
 		state.lastGeneration,
+		state.refreshedCurrent ? state.lastHeaderCommands : undefined,
 	);
 	if (signal?.aborted || rotated === undefined) return undefined;
 	return acceptRetryKey(state, rotated, !directRotation, afterSiblingWait, rotatedGeneration);

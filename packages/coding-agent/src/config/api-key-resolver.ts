@@ -10,6 +10,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { CommandConfigGeneration } from "@oh-my-pi/pi-catalog/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
@@ -27,6 +28,8 @@ export interface ApiKeyResolverOptions {
 export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
 	/** A non-authentication error can skip the selected API-key command, not other provider refresh. */
 	remintApiKeyCommand?: boolean;
+	/** Header slots captured at the exhausted request's materialization, local to this process. */
+	rejectedHeaderCommands?: readonly CommandConfigGeneration[];
 }
 
 /**
@@ -75,7 +78,12 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
 			ApiKeyResolverRequestOptions,
-			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration" | "remintApiKeyCommand"
+			| "signal"
+			| "refreshReason"
+			| "rejectedAccessToken"
+			| "rejectedCredentialGeneration"
+			| "remintApiKeyCommand"
+			| "rejectedHeaderCommands"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -87,7 +95,7 @@ export function createApiKeyResolver(
 		provenance.record(resolved);
 		return resolved;
 	};
-	return async ({ lastChance, error, signal, previousKey, previousGeneration }) => {
+	return async ({ lastChance, error, signal, previousKey, previousGeneration, previousHeaderCommands }) => {
 		const rejectedAccessToken = provenance.accessFor(previousKey);
 		if (error === undefined) {
 			return resolveKey(undefined);
@@ -118,6 +126,7 @@ export function createApiKeyResolver(
 			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
 				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
+				rejectedHeaderCommands: previousHeaderCommands,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
