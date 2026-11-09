@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- ACP clients can negotiate `_omp/subagents` with `clientCapabilities._meta["omp/subagents"]: true` to receive sequenced full child-lifecycle snapshots, including detached task completions that arrive after the parent turn ends; clients without the capability receive none.
+- ACP clients can negotiate `_omp/subagents` with `clientCapabilities._meta["omp/subagents"]: true` to receive sequenced full child-lifecycle snapshots, including detached task completions that arrive after the parent turn ends; clients without the capability receive none ([#18593](https://github.com/can1357/oh-my-pi/pull/18593), @aciDrums7).
 
 ## [18.18.3] - 2026-11-09
 
