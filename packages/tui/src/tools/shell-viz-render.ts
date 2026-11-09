@@ -9,6 +9,16 @@ export function shellVizText(text: string): string {
 	return replaceTabs(sanitizeText(text)).replace(/[\r\n]/g, " ");
 }
 
+/**
+ * Nerd Font glyphs that replace the whole `🔇 out|err|silent` /dev/null badge;
+ * keyed by the native `badge-discard-*` style token.
+ */
+const DISCARD_ICONS: Record<string, string> = {
+	"badge-discard-out": "\u{f164d}", // nf-md-message_off
+	"badge-discard-err": "\u{f14bc}", // nf-md-alert_remove
+	"badge-discard-all": "\u{f0581}", // nf-md-volume_off
+};
+
 function color(style: string | undefined): ThemeColor {
 	const tokens = style?.split(" ") ?? [];
 	if (tokens.includes("comment")) return "syntaxComment";
@@ -28,10 +38,12 @@ function segmentText(
 	presentation: ShellVizPresentation,
 	theme: Theme,
 ): string {
-	const text = shellVizText(segment.text);
+	const tokens = segment.style?.split(" ") ?? [];
+	const discard =
+		theme.getSymbolPreset() === "nerd" ? tokens.find(token => Object.hasOwn(DISCARD_ICONS, token)) : undefined;
+	const text = discard ? ` ${DISCARD_ICONS[discard]}` : shellVizText(segment.text);
 	const inactive =
 		(presentation.running && !(segment.active ?? row.active)) || (segment.state ?? row.state) === "skipped";
-	const tokens = segment.style?.split(" ") ?? [];
 	const semantic = tokens.some(token => ["chip", "badge", "secret"].includes(token));
 	const styled = presentation.preferences.layers.color || semantic ? theme.fg(color(segment.style), text) : text;
 	const emphasized = inactive
@@ -42,7 +54,13 @@ function segmentText(
 	return emphasized;
 }
 
-function rowText(row: ShellVizRow, presentation: ShellVizPresentation, theme: Theme, width: number): string {
+/** A row split into its gutter/indent/effects lead and the wrappable source text after it. */
+function rowParts(
+	row: ShellVizRow,
+	presentation: ShellVizPresentation,
+	theme: Theme,
+	width: number,
+): { lead: string; body: string } {
 	const selected =
 		presentation.preferences.selectedNode !== undefined &&
 		(row.node === presentation.preferences.selectedNode ||
@@ -54,7 +72,7 @@ function rowText(row: ShellVizRow, presentation: ShellVizPresentation, theme: Th
 		row.state === "fail" && !rowFailedInSegments && row.role !== "head" && row.role !== "mid" && row.role !== "tail";
 	const gutter = failedStatement
 		? theme.fg("error", "×")
-		: presentation.running && row.active
+		: presentation.running && row.segments.some(segment => segment.active)
 			? theme.fg("accent", "▶")
 			: selected
 				? theme.fg("accent", "›")
@@ -84,11 +102,24 @@ function rowText(row: ShellVizRow, presentation: ShellVizPresentation, theme: Th
 			return muted ? theme.faint(annotation) : annotation;
 		})
 		.join(theme.fg("muted", " · "));
-	return `${gutter} ${indent}${effect ? `${effect} ` : ""}${body}${meta}${annotations ? `  ${theme.fg("muted", "‹")} ${annotations} ${theme.fg("muted", "›")}` : ""}`;
+	return {
+		lead: `${gutter} ${indent}${effect ? `${effect} ` : ""}`,
+		body: `${body}${meta}${annotations ? `  ${theme.fg("muted", "‹")} ${annotations} ${theme.fg("muted", "›")}` : ""}`,
+	};
 }
 
+/**
+ * Wrap the row's text under its lead with a hanging indent. Wrapping the lead
+ * together with the text would let a long unbreakable token (an embedded regex
+ * or URL) drop to its own line: the whitespace-only lead becomes a blank row
+ * and the continuation loses the gutter and nesting indent.
+ */
 function rowLines(row: ShellVizRow, presentation: ShellVizPresentation, theme: Theme, width: number): string[] {
-	return wrapTextWithAnsi(rowText(row, presentation, theme, width), Math.max(1, width));
+	const { lead, body } = rowParts(row, presentation, theme, width);
+	const leadWidth = visibleWidth(lead);
+	if (leadWidth >= width) return wrapTextWithAnsi(`${lead}${body}`, Math.max(1, width));
+	const hanging = " ".repeat(leadWidth);
+	return wrapTextWithAnsi(body, width - leadWidth).map((line, index) => `${index === 0 ? lead : hanging}${line}`);
 }
 
 function joinPanes(left: string[], right: string[], width: number, separator: string): string[] {

@@ -48,7 +48,7 @@ import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
-import type { SettingsGatedToolDelta } from "./session-tools";
+import type { SettingsGatedToolDelta, SystemPromptRebuilder } from "./session-tools";
 import type { CostGateApi } from "./cost-gate";
 import type { SessionManager } from "./session-manager";
 
@@ -349,10 +349,7 @@ export interface AgentSessionConfig {
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	rebuildSystemPrompt?: SystemPromptRebuilder;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
 	/** `xd://` presentation state backed by the canonical tool map. */

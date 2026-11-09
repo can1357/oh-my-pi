@@ -295,6 +295,12 @@ mod filter {
 	impl DataT for Kind {
 		type Data<'a> = &'a Data<'a>;
 		type V<'a> = Val;
+
+		const CHECK_CANCELLATION: bool = true;
+
+		fn cancelled(data: &Self::Data<'_>) -> bool {
+			data.session.cancelled()
+		}
 	}
 
 	/// What natives see while a filter runs.
@@ -677,8 +683,8 @@ def tonumber: tonumber_;
 		// next input arrives
 		let mut failed = None;
 		for item in inputs {
-			// host abort/timeout: stdin reads observe the cancel flag themselves,
-			// but file/slurped inputs and long-running filters do not
+			// Stdin reads observe cancellation; file/slurped inputs need this
+			// check, and the patched jaq-core polls during filter evaluation.
 			if session.cancelled() {
 				break;
 			}
@@ -1807,7 +1813,15 @@ fn run_tests(
 
 #[cfg(test)]
 mod tests {
-	use std::{collections::HashMap, io, io::Write, path::PathBuf};
+	use std::{
+		collections::HashMap,
+		io,
+		io::Write,
+		path::PathBuf,
+		sync::{atomic::Ordering, mpsc},
+		thread,
+		time::{Duration, Instant},
+	};
 
 	use clap::Parser as _;
 
@@ -1903,6 +1917,32 @@ mod tests {
 		let (code, out, _) = run_jq(&["-n", "1+2"], "");
 		assert_eq!(code, 0);
 		assert_eq!(out, "3\n");
+	}
+
+	#[test]
+	fn cancellation_stops_a_filter_before_its_first_output() {
+		let (mut host, capture) = Host::for_test("jq", "", ".");
+		let cancel = host.cancel_flag_for_test();
+		let stdout = capture.stdout_buffer();
+		let (tx, rx) = mpsc::channel();
+		let worker = thread::spawn(move || {
+			let jq = Jq::try_parse_from([
+				"jq", "-n", "--unbuffered", "0, ([range(0; 1000000000)] | length)",
+			])
+			.expect("valid filter");
+			let code = jq.run(&mut host);
+			tx.send((code, capture.out())).expect("test receiver");
+		});
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while stdout.lock().is_empty() && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(5));
+		}
+		assert_eq!(&*stdout.lock(), b"0\n", "filter did not begin evaluation");
+		cancel.store(true, Ordering::Relaxed);
+		let (code, output) = rx.recv_timeout(Duration::from_secs(2)).expect("cancelled filter still running");
+		worker.join().expect("jq worker");
+		assert_eq!(code, 0);
+		assert_eq!(output, "0\n", "cancelled filter must not publish a partial array length");
 	}
 
 	#[test]

@@ -50,11 +50,47 @@ pub struct NativeHost {
 	/// external this host spawns hands them over when its exit is observed.
 	bridge:    Option<(ControlHandle, Vpid)>,
 	/// The process's terminals ([`crate::bash::Host::terminal`]).
-	#[cfg(unix)]
+	#[cfg(any(unix, windows))]
 	terminal:  crate::sys::tty::NativeTerminal,
 	/// The OS's stream sockets ([`crate::bash::Host::sockets`]).
 	#[cfg(unix)]
 	sockets:   crate::sys::socket::NativeSockets,
+	/// pi's builtin utilities standing in for tools `PATH` lacks
+	/// ([`crate::bash::Host::fallback`]); `None` offers none.
+	extras:    Option<Extras>,
+}
+
+/// The utilities a process shell offers where `PATH` has none (`ls`,
+/// `cat`, `head`, … on Windows) and the runtime they run on, started on
+/// first use.
+struct Extras {
+	tools:   crate::tools::ToolConfig,
+	runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Extras {
+	/// The runtime the utilities run on; `None` when it cannot start.
+	fn runtime(&mut self) -> Option<tokio::runtime::Handle> {
+		if self.runtime.is_none() {
+			self.runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(2)
+				.thread_name("pi-shell-extras")
+				.enable_all()
+				.build()
+				.ok();
+		}
+		self.runtime.as_ref().map(|r| r.handle().clone())
+	}
+}
+
+impl Drop for Extras {
+	/// A utility still running (a cancelled one finishing) is not waited
+	/// for: the shell is done.
+	fn drop(&mut self) {
+		if let Some(rt) = self.runtime.take() {
+			rt.shutdown_background();
+		}
+	}
 }
 
 impl NativeHost {
@@ -134,11 +170,30 @@ impl NativeHost {
 			ignored,
 			user: std::cell::OnceCell::new(),
 			bridge: None,
-			#[cfg(unix)]
+			#[cfg(any(unix, windows))]
 			terminal: crate::sys::tty::NativeTerminal::new(embedded),
 			#[cfg(unix)]
 			sockets: crate::sys::socket::NativeSockets,
+			extras: None,
 		}
+	}
+
+	/// Offer pi's builtin utilities for commands `PATH` does not have, as
+	/// `env` allows them (`PI_DISABLE_UUTILS_BUILTINS`, …): a program on
+	/// `PATH` always runs instead, so a system's own tools keep their
+	/// behaviour.
+	pub fn offer_extras(&mut self, env: &[(BString, BString)]) {
+		let var = |name: &str| {
+			env.iter()
+				.rev()
+				.find(|(k, _)| k == name.as_bytes())
+				.and_then(|(_, v)| v.to_str().ok())
+		};
+		let tools = crate::tools::ToolConfig {
+			extras: crate::extras::ExtrasGate::from_env(var),
+			..crate::tools::ToolConfig::default()
+		};
+		self.extras = Some(Extras { tools, runtime: None });
 	}
 
 	/// Deliver the OS signals caught before an external's exit to the root
@@ -164,10 +219,6 @@ impl NativeHost {
 	}
 
 	/// Forward OS signals captured by active traps to the root vproc.
-	#[cfg_attr(
-		not(unix),
-		expect(clippy::missing_const_for_fn, reason = "the Unix version drains an atomic")
-	)]
 	pub fn dispatch_signals(ctl: &crate::bash::ControlHandle, root: crate::bash::Vpid) {
 		Signals::dispatch(ctl, root);
 	}
@@ -192,8 +243,25 @@ impl crate::bash::Host for NativeHost {
 		IntrinsicId::lookup(name, mode).map_or(Resolved::NotFound, Resolved::Intrinsic)
 	}
 
-	fn start(&mut self, _cmd: &NativeRef, _inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {
-		Err(io::ErrorKind::Unsupported.into())
+	fn start(&mut self, cmd: &NativeRef, inv: Invocation<'_>) -> io::Result<Box<dyn Task>> {
+		let extras = self.extras.as_mut().ok_or(io::ErrorKind::Unsupported)?;
+		let name = crate::extras::native_name(*cmd).ok_or(io::ErrorKind::NotFound)?;
+		let runtime = extras.runtime().ok_or(io::ErrorKind::Unsupported)?;
+		let mut invocation = crate::extras::invocation(
+			inv.argv,
+			inv.env,
+			inv.cwd,
+			&inv.stdio,
+			inv.extra_fds,
+			inv.umask,
+			&extras.tools,
+		);
+		name.clone_into(&mut invocation.name);
+		Ok(Box::new(crate::extras::ExtraTask::start(&runtime, invocation)))
+	}
+
+	fn fallback(&mut self, name: &BStr) -> Option<NativeRef> {
+		self.extras.as_ref()?.tools.native_extra(name)
 	}
 
 	fn restore_task(&mut self, _cmd: &NativeRef, _state: &[u8]) -> io::Result<Box<dyn Task>> {
@@ -295,7 +363,7 @@ impl crate::bash::Host for NativeHost {
 	}
 
 	fn user(&self) -> UserInfo {
-		self.user.get_or_init(read_user).clone()
+		self.user.get_or_init(crate::sys::user::read_user).clone()
 	}
 
 	fn login_shell(&self) -> Option<BString> {
@@ -352,7 +420,7 @@ impl crate::bash::Host for NativeHost {
 		Some(TtyInfo { rows: 24, cols: 80 })
 	}
 
-	#[cfg(unix)]
+	#[cfg(any(unix, windows))]
 	fn terminal(&mut self) -> Option<&mut dyn crate::bash::Terminal> {
 		Some(&mut self.terminal)
 	}
@@ -681,53 +749,4 @@ fn login_shell(uid: libc::uid_t) -> Option<BString> {
 	// SAFETY: see above.
 	let bytes = unsafe { std::ffi::CStr::from_ptr(shell) }.to_bytes();
 	(!bytes.is_empty()).then(|| BString::from(bytes))
-}
-
-/// The current user: ids, groups, and `USER`/`HOME` (`USERNAME`/
-/// `USERPROFILE` on Windows) of the process environment.
-fn read_user() -> UserInfo {
-	let var = |k: &str| {
-		std::env::var_os(k).map_or_else(BString::default, |v| BString::from(v.as_encoded_bytes()))
-	};
-	#[cfg(unix)]
-	// SAFETY: getuid/geteuid/getgid have no preconditions.
-	let (uid, euid, gid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getgid()) };
-	#[cfg(not(unix))]
-	let (uid, euid, gid) = (0, 0, 0);
-	let name = if cfg!(windows) {
-		var("USERNAME")
-	} else {
-		var("USER")
-	};
-	let home = if cfg!(windows) {
-		var("USERPROFILE")
-	} else {
-		var("HOME")
-	};
-	UserInfo { uid, euid, gid, groups: groups(), name, home }
-}
-
-/// The process's supplementary group ids (`GROUPS`); empty where the
-/// platform has none or `getgroups` fails.
-#[cfg_attr(
-	not(unix),
-	expect(clippy::missing_const_for_fn, reason = "the Unix body calls getgroups")
-)]
-fn groups() -> Vec<u32> {
-	#[cfg(unix)]
-	{
-		// SAFETY: a zero count with a null pointer only asks for the count.
-		let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-		let Ok(len) = usize::try_from(n) else {
-			return Vec::new();
-		};
-		let mut ids: Vec<libc::gid_t> = vec![0; len];
-		// SAFETY: `ids` has room for `n` entries; getgroups writes at most
-		// that many and returns how many it wrote.
-		let got = unsafe { libc::getgroups(n, ids.as_mut_ptr()) };
-		ids.truncate(usize::try_from(got).unwrap_or(0));
-		ids
-	}
-	#[cfg(not(unix))]
-	Vec::new()
 }

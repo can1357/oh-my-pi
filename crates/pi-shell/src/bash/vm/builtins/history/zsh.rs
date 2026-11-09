@@ -589,7 +589,11 @@ fn bang_opts(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<BangOpts, St
 		verify:       zopt(&mut k.root, cx.store, vp, ZshOpt::Histverify)?,
 		substpattern: zopt(&mut k.root, cx.store, vp, ZshOpt::Histsubstpattern)?,
 		cwd:          vp.cwd.clone(),
-		path:         var(&k.root, cx.store, vp, b"PATH")?.unwrap_or_default(),
+		path:         var(&k.root, cx.store, vp, b"PATH")?
+			.unwrap_or_default()
+			.split(|&c| c == crate::bash::vm::probe::path_separator(k.engine.config().platform))
+			.map(BString::from)
+			.collect(),
 		bash:         false,
 		multibyte:    zopt(&mut k.root, cx.store, vp, ZshOpt::Multibyte)?
 			&& crate::bash::vm::locale::is_utf8(k, cx.store, vp),
