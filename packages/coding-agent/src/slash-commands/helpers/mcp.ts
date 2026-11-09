@@ -1,14 +1,8 @@
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
+import { getMcpConfigPath, loadAllMCPConfigs } from "../../mcp/config";
 import { connectToServer, disconnectServer, listPrompts, listResources, listTools } from "../../mcp/client";
-import {
-	addMCPServer,
-	readDisabledServers,
-	readMCPConfigFile,
-	removeMCPServer,
-	setServerDisabled,
-	updateMCPServer,
-} from "../../mcp/config-writer";
+import { addMCPServer, readDisabledServers, removeMCPServer, setMcpServerEnabled } from "../../mcp/config-writer";
 import { cfgMcpEnableProjectConfig } from "../../mcp/settings";
 import { MCPManager } from "../../mcp/manager";
 import {
@@ -85,24 +79,14 @@ const MCP_ADD_OPTION_PARSERS = new Map<string, McpAddOptionParser>([
 	],
 ]);
 
-async function getMcpConfiguredServers(
-	cwd: string,
-): Promise<Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }>> {
-	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", cwd);
-	const [userConfig, projectConfig] = await Promise.all([readMCPConfigFile(userPath), readMCPConfigFile(projectPath)]);
-	const servers: Array<{ name: string; config: MCPServerConfig; scope: AcpMcpScope }> = [];
-	const seen = new Set<string>();
-	for (const [name, config] of Object.entries(projectConfig.mcpServers ?? {})) {
-		if (config.enabled !== false) {
-			servers.push({ name, config, scope: "project" });
-			seen.add(name);
-		}
-	}
-	for (const [name, config] of Object.entries(userConfig.mcpServers ?? {})) {
-		if (!seen.has(name) && config.enabled !== false) servers.push({ name, config, scope: "user" });
-	}
-	return servers;
+async function getMcpConfiguredServers(runtime: SlashCommandRuntime) {
+	const { configs, sources } = await loadAllMCPConfigs(runtime.cwd, {
+		settings: runtime.settings,
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+		extensionRoots: runtime.session.effectiveExtensionRoots,
+		filterExa: false,
+	});
+	return Object.entries(configs).map(([name, config]) => ({ name, config, scope: sources[name]?.level }));
 }
 
 function validateParsedMcpAddArgs(parsed: ParsedMcpAddArgs): ParsedMcpAddArgs {
@@ -240,7 +224,7 @@ async function collectConnectedMcpLines(
 	runtime: SlashCommandRuntime,
 	collect: (serverName: string, connection: MCPServerConnection) => Promise<string[]>,
 ): Promise<string[] | undefined> {
-	const servers = await getMcpConfiguredServers(runtime.cwd);
+	const servers = await getMcpConfiguredServers(runtime);
 	if (servers.length === 0) return undefined;
 
 	const lines: string[] = [];
@@ -286,7 +270,7 @@ async function handlePromptsCommand(runtime: SlashCommandRuntime): Promise<Slash
 async function handleTestCommand(rest: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	const name = rest.split(/\s+/)[0]?.trim() ?? "";
 	if (!name) return usage("Usage: /mcp test <name>", runtime);
-	const servers = await getMcpConfiguredServers(runtime.cwd);
+	const servers = await getMcpConfiguredServers(runtime);
 	const server = servers.find(item => item.name === name);
 	if (!server) return usage(`Server "${name}" not found. Run /mcp list to see configured servers.`, runtime);
 
@@ -325,7 +309,7 @@ async function handleAddCommand(rest: string, runtime: SlashCommandRuntime): Pro
 	const config = buildMcpServerConfig(parsed);
 	if (!config) return usage(MCP_ADD_USAGE, runtime);
 	try {
-		const filePath = getMCPConfigPath(parsed.scope, runtime.cwd);
+		const filePath = getMcpConfigPath(parsed.scope, runtime.cwd, runtime.settings);
 		await addMCPServer(filePath, parsed.name, config);
 		await runtime.output(`Added MCP server "${parsed.name}" (${parsed.scope}).`);
 		return commandConsumed();
@@ -371,20 +355,14 @@ async function handleSmitherySearchCommand(rest: string, runtime: SlashCommandRu
 
 async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
 	try {
-		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getMCPConfigPath("project", runtime.cwd);
-		const [userConfig, projectConfig] = await Promise.all([
-			readMCPConfigFile(userPath),
-			readMCPConfigFile(projectPath),
-		]);
-		const disabledSet = new Set(await readDisabledServers(userPath));
-		const entries: Array<{ name: string; config: MCPServerConfig; scope: string }> = [];
-		for (const [name, config] of Object.entries(userConfig.mcpServers ?? {})) {
-			entries.push({ name, config, scope: "user" });
-		}
-		for (const [name, config] of Object.entries(projectConfig.mcpServers ?? {})) {
-			if (!entries.some(entry => entry.name === name)) entries.push({ name, config, scope: "project" });
-		}
+		const { configs, sources } = await loadAllMCPConfigs(runtime.cwd, {
+			settings: runtime.settings,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+			extensionRoots: runtime.session.effectiveExtensionRoots,
+			includeSuppressed: true,
+			filterExa: false,
+		});
+		const entries = Object.entries(configs).map(([name, config]) => ({ name, config, scope: sources[name]?.level }));
 		if (entries.length === 0) {
 			await runtime.output("No MCP servers configured.");
 			return commandConsumed();
@@ -393,7 +371,7 @@ async function handleListCommand(runtime: SlashCommandRuntime): Promise<SlashCom
 			entries
 				.map(({ name, config, scope }) => {
 					const type = config.type ?? "stdio";
-					const enabled = config.enabled !== false && !disabledSet.has(name) ? "enabled" : "disabled";
+					const enabled = config.enabled !== false ? "enabled" : "disabled";
 					let location: string | undefined;
 					if (config.type === "http" || config.type === "sse") {
 						// Strip query string and userinfo from URLs to avoid leaking
@@ -433,29 +411,24 @@ async function handleEnableDisableCommand(
 	if (!name) return usage(`Usage: /mcp ${verb} <name>`, runtime);
 	const enabled = verb === "enable";
 	try {
-		const userPath = getMCPConfigPath("user", runtime.cwd);
-		const projectPath = getMCPConfigPath("project", runtime.cwd);
-		const [userConfig, projectConfig] = await Promise.all([
-			readMCPConfigFile(userPath),
-			readMCPConfigFile(projectPath),
-		]);
-		if (projectConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(projectPath, name, { ...projectConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (project config).`);
-			return commandConsumed();
+		const userPath = getMcpConfigPath("user", runtime.cwd, runtime.settings);
+		const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, {
+			settings: runtime.settings,
+			extensionRoots: runtime.session.effectiveExtensionRoots,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+		});
+		if (!found && !(await readDisabledServers(userPath)).includes(name)) {
+			return usage(`Server "${name}" not found.`, runtime);
 		}
-		if (userConfig.mcpServers?.[name] !== undefined) {
-			await updateMCPServer(userPath, name, { ...userConfig.mcpServers[name], enabled } as MCPServerConfig);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"} (user config).`);
-			return commandConsumed();
-		}
-		const disabledList = await readDisabledServers(userPath);
-		if (!enabled || disabledList.includes(name)) {
-			await setServerDisabled(userPath, name, !enabled);
-			await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
-			return commandConsumed();
-		}
-		return usage(`Server "${name}" not found in user or project config.`, runtime);
+		await setMcpServerEnabled({
+			userPath,
+			projectPath: getMcpConfigPath("project", runtime.cwd, runtime.settings),
+			sourcePath: found && !found.discovered ? found.filePath : null,
+			name,
+			enabled,
+		});
+		await runtime.output(`Server "${name}" ${enabled ? "enabled" : "disabled"}.`);
+		return commandConsumed();
 	} catch (err) {
 		return usage(`Failed to ${verb} MCP server: ${errorMessage(err)}`, runtime);
 	}
@@ -466,9 +439,25 @@ async function handleRemoveCommand(rest: string, runtime: SlashCommandRuntime): 
 	if (parsed.error) return usage(parsed.error, runtime);
 	if (!parsed.name) return usage("Usage: /mcp remove <name> [--scope project|user]", runtime);
 	try {
-		const filePath = getMCPConfigPath(parsed.scope, runtime.cwd);
+		const found = parseCommandArgs(rest).includes("--scope")
+			? null
+			: await findMcpServerForAuth(parsed.name, runtime.cwd, runtime.mcpManager, {
+					settings: runtime.settings,
+					extensionRoots: runtime.session.effectiveExtensionRoots,
+					enableProjectConfig: cfgMcpEnableProjectConfig.get(runtime.settings),
+				});
+		if (found && found.scope !== parsed.scope) {
+			return usage(`Server "${parsed.name}" not found in ${parsed.scope} config.`, runtime);
+		}
+		if (found?.discovered) {
+			return usage(
+				`Server "${parsed.name}" is defined in an external config. Disable it with /mcp disable ${parsed.name}.`,
+				runtime,
+			);
+		}
+		const filePath = found?.filePath ?? getMcpConfigPath(parsed.scope, runtime.cwd, runtime.settings);
 		await removeMCPServer(filePath, parsed.name);
-		await runtime.output(`Removed server "${parsed.name}" from ${parsed.scope} config.`);
+		await runtime.output(`Removed server "${parsed.name}" from ${found?.scope ?? parsed.scope} config.`);
 		return commandConsumed();
 	} catch (err) {
 		return usage(`Failed to remove MCP server: ${errorMessage(err)}`, runtime);
@@ -496,6 +485,8 @@ async function handleReauthCommand(rest: string, runtime: SlashCommandRuntime): 
 	if (!name) return usage("Usage: /mcp reauth <name>", runtime);
 	const found = await findMcpServerForAuth(name, runtime.cwd, runtime.mcpManager, {
 		preferManager: true,
+		settings: runtime.settings,
+		extensionRoots: runtime.session.effectiveExtensionRoots,
 		// `mcp.enableProjectConfig: false` opts the project out of project-scoped
 		// config; the lookup must not resurrect (or write bindings for) an
 		// opted-out entry.

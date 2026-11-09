@@ -380,12 +380,12 @@ export async function loadAllExtensions(
 /**
  * Toggle provider enabled state.
  */
-export function toggleProvider(providerId: string): boolean {
-	if (isProviderEnabled(providerId)) {
-		disableProvider(providerId);
+export function toggleProvider(providerId: string, settings?: Settings): boolean {
+	if (isProviderEnabled(providerId, settings)) {
+		disableProvider(providerId, settings);
 		return false;
 	} else {
-		enableProvider(providerId);
+		enableProvider(providerId, settings);
 		return true;
 	}
 }
@@ -393,11 +393,11 @@ export function toggleProvider(providerId: string): boolean {
 /**
  * Toggle a foreign provider's `~/` config opt-in.
  */
-export function toggleUserSource(providerId: string): boolean {
-	if (isUserSourceEnabled(providerId)) {
-		disableUserSource(providerId);
+export function toggleUserSource(providerId: string, settings?: Settings): boolean {
+	if (isUserSourceEnabled(providerId, { settings })) {
+		disableUserSource(providerId, settings);
 		return false;
 	}
-	enableUserSource(providerId);
+	enableUserSource(providerId, settings);
 	return true;
 }

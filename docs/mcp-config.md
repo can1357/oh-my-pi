@@ -515,7 +515,11 @@ The active profile's user file supplies two cross-source overrides:
 }
 ```
 
-`/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
+Direct MCP controls use discovery's winning source, including inherited definitions and initially disabled servers that have no live manager entry. `/mcp enable` and `/mcp disable` update `enabled` directly when that definition is in an OMP-owned writable file. Disabling an inherited definition therefore edits the shared workspace file; use your profile's `disabledServers` instead when only that profile should opt out.
+
+OMP does not mutate another tool's config when toggling its servers. Those commands maintain the owning profile's user-level allowlist or denylist instead and remove a conflicting stale override. Dashboard toggles use the displayed session's profile even if another SDK session currently owns the process binding.
+
+For writable native and standalone definitions, auth cleanup preserves the raw source's `enabled` state and credential indirections; per-profile suppression is not written into the shared definition. Default `/mcp remove <name>` remains project-scoped and cannot remove a user-scoped definition without explicit `--scope user`.
 
 ## `/mcp add` vs editing JSON directly
 

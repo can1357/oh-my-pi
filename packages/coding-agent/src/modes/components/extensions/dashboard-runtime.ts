@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
@@ -39,13 +40,13 @@ export function createExtensionDashboardRuntime(options: {
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
 		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.(), settings),
-		toggleProvider,
-		toggleUserSource,
+		toggleProvider: providerId => toggleProvider(providerId, settings),
+		toggleUserSource: providerId => toggleUserSource(providerId, settings),
 		async persistMcpToggle(name, enabled, sourcePath) {
 			await setMcpServerEnabled({
-				userPath: getMCPConfigPath("user", cwd),
+				userPath: path.join(settings.getAgentDir(), "mcp.json"),
 				projectPath: getMCPConfigPath("project", cwd),
-				sourcePath,
+				sourcePath: sourcePath ?? null,
 				name,
 				enabled,
 			});

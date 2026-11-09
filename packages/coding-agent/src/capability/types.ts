@@ -148,6 +148,8 @@ export interface LoadOptions<T = unknown> {
 	 * Return `true` to suppress. Receives the item with its attached `_source`.
 	 */
 	suppress?(item: T & { _source: SourceMeta }): boolean;
+	/** Observe suppressed items that own their dedupe key, excluding lower-priority same-key definitions. */
+	onSuppressed?(item: T & { _source: SourceMeta }): void;
 }
 
 /**

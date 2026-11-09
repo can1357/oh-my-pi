@@ -308,6 +308,7 @@ async function loadImpl<T>(
 		if (suppressedItems.has(item)) {
 			// Claim key ownership (same-name precedence, including disabled
 			// state) without surviving or equivalence-shadowing survivors.
+			if (key === undefined || !seen.has(key)) options.onSuppressed?.(item);
 			if (key !== undefined) seen.add(key);
 			continue;
 		}
@@ -436,13 +437,16 @@ export function isUserSourceEnabled(
 }
 
 /** Opt a foreign provider's `~/` config in. */
-export function enableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders(), providerId]);
+export function enableUserSource(providerId: string, settings?: Settings): void {
+	setEnabledProviders([...enabledProviders(settings), providerId], settings);
 }
 
 /** Opt a foreign provider's `~/` config out (project config keeps loading). */
-export function disableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders()].filter(id => id !== providerId));
+export function disableUserSource(providerId: string, settings?: Settings): void {
+	setEnabledProviders(
+		[...enabledProviders(settings)].filter(id => id !== providerId),
+		settings,
+	);
 }
 
 /**
@@ -468,15 +472,18 @@ export function initializeWithSettings(activeSettings: Settings): () => void {
 /**
  * Disable a provider globally (across all capabilities).
  */
-export function disableProvider(providerId: string): void {
-	setDisabledProviders([...disabledProviders(), providerId]);
+export function disableProvider(providerId: string, settings?: Settings): void {
+	setDisabledProviders([...disabledProviders(settings), providerId], settings);
 }
 
 /**
  * Enable a previously disabled provider.
  */
-export function enableProvider(providerId: string): void {
-	setDisabledProviders([...disabledProviders()].filter(id => id !== providerId));
+export function enableProvider(providerId: string, settings?: Settings): void {
+	setDisabledProviders(
+		[...disabledProviders(settings)].filter(id => id !== providerId),
+		settings,
+	);
 }
 
 /**
@@ -496,10 +503,9 @@ export function getDisabledProviders(): string[] {
 }
 
 /**
- * Set disabled providers from a list (replaces current set), persisting to the bound settings.
+ * Set disabled providers from a list (replaces current set), persisting to the supplied or bound settings.
  */
-export function setDisabledProviders(providerIds: string[]): void {
-	const settings = boundSettings();
+export function setDisabledProviders(providerIds: string[], settings: Settings | undefined = boundSettings()): void {
 	if (settings) {
 		cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
 		return;
@@ -516,10 +522,9 @@ export function getEnabledProviders(): string[] {
 }
 
 /**
- * Set enabled providers from a list (replaces current set), persisting to the bound settings.
+ * Set enabled providers from a list (replaces current set), persisting to the supplied or bound settings.
  */
-export function setEnabledProviders(providerIds: string[]): void {
-	const settings = boundSettings();
+export function setEnabledProviders(providerIds: string[], settings: Settings | undefined = boundSettings()): void {
 	if (settings) {
 		cfgEnabledProviders.set(settings, [...new Set(providerIds)]);
 		return;

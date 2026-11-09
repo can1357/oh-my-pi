@@ -3,9 +3,8 @@
  *
  * Both the interactive `McpCommandController` and the shared ACP/text
  * `/mcp` dispatcher drive `/mcp reauth` through this module so the flow can
- * never drift between clients: server lookup precedence (project over user —
- * matching runtime discovery's first-wins enumeration — plus standalone
- * `mcp.json`/`.mcp.json` fallbacks), the anonymous connection
+ * never drift between clients: server lookup uses runtime provider, workspace,
+ * and filename precedence, including disabled name owners; the anonymous connection
  * probe, endpoint discovery, client-credential assembly (configured >
  * persisted > stored > metadata-advertised, DCR preferred), the browser flow
  * itself, and the persistence policy (url-keyed credential row, `auth` block
@@ -13,9 +12,11 @@
  * Callers supply only presentation: how the authorization URL and progress are
  * shown, and (TUI only) where manual code input comes from.
  */
-import * as path from "node:path";
-import { getMCPConfigPath, getProjectDir, toError } from "@oh-my-pi/pi-utils";
+import { getProjectDir, toError } from "@oh-my-pi/pi-utils";
 import type { OAuthController } from "@oh-my-pi/pi-ai/oauth/types";
+import type { Settings } from "../config/settings";
+import type { EffectiveExtensionRoots } from "../capability/types";
+import { getMcpConfigPath, loadAllMCPConfigs } from "./config";
 import { expandEnvVarsDeep } from "../discovery/helpers";
 import { connectToServer, disconnectServer } from "./client";
 import { readMCPConfigFile, updateMCPServer } from "./config-writer";
@@ -165,7 +166,9 @@ export interface FoundMcpServer {
 	filePath: string;
 	scope: "user" | "project";
 	config: MCPServerConfig;
-	/** Live-manager entry that lives in no writable config file; writes go to user scope. */
+	/** Effective runtime state, kept separate from raw config for safe write-back. */
+	effectiveEnabled?: boolean;
+	/** Definition lives outside writable native/standalone config; writes go to user scope. */
 	discovered: boolean;
 	/**
 	 * The manager entry belongs to an ACP-isolated session: the client declared
@@ -177,37 +180,28 @@ export interface FoundMcpServer {
 }
 
 /**
- * Resolve a server for an auth/test operation. Project wins over user on a
- * name collision — runtime discovery enumerates project paths first and
- * deduplicates first-wins, so the project entry is the server actually
- * invoked — then falls back to standalone `mcp.json` / `.mcp.json` (the
- * mcp-json discovery paths), then to runtime-discovered servers (`/mcp list`
- * surfaces marketplace/Claude-Code-plugin entries that live in no writable
- * config). For a discovered server, persisted changes are written into the
- * user config under the same namespaced name; the native provider
- * (priority 100) shadows the discovered entry after the next reload.
- *
- * `preferManager` flips the first step — but only for ACP-isolated managers:
- * ACP declares servers at `session/new` (source `provider: "acp"`), and
- * isolation means the manager entry is the server actually active while a
- * same-named file entry is inert. Print/RPC managers enumerate the same files
- * the lookup below reads, and their entries are env-expanded copies with
- * synthesized user-config paths — preferring them would shadow the real
- * project/user source, serialize expanded `${...}` placeholders, and write
- * fresh bindings to the wrong file.
+ * Resolve the winning definition through runtime discovery, including suppressed
+ * name owners. Owned JSON is read again without expansion before persistence.
+ * ACP may explicitly prefer its session-owned manager over file discovery.
  */
 export async function findMcpServerForAuth(
 	name: string,
 	cwd: string = getProjectDir(),
 	mcpManager?: MCPManager,
-	options?: { preferManager?: boolean; enableProjectConfig?: boolean },
+	options?: {
+		preferManager?: boolean;
+		enableProjectConfig?: boolean;
+		settings?: Settings | null;
+		extensionRoots?: EffectiveExtensionRoots;
+	},
 ): Promise<FoundMcpServer | null> {
+	const userPath = getMcpConfigPath("user", cwd, options?.settings);
 	if (options?.preferManager) {
 		const managerConfig = mcpManager?.getServerConfig(name);
 		const managerSource = mcpManager?.getSource(name);
 		if (managerConfig && managerSource?.provider === "acp") {
 			return {
-				filePath: getMCPConfigPath("user", cwd),
+				filePath: userPath,
 				scope: "user",
 				config: managerConfig,
 				discovered: true,
@@ -215,54 +209,38 @@ export async function findMcpServerForAuth(
 			};
 		}
 	}
-	const userPath = getMCPConfigPath("user", cwd);
-	const projectPath = getMCPConfigPath("project", cwd);
-
-	// `mcp.enableProjectConfig: false` opts the project out of project-scoped
-	// config at startup; the lookup must not resurrect an opted-out entry here
-	// (a reauth would write a credential binding for a server that never loads).
-	const enableProjectConfig = options?.enableProjectConfig ?? true;
-	const [userConfig, projectConfig] = await Promise.all([
-		readMCPConfigFile(userPath),
-		enableProjectConfig ? readMCPConfigFile(projectPath) : Promise.resolve(null),
-	]);
-
-	// Project wins over user on a name collision: runtime discovery enumerates
-	// project paths first and deduplicates first-wins, so the project entry is
-	// the server users actually invoke. Refreshing the user shadow instead
-	// would report success while the active project server keeps its stale
-	// credential after the next reload.
-	if (enableProjectConfig && projectConfig?.mcpServers?.[name]) {
-		return { filePath: projectPath, scope: "project", config: projectConfig.mcpServers[name], discovered: false };
-	}
-	if (userConfig.mcpServers?.[name]) {
-		return { filePath: userPath, scope: "user", config: userConfig.mcpServers[name], discovered: false };
-	}
-
-	// Standalone fallback files match the discovery paths used by the
-	// mcp-json provider; precedence is preserved by iteration order. Both are
-	// project-level sources, so the same `enableProjectConfig` opt-out applies.
-	const standalonePaths = enableProjectConfig ? [path.join(cwd, "mcp.json"), path.join(cwd, ".mcp.json")] : [];
-	const fallbackConfigs = await Promise.all(
-		standalonePaths.map(async fallbackPath => {
-			try {
-				return await readMCPConfigFile(fallbackPath);
-			} catch {
-				// Malformed JSON in a standalone file — skip and continue lookup.
-				return null;
-			}
-		}),
-	);
-	for (const [index, fallbackConfig] of fallbackConfigs.entries()) {
-		const config = fallbackConfig?.mcpServers?.[name];
-		if (config) {
-			return { filePath: standalonePaths[index]!, scope: "project", config, discovered: false };
+	const { configs, sources } = await loadAllMCPConfigs(cwd, {
+		settings: options?.settings,
+		extensionRoots: options?.extensionRoots,
+		enableProjectConfig: options?.enableProjectConfig,
+		includeSuppressed: true,
+		filterExa: false,
+	});
+	const discoveredConfig = configs[name];
+	const discoveredSource = sources[name];
+	if (discoveredConfig && discoveredSource) {
+		const owned = discoveredSource.provider === "native" || discoveredSource.provider === "mcp-json";
+		if (owned) {
+			const raw = (await readMCPConfigFile(discoveredSource.path)).mcpServers?.[name];
+			if (!raw) return null;
+			return {
+				filePath: discoveredSource.path,
+				scope: discoveredSource.level === "project" ? "project" : "user",
+				config: raw,
+				effectiveEnabled: discoveredConfig.enabled !== false,
+				discovered: false,
+			};
 		}
+		return { filePath: userPath, scope: "user", config: discoveredConfig, discovered: true };
 	}
 
 	const config = mcpManager?.getServerConfig(name);
 	const source = mcpManager?.getSource(name);
 	if (!config || !source) return null;
+	if (options?.enableProjectConfig === false && source.level === "project") return null;
+	// Owned sources must pass current-profile, workspace and provider discovery;
+	// a stale manager entry cannot bypass a revoked boundary or source opt-out.
+	if (source.provider === "native" || source.provider === "mcp-json") return null;
 
 	return { filePath: userPath, scope: "user", config, discovered: true };
 }
@@ -736,7 +714,7 @@ export async function reauthorizeMcpServer(
 	opts: McpReauthOptions,
 ): Promise<McpReauthOutcome> {
 	const { authStorage } = opts;
-	if (found.config.enabled === false) {
+	if ((found.effectiveEnabled ?? found.config.enabled) === false) {
 		throw new McpReauthRefusalError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 	}
 

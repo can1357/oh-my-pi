@@ -405,6 +405,11 @@ owning settings instance's user layer grants `mcp.workspaceRoots`; project,
 CLI, runtime, and child-overlay layers cannot broaden it. A borrowed manager
 keeps its original owner's settings and connections.
 
+Extension-dashboard MCP, provider, and user-source toggles also read and persist
+the displayed session's settings. Lower-level provider/source mutation helpers
+accept an optional owning `Settings`; omission retains the current discovery
+holder's behavior.
+
 ## `createAgentSession()` return value
 
 ```ts
