@@ -505,6 +505,44 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
 	});
 
+	it("keeps a per-call model's explicit :level over the coarse effort hint", async () => {
+		const model = getBundledModel("anthropic", "claude-opus-5-5");
+		if (!model) throw new Error("Expected claude-opus-5-5 model to exist");
+		const selector = `${model.provider}/${model.id}`;
+		const settings = Settings.isolated({ "task.perCallModel": "on", modelRoles: { task: selector } });
+		const modelRegistry = {
+			...createModelRegistry(model),
+			getAll: () => [model],
+			awaitBackgroundRefresh: async () => {},
+		} as unknown as ModelRegistry;
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			const child = Object.assign(yieldEmittingSession(), {
+				model,
+				configuredThinkingLevel: () => options?.thinkingLevel,
+			});
+			return createSessionResult(child);
+		});
+		const spawn = (modelOverride: string) =>
+			runSubprocess({
+				...baseOptions,
+				id: `subagent-per-call-effort-${modelOverride}`,
+				modelOverride,
+				perCallModelGrants: { settings, agentName: "task", agentSource: "bundled" },
+				effort: "hi",
+				settings,
+				modelRegistry,
+			});
+
+		expect((await spawn(`${selector}:xhigh`)).exitCode).toBe(0);
+		// Without a `:level`, the hint still picks the model's highest supported effort.
+		expect((await spawn(selector)).exitCode).toBe(0);
+
+		expect(spy.mock.calls.map(([options]) => options?.thinkingLevel)).toEqual([
+			ThinkingLevel.XHigh,
+			ThinkingLevel.Max,
+		]);
+	});
+
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
