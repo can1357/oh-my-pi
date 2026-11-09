@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Sessions on a full disk keep refused appends and drain them in order when space returns, without rebuilding the whole transcript for a rewrite the disk cannot hold ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Session titles persist as ordered journal entries, keeping renames and follow-up turns intact across session switches, rollback, cloning, and shutdown; a rename the full disk held back reaches the recent-sessions list once its line lands; read-only sessions leave journals untouched, and failed closes retain pending writes and ownership ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- SQL and Redis session lists use indexed titles without repeatedly scanning journals, respect cleared titles and compaction-summary fallbacks, and keep externally managed six-column SQL tables working with `createTable: false` and no DDL ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+- Continue picks among sessions with equal modification times by creation time and path, as session lists order them, without scanning older journals ([#17431](https://github.com/can1357/oh-my-pi/pull/17431) by [@AdamDureyAtWillship](https://github.com/AdamDureyAtWillship))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

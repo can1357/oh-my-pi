@@ -9,8 +9,10 @@ import {
 	type SessionStorageWriteOptions,
 	type WriteTextAtomicOptions,
 } from "./session-storage";
+import { SESSION_LIST_SUFFIX_BYTES, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import { enoent } from "./session-storage-errors";
 import {
+	latestTitleChangeFromContent,
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
 	parseTitleSlotFromContent,
@@ -25,6 +27,10 @@ export interface SessionStorageIndexEntry {
 	title?: string;
 	titleSource?: SessionTitleUpdate["source"];
 	titleUpdatedAt?: string;
+	/** Body byte length whose complete journal is represented by the title fields. */
+	titleIndexedSize?: number;
+	/** A compatibility backend whose persisted title fields are authoritative without a size column. */
+	titleMetadataAuthoritative?: boolean;
 }
 
 export interface SessionStorageBackend {
@@ -43,8 +49,16 @@ export interface SessionStorageBackend {
 		title?: SessionTitleUpdate,
 		expectedSize?: number | null,
 	): Promise<void>;
-	append(path: string, line: string, mtimeMs: number): Promise<void>;
-	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
+	append(
+		path: string,
+		line: string,
+		mtimeMs: number,
+		title?: SessionTitleUpdate,
+		titleIndexedSize?: number,
+	): Promise<void>;
+	/** Lazily publish legacy journal metadata only while the body still has `size` bytes. */
+	indexTitle?(path: string, title: SessionTitleUpdate | undefined, size: number): Promise<boolean | void>;
+	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number, size?: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
 	move(src: string, dst: string, mtimeMs: number): Promise<void>;
@@ -56,6 +70,7 @@ interface IndexEntry {
 	title?: string;
 	titleSource?: SessionTitleUpdate["source"];
 	titleUpdatedAt?: string;
+	titleIndexedSize?: number;
 	/**
 	 * Set on an entry restored after a failed removal: the backend may have
 	 * deleted part of the path (Redis deletes the file key before the
@@ -80,6 +95,8 @@ interface EnqueueOptions {
 interface IndexAppend {
 	mtimeMs: number;
 	previous: IndexEntry | undefined;
+	title?: SessionTitleUpdate;
+	titleIndexedSize?: number;
 	/** Set when the queued op removes the path (unlink, delete, rename source). */
 	removal?: true;
 }
@@ -112,8 +129,18 @@ function uniquePaths(paths: readonly string[]): string[] {
 	return out;
 }
 function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined {
-	if (!entry.titleUpdatedAt) return undefined;
+	if (entry.titleUpdatedAt === undefined) return undefined;
 	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
+}
+
+/**
+ * The title a full body carries: the writer's current title when it gives one, else the newest journal title over
+ * the slot. A current title without a title is a cleared one, indexed without a title rather than as "".
+ */
+function bodyTitle(content: string, options?: SessionStorageWriteOptions): SessionTitleUpdate | undefined {
+	const current = options?.currentTitle;
+	if (current) return { ...current, title: current.title || undefined };
+	return latestTitleChangeFromContent(content) ?? titleUpdateFromSlot(parseTitleSlotFromContent(content));
 }
 
 export class IndexedSessionStorage implements SessionStorage {
@@ -139,7 +166,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	 */
 	readonly #pendingFrames = new Map<string, IndexAppend[]>();
 	#nextMtimeMs = 0;
-	#firstDrainError: Error | undefined;
+	readonly #drainErrors = new Map<string, Error>();
 	#assertExpectedSize(path: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		const actualSize = this.#index.get(path)?.size ?? null;
@@ -162,14 +189,46 @@ export class IndexedSessionStorage implements SessionStorage {
 		const rows = await this.#backend.loadIndex();
 		this.#index.clear();
 		for (const row of rows) {
-			const title = row.titleUpdatedAt
-				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
-				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title);
+			const title =
+				row.titleUpdatedAt || row.titleMetadataAuthoritative
+					? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt ?? "" }
+					: null;
+			// Empty updatedAt preserves a known legacy title/source without inventing a missing timestamp.
+			this.#setIndex(
+				row.path,
+				row.size,
+				row.mtimeMs,
+				title,
+				row.titleIndexedSize ?? (row.titleMetadataAuthoritative ? row.size : undefined),
+			);
 		}
 	}
 
-	async drain(): Promise<void> {
+	async drain(path?: string, excludedPaths?: ReadonlySet<string>): Promise<void> {
+		if (path !== undefined) {
+			let pending: Promise<void> | undefined;
+			while ((pending = this.#pathPending.get(path))) await Promise.allSettled([pending]);
+			const error = this.#drainErrors.get(path);
+			this.#drainErrors.delete(path);
+			if (error) throw error;
+			return;
+		}
+		if (excludedPaths?.size) {
+			for (;;) {
+				const pending: Promise<void>[] = [];
+				for (const [file, operation] of this.#pathPending) if (!excludedPaths.has(file)) pending.push(operation);
+				if (pending.length === 0) break;
+				await Promise.allSettled(pending);
+			}
+			let failure: Error | undefined;
+			for (const [file, error] of this.#drainErrors) {
+				if (excludedPaths.has(file)) continue;
+				failure ??= error;
+				this.#drainErrors.delete(file);
+			}
+			if (failure) throw failure;
+			return;
+		}
 		// Quiesce EVERY pending backend operation, not just the drain-tracked
 		// fire-and-forget publishes: an atomic write whose commit guard passed
 		// just before a terminal seal is still on the wire with
@@ -178,8 +237,8 @@ export class IndexedSessionStorage implements SessionStorage {
 		while (this.#drainPending.size > 0 || this.#pathPending.size > 0) {
 			await Promise.allSettled([...this.#drainPending, ...this.#pathPending.values()]);
 		}
-		const error = this.#firstDrainError;
-		this.#firstDrainError = undefined;
+		const error = this.#drainErrors.values().next().value;
+		this.#drainErrors.clear();
 		if (error) throw error;
 	}
 
@@ -219,8 +278,9 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		const title = bodyTitle(content, options);
+		const size = byteLength(content);
+		this.#setIndex(path, size, mtimeMs, title ?? null, size);
 		this.#pushFrame(path, { mtimeMs, previous });
 		const write = this.#enqueuePath(
 			path,
@@ -240,13 +300,18 @@ export class IndexedSessionStorage implements SessionStorage {
 			title: title.title,
 			titleSource: title.source,
 			titleUpdatedAt: title.updatedAt,
+			titleIndexedSize: previous.size,
 			mtimeMs,
 		};
 		this.#index.set(path, next);
 		this.#pushFrame(path, { mtimeMs, previous });
-		const pending = this.#enqueuePath(path, () => this.#backend.updateSessionTitle(path, title, mtimeMs), {
-			trackDrain: false,
-		});
+		const pending = this.#enqueuePath(
+			path,
+			() => this.#backend.updateSessionTitle(path, title, mtimeMs, previous.size),
+			{
+				trackDrain: false,
+			},
+		);
 		this.#trackFrame(path, mtimeMs, pending);
 		try {
 			await pending;
@@ -281,25 +346,81 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async readText(path: string): Promise<string> {
+		await this.#awaitPath(path);
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(path);
-		await this.#awaitPath(path);
 		const content = await this.#backend.readFull(path);
 		if (content === null) throw enoent(path);
 		const title = titleUpdateForIndex(entry);
-		return title ? overlayTitleSlotContent(content, title) : content;
+		return title && parseTitleSlotFromContent(content) && !latestTitleChangeFromContent(content)
+			? overlayTitleSlotContent(content, title)
+			: content;
 	}
 
 	async readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		await this.#awaitPath(path);
 		const entry = this.#index.get(path);
 		if (!entry) throw enoent(path);
 		const prefixLimit = normalizeByteLimit(prefixBytes);
 		const suffixLimit = normalizeByteLimit(suffixBytes);
 		if (prefixLimit === 0 && suffixLimit === 0) return ["", ""];
-		await this.#awaitPath(path);
-		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		const title = titleUpdateForIndex(entry);
-		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
+		// Validate a complete physical slot before overlaying it: journal-titled
+		// legacy files can start directly with their session header.
+		const headLimit = title && prefixLimit > 0 ? Math.max(prefixLimit, SESSION_TITLE_SLOT_BYTES) : prefixLimit;
+		const [prefix, suffix] = await this.#backend.readSlices(path, headLimit, suffixLimit);
+		if (title && parseTitleSlotFromContent(prefix)) {
+			return [overlayTitleSlotPrefix(prefix, prefixLimit, title), suffix];
+		}
+		return [
+			headLimit === prefixLimit ? prefix : Buffer.from(prefix).subarray(0, prefixLimit).toString("utf8"),
+			suffix,
+		];
+	}
+
+	async readLatestTitle(path: string): Promise<SessionTitleUpdate | undefined> {
+		await this.#awaitPath(path);
+		const entry = this.#index.get(path);
+		if (!entry) throw enoent(path);
+		if (entry.titleIndexedSize === entry.size) return titleUpdateForIndex(entry);
+		let latest: SessionTitleUpdate | undefined;
+		await this.#enqueuePath(
+			path,
+			async () => {
+				const current = this.#index.get(path);
+				if (!current) throw enoent(path);
+				if (current.titleIndexedSize === current.size) {
+					latest = titleUpdateForIndex(current);
+					return;
+				}
+				// Small legacy rows fit entirely in the same bounded window listing uses.
+				// Larger rows need one full scan to rule out a title in the unbounded middle.
+				const boundedBytes = SESSION_TITLE_SLOT_BYTES + SESSION_LIST_SUFFIX_BYTES;
+				let content: string | null;
+				if (current.size > 0 && current.size <= boundedBytes) {
+					const [prefix] = await this.#backend.readSlices(path, boundedBytes, 0);
+					content = byteLength(prefix) === current.size ? prefix : await this.#backend.readFull(path);
+				} else content = await this.#backend.readFull(path);
+				if (content === null) throw enoent(path);
+				const size = byteLength(content);
+				latest =
+					latestTitleChangeFromContent(content) ??
+					titleUpdateForIndex(current) ??
+					titleUpdateFromSlot(parseTitleSlotFromContent(content));
+				const indexed = await this.#backend.indexTitle?.(path, latest, size);
+				if (indexed !== false && this.#index.get(path) === current && current.size === size) {
+					this.#index.set(path, {
+						...current,
+						title: latest?.title,
+						titleSource: latest?.source,
+						titleUpdatedAt: latest?.updatedAt,
+						titleIndexedSize: size,
+					});
+				}
+			},
+			{ trackDrain: false },
+		);
+		return latest;
 	}
 
 	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {
@@ -312,8 +433,9 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		const title = latestTitleChangeFromContent(content) ?? titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		const size = byteLength(content);
+		this.#setIndex(path, size, mtimeMs, title ?? null, size);
 		this.#pushFrame(path, { mtimeMs, previous });
 		const pending = this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs, title), {
 			trackDrain: false,
@@ -333,8 +455,9 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const title = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-		this.#setIndex(path, byteLength(content), mtimeMs, title ?? null);
+		const title = bodyTitle(content, options);
+		const size = byteLength(content);
+		this.#setIndex(path, size, mtimeMs, title ?? null, size);
 		this.#pushFrame(path, { mtimeMs, previous });
 		try {
 			await this.#enqueuePath(
@@ -457,7 +580,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	_truncateForWriter(path: string): number {
 		const mtimeMs = this.#allocMtimeMs();
 		this.#pushFrame(path, { mtimeMs, previous: this.#index.get(path) });
-		this.#setIndex(path, 0, mtimeMs, null);
+		this.#setIndex(path, 0, mtimeMs, null, 0);
 		return mtimeMs;
 	}
 
@@ -479,8 +602,19 @@ export class IndexedSessionStorage implements SessionStorage {
 		const mtimeMs = this.#allocMtimeMs();
 		const previous = this.#index.get(path);
 		const size = (previous?.size ?? 0) + byteLength(line);
-		this.#setIndex(path, size, mtimeMs);
-		return { mtimeMs, previous };
+		const title =
+			latestTitleChangeFromContent(line) ??
+			(!previous?.size ? titleUpdateFromSlot(parseTitleSlotFromContent(line)) : undefined);
+		const titleIndexedSize = title || !previous || previous.titleIndexedSize === previous.size ? size : undefined;
+		const next: IndexEntry = {
+			...previous,
+			size,
+			mtimeMs,
+			titleIndexedSize,
+			...(title ? { title: title.title, titleSource: title.source, titleUpdatedAt: title.updatedAt } : {}),
+		};
+		this.#index.set(path, next);
+		return { mtimeMs, previous, title: titleUpdateForIndex(next), titleIndexedSize };
 	}
 
 	_queueAppend(path: string, line: string, append: IndexAppend, getError?: () => Error | undefined): Promise<void> {
@@ -491,7 +625,7 @@ export class IndexedSessionStorage implements SessionStorage {
 			async () => {
 				const error = getError?.();
 				if (error) throw error;
-				await this.#backend.append(path, line, mtimeMs);
+				await this.#backend.append(path, line, mtimeMs, append.title, append.titleIndexedSize);
 			},
 			{ trackDrain: true, abortOnPredecessorFailure: true },
 		);
@@ -512,6 +646,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		size: number,
 		mtimeMs: number,
 		title: SessionTitleUpdate | null | undefined = undefined,
+		titleIndexedSize?: number,
 	): void {
 		const current = title === undefined ? this.#index.get(path) : undefined;
 		this.#index.set(path, {
@@ -520,6 +655,7 @@ export class IndexedSessionStorage implements SessionStorage {
 			title: title === undefined ? current?.title : (title?.title ?? undefined),
 			titleSource: title === undefined ? current?.titleSource : (title?.source ?? undefined),
 			titleUpdatedAt: title === undefined ? current?.titleUpdatedAt : (title?.updatedAt ?? undefined),
+			titleIndexedSize,
 			// An append extends the current content, so it does not restore what a failed removal deleted.
 			...(current?.unconfirmed ? { unconfirmed: true } : {}),
 		});
@@ -626,7 +762,11 @@ export class IndexedSessionStorage implements SessionStorage {
 		const operation = Promise.all(previous).then(task);
 		const tracked = operation.catch(err => {
 			const error = toError(err);
-			if (options.trackDrain && !this.#firstDrainError) this.#firstDrainError = error;
+			if (options.trackDrain) {
+				for (const path of unique) {
+					if (!this.#drainErrors.has(path)) this.#drainErrors.set(path, error);
+				}
+			}
 			throw error;
 		});
 		const tail = tracked.catch(() => {});

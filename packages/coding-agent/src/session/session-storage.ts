@@ -101,6 +101,12 @@ export interface SessionStorageWriter {
 export interface SessionStorageWriteOptions {
 	/** Current UTF-8 byte length, or `null` when the target must not exist. */
 	expectedSize?: number | null;
+	/**
+	 * The writer's current title for this body, complete (the slot holds it truncated). Indexed backends index it
+	 * rather than the body's newest journal title, which can predate a metadata-only title the writer loaded.
+	 * Without it the journal outranks the slot, which another writer can have left stale.
+	 */
+	currentTitle?: SessionTitleUpdate;
 }
 
 /**
@@ -190,11 +196,16 @@ export interface SessionStorage {
 	 */
 	writeLinesSync?(path: string, lines: readonly string[], options?: SessionStorageWriteOptions): void;
 	/**
-	 * Update the current session title through the storage backend.
+	 * Update the current session title through the storage backend, without a journal line.
 	 *
 	 * File-like backends rewrite the fixed-width JSONL title slot; indexed
 	 * backends can store the semantic title fields and synthesize the slot when
-	 * reading.
+	 * reading. An indexed backend's title outranks the body's journal titles,
+	 * across later appends: a manager resuming the session takes it. A manager
+	 * already holding the session does not see it, and supersedes it with its
+	 * next whole-body write or a rename it adopts from another writer: the body
+	 * records no position for a title set here, so nothing orders it against
+	 * entries written meanwhile. `setSessionName` journals its title instead.
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;
@@ -210,6 +221,12 @@ export interface SessionStorage {
 	readTextSync?(path: string): string;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * Authoritative indexed title metadata, after pending writes for this path.
+	 * `undefined` means no indexed title; callers may use bounded header fallback.
+	 * Legacy metadata may be reconciled lazily on first lookup. Missing paths reject.
+	 */
+	readLatestTitle?(path: string): Promise<SessionTitleUpdate | undefined>;
 	/**
 	 * Feed each line of the file to `visit`, in order, until it returns true or
 	 * the file ends. Lets callers find records that fall between the bounded
@@ -255,8 +272,11 @@ export interface SessionStorage {
 	 * {@link IndexedSessionStorage}) await their per-path queues so a caller
 	 * driving a graceful shutdown does not exit while a fire-and-forget
 	 * `writeTextSync` publish is still on the wire.
+	 * When `path` is supplied, wait for and consume failures from that path only.
+	 * Without it, wait for all paths and consume every outstanding failure, except
+	 * explicitly excluded retired writer paths. Unrelated failures remain visible.
 	 */
-	drain(): Promise<void>;
+	drain(path?: string, excludedPaths?: ReadonlySet<string>): Promise<void>;
 }
 
 // FinalizationRegistry to clean up leaked file descriptors
@@ -1046,6 +1066,10 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
+		this.updateSessionTitleSync(fpath, update);
+	}
+
+	updateSessionTitleSync(fpath: string, update: SessionTitleUpdate): void {
 		const fd = fs.openSync(fpath, "r+");
 		try {
 			const buf = Buffer.from(serializeTitleSlot(update), "utf-8");
