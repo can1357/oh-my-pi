@@ -1039,6 +1039,7 @@ requires a request shape the server treats as off; for example,
 - `reasoningContentField` — assistant field carrying chain-of-thought: `"reasoning_content"`, `"reasoning"`, or `"reasoning_text"`. Default: auto.
 - `requiresReasoningContentForToolCalls` — assistant tool-call turns must round-trip the reasoning field. Default: endpoint/model policy (including DeepSeek, Kimi, and reasoning-enabled OpenRouter).
 - `allowsSyntheticReasoningContentForToolCalls` — allow a placeholder reasoning field when a prior assistant tool-call turn lacks provider reasoning content. Default: endpoint/model policy; set `false` for providers that validate the exact reasoning value.
+- `translatesResponsesToChatCompletions` — the endpoint accepts Responses requests but serves them by translating them into chat completions. Such a bridge reads a reasoning item's `summary` and fabricates `reasoning_content: "[reasoning unavailable]"` for a replayed tool-call turn that carries no reasoning item, which reasoning models then echo back as their own thinking. Set `true` for those proxies: the handler then gives every such turn a reasoning item whose summary carries the turn's own thinking. Default: `false`.
 - `requiresAssistantContentForToolCalls` — assistant tool-call turns must include non-empty text content. Default: endpoint/model policy (including Kimi and direct DeepSeek reasoning).
 - `whenThinking` — partial compat overrides applied only when a request actually engages thinking mode (deep-merged over the baseline compat).
 

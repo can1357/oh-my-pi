@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `translates-responses-to-chat-completions` compat axis (`translatesResponsesToChatCompletions`) for endpoints that accept Responses requests but serve them by translating them into chat completions; set it per model in `models.yml`. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
+
 ## [18.18.3] - 2026-11-09
 
 ### Changed

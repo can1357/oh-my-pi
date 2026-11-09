@@ -755,6 +755,7 @@ function resolveOpenAIResponsesPolicy(
 			(isAzure && !baseUrl) ||
 			hostMatchesUrl(baseUrl, "openaiCodex"),
 		supportsReasoningSummary: !isXaiHost,
+		translatesResponsesToChatCompletions: false,
 		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
@@ -880,6 +881,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		cacheControlFormat: compat.cacheControlFormat,
 		requiresReasoningOffJuiceInstruction: compat.requiresReasoningOffJuiceInstruction,
 		supportsReasoningSummary: compat.supportsReasoningSummary,
+		translatesResponsesToChatCompletions: compat.translatesResponsesToChatCompletions,
 		statefulResponses: compat.statefulResponses,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
 	} satisfies ResponsesOnlyCompat;

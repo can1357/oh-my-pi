@@ -350,6 +350,15 @@ export interface OpenAICompat {
 	includeEncryptedReasoning?: boolean;
 	/** Whether replayed Responses history should strip native `type: "reasoning"` items before request encoding. Default: false. */
 	filterReasoningHistory?: boolean;
+	/**
+	 * Whether the endpoint accepts Responses requests but serves them by
+	 * translating them into chat completions. Such a bridge reads a reasoning
+	 * item's `summary` and ignores its `content`, and it fabricates
+	 * `reasoning_content: "[reasoning unavailable]"` for a replayed tool-call
+	 * turn that carries no reasoning item — a placeholder reasoning models then
+	 * echo back as their own thinking. Default: false.
+	 */
+	translatesResponsesToChatCompletions?: boolean;
 	/** Optional `thinking.keep` value for Z.ai/Moonshot-style thinking params. Set false to suppress auto-detected keep. Default: auto-detected. */
 	thinkingKeep?: "all" | false;
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
@@ -1042,6 +1051,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
+			| "translatesResponsesToChatCompletions"
 			| "statefulResponses"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
@@ -1155,6 +1165,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * filling `"auto"`.
 	 */
 	supportsReasoningSummary: boolean;
+	/**
+	 * Whether the endpoint serves Responses requests by translating them into
+	 * chat completions. Such a bridge reads a reasoning item's `summary` and
+	 * fabricates `reasoning_content: "[reasoning unavailable]"` for a replayed
+	 * tool-call turn that carries no reasoning item.
+	 */
+	translatesResponsesToChatCompletions: boolean;
 	/** Optional chaining override; unset falls back to officialEndpoint at request time. */
 	statefulResponses?: boolean;
 	/**

@@ -3,6 +3,10 @@ import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
+import {
+	isSyntheticReasoningPlaceholder,
+	reasoningSignatureCarriesEncryptedReasoning,
+} from "../utils/reasoning-placeholder";
 import type {
 	Api,
 	AssistantMessage,
@@ -1090,6 +1094,14 @@ export function transformMessages<TApi extends Api>(
 					return [];
 				}
 				if (block.type === "thinking") {
+					// A gateway placeholder (`[reasoning unavailable]`) is not reasoning:
+					// the proxy injected it because it had nothing real to replay, and
+					// the model echoed it back as its own thinking. Demoting it to prose
+					// would re-inject the same text on every later turn, so drop it.
+					const placeholderText = isSyntheticReasoningPlaceholder(block.thinking);
+					if (placeholderText && !reasoningSignatureCarriesEncryptedReasoning(block.thinkingSignature)) {
+						return [];
+					}
 					// Only an aborted/errored turn's final (mid-stream) block can hold a
 					// partial signature; abandoned tool-use turns strip all. Drop the
 					// untrustworthy signature so the encoder can downgrade the block to text.
@@ -1098,6 +1110,14 @@ export function transformMessages<TApi extends Api>(
 						signatureUntrustworthy && block.thinkingSignature
 							? { ...block, thinkingSignature: undefined }
 							: block;
+					if (placeholderText) {
+						// The turn's signature carries the server's opaque reasoning blob —
+						// the real reasoning — while the text is only the placeholder. Keep
+						// the signature and drop the text: the blob still replays natively
+						// for the model that minted it, and the placeholder can neither be
+						// displayed nor demoted to prose.
+						sanitized = { ...sanitized, thinking: "" };
+					}
 					if (isAnthropicReplay) {
 						// A signature is only replayable where its issuer can verify it.
 						// Same-provider replays (including cross-model-id switches within

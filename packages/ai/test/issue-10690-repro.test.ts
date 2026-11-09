@@ -1,10 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import {
-	convertResponsesAssistantMessage,
-	SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
-} from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { convertResponsesAssistantMessage } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import { SYNTHETIC_REASONING_REPLAY_PLACEHOLDER } from "@oh-my-pi/pi-ai/utils/reasoning-placeholder";
 import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -134,7 +132,8 @@ describe("issue #10690: DeepSeek Responses replay must never synthesize empty re
 			true,
 			undefined,
 			undefined,
-			true,
+			undefined,
+			{ allTurns: true },
 		) as ResponsesInputItem[];
 		const reasoning = items.filter(item => item.type === "reasoning");
 		expect(reasoning).toHaveLength(1);

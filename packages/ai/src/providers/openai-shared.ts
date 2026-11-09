@@ -82,6 +82,14 @@ import {
 	truncateResponseItemId,
 } from "../utils";
 import {
+	hasEncryptedReasoningBlob,
+	isPlaceholderOnlyReasoningItem,
+	isSyntheticReasoningPlaceholder,
+	isUsableReasoningText,
+	stripPlaceholderReasoningParts,
+	SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
+} from "../utils/reasoning-placeholder";
+import {
 	clearStreamingPartialJson,
 	isCarriedReasoning,
 	kStreamingArgumentsDone,
@@ -2062,6 +2070,20 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForAllTurns?: boolean;
 	/** As {@link requiresReasoningReplayForAllTurns}, but only for turns that contain a tool call. */
 	requiresReasoningReplayForToolCalls?: boolean;
+	/**
+	 * Replay reasoning so that a proxy translating Responses requests into chat
+	 * completions has something real to forward.
+	 *
+	 * Such a proxy reads a reasoning item's `summary` and ignores `content`, so
+	 * an item without a summary reaches the upstream model as
+	 * `reasoning_content: "[reasoning unavailable]"`; a reasoning model then
+	 * repeats that placeholder back as its own thinking. The same proxy
+	 * fabricates the placeholder for every replayed tool-call turn that carries
+	 * no reasoning item at all. Targets behind such a proxy therefore get a
+	 * summary on every replayed reasoning item and a reasoning item of their own
+	 * on every tool-call turn.
+	 */
+	gatewayReasoningReplay?: boolean;
 	/** Naming rule for rebuilt `function_call` names; see {@link ResponsesToolNaming}. */
 	toolNaming?: ResponsesToolNaming;
 }
@@ -2421,9 +2443,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 										supportsCustomToolCalls,
 										customToolWireNameMap,
 										computerCallIds,
-										false,
-										false,
 										options.toolNaming,
+										{ gateway: options.gatewayReasoningReplay ?? false },
 									),
 								]
 							: nativeItems;
@@ -2432,6 +2453,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 						assistantMsg.stopReason,
 						options.requiresReasoningReplayForAllTurns ?? false,
 						options.requiresReasoningReplayForToolCalls ?? false,
+						options.gatewayReasoningReplay ?? false,
 					);
 					// Model-owned replay items can carry reserved control-token
 					// spellings as data (the model writing *about* Harmony); escape the
@@ -2467,9 +2489,12 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				supportsCustomToolCalls,
 				customToolWireNameMap,
 				computerCallIds,
-				options.requiresReasoningReplayForAllTurns ?? false,
-				options.requiresReasoningReplayForToolCalls ?? false,
 				options.toolNaming,
+				{
+					allTurns: options.requiresReasoningReplayForAllTurns ?? false,
+					toolCalls: options.requiresReasoningReplayForToolCalls ?? false,
+					gateway: options.gatewayReasoningReplay ?? false,
+				},
 			);
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
@@ -2531,27 +2556,25 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
 }
 
 /**
- * Non-empty `reasoning_text` shipped for a synthesized reasoning item when no
- * thinking text survived history reconstruction. DeepSeek-family Responses
- * targets (e.g. opencode-go) reject BOTH a missing reasoning item and one whose
- * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
- * passed back to the API" (#8248 covered the missing case, #10690 the empty
- * one). The item's presence plus a non-empty payload is what satisfies the
- * contract; the exact text is immaterial once the source turn's reasoning is
- * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
- * bare-dot synthetic placeholder on the chat-completions path.
+ * Builds a synthetic reasoning item for a replayed assistant turn.
+ *
+ * `withSummary` mirrors the text into a `summary_text` part: gateways that
+ * translate Responses requests to chat completions (cliproxy and friends) read
+ * the summary and ignore `content`, so an item carrying text only in `content`
+ * reaches the upstream model with no reasoning at all — the gateway then
+ * substitutes its own `[reasoning unavailable]` placeholder, which the model
+ * echoes back as thinking. Real synthesized text therefore rides in both slots.
  */
-export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
-
 function createSyntheticResponsesReasoningItem(
 	text = SYNTHETIC_REASONING_REPLAY_PLACEHOLDER,
 	id?: string,
+	withSummary = false,
 ): ResponseReasoningItem {
 	const item = {
 		type: "reasoning",
 		...(id ? { id } : {}),
-		summary: [],
-		content: [{ type: "reasoning_text", text }],
+		summary: withSummary ? [{ type: "summary_text" as const, text }] : [],
+		content: [{ type: "reasoning_text" as const, text }],
 	} satisfies Omit<ResponseReasoningItem, "id"> & Partial<Pick<ResponseReasoningItem, "id">>;
 	// The vendored SDK type marks `id` required; the wire accepts its absence.
 	return item as ResponseReasoningItem;
@@ -2570,14 +2593,41 @@ function createSyntheticResponsesReasoningItem(
  */
 function withRequiredReasoningText(item: ResponseReasoningItem): ResponseReasoningItem {
 	if (typeof item.encrypted_content === "string") return item;
-	if (item.content?.some(part => part.type === "reasoning_text" && part.text.trim().length > 0)) return item;
+	if (item.content?.some(part => part.type === "reasoning_text" && isUsableReasoningText(part.text))) return item;
 	const summaryText = (item.summary ?? [])
 		.map(part => part.text)
-		.filter(text => text.trim().length > 0)
+		.filter(isUsableReasoningText)
 		.join("\n\n");
 	return {
 		...item,
 		content: [{ type: "reasoning_text", text: summaryText || SYNTHETIC_REASONING_REPLAY_PLACEHOLDER }],
+	};
+}
+
+/**
+ * Give a replayed reasoning item a summary when it has none.
+ *
+ * A proxy translating Responses requests into chat completions reads the
+ * `summary` and ignores `content`, so an item without a summary reaches the
+ * upstream model with the proxy's own `[reasoning unavailable]` placeholder
+ * instead of the reasoning. The item's own `reasoning_text` is the text to
+ * forward; a bare dot stands in when the item carries no text either, matching
+ * the chat-completions path's synthetic reasoning content.
+ */
+function withGatewayReasoningSummary(item: ResponseReasoningItem): ResponseReasoningItem {
+	// The gateway's placeholder text never reaches the wire: it is not
+	// reasoning, and a bridge that forwards it makes the model repeat it.
+	const stripped = stripPlaceholderReasoningParts(item);
+	const usableSummary = (stripped.summary ?? []).filter(part => isUsableReasoningText(part.text));
+	if (usableSummary.length > 0) return stripped;
+	const reasoningText = (stripped.content ?? [])
+		.filter(part => part.type === "reasoning_text")
+		.map(part => part.text)
+		.filter(isUsableReasoningText)
+		.join("\n\n");
+	return {
+		...stripped,
+		summary: [{ type: "summary_text", text: reasoningText || "." }],
 	};
 }
 
@@ -2592,8 +2642,11 @@ function ensureRequiredResponsesReasoningReplay(
 	stopReason: AssistantMessage["stopReason"],
 	requiresAllTurns: boolean,
 	requiresToolCalls: boolean,
+	gatewayReasoningReplay = false,
 ): ResponseInput {
-	if (stopReason === "error" || (!requiresAllTurns && !requiresToolCalls)) return items;
+	if (stopReason === "error" || (!requiresAllTurns && !requiresToolCalls && !gatewayReasoningReplay)) {
+		return items;
+	}
 
 	const repaired: ResponseInput = [];
 	let changed = false;
@@ -2607,20 +2660,51 @@ function ensureRequiredResponsesReasoningReplay(
 		for (let turnIndex = turnStart; turnIndex < index; turnIndex++) {
 			const item = items[turnIndex];
 			if (item.type === "reasoning") {
-				hasReasoning = true;
+				// A gateway placeholder is not reasoning: it must not satisfy the
+				// requirement, and it must not be replayed.
+				if (!isPlaceholderOnlyReasoningItem(item)) hasReasoning = true;
 				continue;
 			}
 			hasContent = true;
 			if (classifyResponsesBatchItem(item) === "call") hasToolCall = true;
 		}
+		// A target that demands `reasoning_text` on the turn needs the text filled
+		// in; a gateway target needs a summary the proxy can read. The two are
+		// separate contracts: filling the text for a gateway target would change
+		// an item the provider sent verbatim.
 		const required = hasContent && (requiresAllTurns || (requiresToolCalls && hasToolCall));
-		if (required && !hasReasoning) {
-			repaired.push(createSyntheticResponsesReasoningItem());
+		const gatewayRequired = hasContent && gatewayReasoningReplay && hasToolCall;
+		// Targets that demand reasoning replay get omp's own placeholder; the
+		// gateway path gets a neutral dot so a proxy does not substitute its
+		// `[reasoning unavailable]` stand-in, which reasoning models echo back.
+		if ((required || gatewayRequired) && !hasReasoning) {
+			repaired.push(
+				createSyntheticResponsesReasoningItem(
+					gatewayReasoningReplay ? "." : undefined,
+					undefined,
+					gatewayReasoningReplay,
+				),
+			);
 			changed = true;
 		}
 		for (let turnIndex = turnStart; turnIndex < index; turnIndex++) {
 			const item = items[turnIndex];
-			const replayed = required && item.type === "reasoning" ? withRequiredReasoningText(item) : item;
+			if (item.type === "reasoning" && isPlaceholderOnlyReasoningItem(item)) {
+				// Drop the placeholder item; the synthetic item above replaces it.
+				changed = true;
+				continue;
+			}
+			let replayed = item;
+			if (item.type === "reasoning") {
+				// A gateway placeholder is not reasoning: strip it from the item even
+				// when the item also carries the server's opaque reasoning blob.
+				const reasoningItem = stripPlaceholderReasoningParts(item);
+				replayed = required ? withRequiredReasoningText(reasoningItem) : reasoningItem;
+				// A proxy reads the summary and ignores the content, so an item
+				// without a usable summary reaches the upstream model as the
+				// proxy's own `[reasoning unavailable]` placeholder.
+				if (gatewayReasoningReplay) replayed = withGatewayReasoningSummary(replayed);
+			}
 			if (replayed !== item) changed = true;
 			repaired.push(replayed);
 		}
@@ -2628,6 +2712,23 @@ function ensureRequiredResponsesReasoningReplay(
 		turnStart = index + 1;
 	}
 	return changed ? repaired : items;
+}
+
+/**
+ * How replayed assistant turns must carry reasoning.
+ */
+export interface ResponsesReasoningReplay {
+	/** Every replayed assistant turn must carry a reasoning item (DeepSeek family). */
+	allTurns?: boolean;
+	/** Replayed assistant turns that call a tool must carry a reasoning item. */
+	toolCalls?: boolean;
+	/**
+	 * The endpoint translates Responses requests into chat completions: it reads
+	 * a reasoning item's `summary` and substitutes its own
+	 * `[reasoning unavailable]` placeholder for a replayed tool-call turn that
+	 * carries no reasoning item.
+	 */
+	gateway?: boolean;
 }
 
 export function convertResponsesAssistantMessage<TApi extends Api>(
@@ -2641,9 +2742,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	customToolWireNameMap?: ReadonlyMap<string, string>,
 	computerCallIds?: Set<string>,
-	requiresReasoningReplayForAllTurns = false,
-	requiresReasoningReplayForToolCalls = false,
 	toolNaming?: ResponsesToolNaming,
+	reasoningReplay?: ResponsesReasoningReplay,
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
@@ -2665,8 +2765,17 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	// empty-`reasoning_content` safety net.
 	const requiresReasoningItem =
 		assistantMsg.stopReason !== "error" &&
-		(requiresReasoningReplayForAllTurns ||
-			(requiresReasoningReplayForToolCalls && assistantMsg.content.some(block => block.type === "toolCall")));
+		(reasoningReplay?.allTurns === true ||
+			(reasoningReplay?.toolCalls === true && assistantMsg.content.some(block => block.type === "toolCall")));
+	// A proxy that translates Responses requests into chat completions fabricates
+	// `reasoning_content: "[reasoning unavailable]"` for every replayed tool-call
+	// turn that carries no reasoning item, and reasoning models echo that
+	// placeholder back as their own thinking. Give those turns a reasoning item
+	// of their own so the proxy forwards real text.
+	const synthesizeReasoningItem =
+		assistantMsg.stopReason !== "error" &&
+		reasoningReplay?.gateway === true &&
+		assistantMsg.content.some(block => block.type === "toolCall");
 	let reasoningItemEmitted = false;
 	const carriedReasoningTexts: string[] = [];
 	let synthesizedReasoningItemId: string | undefined;
@@ -2676,21 +2785,44 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			if (requiresReasoningItem) {
 				if (block.itemId) synthesizedReasoningItemId ??= block.itemId;
 				if (block.thinking.trim().length > 0) carriedReasoningTexts.push(block.thinking);
+			} else if (synthesizeReasoningItem) {
+				// The turn's own thinking is the only real reasoning available for a
+				// gateway target; keep it for the synthesized item.
+				if (isUsableReasoningText(block.thinking)) {
+					carriedReasoningTexts.push(block.thinking);
+				}
 			}
 			// Reasoning carried from another host of the same model has no stored
 			// item (its id belonged to that host). Its plaintext item references no
 			// server state, so it replays on a cold session too.
 			if (isCarriedReasoning(block)) {
-				outputItems.push(createSyntheticResponsesReasoningItem(block.thinking));
+				if (isSyntheticReasoningPlaceholder(block.thinking)) continue;
+				outputItems.push(
+					createSyntheticResponsesReasoningItem(block.thinking, undefined, reasoningReplay?.gateway === true),
+				);
 				reasoningItemEmitted = true;
 				continue;
 			}
 			if (!includeThinkingSignatures) {
 				continue;
 			}
-			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
-			if (reasoningItem) {
-				outputItems.push(requiresReasoningItem ? withRequiredReasoningText(reasoningItem) : reasoningItem);
+			const parsedReasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+			if (parsedReasoningItem) {
+				if (isPlaceholderOnlyReasoningItem(parsedReasoningItem)) {
+					// A gateway placeholder, not reasoning: replaying it would feed the
+					// placeholder back to the model. The synthesized item below takes
+					// this turn's place instead.
+					continue;
+				}
+				// A gateway placeholder is not reasoning: strip it from the item even
+				// when the item also carries the server's opaque reasoning blob.
+				const reasoningItem = stripPlaceholderReasoningParts(parsedReasoningItem);
+				let replayed = requiresReasoningItem ? withRequiredReasoningText(reasoningItem) : reasoningItem;
+				// A proxy reads the summary and ignores the content, so an item
+				// without a usable summary reaches the upstream model as the
+				// proxy's own `[reasoning unavailable]` placeholder.
+				if (reasoningReplay?.gateway === true) replayed = withGatewayReasoningSummary(replayed);
+				outputItems.push(replayed);
 				reasoningItemEmitted = true;
 			}
 			continue;
@@ -2795,7 +2927,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		});
 	}
 
-	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
+	if ((requiresReasoningItem || synthesizeReasoningItem) && !reasoningItemEmitted && outputItems.length > 0) {
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
 		// carries the `reasoning_text` the provider requires. When no thinking
@@ -2809,9 +2941,15 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 		// … was not found or has expired", and the targets that need the item
 		// (DeepSeek, Kimi, Meta) all accept it without an id.
 		const carriedReasoningText = carriedReasoningTexts.join("\n");
+		// A proxy target must never receive omp's placeholder: the proxy turns a
+		// missing or empty reasoning payload into `[reasoning unavailable]`, which
+		// the model then repeats as its own thinking. Real text rides along in the
+		// summary; a neutral dot stands in when the turn has no reasoning left.
 		const reasoningText =
-			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
-		outputItems.unshift(createSyntheticResponsesReasoningItem(reasoningText, synthesizedReasoningItemId));
+			carriedReasoningText || (synthesizeReasoningItem ? "." : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER);
+		outputItems.unshift(
+			createSyntheticResponsesReasoningItem(reasoningText, synthesizedReasoningItemId, synthesizeReasoningItem),
+		);
 	}
 
 	return outputItems;
@@ -3864,9 +4002,26 @@ export async function processResponsesStream<TApi extends Api>(
 								| ThinkingContent
 								| undefined);
 				if (reasoningBlock) {
-					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
-					reasoningBlock.thinkingSignature = JSON.stringify(item);
-					settleReasoningSummary(item, reasoningBlock);
+					const finalizedThinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
+					if (isSyntheticReasoningPlaceholder(finalizedThinking)) {
+						// A gateway placeholder (`[reasoning unavailable]`) is not reasoning:
+						// the proxy had nothing real to send and the model merely echoed
+						// it back. Storing or replaying it would keep the session pinned to
+						// that text, so leave the block empty and unreplayable.
+						reasoningBlock.thinking = "";
+						reasoningBlock.summary = false;
+						// The item's opaque reasoning blob is the server's own reasoning:
+						// keep it so the model that minted it can still replay it. The
+						// placeholder text goes with it — it is not reasoning.
+						const stripped = stripPlaceholderReasoningParts(item);
+						reasoningBlock.thinkingSignature = hasEncryptedReasoningBlob(stripped)
+							? JSON.stringify(stripped)
+							: undefined;
+					} else {
+						reasoningBlock.thinking = finalizedThinking;
+						reasoningBlock.thinkingSignature = JSON.stringify(item);
+						settleReasoningSummary(item, reasoningBlock);
+					}
 					if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(item);
 					stream.push({
 						type: "thinking_end",
