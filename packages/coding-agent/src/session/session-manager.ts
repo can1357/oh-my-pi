@@ -888,6 +888,9 @@ interface SessionBodyStamp {
 	revision: number;
 	/** Serialized title slot and header lines. */
 	prefix: string;
+	/** Session and title the slot was serialized with, for the recent-sessions index once the body lands. */
+	sessionId: string;
+	title: string | undefined;
 }
 
 /**
@@ -1630,6 +1633,7 @@ export class SessionManager {
 			this.#abandonUnappendedTail();
 			return true;
 		}
+		let landedTitle: string | undefined;
 		try {
 			const writer = this.#appendWriter();
 			if (!writer.appendSync) {
@@ -1637,10 +1641,12 @@ export class SessionManager {
 				return true;
 			}
 			while (this.#unappendedTail.length > 0) {
-				const line = this.#lineFor(this.#unappendedTail[0]!);
+				const entry = this.#unappendedTail[0]!;
+				const line = this.#lineFor(entry);
 				writer.appendSync(line);
 				this.#recordDurableAppend(line);
 				this.#unappendedTail.shift();
+				if (entry.type === TITLE_CHANGE_ENTRY_TYPE) landedTitle = entry.title;
 			}
 			this.#prospectiveDiskSize = this.#expectedDiskSize ?? this.#prospectiveDiskSize;
 		} catch (err) {
@@ -1651,6 +1657,9 @@ export class SessionManager {
 			}
 			this.#abandonUnappendedTail();
 			return true;
+		} finally {
+			// The journal's newest title is now the last title line this drain appended.
+			if (landedTitle !== undefined) this.#indexDurableTitle(this.#sessionId, landedTitle);
 		}
 		this.#clearDiskError();
 		return true;
@@ -1948,6 +1957,18 @@ export class SessionManager {
 				return index < 0 || index >= stamp.entryCount;
 			});
 		}
+		// The body's title slot is the session's title as serialized, whatever the live title is now.
+		if (stamp.title !== undefined) this.#indexDurableTitle(stamp.sessionId, stamp.title);
+	}
+
+	/**
+	 * Keep the recent-sessions title index on the title the file now holds. setSessionName indexes
+	 * a title its flush landed; a line the full volume held back lands later, by the queued-tail
+	 * append or a whole-file rewrite, possibly from a clone or a restored snapshot.
+	 */
+	#indexDurableTitle(sessionId: string, title: string): void {
+		if (!this.#persist || !(this.#storage instanceof FileSessionStorage) || sessionId !== this.#sessionId) return;
+		recordSessionTitle(sessionId, title);
 	}
 
 	/**
@@ -2027,6 +2048,8 @@ export class SessionManager {
 			lastEntry: entries.at(-1),
 			revision: this.#bodyRevision,
 			prefix: titleLine + headerLine,
+			sessionId: this.#sessionId,
+			title: this.#sessionName,
 		};
 		return { lines, bytes, stamp };
 	}
@@ -4120,7 +4143,8 @@ export class SessionManager {
 		this.#recordEntry(entry);
 		await this.flush();
 		// Keep the recent-sessions title index current so welcome-screen lookups
-		// never have to content-scan this session's file.
+		// never have to content-scan this session's file. A line the full volume
+		// held back is indexed where it lands (#indexDurableTitle).
 		if (this.#persist && this.#storage instanceof FileSessionStorage) {
 			recordSessionTitle(sessionId, title);
 		}

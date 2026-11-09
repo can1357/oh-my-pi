@@ -98,6 +98,17 @@ function appendWhileFull(manager: SessionManager, text: string): void {
 	}
 }
 
+async function renameWhileFull(manager: SessionManager, title: string): Promise<void> {
+	const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+		throw fsError("ENOSPC");
+	});
+	try {
+		await expect(manager.setSessionName(title, "user")).rejects.toThrow("ENOSPC");
+	} finally {
+		diskFull.mockRestore();
+	}
+}
+
 /** statfs of a volume with one free block, for root and everyone else. */
 const nearlyFullVolume = { bavail: 1, bfree: 1, bsize: 4096 } as unknown as fs.StatsFs;
 
@@ -532,6 +543,157 @@ describe("session persistence on a full volume", () => {
 		expect(usersOnDisk(sessionFile)).toEqual(["before", "queued", "after"]);
 		const reopened = await SessionManager.open(sessionFile);
 		expect(reopened.getSessionName()).toBe("Older file topic");
+	});
+
+	it("indexes a queued title in recent sessions once a later rewrite lands it", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-rewrite-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendMessage(userMessage("before"));
+		const diskFull = spyOn(fs, "writeSync").mockImplementation(() => {
+			throw fsError("ENOSPC");
+		});
+		const rewritesRefused = spyOnWholeFileRewrites();
+		for (const rewrite of rewritesRefused) {
+			rewrite.mockImplementation(() => {
+				throw fsError("ENOSPC");
+			});
+		}
+		try {
+			await expect(manager.setSessionName("Rewritten topic", "user")).rejects.toThrow("ENOSPC");
+			// Header metadata needs a whole-file rewrite, so the queued title can now land only by one.
+			await expect(manager.setTaskPromptCacheKey("rewrite-key")).rejects.toThrow("ENOSPC");
+		} finally {
+			diskFull.mockRestore();
+			for (const rewrite of rewritesRefused) rewrite.mockRestore();
+		}
+		const rewrites = spyOnWholeFileRewrites();
+		try {
+			await manager.flush();
+			expect(rewrites.some(rewrite => rewrite.mock.calls.length > 0)).toBe(true);
+		} finally {
+			for (const rewrite of rewrites) rewrite.mockRestore();
+			await manager.close();
+		}
+
+		expect(await titleOnDisk(sessionFile)).toBe("Rewritten topic");
+		expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Rewritten topic");
+	});
+
+	it("indexes a held-back title in recent sessions when a persistent clone lands it", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-clone-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendMessage(userMessage("before"));
+		await renameWhileFull(manager, "Landed by clone");
+		const clone = manager.cloneCurrentSession({ persist: true });
+		try {
+			await clone.flush();
+			expect(await titleOnDisk(sessionFile)).toBe("Landed by clone");
+			expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Landed by clone");
+		} finally {
+			await clone.close();
+			await manager.close();
+		}
+	});
+
+	it("indexes the held-back title of a restored snapshot, not the rename it rolled back", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-restore-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendMessage(userMessage("before"));
+		await renameWhileFull(manager, "Kept topic");
+		const snapshot = manager.captureState();
+		await renameWhileFull(manager, "Rolled back topic");
+		manager.restoreState(snapshot);
+		await manager.flush();
+		await manager.close();
+
+		expect(await titleOnDisk(sessionFile)).toBe("Kept topic");
+		expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Kept topic");
+	});
+
+	it("keeps a clone's newer title indexed when the source's rewrite lands an older held-back one", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-newer-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendMessage(userMessage("before"));
+		await renameWhileFull(manager, "Older held-back topic");
+		const clone = manager.cloneCurrentSession({ persist: true });
+		try {
+			await clone.flush();
+			await clone.setSessionName("Newer clone topic", "user");
+			await manager.flush();
+			expect(manager.getSessionName()).toBe("Newer clone topic");
+			expect(await titleOnDisk(sessionFile)).toBe("Newer clone topic");
+			expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Newer clone topic");
+		} finally {
+			await clone.close();
+			await manager.close();
+		}
+	});
+
+	it("indexes only the title a partly refused drain lands", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-partial-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendMessage(userMessage("before"));
+		await renameWhileFull(manager, "Landed topic");
+		await renameWhileFull(manager, "Still queued topic");
+		const writeSync: (...args: unknown[]) => number = fs.writeSync as never;
+		// Let the first queued title land, then refuse the line that carries the second.
+		const refuseSecond = spyOn(fs, "writeSync").mockImplementation(((...args: unknown[]) => {
+			if (Buffer.from(args[1] as string | Uint8Array).includes("Still queued topic")) throw fsError("ENOSPC");
+			return writeSync(...args);
+		}) as never);
+		try {
+			await expect(manager.flush()).rejects.toThrow("ENOSPC");
+			expect(await titleOnDisk(sessionFile)).toBe("Landed topic");
+			expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Landed topic");
+		} finally {
+			refuseSecond.mockRestore();
+		}
+		await manager.flush();
+		await manager.close();
+		expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Still queued topic");
+	});
+
+	it("indexes the title a landing rewrite serialized, not a newer rename it does not hold", async () => {
+		const { manager, sessionFile } = newSession("@pi-full-volume-title-stamp-");
+		await manager.setSessionName("Previous topic", "user");
+		manager.appendCustomEntry("large-rewrite", Array(16).fill("x".repeat(400 * 1024)));
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const writeLinesAtomic = FileSessionStorage.prototype.writeLinesAtomic;
+		let paused = false;
+		const pauseRewrite = spyOn(FileSessionStorage.prototype, "writeLinesAtomic").mockImplementation(async function (
+			this: FileSessionStorage,
+			...args: Parameters<FileSessionStorage["writeLinesAtomic"]>
+		) {
+			if (args[0] === sessionFile && !paused) {
+				paused = true;
+				entered.resolve();
+				await release.promise;
+			}
+			return writeLinesAtomic.apply(this, args);
+		});
+		const rewrite = manager.setTaskPromptCacheKey("paused-rewrite").catch(() => undefined);
+		await entered.promise;
+		const volumeFull = spyOn(fs, "statfsSync").mockReturnValue(nearlyFullVolume);
+		try {
+			// The rename refuses its own rewrite while the body serialized before it lands.
+			const naming = manager.setSessionName("Newer unlanded topic", "user");
+			release.resolve();
+			await expect(naming).rejects.toThrow("ENOSPC");
+			await rewrite;
+			expect(manager.getSessionName()).toBe("Newer unlanded topic");
+			expect(await titleOnDisk(sessionFile)).toBe("Previous topic");
+			expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Previous topic");
+		} finally {
+			release.resolve();
+			await rewrite;
+			volumeFull.mockRestore();
+			pauseRewrite.mockRestore();
+		}
+		manager.appendMessage(userMessage("recover"));
+		await manager.flush();
+		await manager.close();
+		expect((await getRecentSessions(path.dirname(sessionFile), 1))[0]?.name).toBe("Newer unlanded topic");
 	});
 
 	it("gives up the session's ownership lease when a close without seal lands queued lines", async () => {
