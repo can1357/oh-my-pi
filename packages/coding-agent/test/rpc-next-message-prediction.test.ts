@@ -143,6 +143,19 @@ describe("RpcNextMessagePredictor", () => {
 		expect(predictor.cancel()).toBe(false);
 	});
 
+	it("retires an offered prediction and cancels a pending one when a manual compaction starts", async () => {
+		const { predictor, frames, reply, settled } = harness();
+		const offered = predictor.request()!;
+		await reply(0, "ship it");
+		predictor.observe({ type: "manual_compaction_start" } as AgentSessionEvent);
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: offered, status: "retired" });
+
+		const pending = predictor.request()!;
+		predictor.observe({ type: "manual_compaction_start" } as AgentSessionEvent);
+		await settled(1);
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: pending, status: "cancelled" });
+	});
+
 	it("supersedes an offered prediction with a new request, retiring it first", async () => {
 		const { predictor, frames, reply } = harness();
 		const first = predictor.request()!;

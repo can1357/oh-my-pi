@@ -15,10 +15,11 @@ import {
 } from "../controllers/composer-prediction-controller";
 import type { RpcNextMessagePredictionFeedbackEvent, RpcNextMessagePredictionFrame } from "./rpc-types";
 
-/** Session events that end any pending or offered prediction, as in the TUI. */
+/** Session events that end any pending or offered prediction: a new run, or a compaction rewriting the history it read. */
 const CANCELLING_EVENTS: Partial<Record<AgentSessionEvent["type"], true>> = {
 	agent_start: true,
 	auto_compaction_start: true,
+	manual_compaction_start: true,
 };
 
 export class RpcNextMessagePredictor {

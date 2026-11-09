@@ -1282,7 +1282,7 @@ Every started prediction produces exactly one settling frame:
 An `offered` prediction is later followed by exactly one `retired` frame, after
 which the host must stop showing it and must not accept it. It retires when
 the host cancels it or requests another, when a new message lands, when a run or
-auto-compaction starts, and on `new_session`, `switch_session`, `branch`,
+a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
 `fork`, `navigate_tree`, `open_session`, extension-initiated session changes,
 and shutdown. These frames bypass `set_event_filter`.
 
