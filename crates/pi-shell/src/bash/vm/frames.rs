@@ -43,6 +43,7 @@ use super::{
 	state::{self, Overlay, Root, Scope},
 };
 use crate::bash::{
+	Diag,
 	engine::Engine,
 	error::{ExtError, Incompatibility, RestoreError},
 	event::{EventData, EventMask, OriginChain, WaitKey},
@@ -899,6 +900,20 @@ impl Shell {
 			entries: Vec::new(),
 		};
 		let mut report = RestoreReport::default();
+		// Legacy Proc cannot identify disown state. Parent equality selects
+		// only a diagnostic; every legacy record resolves to explicit ownership.
+		let mut legacy_procs = Vec::new();
+		cx.store.scan(Table::Proc, &mut |key, record| {
+			if let (Key::Proc(vpid), Record::Proc { parent, status }) = (key, record) {
+				legacy_procs.push((vpid, *parent, *status, *parent == Some(vpid)));
+			}
+		})?;
+		for &(vpid, parent, status, _) in &legacy_procs {
+			shell
+				.k
+				.root
+				.write(cx.store, Change::Put(Key::Proc(vpid), Record::OwnedProc { parent, status }));
+		}
 		cx.store.scan(Table::Misc, &mut |key, _| {
 			if let Key::UnknownMisc(id) = key {
 				report.lost.push(Lost::Record { id });
@@ -965,6 +980,13 @@ impl Shell {
 		}
 		reinstall_signal_traps(cx)?;
 		shell.k.root.commit_restore(cx.store)?;
+		for (vpid, _, _, ambiguous) in legacy_procs {
+			if ambiguous {
+				shell
+					.k
+					.diag(cx, &mut shell.procs[0], 0, Diag::AmbiguousProcOwnership { vpid: vpid.0 });
+			}
+		}
 		let root = (shell.procs[0].vpid, shell.procs[0].mode);
 		shell
 			.k
@@ -1291,11 +1313,22 @@ impl Shell {
 		self.k.root.drop_scopes(cx.store);
 		let root = self.procs[0].vpid;
 		let mut children = Vec::new();
+		let mut disowned = Vec::new();
 		cx.store.scan(Table::Proc, &mut |key, rec| {
-			if let (Key::Proc(vpid), Record::Proc { parent, status }) = (key, rec) {
+			if let (
+				Key::Proc(vpid),
+				Record::OwnedProc { parent, status } | Record::Proc { parent, status },
+			) = (key, rec)
+			{
 				children.push((vpid, *parent, *status));
 			}
+			if let (Key::Proc(vpid), Record::DisownedProc) = (key, rec) {
+				disowned.push(vpid);
+			}
 		})?;
+		for vpid in disowned {
+			self.k.root.write(cx.store, Change::Del(Key::Proc(vpid)));
+		}
 		children.sort_unstable_by_key(|(vpid, ..)| *vpid);
 		for (vpid, parent, status) in children {
 			if parent != Some(root) {

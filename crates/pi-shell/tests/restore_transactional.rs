@@ -265,7 +265,7 @@ fn finish(
 			.unwrap();
 		assert_eq!(children, vec![(
 			Key::Proc(pi_shell::bash::Vpid(1_073_741_825)).to_buf(),
-			Record::Proc { parent: Some(pi_shell::bash::Vpid(1_073_741_824)), status: Some(137) }
+			Record::OwnedProc { parent: Some(pi_shell::bash::Vpid(1_073_741_824)), status: Some(137) }
 		)]);
 		let run = shell.submit(Script::command(
 			br#"wait "$p"; echo lost=$?; echo local=${KEEP-unset}"#.as_slice(),

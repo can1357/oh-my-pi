@@ -2606,7 +2606,7 @@ pub fn start_procsub(
 	// The parent can read `$!` and call `wait` in this same slice, before
 	// the scheduler adopts the child. Publish its parentage and running
 	// state before publishing the pid, so every wait lookup can find it.
-	let rec = Record::Proc { parent: child.parent, status: None };
+	let rec = Record::OwnedProc { parent: child.parent, status: None };
 	k.root.write(cx.store, Change::Put(Key::Proc(vpid), rec));
 	// Not a job: its externals stay in the shell's group, without the
 	// terminal.

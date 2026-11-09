@@ -5,13 +5,14 @@
 ### Breaking Changes
 
 - Custom Rust shell stores must implement atomic `StateStore::commit_restore`; stores that cannot commit a complete restore must refuse it without changing state ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
+- Older versions cannot read shell snapshots containing the new explicit process ownership records, even when no process was disowned ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
 - Fixed the bash tool's job control after a background job ends to match Bash 5.3: `wait PID` reports a finished job's status again, cleanup at a later wait, fork or `jobs` updates job specifications consistently, `wait` without operands forgets kept statuses, `disown` keeps Bash's statuses, `$!` is the same inside `$( )`, and a background function that traps `TERM` runs its trap and ends with its own status ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed restoring upstream shell snapshots with an active background child, with or without a pending parent `wait` ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Fixed refused execution-image cleanup silently losing a suspended root command, child or retained job result on a second restore; refused frame and job-record deletion both leave the complete image available for retry ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
-- Fixed foreground waits and restored subshells hanging when the embedded shell starts at virtual process ID zero; disowned children no longer share an ownership marker with that root's children ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
+- Fixed foreground waits and restored subshells hanging at virtual process ID zero or after a frameless restore changes the root's ID; disowned children use explicit persistent state instead of a parent-id marker, and ambiguous legacy self-parent records restore as owned with a diagnostic ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
 - Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
 - Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
 ## [18.18.2] - 2026-11-08

@@ -374,6 +374,7 @@ struct PendingWrite {
 enum ProcIntent {
 	Delete,
 	Proc { parent: Option<Vpid>, status: Option<i32> },
+	DisownedProc,
 }
 
 impl PendingWrites {
@@ -421,7 +422,10 @@ impl PendingWrites {
 		};
 		let change = match intent.value {
 			ProcIntent::Delete => Change::Del(key),
-			ProcIntent::Proc { parent, status } => Change::Put(key, Record::Proc { parent, status }),
+			ProcIntent::Proc { parent, status } => {
+				Change::Put(key, Record::OwnedProc { parent, status })
+			},
+			ProcIntent::DisownedProc => Change::Put(key, Record::DisownedProc),
 		};
 		store.apply(change)?;
 		self.acknowledge(key, sequence);
@@ -668,14 +672,14 @@ impl Root {
 		self.fault.take()
 	}
 
-	/// A disowned child names itself as its record's parent. Adoption and
-	/// exit also observe an ownership release not yet accepted by the store.
+	/// Explicit ownership release, including one not yet accepted by the
+	/// store. Parent identities do not determine this state.
 	pub fn disowned(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> bool {
 		if let Some(intent) = self.pending.value(Key::Proc(vpid)) {
-			return matches!(intent, ProcIntent::Proc { parent: Some(parent), .. } if parent == vpid);
+			return matches!(intent, ProcIntent::DisownedProc);
 		}
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { parent: Some(parent), .. })) => *parent == vpid,
+			Ok(Some(Record::DisownedProc)) => true,
 			Err(err) => {
 				self.fail(err);
 				false
@@ -701,10 +705,14 @@ impl Root {
 				let sequence = self.pending.submit(key, Some(ProcIntent::Delete));
 				self.pending.attempt(store, key, sequence)
 			},
-			Change::Put(key @ Key::Proc(_), Record::Proc { parent, status }) => {
+			Change::Put(key @ Key::Proc(_), Record::OwnedProc { parent, status }) => {
 				let sequence = self
 					.pending
 					.submit(key, Some(ProcIntent::Proc { parent, status }));
+				self.pending.attempt(store, key, sequence)
+			},
+			Change::Put(key @ Key::Proc(_), Record::DisownedProc) => {
+				let sequence = self.pending.submit(key, Some(ProcIntent::DisownedProc));
 				self.pending.attempt(store, key, sequence)
 			},
 			change => {
@@ -3548,7 +3556,7 @@ mod tests {
 		// A proc record deleted outside the sync (a disowned child that
 		// ended) is refused too: every refused deletion is made again.
 		let proc = Vpid(44);
-		let rec = Record::Proc { parent: Some(Vpid(1)), status: None };
+		let rec = Record::OwnedProc { parent: Some(Vpid(1)), status: None };
 		root.write(&mut store, Change::Put(Key::Proc(proc), rec));
 		{
 			// The deletion outside the sync, its retry inside it, and both
@@ -3920,14 +3928,14 @@ mod tests {
 			.unwrap();
 			let vpid = Vpid(42);
 			let parent = Some(shell.procs[0].vpid);
-			let record = Record::Proc { parent, status: Some(23) };
+			let record = Record::OwnedProc { parent, status: Some(23) };
 			for &(op, refuse) in ops {
 				store.refuse = refuse;
 				match op {
-					M => shell.k.root.write(
-						&mut store,
-						Change::Put(Key::Proc(vpid), Record::Proc { parent: Some(vpid), status: None }),
-					),
+					M => shell
+						.k
+						.root
+						.write(&mut store, Change::Put(Key::Proc(vpid), Record::DisownedProc)),
 					O => shell
 						.k
 						.root
@@ -4177,8 +4185,8 @@ mod tests {
 					let vpid = Vpid(42 + i as u32);
 					store.mask = if op % 2 == 0 { 0 } else { 3 };
 					want[i] = match (op / 2) % 3 {
-						0 => Some(Record::Proc { parent: Some(vpid), status: None }),
-						1 => Some(Record::Proc { parent, status: Some(23 + i as i32) }),
+						0 => Some(Record::DisownedProc),
+						1 => Some(Record::OwnedProc { parent, status: Some(23 + i as i32) }),
 						_ => None,
 					};
 					let change = match &want[i] {
@@ -4235,6 +4243,7 @@ mod tests {
 			let values = [
 				ProcIntent::Delete,
 				ProcIntent::Proc { parent: Some(vpid), status: None },
+				ProcIntent::DisownedProc,
 				ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(23) },
 			];
 			let other = if key == Key::Proc(Vpid(42)) {
@@ -4262,8 +4271,9 @@ mod tests {
 					let wanted = match new_value {
 						ProcIntent::Delete => None,
 						ProcIntent::Proc { parent, status } => {
-							Some(Record::Proc { parent: *parent, status: *status })
+							Some(Record::OwnedProc { parent: *parent, status: *status })
 						},
+						ProcIntent::DisownedProc => Some(Record::DisownedProc),
 					};
 					assert_eq!(
 						store.get(key).unwrap(),
@@ -4272,7 +4282,7 @@ mod tests {
 					);
 					assert_eq!(
 						store.get(other).unwrap(),
-						Some(&Record::Proc { parent: Some(Vpid(1)), status: Some(7) })
+						Some(&Record::OwnedProc { parent: Some(Vpid(1)), status: Some(7) })
 					);
 					let newest = pending
 						.submit(key, Some(ProcIntent::Proc { parent: Some(Vpid(1)), status: Some(37) }));
@@ -4281,7 +4291,7 @@ mod tests {
 					pending.attempt(&mut store, key, newest).unwrap();
 					assert_eq!(
 						store.get(key).unwrap(),
-						Some(&Record::Proc { parent: Some(Vpid(1)), status: Some(37) }),
+						Some(&Record::OwnedProc { parent: Some(Vpid(1)), status: Some(37) }),
 						"a removed and resubmitted key must not reuse an acknowledged generation"
 					);
 				}

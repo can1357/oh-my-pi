@@ -442,8 +442,8 @@ pub enum Record {
 	},
 	/// A job of the root shell's job table.
 	Job(Job),
-	/// A child vproc of the shell (subshell, pipeline stage, background job,
-	/// substitution), from its start until its exit status is collected.
+	/// A legacy process record without an ownership tag. Restore treats it
+	/// as owned and atomically rewrites it as [`Record::OwnedProc`].
 	Proc {
 		/// The vproc that started it.
 		parent: Option<Vpid>,
@@ -464,6 +464,20 @@ pub enum Record {
 	/// A list-valued [`MiscKey`] value (positional parameters, `enable`
 	/// lists, history, …).
 	Words(Vec<BString>),
+	/// A running child explicitly released by `disown` or job deletion.
+	/// No parent id encodes this state. Exit removes this record instead of
+	/// publishing a status. Appended so all existing record tags stay stable;
+	/// readers without this variant refuse images containing it.
+	DisownedProc,
+	/// An owned child vproc, from its start until its status is collected.
+	/// The explicit tag preserves a legacy record's resolved ownership when
+	/// saved again. Readers without this variant refuse such images.
+	OwnedProc {
+		/// The vproc that started it; an identity, never an ownership flag.
+		parent: Option<Vpid>,
+		/// Exit status once it finished; `None` while it runs.
+		status: Option<i32>,
+	},
 }
 
 /// zsh sticky emulation (zsh `struct emulation_options`): the emulation

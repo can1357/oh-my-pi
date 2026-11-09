@@ -466,11 +466,8 @@ fn refused_disown_markers_do_not_leak_proc_records_through_restore() {
 		}
 
 		fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
-			if self.remaining > 0
-				&& matches!(
-					&change,
-					Change::Put(Key::Proc(child), Record::Proc { parent: Some(parent), status: None }) if child == parent
-				) {
+			if self.remaining > 0 && matches!(&change, Change::Put(Key::Proc(_), Record::DisownedProc))
+			{
 				self.remaining -= 1;
 				self.refused += 1;
 				return Err(StoreError::Backend("disown marker refused".into()));
@@ -589,11 +586,13 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 	};
 	#[derive(Default)]
 	struct Refuse {
-		inner:          MemStore,
-		armed:          bool,
-		saw_delete:     bool,
-		deletions_left: usize,
-		log:            Vec<String>,
+		inner:             MemStore,
+		armed:             bool,
+		saw_delete:        bool,
+		deletions_left:    usize,
+		marker_refusals:   usize,
+		deletion_refusals: usize,
+		log:               Vec<String>,
 	}
 	impl StateStore for Refuse {
 		fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
@@ -610,10 +609,7 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 
 		fn apply(&mut self, change: Change<'_>) -> Result<(), StoreError> {
 			if self.armed {
-				let marker = matches!(
-					&change,
-					Change::Put(Key::Proc(child), Record::Proc { parent: Some(parent), status: None }) if child == parent
-				);
+				let marker = matches!(&change, Change::Put(Key::Proc(_), Record::DisownedProc));
 				let deletion = matches!(&change, Change::Del(Key::Proc(_)));
 				if deletion {
 					self.saw_delete = true;
@@ -621,6 +617,9 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 				if (marker && !self.saw_delete) || (deletion && self.deletions_left > 0) {
 					if deletion {
 						self.deletions_left -= 1;
+						self.deletion_refusals += 1;
+					} else {
+						self.marker_refusals += 1;
 					}
 					self.log.push(format!("REFUSED {change:?}"));
 					return Err(StoreError::Backend("proc change refused".into()));
@@ -695,6 +694,14 @@ fn proc_retry_fault_reproduction_stays_deleted_after_each_restore() {
 		assert!(idle, "{name}: children must finish");
 		if armed {
 			assert!(store.saw_delete, "{name}: the child deletion must reach the backend");
+			assert!(
+				store.marker_refusals > 0,
+				"{name}: the explicit disown write must actually be refused"
+			);
+			assert!(
+				store.deletion_refusals > 0,
+				"{name}: the newer child deletion must actually be refused"
+			);
 		}
 		if external_refusal {
 			let before = store.log.len();
@@ -854,7 +861,15 @@ fn upstream_wait_image_restores_within_one_build_identity() {
 	let ((_, _, _, build), _) =
 		postcard::take_from_bytes::<([u8; 4], u32, u32, [u8; 32])>(&blob).unwrap();
 	assert_eq!(build, Engine::build_id(), "fixture must use this engine build");
-	let before = records(&mut store);
+	let mut before = records(&mut store);
+	let mut normalized = 0;
+	for (_, record) in &mut before {
+		if let Record::Proc { parent, status } = record {
+			*record = Record::OwnedProc { parent: *parent, status: *status };
+			normalized += 1;
+		}
+	}
+	assert_eq!(normalized, 1, "the genuine fixture has exactly one legacy process record");
 	let mut host = FakeHost::new();
 	let engine = Engine::new(EngineConfig::default());
 	let (mut shell, report) = Shell::restore(
@@ -866,7 +881,12 @@ fn upstream_wait_image_restores_within_one_build_identity() {
 	assert_eq!((report.vprocs, report.runs), (2, 1));
 	assert!(report.lost.is_empty(), "restore lost {:?}", report.lost);
 	assert!(report.abandoned.is_empty(), "restore abandoned {:?}", report.abandoned);
-	assert_eq!(records(&mut store), before, "restore must preserve all session records");
+	assert_eq!(
+		records(&mut store),
+		before,
+		"restore must preserve every session record's data and normalize only the legacy ownership \
+		 tag"
+	);
 	shell.control().request_suspend();
 	assert!(matches!(
 		shell.step(&mut Cx { host: &mut host, store: &mut store }, Budget::default()),

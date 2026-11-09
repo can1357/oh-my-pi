@@ -359,6 +359,12 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 			status: None,
 		}),
 		(KeyBuf::Proc(Vpid(Vpid::BASE + 2)), Record::Proc { parent: None, status: Some(0) }),
+		(KeyBuf::Proc(Vpid(Vpid::BASE + 3)), Record::OwnedProc {
+			parent: Some(Vpid(Vpid::BASE)),
+			status: None,
+		}),
+		(KeyBuf::Proc(Vpid(Vpid::BASE + 4)), Record::OwnedProc { parent: None, status: Some(0) }),
+		(KeyBuf::Proc(Vpid(Vpid::BASE + 5)), Record::DisownedProc),
 		(KeyBuf::DirStack, Record::DirStack(vec![bytes(b"/a"), bytes(b"/\xffb")])),
 		(KeyBuf::CmdHash(bytes(b"ls")), Record::CmdHash { path: bytes(b"/bin/ls"), hits: 3 }),
 		(
@@ -1122,7 +1128,7 @@ fn cd_set_o_and_alias_are_visible_after_each_op<S: StateStore>(store: &mut S) {
 }
 
 /// A background vproc job's `Record::Job` (running) and its running
-/// `Record::Proc` are in the store while it runs, and its exit is written
+/// `Record::OwnedProc` are in the store while it runs, and its exit is written
 /// as it happens.
 fn a_background_job_is_visible_while_it_runs<S: StateStore>(store: &mut S) {
 	let mut host = FakeHost::new();
@@ -1143,7 +1149,7 @@ fn a_background_job_is_visible_while_it_runs<S: StateStore>(store: &mut S) {
 			assert_eq!(*vpid.get_or_insert(j.vpid), j.vpid, "the job keeps its vpid");
 		}
 		let proc = vpid.and_then(|v| match s.get(Key::Proc(v)).expect("get") {
-			Some(Record::Proc { status, .. }) => Some(*status),
+			Some(Record::OwnedProc { status, .. }) => Some(*status),
 			_ => None,
 		});
 		push_distinct(&mut seen, (job.map(|j| j.state), proc));

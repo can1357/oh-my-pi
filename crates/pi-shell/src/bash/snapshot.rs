@@ -17,6 +17,39 @@
 //! background job's table entry is live in the store; its execution
 //! position needs `externalize` at a safepoint.
 //!
+//! # Process ownership compatibility
+//!
+//! [`Record::OwnedProc`](crate::bash::store::Record::OwnedProc) and
+//! [`Record::DisownedProc`](crate::bash::store::Record::DisownedProc) give
+//! process ownership its own tags; parent ids are identities, not flags.
+//! These records persist independently of the optional `Frames` blob.
+//! Older readers reject images containing either new tag during store
+//! decoding. This downgrade barrier covers ordinary owned-process images,
+//! not only sessions that disowned a process. An image with no process
+//! record has neither new tag and does not acquire this barrier.
+//! The store image has no ownership format version, and saving can carry
+//! unchanged legacy records forward, so file-level version inference
+//! cannot preserve each record's resolved ownership.
+//!
+//! Legacy `Proc` records have no ownership tag. They restore as owned,
+//! including a self-parent relationship: such a relationship can belong to
+//! a real owned child after a frameless restore changes `vpid_base`.
+//! Restore queues `Diag::AmbiguousProcOwnership` on stderr and emits its
+//! diagnostic event for a self-parent; the comparison selects only the
+//! warning, not ownership. A genuinely disowned legacy child therefore
+//! retains its real completion instead of deleting it. Plain `disown PID`
+//! still keeps status 0 and `wait PID` still returns 0; it is not affected.
+//! Without a retained status, the real completion can become visible:
+//! a legacy `disown -a` image whose child exits 7 gives `wait PID` status
+//! 7, where the older reader and Bash give 127. This accepts a wrong status
+//! instead of a potentially unbounded wait for an owned child.
+//!
+//! A successful restore atomically replaces every legacy `Proc` with an
+//! explicit `OwnedProc`, after selecting diagnostics. Subsequent saves
+//! preserve that decision, and reloading them does not diagnose ownership
+//! again. Untouched historical images remain ambiguous indefinitely;
+//! replacing one saved image does not rewrite other archived copies.
+//!
 //! # When `externalize` is complete
 //!
 //! [`Shell::externalize`](crate::bash::Shell::externalize) may be called

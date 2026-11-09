@@ -441,7 +441,7 @@ pub struct Kernel {
 	/// Idempotent fs ops dropped by the last suspend (re-issued on resume).
 	pub dropped_fs:         u32,
 	/// Child vprocs created during a turn, adopted by the scheduler after it.
-	/// Every child vproc has a `Record::Proc` from its adoption until its
+	/// Every owned child vproc has a `Record::OwnedProc` from adoption until its
 	/// exit status is collected ([`Kernel::proc_exited`],
 	/// [`Kernel::proc_collect`]). Boxed as `Shell::procs` holds them:
 	/// adoption moves pointers, and the capacity a burst leaves behind is 8
@@ -726,7 +726,7 @@ impl Kernel {
 			self.root.write(store, Change::Del(Key::Proc(vpid)));
 			return;
 		}
-		let rec = Record::Proc { parent, status: Some(status) };
+		let rec = Record::OwnedProc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
 
@@ -735,9 +735,10 @@ impl Kernel {
 	/// next turn).
 	pub fn proc_state(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<ProcState> {
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { status, .. })) => {
+			Ok(Some(Record::OwnedProc { status, .. } | Record::Proc { status, .. })) => {
 				Some(status.map_or(ProcState::Running, ProcState::Exited))
 			},
+			Ok(Some(Record::DisownedProc)) => Some(ProcState::Running),
 			Ok(_) => None,
 			Err(err) => {
 				self.root.fail(err);
@@ -749,11 +750,10 @@ impl Kernel {
 	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
 	/// parent): a subshell copies `$!`, not its parent's children.
 	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
-		if vp == vpid {
-			return false;
-		}
 		match store.get(Key::Proc(vpid)) {
-			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(Some(Record::OwnedProc { parent, .. } | Record::Proc { parent, .. })) => {
+				*parent == Some(vp)
+			},
 			Ok(_) => false,
 			Err(err) => {
 				self.root.fail(err);
@@ -778,7 +778,11 @@ impl Kernel {
 	pub fn forget_completed_nonjobs(&mut self, store: &mut dyn StateStore, vp: &Vproc) {
 		let mut ended = Vec::new();
 		let result = store.scan(Table::Proc, &mut |key, rec| {
-			if let (Key::Proc(v), Record::Proc { parent: Some(parent), status: Some(_) }) = (key, rec)
+			if let (
+				Key::Proc(v),
+				Record::OwnedProc { parent: Some(parent), status: Some(_) }
+				| Record::Proc { parent: Some(parent), status: Some(_) },
+			) = (key, rec)
 				&& *parent == vp.vpid
 				&& vp.jobs.by_vpid(v).is_none()
 				&& !vp.frames.iter().any(|f| {
@@ -816,21 +820,19 @@ impl Kernel {
 		Some(job)
 	}
 
-	/// Release a deleted job's proc record, retaining a disown marker while
-	/// it runs. The caller applies its dialect's job-table deletion rules.
+	/// Release a deleted job's proc record, explicitly marking it disowned
+	/// while it runs. The caller applies its dialect's job-table deletion rules.
 	pub fn forget_job_proc(&mut self, store: &mut dyn StateStore, job: &proc::Job) {
 		if !job.inherited && self.proc_collect(store, job.vpid).is_none() {
-			// A live child cannot parent itself: roots have no parent and
-			// children and job-control parents have distinct allocated ids.
-			// This marker cannot collide with a configured root pid. Adoption
-			// preserves it until exit deletes the record.
 			let running = match store.get(Key::Proc(job.vpid)) {
-				Ok(Some(Record::Proc { status, .. })) => status.is_none(),
+				Ok(Some(Record::OwnedProc { status, .. } | Record::Proc { status, .. })) => {
+					status.is_none()
+				},
 				Ok(_) => !matches!(job.state, proc::JobState::Done(_)),
 				Err(_) => false,
 			};
 			if running {
-				let rec = Record::Proc { parent: Some(job.vpid), status: None };
+				let rec = Record::DisownedProc;
 				self
 					.root
 					.write(store, Change::Put(Key::Proc(job.vpid), rec));
@@ -1739,8 +1741,8 @@ impl Shell {
 	/// [`Self::submit`] for the vproc at `parent` (`ShellApi::run_subshell`
 	/// passes its store: the new subshell sees the caller's function
 	/// scopes). A new subshell vproc gets `lineage`, or else the parent's.
-	/// The new vproc is adopted, and its `Record::Proc` written, at the next
-	/// scheduler turn.
+	/// The new vproc is adopted, and its `Record::OwnedProc` written, at the
+	/// next scheduler turn.
 	fn submit_from(
 		&mut self,
 		parent: usize,
@@ -1983,7 +1985,7 @@ impl Shell {
 			if self.k.root.disowned(cx.store, p.vpid) {
 				continue;
 			}
-			let rec = Record::Proc { parent: p.parent, status: None };
+			let rec = Record::OwnedProc { parent: p.parent, status: None };
 			self
 				.k
 				.root
