@@ -10,7 +10,7 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "../src/overlays/session-observer-registry";
-import { initTheme, setSymbolPreset } from "../src/theme";
+import { getSymbolPresetOverride, initTheme, setSymbolPreset } from "../src/theme";
 
 const pickerCx: DescribeContext = {
 	cols: 120,
@@ -296,19 +296,20 @@ test("a narrow activity footer keeps the roster hint and the rest of the hints",
 // far wider than the unicode keycaps. The section pair therefore only stays
 // while the rendered footer still fits — otherwise the row cuts the tail off.
 test("the ascii preset's footers keep their Esc:close tail where the section pair does not fit", async () => {
+	const previousPreset = getSymbolPresetOverride() ?? "unicode";
 	await setSymbolPreset("ascii");
 	const hub = createHub([agent("alpha", 3_000)]);
 	try {
-		hub.showSection("activity");
-		const activityFooter = hub.render(104).at(-2) ?? "";
-		expect(activityFooter).toContain("Esc:close");
+		for (const width of [104, 90, 60]) {
+			hub.showSection("activity");
+			expect(hub.render(width).at(-2) ?? "").toContain("Esc:close");
 
-		hub.showSection("agents");
-		const rosterFooter = hub.render(104).at(-2) ?? "";
-		expect(rosterFooter).toContain("Esc:close");
+			hub.showSection("agents");
+			expect(hub.render(width).at(-2) ?? "").toContain("Esc:close");
+		}
 	} finally {
 		hub.dispose();
-		await setSymbolPreset("unicode");
+		await setSymbolPreset(previousPreset);
 	}
 });
 

@@ -153,7 +153,15 @@ const SECTION_HINTS: readonly NativeHint[] = [
  */
 function fitFooter(candidates: readonly string[], available: number): string {
 	const fitting = candidates.find(candidate => visibleWidth(candidate) <= available);
-	return fitting ?? candidates[candidates.length - 1]!;
+	if (fitting !== undefined) return fitting;
+	// Even the narrowest variant overflows. Drop leading hint segments until the
+	// row fits, so the tail — the close hint — survives instead of being cut off.
+	const narrowest = candidates[candidates.length - 1]!;
+	const segments = narrowest.split("  ");
+	while (segments.length > 1 && visibleWidth(segments.join("  ")) > available) {
+		segments.shift();
+	}
+	return segments.join("  ");
 }
 const AGENT_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
 	roster: agentHints("by parent"),
