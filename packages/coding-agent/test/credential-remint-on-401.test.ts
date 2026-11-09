@@ -92,6 +92,17 @@ function mintFresh(counterFile: string): string {
 	return `!printf 1 >> ${shellQuote(counterFile)}; printf 'tok-%s' "$(date +%s%N)"`;
 }
 
+/**
+ * Mint that records one invocation and prints a value no earlier run produced,
+ * until the token file says otherwise: `FAIL` exits non-zero, `EMPTY` exits
+ * zero with nothing on stdout. Both are how an issuer stops answering, and
+ * `runShellCommand` maps both to no credential.
+ */
+function mintFreshFromFile(counterFile: string, tokenFile: string): string {
+	const counter = shellQuote(counterFile);
+	return `!printf 1 >> ${counter}; IFS= read -r t < ${shellQuote(tokenFile)}; [ "$t" = FAIL ] && exit 1; [ "$t" = EMPTY ] && exit 0; printf '%s-%s' "$t" "$(wc -c < ${counter} | tr -d ' ')"`;
+}
+
 const CONTEXT: Context = { systemPrompt: ["s"], messages: [{ role: "user", content: "hi", timestamp: 0 }] };
 
 /**
@@ -301,10 +312,7 @@ describe("a `!command` credential the provider refuses", () => {
 					const headers = await original(signal);
 					if (!next && materializations === 2) {
 						if (partial) {
-							await registry.getApiKeyWithCredentialForProvider("probe-gw", undefined, {
-								forceRefresh: true,
-								remintApiKeyCommand: false,
-							});
+							await registry.getApiKeyWithCredentialForProvider("probe-gw", undefined, { forceRefresh: true });
 							const fresh = await original(signal);
 							const observed = headers?.[modelHeaderCommandGenerations]?.["X-C"];
 							if (!observed) throw new Error("Expected an observed test command");
@@ -611,8 +619,11 @@ describe("a `!command` credential the provider refuses", () => {
 			const before = rig.mints();
 			fs.writeFileSync(token, "test-key-two");
 			expect((await send()).errorStatus).toBe(401);
-			expect(rig.mints() - before).toBe(0);
-			expect(rig.seen).toEqual(["test-key-one"]);
+			// Every spelling of the selected API key shares one policy and one
+			// cache slot: the refusal costs one re-mint, not one per spelling, and
+			// the alias gets no recovery channel of its own.
+			expect(rig.mints() - before).toBe(1);
+			expect(rig.seen).toEqual(["test-key-one", "test-key-two"]);
 		},
 	);
 
@@ -1261,55 +1272,73 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(await resolveConfigValue(config)).toBe("renewed-token");
 	});
 
-	test("is not re-minted when the 401's own error class says it is not an auth failure", async () => {
+	// The ladders a provider's non-authentication 401 classes make. Upstream
+	// re-mints on every one of them, because `forceRefresh` invalidates the
+	// command whatever the body says; gating the re-mint on the class cost the
+	// recovery in each row below, measured against base.
+	test.each([
+		["invalid_request_error", undefined],
+		["budget_exceeded", undefined],
+		["policy_blocked", "Authentication Error, Invalid proxy server token passed."],
+	] as const)("re-mints and recovers a 401 whose error class is %s, as base does", async (type, message) => {
 		const counterFile = path.join(tempDir, "mints");
-		const tokenFile = path.join(tempDir, "token");
 		fs.writeFileSync(counterFile, "");
-		fs.writeFileSync(tokenFile, "live-token");
-		const modelsPath = path.join(tempDir, "models.json");
-		fs.writeFileSync(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					"probe-gw": {
-						baseUrl: "https://gateway.invalid/v1",
-						api: "openai-completions",
-						apiKey: mintFromFile(counterFile, tokenFile),
-						models: [{ id: "gw-model", name: "GW Model" }],
-					},
-				},
-			}),
+		const body = JSON.stringify({ error: { message: message ?? `refused as ${type}`, type, code: "401" } });
+		let refusals = 0;
+		// A fresh bearer per run, so the retry is not the bearer dedupe's doing:
+		// the request the provider accepts carries a credential minted after it
+		// refused the previous one.
+		const rig = buildRig(
+			mintFresh(counterFile),
+			counterFile,
+			() => refusals > 0,
+			{},
+			() => {
+				refusals += 1;
+				return new Response(body, { status: 401, headers: { "Content-Type": "application/json" } });
+			},
 		);
-		const registry = new ModelRegistry(authStorage, modelsPath);
-		const model = registry.find("probe-gw", "gw-model");
-		if (!model) throw new Error("probe model missing");
 
-		const seen: string[] = [];
-		const policyBody = JSON.stringify({
-			error: { message: "request blocked by policy", type: "invalid_request_error", code: "policy_blocked" },
-		});
-		const fetchImpl: FetchImpl = async (_url, init) => {
-			const headers = (init?.headers ?? {}) as Record<string, string>;
-			seen.push(headers.Authorization ?? "<none>");
-			return new Response(policyBody, { status: 401, headers: { "Content-Type": "application/json" } });
-		};
-
-		const handle = streamSimple(model, CONTEXT, {
-			apiKey: registry.resolver(model),
-			fetch: fetchImpl,
-			maxTokens: 16,
-		});
-		for await (const _event of handle) {
-			// drain
-		}
-		const result = await handle.result();
-
-		expect(result.errorStatus).toBe(401);
-		// One mint for the initial resolve and no re-mint: the provider's own
-		// class says the credential is not what it refused.
-		expect(fs.readFileSync(counterFile, "utf8").length).toBe(1);
-		expect(seen.length).toBe(1);
+		expect((await rig.turn()).stopReason).toBe("stop");
+		// Two requests and two mints: the initial resolve, the refusal's re-mint,
+		// and the retry that recovers — the ladder base climbs for these bodies.
+		expect(rig.seen).toHaveLength(2);
+		expect(rig.seen[0]).not.toBe(rig.seen[1]);
+		expect(rig.mints()).toBe(2);
 	});
+
+	test.each(["FAIL", "EMPTY"] as const)(
+		"sends the credential it holds when the %s issuer has no replacement for it",
+		async outcome => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "live");
+			let accepting = false;
+			const rig = buildRig(mintFreshFromFile(counterFile, tokenFile), counterFile, () => accepting);
+
+			// Turn one exhausts its retry: the watermark now condemns every
+			// generation the cache holds.
+			expect((await rig.turn()).errorStatus).toBe(401);
+			const mintsAfterFirstTurn = rig.mints();
+			const requestsAfterFirstTurn = rig.seen.length;
+
+			// The issuer then goes down — a non-zero exit, or stdout with nothing
+			// in it — while the provider would accept the credential still cached.
+			fs.writeFileSync(tokenFile, outcome);
+			accepting = true;
+
+			expect((await rig.turn()).stopReason).toBe("stop");
+			expect(rig.seen.length - requestsAfterFirstTurn).toBe(1);
+			expect(rig.mints() - mintsAfterFirstTurn).toBe(1);
+			// The failure backoff parks the next mint; it must not park the
+			// credential, which is the only one anybody has.
+			const requestsAfterSecondTurn = rig.seen.length;
+			expect((await rig.turn()).stopReason).toBe("stop");
+			expect(rig.seen.length - requestsAfterSecondTurn).toBe(1);
+			expect(rig.mints() - mintsAfterFirstTurn).toBe(1);
+		},
+	);
 
 	test("does not run another model's credential helper", async () => {
 		const counterFile = path.join(tempDir, "mints");

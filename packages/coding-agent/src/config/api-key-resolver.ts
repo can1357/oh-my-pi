@@ -26,8 +26,6 @@ export interface ApiKeyResolverOptions {
 
 /** Registry-only command policy; never forwarded to the durable credential store. */
 export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
-	/** A non-authentication error can skip the selected API-key command, not other provider refresh. */
-	remintApiKeyCommand?: boolean;
 	/** Positive local header observations, or null when unavailable; absent before refresh-same. */
 	rejectedHeaderCommands?: readonly CommandConfigGeneration[] | null;
 }
@@ -78,12 +76,7 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
 			ApiKeyResolverRequestOptions,
-			| "signal"
-			| "refreshReason"
-			| "rejectedAccessToken"
-			| "rejectedCredentialGeneration"
-			| "remintApiKeyCommand"
-			| "rejectedHeaderCommands"
+			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration" | "rejectedHeaderCommands"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -131,10 +124,15 @@ export function createApiKeyResolver(
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
 		// Step (b) refreshes provider credentials as upstream does, regardless of
-		// error-body taxonomy. Only the selected API-key command's re-mint is
-		// narrowed by the structured credential verdict.
+		// error-body taxonomy — the selected API-key command included. A 401 whose
+		// body names a non-authentication class is still a refusal of the request
+		// this credential carried, and the trade is asymmetric: an unnecessary
+		// re-mint costs one issuer call, a missed one costs the whole turn. Reading
+		// a provider's own error taxonomy to decide a credential's fate makes
+		// recovery depend on a vocabulary no provider owes us; measured against
+		// base, gating here lost the recovery on every `invalid_request_error`,
+		// `budget_exceeded` and `policy_blocked` 401 that base recovers from.
 		const resolved = await resolveKey(true, {
-			remintApiKeyCommand: verdict !== "not-credential",
 			signal,
 			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			rejectedAccessToken,

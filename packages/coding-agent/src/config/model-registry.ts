@@ -3817,11 +3817,7 @@ export class ModelRegistry {
 			);
 		}
 		if (options?.forceRefresh) {
-			if (options.remintApiKeyCommand === false) {
-				this.#invalidateProviderCommandConfigs(provider, this.#selectedProviderApiKeyCommand(provider));
-			} else {
-				await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
-			}
+			await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
 		} else if (rejectedGeneration !== undefined) {
 			await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
 		}

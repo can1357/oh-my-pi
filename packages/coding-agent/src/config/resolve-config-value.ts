@@ -217,13 +217,30 @@ function settledMintFor(command: string): string | undefined {
 	return cached.generation > refused ? cached.value : undefined;
 }
 
+/**
+ * What a command resolves to when the issuer cannot replace a refused
+ * credential: the refused one, if that is all there is.
+ *
+ * The watermark disqualifies a cached credential *in favour of its
+ * replacement*. A mint that fails, or prints nothing, produces no replacement,
+ * and then withholding the cached copy leaves the caller with no credential at
+ * all — no request is sent, and the failure backoff parks the next turn too.
+ * The provider is the only judge of a credential it has refused before: it may
+ * accept this one now, and upstream, which holds no watermark, does send it and
+ * does recover. A refusal orders a credential behind its successor; it does not
+ * destroy the only one in hand.
+ */
+function cachedCredentialFallback(command: string): CommandCredential | undefined {
+	return commandResultCache.get(command);
+}
+
 async function executeCommand(valueConfig: string): Promise<CommandCredential | undefined> {
 	const command = commandKey(valueConfig);
 
 	const cached = commandResultCache.get(command);
 	if (cached !== undefined && cached.generation > (commandRefusedGeneration.get(command) ?? 0)) return cached;
 	const retryAt = commandFailureRetryAt.get(command);
-	if (retryAt !== undefined && Date.now() < retryAt) return undefined;
+	if (retryAt !== undefined && Date.now() < retryAt) return cachedCredentialFallback(command);
 
 	const existing = commandInFlight.get(command);
 	if (existing) return await existing;
@@ -235,11 +252,13 @@ async function executeCommand(valueConfig: string): Promise<CommandCredential | 
 		return await runShellCommand(command, 10_000, cwd);
 	})()
 		.then(result => {
+			// `runShellCommand` maps both a non-zero exit and an empty stdout to
+			// `undefined`; neither produced a replacement.
 			if (result === undefined) {
 				if ((commandInvalidationEpoch.get(command) ?? 0) === epoch) {
 					commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 				}
-				return undefined;
+				return cachedCredentialFallback(command);
 			}
 			// A run the cache no longer owns still produced a credential its
 			// caller will send, so it gets a generation of its own; what it must
@@ -262,7 +281,7 @@ async function executeCommand(valueConfig: string): Promise<CommandCredential | 
 			if ((commandInvalidationEpoch.get(command) ?? 0) === epoch) {
 				commandFailureRetryAt.set(command, Date.now() + COMMAND_FAILURE_RETRY_MS);
 			}
-			return undefined;
+			return cachedCredentialFallback(command);
 		})
 		.finally(() => {
 			if (commandInFlight.get(command) === promise) commandInFlight.delete(command);
