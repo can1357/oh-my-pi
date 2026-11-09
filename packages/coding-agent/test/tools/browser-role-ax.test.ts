@@ -70,9 +70,10 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			const controller = new AbortController();
 			const checked = Promise.withResolvers<void>();
 			const send = page.mainFrame().client.send.bind(page.mainFrame().client);
+			let probes = 0;
 			const probe = spyOn(page.mainFrame().client, "send").mockImplementation(async (method, ...args) => {
 				const result = await send(method, ...args);
-				if (method === "Accessibility.getPartialAXTree") checked.resolve();
+				if (method === "Accessibility.getPartialAXTree" && ++probes === 2) checked.resolve();
 				return result;
 			});
 			try {
@@ -80,7 +81,12 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 				const pending = rejectionOf(
 					page.waitForSelector("role/RootWebArea", { hidden: true, signal: controller.signal }),
 				);
-				await checked.promise;
+				await Promise.race([
+					checked.promise,
+					pending.then(error => {
+						throw error;
+					}),
+				]);
 				controller.abort(reason);
 				expect(await pending).toBe(reason);
 			} finally {
