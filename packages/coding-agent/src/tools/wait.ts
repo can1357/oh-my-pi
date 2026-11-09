@@ -135,12 +135,15 @@ export function hasWaitTool(session: ToolSession): boolean {
  * still answer soon: each one finished its turn, is blocked on the caller
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits. A direct message or team notice
- * arriving mid-wait ends any wait, returning every message queued by then.
- * Broadcasts and ordinary progress ask the caller nothing, so they never end a
- * wait and inject as asides once it returns; the exception is a broadcast from
- * an agent a reply wait asked (see `IrcBus.unansweredSends`). Ordinary progress
- * leaves its sender's reply owed; a team notice can settle it without a reply.
+ * that climbs across back-to-back idle waits. A direct message arriving
+ * mid-wait ends any wait, returning every message queued by then. Broadcasts,
+ * ordinary progress and team notices ask the caller nothing, so they never end
+ * a wait on its own jobs or services and inject as asides once it returns; the
+ * exception is a broadcast from an agent a reply wait asked (see
+ * `IrcBus.unansweredSends`). A team notice does end a reply wait — it is a
+ * non-request answer, e.g. plan approval — but it answers nothing in the
+ * accounting: ordinary progress and notices both leave their sender's reply
+ * owed.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
@@ -220,7 +223,9 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message or team notice arrives, the ladder window elapses, or the call aborts.
+	 * Block until an owned job settles, an owned service finishes, a direct message
+	 * (or, with no jobs and no service, a team notice) arrives, the ladder window
+	 * elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
@@ -245,7 +250,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		const busLeg = messaging
 			? IrcBus.global()
-					.wait(messaging.senderId, { directOnly: true, repliesFrom: asked }, 0, busAbort.signal)
+					// A wait on the caller's own jobs or service is not its answer
+					// inbox: a team notice stays queued and injects as an aside after
+					// the wait instead of cutting it short. A pure reply wait takes one.
+					.wait(
+						messaging.senderId,
+						{ directOnly: true, repliesFrom: asked, teamNotices: replyWait },
+						0,
+						busAbort.signal,
+					)
 					.catch(() => null)
 			: undefined;
 		// A reply wait re-checks whether an agent asked can still answer on

@@ -31,7 +31,8 @@ export interface IrcWaitFilter {
 	from?: string;
 	/**
 	 * Skip broadcast legs and ordinary progress notes: they reach the waiter
-	 * through ordinary delivery. Direct team notices can end the wait.
+	 * through ordinary delivery. Direct team notices can end the wait unless
+	 * the caller is waiting on its own work (`teamNotices: false`).
 	 */
 	directOnly?: boolean;
 	/**
@@ -39,11 +40,18 @@ export interface IrcWaitFilter {
 	 * asked them something, and a broadcast answers it (see {@link IrcBusApi.unansweredSends}).
 	 */
 	repliesFrom?: readonly string[];
+	/**
+	 * Whether a team notice may end the wait (default `true`): a reply wait
+	 * accepts one, a wait on the caller's own jobs or services must not —
+	 * notices are informational and are delivered afterwards instead.
+	 */
+	teamNotices?: boolean;
 }
 
 /** Whether a bus wait under `filter` consumes `msg`. */
 export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
+	if (filter.teamNotices === false && msg.teamNotice) return false;
 	if (!filter.directOnly || (!msg.broadcast && (msg.teamNotice || !msg.progress))) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
 }
@@ -138,7 +146,7 @@ export class IrcBus implements IrcBusApi {
 	#limits: { settings: Settings; revision: number; limits: IrcIngressLimits | undefined } | undefined;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
-	/** The latest successful message other than ordinary progress per `from` → `to`; see {@link sentSince}. */
+	/** The latest successful message other than ordinary progress or a team notice per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, SendMark>>();
 	/** The latest direct request (not a broadcast, progress or team notice); see {@link unansweredSends}. */
 	readonly #lastDirect = new Map<string, Map<string, SendMark>>();
@@ -201,12 +209,14 @@ export class IrcBus implements IrcBusApi {
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliver(message);
-		if (receipt.outcome !== "failed") {
-			if (message.progress && !message.teamNotice) {
+		// A team notice is informational: it answers nothing, promises nothing
+		// and never stands in for the reply a wake relay would skip.
+		if (receipt.outcome !== "failed" && !message.teamNotice) {
+			if (message.progress) {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
 			} else {
 				this.#record(this.#lastSent, message.from, message.to, mark);
-				if (!message.broadcast && !message.wakeRelay && !message.teamNotice)
+				if (!message.broadcast && !message.wakeRelay)
 					this.#record(this.#lastDirect, message.from, message.to, mark);
 			}
 		}
@@ -268,9 +278,10 @@ export class IrcBus implements IrcBusApi {
 	}
 
 	/**
-	 * Whether `from` successfully sent `to` anything, progress included, at or
-	 * after `sinceTs`. The wake-turn relay uses it to skip agents that already
-	 * answered their waker themselves, or promised it a later answer.
+	 * Whether `from` successfully sent `to` anything, progress included but
+	 * team notices excluded, at or after `sinceTs`. The wake-turn relay uses it
+	 * to skip agents that already answered their waker themselves, or promised
+	 * it a later answer.
 	 */
 	sentSince(from: string, to: string, sinceTs: number): boolean {
 		return [this.#lastSent, this.#lastProgress].some(table => (table.get(from)?.get(to)?.ts ?? -1) >= sinceTs);
@@ -280,13 +291,13 @@ export class IrcBus implements IrcBusApi {
 	 * Agents `from` messaged directly at or after `sinceTs` that have not
 	 * answered since, with when the latest of those messages went out: the
 	 * replies a `wait` can block for. A message back answers, and so does a
-	 * settled job of the agent `from` owns, which delivers its result. An
-	 * addressed team notice also answers; ordinary progress only marks the
-	 * request `promised`, after which only an explicit message answers it (a
-	 * job settling the turn that sent the progress must not). "Since" is by send
-	 * order, not timestamp, so an answer
-	 * to an earlier question never settles a later one sent within the same
-	 * millisecond.
+	 * settled job of the agent `from` owns, which delivers its result. A team
+	 * notice answers nothing: it is informational and records into no
+	 * accounting table. Ordinary progress only marks the request `promised`,
+	 * after which only an explicit message answers it (a job settling the turn
+	 * that sent the progress must not). "Since" is by send order, not timestamp,
+	 * so an answer to an earlier question never settles a later one sent within
+	 * the same millisecond.
 	 */
 	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number; promised: boolean }> {
 		const sends = this.#lastDirect.get(from);

@@ -328,6 +328,32 @@ describe("wait", () => {
 			]);
 		});
 
+		test("a team notice leaves a wait on its own job blocking, and injects after it", async () => {
+			const bridge = streamingMain();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const build = Promise.withResolvers<string>();
+			const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+			const waiting = new WaitTool(session(manager)).execute("wait-notice", {});
+			await IrcBus.global().send({
+				from: "Peer",
+				to: "Main",
+				body: "Plan approved.",
+				progress: true,
+				teamNotice: true,
+			});
+			expect(await stillPending(waiting)).toBe(true);
+			// Nor may it cut the interruptible wait short from the agent loop.
+			expect(bridge.hasInterrupts()).toBe(false);
+			build.resolve("built");
+			const result = await waiting;
+			expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "built" });
+			expect(result.details?.waited).toBeUndefined();
+			// Delivered afterwards, as an aside at the caller's next step boundary.
+			expect(details(bridge.drainPending())).toMatchObject([
+				{ from: "Peer", message: "Plan approved.", teamNotice: true },
+			]);
+		});
+
 		test("a queued team notice ends a wait without becoming an ordinary progress note", async () => {
 			const bridge = streamingMain();
 			await IrcBus.global().send({
@@ -765,7 +791,12 @@ describe("wait", () => {
 						text: expect.stringContaining("(team notice; no reply needed)"),
 					});
 					expect(JSON.stringify(result.content)).not.toContain("reply follows");
-					expect(IrcBus.global().unansweredSends("Child", 0)).toEqual([]);
+					// The notice ends the wait but answers nothing: the question the
+					// member asked is still owed, while the notice leaves no trace of
+					// its own in the reply accounting.
+					expect(IrcBus.global().unansweredSends("Child", 0)).toEqual([
+						{ to: "Main", sentAt: expect.any(Number), promised: false },
+					]);
 					expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([]);
 				} finally {
 					controller.abort();
@@ -773,6 +804,22 @@ describe("wait", () => {
 				}
 			},
 		);
+		test("a team notice from the agent asked wakes a reply wait", async () => {
+			registerParentAndChild();
+			await ask();
+			const waiting = childWait();
+			await IrcBus.global().send({
+				from: "Main",
+				to: "Child",
+				body: "Plan approved.",
+				progress: true,
+				teamNotice: true,
+			});
+			expect((await waiting).details?.waited).toMatchObject([
+				{ from: "Main", body: "Plan approved.", teamNotice: true },
+			]);
+		});
+
 		test("a progress note from the agent asked keeps the wait blocking for its answer", async () => {
 			registerParentAndChild();
 			await ask();

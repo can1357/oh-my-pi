@@ -198,12 +198,16 @@ or recipient availability constraints.
 
 Idle notices, plan submissions, approval/rejection notices and stop
 decline/timeout notices are displayed as **team notices, no reply needed**.
-They impose no automatic reply obligation or wake-relay loop. An addressed team
-notice can end a pending `wait`, including a member waiting for plan approval.
-Ordinary progress messages retain their “reply follows later” presentation and
-do not end waits. This is different from ordinary request wake-relay, which
-returns a woken subagent's turn output to the requester and is not an idle
-notification. Direct peer messages keep the existing IRC ingress guard.
+They are informational: they impose no automatic reply obligation or wake-relay
+loop, and they count as neither a reply nor a promise of one. A notice addressed
+to an agent wakes that agent's reply `wait` (including a member waiting for plan
+approval), but it never interrupts a wait on its own background jobs or
+services: there it stays queued and is delivered as an aside once the wait
+returns. Ordinary progress messages retain their “reply follows later”
+presentation and do not end waits. This is different from ordinary request
+wake-relay, which returns a woken subagent's turn output to the requester and is
+not an idle notification. Direct peer messages keep the existing IRC ingress
+guard.
 
 ## Cooperative stop
 

@@ -170,6 +170,52 @@ describe("IrcBus baseline", () => {
 		expect(bus.take("0-Busy")).toBeUndefined();
 	});
 
+	it("a team notice neither answers the question nor counts as the reply that wakes the relay", async () => {
+		const asker = makeFakeSession();
+		const replier = makeFakeSession();
+		registry.register({ id: "0-Ask", displayName: "ask", kind: "main", session: asker.session });
+		registry.register({ id: "0-Rep", displayName: "rep", kind: "sub", parentId: "0-Ask", session: replier.session });
+
+		const t0 = Date.now();
+		await bus.send({ from: "0-Ask", to: "0-Rep", body: "which codeword?" });
+		await bus.send({ from: "0-Rep", to: "0-Ask", body: "Plan approved.", progress: true, teamNotice: true });
+
+		// A notice is informational: the question is still open, with no promise
+		// of a later answer, and the wake relay has nothing to skip the agent for.
+		expect(bus.unansweredSends("0-Ask", t0)).toEqual([
+			{ to: "0-Rep", sentAt: expect.any(Number), promised: false },
+		]);
+		expect(bus.sentSince("0-Rep", "0-Ask", t0)).toBe(false);
+
+		// An ordinary message back does answer it.
+		await bus.send({ from: "0-Rep", to: "0-Ask", body: "heliotrope" });
+		expect(bus.unansweredSends("0-Ask", t0)).toEqual([]);
+		expect(bus.sentSince("0-Rep", "0-Ask", t0)).toBe(true);
+	});
+
+	it("a waiter that refuses team notices leaves the notice to ordinary delivery", async () => {
+		const sink = makeFakeSession();
+		registry.register({ id: "0-Sink", displayName: "sink", kind: "sub", session: sink.session });
+
+		const waiting = bus.wait("0-Sink", { directOnly: true, teamNotices: false }, 1_000);
+		const notice = await bus.send({
+			from: "0-Owner",
+			to: "0-Sink",
+			body: "Plan approved.",
+			progress: true,
+			teamNotice: true,
+		});
+
+		// Rejected by the filter, not dropped: the recipient gets it as an ordinary
+		// delivery and nothing lingers in the mailbox.
+		expect(notice.outcome).toBe("injected");
+		expect(sink.delivered).toMatchObject([{ body: "Plan approved.", teamNotice: true }]);
+		expect(bus.unreadCount("0-Sink")).toBe(0);
+
+		await bus.send({ from: "0-Owner", to: "0-Sink", body: "codeword" });
+		expect((await waiting)?.body).toBe("codeword");
+	});
+
 	it("the mailbox cap bounds unread count and wait drains the survivors oldest-first", async () => {
 		const sink = makeFakeSession();
 		registry.register({ id: "0-Sink", displayName: "task", kind: "sub", session: sink.session });

@@ -39,8 +39,8 @@ export class IrcBridge {
 	/** A subagent's records from anyone but its parent: answered in their own turn, never by
 	 *  extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
-	/** Queued broadcasts and ordinary progress: they inject at the next step
-	 *  boundary but never cut a wait short. Direct team notices can interrupt. */
+	/** Queued broadcasts, ordinary progress and team notices: they inject at
+	 *  the next step boundary but never cut a wait short. */
 	readonly #quietRecords = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
@@ -68,7 +68,7 @@ export class IrcBridge {
 		return this.#peerMessages.has(record);
 	}
 
-	/** Whether an incoming message can interrupt a wait: direct messages and team notices. */
+	/** Whether an incoming message can interrupt a wait: direct requests, never chatter or a notice. */
 	hasInterrupts(): boolean {
 		return this.#interrupts.some(record => !this.#quietRecords.has(record));
 	}
@@ -292,9 +292,10 @@ export class IrcBridge {
 			msg.broadcast !== true &&
 			msg.progress !== true &&
 			msg.teamNotice !== true;
-		// Ordinary progress and broadcasts stay quiet; a direct team notice can
-		// settle a blocked wait even though it asks for no reply.
-		const quiet = msg.broadcast === true || (msg.progress === true && msg.teamNotice !== true);
+		// Chatter stays quiet: it injects at the next step boundary but never cuts
+		// a wait short from the agent loop. A team notice asks for no reply, so it
+		// belongs here too — a reply wait takes it through its bus waiter instead.
+		const quiet = msg.broadcast === true || msg.progress === true || msg.teamNotice === true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent

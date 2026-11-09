@@ -307,7 +307,10 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 			teamNotice: true,
 		});
 		expect(steered).toEqual([]);
-		expect(bridge.hasInterrupts()).toBe(true);
+		// Informational: queued for the next step boundary, never a wait-cutting
+		// interrupt.
+		expect(bridge.hasInterrupts()).toBe(false);
+		expect(bridge.hasPending()).toBe(true);
 		expect(bridge.drainInboxMessages("Child")).toMatchObject([
 			{ id: "parent-approval", body: "Plan approved.", teamNotice: true },
 		]);
