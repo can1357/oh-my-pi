@@ -169,7 +169,9 @@ Enabled extension preludes add globals (such as `browser`) with documentation at
 
 Runs an embedded-shell command to completion without BashTool auto-backgrounding or output minimization. Commands use a separate persistent eval shell and start in the session cwd or the supplied cwd. JS template interpolations are shell-quoted. Success returns combined stdout/stderr; nonzero exits and timeouts raise `ShellError`.
 
-Before execution, the host checks the enabled Bash tool's command policy, including interception, explicit deny/prompt rules, per-tool policy and folder restrictions. Required approval uses the existing UI per call; without an interactive UI it fails closed and reports the blocking reason. Bash disablement, replacement or a session switch while awaiting approval invalidates the call. Bare SDK sessions without a tool registry use the built-in Bash policy and honor `bash.enabled: false`.
+Before execution, the host checks the enabled Bash tool's command policy, including interception, explicit deny/prompt rules, per-tool policy and folder restrictions for literal leading `cd` directories. Required approval uses the existing UI per call; without an interactive UI it fails closed and reports the blocking reason. Bash disablement, replacement or a session switch while awaiting approval invalidates the call. After approval, current policy is checked again; a new denial or changed prompt invalidates the old answer. Bare SDK sessions without a tool registry use the built-in Bash policy and honor `bash.enabled: false`.
+
+Literal leading-directory checks include both successful and failed `cd` outcomes. Calls that would produce more than 64 possible directories fail closed; use `cwd` instead of a long navigation prefix.
 
 In `always-ask`, `always-ask-cached` and `write` modes, an unmatched exec-tier command requires approval; configured allows still apply. In `yolo`, unmatched commands remain allowed unless interception, an explicit deny/prompt or a folder restriction applies. Waiting for approval counts against the cell timeout.
 

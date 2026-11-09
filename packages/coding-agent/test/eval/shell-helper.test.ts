@@ -199,6 +199,52 @@ describe("eval sh approval", () => {
 		expect(await Bun.file(path.join(temp.path(), "sub", "guard-marker")).exists()).toBe(false);
 	});
 
+	it.each([
+		{ cwd: undefined, prefix: "cd sub && " },
+		{ cwd: "other", prefix: "cd ../sub; " },
+		{ cwd: undefined, prefix: "cd other && cd ../sub && " },
+		{ cwd: undefined, prefix: "cd missing; cd sub && " },
+		{ cwd: "other", prefix: "cd missing; cd ../sub && " },
+		{ cwd: undefined, prefix: "cd missing && cd other; cd sub && " },
+	])("requires approval for restricted leading directories: %j", async ({ cwd, prefix }) => {
+		await fs.mkdir(path.join(temp.path(), "other"));
+		const session = makeSession({
+			"tools.approvalMode": "yolo",
+			"tools.restrictedFolders": [path.join(temp.path(), "sub")],
+		});
+
+		await expect(shellBridge.runEvalShell({ command: prefix + MARKER_COMMAND, cwd }, { session })).rejects.toThrow(
+			/requires approval[\s\S]*Restricted folder/,
+		);
+		expect(await Bun.file(path.join(temp.path(), "sub", "guard-marker")).exists()).toBe(false);
+	});
+
+	it("bounds ambiguous leading-directory analysis before executing", async () => {
+		const session = makeSession({ "tools.restrictedFolders": [path.join(temp.path(), "sub")] });
+		const command = Array.from({ length: 8 }, (_, index) => `cd absent${index}; `).join("") + MARKER_COMMAND;
+
+		await expect(shellBridge.runEvalShell({ command }, { session })).rejects.toThrow(
+			/Too many possible leading cd directories/,
+		);
+		expect(await Bun.file(path.join(temp.path(), "guard-marker")).exists()).toBe(false);
+	});
+
+	it("executes a restricted leading-directory command after approval", async () => {
+		const session = makeSession({ "tools.restrictedFolders": [path.join(temp.path(), "sub")] });
+		session.getToolContext = () =>
+			({
+				settings: session.settings,
+				hasUI: true,
+				toolNames: ["bash"],
+				ui: { approve: async () => "once" },
+			}) as unknown as AgentToolContext;
+
+		expect((await shellBridge.runEvalShell({ command: `cd sub && ${MARKER_COMMAND}` }, { session })).exitCode).toBe(
+			0,
+		);
+		expect(await Bun.file(path.join(temp.path(), "sub", "guard-marker")).text()).toBe("approved");
+	});
+
 	it("honors disabled Bash in a bare SDK session", async () => {
 		const session = makeSession({ "bash.enabled": false });
 
@@ -239,6 +285,34 @@ describe("eval sh approval", () => {
 		);
 		expect(await Bun.file(path.join(temp.path(), "guard-marker")).exists()).toBe(false);
 	});
+
+	it.each(["pattern", "tool", "restriction"] as const)(
+		"rejects approval invalidated by a changed %s policy",
+		async policy => {
+			const shown = Promise.withResolvers<void>();
+			const answer = Promise.withResolvers<"once">();
+			const session = promptedSession(() => {
+				shown.resolve();
+				return answer.promise;
+			});
+			const run = shellBridge.runEvalShell({ command: MARKER_COMMAND }, { session });
+			try {
+				await shown.promise;
+				session.settings = Settings.isolated({
+					"tools.approvalMode": "yolo",
+					"bash.patterns": [{ match: MARKER_COMMAND, approval: policy === "pattern" ? "deny" : "prompt" }],
+					"tools.approval": policy === "tool" ? { bash: "deny" } : {},
+					"tools.restrictedFolders": policy === "restriction" ? [temp.path()] : [],
+				});
+				answer.resolve("once");
+				await expect(run).rejects.toThrow(/blocked|authorization changed/);
+				expect(await Bun.file(path.join(temp.path(), "guard-marker")).exists()).toBe(false);
+			} finally {
+				answer.resolve("once");
+				await run.catch(() => undefined);
+			}
+		},
+	);
 
 	it("does not fall back to an available registration when Bash is disabled", async () => {
 		const session = makeSession();

@@ -8,6 +8,7 @@ import {
 	requestApproval,
 	resolveApproval,
 	resolveApprovalFromContext,
+	type ResolvedApproval,
 } from "../tools/approval";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
@@ -99,20 +100,24 @@ export async function approveEvalHostCall(
 	context: Pick<EvalPreludeContext, "session" | "signal" | "context">,
 ): Promise<void> {
 	context.signal?.throwIfAborted();
-	// An omitted context inherits session policy; an explicitly empty context fails closed.
-	const settings = context.context?.settings ?? context.session.settings;
-	const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
-		context.context ?? (settings ? { settings } : undefined),
-	);
-	const resolved = resolveApproval(
-		subject,
-		parameters,
-		mode,
-		policies,
-		undefined,
-		approvalRestrictions(settings, context.session.cwd),
-		context.context,
-	);
+	const cwd = context.session.cwd;
+	const resolveCurrentApproval = (toolContext = context.context): ResolvedApproval => {
+		// An omitted context inherits session policy; an explicitly empty context fails closed.
+		const settings = toolContext?.settings ?? context.session.settings;
+		const { approvalMode: mode, userPolicies: policies } = resolveApprovalFromContext(
+			toolContext ?? (settings ? { settings } : undefined),
+		);
+		return resolveApproval(
+			subject,
+			parameters,
+			mode,
+			policies,
+			undefined,
+			approvalRestrictions(settings, cwd),
+			toolContext,
+		);
+	};
+	const resolved = resolveCurrentApproval();
 	if (resolved.policy === "deny") throw denyError(resolved, subject.name);
 	if (resolved.policy !== "prompt") return;
 
@@ -128,6 +133,18 @@ export async function approveEvalHostCall(
 		requestApproval(ui, subject, parameters, { reason: resolved.reason }),
 	);
 	if (answer === "deny") throw new Error(`Eval host call denied by user: ${subject.name}`);
+	const current = resolveCurrentApproval(context.session.getToolContext?.() ?? context.context);
+	if (current.policy === "deny") throw denyError(current, subject.name);
+	if (
+		current.policy === "prompt" &&
+		(current.reason !== resolved.reason ||
+			current.source !== resolved.source ||
+			current.tier !== resolved.tier ||
+			current.override !== resolved.override ||
+			current.policyKey !== resolved.policyKey)
+	) {
+		throw new Error(`Eval host call "${subject.name}" authorization changed; retry the call.`);
+	}
 }
 
 /**

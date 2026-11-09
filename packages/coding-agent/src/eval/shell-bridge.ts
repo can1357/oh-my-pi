@@ -67,10 +67,9 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 				: undefined;
 	if (!bash) throw new ToolError("sh() requires Bash to be enabled in this session");
 
-	// An omitted cwd lets Bash policy resolve a leading cd before checking interception.
 	await approveEvalHostCall(
 		bash,
-		{ command, cwd: cwd ? commandCwd : undefined },
+		{ command, cwd: commandCwd },
 		{ session, signal, context: session.getToolContext?.() },
 	);
 	signal?.throwIfAborted();
