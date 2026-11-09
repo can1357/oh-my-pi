@@ -195,6 +195,28 @@ describe("Anthropic controls derived from the transcript", () => {
 		expectCacheStableContinuation(main.payload, side.payload);
 	});
 
+	it("keeps a revived request's deferred declaration and signed thinking prefix", async () => {
+		const original = [user("start")];
+		const initial = await capture(original, Effort.High, {
+			tools: [tool("read"), { ...tool("grep"), deferLoading: true }],
+		});
+		const history = [...original, answering(reply("signed response"), initial), user("revived turn")];
+		const options = { tools: [tool("read")], inactiveTools: [tool("grep")] };
+		const resumed = await capture(history, Effort.High, options);
+
+		expect(resumed.payload.tools?.map(declared => declared.defer_loading)).toEqual([undefined, true]);
+		expect(resumed.payload.tools?.map(declared => declared.name)).toEqual(
+			initial.payload.tools?.map(declared => declared.name),
+		);
+		expectCacheStableContinuation(initial.payload, resumed.payload);
+		const next = await capture(
+			[...history, answering(reply("continued"), resumed), user("next")],
+			Effort.High,
+			options,
+		);
+		expectCacheStableContinuation(resumed.payload, next.payload);
+	});
+
 	it("drops a declared tool whose definition is no longer available", async () => {
 		const turn0 = [user("start")];
 		const first = await capture(turn0, Effort.High, { tools: [tool("read"), tool("grep")] });

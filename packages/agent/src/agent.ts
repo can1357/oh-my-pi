@@ -669,6 +669,20 @@ export class Agent {
 	}
 
 	/**
+	 * Rebuild definitions for tools still registered after reopening a transcript.
+	 * Request controls persist the declaration names, but not their schemas; a fresh
+	 * Agent otherwise drops withdrawn declarations when replaying Anthropic history.
+	 */
+	restoreSentToolDefinitions(tools: AgentTool[]): void {
+		const normalized = normalizeTools(tools, {
+			injectIntent: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneDescriptions: this.#pruneToolDescriptions,
+		});
+		if (normalized) this.#sentToolDefinitions.record(normalized);
+	}
+
+	/**
 	 * Fields added to every log record written while this agent runs (the
 	 * owning session's `sessionId`), so in-process agents' records stay apart.
 	 */

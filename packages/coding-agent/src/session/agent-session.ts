@@ -6413,7 +6413,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		done: PromiseWithResolvers<void>,
 		fromOutside: boolean,
 	): Promise<void> {
-		while (turn.nested.size > 0) await Promise.allSettled([...turn.nested]);
+		while (turn.nested.size > 0) await Promise.allSettled(turn.nested);
 		turn.released = true;
 		if (fromOutside) this.#queuedSessionTransitions--;
 		done.resolve();
@@ -9539,9 +9539,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (maintenanceMessages !== messages && previewXdevMountNotice?.notice) {
 				maintenanceMessages.splice(xdevMountNoticeIndex, 0, previewXdevMountNotice.notice);
 			}
-			await logger.time("prompt:prePromptCompaction", () =>
+			const fixedContextDeadEnd = await logger.time("prompt:prePromptCompaction", () =>
 				this.#maintenance.runPrePromptCompactionIfNeeded(maintenanceMessages),
 			);
+			if (fixedContextDeadEnd) throw new PromptPreflightError(fixedContextDeadEnd);
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}

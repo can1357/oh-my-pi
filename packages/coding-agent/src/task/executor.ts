@@ -4298,6 +4298,20 @@ function trackSubagentSettings(session: AgentSession, capture: WarmReviveCapture
  */
 export async function replayRevivedAgentStart(session: AgentSession): Promise<void> {
 	await session.extensionRunner?.emitBeforeAgentStart("", undefined, session.baseSystemPrompt, "revive");
+	// Reopening creates a fresh Agent, which has no memory of withdrawn tool schemas.
+	// Restore only definitions still registered locally: requestControls supplies the
+	// original declaration/deferred order, and unavailable tools remain omitted.
+	const messages = session.agent.state.messages;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "assistant" || !message.requestControls?.tools) continue;
+		const tools = message.requestControls.tools.declared.flatMap(name => {
+			const tool = session.getToolByName(name);
+			return tool ? [tool] : [];
+		});
+		session.agent.restoreSentToolDefinitions(tools);
+		break;
+	}
 }
 
 /**
