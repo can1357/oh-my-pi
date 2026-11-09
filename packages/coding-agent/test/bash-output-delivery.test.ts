@@ -8,12 +8,12 @@
  * through the real `executeBash` consumer rather than through the native call
  * underneath it:
  *
- *  1. A delivery failure fails the run without discarding the persistent
+ *  1. A delivery-only failure fails the run without discarding the persistent
  *     shell, so the variables, exported environment and functions the user set
  *     before it survive into the next call.
- *  2. Lost output outranks a cancel that arrives after it. One owner decides
- *     the outcome: a run whose output was already lost reports the delivery
- *     failure, not `cancelled`.
+ *  2. Lost output outranks a cancel or native timeout that arrives after it.
+ *     One owner decides the outcome: a run whose output was already lost
+ *     reports the delivery failure, not an interruption.
  *
  * The cancels below are driven from the output callback itself rather than
  * from a timer: the chunk is the event that orders "output was lost" before
@@ -292,3 +292,41 @@ it.skipIf(process.platform === "win32")(
 	},
 	10_000,
 );
+
+// Native timeout enforcement uses the platform clock, so fake JS timers cannot
+// reproduce its ordering against asynchronous rejection or the observation window.
+for (const [delivery, command, timeout] of [
+	["rejects before the timeout", "printf first; sleep 10", 400],
+	["stalls past the observation window", "printf first; sleep 40", 32_000],
+] as const) {
+	it.skipIf(process.platform === "win32")(
+		`reports lost output when the consumer ${delivery} before a native timeout`,
+		async () => {
+			let callbacks = 0;
+			const failure = new Error("asynchronous output failed before timeout");
+			const run = executeBash(command, {
+				cwd,
+				sessionKey,
+				timeout,
+				chunkThrottleMs: 0,
+				minimize: false,
+				onChunk: async () => {
+					callbacks++;
+					if (delivery === "stalls past the observation window") {
+						return Promise.withResolvers<void>().promise;
+					}
+					await Bun.sleep(25);
+					throw failure;
+				},
+			});
+			await expect(run).rejects.toThrow("Command output was not all delivered");
+			if (delivery === "rejects before the timeout") {
+				await expect(run).rejects.toHaveProperty("cause", failure);
+			} else {
+				await expect(run).rejects.toThrow("the output callback did not return for 30 s");
+			}
+			expect(callbacks).toBe(1);
+		},
+		40_000,
+	);
+}

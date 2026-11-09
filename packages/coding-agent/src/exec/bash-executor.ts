@@ -293,11 +293,10 @@ const NATIVE_TIMEOUT_FALLBACK_GRACE_MS = 5_000;
 // leaking the session key in `brokenShellSessions`/`shellSessionQuarantines`
 // (#10308). The backing timer is unref'd so it never keeps the process alive.
 const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
-// A run whose output a consumer did not take fails with this prefix. The
-// engine raises it without tearing its shell down: the command ran, only its
-// output was lost, so the session's variables, exports and functions are
-// intact and the next call must still see them. This is the line between "the
-// run failed" and "the session is unusable".
+// Output loss alone does not make a session unusable. The engine keeps its
+// shell after a delivery-only failure, so the next call still sees its
+// variables, exports and functions. Native interruption may already have
+// discarded that state before the executor receives the run's result.
 const OUTPUT_DELIVERY_FAILURE = "Command output was not all delivered";
 // Matches pi-natives' FORWARD_STALL_TIMEOUT (crates/pi-natives/src/shell.rs).
 // Check elapsed time as well as promises: JS timers cannot run while a
@@ -994,6 +993,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);
 			timeoutTimer = undefined;
+		}
+
+		if ((winner.result.timedOut || winner.result.cancelled) && consumerFailure) {
+			throw consumerFailure;
 		}
 
 		// Handle timeout
