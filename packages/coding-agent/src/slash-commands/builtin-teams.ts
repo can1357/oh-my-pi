@@ -389,14 +389,17 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const live = snapshots.filter(item => item.snapshot !== undefined);
 				const wholeTeams = target === "all" ? live : live.filter(item => item.name === target);
 				const matchingMembers =
-					wholeTeams.length > 0 || target === "all"
+					target === "all"
 						? []
 						: live.flatMap(item =>
 								item
 									.snapshot!.members.filter(([handle, member]) => handle === target || member.id === target)
 									.map(([handle]) => ({ ...item, handle })),
 							);
-				if (matchingMembers.length > 1) {
+				if (
+					matchingMembers.length > 1 ||
+					(wholeTeams.length > 0 && matchingMembers.some(item => item.name !== target))
+				) {
 					await runtime.output(teamRuntimeError(`ambiguous member handle "${target}"`));
 					return commandConsumed();
 				}
@@ -427,6 +430,7 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 								entry,
 								force,
 								cfgTeamStopAckTimeoutMs.get(runtime.settings),
+								handle === undefined,
 							);
 							lines.push(`  ${memberHandle} - ${result}`);
 						} catch (error) {

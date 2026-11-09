@@ -41,6 +41,7 @@ export type TeamProtocol = {
 			expected: TeamCommandMember,
 			force: boolean,
 			timeoutMs: number,
+			wholeTeam?: boolean,
 		],
 		string
 	>;
@@ -96,6 +97,7 @@ export interface TeamClient {
 		expected: TeamCommandMember,
 		force: boolean,
 		timeoutMs: number,
+		wholeTeam?: boolean,
 	): Promise<string>;
 	resolvePendingStop(
 		sessionKey: string,

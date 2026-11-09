@@ -86,8 +86,18 @@ export class TeamEndpoint implements TeamClient {
 		expected: TeamCommandMember,
 		force: boolean,
 		timeoutMs: number,
+		wholeTeam = false,
 	) {
-		return teamRuntime.requestStop(this.#session(key), team, generation, handle, expected, force, timeoutMs);
+		return teamRuntime.requestStop(
+			this.#session(key),
+			team,
+			generation,
+			handle,
+			expected,
+			force,
+			timeoutMs,
+			wholeTeam,
+		);
 	}
 	resolvePendingStop(
 		key: string,

@@ -16,8 +16,8 @@ const serve: RpcServe<TeamEndpoint, TeamProtocol> = {
 	deleteMember: (endpoint, key, team, generation, handle, expected) =>
 		endpoint.deleteMember(key, team, generation, handle, expected),
 	stop: (endpoint, key, team, generation) => endpoint.stop(key, team, generation),
-	requestStop: (endpoint, key, team, generation, handle, expected, force, timeoutMs) =>
-		endpoint.requestStop(key, team, generation, handle, expected, force, timeoutMs),
+	requestStop: (endpoint, key, team, generation, handle, expected, force, timeoutMs, wholeTeam) =>
+		endpoint.requestStop(key, team, generation, handle, expected, force, timeoutMs, wholeTeam),
 	resolvePendingStop: (endpoint, key, team, generation, handle, expected, ref, failure) =>
 		endpoint.resolvePendingStop(key, team, generation, handle, expected, ref, failure),
 	leadIdentity: (endpoint, key, team) => endpoint.leadIdentity(key, team),

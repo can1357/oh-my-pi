@@ -41,6 +41,12 @@ export interface IrcMessage {
 	 * boundary is its own throttle. Set by `a2a/rpc.ts`; agents never set it.
 	 */
 	external?: boolean;
+	/**
+	 * Runtime-authored team control request. Exempt from sender rate charging
+	 * so a whole-team stop reaches every member; still a normal wakeable request.
+	 * Set only by TeamRuntime, never by agent-authored messaging.
+	 */
+	teamControl?: boolean;
 	/** Original A2A message id for an external request, distinct from the IRC bus id. */
 	a2aMessageId?: string;
 	/**

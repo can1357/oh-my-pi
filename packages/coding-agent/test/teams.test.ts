@@ -622,7 +622,7 @@ describe("/team start and stop", () => {
 		}
 	});
 
-	it("requests cooperative stop and releases only after the targeted member acknowledges", async () => {
+	it("delivers cooperative stop to every member with production ingress defaults and releases only on ack", async () => {
 		const { team, root, cleanup } = await teamFixture({ handles: ["Scout", "Reviewer"] });
 		try {
 			mockTeamDiscovery(team);
@@ -654,6 +654,7 @@ describe("/team start and stop", () => {
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
 			const leadSession = (runtime as { session: object }).session;
 			const identity = teamRuntimeState.identity(leadSession, "audit")!;
+			IrcBus.installGlobal(new IrcBus(registry, undefined, { settings: Settings.isolated() }));
 			await TEAM_HANDLE({ args: "stop audit" }, runtime);
 			expect(release).not.toHaveBeenCalled();
 			expect(messages).toHaveLength(2);
@@ -683,6 +684,15 @@ describe("/team start and stop", () => {
 			expect(release).toHaveBeenCalledWith("Scout", registry.get("Scout"), { tombstone: true });
 			await expect(router.write(url!, "ack", { session })).rejects.toThrow();
 			expect(release).toHaveBeenCalledTimes(1);
+			expect(teamRuntimeState.listTeams(leadSession)).toEqual(["audit"]);
+			const reviewerUrl = messages
+				.find(message => message.to === "Reviewer")!
+				.body.match(/team:\/\/audit\/stop\/[\w-]+/)![0];
+			await router.write(reviewerUrl, "ack", { session: wrongMember });
+			expect(teamRuntimeState.listTeams(leadSession)).toEqual([]);
+			expect(teamRuntimeState.identity(leadSession, "audit")).toBeUndefined();
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			expect(teamRuntimeState.identity(leadSession, "audit")!.generation).toBeGreaterThan(identity.generation);
 		} finally {
 			await cleanup();
 		}
@@ -880,6 +890,36 @@ describe("/team start and stop", () => {
 		}
 	});
 
+	it.each(["audit", "Scout"])("rejects a target naming both a team and another team's member (%s)", async target => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
+		try {
+			mockTeamDiscovery(team);
+			const other = {
+				...team,
+				name: target === "Scout" ? "Scout" : "other",
+				members: [{ ...team.members[0]!, handle: "audit" }],
+			};
+			vi.spyOn(teamsModule, "discoverTeams").mockResolvedValue([team, other]);
+			vi.spyOn(spawnSubagent, "spawnSubagentForSession").mockImplementation(async (_session, options) =>
+				AgentRegistry.global().register({
+					id: options.teamReservedId!,
+					displayName: options.handle!,
+					kind: "sub",
+					session: null,
+				}),
+			);
+			const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+			const { runtime, outputs } = teamRuntime(root);
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			await TEAM_HANDLE({ args: `start ${other.name}` }, runtime);
+			await TEAM_HANDLE({ args: `stop --force ${target}` }, runtime);
+			expect(outputs.at(-1)?.toLowerCase()).toContain("ambiguous");
+			expect(release).not.toHaveBeenCalled();
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("rejects extra stop arguments without releasing members", async () => {
 		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
 		try {
@@ -969,6 +1009,9 @@ describe("/team start and stop", () => {
 			registration.resolve(ref);
 			await registration.promise;
 			expect(release).toHaveBeenCalledWith("Scout-pending", ref, { tombstone: true });
+			await Bun.sleep(0);
+			const lead = (runtime as { session: object }).session;
+			expect(teamRuntimeState.listTeams(lead)).toEqual([]);
 		} finally {
 			await cleanup();
 		}
@@ -1121,12 +1164,22 @@ describe("/team start and stop", () => {
 				.spyOn(spawnSubagent, "spawnSubagentForSession")
 				.mockRejectedValueOnce(new spawnSubagent.SpawnPendingError("Scout", registration.promise));
 			const { runtime, outputs } = teamRuntime(root);
+			const notices: string[] = [];
+			Reflect.set(
+				(runtime as { session: object }).session,
+				"deliverIrcMessage",
+				async (message: { body: string }) => {
+					notices.push(message.body);
+					return "injected";
+				},
+			);
 
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
 			await TEAM_HANDLE({ args: "stop audit" }, runtime);
 			registration.reject(new Error("model unavailable"));
 			await registration.promise.catch(() => {});
 			expect(outputs.join("\n")).toContain("failed to register: model unavailable");
+			expect(notices.join("\n")).toContain("failed during registration: model unavailable");
 			await TEAM_HANDLE({ args: "status audit" }, runtime);
 			expect(outputs.at(-1)).toContain("failed: model unavailable");
 
@@ -1140,6 +1193,12 @@ describe("/team start and stop", () => {
 			);
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
 			expect(outputs.at(-1)).toContain("Scout → spawned (Scout-2)");
+			const lead = (runtime as { session: object }).session;
+			const ref = teamRuntimeState.members(lead, "audit")!.get("Scout")!.ref!;
+			const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+			await TEAM_HANDLE({ args: "stop --force audit" }, runtime);
+			expect(outputs.at(-1)).not.toContain("stop already pending");
+			expect(release).toHaveBeenCalledWith(ref.id, ref, { tombstone: true });
 		} finally {
 			await cleanup();
 		}

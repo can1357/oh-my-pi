@@ -39,8 +39,9 @@ export class RemoteTeamClient implements TeamClient {
 		expected: TeamCommandMember,
 		force: boolean,
 		timeoutMs: number,
+		wholeTeam = false,
 	) {
-		return this.remote.call("requestStop", key, team, generation, handle, expected, force, timeoutMs);
+		return this.remote.call("requestStop", key, team, generation, handle, expected, force, timeoutMs, wholeTeam);
 	}
 	resolvePendingStop(
 		key: string,

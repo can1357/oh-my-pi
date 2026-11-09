@@ -4,6 +4,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { randomUUID } from "node:crypto";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import stopRequestTemplate from "../prompts/system/team-stop-request.md" with { type: "text" };
+import type { TeamCommandMember } from "../thread/services/team-protocol";
 import { TeamLedger, type TeamClaimResult, type TeamTask } from "./team-ledger";
 import type { TeamDefinition } from "./teams";
 
@@ -32,16 +33,15 @@ export interface StartedTeam {
 	members: Map<string, TeamMembership>;
 }
 
-type ReservedMember = TeamMembership & { reservation: string };
-
 interface StopIntent {
 	handle: string;
 	reservation: string;
 	id: string;
 	force: boolean;
+	wholeTeam: boolean;
 	timeoutMs: number;
 	ref?: AgentRef;
-	requestId?: string;
+	requestId: string;
 	timer?: NodeJS.Timeout;
 }
 
@@ -52,6 +52,7 @@ interface RuntimeTeam extends StartedTeam {
 	ledger: TeamLedger;
 	pendingRefs: Map<string, { reservation: unknown; generation: number }>;
 	stops: Map<string, StopIntent>;
+	releasing: Map<string, StopIntent>;
 }
 
 /** Main-owned membership and authority for all team generations. */
@@ -182,6 +183,7 @@ export class TeamRuntime {
 			members: new Map(),
 			pendingRefs: new Map(),
 			stops: new Map(),
+			releasing: new Map(),
 		};
 		let teams = this.#sessions.get(lead);
 		if (!teams) this.#sessions.set(lead, (teams = new Map()));
@@ -254,10 +256,10 @@ export class TeamRuntime {
 		for (const intent of state.stops.values()) this.#clearStop(state, intent);
 	}
 
-	#notifyLead(state: RuntimeTeam, memberId: string, body: string): void {
+	#notifyLead(state: RuntimeTeam, intent: StopIntent, body: string): void {
 		if (!this.isCurrentLead(state.lead, state.name, state.generation)) return;
 		void IrcBus.global()
-			.send({ from: memberId, to: state.leadId, body, progress: true })
+			.send({ from: intent.id, to: state.leadId, body: `${body} (request ${intent.requestId})`, progress: true })
 			.catch(error => logger.warn("Team stop notification failed", { error: String(error) }));
 	}
 
@@ -275,12 +277,19 @@ export class TeamRuntime {
 		if (!this.#matches(state, intent) || !intent.ref) return false;
 		const current = AgentRegistry.global().get(intent.id);
 		if (!current || current.generation !== intent.ref.generation || current.id !== intent.ref.id) return false;
-		const released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
-		if (released && this.#matches(state, intent)) {
-			const member = state.members.get(intent.handle);
-			if (member?.ref?.generation === intent.ref.generation) state.members.delete(intent.handle);
+		if (state.releasing.has(intent.handle) || current.status === "aborted") return false;
+		state.releasing.set(intent.handle, intent);
+		try {
+			const released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
+			if (released && this.#matches(state, intent)) {
+				const member = state.members.get(intent.handle);
+				if (member?.ref?.generation === intent.ref.generation) state.members.delete(intent.handle);
+				if (intent.wholeTeam && state.members.size === 0) await this.stop(state.lead, state.name);
+			}
+			return released;
+		} finally {
+			state.releasing.delete(intent.handle);
 		}
-		return released;
 	}
 
 	async #dispatchStop(state: RuntimeTeam, intent: StopIntent, ref: AgentRef): Promise<string> {
@@ -294,28 +303,26 @@ export class TeamRuntime {
 			this.#clearStop(state, intent);
 			return (await this.#releaseStop(state, intent)) ? "released" : "release refused";
 		}
-		const requestId = randomUUID();
-		intent.requestId = requestId;
+		const requestId = intent.requestId;
 		intent.timer = setTimeout(() => {
 			if (state.stops.get(intent.handle) !== intent) return;
 			this.#clearStop(state, intent);
-			if (this.#matches(state, intent))
-				this.#notifyLead(state, intent.id, `Stop request for ${intent.id} timed out.`);
+			if (this.#matches(state, intent)) this.#notifyLead(state, intent, `Stop request for ${intent.id} timed out.`);
 		}, intent.timeoutMs);
 		intent.timer.unref?.();
 		const body = prompt.render(stopRequestTemplate, { teamName: state.name, requestId }).trim();
 		void IrcBus.global()
-			.send({ from: state.leadId, to: intent.id, body })
+			.send({ from: state.leadId, to: intent.id, body, teamControl: true })
 			.then(receipt => {
 				if (receipt.outcome === "failed" && state.stops.get(intent.handle) === intent) {
 					this.#clearStop(state, intent);
-					this.#notifyLead(state, intent.id, `Stop request for ${intent.id} failed: ${receipt.error}`);
+					this.#notifyLead(state, intent, `Stop request for ${intent.id} failed: ${receipt.error}`);
 				}
 			})
 			.catch(error => {
 				if (state.stops.get(intent.handle) !== intent) return;
 				this.#clearStop(state, intent);
-				this.#notifyLead(state, intent.id, `Stop request for ${intent.id} failed: ${String(error)}`);
+				this.#notifyLead(state, intent, `Stop request for ${intent.id} failed: ${String(error)}`);
 			});
 		return `requested (${requestId})`;
 	}
@@ -325,9 +332,10 @@ export class TeamRuntime {
 		name: string,
 		generation: number,
 		handle: string,
-		expected: ReservedMember,
+		expected: TeamCommandMember,
 		force: boolean,
 		timeoutMs: number,
+		wholeTeam = false,
 	): Promise<string> {
 		const state = this.#sessions.get(lead)?.get(name);
 		if (!state || !this.isCurrentLead(lead, name, generation)) return "team changed";
@@ -342,12 +350,29 @@ export class TeamRuntime {
 		)
 			return "member changed";
 		if (member.failure !== undefined) return `failed before registering: ${member.failure}`;
+		const current = member.ref && AgentRegistry.global().get(member.id);
+		const releasing = state.releasing.get(handle);
+		if (releasing) {
+			releasing.wholeTeam ||= wholeTeam;
+			return "stop already pending";
+		}
+		if (current?.generation === member.ref?.generation && current?.status === "aborted")
+			return "stop already pending";
 		const existing = state.stops.get(handle);
 		if (existing) {
+			existing.wholeTeam ||= wholeTeam;
 			if (!force || existing.force) return "stop already pending";
 			this.#clearStop(state, existing);
 		}
-		const intent: StopIntent = { handle, reservation: expected.reservation, id: expected.id, force, timeoutMs };
+		const intent: StopIntent = {
+			handle,
+			reservation: expected.reservation,
+			id: expected.id,
+			force,
+			wholeTeam: wholeTeam || existing?.wholeTeam === true,
+			timeoutMs: Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 1000,
+			requestId: randomUUID(),
+		};
 		state.stops.set(handle, intent);
 		return member.ref ? this.#dispatchStop(state, intent, member.ref) : "stop pending registration";
 	}
@@ -357,7 +382,7 @@ export class TeamRuntime {
 		name: string,
 		generation: number,
 		handle: string,
-		expected: ReservedMember,
+		expected: TeamCommandMember,
 		ref?: AgentRef,
 		failure?: string,
 	): Promise<boolean> {
@@ -379,17 +404,18 @@ export class TeamRuntime {
 				return false;
 			member.ref = current;
 		} else if (failure !== undefined) {
+			if (member.ref) return false;
 			member.failure = failure;
 		} else return false;
 		const intent = state.stops.get(handle);
 		if (intent && this.#matches(state, intent)) {
 			if (failure !== undefined) {
 				this.#clearStop(state, intent);
-				this.#notifyLead(state, intent.id, `Stop request for ${member.id} failed during registration: ${failure}`);
-			} else if (ref && !intent.requestId) {
+				this.#notifyLead(state, intent, `Stop request for ${member.id} failed during registration: ${failure}`);
+			} else if (ref && !intent.ref) {
 				const result = await this.#dispatchStop(state, intent, ref);
 				if (result === "release refused" || result === "member changed")
-					this.#notifyLead(state, intent.id, `Stop request for ${member.id} failed: ${result}`);
+					this.#notifyLead(state, intent, `Stop request for ${member.id} failed: ${result}`);
 			}
 		}
 		return true;
@@ -418,7 +444,7 @@ export class TeamRuntime {
 		}
 		this.#notifyLead(
 			state,
-			intent.id,
+			intent,
 			`${intent.id} declined stop: ${response.slice(response.indexOf(":") + 1).trim()}`,
 		);
 		return { requestId, outcome: "declined" };

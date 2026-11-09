@@ -159,7 +159,8 @@ export class IrcIngressGuard {
 		// ever regain broadcast, charge its legs again.
 		// Bridge deliveries are external client requests, not agent-loop traffic:
 		// they have no shared sender budget to spend.
-		if (message.broadcast || message.wakeRelay || message.external) return undefined;
+		// Team control is runtime-authored fan-out, not agent-loop traffic.
+		if (message.broadcast || message.wakeRelay || message.external || message.teamControl) return undefined;
 		const window = this.#rates.get(message.from);
 		if (window) {
 			// Drop sends that left the sliding window, then compact the arrays.
@@ -196,7 +197,14 @@ export class IrcIngressGuard {
 			this.#dedup.set(dedupKey, now);
 			this.#dedupOrder.push({ key: dedupKey, ts: now });
 		}
-		if (limits.rateLimitTokens <= 0 || message.broadcast || message.wakeRelay || message.external) return;
+		if (
+			limits.rateLimitTokens <= 0 ||
+			message.broadcast ||
+			message.wakeRelay ||
+			message.external ||
+			message.teamControl
+		)
+			return;
 		let window = this.#rates.get(message.from);
 		if (!window) {
 			// Agent ids are unique per spawn, so a long-lived process would keep one

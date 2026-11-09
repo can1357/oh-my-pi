@@ -783,7 +783,8 @@ export const cfgTeamStopAckTimeoutMs = register({
 		tab: "tasks",
 		group: "Teams",
 		label: "Stop Acknowledgement Timeout",
-		description: "Milliseconds to wait for a teammate to acknowledge or decline a cooperative stop request",
+		description:
+			"Milliseconds to wait for a teammate to acknowledge or decline a cooperative stop request (minimum 1000)",
 	},
 });
 

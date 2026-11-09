@@ -108,6 +108,27 @@ describe("IrcBus ingress guard", () => {
 		return { main, sender, sink };
 	}
 
+	it("exempts team control rate charging without exempting ordinary traffic, dedup, or hops", async () => {
+		const bus = makeBus();
+		const { sink } = registerPeers();
+		const ordinary = { from: "0-Sender", to: "0-Sink", body: "ordinary".padEnd(120, "x") };
+		expect((await bus.send(ordinary)).outcome).toBe("injected");
+		const control = { from: "0-Sender", to: "0-Sink", body: "stop-request-1".padEnd(120, "x"), teamControl: true };
+		expect((await bus.send(control)).outcome).toBe("injected");
+		expect((await bus.send({ ...control, body: "stop-request-2".padEnd(120, "x") })).outcome).toBe("injected");
+		const refused = await bus.send({ ...ordinary, body: "another ordinary message" });
+		expect(refused.error).toStartWith("rate limited");
+		expect((await bus.send(control)).error).toStartWith("duplicate");
+		expect((await bus.send({ ...control, body: "hop overflow", hops: Array(28).fill("peer") })).error).toStartWith(
+			"hop limit",
+		);
+		expect(bus.unansweredSends("0-Sender", 0)).toEqual([expect.objectContaining({ to: "0-Sink", promised: false })]);
+		expect(sink.delivered).toHaveLength(3);
+		expect(
+			sink.delivered.slice(1).every(message => !message.progress && !message.wakeRelay && !message.broadcast),
+		).toBe(true);
+	});
+
 	it("refuses a sender's flood past 30 tokens per 500 ms, and lets it through after the window", async () => {
 		const bus = makeBus();
 		const { sink } = registerPeers();

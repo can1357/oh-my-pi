@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "bun:test";
+import { Settings } from "../../src/config/settings";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -153,6 +154,8 @@ describe("team cooperative stop", () => {
 		expect(disposed).toBe(1);
 		expect(registry.get("worker")?.status).toBe("aborted");
 		expect(started.members.has("worker")).toBe(false);
+		expect(runtime.listTeams(lead)).toEqual(["audit"]);
+		expect(runtime.identity(lead, "audit")?.generation).toBe(started.generation);
 		await expect(runtime.respondStop(child, identity, requestId, "ack")).rejects.toThrow();
 		await runtime.stop(lead, "audit");
 	});
@@ -212,6 +215,7 @@ describe("team cooperative stop", () => {
 		} as unknown as AgentSessionHandle;
 		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
 		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		IrcBus.installGlobal(new IrcBus(registry, undefined, { settings: Settings.isolated() }));
 		const runtime = new TeamRuntime();
 		const started = await runtime.start(lead, team);
 		const entry = { id: "worker", reservation: "reservation", ref };
@@ -221,22 +225,79 @@ describe("team cooperative stop", () => {
 		const first = requests[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
 		await runtime.respondStop(child, identity, first, "decline: busy");
 		expect(notices.find(message => message.body.includes("busy"))).toMatchObject({ from: "worker", progress: true });
+		expect(notices[0]!.body).toContain(first);
 		vi.useFakeTimers();
 		try {
-			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 10);
-			vi.advanceTimersByTime(10);
+			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 1000);
+			vi.advanceTimersByTime(1000);
 			await Promise.resolve();
+			const third = await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 1000);
+			const thirdId = third.match(/requested \(([^)]+)\)/)![1]!;
+			vi.advanceTimersByTime(1000);
+			await Promise.resolve();
+			expect(notices.filter(message => message.body.includes("timed out"))).toHaveLength(2);
+			expect(notices.at(-1)!.body).toContain(thirdId);
 		} finally {
 			vi.useRealTimers();
 		}
 		expect(notices.filter(message => message.body.includes("timed out"))).toEqual([
 			expect.objectContaining({ from: "worker", progress: true }),
+			expect.objectContaining({ from: "worker", progress: true }),
 		]);
 		const second = requests[1]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+		expect(notices.find(message => message.body.includes("timed out"))!.body).toContain(second);
 		await expect(runtime.respondStop(child, identity, second, "ack")).rejects.toThrow();
 		expect(registry.get("worker")?.session).toBe(child);
 		expect(started.members.has("worker")).toBe(true);
 		await runtime.stop(lead, "audit");
+	});
+
+	it.each(["decline", "timeout"])("keeps a later handle-only stop from inheriting a whole-team %s", async outcome => {
+		const registry = AgentRegistry.global();
+		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		const child = {
+			deliverIrcMessage: async () => "injected",
+			dispose: async () => {},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "registered", ref };
+		started.members.set("worker", entry);
+		vi.useFakeTimers();
+		try {
+			const result = await runtime.requestStop(
+				lead,
+				"audit",
+				started.generation,
+				"worker",
+				entry,
+				false,
+				1000,
+				true,
+			);
+			const requestId = result.match(/requested \(([^)]+)\)/)![1]!;
+			if (outcome === "decline") {
+				await runtime.respondStop(
+					child,
+					{ team: "audit", generation: started.generation, memberId: "worker" },
+					requestId,
+					"decline: busy",
+				);
+			} else {
+				vi.advanceTimersByTime(1000);
+			}
+			expect(await runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 1000)).toBe(
+				"released",
+			);
+			expect(started.members.size).toBe(0);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			expect((await runtime.start(lead, team)).generation).toBe(started.generation);
+		} finally {
+			await runtime.stop(lead, "audit");
+			vi.useRealTimers();
+		}
 	});
 
 	it("applies pending force only to the matching reservation and generation", async () => {
@@ -334,6 +395,113 @@ describe("team cooperative stop", () => {
 		expect(notices.some(message => message.includes("spawn failed"))).toBe(true);
 		await runtime.stop(lead, "audit");
 	});
+	it("does not mark a registered member failed after a late registration rejection", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: session() });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "registered", ref };
+		started.members.set("worker", entry);
+		expect(
+			await runtime.resolvePendingStop(
+				lead,
+				"audit",
+				started.generation,
+				"worker",
+				entry,
+				undefined,
+				"late failure",
+			),
+		).toBe(false);
+		expect(started.members.get("worker")?.failure).toBeUndefined();
+		expect(started.members.get("worker")?.ref).toBe(ref);
+		await runtime.stop(lead, "audit");
+	});
+
+	it.each([false, true])("does not release twice while release is in flight (aborted=%s)", async aborted => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: session() });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "registered", ref };
+		started.members.set("worker", entry);
+		const completion = Promise.withResolvers<boolean>();
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockImplementation(() => completion.promise);
+		try {
+			const first = runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000);
+			if (aborted) registry.setStatus("worker", "aborted", ref);
+			expect(await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000)).toBe(
+				"stop already pending",
+			);
+			// Resolve before awaiting a second force, so broken code cannot deadlock the test.
+			const second = runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000);
+			completion.resolve(true);
+			expect(await second).toBe("stop already pending");
+			expect(await first).toBe("released");
+			expect(release).toHaveBeenCalledTimes(1);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+		} finally {
+			completion.resolve(true);
+			release.mockRestore();
+			await runtime.stop(lead, "audit");
+		}
+	});
+
+	it("does not dispatch a stop to an already aborted current ref", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({
+			id: "worker",
+			displayName: "worker",
+			kind: "sub",
+			session: session(),
+			status: "aborted",
+		});
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "registered", ref };
+		started.members.set("worker", entry);
+		expect(await runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000)).toBe(
+			"stop already pending",
+		);
+		await runtime.stop(lead, "audit");
+	});
+
+	it.each([0, -10, Number.NaN, 1])("clamps a short or invalid stop timeout (%s) to one second", async timeout => {
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "registered", ref };
+		started.members.set("worker", entry);
+		vi.useFakeTimers();
+		try {
+			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, timeout);
+			vi.advanceTimersByTime(999);
+			expect(notices).toEqual([]);
+			vi.advanceTimersByTime(1);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("timed out");
+		} finally {
+			await runtime.stop(lead, "audit");
+			vi.useRealTimers();
+		}
+	});
+
 	it.each(["ack", "decline", "release", "replacement", "restart", "teardown", "registration failure"] as const)(
 		"cleans the stop timer on %s and rejects the old response",
 		async action => {
@@ -358,17 +526,23 @@ describe("team cooperative stop", () => {
 				},
 			} as unknown as AgentSessionHandle;
 			registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
-			const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+			const ref =
+				action === "registration failure"
+					? undefined
+					: registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
 			const runtime = new TeamRuntime();
 			const started = await runtime.start(lead, team);
-			const entry = { id: "worker", reservation: "original", ref: { ...ref } };
+			const entry = { id: "worker", reservation: "original", ref: ref ? { ...ref } : undefined };
 			started.members.set("worker", entry);
 			const identity = { team: "audit", generation: started.generation, memberId: "worker" };
 			vi.useFakeTimers();
 			try {
 				await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000);
-				expect(vi.getTimerCount()).toBe(1);
-				const requestId = requests[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+				expect(vi.getTimerCount()).toBe(action === "registration failure" ? 0 : 1);
+				const requestId =
+					action === "registration failure"
+						? "undispatched"
+						: requests[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
 				switch (action) {
 					case "ack":
 					case "decline":
@@ -661,6 +835,10 @@ describe("team runtime authorization", () => {
 				duplicateError = error;
 			}
 			expect(duplicateError).toBeInstanceOf(Error);
+			const leadSession = AgentRegistry.global().get("worker-lead")!.session!;
+			expect(teamRuntime.listTeams(leadSession)).toEqual([]);
+			const restarted = await probe.start(lead, team);
+			expect(restarted.generation).toBeGreaterThan(next.generation);
 		} finally {
 			await worker.terminate("test end");
 			await fs.rm(directory, { recursive: true, force: true });
