@@ -16,7 +16,7 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 
-- The dot between two extension statuses in the status bar now uses the status line separator color instead of the statuses' accent color, matching the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#16351](https://github.com/can1357/oh-my-pi/pull/16351) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- The dot between two extension statuses in the status bar now uses the status line separator color instead of the statuses' accent color, matching the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#18616](https://github.com/can1357/oh-my-pi/pull/18616) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 
 ## [18.18.3] - 2026-11-09
