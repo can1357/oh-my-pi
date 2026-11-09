@@ -40,6 +40,7 @@ import {
 	type CollabSessionState,
 	encodeEntryFrame,
 	encodeEventFrame,
+	encodeFrame,
 	encodeSnapshotChunk,
 	type EncodedFrame,
 	formatCollabLink,
@@ -133,6 +134,7 @@ const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fe
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
 const MAX_PENDING_UI_REQUESTS = 64;
+const RESYNC_MESSAGE = "the host discarded your backlog; rejoin to resync";
 /**
  * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
  * response (an `undefined` value is a genuine guest cancel); `unavailable`
@@ -146,6 +148,8 @@ interface PendingCollabUiRequest {
 	promise: Promise<CollabGuestUiResult>;
 	settle(result: CollabGuestUiResult): void;
 	responsePending?: boolean;
+	/** Peers that were handed this dialog and can still answer it. */
+	recipients: Set<number>;
 	retainOnReconnect?: boolean;
 }
 
@@ -364,32 +368,80 @@ export class CollabHost {
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
+		const recipients = new Set<number>();
 		let settled = false;
 		const settle = (result: CollabGuestUiResult): void => {
 			if (settled) return;
 			settled = true;
 			signal?.removeEventListener("abort", onAbort);
 			this.#pendingUi.delete(reqId);
-			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+			this.#endUiRequest(reqId, recipients);
 			resolve(result);
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
+		// The queue can refuse a targeted frame and the caller has no timeout, so track
+		// who actually holds the dialog. With no writer connected yet, the ask waits for
+		// the first one to join; writers that all refused it can never answer.
+		const hadWritable = this.#hasWritablePeers();
+		for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: fullRequest })) recipients.add(peerId);
 		this.#pendingUi.set(reqId, {
 			request: fullRequest,
 			promise,
+			recipients,
 			settle,
 			retainOnReconnect: options?.retainOnReconnect,
 		});
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		if (hadWritable && recipients.size === 0) settle({ kind: "unavailable" });
 		return promise;
 	}
 
-	#sendWritablePeers(frame: CollabFrame): void {
+	#hasWritablePeers(): boolean {
+		for (const peer of this.#peers.values()) {
+			if (peer.canWrite) return true;
+		}
+		return false;
+	}
+
+	/** @returns the writable peers outside {@link skip} the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame, skip?: ReadonlySet<number>): number[] {
 		const socket = this.#socket;
-		if (!socket) return;
+		if (!socket || this.#sendSuppressed(frame)) return [];
+		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) this.#send(frame, peerId);
+			if (!peer.canWrite || skip?.has(peerId)) continue;
+			if (socket.send(frame, peerId)) admitted.push(peerId);
+		}
+		return admitted;
+	}
+
+	/**
+	 * Dismiss a settled ask on every writer. A holder the queue refused for capacity
+	 * alone would keep the dialog open with nothing left to close it, so the end falls
+	 * back to a broadcast, which replica-bearing admission delivers or ends the room
+	 * over. Guests ignore an end for a request they never held. A holder that left or
+	 * was shed needs none: its rejoin clears every presentation.
+	 */
+	#endUiRequest(reqId: number, recipients: ReadonlySet<number>): void {
+		const frame: CollabFrame = { t: "ui-request-end", reqId };
+		const socket = this.#socket;
+		const admitted = new Set(this.#sendWritablePeers(frame));
+		for (const peerId of recipients) {
+			if (admitted.has(peerId) || !this.#peers.get(peerId)?.canWrite || !socket?.isAdmitting(peerId)) continue;
+			this.#broadcast(frame);
+			return;
+		}
+	}
+
+	/**
+	 * Drop {@link peer} from every outstanding ask once it can no longer answer
+	 * (departure, shed, or demotion), so no caller waits on it. A departure retains an
+	 * emptied ask for the next writer; a shed or demotion settles it.
+	 */
+	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
+		for (const pending of this.#pendingUi.values()) {
+			if (!pending.recipients.delete(peer)) continue;
+			if (pending.recipients.size === 0 && !retainWhenEmpty) pending.settle({ kind: "unavailable" });
 		}
 	}
 
@@ -425,6 +477,7 @@ export class CollabHost {
 			}
 		};
 		socket.onRoomRecreated = () => this.#handleRoomRecreated();
+		socket.onPeerOverload = peer => this.#handlePeerOverload(peer);
 		socket.onFrame = (frame, fromPeer) => this.#handleFrame(frame, fromPeer);
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
@@ -696,8 +749,22 @@ export class CollabHost {
 		// Ending an existing dialog contains only its old-room request ID, never
 		// current-session data. Do not strand guests if it settles during a
 		// provisional /resume that later rolls back. All other traffic stays gated.
-		if (this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end")) return;
+		if (this.#sendSuppressed(frame)) return;
 		this.#socket?.send(frame, toPeer);
+	}
+
+	#sendSuppressed(frame: CollabFrame): boolean {
+		return this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end");
+	}
+
+	/**
+	 * @param advisory the frame carries no replica state, so the queue drops it under
+	 * pressure instead of shedding a peer.
+	 * @returns whether the queue admitted the frame.
+	 */
+	#broadcast(frame: CollabFrame, advisory = false): boolean {
+		if (this.#stopped || !this.#socket || this.#sendSuppressed(frame)) return false;
+		return advisory ? this.#socket.broadcastAdvisory(frame) : this.#socket.send(frame);
 	}
 
 	/**
@@ -719,8 +786,10 @@ export class CollabHost {
 		// Each update carries the whole message so far, so a newer one supersedes
 		// any still queued for the same message (#16956). Keyed per message so the
 		// last update of one message is never superseded by the next one's.
-		if (event.type === "message_update") this.#socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
-		else this.#socket?.send(frame);
+		const socket = this.#socket;
+		if (event.type === "notice") socket?.broadcastAdvisory(frame);
+		else if (event.type === "message_update") socket?.sendLatest(`message_update:${this.#messageSeq}`, frame);
+		else socket?.send(frame);
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
@@ -730,6 +799,12 @@ export class CollabHost {
 		// sender that is already gone and registering a ghost participant.
 		if (!this.#socket?.isServing(fromPeer)) {
 			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			return;
+		}
+		// Served by the relay but not registered here: shed, or its welcome was
+		// refused. Its frames would otherwise be judged as a read-only peer's.
+		if (frame.t !== "hello" && !this.#peers.has(fromPeer)) {
+			this.#sendResync(fromPeer);
 			return;
 		}
 		// An old-room answer may wait for rollback, but cannot settle against
@@ -808,6 +883,7 @@ export class CollabHost {
 		const cleanName = name.trim().slice(0, 64) || `guest-${fromPeer}`;
 		const canWrite = this.#verifyWriteToken(writeToken);
 		const firstPeer = this.#peers.size === 0;
+		const registered = this.#peers.get(fromPeer);
 		this.#peers.set(fromPeer, { name: cleanName, canWrite });
 
 		const socket = this.#socket;
@@ -820,28 +896,39 @@ export class CollabHost {
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
 		const snapshotEntries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
 		const state = this.#buildState();
+		const welcome = encodeFrame({
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: snapshot.header,
+			state,
+			agents: this.#snapshotAgents(),
+			entryCount: snapshotEntries.json.length,
+			readOnly: canWrite ? undefined : true,
+		});
+		// Welcome, chunks and replayed asks are one queue entry: up to
+		// MAX_PENDING_UI_REQUESTS asks would exceed the peer's share on their own.
+		const replayed = canWrite ? [...this.#pendingUi.values()].filter(pending => !pending.responsePending) : [];
+		let retainedBytes = Buffer.byteLength(welcome);
+		for (const bytes of snapshotEntries.bytes) retainedBytes += bytes;
+		for (const pending of replayed) {
+			retainedBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
+		}
+		if (!socket.sendBatch(this.#welcomeBatch(welcome, snapshotEntries, replayed), fromPeer, retainedBytes)) {
+			// The guest applies nothing before a welcome, so record nothing for it either.
+			if (registered) this.#peers.set(fromPeer, registered);
+			else this.#peers.delete(fromPeer);
+			logger.debug("collab: welcome batch was not admitted; leaving the peer unregistered", { fromPeer });
+			return;
+		}
 		// State broadcasts pause while no guest is joined, so the dedupe baseline
 		// may predate this welcome; with no other peer to keep current, the welcome
 		// becomes the baseline.
 		if (firstPeer) this.#lastStateJson = JSON.stringify(state);
-		this.#send(
-			{
-				t: "welcome",
-				proto: COLLAB_PROTO,
-				header: snapshot.header,
-				state,
-				agents: this.#snapshotAgents(),
-				entryCount: snapshotEntries.json.length,
-				readOnly: canWrite ? undefined : true,
-			},
-			fromPeer,
-		);
-		socket.sendBatch(this.#snapshotChunks(snapshotEntries.json, snapshotEntries.bytes), fromPeer);
 		if (canWrite) {
-			for (const pending of this.#pendingUi.values()) {
-				if (pending.responsePending) continue;
-				this.#send({ t: "ui-request", request: pending.request }, fromPeer);
-			}
+			for (const pending of replayed) pending.recipients.add(fromPeer);
+		} else {
+			// A hello without the write token demotes the peer; it can no longer answer.
+			this.#dropAskRecipient(fromPeer);
 		}
 		this.#ctx.session.emitNotice(
 			"info",
@@ -926,6 +1013,16 @@ export class CollabHost {
 	 * still emits one `final` chunk so the guest never blocks on a missing
 	 * terminator. Each batch's strings are released once its frame is built.
 	 */
+	*#welcomeBatch(
+		welcome: EncodedFrame,
+		entries: { json: string[]; bytes: number[] },
+		replayed: readonly PendingCollabUiRequest[],
+	): Generator<CollabFrame | EncodedFrame> {
+		yield welcome;
+		yield* this.#snapshotChunks(entries.json, entries.bytes);
+		for (const pending of replayed) yield { t: "ui-request", request: pending.request };
+	}
+
 	*#snapshotChunks(entries: string[], bytes: number[]): Generator<EncodedFrame> {
 		if (entries.length === 0) {
 			yield encodeSnapshotChunk([], true);
@@ -957,7 +1054,7 @@ export class CollabHost {
 		}
 		const pending = this.#pendingUi.get(reqId);
 		if (pending) {
-			if (pending.responsePending) return;
+			if (!pending.recipients.has(fromPeer) || pending.responsePending) return;
 			if (suspended) {
 				void this.#settleUiAfterTransition(pending, value, fromPeer);
 				return;
@@ -991,8 +1088,17 @@ export class CollabHost {
 				this.#ctx.session.isSessionTransitioning
 			);
 			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
-			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
-			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) {
+				pending.settle({ kind: "answered", value });
+				return;
+			}
+			// Re-pose only to writers not already holding it, and record who took it.
+			const hadWritable = this.#hasWritablePeers();
+			const holders = new Set(pending.recipients);
+			for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: pending.request }, holders)) {
+				pending.recipients.add(peerId);
+			}
+			if (hadWritable && pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
 		} catch (error) {
 			logger.warn("Collab UI response could not await session transition", { error: String(error) });
 			pending.settle({ kind: "unavailable" });
@@ -1090,6 +1196,8 @@ export class CollabHost {
 		// guest-only callers still settle rather than wait without a recipient.
 		// Explicit stop and session replacement continue to settle every request.
 		for (const pending of this.#pendingUi.values()) {
+			// Old-room ids may be reissued; only a writer that says hello again holds it.
+			pending.recipients.clear();
 			if (!pending.retainOnReconnect) pending.settle({ kind: "unavailable" });
 		}
 		this.#updateStatusSegment();
@@ -1100,11 +1208,34 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		this.#dropAskRecipient(peer, true);
 		// Relay controls arrive outside the normal frame handler.
 		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
+	}
+
+	/** The socket discarded this peer's backlog to keep the room alive; drop it and tell it to rejoin. */
+	#handlePeerOverload(peer: number): void {
+		if (this.#stopped) return;
+		const name = this.#peers.get(peer)?.name;
+		this.#peers.delete(peer);
+		this.#dropAskRecipient(peer);
+		this.#sendResync(peer);
+		if (name) {
+			this.#ctx.session.emitNotice(
+				"warning",
+				`${name} fell too far behind and was dropped; they can rejoin`,
+				"collab",
+			);
+		}
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
+	}
+
+	#sendResync(peer: number): void {
+		this.#send({ t: "error", message: RESYNC_MESSAGE, resync: true }, peer);
 	}
 
 	#buildState(): CollabSessionState {
@@ -1168,7 +1299,7 @@ export class CollabHost {
 		if (this.ending || this.#agentsDebounce || this.#peers.size === 0) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#send({ t: "agents", agents: this.#snapshotAgents() });
+			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true);
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
@@ -1274,8 +1405,8 @@ export class CollabHost {
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
-			this.#lastStateJson = json;
-			this.#send({ t: "state", state });
+			// A dropped `state` is healed by the next change, which must not dedupe against it.
+			if (this.#broadcast({ t: "state", state }, true)) this.#lastStateJson = json;
 		}, STATE_DEBOUNCE_MS);
 	}
 

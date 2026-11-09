@@ -365,6 +365,130 @@ describe("collab host registry lifecycle (#6099)", () => {
 		});
 	}
 
+	async function startCapturedHost(): Promise<{
+		transport: CollabSocket;
+		state: HostContextState;
+		writeToken: string;
+	}> {
+		const { ctx, state } = makeHostContext();
+		const originalConnect = CollabSocket.prototype.connect;
+		let transport: CollabSocket | undefined;
+		const capture = spyOn(CollabSocket.prototype, "connect").mockImplementation(function (this: CollabSocket) {
+			transport = this;
+			return originalConnect.call(this);
+		});
+		host = new CollabHost(ctx);
+		try {
+			await host.start(RELAY_URL, WEB_URL);
+		} finally {
+			capture.mockRestore();
+		}
+		if (!transport) throw new Error("host transport missing");
+		const parsed = parseCollabLink(host.link);
+		if ("error" in parsed || !parsed.writeToken) throw new Error("writable link missing");
+		return { transport, state, writeToken: Buffer.from(parsed.writeToken).toString("base64url") };
+	}
+
+	function isEnd(frame: unknown): boolean {
+		return typeof frame === "object" && frame !== null && (frame as CollabFrame).t === "ui-request-end";
+	}
+
+	it("broadcasts a dialog end when a holder's targeted end was refused", async () => {
+		const { transport, writeToken } = await startCapturedHost();
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken }, 1);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "holder", writeToken }, 2);
+		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] });
+		if (!answer) throw new Error("host did not offer the ask");
+		const real = transport.send.bind(transport);
+		const send = spyOn(transport, "send").mockImplementation((frame, targetPeer) =>
+			isEnd(frame) && targetPeer === 2 ? false : real(frame, targetPeer),
+		);
+		try {
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+			expect(await answer).toEqual({ kind: "answered", value: "Yes" });
+			expect(send.mock.calls.filter(([frame]) => isEnd(frame))).toEqual([
+				[{ t: "ui-request-end", reqId: 1 }, 1],
+				[{ t: "ui-request-end", reqId: 1 }, 2],
+				[{ t: "ui-request-end", reqId: 1 }],
+			]);
+		} finally {
+			send.mockRestore();
+		}
+	});
+
+	it("settles a retained ask once its only recreated-room holder is demoted", async () => {
+		const { transport, writeToken } = await startCapturedHost();
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first", writeToken }, 1);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "second", writeToken }, 2);
+		const abort = new AbortController();
+		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal, {
+			retainOnReconnect: true,
+		});
+		if (!answer) throw new Error("host did not offer the ask");
+		let outcome: CollabGuestUiResult | undefined;
+		void answer.then(result => {
+			outcome = result;
+		});
+		try {
+			transport.onRoomRecreated?.();
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "rejoined", writeToken }, 1);
+			await setImmediate();
+			expect(outcome).toBeUndefined();
+			// Old-room peer 2 never rejoined; demoting the one real holder leaves nobody to answer.
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "rejoined" }, 1);
+			await setImmediate();
+			expect(outcome).toEqual({ kind: "unavailable" });
+		} finally {
+			abort.abort();
+		}
+	});
+
+	it("accepts an answer from a writer the transition replay reached", async () => {
+		const { transport, state, writeToken } = await startCapturedHost();
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken }, 1);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "late", writeToken }, 2);
+		const real = transport.send.bind(transport);
+		const refuse = spyOn(transport, "send").mockImplementation((frame, targetPeer) =>
+			typeof frame === "object" && frame.t === "ui-request" && targetPeer === 2 ? false : real(frame, targetPeer),
+		);
+		const abort = new AbortController();
+		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] }, abort.signal);
+		refuse.mockRestore();
+		if (!answer) throw new Error("host did not offer the ask");
+		let outcome: CollabGuestUiResult | undefined;
+		void answer.then(result => {
+			outcome = result;
+		});
+		const original = state.sessionId;
+		const transition = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		state.sessionId = "provisional";
+		const replay = spyOn(transport, "send");
+		try {
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+			await setImmediate();
+			state.sessionId = original;
+			transport.onControl?.({ t: "peer-left", peer: 1 });
+			state.transition = undefined;
+			transition.resolve();
+			await setImmediate();
+			expect(outcome).toBeUndefined();
+			expect(
+				replay.mock.calls.filter(
+					([frame, peer]) => typeof frame !== "string" && frame.t === "ui-request" && peer === 2,
+				),
+			).toHaveLength(1);
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+			await setImmediate();
+			expect(outcome).toEqual({ kind: "answered", value: "No" });
+		} finally {
+			replay.mockRestore();
+			state.transition = undefined;
+			transition.resolve();
+			abort.abort();
+		}
+	});
+
 	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;
