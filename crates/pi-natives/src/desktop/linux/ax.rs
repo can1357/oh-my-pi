@@ -60,8 +60,11 @@ struct FrameCache {
 	/// Whether each frame's toolkit answers screen coordinates with window
 	/// ones (GTK4).
 	unplaced:  HashMap<ObjectRefOwned, bool>,
-	/// Each frame's native window id; `None` when no single one matches.
-	native_of: HashMap<ObjectRefOwned, Option<String>>,
+	/// Each frame's native window id, once one matched.
+	native_of: HashMap<ObjectRefOwned, String>,
+	/// Each frame's window geometry as one operation read it; `None` when no
+	/// window shows the frame. Cleared by [`Self::refresh`].
+	geometry:  HashMap<ObjectRefOwned, Option<NativeGeometry>>,
 }
 
 /// Where a frame whose screen position its toolkit cannot report sits on
@@ -809,28 +812,33 @@ impl FrameCache {
 		own
 	}
 
-	/// The current geometry of the native window showing `frame`, matched once
-	/// by process and title.
+	/// Starts a new operation: windows are read again, so a moved window is
+	/// seen and a frame whose window was hidden is matched again once shown.
+	fn refresh(&mut self) {
+		self.geometry.clear();
+	}
+
+	/// The geometry of the native window showing `frame`, read once per
+	/// operation; its window is matched by process and title until it is gone.
 	async fn native_geometry(
 		&mut self,
 		connection: &zbus::Connection,
 		native: &dyn NativeWindows,
 		frame: &ObjectRefOwned,
 	) -> Option<NativeGeometry> {
-		match self.native_of.get(frame) {
-			Some(None) => return None,
-			Some(Some(id)) => {
-				if let Some(geometry) = native.geometry(id) {
-					return Some(geometry);
-				}
-			},
-			None => {},
+		if let Some(&geometry) = self.geometry.get(frame) {
+			return geometry;
 		}
-		let id = native_window(connection, native, frame).await;
-		let geometry = id.as_deref().and_then(|id| native.geometry(id));
-		self
-			.native_of
-			.insert(frame.clone(), id.filter(|_| geometry.is_some()));
+		let mut geometry = self.native_of.get(frame).and_then(|id| native.geometry(id));
+		if geometry.is_none() {
+			let id = native_window(connection, native, frame).await;
+			geometry = id.as_deref().and_then(|id| native.geometry(id));
+			match id.filter(|_| geometry.is_some()) {
+				Some(id) => self.native_of.insert(frame.clone(), id),
+				None => self.native_of.remove(frame),
+			};
+		}
+		self.geometry.insert(frame.clone(), geometry);
 		geometry
 	}
 }
@@ -1137,6 +1145,7 @@ impl AxBackend for AtSpiAx {
 	}
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
+		self.frames.refresh();
 		self.read_props(h, WalkBounds::Read)
 	}
 
@@ -1263,6 +1272,7 @@ impl AxBackend for AtSpiAx {
 		let x = x.round() as i32;
 		let y = y.round() as i32;
 		let Self { rt, connection, native, frames: cache } = self;
+		cache.refresh();
 		rt.block_on(async {
 			let bus = connection.connection();
 			let mut root: Option<(ObjectRefOwned, Option<Placement>)> = None;
@@ -2125,15 +2135,20 @@ mod tests {
 		}
 	}
 
-	/// The display server's windows, all 890x550 and of process 7.
-	struct Native(std::sync::Mutex<Vec<DesktopWindow>>);
+	/// The display server's windows, all 890x550 and of process 7, and how
+	/// many geometry reads it answered.
+	struct Native(std::sync::Mutex<Vec<DesktopWindow>>, std::sync::atomic::AtomicU32);
 
 	impl Native {
 		fn new(windows: &[(&str, &str, i32, i32)]) -> Self {
 			let windows = windows
 				.iter()
 				.map(|&(id, title, x, y)| window(id, title, x, y));
-			Self(std::sync::Mutex::new(windows.collect()))
+			Self(std::sync::Mutex::new(windows.collect()), std::sync::atomic::AtomicU32::new(0))
+		}
+
+		fn reads(&self) -> u32 {
+			self.1.load(std::sync::atomic::Ordering::Relaxed)
 		}
 	}
 
@@ -2157,6 +2172,7 @@ mod tests {
 		}
 
 		fn geometry(&self, id: &str) -> Option<NativeGeometry> {
+			self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 			let windows = self.0.lock().unwrap();
 			let window = windows.iter().find(|window| window.id == id)?;
 			Some(NativeGeometry {
@@ -2214,7 +2230,7 @@ mod tests {
 	#[test]
 	fn elements_reported_at_the_screen_origin_are_placed_by_their_window() {
 		let rt = Builder::new_current_thread().enable_all().build().unwrap();
-		let bounds = rt.block_on(async {
+		let (bounds, walk_reads) = rt.block_on(async {
 			// What Files (GTK 4.14) reports, with an open popover, and a control
 			// of a toolkit that reports real screen positions.
 			let (server, client) = serve(vec![
@@ -2249,14 +2265,18 @@ mod tests {
 			for path in ["/downloads", "/frame", "/placed", "/item"] {
 				bounds.push(read_bounds(&mut cache, &client, Some(&native), path).await);
 			}
-			// The window was replaced by one elsewhere.
+			// One walk reads the frame's window once, whatever it places.
+			let walk_reads = native.reads();
+			// The window was replaced by one elsewhere before the next operation.
 			*native.0.lock().unwrap() = vec![window("43", "Desktop", 500, 100)];
+			cache.refresh();
 			bounds.push(read_bounds(&mut cache, &client, Some(&native), "/downloads").await);
 			// Without a display server that knows (Wayland), as reported.
 			bounds.push(read_bounds(&mut cache, &client, None, "/downloads").await);
 			drop(server);
-			bounds
+			(bounds, walk_reads)
 		});
+		assert_eq!(walk_reads, 1);
 		assert_eq!(bounds, [
 			Some((306.0, 442.0, 168.0, 36.0)),
 			Some((300.0, 200.0, 890.0, 550.0)),
@@ -2318,8 +2338,8 @@ mod tests {
 				),
 			])
 			.await;
-			let native = Native::new(&[("42", "Desktop", 300, 200)]);
-			let native: Option<&dyn NativeWindows> = Some(&native);
+			let windows = Native::new(&[("42", "Desktop", 300, 200)]);
+			let native: Option<&dyn NativeWindows> = Some(&windows);
 			let mut cache = FrameCache::default();
 			let mut claims = Vec::new();
 			for (path, x, y, native) in [
@@ -2338,6 +2358,19 @@ mod tests {
 						.unwrap(),
 				);
 			}
+			// The hidden window is shown again: the next operation finds it.
+			windows
+				.0
+				.lock()
+				.unwrap()
+				.push(window("44", "Hidden", 100, 50));
+			cache.refresh();
+			claims.push(
+				cache
+					.claim(&client, native, &object("/hidden"), 390, 460)
+					.await
+					.unwrap(),
+			);
 			let mut found = Vec::new();
 			for (path, placement, x, y) in
 				[("/frame", claims[0].flatten(), 390, 460), ("/editor", None, 20, 15)]
@@ -2351,7 +2384,16 @@ mod tests {
 			(claims, found)
 		});
 		let placed = Placement { x: 300, y: 200, width: 890, height: 550 };
-		assert_eq!(claims, [Some(Some(placed)), None, None, Some(None), None, Some(None)]);
+		let shown = Placement { x: 100, y: 50, width: 890, height: 550 };
+		assert_eq!(claims, [
+			Some(Some(placed)),
+			None,
+			None,
+			Some(None),
+			None,
+			Some(None),
+			Some(Some(shown)),
+		]);
 		assert_eq!(found, [Some("/downloads".to_owned()), Some("/open".to_owned())]);
 	}
 }
