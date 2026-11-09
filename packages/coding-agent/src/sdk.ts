@@ -621,7 +621,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
-	/** Role name when the session model was selected via an explicit role alias (e.g. CLI `--model pi/<role>`). */
+	/** Role whose alias selected {@link model} (CLI `--model pi/<role>`); retries walk that role's fallback chain. */
 	modelRole?: string;
 	/**
 	 * Allow an explicit {@link model} to be rebound to its same-selector registry
@@ -4961,16 +4961,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
-		const recordInitialModelChange = (targetModel: Model) => {
-			const initialModel = `${targetModel.provider}/${targetModel.id}`;
+		// The retry role follows the explicit default entry, as the task executor records it,
+		// so chain lookup prefers the role's chain while resume still restores this model as the default.
+		const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
+		const recordInitialModelChange = (initialModel: string) => {
 			sessionManager.appendModelChange(initialModel);
-			// An explicit role's or deferred pattern's own retry role follows the explicit default
-			// entry, as the task executor records it, so chain lookup prefers the role's chain
-			// while resume still restores this model as the default.
-			const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
-			if (retryRole && retryRole !== "default") {
-				sessionManager.appendModelChange(initialModel, retryRole);
-			}
+			if (retryRole && retryRole !== "default") sessionManager.appendModelChange(initialModel, retryRole);
 		};
 
 		// Restore messages if session has existing data
@@ -4989,9 +4985,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							obfuscator,
 						);
 			agent.replaceMessages(restored.messages);
-			if (model && (hasExplicitModel || options.modelRole !== undefined)) {
-				recordInitialModelChange(model);
-			}
+			// Only an explicit role alias re-owns a resumed branch; any other explicit model
+			// (subagent revival, SDK callers) keeps the role its history recorded.
+			if (model && options.modelRole) recordInitialModelChange(`${model.provider}/${model.id}`);
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -4999,9 +4995,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
-			if (model) {
-				recordInitialModelChange(model);
-			}
+			if (model) recordInitialModelChange(`${model.provider}/${model.id}`);
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
 				// classification persists its concrete effort once a real user turn runs.
