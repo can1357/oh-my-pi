@@ -233,4 +233,139 @@ describe("optional embeddings", () => {
 			},
 		);
 	});
+
+	it("loads a separate local encoder per configured model", async () => {
+		await withEnv(
+			{
+				NODE_ENV: undefined,
+				BUN_ENV: undefined,
+				MNEMOPI_NO_EMBEDDINGS: undefined,
+				MNEMOPI_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5",
+				MNEMOPI_EMBEDDING_API_URL: undefined,
+				OPENROUTER_BASE_URL: undefined,
+				OPENROUTER_API_KEY: undefined,
+				OPENAI_API_KEY: undefined,
+			},
+			async () => {
+				const inits: string[] = [];
+				setLocalModelInitializerForTests(async options => {
+					inits.push(options.model as string);
+					return {
+						embed: streamRows(texts =>
+							texts.map(text =>
+								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
+							),
+						),
+					};
+				});
+
+				// Same query text, two runtime scopes with different local models: each
+				// scope must embed through its own encoder, not the first-loaded one.
+				expect(await embed(["shared text"])).toEqual([new Float32Array([1, 0])]);
+				const scoped = await withMnemopiRuntimeOptions(
+					{ embeddings: { model: "intfloat/multilingual-e5-large" } },
+					() => embed(["shared text"]),
+				);
+				expect(scoped).toEqual([new Float32Array([0, 1, 11])]);
+				expect([...inits].sort()).toEqual(["fast-bge-small-en-v1.5", "fast-multilingual-e5-large"]);
+
+				// Switching back reuses the first encoder instead of re-initializing it.
+				expect(await embed(["again"])).toEqual([new Float32Array([1, 0])]);
+				expect(inits).toHaveLength(2);
+			},
+		);
+	});
+
+	it("evicts only the failed model's local encoder entry", async () => {
+		await withEnv(
+			{
+				NODE_ENV: undefined,
+				BUN_ENV: undefined,
+				MNEMOPI_NO_EMBEDDINGS: undefined,
+				MNEMOPI_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5",
+				MNEMOPI_EMBEDDING_API_URL: undefined,
+				OPENROUTER_BASE_URL: undefined,
+				OPENROUTER_API_KEY: undefined,
+				OPENAI_API_KEY: undefined,
+			},
+			async () => {
+				const inits: string[] = [];
+				setLocalModelInitializerForTests(async options => {
+					inits.push(options.model as string);
+					if ((options.model as string) === "fast-multilingual-e5-large" && inits.length === 2) {
+						throw new Error("multilingual init failure");
+					}
+					return {
+						embed: streamRows(texts =>
+							texts.map(text =>
+								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
+							),
+						),
+					};
+				});
+				const multilingualScope = { embeddings: { model: "intfloat/multilingual-e5-large" } } as const;
+
+				expect(await embed(["alpha"])).toEqual([new Float32Array([1, 0])]);
+				// The failed multilingual init must not poison or reuse the healthy
+				// English encoder: embed returns null, and the next scoped call retries.
+				expect(await withMnemopiRuntimeOptions(multilingualScope, () => embed(["beta"]))).toBeNull();
+				expect(await withMnemopiRuntimeOptions(multilingualScope, () => embed(["beta"]))).toEqual([
+					new Float32Array([0, 1, 4]),
+				]);
+				expect(await embed(["gamma"])).toEqual([new Float32Array([1, 0])]);
+				expect([...inits].sort()).toEqual([
+					"fast-bge-small-en-v1.5",
+					"fast-multilingual-e5-large",
+					"fast-multilingual-e5-large",
+				]);
+			},
+		);
+	});
+
+	it("initializes each configured model once under concurrent calls", async () => {
+		await withEnv(
+			{
+				NODE_ENV: undefined,
+				BUN_ENV: undefined,
+				MNEMOPI_NO_EMBEDDINGS: undefined,
+				MNEMOPI_EMBEDDING_MODEL: "BAAI/bge-small-en-v1.5",
+				MNEMOPI_EMBEDDING_API_URL: undefined,
+				OPENROUTER_BASE_URL: undefined,
+				OPENROUTER_API_KEY: undefined,
+				OPENAI_API_KEY: undefined,
+			},
+			async () => {
+				const inits: string[] = [];
+				setLocalModelInitializerForTests(async options => {
+					inits.push(options.model as string);
+					return {
+						embed: streamRows(texts =>
+							texts.map(text =>
+								(options.model as string) === "fast-bge-small-en-v1.5" ? [1, 0] : [0, 1, text.length],
+							),
+						),
+					};
+				});
+				const multilingualScope = { embeddings: { model: "intfloat/multilingual-e5-large" } } as const;
+
+				const [defaultVector, scopedVector] = await Promise.all([
+					embed(["one"]),
+					withMnemopiRuntimeOptions(multilingualScope, () => embed(["two"])),
+				]);
+				expect(defaultVector).toEqual([new Float32Array([1, 0])]);
+				expect(scopedVector).toEqual([new Float32Array([0, 1, 3])]);
+				expect([...inits].sort()).toEqual(["fast-bge-small-en-v1.5", "fast-multilingual-e5-large"]);
+
+				// Concurrent calls for the SAME model share one initialization.
+				const baseScope = { embeddings: { model: "BAAI/bge-base-en-v1.5" } } as const;
+				const [first, second] = await Promise.all([
+					withMnemopiRuntimeOptions(baseScope, () => embed(["three"])),
+					withMnemopiRuntimeOptions(baseScope, () => embed(["four"])),
+				]);
+				expect(first).toEqual([new Float32Array([0, 1, 5])]);
+				expect(second).toEqual([new Float32Array([0, 1, 4])]);
+				expect(inits.filter(name => name === "fast-bge-base-en-v1.5")).toHaveLength(1);
+			},
+		);
+	});
 });
