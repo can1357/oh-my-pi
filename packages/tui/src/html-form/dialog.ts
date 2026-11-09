@@ -468,6 +468,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * The form as one native column: sections with their context, option lists
 	 * (`select` focuses/picks, a checkbox `select` toggles), the field `Input`s and
 	 * `Editor`s as their own described children, and a Cancel/Submit bar.
+	 *
+	 * The column rides in an item-less `omp.ask.options` list: the composer-place
+	 * ask frame caps its height and scrolls only that list among its children, so
+	 * a tall form scrolls (focused option lists reveal themselves) and the bar stays put.
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		const blocked = this.#guardBlocks();
@@ -490,7 +494,11 @@ export class HtmlFormDialog implements Component, Focusable {
 					: undefined;
 		const described = col(
 			[
-				keyed(col(sections, { gap: "lg", role: "omp.ask.form" }), "form"),
+				list(
+					[keyed(col(sections, { gap: "lg", role: "omp.ask.form" }), "body")],
+					{ role: "omp.ask.options" },
+					"form",
+				),
 				actionBar([
 					lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 					...(lead ? [null] : []),

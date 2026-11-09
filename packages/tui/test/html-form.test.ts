@@ -397,7 +397,11 @@ describe("html form", () => {
 				expect(harness.errors).toEqual([]);
 				const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask");
 				expect(root).toBeDefined();
-				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(3);
+				// The form scrolls: Tern's ask frame caps its height and scrolls only a direct `omp.ask.options` list.
+				const scroller = root!.c?.find(node => node.k === "list" && node.p?.role === "omp.ask.options");
+				expect(scroller?.c?.[0]?.p?.role).toBe("omp.ask.form");
+				// Its three field option lists sit inside it.
+				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(4);
 				// Focus is on a radio: no editor node, so the terminal keeps sending keys to the form.
 				expect(harness.findAll(node => node.k === "input" || node.k === "editor")).toEqual([]);
 				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toHaveLength(1);
