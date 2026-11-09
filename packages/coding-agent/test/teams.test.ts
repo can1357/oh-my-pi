@@ -98,6 +98,35 @@ describe("parseTeamFile", () => {
 		}
 	});
 
+	it("preserves team and member approval booleans, including an explicit false override", () => {
+		for (const teamDefault of [true, false]) {
+			const contents = TEAM_YAML.replace("members:", `planApproval: ${teamDefault}\nmembers:`)
+				.replace("    handle: Scout", "    handle: Scout\n    planApproval: false")
+				.replace("    handle: Reviewer", "    handle: Reviewer\n    planApproval: true");
+			const team = parseTeamFile(contents, "/tmp/audit.md");
+			expect(team?.planApproval).toBe(teamDefault);
+			expect(team?.members[0]?.planApproval).toBe(false);
+			expect(team?.members[1]?.planApproval).toBe(true);
+		}
+		const ordinary = parseTeamFile(TEAM_YAML, "/tmp/audit.md");
+		expect(ordinary?.planApproval).toBeUndefined();
+		expect(ordinary?.members[0]?.planApproval).toBeUndefined();
+	});
+
+	it("rejects nonboolean approval settings rather than silently starting an ungated member", () => {
+		for (const value of ['"true"', '"false"', "null", "1", "[]", "{}"]) {
+			expect(
+				parseTeamFile(TEAM_YAML.replace("members:", `planApproval: ${value}\nmembers:`), "/tmp/audit.md"),
+			).toBeUndefined();
+			expect(
+				parseTeamFile(
+					TEAM_YAML.replace("    handle: Scout", `    handle: Scout\n    planApproval: ${value}`),
+					"/tmp/audit.md",
+				),
+			).toBeUndefined();
+		}
+	});
+
 	it("skips a file with no name with undefined (warning logged)", () => {
 		const team = parseTeamFile("---\ndescription: x\n---\nbody", "/tmp/bad.md");
 		expect(team).toBeUndefined();

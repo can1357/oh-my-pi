@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Team/member `planApproval` gates mutation until the actual lead approves a submitted `team://<team>/plan`; `/team reject <handle> <reason>` requests revision without opening the gate. Member overrides preserve explicit `false`, worker and extension/device dispatch obey the gate, and approval never expands read-only role permissions.
 - `/team stop` asks teammates to acknowledge or decline before release; `--force` releases matching members immediately, including pending spawns once registered. `team.stopAckTimeoutMs` controls the acknowledgement deadline.
 - Teams can coordinate atomic task claims through `team://`; workspace ledgers persist across restarts and generate a readable `TASKS.md` view.
 - Team task mutations now distinguish a committed ledger from a failed generated view update, reject multiline titles, and preserve worker member identity by generation.

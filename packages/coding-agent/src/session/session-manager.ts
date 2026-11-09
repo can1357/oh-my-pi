@@ -43,6 +43,7 @@ import {
 	stripInternalDetailsFields,
 } from "./messages";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { TeamIdentity } from "../task/team-runtime";
 import { createInterruptedToolResults, sessionExitFollowsLastMessage } from "./exit-diagnostics";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import {
@@ -3710,6 +3711,7 @@ export class SessionManager {
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		coordinationOnlyWrite?: boolean;
+		teamIdentity?: TeamIdentity;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
@@ -4782,6 +4784,7 @@ export interface PersistedSessionInit {
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	coordinationOnlyWrite?: boolean;
+	teamIdentity?: TeamIdentity;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	restrictToolNames?: boolean;
@@ -4815,6 +4818,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			coordinationOnlyWrite: entry.coordinationOnlyWrite,
+			teamIdentity: entry.teamIdentity,
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
 			restrictToolNames: entry.restrictToolNames,

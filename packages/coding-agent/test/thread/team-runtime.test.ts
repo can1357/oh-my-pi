@@ -601,6 +601,178 @@ describe("team cooperative stop", () => {
 	);
 });
 
+describe("team plan approval", () => {
+	it("closes before registration, delivers non-request plans and rejection, and requires resubmission", async () => {
+		const registry = AgentRegistry.global();
+		const notices: Array<{ from: string; to: string; body: string; progress?: boolean }> = [];
+		const receive = async (message: (typeof notices)[number]) => {
+			notices.push(message);
+			return "injected";
+		};
+		const lead = { deliverIrcMessage: receive } as unknown as AgentSessionHandle;
+		const child = { deliverIrcMessage: receive } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, { ...team, planApproval: true });
+		started.members.set("worker", { id: "worker" });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await expect(runtime.approve(lead, "worker")).rejects.toThrow("write team://audit/plan");
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await runtime.submitPlan(child, identity, "Inspect before editing");
+		expect(notices.at(-1)).toMatchObject({ from: "worker", to: "lead", progress: true });
+		expect(notices.at(-1)!.body).toContain("Inspect before editing");
+		expect(IrcBus.global().unansweredSends("worker", 0)).toEqual([]);
+		await runtime.reject(lead, "worker", "Include regression coverage");
+		expect(notices.at(-1)).toMatchObject({ from: "lead", to: "worker", progress: true });
+		expect(notices.at(-1)!.body).toContain("Include regression coverage");
+		expect(IrcBus.global().unansweredSends("lead", 0)).toEqual([]);
+		await expect(runtime.approve(lead, "worker")).rejects.toThrow("write team://audit/plan");
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await runtime.submitPlan(child, identity, "Inspect, add regression, edit");
+		await runtime.approve(lead, "worker");
+		expect(await runtime.planPending(child, identity)).toBe(false);
+		// Replacing the same ref/session still creates a new approval boundary.
+		const replacement = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		await expect(runtime.planPending(child, identity)).rejects.toThrow();
+		started.members.set("worker", { id: "worker", ref: replacement });
+		expect(await runtime.planPending(child, identity)).toBe(true);
+		await expect(runtime.approve(lead, "worker")).rejects.toThrow("write team://audit/plan");
+		expect(ref.generation).not.toBe(replacement.generation);
+		await runtime.stop(lead, "audit");
+	});
+
+	it("rejects nonmembers, wrong leads, stale generations, replaced leads and ambiguous handles", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		const child = session();
+		const other = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		registry.register({ id: "outsider", displayName: "outsider", kind: "sub", session: other });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, { ...team, planApproval: true });
+		started.members.set("worker", { id: "worker", ref });
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		await expect(runtime.submitPlan(other, identity, "spoof")).rejects.toThrow();
+		await expect(runtime.planPending(other, identity)).rejects.toThrow();
+		await expect(runtime.submitPlan(child, { ...identity, memberId: "outsider" }, "spoof")).rejects.toThrow();
+		await expect(runtime.submitPlan(child, { ...identity, generation: -1 }, "stale")).rejects.toThrow();
+		await expect(runtime.submitPlan(lead, { ...identity, memberId: "lead" }, "lead")).rejects.toThrow();
+		await expect(runtime.approve(other, "worker")).rejects.toThrow();
+		await expect(runtime.reject(child, "worker", "wrong lead")).rejects.toThrow();
+		const second = await runtime.start(lead, { ...team, name: "review", planApproval: true });
+		second.members.set("worker", { id: "worker", ref });
+		await expect(runtime.approve(lead, "worker")).rejects.toThrow("ambiguous");
+		await expect(runtime.reject(lead, "worker", "ambiguous")).rejects.toThrow("ambiguous");
+		await runtime.stop(lead, "review");
+		registry.register({ id: "lead", displayName: "replacement", kind: "main", session: lead });
+		await expect(runtime.approve(lead, "worker")).rejects.toThrow();
+		await expect(runtime.submitPlan(child, identity, "stale lead")).rejects.toThrow();
+		await runtime.stop(lead, "audit");
+	});
+
+	it("honors false overrides and resets approval for a new reservation and team generation", async () => {
+		const registry = AgentRegistry.global();
+		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		const child = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const definition = {
+			...team,
+			planApproval: true,
+			members: [{ agent: "worker", handle: "worker", planApproval: false }],
+		};
+		const started = await runtime.start(lead, definition);
+		started.members.set("worker", { id: "worker", ref });
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		expect(await runtime.planPending(child, identity)).toBe(false);
+		expect(runtime.memberIdentity(lead, "audit", started.generation, "worker").planApproval).toBe(false);
+		expect(() => runtime.memberIdentity(child, "audit", started.generation, "worker")).toThrow();
+		await runtime.stop(lead, "audit");
+		const next = await runtime.start(lead, { ...definition, members: [] });
+		const entry = { id: "worker", ref, reservation: "first" };
+		next.members.set("worker", entry);
+		const nextIdentity = { ...identity, generation: next.generation };
+		expect(await runtime.planPending(child, nextIdentity)).toBe(true);
+		expect(runtime.memberIdentity(lead, "audit", next.generation, "worker").planApproval).toBe(true);
+		expect(await runtime.planPending(child, { ...nextIdentity, planApproval: false })).toBe(true);
+		await runtime.submitPlan(child, nextIdentity, "Plan");
+		await runtime.approve(lead, "worker");
+		expect(await runtime.planPending(child, nextIdentity)).toBe(false);
+		const replacement = { ...entry, reservation: "second" };
+		next.members.set("worker", replacement);
+		runtime.memberUpdated(lead, "audit", next.generation, "worker", entry, replacement);
+		expect(await runtime.planPending(child, nextIdentity)).toBe(true);
+		await expect(runtime.planPending(child, identity)).rejects.toThrow();
+		await runtime.stop(lead, "audit");
+	});
+
+	it("looks up a real worker's pending gate in main and observes main-side rejection and approval", async () => {
+		const registry = AgentRegistry.global();
+		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const started = await teamRuntime.start(lead, { ...team, planApproval: true });
+		started.members.set("worker", { id: "worker" });
+		const ready = Promise.withResolvers<TeamProbe>();
+		const probeService: ThreadService = {
+			name: "team-probe",
+			globals: (): TeamProbeGlobals => ({ ready: ready.resolve }),
+		};
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/team-runtime-worker.ts", import.meta.url),
+			services: [identityThreadService, agentsThreadService, teamThreadService, probeService],
+			initTimeoutMs: 60_000,
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			const key = await probe.open("worker");
+			const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+			expect(await probe.planPending(key, identity)).toBe(true);
+			await probe.submitPlan(key, identity, "Worker plan");
+			await teamRuntime.reject(lead, "worker", "Revise worker plan");
+			expect(await probe.planPending(key, identity)).toBe(true);
+			await probe.submitPlan(key, identity, "Worker revised plan");
+			await teamRuntime.approve(lead, "worker");
+			expect(await probe.planPending(key, identity)).toBe(false);
+			let error: unknown;
+			try {
+				await probe.planPending(key, { ...identity, memberId: "lead" });
+			} catch (caught) {
+				error = caught;
+			}
+			expect(error).toBeInstanceOf(Error);
+			const workerLead = await probe.open("worker-lead");
+			const workerMember = await probe.open("worker-member");
+			const workerTeam = await probe.start(workerLead, { ...team, planApproval: true });
+			expect(await probe.putMember(workerLead, workerTeam.generation, "worker-member")).toBe(true);
+			const issued = await probe.memberIdentity(workerLead, "audit", workerTeam.generation, "worker-member");
+			expect(issued.planApproval).toBe(true);
+			expect(issued.memberId).toBe("worker-member");
+			let metadataError: unknown;
+			try {
+				await probe.memberIdentity(workerMember, "audit", workerTeam.generation, "worker-member");
+			} catch (caught) {
+				metadataError = caught;
+			}
+			expect(metadataError).toBeInstanceOf(Error);
+			const workerIdentity = { team: "audit", generation: workerTeam.generation, memberId: "worker-member" };
+			await probe.submitPlan(workerMember, workerIdentity, "First worker-led plan");
+			expect(await probe.command(workerLead, ".", "reject worker-member Add tests")).toContain("rejected");
+			expect(await probe.planPending(workerMember, workerIdentity)).toBe(true);
+			await probe.submitPlan(workerMember, workerIdentity, "Revised worker-led plan");
+			expect(await probe.command(workerLead, ".", "approve worker-member")).toContain("approved");
+			expect(await probe.planPending(workerMember, workerIdentity)).toBe(false);
+		} finally {
+			await teamRuntime.stop(lead, "audit");
+			await worker.terminate("test end");
+		}
+	});
+});
+
 describe("team runtime authorization", () => {
 	it("rejects spoofed sessions and replaced registry refs without changing tasks", async () => {
 		const registry = AgentRegistry.global();

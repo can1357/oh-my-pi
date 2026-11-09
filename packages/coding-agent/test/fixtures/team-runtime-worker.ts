@@ -29,6 +29,9 @@ export interface TeamProbe {
 	claim(key: string, identity: TeamIdentity, id: string): Promise<TeamClaimResult>;
 	putMember(key: string, generation: number, memberId: string): Promise<boolean>;
 	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string): Promise<TeamStopResponse>;
+	planPending(key: string, identity: TeamIdentity): Promise<boolean>;
+	submitPlan(key: string, identity: TeamIdentity, text: string): Promise<void>;
+	memberIdentity(key: string, team: string, generation: number, handle: string): Promise<TeamIdentity>;
 	command(key: string, cwd: string, args: string): Promise<string>;
 	beforeInstall(): Promise<string>;
 }
@@ -69,6 +72,9 @@ const probe: TeamProbe = {
 	start: (key, team) => getTeamClient().start(key, team),
 	claim: (key, identity, id) => getTeamClient().claim(key, identity, id),
 	respondStop: (key, identity, requestId, body) => getTeamClient().respondStop(key, identity, requestId, body),
+	planPending: (key, identity) => getTeamClient().planPending(key, identity),
+	submitPlan: (key, identity, text) => getTeamClient().submitPlan(key, identity, text),
+	memberIdentity: (key, team, generation, handle) => getTeamClient().memberIdentity(key, team, generation, handle),
 	async putMember(key, generation, memberId) {
 		const ref = AgentRegistry.global().get(memberId);
 		if (!ref) throw new Error("member missing");

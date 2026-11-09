@@ -46,6 +46,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { PerCallModelError, PerCallModelUnavailableError } from "@oh-my-pi/pi-coding-agent/task/model-approval";
 import { cfgTaskMaxEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
+import type { TeamIdentity } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -181,6 +182,7 @@ async function createPersistedSession(
 		tools?: string[];
 		readOnly?: boolean;
 		coordinationOnlyWrite?: boolean;
+		teamIdentity?: TeamIdentity;
 		agent?: string;
 		isolated?: boolean;
 		retryFallback?: RetryFallbackRole;
@@ -204,6 +206,7 @@ async function createPersistedSession(
 		advisor,
 		readOnly: contract?.readOnly,
 		coordinationOnlyWrite: contract?.coordinationOnlyWrite,
+		teamIdentity: contract?.teamIdentity,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
 		retryFallback: contract?.retryFallback,
@@ -528,6 +531,85 @@ describe("persisted subagent revival", () => {
 				await expect(write.execute("blocked", { path: target, content: "x" })).rejects.toThrow("coordination-only");
 			}
 			expect(await Bun.file(path.join(cwd, "blocked")).exists()).toBe(false);
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("retains a stale team identity on cold revival and blocks actual session dispatch", async () => {
+		const cwd = makeTempDir("@pi-team-plan-real-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "default", undefined, {
+			tools: ["read", "write", "bash"],
+			teamIdentity: { team: "audit", generation: -1, memberId: "persisted-restricted" },
+		});
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		MCPManager.setInstance(new MCPManager(cwd));
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, { authStorage, modelRegistry })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		let revived: AgentSession | undefined;
+		try {
+			revived = localSession(await reviver(ref));
+			const write = revived.getToolByName("write");
+			if (!write) throw new Error("Missing revived write tool");
+			const args = { path: path.join(cwd, "must-not-exist.txt"), content: "unsafe" };
+			const mock = createMockModel({
+				responses: [{ content: [{ type: "toolCall", name: "write", arguments: args }] }, { content: ["stopped"] }],
+			});
+			revived.agent.streamFn = mock.stream;
+			revived.agent.setModel(mock.model);
+			await revived.agent.prompt("Attempt a write after cold revival");
+			expect(await Bun.file(args.path).exists()).toBe(false);
+			const result = revived.agent.state.messages.find(message => message.role === "toolResult");
+			expect(result).toMatchObject({ isError: true });
+			expect(JSON.stringify(result)).toContain("plan approval required: send it via write team://audit/plan");
+		} finally {
+			await revived?.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("cold-revives an ungated former teammate with usable read and disk write tools", async () => {
+		const cwd = makeTempDir("@pi-ungated-team-real-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "default", undefined, {
+			tools: ["read", "write", "bash"],
+			teamIdentity: { team: "audit", generation: -1, memberId: "persisted-restricted", planApproval: false },
+		});
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		MCPManager.setInstance(new MCPManager(cwd));
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, { authStorage, modelRegistry })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		let revived: AgentSession | undefined;
+		try {
+			revived = localSession(await reviver(ref));
+			const input = path.join(cwd, "source.txt");
+			const output = path.join(cwd, "result.txt");
+			await Bun.write(input, "readable former team source\n");
+			const mock = createMockModel({
+				responses: [
+					{ content: [{ type: "toolCall", name: "read", arguments: { path: input } }] },
+					{
+						content: [
+							{ type: "toolCall", name: "write", arguments: { path: output, content: "ordinary output" } },
+						],
+					},
+					{ content: ["finished"] },
+				],
+			});
+			revived.agent.streamFn = mock.stream;
+			revived.agent.setModel(mock.model);
+			await revived.agent.prompt("Read and write after the ungated team's runtime has ended");
+			const results = revived.agent.state.messages.filter(message => message.role === "toolResult");
+			expect(results).toHaveLength(2);
+			expect(results.every(result => result.isError !== true)).toBe(true);
+			expect(JSON.stringify(results[0])).toContain("readable former team source");
+			expect(await Bun.file(output).text()).toBe("ordinary output");
 		} finally {
 			await revived?.dispose();
 			authStorage.close();

@@ -1,12 +1,68 @@
 import { describe, expect, it } from "bun:test";
 import { InternalUrlRouter } from "../src/internal-urls/router";
 import { AgentRegistry } from "../src/registry/agent-registry";
+import { IrcBus } from "../src/irc/bus";
 import type { AgentSession } from "../src/session/agent-session";
 import { teamRuntime } from "../src/task/team-runtime";
 import { registerLocalSession } from "../src/thread/session-directory";
 import type { ToolSession } from "../src/tools";
 
 describe("team:// routing", () => {
+	it("submits a plan as the actual session author and rejects forged or malformed requests", async () => {
+		const registry = AgentRegistry.global();
+		const suffix = crypto.randomUUID();
+		const plans: Array<{ from: string; body: string; progress?: boolean }> = [];
+		const lead = {
+			instanceKey: `plan-lead:${suffix}`,
+			deliverIrcMessage: async (message: (typeof plans)[number]) => {
+				plans.push(message);
+				return "injected";
+			},
+		} as unknown as AgentSession;
+		const child = { instanceKey: `plan-child:${suffix}` } as AgentSession;
+		const outsider = { instanceKey: `plan-outsider:${suffix}` } as AgentSession;
+		for (const session of [lead, child, outsider]) registerLocalSession(session);
+		const leadRef = registry.register({ id: `lead-${suffix}`, displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: `child-${suffix}`, displayName: "child", kind: "sub", session: child });
+		const started = await teamRuntime.start(lead, {
+			name: `plan-${suffix}`,
+			description: "",
+			members: [],
+			body: "",
+			source: "project",
+			filePath: "plan.md",
+			planApproval: true,
+		});
+		started.members.set("worker", { id: ref.id, ref });
+		const identity = { team: `plan-${suffix}`, generation: started.generation, memberId: ref.id };
+		const tools = (session: AgentSession): ToolSession =>
+			({
+				cwd: ".",
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionInstanceKey: () => session.instanceKey,
+				teamIdentity: identity,
+			}) as ToolSession;
+		const router = new InternalUrlRouter();
+		const url = `team://${identity.team}/plan`;
+		try {
+			await router.write(url, "Inspect and add tests", { session: tools(child) });
+			expect(plans.at(-1)).toMatchObject({ from: ref.id, progress: true });
+			expect(plans.at(-1)!.body).toContain("Inspect and add tests");
+			expect(IrcBus.global().unansweredSends(ref.id, 0)).toEqual([]);
+			await expect(router.write(url, "spoofed", { session: tools(outsider) })).rejects.toThrow();
+			await expect(router.write(url, "   ", { session: tools(child) })).rejects.toThrow();
+			for (const target of [`${url}/worker`, `${url}?author=lead`, `${url}#lead`]) {
+				await expect(router.write(target, "spoofed", { session: tools(child) })).rejects.toThrow();
+			}
+			await expect(router.resolve(url, { session: tools(child) })).rejects.toThrow();
+		} finally {
+			await teamRuntime.stop(lead, identity.team);
+			registry.unregister(leadRef.id, leadRef);
+			registry.unregister(ref.id, ref);
+		}
+	});
+
 	it("rejects malformed task paths and never locates the ledger", async () => {
 		const router = new InternalUrlRouter();
 		for (const url of ["team://audit", "team://audit/tasks/1", "team://audit/tasks/1/claim/extra"]) {

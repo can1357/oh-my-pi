@@ -11,16 +11,17 @@ Implemented. A team is a group of **in-session teammates** spawned through the
 shared subagent seam (`spawnSubagentForSession`) - not separate terminals, not
 A2A peers, and not a new kind of session. They are ordinary kept-alive
 subagents with their own context, registry rows and transcripts. `/team start`
-records which ref ids belong to the team; `/team stop` releases exactly those
-ids with tombstones (transcripts kept, revive available) and never touches an
-unrelated ref that happens to share a handle.
+records which refs belong to the team. `/team stop` requests cooperative release;
+`/team stop --force` releases matching refs immediately with tombstones
+(transcripts kept, revive available). Neither targets an unrelated replacement
+that happens to share a handle.
 
 ## What it is
 
 - a **team file** `.omp/teams/<name>.md` or `~/.omp/agent/teams/<name>.md` (project scope wins by team name)
   listing `name`, `description`, optional `workspace`, optional `context`,
-  optional initial `tasks` titles, and `members` (each an existing agent
-  definition + `handle` + optional `role`);
+  optional initial `tasks` titles, optional `planApproval`, and `members` (each
+  an existing agent definition + `handle` + optional `role` and `planApproval`);
 - **teammates**: one subagent per member, spawned with the normalized handle as
   its registry id. The handle is normalized by the same `sanitizeAgentId` the
   registry uses (48-character cap), so `agent://<handle>` always addresses the
@@ -35,6 +36,12 @@ unrelated ref that happens to share a handle.
 - **idle notices**: when a member finishes a running turn and becomes idle,
   the team's lead receives its id, a short excerpt and an `agent://` link.
   The notice is not a request and does not require an automatic reply.
+- **plan approval**: a team or member with `planApproval: true` starts with a
+  separate tool gate. It can read, search, wait and coordinate while waiting
+  for its actual lead to approve its submitted plan. A member's explicit
+  `planApproval: false` overrides a team-wide requirement. Approval removes
+  only this gate; it never grants new tools or disk write permission to
+  read-only roles.
 - **team role prompts**: read-only definitions and definitions with
   `team: false` require a `team-prompt` to join a team. The path must be a
   non-empty relative path whose resolved real path stays inside the agent
@@ -64,7 +71,8 @@ unrelated ref that happens to share a handle.
   old `TASKS.md` exists without `tasks.json`, startup refuses to overwrite it
   and requires migration.
 - **commands**: `/team list`, `/team start <name> [assignment]`,
-  `/team status [name]`, `/team stop <name|all>`. A spawn whose registry ref
+  `/team status [name]`, `/team stop [--force] <name|handle|all>`,
+  `/team approve <handle>`, and `/team reject <handle> <reason>`. A spawn whose registry ref
   does not appear in time is reported as *pending* (with its reserved id); a
   retry skips it instead of spawning a duplicate. Once the run registers, the
   member is live; if the run ends without registering, `/team status` and
@@ -76,10 +84,9 @@ unrelated ref that happens to share a handle.
 
 - **Not cross-terminal.** Teammates live in the lead's process. Cross-terminal
   delegation is the separate `a2a:<name>` spawn path.
-- **No file-backed mailbox, idle notification, split-pane display, or
-  shutdown request/approve flow.** Delivery uses the existing IRC queues and
-  wake turns; termination is `/team stop` (a lifecycle release), not a
-  negotiation.
+- **No file-backed mailbox or split-pane display.** Delivery and cooperative
+  stop requests use existing IRC queues and wake turns; notifications are
+  not requests and do not create automatic reply obligations.
 - **No team-lead type or team config file beyond the `.md` itself.** The lead
   is whatever session ran `/team`.
 
@@ -96,10 +103,12 @@ workspace: ./ws
 tasks:
   - Collect logs
   - Verify findings
+planApproval: true
 members:
   - agent: scout
     handle: Scout
     role: Collect logs
+    planApproval: false
   - agent: reviewer
     handle: Reviewer
     role: Verify findings
@@ -113,7 +122,47 @@ Audit covers services X and Y; the lead collects the final report.
    `Reviewer`, the workspace ledger and view are created, and they appear in the
    Agent Hub. Read `team://audit/tasks` to inspect work. Message members with
    `write agent://Scout`; inspect them with `/team status audit`; release them
-   with `/team stop audit`.
+   with `/team stop audit` (or `/team stop --force audit` for immediate release).
+
+## Plan submission and approval
+
+`planApproval` must be a YAML boolean. Set it on the team to require approval
+for all members, or on individual members; an explicit member value always
+overrides the team value. Omitted settings do not add a gate. Malformed values
+are refused rather than silently starting an ungated teammate.
+
+Until approval, the exact allowed tool names are `read`, `grep`, `glob`,
+`lsp`, `web_search`, `wait`, and `write` targeting `agent://` or `team://`
+coordination URLs. `lsp` is limited to read-only actions (for example, hover,
+definitions and diagnostics); rename, all `code_actions` calls (including
+listing), raw requests and other state-changing actions are blocked. Other tools, disk writes and `xd://`
+dispatch are blocked:
+
+```text
+plan approval required: send it via write team://audit/plan
+```
+
+This is not session plan mode: IRC wake turns remain enabled. Gated sessions
+consult the main runtime for each call, including worker calls and
+extension-rewritten arguments. The gate remains closed if its authority cannot
+be reached, including after revival with stale membership. Teammates started
+without an approval requirement remain usable after their team ends or they
+are cold-revived; approval itself is never persisted as a grant.
+
+1. The member submits its plan as the content of `write team://audit/plan`.
+   Its trusted session identifies the author; the URL/body cannot select
+   another author. The actual lead receives a non-request notification.
+2. The lead runs `/team reject Reviewer Explain how you will verify the result`.
+   The member receives the reason, and the gate stays closed. The member can
+   revise and submit again through the same URL.
+3. The lead runs `/team approve Reviewer` after submission. Approving without
+   a submitted plan is refused and leaves the gate closed.
+
+Only the current lead can approve or reject its members. Ambiguous handles,
+nonmembers, stale generations and replaced refs are refused. Approval belongs
+to that member's generation, not to any later replacement. A writable member
+can mutate after approval; a read-only scout/reviewer still has only its
+original tools and coordination-only write capability.
 
 ## Implementation
 
@@ -124,7 +173,7 @@ and the task ledger; the thread service routes worker operations to it.
 `task/spawn-subagent.ts` forwards team spawn metadata through
 `task/structured-subagent.ts` and the session/tool creation path, where a
 coordination-only write capability is enforced. Settings:
-`team.enabled` / `team.maxTeammates`. The design contract is
+`team.enabled` / `team.maxTeammates` / `team.stopAckTimeoutMs`. The design contract is
 [`docs/specs/2026-11-06-agent-teams-design.md`](./specs/2026-11-06-agent-teams-design.md).
 
 ## Source

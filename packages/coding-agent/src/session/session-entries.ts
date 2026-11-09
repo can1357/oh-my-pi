@@ -11,6 +11,7 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { TeamIdentity } from "../task/team-runtime";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import type { RuntimeIdentity } from "./runtime-identity";
 
@@ -302,6 +303,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readOnly?: boolean;
 	/** Whether write was granted only for agent:// and team:// coordination. */
 	coordinationOnlyWrite?: boolean;
+	/** Membership hint only; revival must revalidate it with the main runtime. */
+	teamIdentity?: TeamIdentity;
 	/** Output schema if structured output was requested. */
 	outputSchema?: unknown;
 	/** Enforcement policy recorded with the output schema for faithful revival. */

@@ -25,6 +25,8 @@ export interface TeamMember {
 	handle: string;
 	/** Free-text role description rendered into the member's context. */
 	role?: string;
+	/** Override the team's plan-approval requirement, including explicit false. */
+	planApproval?: boolean;
 }
 
 /** A parsed team file. */
@@ -39,6 +41,8 @@ export interface TeamDefinition {
 	members: TeamMember[];
 	/** Initial task titles, seeded only when a ledger is first created. */
 	tasks?: string[];
+	/** Require lead approval of each member's plan before non-coordination tools. */
+	planApproval?: boolean;
 	/** Shared context block rendered into every member's prompt. */
 	context?: string;
 	/** The file's body: the team's standing instruction. */
@@ -60,6 +64,10 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 		logger.warn(`team file ${filePath}: frontmatter 'description' is required; skipped`);
 		return undefined;
 	}
+	if ("planApproval" in frontmatter && typeof frontmatter.planApproval !== "boolean") {
+		logger.warn(`team file ${filePath}: frontmatter 'planApproval' must be a boolean; skipped`);
+		return undefined;
+	}
 	const rawMembers = Array.isArray(frontmatter.members) ? frontmatter.members : [];
 	const members: TeamMember[] = [];
 	for (const raw of rawMembers) {
@@ -68,6 +76,10 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 			continue;
 		}
 		const record = raw as Record<string, unknown>;
+		if ("planApproval" in record && typeof record.planApproval !== "boolean") {
+			logger.warn(`team file ${filePath}: member 'planApproval' must be a boolean; skipped team`);
+			return undefined;
+		}
 		if (typeof record.agent !== "string" || record.agent.trim().length === 0) {
 			logger.warn(`team file ${filePath}: member 'agent' is required; skipped member`);
 			continue;
@@ -80,6 +92,7 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 			agent: record.agent.trim(),
 			handle: record.handle.trim(),
 			...(typeof record.role === "string" && record.role.trim().length > 0 ? { role: record.role.trim() } : {}),
+			...(typeof record.planApproval === "boolean" ? { planApproval: record.planApproval } : {}),
 		});
 	}
 	if (members.length === 0) {
@@ -107,6 +120,7 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 		...(workspace !== undefined ? { workspace } : {}),
 		members,
 		...(tasks !== undefined ? { tasks } : {}),
+		...(typeof frontmatter.planApproval === "boolean" ? { planApproval: frontmatter.planApproval } : {}),
 		...(typeof frontmatter.context === "string" && frontmatter.context.trim().length > 0
 			? { context: frontmatter.context }
 			: {}),

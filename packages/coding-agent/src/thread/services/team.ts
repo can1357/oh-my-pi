@@ -21,6 +21,11 @@ const serve: RpcServe<TeamEndpoint, TeamProtocol> = {
 	resolvePendingStop: (endpoint, key, team, generation, handle, expected, ref, failure) =>
 		endpoint.resolvePendingStop(key, team, generation, handle, expected, ref, failure),
 	leadIdentity: (endpoint, key, team) => endpoint.leadIdentity(key, team),
+	memberIdentity: (endpoint, key, team, generation, handle) => endpoint.memberIdentity(key, team, generation, handle),
+	planPending: (endpoint, key, identity) => endpoint.planPending(key, identity),
+	submitPlan: (endpoint, key, identity, text) => endpoint.submitPlan(key, identity, text),
+	approve: (endpoint, key, handle) => endpoint.approve(key, handle),
+	reject: (endpoint, key, handle, reason) => endpoint.reject(key, handle, reason),
 	respondStop: (endpoint, key, identity, requestId, body) => endpoint.respondStop(key, identity, requestId, body),
 	readTasks: (endpoint, key, identity) => endpoint.readTasks(key, identity),
 	addTask: (endpoint, key, identity, title) => endpoint.addTask(key, identity, title),

@@ -471,6 +471,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			taskDepth,
 			toolNames: revivedToolNames,
 			coordinationOnlyWrite: init.coordinationOnlyWrite === true,
+			// This is not an approval grant. Missing runtime state or a stale ref
+			// fails closed at dispatch instead of reviving as a non-team agent.
+			teamIdentity: init.teamIdentity,
 			// `revivedToolNames` is the enabled set, devices included: keep those devices,
 			// or they come back as top-level tools and change the replayed tool list.
 			mountedToolNames: restoredSeance ? undefined : init.mountedTools,

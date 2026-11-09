@@ -31,6 +31,8 @@ const USAGE = [
 	"  /team list                       show discovered team files",
 	"  /team status [name]              member handles + live registry status",
 	"  /team stop [--force] <name|handle|all>  request stop (or force release)",
+	"  /team approve <handle>           approve a submitted member plan",
+	"  /team reject <handle> <reason>   reject a plan and require resubmission",
 ].join("\n");
 
 function teamRuntimeError(message: string): string {
@@ -108,12 +110,14 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				description: "Request members to stop, or force release",
 				usage: "[--force] <name|handle|all>",
 			},
+			{ name: "approve", description: "Approve a submitted member plan", usage: "<handle>" },
+			{ name: "reject", description: "Reject a plan and request revision", usage: "<handle> <reason>" },
 		],
 		subcommandOptional: true,
 		getTuiAutocompleteDescription: () => "Agent teams",
 		handle: async (command, runtime: SlashCommandRuntime) => {
 			const { verb, rest } = parseSubcommand(command.args);
-			if (!verb || verb === "list" || verb === "status" || verb === "start" || verb === "stop") {
+			if (!verb || ["list", "status", "start", "stop", "approve", "reject"].includes(verb)) {
 				if (!cfgTeamEnabled.get(runtime.settings)) {
 					await runtime.output(
 						teamRuntimeError(
@@ -136,6 +140,20 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						.map(team => `${team.name} (${team.members.length} members, ${team.source}) — ${team.description}`)
 						.join("\n"),
 				);
+				return commandConsumed();
+			}
+			if (verb === "approve" || verb === "reject") {
+				const [handle, ...words] = rest.trim().split(/\s+/).filter(Boolean);
+				if (!handle || (verb === "approve" ? words.length !== 0 : words.length === 0)) return usage(USAGE, runtime);
+				try {
+					const client = getTeamClient();
+					const key = runtime.session.instanceKey;
+					if (verb === "approve") await client.approve(key, handle);
+					else await client.reject(key, handle, words.join(" "));
+					await runtime.output(`${handle}: plan ${verb === "approve" ? "approved" : "rejected"}`);
+				} catch (error) {
+					await runtime.output(teamRuntimeError(error instanceof Error ? error.message : String(error)));
+				}
 				return commandConsumed();
 			}
 			if (verb === "start") {
@@ -273,7 +291,7 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							context: renderTeamMemberContext({ ...team, members }, member, ids),
 							handle,
 							teamReservedId: entry.id,
-							teamIdentity: { team: team.name, generation: started.generation, memberId: entry.id },
+							teamIdentity: await client.memberIdentity(key, team.name, started.generation, handle),
 							teamIrc: true,
 							...(team.workspace !== undefined ? { teamWorkspace: team.workspace } : {}),
 						});

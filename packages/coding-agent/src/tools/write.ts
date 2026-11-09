@@ -95,6 +95,16 @@ const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
 const MISSING_DELIMITER_RE = /^([a-z][a-z0-9+.-]*)\/+(.*)$/i;
 
+/**
+ * Canonical write routing, shared with dispatch gates. Never classify the raw
+ * argument: hashline wrappers, URL aliases and selectors must resolve exactly
+ * as they do when WriteTool executes.
+ */
+export function resolveWriteTarget(rawPath: string, router = InternalUrlRouter.instance()) {
+	const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
+	return { ...recovered, target: router.writeTarget(recovered.path) };
+}
+
 /** True when `typo` is exactly one insertion, deletion, substitution, or adjacent swap away from `word`. */
 function isOneEditAway(typo: string, word: string): boolean {
 	if (typo === word || Math.abs(typo.length - word.length) > 1) return false;
@@ -950,9 +960,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// what `read` resolves for the same URL; line-range/malformed selectors throw.
 		// A `<file>:conflict://N` target is normalized to its URL; the note tells the model.
 		const router = InternalUrlRouter.instance();
-		const recovered = recoverConflictUriPrefix(router.peelWriteSelector(unwrapHashlineHeaderPath(rawPath), "write"));
-		const path = recovered.path;
-		const target = router.writeTarget(path);
+		const recovered = resolveWriteTarget(rawPath, router);
+		const { path, target } = recovered;
 		if (
 			this.session.coordinationOnlyWrite === true &&
 			((target?.url.protocol !== "agent:" && target?.url.protocol !== "team:") ||

@@ -12,12 +12,14 @@ import type {
 
 type TeamTarget =
 	| { team: string; kind: "tasks"; id?: string; action?: "claim" | "release" | "done" }
-	| { team: string; kind: "stop"; requestId: string };
+	| { team: string; kind: "stop"; requestId: string }
+	| { team: string; kind: "plan" };
 
 function parseTarget(url: InternalUrl): TeamTarget {
 	const team = url.rawHost;
 	const pathname = url.rawPathname ?? url.pathname;
 	if (!team || url.search || url.hash) throw new Error("Invalid team task URL");
+	if (pathname === "/plan") return { team, kind: "plan" };
 	const stop = /^\/stop\/([a-zA-Z0-9_-]+)$/.exec(pathname);
 	if (stop) return { team, kind: "stop", requestId: stop[1] };
 	const match = /^\/tasks(?:\/([1-9][0-9]*)\/(claim|release|done))?$/.exec(pathname);
@@ -57,7 +59,10 @@ export class TeamProtocolHandler implements ProtocolHandler {
 		const { client, key, identity } = await caller(context?.session, target.team);
 		let result: unknown;
 		if (target.kind === "stop") result = await client.respondStop(key, identity, target.requestId, content);
-		else if (!target.id) result = await client.addTask(key, identity, content);
+		else if (target.kind === "plan") {
+			await client.submitPlan(key, identity, content);
+			result = { submitted: true };
+		} else if (!target.id) result = await client.addTask(key, identity, content);
 		else if (target.action === "claim") {
 			const claim = await client.claim(key, identity, target.id);
 			if (claim.kind === "conflict") throw new Error(`Task ${target.id} is owned by ${claim.owner}`);

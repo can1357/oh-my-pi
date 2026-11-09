@@ -385,6 +385,9 @@ import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateAp
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
+import { getTeamClient } from "../thread/services/team-client";
+import { resolveWriteTarget } from "../tools/write";
+import { LSP_READONLY_ACTIONS } from "../lsp/servers";
 import {
 	collectPendingToolCalls,
 	createInterruptedToolResults,
@@ -5736,6 +5739,50 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		return this.#ttsr.afterToolCall(ctx);
 	}
+
+	/**
+	 * Team approval is main-runtime authority, not a tool-list or plan-mode
+	 * setting. Keep it here so replacing/rebuilding tools cannot remove it.
+	 * A missing/stale caller or unavailable service denies even read-only calls.
+	 */
+	async #teamPlanGate(name: string, args: unknown): Promise<BeforeToolCallResult | undefined> {
+		const identity = this.#evalToolSession?.teamIdentity;
+		if (!identity || identity.planApproval === false) return undefined;
+		const blocked: BeforeToolCallResult = {
+			block: true,
+			reason: `plan approval required: send it via write team://${identity.team}/plan`,
+		};
+		try {
+			const pending = await getTeamClient().planPending(this.instanceKey, identity);
+			if (pending === false) return undefined;
+			if (pending !== true) return blocked;
+			switch (name) {
+				case "read":
+				case "grep":
+				case "glob":
+				case "web_search":
+				case "wait":
+					return undefined;
+				case "lsp":
+					if (isRecord(args) && typeof args.action === "string" && LSP_READONLY_ACTIONS.has(args.action))
+						return undefined;
+					return blocked;
+				case "write": {
+					if (!isRecord(args) || typeof args.path !== "string") return blocked;
+					const { target } = resolveWriteTarget(args.path);
+					if (
+						(target?.url.protocol === "agent:" || target?.url.protocol === "team:") &&
+						target.spec.write?.scope === "coordination"
+					)
+						return undefined;
+				}
+			}
+		} catch {
+			// Never fall back to a cached approval, local flag or tool capability.
+		}
+		return blocked;
+	}
+
 	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at
 	 * arg-prep time — before concurrency scheduling, `tool_execution_start`,
@@ -5748,6 +5795,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
 		const runner = this.#extensionRunner;
+		const teamBlock = await this.#teamPlanGate(ctx.tool.name, ctx.args);
+		if (teamBlock) return teamBlock;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
 		if (ttsrResult) {
@@ -5793,6 +5842,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// view, not the execution params — a revision cannot map back onto them.
 		const args = callResult?.input !== undefined && !computer ? callResult.input : undefined;
 		const additionalContext = callResult?.additionalContext;
+		const finalTeamBlock = await this.#teamPlanGate(ctx.tool.name, args === undefined ? ctx.args : args);
+		if (finalTeamBlock) {
+			runner.clearLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+			return finalTeamBlock;
+		}
 		if (args === undefined && additionalContext === undefined) return undefined;
 		return { args, additionalContext };
 	}

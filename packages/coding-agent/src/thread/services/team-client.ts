@@ -113,6 +113,21 @@ export class TeamEndpoint implements TeamClient {
 	async leadIdentity(key: string, team: string) {
 		return teamRuntime.identity(this.#session(key), team);
 	}
+	async memberIdentity(key: string, team: string, generation: number, handle: string) {
+		return teamRuntime.memberIdentity(this.#session(key), team, generation, handle);
+	}
+	planPending(key: string, identity: TeamIdentity) {
+		return teamRuntime.planPending(this.#session(key), identity);
+	}
+	submitPlan(key: string, identity: TeamIdentity, text: string) {
+		return teamRuntime.submitPlan(this.#session(key), identity, text);
+	}
+	approve(key: string, handle: string) {
+		return teamRuntime.approve(this.#session(key), handle);
+	}
+	reject(key: string, handle: string, reason: string) {
+		return teamRuntime.reject(this.#session(key), handle, reason);
+	}
 	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string) {
 		return teamRuntime.respondStop(this.#session(key), identity, requestId, body);
 	}

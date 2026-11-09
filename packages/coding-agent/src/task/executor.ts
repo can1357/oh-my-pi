@@ -5389,6 +5389,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
 				readOnly: isReadOnlyAgent(agent),
 				coordinationOnlyWrite: options.coordinationOnlyWrite || undefined,
+				teamIdentity: options.teamIdentity,
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorRolePattern ?? "on") : undefined,

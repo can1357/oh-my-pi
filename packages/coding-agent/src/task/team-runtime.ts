@@ -6,13 +6,15 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import stopRequestTemplate from "../prompts/system/team-stop-request.md" with { type: "text" };
 import type { TeamCommandMember } from "../thread/services/team-protocol";
 import { TeamLedger, type TeamClaimResult, type TeamTask } from "./team-ledger";
-import type { TeamDefinition } from "./teams";
+import { sanitizeTeamHandle, type TeamDefinition } from "./teams";
 
 /** Identity propagated to a team member's trusted tool session. */
 export interface TeamIdentity {
 	team: string;
 	generation: number;
 	memberId: string;
+	/** Immutable main-issued requirement, not approval; false keeps ungated revivals usable. */
+	planApproval?: boolean;
 }
 
 /** Result of a member's `write team://<team>/stop/<requestId>`. */
@@ -23,6 +25,7 @@ export interface TeamStopResponse {
 
 export interface TeamMembership {
 	id: string;
+	reservation?: string;
 	ref?: AgentRef;
 	failure?: string;
 }
@@ -45,6 +48,15 @@ interface StopIntent {
 	timer?: NodeJS.Timeout;
 }
 
+interface MemberPlan {
+	id: string;
+	reservation: unknown;
+	refGeneration?: number;
+	submitted?: string;
+	approved: boolean;
+	revision: number;
+}
+
 interface RuntimeTeam extends StartedTeam {
 	name: string;
 	lead: object;
@@ -53,6 +65,9 @@ interface RuntimeTeam extends StartedTeam {
 	pendingRefs: Map<string, { reservation: unknown; generation: number }>;
 	stops: Map<string, StopIntent>;
 	releasing: Map<string, StopIntent>;
+	planApproval: boolean;
+	planOverrides: Map<string, boolean>;
+	plans: Map<string, MemberPlan>;
 }
 
 /** Main-owned membership and authority for all team generations. */
@@ -184,6 +199,15 @@ export class TeamRuntime {
 			pendingRefs: new Map(),
 			stops: new Map(),
 			releasing: new Map(),
+			planApproval: team.planApproval === true,
+			planOverrides: new Map(
+				team.members.flatMap(member =>
+					member.planApproval === undefined
+						? []
+						: [[sanitizeTeamHandle(member.handle), member.planApproval] as const],
+				),
+			),
+			plans: new Map(),
 		};
 		let teams = this.#sessions.get(lead);
 		if (!teams) this.#sessions.set(lead, (teams = new Map()));
@@ -213,7 +237,10 @@ export class TeamRuntime {
 		after: TeamMembership | undefined,
 	): void {
 		const state = this.#sessions.get(lead)?.get(name);
-		if (!state || !this.isCurrentLead(lead, name, generation) || !before) return;
+		if (!state || !this.isCurrentLead(lead, name, generation)) return;
+		if (after) this.#memberPlan(state, handle, after);
+		else state.plans.delete(handle);
+		if (!before) return;
 		const intent = state.stops.get(handle);
 		if (!intent) return;
 		if (
@@ -245,6 +272,20 @@ export class TeamRuntime {
 	identity(lead: object, name: string): TeamIdentity | undefined {
 		const state = this.#sessions.get(lead)?.get(name);
 		return state ? { team: name, generation: state.generation, memberId: state.leadId } : undefined;
+	}
+
+	/** Main-issued spawn identity; derive requirements from the live generation, never re-read config. */
+	memberIdentity(lead: object, name: string, generation: number, handle: string): TeamIdentity {
+		const state = this.#sessions.get(lead)?.get(name);
+		if (!state || !this.isCurrentLead(lead, name, generation)) throw new Error("Team lead is no longer registered");
+		const member = state.members.get(handle);
+		if (!member || member.failure !== undefined) throw new Error("Team member reservation is no longer active");
+		return {
+			team: name,
+			generation,
+			memberId: member.id,
+			planApproval: state.planOverrides.get(handle) ?? state.planApproval,
+		};
 	}
 
 	#clearStop(state: RuntimeTeam, intent: StopIntent): void {
@@ -517,15 +558,115 @@ export class TeamRuntime {
 		const entry = [...state.members.values()].find(member => member.id === identity.memberId);
 		if (!entry || entry.failure !== undefined) throw new Error("Caller is not a team member");
 		const ref = registry.get(entry.id);
+		const pending = state.pendingRefs.get(entry.id);
 		if (
 			!ref ||
 			ref.session !== session ||
-			(entry.ref !== undefined && (entry.ref.id !== ref.id || entry.ref.generation !== ref.generation))
+			(entry.ref !== undefined && (entry.ref.id !== ref.id || entry.ref.generation !== ref.generation)) ||
+			(!entry.ref &&
+				pending?.reservation === entry.reservation &&
+				pending?.generation !== undefined &&
+				pending.generation !== ref.generation)
 		) {
 			throw new Error("Team member session is not registered");
 		}
 		entry.ref ??= ref;
 		return { state, lead: false };
+	}
+
+	#memberPlan(state: RuntimeTeam, handle: string, member: TeamMembership): MemberPlan {
+		const reservation = member.reservation;
+		let plan = state.plans.get(handle);
+		if (
+			!plan ||
+			plan.id !== member.id ||
+			plan.reservation !== reservation ||
+			(plan.refGeneration !== undefined && plan.refGeneration !== member.ref?.generation)
+		) {
+			plan = { id: member.id, reservation, refGeneration: member.ref?.generation, approved: false, revision: 0 };
+			state.plans.set(handle, plan);
+		}
+		plan.refGeneration ??= member.ref?.generation;
+		return plan;
+	}
+
+	/** Resolve every lookup against main-owned membership and the caller's actual ref. */
+	async planPending(session: object, identity: TeamIdentity): Promise<boolean> {
+		const { state, lead } = this.#authorize(session, identity);
+		if (lead) return false;
+		const matches = [...state.members].filter(([, member]) => member.id === identity.memberId);
+		if (matches.length !== 1) throw new Error("Ambiguous team member identity");
+		const [handle, member] = matches[0]!;
+		return (
+			(state.planOverrides.get(handle) ?? state.planApproval) && !this.#memberPlan(state, handle, member).approved
+		);
+	}
+
+	async submitPlan(session: object, identity: TeamIdentity, text: string): Promise<void> {
+		const { state, lead } = this.#authorize(session, identity);
+		if (lead) throw new Error("Only a team member can submit a plan");
+		if (!text.trim()) throw new Error(`Plan must not be empty; send it via write team://${state.name}/plan`);
+		const matches = [...state.members].filter(([, member]) => member.id === identity.memberId);
+		if (matches.length !== 1) throw new Error("Ambiguous team member identity");
+		const [handle, member] = matches[0]!;
+		const plan = this.#memberPlan(state, handle, member);
+		plan.approved = false;
+		plan.submitted = undefined;
+		const revision = ++plan.revision;
+		const receipt = await IrcBus.global().send({
+			from: member.id,
+			to: state.leadId,
+			body: `Plan from ${handle} (${member.id}) for team ${state.name}:\n${text}`,
+			progress: true,
+			teamControl: true,
+		});
+		this.#authorize(session, identity);
+		const current = state.members.get(handle);
+		if (!current || this.#memberPlan(state, handle, current) !== plan || plan.revision !== revision)
+			throw new Error("Plan changed during submission; submit the current plan again");
+		if (receipt.outcome === "failed") throw new Error(`Plan delivery failed: ${receipt.error}; submit again`);
+		plan.submitted = text;
+	}
+
+	#planTarget(lead: object, handle: string): { state: RuntimeTeam; member: TeamMembership; plan: MemberPlan } {
+		const matches = [...(this.#sessions.get(lead)?.values() ?? [])].flatMap(state =>
+			[...state.members]
+				.filter(([name, member]) => name === handle || member.id === handle)
+				.map(([name, member]) => ({ state, name, member })),
+		);
+		if (matches.length > 1) throw new Error(`ambiguous member handle "${handle}"`);
+		const target = matches[0];
+		if (!target) throw new Error(`No live team member named "${handle}" owned by this lead`);
+		const { state, name, member } = target;
+		if (!this.isCurrentLead(lead, state.name, state.generation)) throw new Error("Team lead is no longer registered");
+		if (member.failure !== undefined) throw new Error("Team member failed to register");
+		const ref = AgentRegistry.global().get(member.id);
+		if (!member.ref || !ref || member.ref.id !== ref.id || member.ref.generation !== ref.generation)
+			throw new Error("Team member changed or is still registering; wait for the current member");
+		return { state, member, plan: this.#memberPlan(state, name, member) };
+	}
+
+	async approve(lead: object, handle: string): Promise<void> {
+		const { state, plan } = this.#planTarget(lead, handle);
+		if (!plan.submitted)
+			throw new Error(`No submitted plan; ask the member to send it via write team://${state.name}/plan`);
+		plan.approved = true;
+	}
+
+	async reject(lead: object, handle: string, reason: string): Promise<void> {
+		const { state, member, plan } = this.#planTarget(lead, handle);
+		if (!reason.trim()) throw new Error("Rejection requires a reason");
+		plan.approved = false;
+		plan.submitted = undefined;
+		plan.revision++;
+		const receipt = await IrcBus.global().send({
+			from: state.leadId,
+			to: member.id,
+			body: `Plan rejected for team ${state.name}: ${reason}\nResubmit via write team://${state.name}/plan`,
+			progress: true,
+			teamControl: true,
+		});
+		if (receipt.outcome === "failed") throw new Error(`Plan rejected, but notification failed: ${receipt.error}`);
 	}
 
 	async readTasks(session: object, identity: TeamIdentity): Promise<TeamTask[]> {

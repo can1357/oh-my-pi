@@ -57,6 +57,21 @@ export class RemoteTeamClient implements TeamClient {
 	leadIdentity(key: string, team: string) {
 		return this.remote.call("leadIdentity", key, team);
 	}
+	memberIdentity(key: string, team: string, generation: number, handle: string) {
+		return this.remote.call("memberIdentity", key, team, generation, handle);
+	}
+	planPending(key: string, identity: TeamIdentity) {
+		return this.remote.call("planPending", key, identity);
+	}
+	submitPlan(key: string, identity: TeamIdentity, text: string) {
+		return this.remote.call("submitPlan", key, identity, text);
+	}
+	approve(key: string, handle: string) {
+		return this.remote.call("approve", key, handle);
+	}
+	reject(key: string, handle: string, reason: string) {
+		return this.remote.call("reject", key, handle, reason);
+	}
 	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string) {
 		return this.remote.call("respondStop", key, identity, requestId, body);
 	}
