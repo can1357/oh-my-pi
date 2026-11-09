@@ -113,7 +113,7 @@ describe("AgentSession todo-error reminder", () => {
 
 	it("drops the reminder only after its append retry succeeds", async () => {
 		const { reminders } = await runTwoPrompts([
-			todoCall("todo-fail", { op: "append", items: ["Add tests"] }),
+			todoCall("todo-fail", { op: "append", phase: "Build" }),
 			todoCall("todo-retry", { op: "append", phase: "Build", items: ["Add tests"] }),
 			{ content: ["Appended"] },
 		]);
@@ -124,7 +124,7 @@ describe("AgentSession todo-error reminder", () => {
 
 	it("preserves an uncorrected failure across a view", async () => {
 		const { reminders } = await runTwoPrompts([
-			todoCall("todo-fail", { op: "append", items: ["Add tests"] }),
+			todoCall("todo-fail", { op: "append", phase: "Build" }),
 			todoCall("todo-view", { op: "view" }),
 			{ content: ["Gave up"] },
 		]);
@@ -134,7 +134,7 @@ describe("AgentSession todo-error reminder", () => {
 
 	it("settles after a terminal todo error and delivers the reminder with the next prompt", async () => {
 		const { reminders, settledState } = await runTwoPrompts([
-			todoCall("todo-fail", { op: "append", items: ["Add tests"] }),
+			todoCall("todo-fail", { op: "append", phase: "Build" }),
 			{ content: ["Gave up"] },
 		]);
 
@@ -144,29 +144,44 @@ describe("AgentSession todo-error reminder", () => {
 
 	it("preserves an uncorrected failure after an unrelated mutation without a stale list", async () => {
 		const { reminders } = await runTwoPrompts([
-			todoCall("todo-fail", { op: "append", items: ["Add tests"] }),
+			todoCall("todo-fail", { op: "append", phase: "Build" }),
 			todoCall("todo-unrelated", { op: "done", task: "Release" }),
 			{ content: ["Completed release"] },
 		]);
 
 		expect(session?.getTodoPhases()[1]?.tasks[0]?.status).toBe("completed");
 		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).toContain("Missing phase name for append operation");
-		expect(reminders[0]).not.toContain("Remaining items");
+		expect(reminders[0]).not.toContain("Release");
 	});
 
 	it("keeps only the failed operation that has not been retried", async () => {
 		const { reminders } = await runTwoPrompts([
-			todoCall("todo-missing-phase", { op: "append", items: ["Add tests"] }),
+			todoCall("todo-missing-items", { op: "append", phase: "Build" }),
 			todoCall("todo-duplicate", { op: "append", phase: "Ship", items: ["Write code"] }),
 			todoCall("todo-retry", { op: "append", phase: "Build", items: ["Add tests"] }),
 			{ content: ["Appended"] },
 		]);
 
 		expect(reminders).toHaveLength(1);
-		expect(reminders[0]).toContain('Task "Write code" already exists');
-		expect(reminders[0]).not.toContain("Missing phase name for append operation");
-		expect(reminders[0]).not.toContain("Remaining items");
+		expect(reminders[0]).toContain("Write code");
+		expect(session?.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(["Write code", "Add tests"]);
+		expect(session?.getTodoPhases()[1]?.tasks.map(task => task.content)).toEqual(["Release"]);
+	});
+
+	it("clears every exact retry failure before considering an older failure of the same op", async () => {
+		const { reminders } = await runTwoPrompts([
+			todoCall("todo-missing-items", { op: "append", phase: "Build" }),
+			todoCall("todo-duplicate", { op: "append", phase: "Ship", items: ["Write code"] }),
+			todoCall("todo-duplicate-again", { op: "append", phase: "Ship", items: ["Write code"] }),
+			todoCall("todo-remove", { op: "rm", task: "Write code" }),
+			todoCall("todo-exact-retry", { op: "append", phase: "Ship", items: ["Write code"] }),
+			{ content: ["Moved task"] },
+		]);
+
+		expect(session?.getTodoPhases()[0]?.tasks).toEqual([]);
+		expect(session?.getTodoPhases()[1]?.tasks.map(task => task.content)).toEqual(["Release", "Write code"]);
+		expect(reminders).toHaveLength(1);
+		expect(reminders[0]).not.toContain("Write code");
 	});
 
 	it("drops reminders when retries correct other invalid arguments", async () => {
