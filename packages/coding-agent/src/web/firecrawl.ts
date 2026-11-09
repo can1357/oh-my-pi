@@ -63,6 +63,8 @@ interface FirecrawlScrapeResponse {
 	error?: string | null;
 	data?: {
 		markdown?: string | null;
+		/** The target's own HTTP status; a 4xx or 5xx means the markdown is its error page. */
+		metadata?: { statusCode?: number } | null;
 	} | null;
 }
 
@@ -92,9 +94,9 @@ function parseFirecrawlErrorResponse(statusCode: number, responseText: string): 
 
 /**
  * Scrape a single URL through Firecrawl and return its markdown rendering, or
- * `null` when the response carries no markdown. Unlike the local renderers,
- * Firecrawl fetches the page itself, so it also reaches JS-gated pages that the
- * already-loaded HTML cannot render.
+ * `null` when the response carries no markdown or the target answered with an
+ * error status. Unlike the local renderers, Firecrawl fetches the page itself,
+ * so it also reaches JS-gated pages that the already-loaded HTML cannot render.
  */
 export async function scrapeWithFirecrawl(
 	url: string,
@@ -134,5 +136,7 @@ export async function scrapeWithFirecrawl(
 	if (payload.success === false) {
 		throw new FirecrawlApiError(payload.error?.trim() || "Firecrawl scrape failed");
 	}
+	const statusCode = payload.data?.metadata?.statusCode;
+	if (statusCode !== undefined && statusCode >= 400) return null;
 	return payload.data?.markdown ?? null;
 }

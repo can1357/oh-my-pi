@@ -145,3 +145,18 @@ fn a_standalone_exit_ends_running_background_externals() {
 		std::thread::sleep(std::time::Duration::from_millis(20));
 	}
 }
+
+/// `$!` of a background pipeline is its last process's pid (zsh runs that
+/// stage in the job's shell), as the process reports `$$` itself; it was
+/// the shell's virtual pid, unknown to the system.
+#[test]
+fn a_background_pipelines_bang_is_its_last_process() {
+	let script = "T=$(/bin/mktemp); /bin/sleep 0.1 | /bin/sh -c 'echo $$ >\"$1\"; exec /bin/sleep \
+	              0.1' sh $T & p=$!; wait; [[ $p == $(<$T) ]] && print last; /bin/rm -f $T";
+	let args = ["-f", "-c", script];
+	let ours = obash(&args);
+	assert_eq!(ours, (b"last\n".to_vec(), Vec::new(), Some(0)));
+	if have_zsh() {
+		assert_eq!(ours, run("/bin/zsh", &args));
+	}
+}

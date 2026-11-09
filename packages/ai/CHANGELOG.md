@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- Added the `base64SkipThoughtSignature` compat flag so Gemini gateways that decode `thoughtSignature` as base64 (such as the Hyperspace AI LLM proxy) can receive the unsigned-tool-call bypass sentinel without rejecting the request with a 400 ([#18586](https://github.com/can1357/oh-my-pi/pull/18586) by [@tuandinh0801](https://github.com/tuandinh0801)).
+
+### Changed
+
+- Providers paused by a `disabled` auth rule (currently Google Antigravity) are left out of the built-in login list, refuse login, token refresh and usage probes, resolve no key from any source, and refuse requests and image generation with the pause reason; stored logins are kept and work again once the rule is removed, and an extension that registers its own login under the paused id takes it back ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
+- Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
+
+### Fixed
+
+- Fixed rotated credential pools reporting a stale sibling credential's authentication error instead of the exhausted credential's usage-limit status and reset time.
+- Fixed OpenAI image edits with multiple input images failing because image parameters were duplicated.
+- Fixed Cursor-provider reads of xd:// devices failing due to incorrect device URL handling.
+- Fixed Anthropic sessions getting stuck after refused turns containing thinking or redacted-thinking blocks when followed by a steer, reminder, or new prompt.
+- Fixed Codex Responses requests losing tool namespaces and developer-provided additional tools when replayed through the authentication gateway.
+- Fixed Gemini malformed responses being treated as unhandled stop reasons and losing token usage; they are now handled as transient transport errors.
+- Improved Cursor compatibility with TLS-intercepting proxies that block HTTP/2 by falling back to HTTP/1 for subsequent turns.
+
 ## [18.18.1] - 2026-11-08
 
 ### Fixed

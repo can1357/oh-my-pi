@@ -1171,3 +1171,142 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 		}
 	});
 });
+
+describe("guest HTML form race", () => {
+	async function nextUiRequest(guest: {
+		nextFrame(): Promise<CollabFrame>;
+	}): Promise<CollabFrame & { t: "ui-request" }> {
+		for (;;) {
+			const frame = await guest.nextFrame();
+			if (frame.t === "ui-request") return frame;
+		}
+	}
+
+	it("walks the guest through each field and returns its answers as form data", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form>
+				<input type="hidden" name="plan" value="v2">
+				<fieldset><legend>Database</legend>
+					<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+					<label><input type="radio" name="db" value="postgres" checked> Postgres</label>
+				</fieldset>
+				<fieldset><legend>Extras</legend>
+					<label><input type="checkbox" name="extras" value="cache" required> Cache</label>
+					<label><input type="checkbox" name="extras" value="queue"> Queue</label>
+				</fieldset>
+				<label>Workers <input type="number" name="workers" value="3" min="1"></label>
+			</form>`);
+
+			const db = await nextUiRequest(guest);
+			if (db.request.kind !== "select") throw new Error(`expected select, got ${db.request.kind}`);
+			expect(db.request.options).toEqual(["SQLite", "Postgres", "Other (type your own)"]);
+			expect(db.request.initialIndex).toBe(1);
+			guest.socket.send({ t: "ui-response", reqId: db.request.reqId, value: "SQLite" });
+
+			// A required group offers Next only once something is checked.
+			const extras = await nextUiRequest(guest);
+			if (extras.request.kind !== "select") throw new Error(`expected select, got ${extras.request.kind}`);
+			expect(extras.request.options).toEqual(["Cache", "Queue", "Other (type your own)"]);
+			guest.socket.send({ t: "ui-response", reqId: extras.request.reqId, value: "Queue" });
+			const extrasNext = await nextUiRequest(guest);
+			if (extrasNext.request.kind !== "select") throw new Error(`expected select, got ${extrasNext.request.kind}`);
+			expect(extrasNext.request.checkedIndices).toEqual([1]);
+			guest.socket.send({ t: "ui-response", reqId: extrasNext.request.reqId, value: "Next →" });
+
+			// A value the form rejects is asked again with the reason.
+			const workers = await nextUiRequest(guest);
+			if (workers.request.kind !== "editor") throw new Error(`expected editor, got ${workers.request.kind}`);
+			expect(workers.request.prefill).toBe("3");
+			guest.socket.send({ t: "ui-response", reqId: workers.request.reqId, value: "0" });
+			const retry = await nextUiRequest(guest);
+			if (retry.request.kind !== "editor") throw new Error(`expected editor, got ${retry.request.kind}`);
+			expect(retry.request.prefill).toBe("0");
+			expect(retry.request.title).not.toBe(workers.request.title);
+			guest.socket.send({ t: "ui-response", reqId: retry.request.reqId, value: "8" });
+
+			expect(await result).toEqual({ data: { plan: "v2", db: "sqlite", extras: ["queue"], workers: 8 } });
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("takes a guest's Other text as a radio's value and appends it to a checkbox group", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form>
+				<fieldset><legend>Database</legend>
+					<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+					<label><input type="radio" name="db" value="postgres"> Postgres</label>
+				</fieldset>
+				<fieldset><legend>Extras</legend>
+					<label><input type="checkbox" name="extras" value="cache"> Cache</label>
+					<label><input type="checkbox" name="extras" value="queue"> Queue</label>
+				</fieldset>
+			</form>`);
+			const answer = async (kind: "select" | "editor", value?: string) => {
+				const frame = await nextUiRequest(guest);
+				if (frame.request.kind !== kind) throw new Error(`expected ${kind}, got ${frame.request.kind}`);
+				guest.socket.send({ t: "ui-response", reqId: frame.request.reqId, value });
+				return frame.request;
+			};
+
+			// A cancelled Other editor re-shows the options.
+			await answer("select", "Other (type your own)");
+			await answer("editor");
+			await answer("select", "Other (type your own)");
+			expect((await answer("editor", " MySQL 8 ")).title).toBe("Database");
+
+			await answer("select", "Cache");
+			await answer("select", "Other (type your own)");
+			await answer("editor", "terraform");
+			const done = await answer("select", "Next →");
+			if (done.kind !== "select") throw new Error(`expected select, got ${done.kind}`);
+			expect(done.checkedIndices).toEqual([0, 2]);
+
+			expect(await result).toEqual({ data: { db: "MySQL 8", extras: ["cache", "terraform"] } });
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+
+	it("cancels the form when the guest cancels", async () => {
+		const ctx = makeAskHostContext();
+		const host = new CollabHost(ctx);
+		await host.start("ws://localhost:8787");
+		ctx.collabHost = host;
+		const controller = new ExtensionUiController(ctx);
+		try {
+			const guest = await joinRawGuest(host.link, COLLAB_PROTO);
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+			const result = controller.showFormDialog(`<form><label>Name <input name="name"></label></form>`);
+			const name = await nextUiRequest(guest);
+			guest.socket.send({ t: "ui-response", reqId: name.request.reqId });
+
+			expect(await result).toBeUndefined();
+			guest.socket.close();
+		} finally {
+			await host.stop("test done");
+		}
+	});
+});

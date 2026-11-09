@@ -379,16 +379,20 @@ fn cur_add_func(
 	let noaliases = attrs.contains(Attrs::ZSH_UNALIASED);
 	// zsh `getfpfunc`.
 	let fpath = ctx.scalar(b"FPATH")?.unwrap_or_default();
-	for dir in fpath.split(|&c| c == b':').filter(|d| !d.is_empty()) {
+	let sep = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+	for dir in fpath.split(|&c| c == sep).filter(|d| !d.is_empty()) {
 		let mut file = BString::from(dir);
 		file.push(b'/');
 		file.extend_from_slice(name);
 		let cwd = ctx.vp.cwd.clone();
 		let found = {
 			let mut ask = |p: Probe| ctx.probe(p);
-			try_dump_file::<Need>(&mut ask, &cwd, dir, name, &file)?
+			match try_dump_file::<Need>(&mut ask, &cwd, dir, name, &file)? {
+				Some(dump) => check_dump_file::<Need>(&mut ask, &cwd, &dump, name)?,
+				None => None,
+			}
 		};
-		if let Some((_, prog)) = found {
+		if let Some(prog) = found {
 			return Ok(Some(prog));
 		}
 		if let Some(text) = read_file(ctx, &file)? {
@@ -437,20 +441,43 @@ fn check_dump_file<E>(
 	Ok(head.func_prog(&data, &metafy(name)))
 }
 
+/// Whether the dump `path` (relative to `cwd`; its `stat` is `st`) holds
+/// function `name`, as [`check_dump_file`] would load it: asked once per
+/// dump ([`Probe::DumpHas`]), not read again for every function.
+fn dump_holds<E>(
+	ask: &mut Ask<'_, E>,
+	cwd: &[u8],
+	path: &[u8],
+	name: &[u8],
+	st: Option<&Stat>,
+) -> Result<bool, E> {
+	let Some(st) = st else {
+		return Ok(false);
+	};
+	let probe = Probe::DumpHas(Box::new(crate::bash::vm::proc::DumpQuery {
+		path:     absolute(cwd, path),
+		name:     BString::from(metafy(name)),
+		mtime_ns: st.mtime_ns,
+		size:     st.size,
+	}));
+	Ok(matches!(ask(probe)?, ProbeResult::Ok(true)))
+}
+
 /// zsh `try_dump_file(dir, name, file)`: the dump zsh loads function or
 /// script `name` from, in preference to `file` (`dir/name`): `dir` itself
 /// when it is a digest (`….zwc`), else the digest `dir.zwc` when it is
 /// not older than `file` and `file.zwc`, else `file.zwc` when it is not
-/// older than `file`; with the program it holds.
+/// older than `file`.
 fn try_dump_file<E>(
 	ask: &mut Ask<'_, E>,
 	cwd: &[u8],
 	dir: &[u8],
 	name: &[u8],
 	file: &[u8],
-) -> Result<Option<(BString, Eprog)>, E> {
+) -> Result<Option<BString>, E> {
 	if dir.ends_with(FD_EXT) {
-		return Ok(check_dump_file(ask, cwd, dir, name)?.map(|p| (BString::from(dir), p)));
+		let st = stat(ask, cwd, dir)?;
+		return Ok(dump_holds(ask, cwd, dir, name, st.as_ref())?.then(|| BString::from(dir)));
 	}
 	let dig = with_ext(dir);
 	let mut wc = BString::from(file);
@@ -461,15 +488,15 @@ fn try_dump_file<E>(
 	if let Some(d) = &rd
 		&& rc.as_ref().is_none_or(|c| mtime(d) >= mtime(c))
 		&& rn.as_ref().is_none_or(|n| mtime(d) >= mtime(n))
-		&& let Some(p) = check_dump_file(ask, cwd, &dig, name)?
+		&& dump_holds(ask, cwd, &dig, name, Some(d))?
 	{
-		return Ok(Some((dig, p)));
+		return Ok(Some(dig));
 	}
 	if let Some(c) = &rc
 		&& rn.as_ref().is_none_or(|n| mtime(c) >= mtime(n))
-		&& let Some(p) = check_dump_file(ask, cwd, &wc, name)?
+		&& dump_holds(ask, cwd, &wc, name, Some(c))?
 	{
-		return Ok(Some((wc, p)));
+		return Ok(Some(wc));
 	}
 	Ok(None)
 }
@@ -488,7 +515,28 @@ pub fn fpath_dump<E>(
 	let mut file = BString::from(dir);
 	file.push(b'/');
 	file.extend_from_slice(name);
-	Ok(try_dump_file(ask, cwd, dir, name, &file)?.map(|(dump, _)| dump))
+	try_dump_file(ask, cwd, dir, name, &file)
+}
+
+/// The paths [`crate::bash::vm::command::getfpfunc`] and [`fpath_dump`]
+/// `stat` while they look for function `name` in `$fpath` directory `dir`
+/// (absolute, from `cwd`): `dir/name`, and `dir` itself when it is a
+/// digest, else `dir.zwc` and `dir/name.zwc`.
+pub fn fpath_stat_paths(cwd: &[u8], dir: &[u8], name: &[u8]) -> Vec<BString> {
+	let mut file = BString::from(dir);
+	if !file.is_empty() {
+		file.push(b'/');
+	}
+	file.extend_from_slice(name);
+	let mut out = vec![absolute(cwd, &file)];
+	if dir.ends_with(FD_EXT) {
+		out.push(absolute(cwd, dir));
+	} else {
+		out.push(absolute(cwd, &with_ext(dir)));
+		file.extend_from_slice(FD_EXT);
+		out.push(absolute(cwd, &file));
+	}
+	out
 }
 
 /// The word code file zsh's `try_source_file` would run for `path`, a
@@ -497,13 +545,12 @@ pub fn fpath_dump<E>(
 pub fn source_dump<E>(ask: &mut Ask<'_, E>, cwd: &[u8], path: &[u8]) -> Result<Option<BString>, E> {
 	let tail = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
 	if path.ends_with(FD_EXT) {
-		return Ok(check_dump_file(ask, cwd, path, tail)?.map(|_| BString::from(path)));
+		let st = stat(ask, cwd, path)?;
+		return Ok(dump_holds(ask, cwd, path, tail, st.as_ref())?.then(|| BString::from(path)));
 	}
 	let wc = with_ext(path);
-	if stat(ask, cwd, &wc)?.is_none() {
-		return Ok(None);
-	}
-	Ok(check_dump_file(ask, cwd, &wc, tail)?.map(|_| wc))
+	let st = stat(ask, cwd, &wc)?;
+	Ok(dump_holds(ask, cwd, &wc, tail, st.as_ref())?.then_some(wc))
 }
 
 /// The unsupported-feature report for a definition or script zsh would

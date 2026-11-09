@@ -107,6 +107,7 @@ const UNEXPECTED_STOP_TIMEOUT_MS = 15_000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
+const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -390,6 +391,7 @@ export class TurnRecovery {
 	readonly #unexpectedStopJudgeTimeoutMs: number;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#genericAbortStreak = 0;
 	/**
 	 * Selectors a classifier refusal has already moved off in the current retry saga; see the walk
 	 * bound below. Cleared in `resolveRetry()`, which every end of a saga goes through (an answer,
@@ -2672,7 +2674,12 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
+		if (this.#retryAttempt === 0) this.#genericAbortStreak = 0;
 		this.#retryAttempt++;
+		this.#genericAbortStreak =
+			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)
+				? this.#genericAbortStreak + 1
+				: 0;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2691,7 +2698,8 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const retryBudgetExhausted =
+			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -3060,7 +3068,10 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel) {
+				this.#retryAttempt = 1;
+				this.#genericAbortStreak = 0;
+			}
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`

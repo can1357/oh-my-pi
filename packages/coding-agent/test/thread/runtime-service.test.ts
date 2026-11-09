@@ -161,7 +161,7 @@ describe("runtime thread services: async jobs", () => {
 
 		expect(await waited).toMatchObject({
 			result: { items: [{ kind: "agent", id, status: "completed", text: "all done" }] },
-			progress: [{ op: "agent", id, assignment: "investigate" }],
+			progress: [{ op: "agent", id, taskPreview: "investigate" }],
 		});
 	});
 

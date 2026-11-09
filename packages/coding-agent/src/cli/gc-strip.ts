@@ -16,6 +16,9 @@
  *   a provider's message list joins them. Providers validate that run as one
  *   assistant message, so a resumed turn that continues its tool loop must
  *   replay each response's reasoning unmodified.
+ * - The latest surviving assistant turn, verbatim: a resumed turn that
+ *   continues its tool loop must replay the most recent response's reasoning
+ *   unmodified.
  * - Replay state that carries context found nowhere else: reasoning source
  *   markers ({@link isReasoningSourceSignature}), text signatures (OpenAI
  *   message phase), Anthropic message controls and native compaction blocks,
@@ -52,6 +55,19 @@ const FILE_PERMISSION_MASK = 0o7777n;
 const LINE_INDEX = Symbol("lineIndex");
 
 type TaggedMessage = AgentMessage & { [LINE_INDEX]?: number };
+import type { AssistantMessage, ProviderPayload } from "@oh-my-pi/pi-ai";
+import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { isReasoningSourceSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
+import { isRecord, readLines } from "@oh-my-pi/pi-utils";
+import { type FileSessionStorage, sessionStagingPath } from "../session/session-storage";
+
+const GZIP_SUFFIX = ".gz";
+/** Keys only replay data uses: a line without one has nothing to strip and is never parsed. */
+const REPLAY_KEY_RE =
+	/"(?:providerPayload|requestControls|inputTransformations|thinkingSignature|itemId|redactedThinking|thoughtSignature|partialArgs|streamIndex|providerFile)"/;
+const ASSISTANT_RE = /"role":"assistant"/;
+const NEWLINE = new Uint8Array([0x0a]);
+const WRITE_CHUNK_BYTES = 1 << 20;
 
 /** What stripping one transcript removes, planned against the file as it was at `stat`. */
 export interface StripPlan {
@@ -59,6 +75,8 @@ export interface StripPlan {
 	stat: BigIntStats;
 	/** Line indices whose replay data is removed. */
 	strip: ReadonlySet<number>;
+	/** Line index of the latest surviving assistant turn, which stays verbatim; -1 when there is none. */
+	keep: number;
 	/** Records that lose replay data. */
 	records: number;
 	/** JSONL bytes removed; uncompressed for an archived `.jsonl.gz`. */
@@ -113,6 +131,7 @@ function stripBlock(block: Record<string, unknown>): boolean {
 			return drop(block, ["thoughtSignature", "partialArgs", "streamIndex"]);
 		case "image":
 			return hasImageSource(block) && drop(block, ["providerFile"]);
+			return drop(block, ["providerFile"]);
 		default:
 			return false;
 	}
@@ -211,6 +230,17 @@ function protectedTurnLines(entries: SessionEntry[]): Set<number> | undefined {
 		keep.add(lineIndex);
 	}
 	return keep;
+/** Whether `record` is an assistant turn a provider would replay as its most recent response. */
+function isSurvivingAssistantRecord(record: unknown): boolean {
+	if (!isRecord(record) || record.type !== "message") return false;
+	const message = record.message;
+	return isAssistantMessage(message) && isSurvivingAssistant(message);
+}
+
+function isAssistantMessage(value: unknown): value is AssistantMessage {
+	return (
+		isRecord(value) && value.role === "assistant" && Array.isArray(value.content) && value.content.every(isRecord)
+	);
 }
 
 /** Decoded lines of a transcript, gunzipped for an archived `.jsonl.gz`. */
@@ -225,6 +255,7 @@ async function* transcriptLines(file: string): AsyncGenerator<{ bytes: Uint8Arra
  * Plan stripping `file`. Undefined when it was modified after `idleBeforeMs`,
  * is not a regular file with a single link (a rename would split the links),
  * or carries no replay data outside its latest replay turn.
+ * or carries no replay data outside its latest surviving assistant turn.
  */
 export async function planStrip(file: string, idleBeforeMs: number): Promise<StripPlan | undefined> {
 	const stat = await fs.lstat(file, { bigint: true });
@@ -256,6 +287,31 @@ export async function planStrip(file: string, idleBeforeMs: number): Promise<Str
 		strip.add(lineIndex);
 		plan.records += 1;
 		plan.bytes += byteLength - Buffer.byteLength(JSON.stringify(record));
+	const plan: StripPlan = { file, stat, keep: -1, records: 0, bytes: 0 };
+	// Removable bytes of the kept turn: they count once a later turn supersedes it.
+	let keptBytes: number | undefined;
+	let index = -1;
+	for await (const { bytes, text } of transcriptLines(file)) {
+		index += 1;
+		const replay = REPLAY_KEY_RE.test(text);
+		if (!replay && !ASSISTANT_RE.test(text)) continue;
+		const record = parseRecord(text);
+		if (isSurvivingAssistantRecord(record)) {
+			if (keptBytes !== undefined) {
+				plan.records += 1;
+				plan.bytes += keptBytes;
+			}
+			keptBytes = undefined;
+			plan.keep = index;
+		}
+		if (!replay || !stripRecord(record)) continue;
+		const removed = bytes.length - Buffer.byteLength(JSON.stringify(record));
+		if (index === plan.keep) {
+			keptBytes = removed;
+		} else {
+			plan.records += 1;
+			plan.bytes += removed;
+		}
 	}
 	return plan.records > 0 ? plan : undefined;
 }
@@ -268,6 +324,7 @@ async function* strippedChunks(plan: StripPlan): AsyncGenerator<Buffer> {
 	for await (const { bytes, text } of transcriptLines(plan.file)) {
 		index += 1;
 		const record = plan.strip.has(index) ? parseRecord(text) : undefined;
+		const record = index !== plan.keep && REPLAY_KEY_RE.test(text) ? parseRecord(text) : undefined;
 		const line = stripRecord(record) ? Buffer.from(JSON.stringify(record)) : bytes;
 		parts.push(line, NEWLINE);
 		size += line.length + 1;
@@ -288,6 +345,7 @@ function unchangedSincePlan(plan: StripPlan): boolean {
 		current.size === plan.stat.size &&
 		current.mtimeNs === plan.stat.mtimeNs &&
 		current.mode === plan.stat.mode
+		current.mtimeNs === plan.stat.mtimeNs
 	);
 }
 
@@ -316,6 +374,8 @@ export async function applyStrip(plan: StripPlan, storage: FileSessionStorage): 
 			throw error;
 		}
 		const sink = handle.createWriteStream();
+	try {
+		const sink = (await fs.open(staged, "wx")).createWriteStream();
 		if (plan.file.endsWith(GZIP_SUFFIX)) await pipeline(strippedChunks(plan), createGzip({ level: 9 }), sink);
 		else await pipeline(strippedChunks(plan), sink);
 		await fs.utimes(staged, utimeSeconds(plan.stat.atimeNs), utimeSeconds(plan.stat.mtimeNs));

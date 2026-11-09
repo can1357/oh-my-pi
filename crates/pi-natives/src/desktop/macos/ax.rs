@@ -26,7 +26,10 @@ pub(super) use selection::select_dragged;
 
 use super::{
 	super::{
-		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
+		ax::{
+			AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos, text_readback,
+			truncate_chars,
+		},
 		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
 		control,
 		error::{CoreResult, DesktopError},
@@ -1633,43 +1636,6 @@ fn secure_subrole(read: Result<Subrole, AXError>) -> bool {
 	}
 }
 
-/// Exact equality is the verdict: a field that shows a rewritten value has
-/// not been shown to hold what was sent (Contacts regroups a phone number in
-/// the field and stores none of it). The error names what the field reads so
-/// the next step needs no extra read, except in a secure field, whose text
-/// never enters an error.
-fn text_readback(sent: &str, expected: &str, actual: Option<&str>, secure: bool) -> CoreResult<()> {
-	const SHOWN: usize = 200;
-	if actual == Some(expected) {
-		return Ok(());
-	}
-	if secure {
-		return Err(DesktopError::ax_failed(
-			"the secure text field's value could not be confirmed after the write; inspect the \
-			 target before writing again",
-		));
-	}
-	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
-	let Some(actual) = actual else {
-		return Err(DesktopError::ax_failed(format!(
-			"wrote {}, but the field's value could not be read back; inspect the target before \
-			 writing again",
-			quote(sent),
-		)));
-	};
-	let whole = if sent == expected {
-		String::new()
-	} else {
-		format!(" instead of {}", quote(expected))
-	};
-	Err(DesktopError::ax_failed(format!(
-		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
-		 inspect the target before writing again",
-		quote(sent),
-		quote(actual),
-	)))
-}
-
 /// The system time zone, re-read each call: CF caches it per process, and the
 /// target app follows changes to it.
 fn system_zone() -> Option<CFRetained<CFTimeZone>> {
@@ -2468,15 +2434,6 @@ fn nonempty(value: Option<String>) -> Option<String> {
 	value.filter(|value| !value.is_empty())
 }
 
-fn truncate_chars(value: String, max: usize) -> String {
-	if value.chars().count() <= max {
-		return value;
-	}
-	let mut result: String = value.chars().take(max.saturating_sub(1)).collect();
-	result.push('…');
-	result
-}
-
 fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
 	(error == AXError::Success).ok_or_else(|| ax_error(error, context))
 }
@@ -2511,7 +2468,7 @@ mod tests {
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
 		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
 		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
-		takes_inserted_text, target_window, text_readback, window_records_of,
+		takes_inserted_text, target_window, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -2884,47 +2841,6 @@ mod tests {
 		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
 		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
 		assert!(!other.message.contains("click()"), "{}", other.message);
-	}
-
-	#[test]
-	fn rewritten_readback_fails_and_names_what_the_field_reads() {
-		let error =
-			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
-		assert_eq!(error.code, ErrorCode::AxFailed);
-		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
-		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
-		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
-	}
-
-	#[test]
-	fn inserted_readback_names_the_whole_value_it_expected() {
-		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
-		assert_eq!(error.code, ErrorCode::AxFailed);
-		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
-			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
-		}
-		let unread = text_readback("b", "abc", None, false).unwrap_err();
-		assert_eq!(unread.code, ErrorCode::AxFailed);
-		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
-	}
-
-	#[test]
-	fn long_readbacks_are_cut() {
-		let long = "x".repeat(500);
-		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
-		assert!(error.message.len() < 400, "{}", error.message.len());
-		assert!(error.message.contains('…'), "{}", error.message);
-	}
-
-	#[test]
-	fn secure_readbacks_never_quote_the_text() {
-		for actual in [None, Some("••••"), Some("")] {
-			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
-			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(error.message.contains("secure"), "{}", error.message);
-		}
-		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
 	}
 
 	#[test]

@@ -52,7 +52,11 @@ export type LocalModelInitializer = (options: LocalModelInitOptions) => Promise<
 const QUERY_CACHE_MAX = 512;
 
 let providerOverride: EmbeddingProvider | null = null;
-let localModelPromise: Promise<LocalEmbeddingModel> | null = null;
+// Local encoders are cached per resolved fastembed model id: two Mnemopi instances
+// in one process configured with different local models must each load their own
+// encoder instead of reusing whichever model happened to initialize first. A failed
+// init evicts only that model's entry so other models' encoders stay warm.
+const localModelPromises = new Map<string, Promise<LocalEmbeddingModel>>();
 let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
 let apiCallCount = 0;
 const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
@@ -330,17 +334,20 @@ export function fastembedModelName(modelName: string): StandardEmbeddingModel | 
 }
 
 async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
-	if (isApiModel(defaultModel()) || embeddingsDisabled() || inTestRuntime()) {
+	const configuredModel = defaultModel();
+	if (isApiModel(configuredModel) || embeddingsDisabled() || inTestRuntime()) {
 		return null;
 	}
-	if (localModelPromise !== null) {
-		return localModelPromise;
-	}
 
-	const modelName = fastembedModelName(defaultModel());
+	const modelName = fastembedModelName(configuredModel);
 	if (modelName === null) {
 		return null;
 	}
+	const cached = localModelPromises.get(modelName);
+	if (cached !== undefined) {
+		return cached;
+	}
+
 	const cacheDir = getFastembedCacheDir();
 	mkdirSync(cacheDir, { recursive: true });
 	const loading = localModelInitializer({
@@ -348,7 +355,7 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 		cacheDir,
 		showDownloadProgress: false,
 	});
-	localModelPromise = loading;
+	localModelPromises.set(modelName, loading);
 	try {
 		return await loading;
 	} catch (error) {
@@ -356,7 +363,7 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 			model: modelName,
 			error: String(error),
 		});
-		if (localModelPromise === loading) localModelPromise = null;
+		if (localModelPromises.get(modelName) === loading) localModelPromises.delete(modelName);
 		return null;
 	}
 }
@@ -491,7 +498,7 @@ export const setEmbeddingProvider = setEmbeddingProviderForTests;
 
 export function setLocalModelInitializerForTests(initializer: LocalModelInitializer | null | undefined): void {
 	localModelInitializer = initializer ?? defaultLocalModelInitializer;
-	localModelPromise = null;
+	localModelPromises.clear();
 	queryCache.clear();
 }
 
@@ -507,7 +514,7 @@ export const setLocalModelInitializer = setLocalModelInitializerForTests;
 
 export function resetEmbeddingProviderForTests(): void {
 	providerOverride = null;
-	localModelPromise = null;
+	localModelPromises.clear();
 	localModelInitializer = defaultLocalModelInitializer;
 	apiCallCount = 0;
 	queryCache.clear();
