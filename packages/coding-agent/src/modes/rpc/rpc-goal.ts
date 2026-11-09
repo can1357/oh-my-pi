@@ -9,16 +9,17 @@
  * editor idle window.
  */
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";
+import guidedGoalInterviewPrompt from "../../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { nextActionableTask } from "../../tools/todo";
 
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
 
-export type RpcGoalOp = "get" | "create" | "resume" | "pause" | "drop";
+export type RpcGoalOp = "get" | "create" | "resume" | "pause" | "drop" | "budget" | "guided";
 
 export interface RpcGoalCommand {
 	op: RpcGoalOp;
@@ -44,6 +45,7 @@ export type RpcGoalSession = Pick<
 	| "sendGoalModeContext"
 	| "getTodoPhases"
 	| "promptCustomMessage"
+	| "prompt"
 	| "waitForIdle"
 	| "isStreaming"
 	| "isDisposed"
@@ -120,6 +122,9 @@ export class RpcGoalController {
 		this.#suppressContinuation = true;
 		this.#continuationScheduled = false;
 		this.#continuationGeneration++;
+		this.#queueExit(async () => {
+			if (!this.#session.getGoalModeState()) await this.#exit();
+		});
 	}
 
 	get #state(): RpcGoalResult {
@@ -213,6 +218,44 @@ export class RpcGoalController {
 				return await this.#create(command);
 			case "resume":
 				return await this.#resume();
+			case "budget": {
+				const state = this.#session.getGoalModeState();
+				if (!state?.enabled || (state.goal.status !== "active" && state.goal.status !== "budget-limited")) {
+					throw new Error(
+						state?.goal.status === "paused" ? "Resume the goal before adjusting the budget." : "No active goal.",
+					);
+				}
+				await this.#session.goalRuntime.onBudgetMutated(command.token_budget);
+				this.#resetContinuation();
+				this.#scheduleContinuation();
+				return this.#state;
+			}
+			case "guided": {
+				const admitted = Promise.withResolvers<void>();
+				let started = false;
+				void this.promptGuided(command.objective, content =>
+					this.#session.prompt(content, {
+						synthetic: true,
+						throwOnDrop: true,
+						streamingBehavior: "followUp",
+						onPromptAdmitted: () => {
+							started = true;
+							admitted.resolve();
+						},
+					}),
+				).then(
+					dispatched => {
+						if (dispatched) admitted.resolve();
+						else admitted.reject(new Error("Guided interview was not started."));
+					},
+					error => {
+						if (started) reportControllerError(error);
+						else admitted.reject(error);
+					},
+				);
+				await admitted.promise;
+				return this.#state;
+			}
 			case "pause":
 				await this.#session.goalRuntime.pauseGoal();
 				await this.#exit();
@@ -221,6 +264,7 @@ export class RpcGoalController {
 				// The runtime's `goal_updated(dropped)` queues the exit.
 				await this.#session.goalRuntime.dropGoal();
 				await this.#exitTask;
+				await this.#exit();
 				return this.#state;
 			default: {
 				const op: never = command.op;
@@ -235,6 +279,33 @@ export class RpcGoalController {
 		}
 		if (this.#session.getPlanModeState()?.enabled) {
 			throw new Error("Exit plan mode before starting a goal.");
+		}
+	}
+
+	/** Arm the goal tool before the interview, without creating an objective yet. */
+	async promptGuided(
+		objective: string | undefined,
+		dispatch: (content: string) => Promise<boolean>,
+	): Promise<boolean> {
+		await this.settled();
+		this.#assertCanEnter();
+		if (this.#session.getPlanModeState()) throw new Error("Exit plan mode before starting a goal.");
+		const current = this.#session.getGoalModeState();
+		if (current?.enabled) throw new Error("A goal is already active. Drop it before starting an interview.");
+		if (current?.goal.status === "paused")
+			throw new Error("Resume or drop the paused goal before starting an interview.");
+		const tools = this.#session.getEnabledToolNames();
+		this.#previousTools ??= tools;
+		try {
+			await this.#session.setActiveToolsByName([...new Set([...tools, "goal"])]);
+			const dispatched = await dispatch(
+				prompt.render(guidedGoalInterviewPrompt, { initial: objective?.trim() || undefined }),
+			);
+			if (!dispatched && !this.#session.getGoalModeState()) await this.#exit();
+			return dispatched;
+		} catch (error) {
+			if (!this.#session.getGoalModeState()) await this.#exit();
+			throw error;
 		}
 	}
 

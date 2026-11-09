@@ -41,6 +41,7 @@ import {
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { parseGoalBudget } from "../../goals/commands";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -59,8 +60,13 @@ import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "..
 import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
-import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import {
+	buildRpcAvailableSlashCommands,
+	type InternalAvailableSlashCommand,
+	RPC_ONLY_BUILTIN_SLASH_COMMANDS,
+} from "../../slash-commands/available-commands";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
@@ -1870,7 +1876,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		process.exit(0);
 	};
 
-	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	let availableCommands: InternalAvailableSlashCommand[] = [];
+	const getAvailableCommands = async () => {
+		availableCommands = await buildRpcAvailableSlashCommands(session);
+		return availableCommands;
+	};
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
@@ -1933,6 +1943,41 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				});
 				if (skillResult === "cancelled") return "cancelled";
 				if (skillResult) return "admitted";
+				const goalSlash = parseSlashCommand(text);
+				const isRpcGoalBuiltin =
+					goalSlash !== null &&
+					Object.hasOwn(RPC_ONLY_BUILTIN_SLASH_COMMANDS, goalSlash.name) &&
+					availableCommands.some(entry => entry.name === goalSlash.name && entry.source === "builtin");
+				if (isRpcGoalBuiltin && goalSlash?.name === "goal" && /^budget(?:\s|$)/i.test(goalSlash.args)) {
+					const raw = goalSlash.args.slice("budget".length).trim();
+					const tokenBudget = parseGoalBudget(raw);
+					await goalController.handle({ op: "budget", token_budget: tokenBudget });
+					output({
+						type: "command_output",
+						text: tokenBudget === undefined ? "Goal budget cleared." : `Goal budget set to ${tokenBudget}.`,
+					});
+					return "local";
+				}
+				if (isRpcGoalBuiltin && goalSlash?.name === "guided-goal") {
+					await watchAndReportPromptResult({
+						ticket,
+						startPrompt: onPromptAdmitted =>
+							goalController.promptGuided(goalSlash.args, content => {
+								if (!isCurrent()) return Promise.resolve(false);
+								return session.prompt(content, {
+									synthetic: true,
+									throwOnDrop: true,
+									images,
+									streamingBehavior: "followUp",
+									onPromptAdmitted,
+								});
+							}),
+						results: promptResults,
+						onError: onPromptError(command.id, "prompt"),
+						extensionUserMessageTracker,
+					});
+					return "admitted";
+				}
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC supports `/goal budget <N|off>` and `/guided-goal [objective]`, plus the structured `goal` operations `budget` and `guided` ([#18607](https://github.com/can1357/oh-my-pi/pull/18607) by [@BizerNotNull](https://github.com/BizerNotNull)).
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

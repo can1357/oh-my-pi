@@ -98,8 +98,8 @@ _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "in_progress"
 _decode_todo_status = cast("Decoder[TodoStatus]", literal(_TODO_STATUS_VALUES))
 
 
-GoalOp: TypeAlias = Literal["get", "create", "resume", "pause", "drop"]
-_GOAL_OP_VALUES: Final[frozenset[str]] = frozenset({"get", "create", "resume", "pause", "drop"})
+GoalOp: TypeAlias = Literal["get", "create", "resume", "pause", "drop", "budget", "guided"]
+_GOAL_OP_VALUES: Final[frozenset[str]] = frozenset({"get", "create", "resume", "pause", "drop", "budget", "guided"})
 _decode_goal_op = cast("Decoder[GoalOp]", literal(_GOAL_OP_VALUES))
 
 

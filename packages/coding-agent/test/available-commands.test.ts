@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { buildAvailableSlashCommands } from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
+import {
+	buildAvailableSlashCommands,
+	buildRpcAvailableSlashCommands,
+} from "@oh-my-pi/pi-coding-agent/slash-commands/available-commands";
 
 describe("buildAvailableSlashCommands", () => {
 	test("returns RPC-safe command metadata with stable sources", async () => {
@@ -172,5 +175,68 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName.models).toBeUndefined();
 		expect(byName.plugins.source).toBe("builtin");
 		expect(byName.plugins.aliases).toEqual(["plugin"]);
+	});
+});
+
+describe("RPC-only goal command precedence", () => {
+	test("does not expose TUI-only goal operations through RPC or ACP", async () => {
+		const session = {
+			customCommands: [],
+			skills: [],
+			sessionManager: { getCwd: () => "/tmp" },
+			setSlashCommands: () => {},
+		};
+		const acp = await buildAvailableSlashCommands(session, async () => []);
+		const rpc = await buildRpcAvailableSlashCommands(session, async () => []);
+		expect(acp.map(command => command.name)).not.toContain("goal");
+		expect(acp.map(command => command.name)).not.toContain("guided-goal");
+		expect(rpc.map(command => command.name)).toContain("guided-goal");
+		expect(rpc.find(command => command.name === "goal")?.subcommands?.map(subcommand => subcommand.name)).toEqual([
+			"budget",
+		]);
+	});
+
+	test("preserves file commands named after RPC goal builtins", async () => {
+		const names = ["goal", "guided-goal"];
+		const commands = await buildRpcAvailableSlashCommands(
+			{
+				customCommands: [],
+				skills: [],
+				sessionManager: { getCwd: () => "/tmp" },
+				setSlashCommands: () => {},
+			},
+			async () => names.map(name => ({ name, description: `User ${name}`, content: "body", source: "test" })),
+		);
+		for (const name of names) {
+			const matches = commands.filter(command => command.name === name);
+			expect(matches).toHaveLength(1);
+			expect(matches[0]).toMatchObject({ source: "file", description: `User ${name}` });
+		}
+	});
+
+	test("retains skill names and extension-before-custom-before-file precedence", async () => {
+		const commands = await buildRpcAvailableSlashCommands(
+			{
+				extensionRunner: { getRegisteredCommands: () => [{ name: "goal", description: "Extension goal" }] },
+				customCommands: [
+					{ command: { name: "goal", description: "Custom goal" } },
+					{ command: { name: "guided-goal", description: "Custom guided" } },
+				],
+				skills: [{ name: "goal", description: "Goal skill", filePath: "/tmp/goal/SKILL.md" }],
+				skillsSettings: { enableSkillCommands: true },
+				sessionManager: { getCwd: () => "/tmp" },
+				setSlashCommands: () => {},
+			} as never,
+			async () =>
+				["goal", "guided-goal"].map(name => ({
+					name,
+					description: `File ${name}`,
+					content: "body",
+					source: "test",
+				})),
+		);
+		expect(commands.find(command => command.name === "goal")).toMatchObject({ source: "extension" });
+		expect(commands.find(command => command.name === "guided-goal")).toMatchObject({ source: "custom" });
+		expect(commands.find(command => command.name === "skill:goal")).toMatchObject({ source: "skill" });
 	});
 });

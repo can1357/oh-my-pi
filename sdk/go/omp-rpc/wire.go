@@ -2039,6 +2039,8 @@ const (
 	GoalOpResume GoalOp = "resume"
 	GoalOpPause  GoalOp = "pause"
 	GoalOpDrop   GoalOp = "drop"
+	GoalOpBudget GoalOp = "budget"
+	GoalOpGuided GoalOp = "guided"
 )
 
 func (v *GoalOp) UnmarshalJSON(data []byte) error {
@@ -2047,7 +2049,7 @@ func (v *GoalOp) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch value := GoalOp(s); value {
-	case GoalOpGet, GoalOpCreate, GoalOpResume, GoalOpPause, GoalOpDrop:
+	case GoalOpGet, GoalOpCreate, GoalOpResume, GoalOpPause, GoalOpDrop, GoalOpBudget, GoalOpGuided:
 		*v = value
 		return nil
 	}

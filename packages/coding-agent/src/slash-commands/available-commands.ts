@@ -109,6 +109,35 @@ export async function buildAvailableSlashCommands(
 	return commands;
 }
 
+/** TUI-only builtins that RPC additionally implements, after user commands. */
+export const RPC_ONLY_BUILTIN_SLASH_COMMANDS: Readonly<
+	Partial<Record<string, { readonly subcommands?: readonly string[] }>>
+> = {
+	goal: { subcommands: ["budget"] },
+	"guided-goal": {},
+};
+
+export async function buildRpcAvailableSlashCommands(
+	session: AvailableCommandsSession,
+	loadFileCommands?: (cwd: string) => Promise<FileSlashCommand[]>,
+): Promise<InternalAvailableSlashCommand[]> {
+	const commands = await buildAvailableSlashCommands(session, loadFileCommands);
+	const seenNames = new Set(commands.map(command => command.name));
+	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
+		const rpcBuiltin = RPC_ONLY_BUILTIN_SLASH_COMMANDS[command.name];
+		if (!rpcBuiltin || seenNames.has(command.name)) continue;
+		const hint = command.acpInputHint ?? command.inlineHint;
+		commands.push({
+			name: command.name,
+			description: command.acpDescription ?? command.description,
+			input: hint ? { hint } : undefined,
+			subcommands: command.subcommands?.filter(subcommand => rpcBuiltin.subcommands?.includes(subcommand.name)),
+			source: "builtin",
+		});
+	}
+	return commands;
+}
+
 export function toAcpAvailableCommands(commands: readonly InternalAvailableSlashCommand[]): AvailableCommand[] {
 	return commands.map(command => ({
 		name: command.name,

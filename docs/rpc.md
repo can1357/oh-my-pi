@@ -148,7 +148,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "set_slow_mode", enabled: boolean }`
-- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
+- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop" | "budget" | "guided", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
@@ -601,6 +601,21 @@ including those made by the agent's `goal` tool.
   It adds the `goal` tool to the active tools.
 - `resume` resumes a paused goal (refused in plan mode). `pause` and `drop` restore
   the active tools from before the goal started.
+- `budget` changes an active goal's total token budget. Supply a positive integer
+  `token_budget`, or omit it to remove the limit (`/goal budget off`). Paused goals
+  must be resumed first. Usage is preserved; increasing or clearing an exhausted
+  budget makes the goal active again.
+- `guided` starts the `/guided-goal` chat interview with an optional rough
+  `objective`. It exposes the `goal` tool without creating a goal record; the agent
+  creates the goal after the interview. Both RPC entry points send the kickoff as a
+  hidden synthetic developer message, as the TUI does. It starts a turn even when
+  RPC continuation is disabled, or queues behind a running turn. If the kickoff
+  is cancelled before admission, the request fails and restores the interview's
+  tool set. In RPC, a host `abort` ends an interview that has no goal record and
+  restores the tools; in the TUI, Esc leaves the interview armed.
+- RPC `prompt` also accepts `/goal budget <N|off>` and `/guided-goal [rough objective]`.
+- User file, custom, extension, and skill commands named `goal` or `guided-goal` keep
+  precedence over the RPC-only builtins.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`

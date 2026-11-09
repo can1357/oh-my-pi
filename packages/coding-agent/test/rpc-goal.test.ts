@@ -46,7 +46,7 @@ describe("RPC goal command", () => {
 
 	async function start(options: {
 		continuation: boolean;
-		script?: "complete" | "idle" | "slow";
+		script?: "complete" | "idle" | "slow" | "guided";
 		plan?: boolean;
 		persist?: boolean;
 	}): Promise<RpcClient> {
@@ -82,6 +82,62 @@ describe("RPC goal command", () => {
 		// Continuation is off: nothing ran, so no model turn happened.
 		expect(state.messageCount).toBe(0);
 		expect(state.isStreaming).toBe(false);
+	}, 30_000);
+
+	test("budget changes and clears the total without starting a turn, and refuses invalid or paused edits", async () => {
+		const rpc = await start({ continuation: false });
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: 100 }))).toMatchObject({ command: "goal" });
+		await rpc.goal("create", { objective: "bounded work", tokenBudget: 5000 });
+		const updated = await rpc.goal("budget", { tokenBudget: 2000 });
+		expect(updated.goal).toMatchObject({ objective: "bounded work", tokenBudget: 2000 });
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: -1 }))).toMatchObject({ command: "goal" });
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(2000);
+		expect(await rejectionOf(rpc.promptAndWait("/goal budget nope"))).toMatchObject({
+			message: "Usage: /goal budget <positive integer|off>",
+		});
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(2000);
+		await rpc.promptAndWait("/goal budget 03000");
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBe(3000);
+		await rpc.promptAndWait("/goal budget off");
+		expect((await rpc.goal("get")).goal?.tokenBudget).toBeUndefined();
+		await rpc.goal("budget", { tokenBudget: 4000 });
+		expect((await rpc.goal("budget")).goal?.tokenBudget).toBeUndefined();
+		expect((await rpc.getState()).messageCount).toBe(0);
+		await rpc.goal("pause");
+		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: 100 }))).toMatchObject({ command: "goal" });
+	}, 30_000);
+
+	test("guided starts a hidden interview without creating a goal; abort restores the interview toolset", async () => {
+		const rpc = await start({ continuation: false, script: "idle" });
+		const before = (await rpc.getState()).dumpTools?.map(tool => tool.name);
+		const settled = Promise.withResolvers<void>();
+		const unsubscribe = rpc.onSessionSettled(() => settled.resolve());
+		try {
+			await rpc.goal("guided", { objective: "rough idea" });
+			await withTimeout(settled.promise, 15_000, "Guided interview never settled");
+		} finally {
+			unsubscribe();
+		}
+		expect((await rpc.goal("get")).goal).toBeNull();
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
+		expect(await rpc.getMessages()).toContainEqual(expect.objectContaining({ role: "developer", synthetic: true }));
+		await rpc.abort();
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
+	}, 30_000);
+
+	test("guided slash interview lets the agent create a goal and drop restores tools", async () => {
+		const rpc = await start({ continuation: false, script: "guided" });
+		const before = (await rpc.getState()).dumpTools?.map(tool => tool.name);
+		await rpc.promptAndWait("/guided-goal ship a fix");
+		expect((await rpc.goal("get")).goal).toMatchObject({ objective: "interviewed objective", status: "active" });
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
+		expect(await rejectionOf(rpc.goal("guided"))).toMatchObject({ command: "goal" });
+		expect(await rpc.getMessages()).toContainEqual(expect.objectContaining({ role: "developer", synthetic: true }));
+		expect(await rejectionOf(rpc.promptAndWait("/guided-goal another"))).toMatchObject({
+			message: "A goal is already active. Drop it before starting an interview.",
+		});
+		await rpc.goal("drop");
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
 	}, 30_000);
 
 	test("plan mode refuses create and resume", async () => {
@@ -507,6 +563,7 @@ describe("RpcGoalController continuation gate", () => {
 				}),
 			},
 			promptCustomMessage: (message: { customType: string }) => admit(message.customType),
+			prompt: () => admit("guided-goal"),
 			waitForIdle: () => idle.promise,
 		};
 		let dropped = 0;
@@ -536,6 +593,34 @@ describe("RpcGoalController continuation gate", () => {
 			release: () => idle.resolve(),
 		};
 	}
+
+	test("a refused structured interview rejects and restores the tools", async () => {
+		const { controller, session, tools } = fakeSession(async () => false);
+		session.setGoalModeState(undefined);
+		expect(await rejectionOf(controller.handle({ op: "guided" }))).toMatchObject({
+			message: "Guided interview was not started.",
+		});
+		expect(tools()).toEqual(["read"]);
+		expect(session.getGoalModeState()).toBeUndefined();
+	});
+
+	test("an abort queued before goal creation preserves the active goal's tool and original tools", async () => {
+		const { controller, session, tools } = fakeSession(async () => true);
+		const activeGoal = session.getGoalModeState();
+		session.setGoalModeState(undefined);
+		await controller.promptGuided(undefined, async () => true);
+		controller.stopForHostAbort();
+		// A goal tool commits before the queued exit gets its turn.
+		session.setGoalModeState(activeGoal);
+		controller.observe({ type: "goal_updated", state: activeGoal } as AgentSessionEvent);
+		await controller.settled();
+		expect(tools()).toEqual(["read", "goal"]);
+		expect(session.getGoalModeState()).toBe(activeGoal);
+		session.setGoalModeState(undefined);
+		controller.stopForHostAbort();
+		await controller.settled();
+		expect(tools()).toEqual(["read"]);
+	});
 
 	test("a continuation decided before the session closes is never admitted after it", async () => {
 		const admitted: string[] = [];
