@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,6 +69,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		resetSettingsForTest();
 		if (originalOllamaBaseUrl === undefined) {
 			delete Bun.env.OLLAMA_BASE_URL;
@@ -689,6 +691,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
+		// Antigravity is paused in its auth rules; its discovery stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
 		// authoritative, so reading only one account's roster would prune Claude
 		// 5.5 for both whenever A is the account discovery happens to pick.
@@ -748,6 +752,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity routing still works for an account whose login stored no email", async () => {
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Google's userinfo lookup is optional at login; such a credential keeps
 		// only its project id, which must still tag and select the account.
 		await authStorage.credentials.set("google-antigravity", [
@@ -4154,10 +4159,14 @@ describe("ModelRegistry runtime discovery", () => {
 				supports_vision: false,
 			},
 		];
+		let scopedIds = ["keep-chat-a", "keep-chat-b"];
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);
 			if (url === "https://catalog.stencil.so/models.json.zstd") {
 				return Response.json({});
+			}
+			if (url === "http://127.0.0.1:4007/v1/models") {
+				return Response.json({ data: scopedIds.map(id => ({ id })) });
 			}
 			if (url === "http://127.0.0.1:4007/model_group/info") {
 				return Response.json({ data: modelGroups });
@@ -4169,7 +4178,7 @@ describe("ModelRegistry runtime discovery", () => {
 			) {
 				return new Response("Not Found", { status: 404 });
 			}
-			throw new Error(`/v1/models must not reintroduce the excluded model: ${url}`);
+			throw new Error(`Unexpected URL: ${url}`);
 		};
 
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
@@ -4184,6 +4193,7 @@ describe("ModelRegistry runtime discovery", () => {
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm").map(model => model.id)).toEqual(["keep-chat-a"]);
 
+		scopedIds = ["keep-chat-a"];
 		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm")).toEqual([]);
