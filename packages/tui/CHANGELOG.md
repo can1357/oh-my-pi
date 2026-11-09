@@ -5,6 +5,14 @@
 ### Added
 
 - Added handling of `features` terminal events to update UI without waiting for a new hello
+- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+### Changed
+
+- Asks (`HtmlFormDialog`, `AskDialogComponent`) stack every question, the focused one open and the rest folded to their answer or up to four option pills, instead of question tabs, a Review tab and pages: in rows a scrolling panel (`chrome/ask-fold.ts`), natively one inline card (`native/ask-card.ts`, role `omp.ask.card`) whose pills a click picks, gliding between folded and open (`transition: "layout"`), without Hide. Both take `skipNotice`, `claimKeys` and `releaseKeys` (Esc and Tab past the last stop call it) and expose `keyHints()` for the host's composer in place of their rows footer, cap their rows panel at `terminal.rows - ASK_RESERVED_ROWS`, and no longer take `inputGuard` (`AskDialogInputGuard` is gone: the host keeps a draft's keys in the composer); `HtmlFormDialog.givenAnswers()` reports what changed from the defaults. Folded choices keep their options in view as pills, the chosen ones marked. The ask tool's pending call paints nothing in rows
+- `CustomEditor.faint` draws the rows composer faint (an ask above it holds the keys), `Editor.onUpFromTop` lets the host take ↑ on the first line; `StatusLineComponent.setAwaitingAnswer` turns the brand's spinner into a question mark
+- The composer's `ask` state (`ComposerNativeState.ask`): while an ask waits above it the placeholder says typing there skips it, it folds to its compact row away from the keys (`NativeEditorLayout.folded`, the composer `col`'s `folded`), and a draft that would skip it gets a `skips ask` chip and Skip & send
+- Model search treats `provider/model` specially: the text before `/` prefixes the provider (an exact provider first), the rest searches that provider's model ids, and those rows list ahead of other matches — `ol/` now shows Ollama models first instead of recent `…-sol` models
+- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#18634](https://github.com/can1357/oh-my-pi/pull/18634) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
@@ -254,9 +262,6 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 - Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
-
-- Added `CustomEditor.onEscapeCancel`: it is called for a raw Escape that no configured action claims, so a host can keep Escape as a cancel key when `app.interrupt` is bound elsewhere ([#18634](https://github.com/can1357/oh-my-pi/pull/18634) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ## [18.18.3] - 2026-11-09
 
