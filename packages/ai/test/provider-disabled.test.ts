@@ -92,7 +92,7 @@ describe("a provider disabled in its auth rules", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	test("an extension cannot put it back in the login list", () => {
+	test("an extension that registers its own login under the paused id takes it back", async () => {
 		disable();
 		registerOAuthProvider({
 			id: PROVIDER,
@@ -101,7 +101,9 @@ describe("a provider disabled in its auth rules", () => {
 			login: async () => "",
 		});
 		try {
-			expect(getOAuthProviders().some(provider => provider.name === "Extension login")).toBe(false);
+			await auth.credentials.reload();
+			expect(getOAuthProviders().some(provider => provider.name === "Extension login")).toBe(true);
+			expect(await auth.keys.get(PROVIDER)).toBe("sk-stored");
 		} finally {
 			unregisterOAuthProviders("provider-disabled-test");
 		}

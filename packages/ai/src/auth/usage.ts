@@ -1,8 +1,9 @@
-import { authPolicyFor, providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
@@ -146,7 +147,7 @@ export class UsageService implements UsageApi {
 	 * no usage collection or probe ever calls it.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
-		if (providerDisabledReason(provider) !== undefined) return undefined;
+		if (providerPauseReason(provider) !== undefined) return undefined;
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
 	}
 
@@ -674,7 +675,7 @@ export class UsageService implements UsageApi {
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
 		// A paused provider is never probed, not even through the broker's per-credential hook.
-		if (providerDisabledReason(provider) !== undefined) return null;
+		if (providerPauseReason(provider) !== undefined) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch

@@ -1,4 +1,5 @@
-import { authPolicyFor, providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { providerPauseReason } from "../registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
@@ -337,7 +338,7 @@ export class CredentialPool implements CredentialsApi {
 	 * @param stored - Array of stored credentials to cache
 	 */
 	replace(provider: string, stored: StoredCredential[]): void {
-		const credentials = providerDisabledReason(provider) === undefined ? stored : [];
+		const credentials = providerPauseReason(provider) === undefined ? stored : [];
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);

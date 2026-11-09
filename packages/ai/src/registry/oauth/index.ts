@@ -53,6 +53,21 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 }
 
 /**
+ * Why `provider` is paused by its auth rules (`disabled "<reason>"`), or
+ * undefined when it may be reached. An extension that registers its own OAuth
+ * login under the paused id takes the id back: that is the end user's choice.
+ */
+export function providerPauseReason(provider: string): string | undefined {
+	return customOAuthProviders.has(provider) ? undefined : providerDisabledReason(provider);
+}
+
+/** Throws {@link AIError.ProviderDisabledError} when {@link providerPauseReason} pauses `provider`. */
+export function assertProviderEnabled(provider: string): void {
+	const reason = providerPauseReason(provider);
+	if (reason !== undefined) throw new AIError.ProviderDisabledError(provider, reason);
+}
+
+/**
  * Remove all custom OAuth providers registered by a source.
  */
 export function unregisterOAuthProviders(sourceId: string): void {
@@ -77,8 +92,8 @@ export async function refreshOAuthToken(
 			provider,
 		});
 	}
-	// A paused provider never starts a token exchange, even for an SDK/extension holding an old credential.
-	AIError.assertProviderEnabled(provider);
+	// A paused provider never starts a token exchange, even for an SDK caller holding an old credential.
+	assertProviderEnabled(provider);
 	const def = getProviderDefinition(provider);
 	if (!def?.login) {
 		throw new AIError.OAuthError(`Unknown OAuth provider: ${provider}`, {
@@ -162,20 +177,14 @@ export async function getOAuthApiKey(
  * Get list of OAuth providers.
  */
 export function getOAuthProviders(): OAuthProviderInfo[] {
-	// Extensions cannot re-offer a provider its auth rules pause, under its id or as its credential store.
-	const customProviders = Array.from(customOAuthProviders.values())
-		.filter(
-			provider =>
-				providerDisabledReason(provider.id) === undefined &&
-				(provider.storeCredentialsAs === undefined ||
-					providerDisabledReason(provider.storeCredentialsAs) === undefined),
-		)
-		.map(provider => ({
-			id: provider.id,
-			name: provider.name,
-			available: true,
-			storeCredentialsAs: provider.storeCredentialsAs,
-		}));
+	// Extension-registered logins are listed as-is: registering one is the end user's choice,
+	// even under an id the auth rules pause (see providerPauseReason).
+	const customProviders = Array.from(customOAuthProviders.values(), provider => ({
+		id: provider.id,
+		name: provider.name,
+		available: true,
+		storeCredentialsAs: provider.storeCredentialsAs,
+	}));
 	return [...builtInOAuthProviders, ...customProviders];
 }
 
