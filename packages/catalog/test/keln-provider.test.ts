@@ -158,6 +158,9 @@ describe("Keln chat requests", () => {
 		{ id: "zai-org/glm-5.3", options: { reasoning: Effort.High }, wireEffort: "high" },
 		// Off is the wire value `none` where the row publishes it.
 		{ id: "moonshotai/kimi-k3", options: { disableReasoning: true }, wireEffort: "none" },
+		// Without `none` in the row, off is the lowest level: Keln answers
+		// `reasoning_not_disableable` to `none` on these models.
+		{ id: "zai-org/glm-5.3", options: { disableReasoning: true }, wireEffort: "low" },
 		// `reasoning_effort`, not the Qwen lineage's `enable_thinking`.
 		{ id: "qwen/qwen3.8-27b", options: { reasoning: Effort.XHigh }, wireEffort: "xhigh" },
 	])("sends $id with reasoning_effort $wireEffort", async ({ id, options, wireEffort }) => {

@@ -1785,6 +1785,41 @@ function coralRate(value: unknown, fallback: number): number {
 }
 
 /**
+ * Effort-mode thinking from a catalog row's `reasoning` controls
+ * (`supported_efforts`, `default_effort`, `mandatory`), shared by catalogs that
+ * publish that row shape. Only levels omp knows are kept; `none` is an off
+ * switch, not a level. Returns `undefined` when no level remains.
+ *
+ * `mandatory` picks how `requiresEffort` is set: `"when-boolean"` copies the
+ * row's flag only when the row states one, leaving lineage rules in place
+ * otherwise; `"explicit"` always sets it, so a row without `mandatory: true`
+ * clears a lineage rule that marks the model mandatory.
+ */
+function effortThinkingFromControls(
+	controls: Record<string, unknown> | undefined,
+	mandatory: "when-boolean" | "explicit",
+): ThinkingConfig | undefined {
+	const wireEfforts: unknown[] = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : [];
+	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
+	if (efforts.length === 0) {
+		return undefined;
+	}
+	const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
+	const requiresEffort =
+		mandatory === "explicit"
+			? controls?.mandatory === true
+			: typeof controls?.mandatory === "boolean"
+				? controls.mandatory
+				: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(defaultLevel !== undefined && { defaultLevel }),
+		...(requiresEffort !== undefined && { requiresEffort }),
+	};
+}
+
+/**
  * Map one CoralBricks catalog row to a chat model spec; non-chat rows
  * (`supports_chat: false`) are dropped. Pricing arrives in Coral's own
  * per-million field names; `cached_input_per_m` is $0 on every model and a
@@ -1814,18 +1849,8 @@ function mapCoralbricksModel(
 	let thinking = reasoning ? reference?.thinking : undefined;
 	let compat = reference?.compat;
 	if (reasoning && Array.isArray(wireEfforts)) {
-		const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
 		// `none` is the server's off default, not an Effort (nor `minimal`).
-		const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
-		thinking =
-			efforts.length > 0
-				? {
-						mode: "effort",
-						efforts,
-						...(defaultLevel !== undefined && { defaultLevel }),
-						...(typeof controls?.mandatory === "boolean" && { requiresEffort: controls.mandatory }),
-					}
-				: undefined;
+		thinking = effortThinkingFromControls(controls, "when-boolean");
 	}
 	if (hasReasoningFlag || Array.isArray(wireEfforts)) {
 		// An explicit empty/unknown vocabulary must not regrow a guessed dial
@@ -8335,19 +8360,9 @@ function mapKelnModel(
 	}
 	const controls = isRecord(entry.reasoning) ? entry.reasoning : undefined;
 	const wireEfforts: unknown[] = Array.isArray(controls?.supported_efforts) ? controls.supported_efforts : [];
-	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
-	const defaultLevel = efforts.find(effort => effort === controls?.default_effort);
-	const thinking: ThinkingConfig | undefined =
-		efforts.length > 0
-			? {
-					mode: "effort",
-					efforts,
-					...(defaultLevel !== undefined && { defaultLevel }),
-					// Explicit in both directions: class rules mark some lineages as
-					// mandatory, and the row states what this deployment does.
-					requiresEffort: controls?.mandatory === true,
-				}
-			: undefined;
+	// Explicit in both directions: class rules mark some lineages as mandatory,
+	// and the row states what this deployment does.
+	const thinking = effortThinkingFromControls(controls, "explicit");
 	return {
 		...defaults,
 		reasoning: thinking !== undefined,
