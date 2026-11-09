@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling.
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
