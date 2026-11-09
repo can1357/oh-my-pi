@@ -1419,7 +1419,14 @@ fn zglob_one(
 				}
 			}
 		}
-		matches.sort_by(|a, b| gmatchcmp(a, b, &spec.sorts, spec.numsort));
+		// Matched paths are distinct, so sorted by name alone they have no
+		// ties (colon modifiers can make two equal): any sort gives the
+		// same order, and the unstable one moves the matches less.
+		if spec.colonmod.is_none() && matches!(spec.sorts.as_slice(), [s] if s.key == SortKey::Name) {
+			matches.sort_unstable_by(|a, b| gmatchcmp(a, b, &spec.sorts, spec.numsort));
+		} else {
+			matches.sort_by(|a, b| gmatchcmp(a, b, &spec.sorts, spec.numsort));
+		}
 	}
 	let ct = i64::try_from(matches.len()).unwrap_or(0);
 	let mut first = spec.first;
@@ -1433,7 +1440,7 @@ fn zglob_one(
 		end = ct;
 	}
 	let count = end - first;
-	let picked: Vec<Gmatch> = if count > 0 {
+	let picked = if count > 0 {
 		let (a, b) = if unsorted {
 			(ct - first - count, ct - first)
 		} else {
@@ -1441,12 +1448,13 @@ fn zglob_one(
 		};
 		let a = usize::try_from(a.max(0)).unwrap_or(0);
 		let b = usize::try_from(b.max(0)).unwrap_or(0).min(matches.len());
-		span(&matches, a.min(b), b).to_vec()
+		a.min(b)..b
 	} else {
-		Vec::new()
+		0..0
 	};
-	let mut out = Vec::new();
-	for m in picked {
+	let per = 1 + spec.pre_words.len() + spec.post_words.len();
+	let mut out = Vec::with_capacity(picked.len() * per);
+	for m in matches.drain(picked) {
 		out.extend(spec.pre_words.iter().cloned());
 		out.push(m.name);
 		out.extend(spec.post_words.iter().cloned());

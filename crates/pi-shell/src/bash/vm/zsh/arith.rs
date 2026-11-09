@@ -176,8 +176,9 @@ impl<'x, 'e, 'c> ShellEnv<'x, 'e, 'c> {
 impl Env for ShellEnv<'_, '_, '_> {
 	type Error = Stop;
 	/// What a subscripted operand resolved to (a plain name is found by
-	/// name again: the same parameter).
-	type Slot = Option<params::Value>;
+	/// name again: the same parameter). Boxed: every value-stack entry
+	/// holds one, and most are `None`.
+	type Slot = Option<Box<params::Value>>;
 
 	fn options(&self) -> Options {
 		self.opts
@@ -193,7 +194,10 @@ impl Env for ShellEnv<'_, '_, '_> {
 
 	fn get(&mut self, lval: &[u8]) -> Result<Option<(Param, Self::Slot)>, Stop> {
 		let subscripted = lval.contains(&b'[');
-		Ok(params::getmathparam(self.ex, lval)?.map(|(p, v)| (p, subscripted.then_some(v))))
+		if !subscripted && let Some(p) = params::direct_math_value(self.ex, lval)? {
+			return Ok(Some((p, None)));
+		}
+		Ok(params::getmathparam(self.ex, lval)?.map(|(p, v)| (p, subscripted.then(|| Box::new(v)))))
 	}
 
 	fn set_slot(&mut self, slot: &Self::Slot, value: Number) -> Result<bool, Stop> {
@@ -206,9 +210,12 @@ impl Env for ShellEnv<'_, '_, '_> {
 	}
 
 	fn assign(&mut self, lval: &[u8], value: Number) -> Result<Option<Assigned>, Stop> {
+		self.assigned = true;
+		if let Some(assigned) = params::setnparam_number(self.ex, lval, value)? {
+			return Ok(Some(assigned));
+		}
 		let text = math::format_number(value, &self.state, self.opts);
 		let radix = self.state.output_radix;
-		self.assigned = true;
 		params::setnparam(self.ex, lval, value, text.as_bytes(), radix).map(Some)
 	}
 

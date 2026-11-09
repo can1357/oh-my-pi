@@ -1454,7 +1454,10 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 	};
 	let platform = ex.k.engine.config().platform;
 	let windows = platform == Platform::Windows;
-	let mut entries = HashMap::new();
+	// Every directory's listing is asked first, and the table is built only
+	// once all are answered: each answer re-runs the expansion, which
+	// otherwise rebuilt the names of every directory listed before it.
+	let mut lists: Vec<(&[u8], usize)> = Vec::new();
 	for dir in path.split(|&c| c == crate::bash::vm::probe::path_separator(platform)) {
 		// zsh `isrelative`: not absolute, or with a `.` or `..` component.
 		let absolute = dir.first() == Some(&b'/')
@@ -1466,9 +1469,17 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 		{
 			continue;
 		}
-		let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
-		let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
-		let Atom::List(names) = ask(ex, Probe::Fs { seq, req })? else {
+		if ex.log.get(ex.cursor).is_none() {
+			let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
+			let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
+			return Err(Stop::Probe(Probe::Fs { seq, req }));
+		}
+		lists.push((dir, ex.cursor));
+		ex.cursor += 1;
+	}
+	let mut entries = HashMap::new();
+	for (dir, at) in lists {
+		let Some(Atom::List(names)) = ex.log.get(at).cloned() else {
 			continue;
 		};
 		for name in names {

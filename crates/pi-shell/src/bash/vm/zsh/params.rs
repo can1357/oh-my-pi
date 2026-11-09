@@ -1706,10 +1706,10 @@ fn plain_subscript(s: &[u8], open: usize) -> bool {
 	)
 }
 
-/// [`getparam`] for a [`SCANPM_WINDOW`] read through a plain subscript:
-/// an ordinary stored dense array comes without its value
+/// [`getparam_lazy`] for a [`SCANPM_WINDOW`] read through a plain
+/// subscript: an ordinary stored dense array also comes without its value
 /// ([`Param::lazy`]), for [`window_elem`] to load what the subscript
-/// selects; any other parameter comes whole.
+/// selects.
 fn getparam_window(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 	if let Some(mut pm) = getparam_in(ex, name, Defer::Stored)?
 		&& pm.flags.type_bits() == PmFlags::ARRAY
@@ -1722,7 +1722,7 @@ fn getparam_window(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 		pm.value = PValue::Array(Vec::new());
 		return Ok(Some(pm));
 	}
-	getparam(ex, name)
+	getparam_lazy(ex, name)
 }
 
 /// Load what the subscripted view `v` of a [`getparam_window`] array
@@ -2716,6 +2716,91 @@ fn edits_in_place(ex: &mut Expander<'_, '_>, pm: &Param) -> X<bool> {
 		&& !pm.attrs.contains(Attrs::INVISIBLE))
 }
 
+/// Whether `name` is a plain ASCII identifier (no digits first: not a
+/// positional parameter), which a direct read or write can name.
+fn plain_ident(name: &[u8]) -> bool {
+	matches!(name.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_')
+		&& name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+/// The type of stored variable `v` when a plain-name assignment or
+/// arithmetic may read and write its value directly, as the general path
+/// would leave it: a set scalar, integer or float that nothing rewrites
+/// or redirects (not read-only, tied, hidden or private; no case, padding
+/// or `-U` flags). The caller has checked that no special has its name.
+fn direct_type(v: &Var) -> Option<PmFlags> {
+	const BLOCKING: [Attrs; 13] = [
+		Attrs::INVISIBLE,
+		Attrs::READONLY,
+		Attrs::ZSH_TIED,
+		Attrs::ZSH_HIDE,
+		Attrs::ZSH_PRIVATE,
+		Attrs::LOWER,
+		Attrs::UPPER,
+		Attrs::ZSH_LEFT,
+		Attrs::ZSH_RIGHT_B,
+		Attrs::ZSH_RIGHT_Z,
+		Attrs::ZSH_UNIQUE,
+		Attrs::ASSOC,
+		Attrs::INDEXED,
+	];
+	if !matches!(v.value, VarValue::Str(_)) || BLOCKING.iter().any(|&a| v.attrs.contains(a)) {
+		return None;
+	}
+	let ty = PmFlags::from_var(v).type_bits();
+	matches!(ty, PmFlags::SCALAR | PmFlags::INTEGER | PmFlags::EFLOAT | PmFlags::FFLOAT)
+		.then_some(ty)
+}
+
+/// The direct ([`direct_type`]) variable `name` (raw): its type and its
+/// output base (an integer's `typeset -i N`).
+fn direct_var(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(PmFlags, u8)>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	Ok(read_var(ex, name)?
+		.0
+		.and_then(|v| direct_type(v).map(|ty| (ty, v.attrs.base()))))
+}
+
+/// The text `$name` substitutes (metafied) when `name` is a direct scalar
+/// or integer ([`direct_var`]: its stored text, as `getstrvalue` gives it
+/// without padding or case flags); `None` for any other parameter.
+///
+/// # Errors
+/// A store failure.
+pub(super) fn direct_text(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Vec<u8>>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	Ok(match (direct_type(var), &var.value) {
+		(Some(PmFlags::SCALAR | PmFlags::INTEGER), VarValue::Str(s)) => Some(metafy(s)),
+		_ => None,
+	})
+}
+
+/// Store `value` (raw) as the value of the direct variable `name`
+/// ([`direct_var`]), keeping its attributes, with what the general path's
+/// store does for such a variable (a scalar naming a directory updates its
+/// named directory).
+fn store_direct(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	state::edit_var(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Set { elem: None, value, append: false },
+	)?;
+	if ty == PmFlags::SCALAR {
+		super::nameddir::scalar_assigned(ex, name, value)?;
+	}
+	Ok(())
+}
+
 /// zsh `assignaparam` of `name+=(val)` (metafied elements) when `name` is
 /// an ordinary stored array ([`edits_in_place`]): the elements go after
 /// its last one in place, without the copy of the whole array the general
@@ -2764,6 +2849,16 @@ pub(super) fn assignsparam_meta(
 		return Ok(());
 	}
 	let (name, sub) = split_name(s);
+	// An existing ordinary scalar takes the value directly: no parameter
+	// to build, nothing to create, revive, warn about or keep in step.
+	if !sub
+		&& flags & ASSPM_AUGMENT == 0
+		&& direct_var(ex, name)?.map(|(ty, _)| ty) == Some(PmFlags::SCALAR)
+		&& (flags & ASSPM_WARN == 0 || !opt(ex, ZshOpt::Warnnestedvar)?)
+	{
+		check_restricted(ex, name)?;
+		return store_direct(ex, name, PmFlags::SCALAR, &unmetafy(&val));
+	}
 	revive_special(ex, name)?;
 	let mut flags = flags;
 	let mut created = false;
@@ -3278,6 +3373,18 @@ pub fn setnparam(
 		return Err(not_ident(&s));
 	}
 	let (name, sub) = split_name(&s);
+	// An existing ordinary number or scalar takes the value directly (see
+	// `assignsparam_meta`); `setnumvalue` reports it as assigned.
+	if !sub
+		&& let Some((ty, base)) = direct_var(ex, name)?
+		&& !opt(ex, ZshOpt::Warnnestedvar)?
+	{
+		let (value, assigned) = match number_text(ex, ty, base, val)? {
+			Some(numeric) => numeric,
+			None => (BString::from(text), Assigned::Other),
+		};
+		return store_number(ex, name, ty, &value).map(|()| assigned);
+	}
 	let mut v = target(ex, &s, 0)?;
 	let was_unset = if let Some(cur) = &v
 		&& cur
@@ -3355,6 +3462,86 @@ pub fn setnparam(
 	};
 	setnumvalue(ex, &mut v, val, Some(text))?;
 	Ok(assigned)
+}
+
+/// [`setnparam`] of a plain name that is a direct integer or float
+/// ([`direct_var`]), stored without the text a scalar target would take
+/// (the evaluator need not format the number first); `None` for any other
+/// target.
+///
+/// # Errors
+/// As [`setnparam`].
+pub fn setnparam_number(
+	ex: &mut Expander<'_, '_>,
+	lval: &[u8],
+	val: Number,
+) -> X<Option<Assigned>> {
+	let Some((ty, base)) = direct_var(ex, lval)? else {
+		return Ok(None);
+	};
+	if opt(ex, ZshOpt::Warnnestedvar)? {
+		return Ok(None);
+	}
+	let Some((value, assigned)) = number_text(ex, ty, base, val)? else {
+		return Ok(None);
+	};
+	store_number(ex, lval, ty, &value)?;
+	Ok(Some(assigned))
+}
+
+/// The stored text of number `val` in a direct variable of type `ty`
+/// (output base `base` for an integer); `None` for a scalar.
+fn number_text(
+	ex: &mut Expander<'_, '_>,
+	ty: PmFlags,
+	base: u8,
+	val: Number,
+) -> X<Option<(BString, Assigned)>> {
+	Ok(Some(match ty {
+		// Decimal needs none of the options `convbase` takes.
+		PmFlags::INTEGER if matches!(base, 0 | 1 | 10) => {
+			(BString::from(val.to_int().to_string()), Assigned::Integer)
+		},
+		PmFlags::INTEGER => {
+			let o = arith::math_options(ex)?;
+			(BString::from(math::convbase(val.to_int(), i32::from(base), o)), Assigned::Integer)
+		},
+		PmFlags::EFLOAT | PmFlags::FFLOAT => (float_store(val.to_float()), Assigned::Float),
+		_ => return Ok(None),
+	}))
+}
+
+/// Store an arithmetic result in direct variable `name` ([`store_direct`])
+/// as `setnumvalue` does: restricted names refused, the assignment
+/// reported.
+fn store_number(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	check_restricted(ex, name)?;
+	store_direct(ex, name, ty, value)?;
+	super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, name, Level::Dynamic);
+	Ok(())
+}
+
+/// [`getmathparam`] of a plain name when it is a direct variable
+/// ([`direct_var`]): its number, or its text for a scalar, read in place.
+/// `None`: not such a variable (the caller takes the general path).
+///
+/// # Errors
+/// A store failure.
+pub fn direct_math_value(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<math::Param>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	let (Some(ty), VarValue::Str(s)) = (direct_type(var), &var.value) else {
+		return Ok(None);
+	};
+	Ok(Some(match ty {
+		PmFlags::INTEGER => math::Param::Int(parse_int(s)),
+		PmFlags::EFLOAT | PmFlags::FFLOAT => math::Param::Float(parse_float(s)),
+		_ => math::Param::Text(s.clone()),
+	}))
 }
 
 /// The value arithmetic reads for `lval` (zsh `getvalue` +
