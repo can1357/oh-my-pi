@@ -16,7 +16,7 @@
 
 ### Changed
 
-- Saved-reset auto-redeem now sets 5h and weekly spending independently: `codexResets.autoRedeem5h`/`autoRedeemWeekly` and `claudeResets.autoRedeem5h`/`autoRedeemWeekly` replace each provider's single `autoRedeem`, whose value migrates into both new keys.
+- Saved-reset auto-redeem now sets 5h and weekly spending independently: `codexResets.autoRedeem5h`/`autoRedeemWeekly` and `claudeResets.autoRedeem5h`/`autoRedeemWeekly` replace each provider's single `autoRedeem`, whose value migrates into both new keys ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
 
 ## [18.18.6] - 2026-11-09
 
