@@ -7,6 +7,7 @@
 - Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).
 - Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling ([#18584](https://github.com/can1357/oh-my-pi/pull/18584) by [@chan1103](https://github.com/chan1103))
 - Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
+- Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 
 ## [18.18.3] - 2026-11-09
 
