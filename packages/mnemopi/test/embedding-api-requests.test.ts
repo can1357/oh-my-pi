@@ -1,5 +1,5 @@
 /**
- * Some hosted embedding APIs cap the inputs per request (DashScope: 10). With `batchSize` set to
+ * Some hosted embedding APIs cap the inputs per request. With `batchSize` set to
  * that cap, `embed()` must split a large text list into several requests, keep the order, and
  * return null when any part fails.
  */
@@ -44,7 +44,7 @@ function startServer(handler?: (call: number) => Response | undefined): FakeServ
 
 function run<T>(url: string, fn: () => Promise<T>): Promise<T> {
 	return withMnemopiRuntimeOptions(
-		{ embeddings: { model: "text-embedding-v4", apiUrl: url, apiKey: "test-key", batchSize: LIMIT } },
+		{ embeddings: { model: "test-embedding", apiUrl: url, apiKey: "test-key", batchSize: LIMIT } },
 		fn,
 	);
 }
@@ -83,7 +83,7 @@ describe("embed() against an API with a per-request input cap", () => {
 	it("treats a fractional batchSize as the default cap instead of sending empty requests", async () => {
 		server = startServer();
 		const matrix = await withMnemopiRuntimeOptions(
-			{ embeddings: { model: "text-embedding-v4", apiUrl: server.url, apiKey: "test-key", batchSize: 0.5 } },
+			{ embeddings: { model: "test-embedding", apiUrl: server.url, apiKey: "test-key", batchSize: 0.5 } },
 			() => embed(["1", "2", "3"]),
 		);
 		expect(matrix?.map(v => v[0])).toEqual([1, 2, 3]);
@@ -127,14 +127,14 @@ describe("an embedding model switch against an API with a per-request input cap"
 		const db = seedBank("old-model", 25);
 		const memory = new Mnemopi({
 			db,
-			embeddings: { model: "text-embedding-v4", apiUrl: server.url, apiKey: "test-key", batchSize: LIMIT },
+			embeddings: { model: "test-embedding", apiUrl: server.url, apiKey: "test-key", batchSize: LIMIT },
 		});
 		try {
 			await memory.flushExtractions();
 			expect(server.sizes).toEqual([1, 10, 10, 5]);
 			const models = storedModels(memory);
 			expect(models).toHaveLength(25);
-			expect(models.every(model => model === "text-embedding-v4")).toBe(true);
+			expect(models.every(model => model === "test-embedding")).toBe(true);
 		} finally {
 			memory.close();
 			db.close();
@@ -146,7 +146,7 @@ describe("an embedding model switch against an API with a per-request input cap"
 		const db = seedBank("old-model", 25);
 		const memory = new Mnemopi({
 			db,
-			embeddings: { model: "text-embedding-v4", apiUrl: server.url, apiKey: "test-key", batchSize: LIMIT },
+			embeddings: { model: "test-embedding", apiUrl: server.url, apiKey: "test-key", batchSize: LIMIT },
 		});
 		try {
 			await memory.flushExtractions();

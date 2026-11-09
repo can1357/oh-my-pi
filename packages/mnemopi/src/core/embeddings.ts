@@ -365,7 +365,7 @@ const DEFAULT_EMBEDDING_BATCH_SIZE = 64;
 
 /**
  * Max texts per `/embeddings` request. Some hosted providers cap the inputs per
- * request (DashScope: 10), and a rejected request fails the whole call. Reads the
+ * request, and a rejected request fails the whole call. Reads the
  * runtime scope's `embeddings.batchSize`, then `MNEMOPI_EMBEDDING_BATCH_SIZE`, then 64.
  */
 function embeddingBatchSize(): number {
