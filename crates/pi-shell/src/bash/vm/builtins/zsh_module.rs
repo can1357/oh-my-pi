@@ -1638,7 +1638,7 @@ fn has_stub(
 		Some(Record::Misc(bytes)) => bytes.find(name).is_some(),
 		Some(_) => true,
 	};
-	Ok(maybe && tables(store, vp)?.auto(c, name).is_some())
+	Ok(maybe && read_tables(store, vp, |t| t.auto(c, name).is_some())?)
 }
 
 /// [`resolve_builtin`] for the builtin named `name`.
@@ -1948,13 +1948,46 @@ pub fn call_math(
 }
 
 /// Whether module `name` is loaded (zsh `module_loaded`), for modules
-/// whose effect is not a feature (`zsh/nearcolor`).
+/// whose effect is not a feature (`zsh/nearcolor`). Asked on every
+/// `local`.
 ///
 /// # Errors
 /// A store failure.
 pub fn loaded(store: &mut dyn StateStore, vp: &Vproc, name: &[u8]) -> Result<bool, StoreError> {
-	let t = tables(store, vp)?;
-	Ok(t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i)))
+	read_tables(store, vp, |t| t.find(name, true).is_some_and(|(i, _)| t.is_loaded(i)))
+}
+
+/// `f` of the module tables as `vp` sees them, read in place (no tool
+/// flag: [`tables`] for that): the default tables, or a stored record
+/// decoded once per change ([`DECODED`]), not on every question.
+///
+/// # Errors
+/// A store failure.
+fn read_tables<R>(
+	store: &mut dyn StateStore,
+	vp: &Vproc,
+	f: impl FnOnce(&Tables) -> R,
+) -> Result<R, StoreError> {
+	let Some(Record::Misc(bytes)) = state::record(store, vp, Key::Misc(MiscKey::ZshModules))? else {
+		return Ok(f(&DEFAULT));
+	};
+	Ok(DECODED.with_borrow_mut(|cache| {
+		if cache
+			.as_ref()
+			.is_none_or(|(b, _)| b.as_slice() != bytes.as_slice())
+		{
+			let t = postcard::from_bytes(bytes).unwrap_or_else(|_| DEFAULT.clone());
+			*cache = Some((bytes.to_vec(), t));
+		}
+		let (_, t) = cache.as_ref().expect("decoded just above");
+		f(t)
+	}))
+}
+
+thread_local! {
+	/// The module tables [`read_tables`] last decoded, with the record
+	/// bytes they came from.
+	static DECODED: std::cell::RefCell<Option<(Vec<u8>, Tables)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// `$modules` (zsh `scanpmmodules`): every module loaded, aliased or
