@@ -519,7 +519,9 @@ mod tests {
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
+		let _guard = LIBEI_ENV_LOCK
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
 		let _ = std::fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
@@ -573,10 +575,13 @@ mod tests {
 	/// so a fake socket from a test on another thread would otherwise report
 	/// input as reachable.
 	fn without_libei_socket(action: impl FnOnce()) {
-		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
+		let _guard = LIBEI_ENV_LOCK
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		let previous = std::env::var_os("LIBEI_SOCKET");
-		// SAFETY: LIBEI_ENV_LOCK is held, and every test that reads or writes
-		// LIBEI_SOCKET takes it first.
+		// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes LIBEI_SOCKET
+		// or asserts on what it reads takes it first; std serializes the other
+		// env reads.
 		unsafe { std::env::remove_var("LIBEI_SOCKET") };
 		action();
 		if let Some(previous) = previous {
