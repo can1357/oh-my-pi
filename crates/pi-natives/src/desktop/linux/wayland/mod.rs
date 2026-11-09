@@ -568,21 +568,40 @@ mod tests {
 		assert_eq!(capabilities.input_permission, "prompt-or-granted");
 	}
 
+	/// Runs `action` with `LIBEI_SOCKET` unset, under the same lock as
+	/// `with_fake_libei`: `input_unavailable` reads the variable on every call,
+	/// so a fake socket from a test on another thread would otherwise report
+	/// input as reachable.
+	fn without_libei_socket(action: impl FnOnce()) {
+		let _guard = LIBEI_ENV_LOCK.lock().expect("lock LIBEI_SOCKET test");
+		let previous = std::env::var_os("LIBEI_SOCKET");
+		// SAFETY: LIBEI_ENV_LOCK is held, and every test that reads or writes
+		// LIBEI_SOCKET takes it first.
+		unsafe { std::env::remove_var("LIBEI_SOCKET") };
+		action();
+		if let Some(previous) = previous {
+			// SAFETY: as above; the lock is still held.
+			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
+		}
+	}
+
 	#[test]
 	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
-		let mut backend = backend_without_services();
-		backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
-		let capabilities = backend.capabilities();
-		assert!(!capabilities.input);
-		assert!(!capabilities.held_input);
-		assert_eq!(capabilities.input_permission, "unavailable");
-		let source = control::CancellationSource::default();
-		let error = backend
-			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
-			.unwrap_err();
-		assert_eq!(error.code.as_str(), "PermissionDenied");
-		assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
-		assert!(backend.input.is_none());
+		without_libei_socket(|| {
+			let mut backend = backend_without_services();
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			let capabilities = backend.capabilities();
+			assert!(!capabilities.input);
+			assert!(!capabilities.held_input);
+			assert_eq!(capabilities.input_permission, "unavailable");
+			let source = control::CancellationSource::default();
+			let error = backend
+				.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+				.unwrap_err();
+			assert_eq!(error.code.as_str(), "PermissionDenied");
+			assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+			assert!(backend.input.is_none());
+		});
 	}
 
 	#[test]
