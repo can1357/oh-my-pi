@@ -519,8 +519,8 @@ impl<S: VizSource> Printer<'_, S> {
 			if start > cursor {
 				let end = start.min(source.script().len());
 				let gap = &source.script()[cursor..end];
-				match chain_operator(gap) {
-					Some((op, len)) if len == gap.len() => lead = Some(op),
+				match leading_operator(gap) {
+					Some((Some(op), len)) if len == gap.len() => lead = Some(op),
 					_ => self.ahead(cursor, end),
 				}
 			}
@@ -572,14 +572,11 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 		let source = self.source;
 		let script: &[u8] = source.script().as_ref();
-		let (mut lead, from) = match chain_operator(&script[lo..hi]) {
-			Some((op, len)) => (Some(op), lo + len),
-			None => match separator(&script[lo..hi]) {
-				// A `;` with nothing after it separates nothing to draw.
-				Some(len) if lo + len >= hi => return,
-				Some(len) => (None, lo + len),
-				None => (None, lo),
-			},
+		let (mut lead, from) = match leading_operator(&script[lo..hi]) {
+			// A `;` with nothing after it separates nothing to draw.
+			Some((None, len)) if lo + len >= hi => return,
+			Some((op, len)) => (op, lo + len),
+			None => (None, lo),
 		};
 		let stop = (0..source.unit_count())
 			.filter_map(|index| source.unit(index)?.at)
@@ -2512,18 +2509,20 @@ const fn connector(op: AndOrOp) -> &'static str {
 		AndOrOp::Or => "or ",
 	}
 }
-/// The `&&`/`||` opening `bytes` after blanks, with the byte length through
-/// it and the whitespace following it.
-fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
+/// The operator opening `bytes` after blanks — `&&`/`||` (`Some`), which
+/// continues the chain of the unit before, or `;` (`None`), which ends it —
+/// with the byte length through it and the whitespace following it.
+fn leading_operator(bytes: &[u8]) -> Option<(Option<AndOrOp>, usize)> {
 	let at = bytes
 		.iter()
 		.position(|byte| !matches!(byte, b' ' | b'\t'))?;
-	let op = match bytes.get(at..at + 2)? {
-		b"&&" => AndOrOp::And,
-		b"||" => AndOrOp::Or,
+	let (op, width) = match &bytes[at..] {
+		[b'&', b'&', ..] => (Some(AndOrOp::And), 2),
+		[b'|', b'|', ..] => (Some(AndOrOp::Or), 2),
+		[b';', ..] => (None, 1),
 		_ => return None,
 	};
-	let end = at + 2;
+	let end = at + width;
 	Some((
 		op,
 		end + bytes[end..]
@@ -2531,20 +2530,6 @@ fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
 			.take_while(|byte| byte.is_ascii_whitespace())
 			.count(),
 	))
-}
-/// The `;` opening `bytes` after blanks, with the byte length through it and
-/// the whitespace following it.
-fn separator(bytes: &[u8]) -> Option<usize> {
-	let at = bytes
-		.iter()
-		.position(|byte| !matches!(byte, b' ' | b'\t'))?;
-	(bytes.get(at) == Some(&b';')).then(|| {
-		let end = at + 1;
-		end + bytes[end..]
-			.iter()
-			.take_while(|byte| byte.is_ascii_whitespace())
-			.count()
-	})
 }
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
