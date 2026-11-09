@@ -1,1 +1,1 @@
-`history://<id>`: read-only concise transcript (tool calls/results summarized; `:raw` strips `read` formatting, not summary truncation); bare `history://` lists registered agents and retained on-disk agent transcripts, not persisted unregistered top-level sessions.
+`history://<id>`: read-only concise transcript (tool calls/results summarized); bare lists registered and retained on-disk agents, not persisted unregistered top-level sessions.
