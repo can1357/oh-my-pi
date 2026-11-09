@@ -154,6 +154,11 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	automaticContinuationBlocked: true,
 };
 
+const FIXED_CONTEXT_DEAD_END_WARNING =
+	"Compaction cannot create headroom — pausing automatic maintenance. " +
+	"The system prompt and always-sent tool schemas alone exceed the recovery band; " +
+	"reduce fixed context or adjust compaction.modelThresholds.";
+
 /**
  * Consecutive `response.incomplete` (length-stop) recoveries that deliver no
  * text or tool call before recovery gives up. A model that keeps returning an
@@ -1885,22 +1890,6 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
 		const settings = this.#compactionSettings;
-		if (reason === "threshold" && !options.explicitNewContextRequest) {
-			const fixedContextExceedsBand = this.#fixedContextExceedsRecoveryBand();
-			if (fixedContextExceedsBand) {
-				const sessionId = this.#host.sessionManager.getSessionId();
-				if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
-					this.#host.emitNotice(
-						"warning",
-						this.#compactionDeadEndWarning("clear large tool output"),
-						"compaction",
-					);
-					this.#fixedContextDeadEndNotifiedSessionId = sessionId;
-				}
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
-			}
-			this.#fixedContextDeadEndNotifiedSessionId = undefined;
-		}
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -4355,14 +4344,27 @@ export class SessionMaintenance {
 		);
 	}
 
-	#compactionDeadEndWarning(remedies: string): string {
-		if (this.#fixedContextExceedsRecoveryBand()) {
-			return (
-				"Compaction cannot create headroom — pausing automatic maintenance. " +
-				"The system prompt and always-sent tool schemas alone exceed the recovery band; " +
-				"reduce fixed context or adjust compaction.modelThresholds."
-			);
+	/**
+	 * When the system prompt and tool schemas alone exceed the recovery band, no
+	 * threshold pass can land under it, and re-running one every turn loops
+	 * (#18589). Returns the blocking result (warning once per session), or
+	 * `undefined` when compaction can still help.
+	 */
+	#thresholdFixedContextDeadEnd(): CompactionCheckResult | undefined {
+		if (!this.#fixedContextExceedsRecoveryBand()) {
+			this.#fixedContextDeadEndNotifiedSessionId = undefined;
+			return undefined;
 		}
+		const sessionId = this.#host.sessionManager.getSessionId();
+		if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
+			this.#host.emitNotice("warning", FIXED_CONTEXT_DEAD_END_WARNING, "compaction");
+			this.#fixedContextDeadEndNotifiedSessionId = sessionId;
+		}
+		return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+	}
+
+	#compactionDeadEndWarning(remedies: string): string {
+		if (this.#fixedContextExceedsRecoveryBand()) return FIXED_CONTEXT_DEAD_END_WARNING;
 		return (
 			"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
 			`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`
@@ -5217,6 +5219,11 @@ export class SessionMaintenance {
 		const explicitNewContextRequest = options.explicitNewContextRequest === true;
 		if (reason !== "idle" && !compactionSettings.enabled && !explicitNewContextRequest) {
 			return COMPACTION_CHECK_NONE;
+		}
+		// Every threshold caller and strategy goes through here, so the fixed-context gate lives here once.
+		if (reason === "threshold" && !explicitNewContextRequest) {
+			const deadEnd = this.#thresholdFixedContextDeadEnd();
+			if (deadEnd) return deadEnd;
 		}
 		if (this.#usesExperimentalContextManagement()) {
 			return await this.#runExperimentalContextRollover(reason, willRetry, options);

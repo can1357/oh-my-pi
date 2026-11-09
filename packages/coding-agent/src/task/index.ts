@@ -75,6 +75,7 @@ import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/too
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
+	normalizeModelSelector,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -509,9 +510,9 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
-/** An exact `""` or `[]` model: a placeholder for "use the agent's routing", not a selector. */
+/** A present but blank `model` (see {@link normalizeModelSelector}): "use the agent's routing", not a selector. */
 function isEmptyModelPlaceholder(model: unknown): boolean {
-	return model === "" || (Array.isArray(model) && model.length === 0);
+	return model !== undefined && normalizeModelSelector(model) === undefined;
 }
 
 /**
