@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom Rust shell stores must implement atomic `StateStore::commit_restore`; stores that cannot commit a complete restore must refuse it without changing state ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
+
+### Fixed
+
+- Shell snapshots now name incompatible execution formats before reading state, preserve unknown optional state while reporting its loss, and explain explicit frame abandonment without resuming discarded execution ([#18299](https://github.com/can1357/oh-my-pi/pull/18299) by [@sjawhar](https://github.com/sjawhar)).
+- Failed shell restores leave the saved execution image and all stored state unchanged, including when cleanup or signal setup is refused ([#18470](https://github.com/can1357/oh-my-pi/pull/18470) by [@sjawhar](https://github.com/sjawhar)).
 ## [18.18.2] - 2026-11-08
 
 ### Added

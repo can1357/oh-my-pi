@@ -1,0 +1,92 @@
+{
+  "base-parent-wait.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "sha256": "4b855dea5cd26de43311f46f9571e07af6a232b3f6234e8b75e1b6e96126c82b",
+    "size": 2655
+  },
+  "unknown-root-kept.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "sha256": "0ecd7246cf72f5a09cc56917e7b5bca2b816e8a0a9f121816b4a5b814e2cdd92",
+    "size": 2254
+  },
+  "unknown-root-kept.record": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "sha256": "d063fb26cb1e918597de16e6de3b0719efb8f1f3ba33c7f3074cda6aa3d6c92b",
+    "size": 19
+  },
+  "unknown-subshell-kept.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "sha256": "1c966cc1d75e957a39e130a7051e309923d017e6ca9baeee58160251f5cdeff3",
+    "size": 2495
+  },
+  "unknown-subshell-kept.record": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "sha256": "5b6ea1a1872af2924f57f36d3281c4453a849008c410999b46f0f577743ca9b6",
+    "size": 21
+  },
+  "newer-parent-wait.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + isolated writer-only FRAMES_VERSION=u32::MAX and FormatProbeAwaited::NextCall (see future-writer-patch.log)",
+    "crate_version": "18.17.0",
+    "frames_version": 4294967295,
+    "sha256": "93e8f65fe3185be8dfa455cf7ed80a923927f1cf183a09897ffe8bd6daf833dc",
+    "size": 2659
+  },
+  "foreign-parent-wait.image": {
+    "writer": "b0b02d1120976535f466b282739c25775f991830",
+    "crate_version": "18.16.0",
+    "frames_version": 29,
+    "sha256": "e89cc12a6f2756acf03ba1727a91c8a88f7bfb1b6e11f01da4e14a9ed4a8752c",
+    "size": 2506
+  },
+  "frameless-bg-pids.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa unmodified product source",
+    "crate_version": "18.17.0",
+    "frames_version": null,
+    "sha256": "6528c50a5aa8a130b90cc92c26a0264bc8a9dea611bdb1b9ebc9af6d4a358af8",
+    "size": 1001
+  },
+  "frameless-root-marks.image": {
+    "writer": "dbc063ff00b917301bad22c88648a84a37f20caa unmodified product source",
+    "crate_version": "18.17.0",
+    "frames_version": null,
+    "sha256": "695d87421a6e388c9b75f6ea91737e1b45ca67ff281d97d24fe91b82d2e9285a",
+    "size": 1021
+  },
+  "owned-required-vocabulary.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "5e9d63084e92922c12e58fb9b4c74e475449e719061fed89195251a09f7f5375",
+    "size": 2593
+  },
+  "owned-optional-vocabulary.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "9ea2863668afb36c0befed3086eb9f49806eb775c15d42bd3dc246858217374a",
+    "size": 2593
+  },
+  "owned-reserved-required.image": {
+    "writer": "75e7801e247d4e3263439d4cc08ccad60dc64bdd + archived vocabulary writer patch and independently observed owner",
+    "crate_version": "18.17.0",
+    "frames_version": 29,
+    "writer_vpid_base": 0,
+    "observed_owner_vpid": 1,
+    "sha256": "3651d559bd65aabb67f3711228e57e69a95e54a1f349abf32acb4836eecef753",
+    "size": 2591
+  }
+}

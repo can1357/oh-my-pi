@@ -51,21 +51,42 @@
 use serde::{Deserialize, Serialize};
 
 use crate::bash::{
+	error::Incompatibility,
 	fs::FileKind,
 	ids::{NativeRef, RunId, Vpid},
 };
 
+/// Shared, versioned snapshot entries outside the frozen execution core.
+pub mod vocabulary;
+
 /// Options of [`Shell::restore`](crate::bash::Shell::restore).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RestoreOpts {
-	/// Ignore the frames blob: keep root state, abandon the scripts that were
-	/// running (each reports `Done` with status 255). The fallback after
-	/// [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible).
+	/// Abandon execution and keep root state. Every old script reports `Done`
+	/// with status 255; no old execution is resumed. Unlike ordinary refusal,
+	/// which leaves persisted bytes unchanged, this consumes the Frames blob.
+	/// The report distinguishes incompatibility from requested abandonment;
+	/// root-store integrity is still checked.
 	pub drop_frames:   bool,
 	/// Seed `$RANDOM` from the host instead of continuing the snapshot's
 	/// sequence, as bash reseeds a forked subshell: shells restored from one
 	/// image next to each other would otherwise draw the same numbers.
 	pub reseed_random: bool,
+}
+
+/// Why execution was deliberately discarded by [`RestoreOpts::drop_frames`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FrameAbandonment {
+	/// Header and vocabulary passed preflight; the caller requested abandonment.
+	/// The discarded execution core was not decoded or validated.
+	Requested,
+	/// Ordinary restore would refuse this image as incompatible.
+	Incompatible {
+		/// The same incompatibility ordinary restore reports.
+		why: Incompatibility,
+	},
+	/// The vocabulary metadata could not be decoded or validated.
+	Unreadable,
 }
 
 /// Result of [`Shell::externalize`](crate::bash::Shell::externalize).
@@ -87,18 +108,20 @@ pub struct ExternalizeReport {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreReport {
 	/// Virtual processes rebuilt.
-	pub vprocs:        u32,
+	pub vprocs:           u32,
 	/// Scripts resumed.
-	pub runs:          u32,
+	pub runs:             u32,
 	/// Idempotent fs operations and unfinished external spawns that will be
 	/// re-issued.
-	pub reissued_fs:   u32,
+	pub reissued_fs:      u32,
 	/// Tasks resumed from checkpoints.
-	pub tasks_resumed: u32,
+	pub tasks_resumed:    u32,
 	/// What could not be brought back.
-	pub lost:          Vec<Lost>,
+	pub lost:             Vec<Lost>,
 	/// Scripts abandoned by [`RestoreOpts::drop_frames`] (status 255).
-	pub abandoned:     Vec<RunId>,
+	pub abandoned:        Vec<RunId>,
+	/// Reason execution was discarded, or `None` if no Frames blob was dropped.
+	pub frames_abandoned: Option<FrameAbandonment>,
 }
 
 /// Something a snapshot cannot carry.
@@ -144,5 +167,19 @@ pub enum Lost {
 		/// What the host object was (file, pipe, socket, terminal, device),
 		/// so a consumer can tell which open OS handle was dropped.
 		kind: FileKind,
+	},
+	/// A historical Misc record this reader preserves but cannot interpret.
+	Record {
+		/// Original numeric Misc-key identifier.
+		id: u32,
+	},
+	/// An optional vocabulary entry preserved without applying its payload.
+	Vocabulary {
+		/// Permanent entry identifier.
+		id:       u32,
+		/// Unrecognized payload revision.
+		revision: u32,
+		/// Owning virtual process, or shell-wide state.
+		vpid:     Option<Vpid>,
 	},
 }

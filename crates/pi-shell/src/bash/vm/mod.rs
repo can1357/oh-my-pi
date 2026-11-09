@@ -40,6 +40,8 @@ use std::{
 };
 
 use bstr::{BStr, BString};
+#[cfg(all(test, debug_assertions))]
+pub(crate) use frames::vocabulary_tests::CODEC as TEST_VOCABULARY_CODEC;
 use serde::{Deserialize, Serialize};
 
 /// zsh/newuser's startup check, for the process shell's startup files.
@@ -395,6 +397,8 @@ pub struct Shell {
 	/// Orphaned job trees still watched for in-engine work (see the
 	/// `orphans` module); empty unless [`Self::gone`] ever had entries.
 	orphans: Vec<Vpid>,
+	/// Unknown optional vocabulary entries retained across snapshots.
+	entries: Vec<crate::bash::snapshot::vocabulary::Entry>,
 }
 
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
@@ -1715,6 +1719,7 @@ impl Shell {
 			slice: None,
 			gone: Vec::new(),
 			orphans: Vec::new(),
+			entries: Vec::new(),
 		})
 	}
 

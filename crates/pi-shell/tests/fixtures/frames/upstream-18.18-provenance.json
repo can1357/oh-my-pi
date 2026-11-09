@@ -1,0 +1,20 @@
+{
+  "upstream-v29-18.18-parent-wait.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "product_source": "unmodified upstream main",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "7dd7b745c244fcfa814032d282e3b1a9d1443f876165063e6f9795a2eb736924",
+    "size": 2506
+  },
+  "upstream-v29-18.18-no-wait.image": {
+    "writer": "f2b795ba747b23d42052184d822b41e3d01357cc",
+    "product_source": "unmodified upstream main",
+    "crate_version": "18.18.0",
+    "build_id": "0d9a43b5054d8b5c18972d8b9aa487286c95ade5e4fe5588bc6d79ada090befe",
+    "frames_version": 29,
+    "sha256": "26de3bdb9eee9b3f08e4d04d0582fc704287840dd3c55a450272095b089cee76",
+    "size": 2171
+  }
+}

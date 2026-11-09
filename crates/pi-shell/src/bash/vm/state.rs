@@ -21,8 +21,8 @@ use crate::bash::{
 	host::Rlimit,
 	ids::{JobId, Vpid},
 	store::{
-		Attrs, Change, Elem, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table,
-		VarValue, ZshScope,
+		Attrs, Change, Elem, Key, KeyBuf, MiscKey, OptId, Record, RestoreWrite, StateStore,
+		StoreError, Table, VarValue, ZshScope,
 	},
 	zshopt::{ZshOpt, ZshOpts},
 };
@@ -351,6 +351,8 @@ pub struct Root {
 	fault:             Option<StoreError>,
 	/// The root vproc's in-place fields as last written ([`sync_root`]).
 	synced:            Synced,
+	/// Restore-only writes, discarded on any preparation or commit refusal.
+	restore_writes:    Option<Vec<RestoreWrite>>,
 	/// zsh's history events as last written (mirrors their store record).
 	pub hist_events:   parking_lot::Mutex<super::builtins::history::model::EventsCache>,
 }
@@ -462,6 +464,23 @@ impl Root {
 		Ok(root)
 	}
 
+	/// Hold restore's mutations until all reads and host preparation succeed.
+	pub fn stage_restore(&mut self) {
+		self.restore_writes = Some(Vec::new());
+	}
+
+	pub fn delete_restore_blob(&mut self, slot: crate::bash::store::BlobSlot) {
+		self
+			.restore_writes
+			.as_mut()
+			.expect("restore is staged")
+			.push(RestoreWrite::DeleteBlob(slot));
+	}
+
+	pub fn commit_restore(&mut self, store: &mut dyn StateStore) -> Result<(), StoreError> {
+		store.commit_restore(self.restore_writes.take().expect("restore is staged"))
+	}
+
 	/// Count the root scopes and rebuild the scope masks and the nameref
 	/// flag from the store: one scan of the scopes, their locals and the
 	/// global variables.
@@ -558,6 +577,14 @@ impl Root {
 	/// ([`Self::fail`]).
 	pub fn write(&mut self, store: &mut dyn StateStore, change: Change<'_>) {
 		self.note(&change);
+		if let Some(writes) = &mut self.restore_writes {
+			match change {
+				Change::Put(key, record) => writes.push(RestoreWrite::Put(key.to_buf(), record)),
+				Change::Del(key) => writes.push(RestoreWrite::Delete(key.to_buf())),
+				_ => self.fail(StoreError::Backend("restore requires complete-record writes".into())),
+			}
+			return;
+		}
 		if let Err(err) = store.apply(change) {
 			self.fail(err);
 		}
