@@ -128,6 +128,22 @@ describe("workpool model validation", () => {
 		});
 	}
 
+	it.each(["", "   "])("treats a blank model (%p) as omitted", async model => {
+		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+		const requested = Promise.withResolvers<unknown>();
+		vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
+			requested.resolve(request.perCallModel);
+			throw new Error("stop after dispatch");
+		});
+		// The gate stays off: no per-call route may reach the pool or its workers.
+		const session = makeSession({ "task.perCallModel": "off" });
+
+		await runEvalWorkpool({ op: "create", name: "blank", agent: "scout", model }, { session });
+		await runEvalWorkpool({ op: "push", name: "blank", items: ["one"] }, { session });
+
+		expect(await requested.promise).toBeUndefined();
+	});
+
 	// Losing the selector between bridge and pool would silently run workers on the agent's own model.
 	it("hands the pool selector to workers", async () => {
 		vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
