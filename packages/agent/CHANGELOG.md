@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Context estimates no longer price a turn's thinking text on routes that strip reasoning history from their requests (OpenRouter's Anthropic and Muse routes, opencode's Muse routes, Factory's Muse Spark), which do not send it; the text stays priced where the request rebuilds the stripped reasoning item for a tool call and carries it ([#18489](https://github.com/can1357/oh-my-pi/pull/18489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.2] - 2026-11-08
 
@@ -10,7 +11,6 @@
 
 ### Fixed
 
-- Context estimates no longer price a turn's thinking text on routes that strip reasoning history from their requests (OpenRouter's Anthropic and Muse routes, opencode's Muse routes, Factory's Muse Spark), which do not send it; the text stays priced where the request rebuilds the stripped reasoning item for a tool call and carries it ([#18489](https://github.com/can1357/oh-my-pi/pull/18489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed GenAI message-content capture configured in omp's own `.env` files so it continues to apply when those values are no longer exposed through the process environment.
 - Fixed compaction preparation for remote OpenAI compaction that the active model cannot replay, ensuring the content is expanded and remains available for compaction.
 - Fixed generic remote compaction requests to `/chat/completions` so gateway sessions retain the correct per-request model attribution.
