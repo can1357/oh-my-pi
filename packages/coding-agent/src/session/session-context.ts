@@ -1,8 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	canReplayRemoteCompaction,
+	getAnthropicCompactionPayload,
+	isTurnStartEntry,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
+	type Model,
 	type OpenAIResponsesHistoryPayload,
 	type ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
@@ -179,6 +184,14 @@ export interface BuildSessionContextOptions {
 	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
 	 *  (unset: {@link snapcompact.DEFAULT_FRAME_DATA_BYTES_BUDGET}). */
 	maxFrameDataBytes?: number;
+	/**
+	 * The model that reads this context. A compaction whose provider-native
+	 * payload it cannot replay summarizes nothing for it (the stored summary is a
+	 * placeholder), so the context stands on the previous boundary it can read
+	 * and re-expands the history behind the unreadable one. Ignored for
+	 * transcripts.
+	 */
+	model?: Model;
 }
 
 /** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
@@ -235,6 +248,23 @@ export type TranscriptEntry = SessionMessageEntry | CustomMessageEntry;
 
 export function isTranscriptEntry(entry: SessionEntry): entry is TranscriptEntry {
 	return entry.type === "message" || entry.type === "custom_message";
+}
+
+/**
+ * The newest compaction on `path` that `model` can read (see
+ * {@link BuildSessionContextOptions.model}), or null when there is none.
+ * Without a model the newest compaction is the boundary.
+ */
+export function getReadableCompactionEntry(
+	path: readonly SessionEntry[],
+	model: Model | undefined,
+): CompactionEntry | null {
+	for (let i = path.length - 1; i >= 0; i--) {
+		const entry = path[i];
+		if (entry.type !== "compaction") continue;
+		if (!model || canReplayRemoteCompaction(entry.preserveData, model)) return entry;
+	}
+	return null;
 }
 
 export function buildSessionContext(
@@ -348,6 +378,9 @@ export function buildSessionContext(
 		}
 	}
 
+	if (options?.model && !options.transcript) {
+		compaction = getReadableCompactionEntry(path, options.model);
+	}
 	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
 
 	// Index on the path of the latest `/clear` boundary, or -1 when none. The

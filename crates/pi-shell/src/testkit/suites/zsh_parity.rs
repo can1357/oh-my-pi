@@ -633,6 +633,50 @@ fn expandmb_multibyte_subscripts_case_padding_and_delimiters() {
 	assert_eq!((err.as_str(), st), ("", 0));
 }
 
+// Failure mode: an element read that loads only that element of the
+// array (not the whole array) loses zsh's answers at the edges: negative
+// and out-of-range indices, an empty element, `${+…}`, `(t)`, defaults,
+// a subscript of the element, a range. Outputs from zsh 5.9.
+#[test]
+fn element_reads_answer_as_zsh_at_every_index() {
+	let (out, err, st) = zsh(
+		"a=(one two three '' five); print -r -- \"1:$a[1] -1:$a[-1] -2:${a[-2]} 4:[${a[4]}] \
+		 0:[$a[0]] 9:[${a[9]}] -9:[${a[-9]}]\"; print -r -- \"def:${a[9]:-dflt} set:${+a[2]} \
+		 set9:${+a[9]} set-1:${+a[-1]} type:${(t)a[1]}\"; print -r -- \"nested:${a[2][1,2]} \
+		 len:${#a[3]} upper:${(U)a[1]} range:${a[2,3]}\"; i=3; print -r -- \"var:$a[i] \
+		 expr:$a[i+1]\"",
+	);
+	assert_eq!(
+		out,
+		"1:one -1:five -2: 4:[] 0:[] 9:[] -9:[]\ndef:dflt set:1 set9:0 set-1:1 type:a\nnested:tw \
+		 len:5 upper:ONE range:two three\nvar:three expr:\n"
+	);
+	assert_eq!((err.as_str(), st), ("", 0));
+}
+
+// Failure mode: a plain assignment or arithmetic on an ordinary variable,
+// written to the store directly, loses what zsh's parameter code does
+// for the variable: an integer's output base, a float's display, case
+// and padding flags, modifiers and subscripts in the value, `GLOB_SUBST`,
+// a new variable's type, a read-only refusal. Outputs from zsh 5.9.
+#[test]
+fn plain_assignments_keep_what_parameters_do() {
+	let (out, err, _) = zsh(
+		"a=one; integer n=7; typeset -i 16 h=255; float f=1.5; typeset -u U=low; typeset -L 6 L=ab; \
+		 x=pre$a-$n/$h; print -r -- \"$x\"; x=$f; print -r -- \"$x\"; x=$a:u$a[2]; print -r -- \
+		 \"$x\"; x=$U[$L]; print -r -- \"$x\"; setopt globsubst; s=\"*\"; x=$s; print -r -- \"$x\"; \
+		 unsetopt globsubst; (( n = n * 3 )); (( h = h + 1 )); (( f = f * 2 )); print -r -- $n $h \
+		 $f ${(t)n} ${(t)h}; (( u = 4 )); print -r -- $u ${(t)u}; typeset -r ro=1; (( ro = 2 )); \
+		 print -r -- after",
+	);
+	assert_eq!(
+		out,
+		"preone-7/16#FF\n1.500000000e+00\nONEn\n\n*\n21 16#100 3.000000000e+00 integer integer\n4 \
+		 integer\nafter\n"
+	);
+	assert!(err.contains("read-only variable: ro"), "{err}");
+}
+
 #[test]
 fn expandmb_identifiers_admit_multibyte_letters_unless_posix_identifiers() {
 	let (out, err, st) = zsh(

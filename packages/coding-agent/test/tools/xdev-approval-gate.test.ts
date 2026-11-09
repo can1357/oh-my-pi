@@ -40,7 +40,7 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
 	runner.initialize(
 		{
 			sendMessage: () => {},
-			sendUserMessage: () => {},
+			sendUserMessage: async () => {},
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],

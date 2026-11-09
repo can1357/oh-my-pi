@@ -205,23 +205,29 @@ pub(crate) fn invocation(
 		.iter()
 		.map(|(name, value)| (name.to_str_lossy().into_owned(), value.to_str_lossy().into_owned()))
 		.collect();
-	invocation.stdio = stdio.each_ref().map(open_fd);
+	let [stdin, stdout, stderr] = stdio;
+	invocation.stdio = [open_fd(stdin, false), open_fd(stdout, true), open_fd(stderr, true)];
 	invocation.fds = extra_fds
 		.iter()
 		.filter(|(_, fd)| fd.is_open())
-		.map(|(number, fd)| (*number, open_fd(fd)))
+		.map(|(number, fd)| (*number, open_fd(fd, false)))
 		.collect();
 	invocation.reported_error = config.reported_error.get();
 	invocation
 }
 
-/// The descriptor an extra gets for the engine fd object `fd` (see the
-/// module docs).
-fn open_fd(fd: &FdRef) -> Fd {
+/// The descriptor an extra gets for the engine fd object `fd`, as its
+/// input or its `output` (see the module docs).
+fn open_fd(fd: &FdRef, output: bool) -> Fd {
 	if !fd.is_open() {
 		return Fd::Closed;
 	}
-	if let Some(handle) = fd.os_handle()
+	let handle = if output {
+		fd.os_output_handle()
+	} else {
+		fd.os_handle()
+	};
+	if let Some(handle) = handle
 		&& let Ok(file) = duplicate(handle)
 	{
 		return Fd::File(file);

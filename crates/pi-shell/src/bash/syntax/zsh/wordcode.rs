@@ -1067,7 +1067,7 @@ impl<'c, 's> Wc<'c, 's> {
 						s = self.tokstr();
 						self.lex();
 					},
-					T::Outpar | T::Bar => s = Vec::new(),
+					T::Outpar | T::Bar => s.clear(),
 					_ => return self.yyerror_at(oecused),
 				}
 			}

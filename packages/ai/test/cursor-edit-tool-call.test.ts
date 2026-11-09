@@ -161,10 +161,12 @@ describe("cursor native editToolCall (StrReplace)", () => {
 			return result;
 		});
 		const readPaths: string[] = [];
+		const frames: unknown[] = [];
 		const { h2Request } = mockH2();
 		const execHandlers: CursorExecHandlers = {
-			async read(args) {
+			async read(args, frame) {
 				readPaths.push(args.path);
+				frames.push(frame);
 				return {
 					role: "toolResult",
 					toolCallId: args.toolCallId,
@@ -174,7 +176,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 					timestamp: 1,
 				} satisfies ToolResultMessage;
 			},
-			async write(args) {
+			async write(args, frame) {
+				frames.push(frame);
 				return {
 					role: "toolResult",
 					toolCallId: args.toolCallId,
@@ -244,6 +247,7 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		expect(calls[0]?.[kCursorExecResolved]).toBe(true);
 		expect(calls[0]?.arguments).toEqual({ path: TARGET, stream_content: "orange" });
 		expect(readPaths).toEqual([`${TARGET}:raw`]);
+		expect(frames).toEqual([{ editMaterialization: true }, { editMaterialization: true }]);
 		expect(toolResults.map(result => result.toolName)).toEqual(["edit"]);
 		expect(toolResults[0]?.toolCallId).toBe(EDIT_ID);
 		expect(toolResults[0]?.isError).toBe(false);
@@ -424,6 +428,84 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		).toBe(true);
 	});
 
+	it("settles the live card of an edit completed without a write, but not of one whose write landed", async () => {
+		const settled: ToolResultMessage[] = [];
+		const failedOutput = cursorAssistantMessage();
+		const failedState = newBlockState(result => result);
+		failedState.onEditSettled = result => settled.push(result);
+		const failedStream = new AssistantMessageEventStream();
+		startEdit(failedOutput, failedStream, failedState);
+		const failed = create(ToolCallSchema, {
+			toolCallId: EDIT_ID,
+			tool: {
+				case: "editToolCall",
+				value: create(EditToolCallSchema, {
+					args: { path: TARGET, streamContent: "orange" },
+					result: create(EditResultSchema, {
+						result: {
+							case: "error",
+							value: create(EditErrorSchema, { path: TARGET, error: "old_string not found" }),
+						},
+					}),
+				}),
+			},
+		});
+		processInteractionUpdate(
+			{ message: { case: "toolCallCompleted", value: { callId: ENVELOPE_ID, toolCall: failed } } },
+			failedOutput,
+			failedStream,
+			failedState,
+			{ sawTokenDelta: false },
+		);
+		expect(settled.map(result => [result.toolCallId, result.toolName, result.isError])).toEqual([
+			[EDIT_ID, "edit", true],
+		]);
+
+		settled.length = 0;
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState(result => result);
+		state.onEditSettled = result => settled.push(result);
+		const { h2Request } = mockH2();
+		startEdit(output, stream, state);
+		await handleServerMessage(
+			execWrite({ path: TARGET, toolCallId: EDIT_ID, fileText: "orange\n" }),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			{
+				async write(args) {
+					return {
+						role: "toolResult",
+						toolCallId: args.toolCallId,
+						toolName: "edit",
+						content: [{ type: "text", text: "wrote" }],
+						isError: false,
+						timestamp: 2,
+					} satisfies ToolResultMessage;
+				},
+			},
+			result => result,
+			{ sawTokenDelta: false },
+			[],
+		);
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallCompleted",
+					value: { callId: ENVELOPE_ID, toolCall: editToolCall(TARGET, "orange") },
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+		expect(settled).toEqual([]);
+	});
+
 	it("pairs an interrupted cursor-edit when the transport dies before writeArgs", () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
@@ -432,6 +514,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 			toolResults.push(result);
 			return result;
 		});
+		const settled: ToolResultMessage[] = [];
+		state.onEditSettled = result => settled.push(result);
 		startEdit(output, stream, state);
 		expect(toolResults).toHaveLength(0);
 
@@ -441,6 +525,8 @@ describe("cursor native editToolCall (StrReplace)", () => {
 		expect(toolResults[0]?.toolCallId).toBe(EDIT_ID);
 		expect(toolResults[0]?.toolName).toBe("edit");
 		expect(toolResults[0]?.isError).toBe(true);
+		// The materializing read surfaced no call, so the flush must end the live card itself.
+		expect(settled).toEqual(toolResults);
 	});
 
 	it("treats a completion with no EditResult as a failed edit", () => {

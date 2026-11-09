@@ -346,10 +346,10 @@ describe("AgentSession per-turn prune persistence", () => {
 			expectLastReviewIncremental();
 		});
 
-		it("keeps the advisor's context across two prunes while the eval state message moves to the tail", async () => {
+		it("keeps the advisor's context across two prunes while the eval state message keeps its slot", async () => {
 			enableAdvisor();
-			// An `eval` call in history makes every display-context rebuild append a
-			// fresh synthetic `eval-state-context` message at the tail.
+			// An `eval` call in history makes the next display-context rebuild append
+			// an `eval-state-context` snapshot at the tail and persist it there.
 			await commitUnreviewedTurn([
 				assistant([{ type: "toolCall", id: "call-eval", name: "eval", arguments: { code: "1 + 1" } }]),
 				toolResult("call-eval", "eval", "2"),
@@ -357,17 +357,20 @@ describe("AgentSession per-turn prune persistence", () => {
 			]);
 			const tail = session.agent.state.messages.at(-1);
 			expect(tail?.role === "custom" ? tail.customType : undefined).toBe("eval-state-context");
+			const slot = session.agent.state.messages.length - 1;
 			// Delivers the eval-state message at its current slot.
 			await reviewedTurn("turn one");
 
-			// Second prune: the synthetic message moves past the newer entries.
+			// Second prune: the persisted snapshot stays where it was sent; no copy moves to the tail.
 			await commitUnreviewedTurn([
 				assistant([{ type: "toolCall", id: "call-big-2", name: "grep", arguments: { pattern: "FIXME" } }]),
 				toolResult("call-big-2", "grep", "other line\n".repeat(20000), true),
 				assistant([{ type: "text", text: "Nothing there either." }]),
 			]);
-			const secondTail = session.agent.state.messages.at(-1);
-			expect(secondTail?.role === "custom" ? secondTail.customType : undefined).toBe("eval-state-context");
+			const snapshots = session.agent.state.messages.flatMap((message, index) =>
+				message.role === "custom" && message.customType === "eval-state-context" ? [index] : [],
+			);
+			expect(snapshots).toEqual([slot]);
 
 			const resets = await withPrefixResetCount(() => reviewedTurn("turn two"));
 

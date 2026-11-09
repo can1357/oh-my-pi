@@ -64,6 +64,102 @@ describe("read URL refused for one user agent", () => {
 		expect(text).toContain("Revenue grew in the quarter");
 	});
 
+	it("reads the page from the next user agent when curl receives a 200 challenge page", async () => {
+		const server = serveRefusingCurl(
+			() =>
+				new Response('<html><body><form><input name="js_challenge" value="1"/></form></body></html>', {
+					headers: { "content-type": "text/html" },
+				}),
+		);
+
+		const { method, text } = await readText(server);
+
+		expect(method).not.toBe("blocked");
+		expect(text).toContain("Revenue grew in the quarter");
+	});
+
+	it("still tries the last user agent when the one after curl's challenge gets an error page", async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: request => {
+				const agent = request.headers.get("user-agent") ?? "";
+				if (agent.startsWith("curl/")) {
+					return new Response('<html><body><input name="js_challenge"/></body></html>', {
+						headers: { "content-type": "text/html" },
+					});
+				}
+				if (agent.includes("TextBot")) return new Response("Not Found", { status: 404 });
+				return new Response(ARTICLE, { headers: { "content-type": "text/html" } });
+			},
+		});
+		servers.push(server);
+
+		const result = await loadPage(`http://127.0.0.1:${server.port}/filing.htm`);
+
+		expect(result.ok).toBe(true);
+		expect(result.content).toContain("Revenue grew in the quarter");
+	});
+
+	const jsChallenge = () =>
+		new Response('<html><body><input name="js_challenge"/></body></html>', {
+			headers: { "content-type": "text/html" },
+		});
+	const cloudflareChallenge = () =>
+		new Response("<html><head><title>Just a moment...</title></head></html>", {
+			status: 403,
+			headers: { "content-type": "text/html", "cf-mitigated": "challenge" },
+		});
+	const refused = () => new Response("Forbidden", { status: 403 });
+	const unreachable = () => Promise.withResolvers<Response>().promise;
+
+	it.each([
+		{
+			wall: jsChallenge,
+			later: "fail to connect",
+			refuse: unreachable,
+			stop: true,
+			blockedBy: "JavaScript challenge",
+			status: 200,
+		},
+		{
+			wall: jsChallenge,
+			later: "are refused",
+			refuse: refused,
+			stop: false,
+			blockedBy: "JavaScript challenge",
+			status: 200,
+		},
+		{
+			wall: cloudflareChallenge,
+			later: "are refused",
+			refuse: refused,
+			stop: false,
+			blockedBy: "Cloudflare",
+			status: 403,
+		},
+	])(
+		"keeps curl's $blockedBy wall, never ok, when later user agents $later",
+		async ({ wall, refuse, stop, blockedBy, status }) => {
+			const server = Bun.serve({
+				port: 0,
+				fetch: request => {
+					if (request.headers.get("user-agent")?.startsWith("curl/")) return wall();
+					if (stop) server.stop(true);
+					return refuse();
+				},
+			});
+			servers.push(server);
+			const url = `http://127.0.0.1:${server.port}/canonical`;
+
+			const result = await loadPage(url);
+
+			expect(result.blockedBy).toBe(blockedBy);
+			expect(result.ok).toBe(false);
+			expect(result.finalUrl).toBe(url);
+			expect(result.status).toBe(status);
+		},
+	);
+
 	it("reads the page from the next user agent before waiting out a 429's Retry-After", async () => {
 		const server = serveRefusingCurl(
 			() => new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }),

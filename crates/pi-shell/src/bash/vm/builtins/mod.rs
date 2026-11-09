@@ -31,7 +31,7 @@ mod test;
 pub mod trap;
 mod vars;
 pub mod zsh_args;
-mod zsh_dir;
+pub(crate) mod zsh_dir;
 pub mod zsh_jobs;
 mod zsh_kill;
 mod zsh_mod_attr;
@@ -204,6 +204,11 @@ pub struct Ctx<'a, 'c> {
 	pub cx:          &'a mut Cx<'c>,
 	pub vp:          &'a mut Vproc,
 	probes:          &'a [(Probe, ProbeResult)],
+	/// Where in `probes` the re-run's next probe is expected: a builtin
+	/// asks again in the order it was answered, so its answers are found
+	/// without searching the log (a builtin that asks many probes, each a
+	/// re-run, would otherwise compare every answer per probe).
+	probe_at:        std::cell::Cell<usize>,
 	/// Output and diagnostics in order.
 	pub chunks:      Vec<Chunk>,
 	/// Script line (diagnostics, `$LINENO`).
@@ -246,6 +251,7 @@ impl<'a, 'c> Ctx<'a, 'c> {
 			cx,
 			vp,
 			probes,
+			probe_at: std::cell::Cell::new(0),
 			chunks: Vec::new(),
 			line,
 			name,
@@ -260,15 +266,29 @@ impl<'a, 'c> Ctx<'a, 'c> {
 
 	/// The answer to `p`, or a request for it.
 	pub fn probe(&self, p: Probe) -> Result<ProbeResult, Need> {
-		// Each probe is answered once; a builtin that reads in parts asks
-		// for its latest ones again.
-		self
-			.probes
-			.iter()
-			.rev()
-			.find(|(q, _)| *q == p)
-			.map(|(_, r)| r.clone())
-			.ok_or(Need::Probe(p))
+		// A digest this shell already read answers at once, as its probe
+		// would: an `$fpath` search asks every digest for every function.
+		if let Probe::DumpHas(q) = &p
+			&& let Some(funcs) = self.k.dump_funcs(&q.path, (q.mtime_ns, q.size))
+		{
+			return Ok(ProbeResult::Ok(funcs.contains(q.name.as_slice())));
+		}
+		// Each probe is answered once (only an unanswered one joins the
+		// log), so the answer at the replay position is the only one.
+		let at = self.probe_at.get();
+		if let Some((q, r)) = self.probes.get(at)
+			&& *q == p
+		{
+			self.probe_at.set(at + 1);
+			return Ok(r.clone());
+		}
+		match self.probes.iter().rposition(|(q, _)| *q == p) {
+			Some(i) => {
+				self.probe_at.set(i + 1);
+				Ok(self.probes[i].1.clone())
+			},
+			None => Err(Need::Probe(p)),
+		}
 	}
 
 	/// The probes answered so far, in the order they were answered (for a

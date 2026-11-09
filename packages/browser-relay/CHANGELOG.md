@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- The browser extension now requests Chrome’s downloads permission so relay tabs can report where downloads were saved to omp.
+
 ## [18.18.1] - 2026-11-08
 
 ### Changed

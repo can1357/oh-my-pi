@@ -63,7 +63,9 @@ function toolEnd(toolCallId: string, toolName: string): AgentSessionEvent {
 }
 
 function askArgs(question: string): Record<string, unknown> {
-	return { questions: [{ id: "q", question, options: [{ label: "Yes" }, { label: "No" }] }] };
+	return {
+		html: `<form><p>${question}</p><label><input type="radio" name="q" value="yes"> Yes</label><label><input type="radio" name="q" value="no"> No</label></form>`,
+	};
 }
 
 describe("EventController run status at turn end", () => {

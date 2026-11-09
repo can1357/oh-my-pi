@@ -1518,7 +1518,7 @@ fn filter_gradle_dependencies(input: &str) -> String {
 				configs.push((current_config.clone(), current_deps.clone()));
 			}
 			current_config = trimmed.split(" - ").next().unwrap_or(trimmed).to_string();
-			current_deps = Vec::new();
+			current_deps.clear();
 			continue;
 		}
 
