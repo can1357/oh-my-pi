@@ -80,6 +80,8 @@ const STATE_TRIGGER_EVENTS: Record<string, true> = {
 
 const STATE_DEBOUNCE_MS = 100;
 const AGENTS_DEBOUNCE_MS = 100;
+/** Retry period for a resync notice the queue refused; a shed guest has no timer of its own. */
+const RESYNC_RETRY_MS = 1_000;
 const STREAMING_STATE_INTERVAL_MS = 2000;
 const WELCOME_IMAGE_STRIP_THRESHOLD = 24 * 1024 * 1024;
 const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
@@ -245,6 +247,9 @@ export class CollabHost {
 	#pendingUi = new Map<number, PendingCollabUiRequest>();
 	#lastStateJson = "";
 	#stateDebounce: Timer | null = null;
+	/** Shed peers whose resync notice the queue refused, retried until one is admitted. */
+	#unnotified = new Set<number>();
+	#resyncRetry: Timer | null = null;
 	#streamingInterval: Timer | null = null;
 	#agentsDebounce: Timer | null = null;
 	#busUnsubscribers: (() => void)[] = [];
@@ -657,6 +662,9 @@ export class CollabHost {
 		this.#registryUnsubscribe = undefined;
 		clearTimeout(this.#stateDebounce ?? undefined);
 		this.#stateDebounce = null;
+		this.#unnotified.clear();
+		clearTimeout(this.#resyncRetry ?? undefined);
+		this.#resyncRetry = null;
 		clearTimeout(this.#agentsDebounce ?? undefined);
 		this.#agentsDebounce = null;
 		clearInterval(this.#streamingInterval ?? undefined);
@@ -1054,7 +1062,13 @@ export class CollabHost {
 		}
 		const pending = this.#pendingUi.get(reqId);
 		if (pending) {
-			if (!pending.recipients.has(fromPeer) || pending.responsePending) return;
+			if (!pending.recipients.has(fromPeer)) return;
+			if (pending.responsePending) {
+				// The guest dismissed its dialog on submitting, so it holds the ask no more and
+				// a transition replay must re-pose it there.
+				pending.recipients.delete(fromPeer);
+				return;
+			}
 			if (suspended) {
 				void this.#settleUiAfterTransition(pending, value, fromPeer);
 				return;
@@ -1187,6 +1201,7 @@ export class CollabHost {
 	 */
 	#handleRoomRecreated(): void {
 		if (this.#stopped) return;
+		this.#unnotified.clear();
 		if (this.#peers.size === 0 && this.#pendingUi.size === 0) return;
 		// Identities first: settle() fans `ui-request-end` out over #peers, and those
 		// ids belong to the room that just went away.
@@ -1222,7 +1237,10 @@ export class CollabHost {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
 		this.#dropAskRecipient(peer);
-		this.#sendResync(peer);
+		if (!this.#sendResync(peer)) {
+			this.#unnotified.add(peer);
+			this.#scheduleResyncRetry();
+		}
 		if (name) {
 			this.#ctx.session.emitNotice(
 				"warning",
@@ -1234,8 +1252,30 @@ export class CollabHost {
 		this.#scheduleStateBroadcast();
 	}
 
-	#sendResync(peer: number): void {
-		this.#send({ t: "error", message: RESYNC_MESSAGE, resync: true }, peer);
+	/** @returns whether the queue admitted the notice. */
+	#sendResync(peer: number): boolean {
+		const frame: CollabFrame = { t: "error", message: RESYNC_MESSAGE, resync: true };
+		if (this.#sendSuppressed(frame)) return false;
+		return this.#socket?.send(frame, peer) ?? false;
+	}
+
+	/**
+	 * A guest that was live when shed has no welcome or snapshot timer running, so a
+	 * refused notice would leave it frozen. Retry until one is admitted, the peer
+	 * leaves, or it says hello again.
+	 */
+	#scheduleResyncRetry(): void {
+		if (this.#resyncRetry || this.#unnotified.size === 0) return;
+		this.#resyncRetry = setTimeout(() => {
+			this.#resyncRetry = null;
+			if (this.#stopped) return;
+			for (const peer of this.#unnotified) {
+				if (!this.#socket?.isServing(peer) || this.#peers.has(peer) || this.#sendResync(peer)) {
+					this.#unnotified.delete(peer);
+				}
+			}
+			this.#scheduleResyncRetry();
+		}, RESYNC_RETRY_MS);
 	}
 
 	#buildState(): CollabSessionState {

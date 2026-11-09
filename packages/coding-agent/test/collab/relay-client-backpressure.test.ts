@@ -639,10 +639,33 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			BackpressuredWebSocket.instances[0]!.open();
 			const text = "x".repeat(9 * 1024 * 1024);
+			// The first entry rides the empty-queue exemption; the next two exceed the budget.
 			socket.send({ t: "prompt", text });
+			socket.send({ t: "prompt", text });
+			expect(reason).toBeUndefined();
 			socket.send({ t: "prompt", text });
 			expect(reason).toContain("backlog exceeded");
 			expect(socket.isOpen).toBe(false);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("does not shed a below-budget snapshot for the live traffic queued behind it", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/floor", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			expect(socket.sendBatch(welcomeBatch("joiner"), 5, 15 * 1024 * 1024)).toBe(true);
+			const text = "x".repeat(1024 * 1024);
+			for (let i = 0; i < 4; i++) expect(socket.send({ t: "error", message: text })).toBe(true);
+			await Promise.resolve();
+			expect(shed).toEqual([]);
 		} finally {
 			socket.close();
 		}

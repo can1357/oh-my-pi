@@ -489,6 +489,64 @@ describe("collab host registry lifecycle (#6099)", () => {
 		}
 	});
 
+	it("retries a shed guest's resync notice the queue refused", async () => {
+		const { transport, writeToken } = await startCapturedHost();
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "slow", writeToken }, 1);
+		const isResync = (frame: unknown, peer: number | undefined): boolean =>
+			typeof frame === "object" && frame !== null && (frame as CollabFrame).t === "error" && peer === 1;
+		let refuse = true;
+		const real = transport.send.bind(transport);
+		const send = spyOn(transport, "send").mockImplementation((frame, targetPeer) =>
+			refuse && isResync(frame, targetPeer) ? false : real(frame, targetPeer),
+		);
+		try {
+			transport.onPeerOverload!(1);
+			expect(send.mock.calls.filter(([frame, peer]) => isResync(frame, peer))).toHaveLength(1);
+			refuse = false;
+			await Bun.sleep(1_200);
+			expect(send.mock.calls.filter(([frame, peer]) => isResync(frame, peer))).toHaveLength(2);
+			await Bun.sleep(1_200);
+			expect(send.mock.calls.filter(([frame, peer]) => isResync(frame, peer))).toHaveLength(2);
+		} finally {
+			send.mockRestore();
+		}
+	});
+
+	it("re-poses an ask to a writer whose answer was discarded during a transition", async () => {
+		const { transport, state, writeToken } = await startCapturedHost();
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first", writeToken }, 1);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "second", writeToken }, 2);
+		const abort = new AbortController();
+		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes", "No"] }, abort.signal);
+		if (!answer) throw new Error("host did not offer the ask");
+		const original = state.sessionId;
+		const transition = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		state.sessionId = "provisional";
+		const replay = spyOn(transport, "send");
+		try {
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "Yes" }, 1);
+			// Both guests closed their dialogs on submitting; only the first answer is kept.
+			transport.onFrame!({ t: "ui-response", reqId: 1, value: "No" }, 2);
+			await setImmediate();
+			state.sessionId = original;
+			transport.onControl?.({ t: "peer-left", peer: 1 });
+			state.transition = undefined;
+			transition.resolve();
+			await setImmediate();
+			expect(
+				replay.mock.calls.filter(
+					([frame, peer]) => typeof frame !== "string" && frame.t === "ui-request" && peer === 2,
+				),
+			).toHaveLength(1);
+		} finally {
+			replay.mockRestore();
+			state.transition = undefined;
+			transition.resolve();
+			abort.abort();
+		}
+	});
+
 	it("ends an old-room dialog even while its session is provisionally suspended", async () => {
 		const { ctx, state } = makeHostContext();
 		const originalConnect = CollabSocket.prototype.connect;

@@ -264,6 +264,8 @@ export class GuestClient {
 
 	#handleOpen(): void {
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		// Before the first welcome, connect()'s timer already covers this hello.
+		if (this.#welcomed) this.#armRejoinTimer();
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
@@ -284,20 +286,27 @@ export class GuestClient {
 		this.#clearUiRequests();
 		this.#phase = "reconnecting";
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#armRejoinTimer();
+		this.#commit();
+		return true;
+	}
+
+	/** A post-join hello the host never welcomes retries through the rejoin budget. */
+	#armRejoinTimer(): void {
 		this.#clearWelcomeTimer();
 		this.#welcomeTimer = setTimeout(() => {
 			this.#welcomeTimer = null;
 			if (this.#phase === "live" || this.#phase === "ended") return;
 			if (!this.#rejoin("timed out waiting for the host's welcome")) this.#commit();
 		}, WELCOME_TIMEOUT_MS);
-		this.#commit();
-		return true;
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
 		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
+			// The reopened socket's hello arms its own timer.
+			if (this.#welcomed) this.#clearWelcomeTimer();
 			this.#phase = "reconnecting";
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;

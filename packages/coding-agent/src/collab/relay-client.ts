@@ -82,7 +82,7 @@ const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
 interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
 	targetPeer: number;
-	/** Charge against {@link MAX_PENDING_SEND_BYTES}; 0 for an entry admitted past the budget into an empty queue. */
+	/** Charge against {@link MAX_PENDING_SEND_BYTES}; 0 for an entry admitted into an empty queue. */
 	bytes: number;
 	/** Materializes frames as the transport drains; the welcome-plus-snapshot batch. */
 	lazy: boolean;
@@ -395,7 +395,7 @@ export class CollabSocket {
 				return this.#refuse(entry);
 			}
 		}
-		if (this.#pendingSends.length === 0 && entry.bytes > MAX_PENDING_SEND_BYTES) entry.bytes = 0;
+		if (this.#pendingSends.length === 0) entry.bytes = 0;
 		this.#pendingSends.push(entry);
 		this.#pumpSends();
 		return true;
