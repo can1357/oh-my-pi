@@ -160,6 +160,7 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { formatQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import { loadPinnedSessionIds } from "../session/session-pins";
@@ -2345,7 +2346,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
-		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
+		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
@@ -4010,6 +4011,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType?: string;
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
+			followUps?: string[];
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput {
@@ -4020,6 +4022,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			customType: input.customType,
 			display: input.display,
 			streamingBehavior: input.streamingBehavior,
+			followUps: input.followUps,
 			cancelled: false,
 			started: false,
 		};
@@ -4084,9 +4087,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			const laterText = this.editor.getExpandedText();
 			const submittedImages = submission.images ?? [];
 			const laterImages = this.editor.pendingImages;
-			const recoveredText = laterText
-				? `${submission.text}\n${shiftImageMarkers(laterText, submittedImages.length)}`
+			const submittedText = submission.followUps
+				? formatQueueShorthand([submission.text, ...submission.followUps])
 				: submission.text;
+			const recoveredText = laterText
+				? `${submittedText}\n${shiftImageMarkers(laterText, submittedImages.length)}`
+				: submittedText;
 			this.editor.pendingImages = [...submittedImages, ...laterImages];
 			this.editor.pendingImageLinks = [
 				...(submission.imageLinks ?? submittedImages.map(() => undefined)),
@@ -4106,8 +4112,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * usage preflight denial or the cost cap raced turn setup). The message was
 	 * never persisted, so the tree/branch selectors cannot offer it — remove the
 	 * optimistic transcript row and put the typed text back in the editor for editing.
+	 * A prompt with unsent follow-ups comes back as one `=>` list.
 	 */
-	#restoreDroppedPrompt(prompt: DroppedPrompt): void {
+	restoreDroppedPrompt(prompt: DroppedPrompt): void {
 		this.clearOptimisticUserMessage();
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
@@ -4128,7 +4135,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.pendingImages = prompt.images ? [...prompt.images] : [];
 			this.editor.pendingImageLinks = prompt.images ? prompt.images.map(() => undefined) : [];
 			this.editor.imageLinks = this.editor.pendingImageLinks;
-			this.editor.setText(prompt.text);
+			this.editor.setText(prompt.followUps ? formatQueueShorthand([prompt.text, ...prompt.followUps]) : prompt.text);
 		}
 		this.ui.requestRender();
 	}

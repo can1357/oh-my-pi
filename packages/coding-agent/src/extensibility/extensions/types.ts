@@ -181,6 +181,15 @@ export type {
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 
+import type { HtmlFormData } from "@oh-my-pi/pi-tui/html-form/data";
+export type { HtmlFormData, HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
+
+/** A submitted {@link ExtensionUIContext.formDialog}: the form data, flagged when the timeout submitted the defaults. */
+export interface ExtensionFormDialogResult {
+	data: HtmlFormData;
+	timedOut?: boolean;
+}
+
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
 }
@@ -343,6 +352,14 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/**
+	 * Show an HTML `<form>` (see `@oh-my-pi/pi-tui/html-form/parse`) as an interactive form and
+	 * resolve its data on submit, `undefined` on cancel. With `timeout`, the form's current values
+	 * submit when it elapses (`timedOut: true`); input resets the countdown. Absent on hosts that
+	 * cannot draw a form; callers then fall back to field-by-field `select`/`input`/`editor`.
+	 */
+	formDialog?(html: string, dialogOptions?: ExtensionUIDialogOptions): Promise<ExtensionFormDialogResult | undefined>;
 
 	/**
 	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when

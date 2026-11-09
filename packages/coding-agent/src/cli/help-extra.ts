@@ -45,6 +45,8 @@ export function getExtraHelpText(): string {
   SINGULARITYAPI_DEV_API_KEY - SingularityAPI universal gateway (300+ models)
   SINGULARITYAPI_TECH_API_KEY - SingularityAPI reserved DeepSeek lanes
   SCW_SECRET_KEY             - Scaleway Generative APIs models
+  OTARI_API_KEY              - Otari AI gateway (workspace models)
+  OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)
   KELN_API_KEY               - Keln open models
 
   ${chalk.dim("# Cloud Providers")}

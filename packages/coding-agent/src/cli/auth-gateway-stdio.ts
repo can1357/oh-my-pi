@@ -18,7 +18,7 @@ import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliMode
 import { Settings } from "../config/settings";
 import { claimRpcInput } from "../modes/rpc/rpc-input";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
+import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
@@ -26,8 +26,9 @@ const STDIO_PEER = "stdio";
 /**
  * The models a request naming `selector` may run on, in order: the model
  * `--model` would pick (the first entry of a comma list that resolves), then
- * that model's `retry.fallbackChains` (its role's chain when the entry named a
- * role). Empty when no entry resolves.
+ * that model's configured `retry.fallbackChains` (its role's chain when the
+ * entry named a role; never the role's built-in priority list). Empty when no
+ * entry resolves.
  */
 export function selectorCandidates(
 	selector: string,
@@ -38,9 +39,7 @@ export function selectorCandidates(
 	for (const pattern of normalizeModelPatternList(selector)) {
 		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: registry, settings });
 		if (!model) continue;
-		const chain = configuredRole
-			? collectOnlineTinyCandidates([configuredRole], settings, available).map(candidate => candidate.model)
-			: expandOnlineTinyModelFallbacks(model, settings, available);
+		const chain = expandOnlineTinyModelFallbacks(model, settings, available, configuredRole);
 		const seen = new Set<string>();
 		return [model, ...chain].filter(candidate => {
 			const key = formatModelStringWithRouting(candidate);

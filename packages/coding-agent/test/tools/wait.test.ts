@@ -49,6 +49,11 @@ function notice(result: { content: Array<{ type: string; text?: string }> }): st
 	return result.content.slice(1).find(block => block.type === "text")?.text;
 }
 
+/** An elapsed wait's own report: the snapshot and its timeout line. */
+function report(result: { content: Array<{ type: string; text?: string }> }): string | undefined {
+	return result.content.find(block => block.type === "text")?.text;
+}
+
 /** Whether `promise` is still pending once already-queued work has run. */
 async function stillPending(promise: Promise<unknown>): Promise<boolean> {
 	let settled = false;
@@ -142,11 +147,16 @@ describe("wait", () => {
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
+		expect(report(first)).toContain("within 5.0s");
+		expect(report(first)).toContain("up to 10.0s");
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
 		await elapse(tool, 300_000);
-		expect(notice(await elapse(tool, 300_000))).toContain("11m45s");
+		const capped = await elapse(tool, 300_000);
+		expect(report(capped)).toContain("within 5m");
+		expect(report(capped)).toContain("up to 5m");
+		expect(notice(capped)).toContain("11m45s");
 		build.resolve("done");
 	});
 
