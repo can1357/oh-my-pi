@@ -188,7 +188,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		case "litellm": {
 			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
 			// The selectable roster is issued per virtual key; old rich-only
-			// snapshots must not survive the switch to scoped discovery.
+			// snapshots must not survive the switch to scoped discovery. Bump the
+			// version whenever the LiteLLM mappers change, or warm caches keep
+			// serving pre-change rows for the full TTL (rich-v1…v14 history in git).
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
 		}

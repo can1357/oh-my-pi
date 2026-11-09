@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LiteLLM lists only the models the configured key can call (its authenticated `/v1/models`), keeping the proxy's metadata for them; a proxy whose `/v1/models` fails now lists no models instead of every model it serves ([#18601](https://github.com/can1357/oh-my-pi/issues/18601))
+
 ## [18.18.5] - 2026-11-09
 
 ### Added
@@ -24,10 +28,6 @@
 ### Changed
 
 - Paused Google Antigravity, since Google may restrict accounts that use it outside its own apps ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- LiteLLM now shows only models available to the configured key while retaining metadata for those models ([#18601](https://github.com/can1357/oh-my-pi/issues/18601)).
 
 ## [18.18.3] - 2026-11-09
 
