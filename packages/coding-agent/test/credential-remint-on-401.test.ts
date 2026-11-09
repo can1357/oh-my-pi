@@ -215,6 +215,73 @@ describe("a `!command` credential the provider refuses", () => {
 		expect(rig.seen.slice(requestsBefore)).toEqual(["renewed-test-header"]);
 	});
 
+	test.each(["provider", "model"] as const)(
+		"a %s header refreshes after a 401 with a non-authentication error type",
+		async scope => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "test-expired-header");
+			const headers = { Authorization: mintFromFile(counterFile, tokenFile) };
+			const rig = buildRig(
+				"test-static-key",
+				counterFile,
+				bearer => bearer === "test-renewed-header",
+				scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] },
+				() =>
+					new Response(
+						JSON.stringify({
+							error: { message: "Identity check refused.", type: "invalid_request_error", code: "401" },
+						}),
+						{ status: 401, headers: { "Content-Type": "application/json" } },
+					),
+			);
+			expect((await rig.turn()).errorStatus).toBe(401);
+			const mintsBefore = rig.mints();
+			const requestsBefore = rig.seen.length;
+			fs.writeFileSync(tokenFile, "test-renewed-header");
+			expect((await rig.turn()).stopReason).not.toBe("error");
+			expect(rig.mints() - mintsBefore).toBe(1);
+			expect(rig.seen.slice(requestsBefore)).toEqual(["test-renewed-header"]);
+		},
+	);
+
+	test.each(["provider", "model"] as const)(
+		"a %s header retains a peer replacement after exhausted recovery",
+		async scope => {
+			const counterFile = path.join(tempDir, "mints");
+			const tokenFile = path.join(tempDir, "token");
+			fs.writeFileSync(counterFile, "");
+			fs.writeFileSync(tokenFile, "test-expired-header");
+			const headers = { Authorization: mintFromFile(counterFile, tokenFile) };
+			const rig = buildRig(
+				"test-static-key",
+				counterFile,
+				bearer => bearer === "test-renewed-header",
+				scope === "provider" ? { headers } : { models: [{ id: "gw-model", name: "GW Model", headers }] },
+			);
+			const resolve = rig.registry.getApiKeyWithCredentialForProvider.bind(rig.registry);
+			let peerStarted = false;
+			rig.registry.getApiKeyWithCredentialForProvider = async (...args) => {
+				const resolved = await resolve(...args);
+				if (args[2]?.forceRefresh && !peerStarted) {
+					peerStarted = true;
+					fs.writeFileSync(tokenFile, "test-renewed-header");
+					expect((await rig.turn()).stopReason).not.toBe("error");
+				}
+				return resolved;
+			};
+			expect((await rig.turn()).errorStatus).toBe(401);
+			expect(peerStarted).toBe(true);
+			const mintsBefore = rig.mints();
+			const requestsBefore = rig.seen.length;
+			fs.writeFileSync(tokenFile, "FAIL");
+			expect((await rig.turn()).stopReason).not.toBe("error");
+			expect(rig.mints() - mintsBefore).toBe(0);
+			expect(rig.seen.slice(requestsBefore)).toEqual(["test-renewed-header"]);
+		},
+	);
+
 	test.each(["same", "changed"] as const)(
 		"a pure-header %s-byte refusal retains upstream's no-retry behavior",
 		async bytes => {

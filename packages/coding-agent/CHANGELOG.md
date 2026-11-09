@@ -5,7 +5,7 @@
 ### Fixed
 
 - Worker retries can reuse a newer command-backed API key already minted by the main thread ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
-- `authHeader: true` keeps a command-backed API key paired with its mint generation. Other command-backed headers keep upstream's next-operation refresh after refusal; static API keys do not gain a same-key retry without a mint ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
+- `authHeader: true` keeps a command-backed API key paired with its mint generation. Other command-backed headers refresh after a 401 regardless of its error-body type, and exhausted recovery preserves a peer's replacement. Static API keys do not gain a same-key retry without a mint ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - Requests that share a `!command` API key and are refused together cost one run of the command, not one per request ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - A 401 whose own error class says it is not an authentication failure does not re-run the provider's `!command` API key ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))
 - An API-key refusal that arrives after a shared `!command` re-mint settles reuses that mint and retries instead of calling the issuer again ([#18474](https://github.com/can1357/oh-my-pi/pull/18474) by [@sjawhar](https://github.com/sjawhar))

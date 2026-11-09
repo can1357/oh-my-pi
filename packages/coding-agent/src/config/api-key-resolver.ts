@@ -23,9 +23,10 @@ export interface ApiKeyResolverOptions {
 	modelId?: string;
 }
 
-/** Registry-only recovery state; never forwarded to the durable credential store. */
+/** Registry-only command policy; never forwarded to the durable credential store. */
 export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
-	invalidateOtherCommandConfigs?: boolean;
+	/** A non-authentication error can skip the selected API-key command, not other provider refresh. */
+	remintApiKeyCommand?: boolean;
 }
 
 /**
@@ -74,11 +75,7 @@ export function createApiKeyResolver(
 		forceRefresh: boolean | undefined,
 		recovery?: Pick<
 			ApiKeyResolverRequestOptions,
-			| "signal"
-			| "refreshReason"
-			| "rejectedAccessToken"
-			| "rejectedCredentialGeneration"
-			| "invalidateOtherCommandConfigs"
+			"signal" | "refreshReason" | "rejectedAccessToken" | "rejectedCredentialGeneration" | "remintApiKeyCommand"
 		>,
 	): Promise<ApiKeyResolution> => {
 		const resolved = await registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
@@ -120,17 +117,15 @@ export function createApiKeyResolver(
 			}
 			// Record the exhausted attempt without spending a mint it cannot use.
 			const resolved = await resolveKey(undefined, {
-				invalidateOtherCommandConfigs: credentialRefused,
 				rejectedCredentialGeneration: credentialRefused ? previousGeneration : undefined,
 			});
 			return rotation.afterSiblingWait ? markAfterSiblingWait(resolved) : resolved;
 		}
-		// Step (b): the credential itself may be the problem, so re-mint it and
-		// let the driver try once more. A 401 whose own structured error class
-		// says it is NOT an authentication failure is the one case that skips
-		// the re-mint: refreshing cannot help, and a `!command` credential's
-		// re-mint is a call to its issuer.
-		const resolved = await resolveKey(verdict !== "not-credential", {
+		// Step (b) refreshes provider credentials as upstream does, regardless of
+		// error-body taxonomy. Only the selected API-key command's re-mint is
+		// narrowed by the structured credential verdict.
+		const resolved = await resolveKey(true, {
+			remintApiKeyCommand: verdict !== "not-credential",
 			signal,
 			refreshReason: AIError.status(error) === 401 ? "auth-recovery" : undefined,
 			rejectedAccessToken,

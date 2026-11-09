@@ -3806,15 +3806,13 @@ export class ModelRegistry {
 		if (this.#isProviderDisabled(provider)) return undefined;
 		const rejectedGeneration = options?.rejectedCredentialGeneration;
 		if (options?.forceRefresh) {
-			await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
-		} else {
-			// An exhausted refusal must not leave cached headers stuck for the next operation.
-			if (options?.invalidateOtherCommandConfigs) {
+			if (options.remintApiKeyCommand === false) {
 				this.#invalidateProviderCommandConfigs(provider, this.#selectedProviderApiKeyCommand(provider));
+			} else {
+				await this.#remintProviderCommandConfigs(provider, rejectedGeneration);
 			}
-			if (rejectedGeneration !== undefined) {
-				await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
-			}
+		} else if (rejectedGeneration !== undefined) {
+			await this.#refuseProviderCommandGeneration(provider, rejectedGeneration);
 		}
 		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
 		if (
