@@ -3,7 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import type { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
+import type { StatusNotice, StatusNoticeAction } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -149,6 +149,8 @@ export interface ShowStatusOptions {
 	dim?: boolean;
 	/** Toasts it on a native terminal (default true); false keeps it to the ANSI transcript. */
 	toast?: boolean;
+	/** A button on the native toast (Undo); the ANSI line has none. */
+	action?: StatusNoticeAction;
 }
 
 export interface SelectOnlyModelSelectorOptions {
@@ -637,7 +639,7 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
-	showUserMessageSelector(): void;
+	showUserMessageSelector(startAt?: string): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
 	/** Open the `/effort` picker over the levels the current model accepts. */
