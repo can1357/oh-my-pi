@@ -34,9 +34,7 @@ interface CoordinatorHostBundle {
 	hasQueuedMessages: Mock<() => boolean>;
 	scheduleAgentContinue: Mock<(options: Parameters<TtsrCoordinatorHost["scheduleAgentContinue"]>[0]) => void>;
 	appendMessage: Mock<(message: AgentMessage) => void>;
-	schedulePostPromptTask: Mock<
-		(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }) => void
-	>;
+	schedulePostPromptTask: Mock<(task: (signal: AbortSignal) => Promise<void>, options?: { delayMs?: number }) => void>;
 }
 
 function makeHost(): CoordinatorHostBundle {
@@ -458,6 +456,7 @@ describe("TTSR injection notice", () => {
 		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
 		expect(delivery.content).toContain('<system-reminder reason="rule_violation"');
 		expect(delivery.content).toContain("the output was not interrupted by the rule");
+		expect(delivery.content).toContain(JSON.stringify(CONDITION));
 		expect(delivery.content).not.toContain("Output interrupted");
 	});
 
