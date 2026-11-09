@@ -6,6 +6,7 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { cfgStatusLineLeftSegments, cfgStatusLinePreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
@@ -119,6 +120,40 @@ function nativeErrorText(node: TspNode): string {
 	for (const child of node.c ?? []) text.push(nativeErrorText(child));
 	return text.join("\n");
 }
+
+describe("custom status-line segment editors", () => {
+	function openAppearance(): SettingsSelectorComponent {
+		const component = createSelector();
+		component.handleNativeEvent({ type: "action", key: "", act: "page", value: "appearance", mods: [] });
+		return component;
+	}
+
+	function openSegmentList(path: string): SettingsSelectorComponent {
+		const component = openAppearance();
+		component.handleNativeEvent({ type: "activate", key: "", item: path });
+		return component;
+	}
+
+	it("offers both segment lists as ordered lists once the Custom preset is active", () => {
+		expect(Bun.stripANSI(openAppearance().render(120).join("\n"))).not.toContain("Status Line Left Segments");
+
+		cfgStatusLinePreset.set(settings, "custom");
+		const rendered = Bun.stripANSI(openAppearance().render(120).join("\n"));
+		expect(rendered).toContain("Status Line Left Segments");
+		expect(rendered).toContain("Status Line Right Segments");
+		// Ordered lists render positions, so the current order is visible on the row itself.
+		expect(rendered).toContain("Vim mode → Model → Mode");
+	});
+
+	it("toggles a segment out of the Custom preset's left list", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments");
+		component.handleInput(" ");
+		expect(cfgStatusLineLeftSegments.get(settings)).not.toContain("model");
+		component.handleInput(" ");
+		expect(cfgStatusLineLeftSegments.get(settings)).toContain("model");
+	});
+});
 
 describe("extra context filenames editor", () => {
 	it("saves multiple filenames as an array and lets users disable extras", async () => {

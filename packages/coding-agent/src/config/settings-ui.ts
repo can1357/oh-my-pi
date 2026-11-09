@@ -14,7 +14,7 @@ import {
 } from "../session/settings";
 import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
-import { cfgComposerPredictions, cfgTuiVimMode } from "../modes/settings";
+import { cfgComposerPredictions, cfgStatusLinePreset, cfgTuiVimMode } from "../modes/settings";
 import { cfgAdvisorEnabled } from "../advisor/settings";
 import { cfgContextFilesExtra } from "../session/context-settings";
 import { cfgTaskPerCallModelAllow } from "../task/settings";
@@ -32,6 +32,8 @@ const CONDITIONS: Record<string, () => boolean> = {
 	advisorEnabled: whenSettings(s => cfgAdvisorEnabled.get(s) === true),
 	vimModeEnabled: whenSettings(s => cfgTuiVimMode.get(s) === true),
 	composerPredictionsEnabled: whenSettings(s => cfgComposerPredictions.get(s) === true),
+	// The segment lists are read only by the Custom preset, so keep them out of the way otherwise.
+	statusLineCustomPreset: whenSettings(s => cfgStatusLinePreset.get(s) === "custom"),
 	hindsightActive: whenSettings(s => cfgMemoryBackend.get(s) === "hindsight"),
 	mnemopiActive: whenSettings(s => cfgMemoryBackend.get(s) === "mnemopi"),
 	autolearnActive: whenSettings(s => cfgAutolearnEnabled.get(s) === true),
