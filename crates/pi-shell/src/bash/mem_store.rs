@@ -473,6 +473,12 @@ impl StateStore for MemStore {
 					_ => return Err(shape(key)),
 				}
 			},
+			Change::InsertElem(key, buckets, k, value) => match self.var_mut(key) {
+				Some(VarValue::Assoc(items)) => {
+					items.insert_front(buckets, BString::from(bytes(k)), BString::from(value));
+				},
+				_ => return Err(shape(key)),
+			},
 			Change::DelElem(key, elem) => match (self.var_mut(key), elem) {
 				(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
 					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {

@@ -38,7 +38,6 @@
 mod unix;
 #[cfg(windows)]
 mod windows;
-
 use std::{
 	fmt, fs, io,
 	sync::{Arc, Weak},
@@ -48,6 +47,8 @@ use std::{
 
 use bstr::BString;
 use parking_lot::Mutex;
+#[cfg(windows)]
+pub(crate) use windows::{break_console_groups, has_console_groups};
 
 #[cfg(unix)]
 use self::unix as imp;
@@ -189,14 +190,6 @@ pub struct Leftover {
 	pub name:  BString,
 }
 
-/// A spawn asked for an fd the platform cannot hand to an external.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("fd {fd} to external on Windows")]
-pub struct UnsupportedFd {
-	/// The fd number (> 2).
-	pub fd: i32,
-}
-
 /// Spawner state shared by clones and by the processes it spawned.
 struct Shared {
 	config: SpawnConfig,
@@ -309,8 +302,8 @@ impl NativeSpawner {
 	///
 	/// The OS error of the spawn (`NotFound`, `PermissionDenied`, …), or
 	/// `InvalidInput` for arguments the OS cannot represent (interior NUL;
-	/// non-UTF-8 on Windows). On Windows any extra fd fails with
-	/// `Unsupported` carrying an [`UnsupportedFd`].
+	/// non-UTF-8 on Windows). On Windows an extra fd reaches the child only
+	/// as the named pipe its `/dev/fd/N` argument becomes.
 	pub fn spawn(&self, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
 		imp::spawn(&self.shared, spec)
 	}

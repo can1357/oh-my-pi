@@ -842,11 +842,13 @@ fn columns(
 	} else {
 		let l = widths.iter().copied().max().unwrap_or(0);
 		sc = l + 2;
+		// zsh's `zterm_columns`: `$COLUMNS`, else 80 (no terminal size).
 		let cols = match zx(ctx, |ex| params::getsparam(ex, b"COLUMNS"))? {
 			Ok(Some(v)) => strtol_all(&v)
 				.and_then(|v| usize::try_from(v).ok())
-				.unwrap_or(0),
-			_ => 0,
+				.filter(|&c| c > 0)
+				.unwrap_or(80),
+			_ => 80,
 		};
 		nc = ((cols + 1) / sc).max(1);
 		nr = argc.div_ceil(nc);

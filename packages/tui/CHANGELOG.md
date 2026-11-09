@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+
+### Fixed
+
+- Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).
+- Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling ([#18584](https://github.com/can1357/oh-my-pi/pull/18584) by [@chan1103](https://github.com/chan1103))
+- Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
+- Fixed transcript rows a few turns above the composer disappearing from the screen and from scrollback, at a place that moved with every resize, while a todo list or subagent panel stayed up after a turn ([#18510](https://github.com/can1357/oh-my-pi/pull/18510) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
+- Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
+
+## [18.18.3] - 2026-11-09
+
+### Breaking Changes
+
+- The `ask` tool renderer now draws `{ html }` form calls and `AskToolDetails { answers, timedOut }` results; `QuestionResult` and the question-list detail fields were removed.
+
+### Added
+
+- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+- Added `HtmlFormDialog`, which renders an HTML form as an interactive terminal form, splits long forms into pages, and returns the answers as JSON. Single `<select>`s are one-row dropdowns, radio and checkbox groups get a free-text "Other" answer, `<img>` (URL, `data:` URI or local file) and inline `<svg>` pictures load in the background, an optional inactivity timeout submits the current values, and Tern terminals get the form natively.
+- Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
+
+### Changed
+
+- The ask dialog's Note right after a pointer click now annotates the highlighted answer of the question shown instead of the answer just clicked, and the Note button no longer names a redirect target ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed the ask dialog's `n` right after a keyboard pick annotating the previous question's answer instead of the highlighted row shown; only a pointer click still redirects Note to the answer just picked, and the Note button then names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

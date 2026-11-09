@@ -285,16 +285,79 @@ pub fn print_out(bytes: &[u8]) -> u8 {
 }
 
 /// The process environment, as the shell imports it.
+///
+/// On Windows, where
+/// names are case-insensitive, the search path (spelled `Path` there) and
+/// the temp variables take the spelling the shell reads (`PATH`, `TEMP`,
+/// …), temp paths their long form, and `PATH` gains Git for Windows' tool
+/// directories: the same starting environment the agent's shell gets.
 pub fn environment() -> Vec<(BString, BString)> {
-	std::env::vars_os()
-		.map(|(k, v)| (BString::from(k.as_encoded_bytes()), BString::from(v.as_encoded_bytes())))
-		.collect()
+	#[cfg(windows)]
+	{
+		windows_environment(std::env::vars_os())
+	}
+	#[cfg(not(windows))]
+	{
+		std::env::vars_os()
+			.map(|(k, v)| (BString::from(k.as_encoded_bytes()), BString::from(v.as_encoded_bytes())))
+			.collect()
+	}
 }
 
-/// The process's working directory (`/` when it cannot be read).
+/// [`environment`] on Windows, from the entries `env`. Entries that are not
+/// valid Unicode pass through unchanged.
+#[cfg(windows)]
+fn windows_environment(
+	env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(BString, BString)> {
+	use bstr::ByteSlice;
+
+	use crate::shell::{inherited_env_value, normalize_inherited_env_key};
+	let mut out: Vec<(BString, BString)> = Vec::new();
+	let mut path_at = None;
+	for (key, value) in env {
+		let (Some(k), Some(v)) = (key.to_str(), value.to_str()) else {
+			out.push((BString::from(key.as_encoded_bytes()), BString::from(value.as_encoded_bytes())));
+			continue;
+		};
+		let k = normalize_inherited_env_key(k);
+		if k == "PATH" {
+			path_at = Some(out.len());
+		}
+		out.push((BString::from(k), BString::from(inherited_env_value(k, v).as_ref())));
+	}
+	let mut path = std::collections::HashMap::new();
+	if let Some(i) = path_at {
+		path.insert("PATH".to_owned(), out[i].1.to_str_lossy().into_owned());
+	}
+	crate::windows::configure_windows_path(&mut path);
+	if let Some(value) = path.remove("PATH") {
+		match path_at {
+			Some(i) => out[i].1 = BString::from(value),
+			None => out.push((BString::from("PATH"), BString::from(value))),
+		}
+	}
+	// A Windows console sets no `TERM` but takes xterm's sequences (the
+	// shell turns virtual-terminal processing on): name it as MSYS2 does,
+	// so ZLE and the programs the shell runs drive it as a terminal.
+	if !out.iter().any(|(k, _)| k == "TERM") && std::io::IsTerminal::is_terminal(&std::io::stdout())
+	{
+		out.push((BString::from("TERM"), BString::from("xterm-256color")));
+	}
+	out
+}
+
+/// The process's working directory (`/` when it cannot be read), in its
+/// long form on Windows, as `cd` stores `PWD`.
 pub fn current_dir() -> BString {
-	std::env::current_dir()
-		.map_or_else(|_| BString::from("/"), |p| BString::from(p.as_os_str().as_encoded_bytes()))
+	std::env::current_dir().map_or_else(
+		|_| BString::from("/"),
+		|p| {
+			#[cfg(windows)]
+			let p = crate::windows::expand_to_long_path(&p);
+			BString::from(p.as_os_str().as_encoded_bytes())
+		},
+	)
 }
 
 /// A parsed command line ready to run ([`start`]).
@@ -392,16 +455,19 @@ fn zsh_help_text(argzero: &[u8], args: &ShellArgs) -> Vec<u8> {
 }
 
 /// zsh 5.9 `--version`: `zsh 5.9 (MACHTYPE-VENDOR-OSTYPE)` as configure
-/// names the build host (`arm64-apple-darwinN.0`, `x86_64-pc-linux-gnu`).
+/// names the build host (`arm64-apple-darwinN.0`, `x86_64-pc-linux-gnu`,
+/// MSYS2's `x86_64-pc-msys` on Windows).
 fn zsh_version_text() -> Vec<u8> {
 	let arch = std::env::consts::ARCH;
+	let vendor = if arch == "x86_64" { "pc" } else { "unknown" };
 	let host = if cfg!(target_os = "macos") {
 		let release = crate::sys::uname::uname().map_or_default(|(_, release, _)| release);
 		let major = release.split(|&c| c == b'.').next().unwrap_or_default();
 		let cpu = if arch == "aarch64" { "arm64" } else { arch };
 		format!("{cpu}-apple-darwin{}.0", String::from_utf8_lossy(major))
+	} else if cfg!(windows) {
+		format!("{arch}-{vendor}-msys")
 	} else {
-		let vendor = if arch == "x86_64" { "pc" } else { "unknown" };
 		format!("{arch}-{vendor}-linux-gnu")
 	};
 	format!("zsh 5.9 ({host})\n").into_bytes()
@@ -464,6 +530,11 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	// Before the process opens any fd of its own.
 	let inherited = inherited_fds(opts.embedded);
 	let mut host = NativeHost::new(None, false, inherited, ignored_on_entry(), 0, opts.embedded);
+	// `omp zsh` on Windows: pi's utilities stand in for the Unix tools it
+	// lacks. Elsewhere, and in obash, a missing command stays not found.
+	if opts.embedded && cfg!(windows) {
+		host.offer_extras(&env);
+	}
 	let cfg = EngineConfig::default();
 	let engine = Engine::new(cfg);
 	let mut store = MemStore::new();
@@ -585,6 +656,9 @@ pub fn shell_init(
 				.map(|&(opt, on)| (BString::from(<&'static str>::from(opt)), on)),
 		)
 		.collect();
+	let zsh_fpath = (args.mode.dialect() == Dialect::Zsh)
+		.then(|| system_fpath(&env))
+		.flatten();
 	ShellInit {
 		mode: args.mode,
 		argv0,
@@ -596,7 +670,136 @@ pub fn shell_init(
 		shell_pid: std::process::id(),
 		startup,
 		zsh_params: zsh_params(args),
+		zsh_fpath,
 		profile: Profile::User,
+	}
+}
+
+/// The system zsh's function directories (`fpath` before any startup file):
+/// the site and vendor directories, then each directory of the function
+/// library that holds functions. Distributions install the library at
+/// different places: flat under `/usr/share/zsh/5.9/functions` (zsh's own
+/// layout, macOS, Fedora) or grouped under `/usr/share/zsh/functions`
+/// (Debian, Ubuntu, Arch). On Windows the library is an MSYS2, Cygwin or
+/// Git for Windows zsh's ([`zsh_roots`]), spelled with `/`. `None` without
+/// one: zsh's compiled-in default.
+fn system_fpath(env: &[(BString, BString)]) -> Option<Vec<BString>> {
+	zsh_roots(env).iter().find_map(|root| fpath_under(root))
+}
+
+/// [`system_fpath`] of the zsh installed under `root` (`""`: `/`).
+fn fpath_under(root: &str) -> Option<Vec<BString>> {
+	use std::path::Path;
+	const SITE: [&str; 4] = [
+		"/usr/local/share/zsh/site-functions",
+		"/usr/share/zsh/site-functions",
+		"/usr/share/zsh/vendor-functions",
+		"/usr/share/zsh/vendor-completions",
+	];
+	const LIBRARIES: [&str; 3] = [
+		"/usr/share/zsh/5.9/functions",
+		"/usr/share/zsh/functions",
+		"/usr/local/share/zsh/5.9/functions",
+	];
+	let libraries: Vec<String> = LIBRARIES
+		.iter()
+		.map(|lib| format!("{root}{lib}"))
+		.filter(|p| Path::new(p).is_dir())
+		.collect();
+	if libraries.is_empty() {
+		return None;
+	}
+	// zsh always lists the local site directory, existing or not.
+	let mut out = vec![BString::from(format!("{root}{}", SITE[0]))];
+	out.extend(
+		SITE[1..]
+			.iter()
+			.map(|d| format!("{root}{d}"))
+			.filter(|d| Path::new(d).is_dir())
+			.map(BString::from),
+	);
+	for lib in libraries {
+		function_dirs(Path::new(&lib), 0, &mut out);
+	}
+	Some(out)
+}
+
+/// Where a system zsh may be installed: `/` on Unix.
+#[cfg(unix)]
+fn zsh_roots(_env: &[(BString, BString)]) -> Vec<String> {
+	vec![String::new()]
+}
+
+/// Where a zsh may be installed on Windows, spelled with `/`: the roots of
+/// the Unix trees on `PATH` (an MSYS2 or Git for Windows `…\usr\bin`, a
+/// Cygwin `…\bin`), then MSYS2's and Cygwin's default install directories.
+#[cfg(windows)]
+fn zsh_roots(env: &[(BString, BString)]) -> Vec<String> {
+	use bstr::ByteSlice;
+	let path = env
+		.iter()
+		.find(|(k, _)| k == "PATH")
+		.map_or_else(String::new, |(_, v)| v.to_str_lossy().into_owned());
+	let mut roots: Vec<String> = Vec::new();
+	for dir in path.split(';') {
+		let dir = dir.trim().trim_end_matches(['\\', '/']).replace('\\', "/");
+		let lower = dir.to_ascii_lowercase();
+		let root = if lower.ends_with("/usr/bin") {
+			&dir[..dir.len() - "/usr/bin".len()]
+		} else if lower.ends_with("/bin") {
+			&dir[..dir.len() - "/bin".len()]
+		} else {
+			continue;
+		};
+		if !root.is_empty() {
+			roots.push(root.to_owned());
+		}
+	}
+	roots.extend(["C:/msys64", "C:/cygwin64", "C:/cygwin"].map(String::from));
+	let mut seen = std::collections::HashSet::new();
+	roots.retain(|r| seen.insert(r.to_ascii_lowercase()));
+	roots
+}
+
+/// Push `dir` when it holds a function (a file other than a compiled
+/// `.zwc` digest), then its subdirectories in name order.
+fn function_dirs(dir: &std::path::Path, depth: u32, out: &mut Vec<BString>) {
+	let Ok(entries) = fs::read_dir(dir) else {
+		return;
+	};
+	let mut subdirs = Vec::new();
+	let mut functions = false;
+	for e in entries.flatten() {
+		let Ok(ft) = e.file_type() else { continue };
+		if ft.is_dir() {
+			subdirs.push(e.path());
+		} else if !e.file_name().as_encoded_bytes().ends_with(b".zwc") {
+			functions = true;
+		}
+	}
+	if functions {
+		out.push(fpath_spelling(dir));
+	}
+	if depth < 3 {
+		subdirs.sort();
+		for d in subdirs {
+			function_dirs(&d, depth + 1, out);
+		}
+	}
+}
+
+/// `dir` as an `fpath` entry: its bytes; on Windows with `/` separators.
+fn fpath_spelling(dir: &std::path::Path) -> BString {
+	let bytes = dir.as_os_str().as_encoded_bytes();
+	if cfg!(windows) {
+		BString::from(
+			bytes
+				.iter()
+				.map(|&c| if c == b'\\' { b'/' } else { c })
+				.collect::<Vec<u8>>(),
+		)
+	} else {
+		BString::from(bytes)
 	}
 }
 
@@ -705,5 +908,54 @@ pub fn wait_runnable(parker: &mut Parker, shell: &Shell, root: Vpid) {
 			break;
 		}
 		parker.park(Duration::from_millis(50));
+	}
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+	use super::*;
+
+	/// A zsh on `PATH` (an MSYS2 or Git for Windows `…\usr\bin`) lends its
+	/// function library: `fpath` lists its site and library directories,
+	/// spelled with `/`, ahead of the default install directories.
+	#[test]
+	fn fpath_comes_from_the_zsh_on_path() {
+		let root = tempfile::tempdir().expect("zsh install fixture");
+		let lib = root.path().join("usr/share/zsh/5.9/functions");
+		std::fs::create_dir_all(lib.join("Completion/Unix")).expect("library");
+		std::fs::write(lib.join("Completion/Unix/_ls"), "").expect("function");
+		std::fs::write(lib.join("compinit"), "").expect("function");
+		std::fs::write(lib.join("Completion/Unix.zwc"), "").expect("digest");
+		std::fs::create_dir_all(root.path().join("usr/share/zsh/site-functions")).expect("site");
+		let r = root.path().to_string_lossy().replace('\\', "/");
+		let path = format!("C:\\Windows;{}\\usr\\bin\\", root.path().display());
+		let env = [(BString::from("PATH"), BString::from(path))];
+		let want: Vec<BString> = [
+			"/usr/local/share/zsh/site-functions",
+			"/usr/share/zsh/site-functions",
+			"/usr/share/zsh/5.9/functions",
+			"/usr/share/zsh/5.9/functions/Completion/Unix",
+		]
+		.into_iter()
+		.map(|d| BString::from(format!("{r}{d}")))
+		.collect();
+		assert_eq!(system_fpath(&env), Some(want));
+	}
+
+	/// Windows spells the search path `Path`; imported verbatim, zsh saw no
+	/// `PATH`, fell back to `/bin:/usr/bin:…` and found no program by name.
+	#[test]
+	fn windows_path_is_imported_as_path() {
+		let env = [("Path", "C:\\Windows;C:\\tools"), ("Other", "x")]
+			.map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)));
+		let out = windows_environment(env.into_iter());
+		let path = out
+			.iter()
+			.find(|(k, _)| k == "PATH")
+			.map(|(_, v)| v.to_string())
+			.expect("PATH imported");
+		assert!(path.starts_with("C:\\Windows;C:\\tools"), "{path}");
+		assert!(!out.iter().any(|(k, _)| k == "Path"));
+		assert!(out.iter().any(|(k, v)| k == "Other" && v == "x"));
 	}
 }

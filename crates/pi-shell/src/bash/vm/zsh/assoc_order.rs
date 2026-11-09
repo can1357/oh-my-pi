@@ -21,33 +21,10 @@
 
 use bstr::BString;
 
-use crate::bash::{store::Attrs, syntax::zsh::tok::metafy};
+use crate::bash::store::{Attrs, zsh_bucket as bucket};
 
 /// Initial buckets of a parameter hash table (zsh `newparamtable(17, …)`).
 const INITIAL_BUCKETS: usize = 17;
-
-/// zsh `hasher`: `h += (h << 5) + c` over the (metafied) key.
-fn hasher(key: &[u8]) -> u32 {
-	let mut h: u32 = 0;
-	for &c in key {
-		h = h.wrapping_add((h << 5).wrapping_add(u32::from(c)));
-	}
-	h
-}
-
-/// The bucket of `key` (raw bytes, metafied for hashing as zsh stores
-/// parameter names) in a table of `hsize` buckets.
-fn bucket(key: &[u8], hsize: usize) -> usize {
-	let h = if key
-		.iter()
-		.any(|&c| crate::bash::syntax::zsh::tok::is_meta(c))
-	{
-		hasher(&metafy(key))
-	} else {
-		hasher(key)
-	};
-	(h as usize).checked_rem(hsize).unwrap_or(0)
-}
 
 /// A zsh parameter hash table rebuilt from a stored associative array.
 #[derive(Clone, Debug)]
@@ -203,6 +180,21 @@ impl ZHash {
 	}
 }
 
+/// The bucket count of the stored table (`attrs`, [`Attrs::base`]) of
+/// `len` entries a new key is added to, at the front of its bucket's chain
+/// ([`AssocArray::insert_front`](crate::bash::store::AssocArray::insert_front)).
+/// `None` when adding it grows the table, which reorders every entry
+/// ([`ZHash::insert`] then rebuilds it).
+pub const fn insert_buckets(len: usize, attrs: Attrs) -> Option<usize> {
+	let base = if attrs.base() > 8 { 8 } else { attrs.base() };
+	let hsize = INITIAL_BUCKETS << (2 * base as u32);
+	if len + 1 >= hsize * 2 {
+		None
+	} else {
+		Some(hsize)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -243,5 +235,30 @@ mod tests {
 		let k1: Vec<_> = items.iter().map(|e| &e.0).collect();
 		let k2: Vec<_> = items2.iter().map(|e| &e.0).collect();
 		assert_eq!(k1, k2, "replacing a value keeps the order");
+	}
+
+	/// Adding each new key at the front of its bucket in place
+	/// ([`insert_buckets`], `AssocArray::insert_front`; rebuilding only when
+	/// the table grows) keeps exactly the order zsh's table iterates in.
+	#[test]
+	fn front_inserts_follow_the_table() {
+		let mut items = crate::bash::store::AssocArray::default();
+		let mut attrs = Attrs::NONE;
+		let mut table = ZHash::new();
+		for i in 0..2000 {
+			let key = BString::from(format!("k{i}"));
+			table.insert(key.clone(), BString::from("v"));
+			if let Some(buckets) = insert_buckets(items.len(), attrs) {
+				items.insert_front(buckets, key, BString::from("v"));
+			} else {
+				let mut h = ZHash::from_stored(&items, attrs);
+				h.insert(key, BString::from("v"));
+				let (stored, grown) = h.into_stored(attrs);
+				(items, attrs) = (stored.into(), grown);
+			}
+		}
+		let (want, want_attrs) = table.into_stored(Attrs::NONE);
+		assert_eq!(&*items, want.as_slice());
+		assert_eq!(attrs.base(), want_attrs.base());
 	}
 }

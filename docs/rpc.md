@@ -1325,7 +1325,8 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      host hint from `ExtensionUIDialogOptions.secret`; hosts that support
      masked input should hide typed characters when `secret: true`.
    - `ask` is emitted only after `set_ask_dialog` enables it. It carries every
-     question of one `ask` tool call:
+     question of one extension `ui.askDialog` call (the `ask` tool instead walks
+     its HTML form field by field through `select`, `input` and `editor`):
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.

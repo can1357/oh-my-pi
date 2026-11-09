@@ -654,7 +654,7 @@ const fn normalize_env_key(key: &str) -> &str {
 /// case-sensitive shell. Per-command env keeps the narrower
 /// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
 #[cfg(windows)]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	if key.eq_ignore_ascii_case("TEMP") {
 		"TEMP"
 	} else if key.eq_ignore_ascii_case("TMP") {
@@ -667,7 +667,7 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 }
 
 #[cfg(not(windows))]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	key
 }
 
@@ -679,7 +679,7 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 /// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
 /// and junctions kept); anything else, or a failed expansion, passes through.
 #[cfg(windows)]
-fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+pub(crate) fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
 	let path = Path::new(value);
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
@@ -694,7 +694,10 @@ fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, st
 }
 
 #[cfg(not(windows))]
-const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+pub(crate) const fn inherited_env_value<'a>(
+	_key: &str,
+	value: &'a str,
+) -> std::borrow::Cow<'a, str> {
 	std::borrow::Cow::Borrowed(value)
 }
 
