@@ -320,8 +320,9 @@ describe("team cooperative stop", () => {
 		expect(disposed).toBe(1);
 		expect(registry.get("worker")?.status).toBe("aborted");
 		expect(started.members.has("worker")).toBe(false);
-		expect(runtime.listTeams(lead)).toEqual(["audit"]);
-		expect(runtime.identity(lead, "audit")?.generation).toBe(started.generation);
+		// The only member's ack empties the generation: it retires with one notice.
+		expect(runtime.listTeams(lead)).toEqual([]);
+		expect(runtime.identity(lead, "audit")).toBeUndefined();
 		await expect(runtime.respondStop(child, identity, requestId, "ack")).rejects.toThrow();
 		await runtime.stop(lead, "audit");
 	});
@@ -458,8 +459,9 @@ describe("team cooperative stop", () => {
 				"released",
 			);
 			expect(started.members.size).toBe(0);
-			expect(runtime.listTeams(lead)).toEqual(["audit"]);
-			expect((await runtime.start(lead, team)).generation).toBe(started.generation);
+			// The force release of the only member retires the emptied generation.
+			expect(runtime.listTeams(lead)).toEqual([]);
+			expect((await runtime.start(lead, team)).generation).toBeGreaterThan(started.generation);
 		} finally {
 			await runtime.stop(lead, "audit");
 			vi.useRealTimers();
@@ -609,7 +611,8 @@ describe("team cooperative stop", () => {
 			expect(await second).toBe("stop already pending");
 			expect(await first).toBe("released");
 			expect(release).toHaveBeenCalledTimes(1);
-			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			// The single member's release retires the emptied generation.
+			expect(runtime.listTeams(lead)).toEqual([]);
 		} finally {
 			completion.resolve(true);
 			release.mockRestore();
@@ -642,7 +645,14 @@ describe("team cooperative stop", () => {
 				).toBe("released");
 				expect(release).toHaveBeenCalledTimes(1);
 				expect(release).toHaveBeenCalledWith("worker", ref, { tombstone: true });
-				expect(send).not.toHaveBeenCalled();
+				// Retirement's one finished notice to the lead is the only send.
+				expect(send).toHaveBeenCalledTimes(1);
+				expect(send.mock.calls[0]![0]).toMatchObject({
+					from: "worker",
+					to: "lead",
+					teamNotice: true,
+					teamControl: true,
+				});
 				expect(started.members.has("worker")).toBe(false);
 				expect(runtime.listTeams(lead)).toEqual([]);
 			} finally {
@@ -856,6 +866,168 @@ describe("team cooperative stop", () => {
 			}
 		},
 	);
+});
+
+describe("team retirement", () => {
+	it("retires an emptied generation with one finished notice after handle-only stops", async () => {
+		const registry = AgentRegistry.global();
+		const notices: Array<{ from: string; to: string; body: string; teamNotice?: boolean }> = [];
+		const lead = {
+			deliverIrcMessage: async (message: (typeof notices)[number]) => {
+				notices.push(message);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const memberSession = () => ({ deliverIrcMessage: async () => "injected" }) as unknown as AgentSessionHandle;
+		const firstSession = memberSession();
+		const secondSession = memberSession();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const firstRef = registry.register({ id: "first", displayName: "first", kind: "sub", session: firstSession });
+		const secondRef = registry.register({
+			id: "second",
+			displayName: "second",
+			kind: "sub",
+			session: secondSession,
+		});
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const firstEntry = { id: "first", reservation: "first-reservation", ref: firstRef };
+		const secondEntry = { id: "second", reservation: "second-reservation", ref: secondRef };
+		started.members.set("first", firstEntry);
+		started.members.set("second", secondEntry);
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+		try {
+			const stopAndAck = async (handle: string, entry: typeof firstEntry, child: object, id: string) => {
+				const result = await runtime.requestStop(lead, "audit", started.generation, handle, entry, false, 120000);
+				const requestId = result.match(/requested \(([^)]+)\)/)![1]!;
+				await runtime.respondStop(
+					child,
+					{ team: "audit", generation: started.generation, memberId: id },
+					requestId,
+					"ack",
+				);
+			};
+			await stopAndAck("first", firstEntry, firstSession, "first");
+			expect(started.members.size).toBe(1);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			expect(notices.filter(message => message.body.includes("finished"))).toHaveLength(0);
+			await stopAndAck("second", secondEntry, secondSession, "second");
+			expect(started.members.size).toBe(0);
+			expect(runtime.listTeams(lead)).toEqual([]);
+			expect(runtime.hasLiveTeam(lead)).toBe(false);
+			const finished = notices.filter(message => message.body.includes("finished"));
+			expect(finished).toHaveLength(1);
+			expect(finished[0]).toMatchObject({
+				from: "second",
+				to: "lead",
+				teamNotice: true,
+				progress: true,
+				teamControl: true,
+			});
+			expect(finished[0]!.body).toBe("Team audit finished: no members left.");
+		} finally {
+			release.mockRestore();
+			await runtime.stop(lead, "audit");
+		}
+	});
+
+	it("retires the team when its last member is removed from the registry", async () => {
+		const registry = AgentRegistry.global();
+		const delivered = Promise.withResolvers<void>();
+		const notices: Array<{ from: string; body: string }> = [];
+		const lead = {
+			deliverIrcMessage: async (message: { from: string; body: string }) => {
+				notices.push(message);
+				delivered.resolve();
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: session() });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", reservation: "worker-reservation", ref });
+		expect(registry.unregister("worker", ref)).toBe(true);
+		expect(started.members.has("worker")).toBe(false);
+		expect(runtime.listTeams(lead)).toEqual([]);
+		expect(runtime.hasLiveTeam(lead)).toBe(false);
+		await delivered.promise;
+		expect(notices).toHaveLength(1);
+		expect(notices[0]).toMatchObject({ from: "worker" });
+		expect(notices[0]!.body).toBe("Team audit finished: no members left.");
+	});
+
+	it("does not stop a replacement generation when an old release retires an emptied team", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const child = session();
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "worker-reservation", ref };
+		started.members.set("worker", entry);
+		const completion = Promise.withResolvers<boolean>();
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockImplementation(() => completion.promise);
+		try {
+			const releasing = runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000, true);
+			// The member's ref is removed while its release is in flight: membership
+			// drops, but retirement waits for the in-flight release.
+			expect(registry.unregister("worker", ref)).toBe(true);
+			expect(started.members.has("worker")).toBe(false);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			// The old generation ends and a replacement starts under the same name.
+			await runtime.stop(lead, "audit");
+			const replacement = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+			const restarted = await runtime.start(lead, team);
+			expect(restarted.generation).toBeGreaterThan(started.generation);
+			restarted.members.set("worker", { id: "worker", reservation: "replacement-reservation", ref: replacement });
+			completion.resolve(true);
+			expect(await releasing).toBe("released");
+			// The old generation's retirement must not stop the replacement.
+			expect(runtime.identity(lead, "audit")?.generation).toBe(restarted.generation);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			expect(runtime.hasLiveTeam(lead)).toBe(true);
+			await runtime.stop(lead, "audit");
+		} finally {
+			completion.resolve(true);
+			release.mockRestore();
+		}
+	});
+
+	it("keeps a whole-team stop live with a timeout notice when a member never acks", async () => {
+		const registry = AgentRegistry.global();
+		const notices: Array<{ from: string; body: string }> = [];
+		const lead = {
+			deliverIrcMessage: async (message: { from: string; body: string }) => {
+				notices.push(message);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "worker-reservation", ref };
+		started.members.set("worker", entry);
+		vi.useFakeTimers();
+		try {
+			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 1000, true);
+			vi.advanceTimersByTime(1000);
+			await Promise.resolve();
+			const timeouts = notices.filter(message => message.body.includes("timed out"));
+			expect(timeouts).toHaveLength(1);
+			expect(timeouts[0]).toMatchObject({ from: "worker" });
+			expect(started.members.has("worker")).toBe(true);
+			expect(runtime.listTeams(lead)).toEqual(["audit"]);
+			expect(runtime.hasLiveTeam(lead)).toBe(true);
+			expect(notices.filter(message => message.body.includes("finished"))).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+			await runtime.stop(lead, "audit");
+		}
+	});
 });
 
 describe("team plan approval", () => {

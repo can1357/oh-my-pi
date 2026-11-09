@@ -68,6 +68,8 @@ interface RuntimeTeam extends StartedTeam {
 	pendingRefs: Map<string, { reservation: unknown; generation: number }>;
 	stops: Map<string, StopIntent>;
 	releasing: Map<string, StopIntent>;
+	/** Sender for the retirement notice: the member whose removal emptied this generation. */
+	lastRemovedMember?: string;
 	planApproval: boolean;
 	planOverrides: Map<string, boolean>;
 	plans: Map<string, MemberPlan>;
@@ -104,7 +106,28 @@ export class TeamRuntime {
 				}
 				return;
 			}
-			if (event.type === "removed" || (event.type === "status_changed" && event.ref.status === "aborted")) {
+			if (event.type === "removed") {
+				for (const state of this.#generations.values()) {
+					for (const intent of state.stops.values()) {
+						if (intent.id === event.ref.id && intent.ref?.generation === event.ref.generation)
+							this.#clearStop(state, intent);
+					}
+					// A removed ref (kill, teardown, release without the runtime) takes
+					// its recorded membership with it; the generation retires when last.
+					const member = [...state.members.entries()].find(
+						([, entry]) => entry.ref?.id === event.ref.id && entry.ref.generation === event.ref.generation,
+					);
+					if (member) {
+						state.members.delete(member[0]);
+						state.lastRemovedMember = event.ref.id;
+						void this.#retireIfEmpty(state).catch(error =>
+							logger.warn("Team retirement failed", { error: String(error) }),
+						);
+					}
+				}
+				return;
+			}
+			if (event.type === "status_changed" && event.ref.status === "aborted") {
 				for (const state of this.#generations.values()) {
 					for (const intent of state.stops.values()) {
 						if (intent.id === event.ref.id && intent.ref?.generation === event.ref.generation)
@@ -246,7 +269,17 @@ export class TeamRuntime {
 		const state = this.#sessions.get(lead)?.get(name);
 		if (!state || !this.isCurrentLead(lead, name, generation)) return;
 		if (after) this.#memberPlan(state, handle, after);
-		else state.plans.delete(handle);
+		else {
+			state.plans.delete(handle);
+			// The lead's own membership removal (e.g. dropping a failed reservation)
+			// can empty the generation; retire it like any other removal.
+			if (before) {
+				state.lastRemovedMember = before.id;
+				void this.#retireIfEmpty(state).catch(error =>
+					logger.warn("Team retirement failed", { error: String(error) }),
+				);
+			}
+		}
 		if (!before) return;
 		const intent = state.stops.get(handle);
 		if (!intent) return;
@@ -304,6 +337,30 @@ export class TeamRuntime {
 		for (const intent of state.stops.values()) this.#clearStop(state, intent);
 	}
 
+	/**
+	 * Retire `state` when its last member is gone: no recorded members and no
+	 * release in flight (a spawn still registering stays recorded, so an empty
+	 * roster means nothing is pending either). The lead gets one finished
+	 * notice, sent from the last member's id — the runtime speaks on behalf of
+	 * members, matching `#notifyLead`, never the lead's own id.
+	 */
+	async #retireIfEmpty(state: RuntimeTeam): Promise<void> {
+		if (state.members.size !== 0 || state.releasing.size !== 0) return;
+		if (!this.isCurrentLead(state.lead, state.name, state.generation)) return;
+		const sender = state.lastRemovedMember ?? state.leadId;
+		await this.stop(state.lead, state.name);
+		await IrcBus.global()
+			.send({
+				from: sender,
+				to: state.leadId,
+				body: `Team ${state.name} finished: no members left.`,
+				progress: true,
+				teamControl: true,
+				teamNotice: true,
+			})
+			.catch(error => logger.warn("Team retirement notice failed", { error: String(error) }));
+	}
+
 	#notifyLead(state: RuntimeTeam, intent: StopIntent, body: string): void {
 		if (!this.isCurrentLead(state.lead, state.name, state.generation)) return;
 		void IrcBus.global()
@@ -334,16 +391,24 @@ export class TeamRuntime {
 		if (!current || current.generation !== intent.ref.generation || current.id !== intent.ref.id) return false;
 		if (state.releasing.has(intent.handle)) return false;
 		state.releasing.set(intent.handle, intent);
+		let released = false;
 		try {
-			const released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
+			released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
 			if (released && this.#matches(state, intent)) {
 				const member = state.members.get(intent.handle);
-				if (member?.ref?.generation === intent.ref.generation) state.members.delete(intent.handle);
-				if (intent.wholeTeam && state.members.size === 0) await this.stop(state.lead, state.name);
+				if (member?.ref?.generation === intent.ref.generation) {
+					state.members.delete(intent.handle);
+					state.lastRemovedMember = intent.id;
+				}
 			}
 			return released;
 		} finally {
 			state.releasing.delete(intent.handle);
+			// A retirement failure must not mask a truthful release result.
+			if (released)
+				await this.#retireIfEmpty(state).catch(error =>
+					logger.warn("Team retirement failed", { error: String(error) }),
+				);
 		}
 	}
 

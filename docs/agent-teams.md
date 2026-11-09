@@ -259,9 +259,16 @@ replacement generation does not inherit old stop intent.
 
 A whole-team stop (by name or `all`) retires that generation when its members
 have been removed, including final acknowledgements and pending force releases.
-A handle-only stop preserves the generation, even if it removes the last member.
-A subsequent whole-team start after retirement gets a fresh generation; a
-workspace ledger survives, whereas the old in-memory ledger does not.
+A handle-only stop, an outside release, a kill or any other removal of the last
+member also retires the emptied generation: the runtime stops it and tells the
+lead once (`Team <name> finished: no members left.`), after which normal
+idle-TTL parking resumes for the lead. A whole-team stop awaiting an
+acknowledgement keeps the generation live; the timeout notice leaves the
+decision to the lead. A subsequent whole-team start after retirement gets a
+fresh generation; a workspace ledger survives, whereas the old in-memory
+ledger does not. Retirement never races a concurrent restart: only the
+generation that still owns the team name is retired, so a new `/team start`
+under the same name is untouched.
 
 A session leading a current team generation is not idle-TTL parked: its timer
 is re-armed so the team, active members and the lead's `/team stop` authority
@@ -270,14 +277,14 @@ Genuine session termination still retires its generations without changing
 member teardown ownership; Main shutdown leaves cleanup to the lifecycle manager.
 
 Runtime-authored team traffic — stop requests, plan approval/rejection notices,
-and idle, decline, timeout and failed-registration notices sent on behalf of a
-member — bypasses **only sender rate charging**. Stop requests still undergo
-dedup/hop/delivery checks; the notices are progress deliveries, which already
-skip dedup. Agent-authored plan submissions remain rate-limited like ordinary
-progress messages. All traffic retains hop, membership/ref and ordinary
-delivery/queue checks; this is not an unrestricted messaging bypass, and the
-`teamControl` flag is set only by runtime code — an agent cannot claim the
-exemption through any tool.
+and idle, decline, timeout, failed-registration and team-finished notices sent
+on behalf of a member — bypasses **only sender rate charging**. Stop requests
+still undergo dedup/hop/delivery checks; the notices are progress deliveries,
+which already skip dedup. Agent-authored plan submissions remain rate-limited
+like ordinary progress messages. All traffic retains hop, membership/ref and
+ordinary delivery/queue checks; this is not an unrestricted messaging bypass,
+and the `teamControl` flag is set only by runtime code — an agent cannot claim
+the exemption through any tool.
 
 ## Plan submission and approval
 

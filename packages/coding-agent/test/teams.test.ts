@@ -515,7 +515,10 @@ describe("team startup lifecycle", () => {
 			expect(put.mock.calls.length).toBeGreaterThan(1);
 			expect(put.mock.calls.length).toBeLessThan(100);
 			expect(spawn).not.toHaveBeenCalled();
-			expect(teamRuntimeState.members(session, team.name)?.size).toBe(0);
+			// Scout's reservation is dropped during the conflict loop, so the emptied
+			// generation retires; there are no members left to keep it live.
+			expect(teamRuntimeState.listTeams(session)).toEqual([]);
+			expect(teamRuntimeState.identity(session, team.name)).toBeUndefined();
 			const fresh = { getArtifactsDir: () => null } as unknown as ToolSession;
 			const scout = await reserveStructuredSubagentId(fresh, { label: "Scout" });
 			const reviewer = await reserveStructuredSubagentId(fresh, { label: "Reviewer" });
@@ -774,6 +777,77 @@ describe("/team start and stop", () => {
 			await expect(router.write(url!, "ack", { session })).rejects.toThrow();
 			await TEAM_HANDLE({ args: "stop audit" }, runtime);
 			expect(messages).toHaveLength(2);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("retires the team after handle-only stops release every member and tells the lead", async () => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout", "Reviewer"] });
+		try {
+			mockTeamDiscovery(team);
+			const messages: Array<{ body: string; to: string }> = [];
+			const notices: Array<{ body: string; from: string }> = [];
+			const scoutSession = {
+				instanceKey: `team-member:${crypto.randomUUID()}`,
+				deliverIrcMessage: async (message: { body: string; to: string }) => {
+					messages.push(message);
+					return "injected";
+				},
+			};
+			const reviewerSession = {
+				instanceKey: `team-member:${crypto.randomUUID()}`,
+				deliverIrcMessage: scoutSession.deliverIrcMessage,
+			};
+			registerLocalSession(scoutSession as unknown as AgentSession);
+			registerLocalSession(reviewerSession as unknown as AgentSession);
+			const registry = AgentRegistry.global();
+			vi.spyOn(spawnSubagent, "spawnSubagentForSession").mockImplementation(async (_session, options) =>
+				registry.register({
+					id: options.teamReservedId!,
+					displayName: options.handle!,
+					kind: "sub",
+					session: (options.handle === "Scout" ? scoutSession : reviewerSession) as unknown as AgentSession,
+				}),
+			);
+			const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+			const { runtime, outputs } = teamRuntime(root);
+			const lead = (runtime as { session: object }).session;
+			Reflect.set(lead, "deliverIrcMessage", async (message: { body: string; from: string }) => {
+				notices.push(message);
+				return "injected";
+			});
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			const identity = teamRuntimeState.identity(lead, "audit")!;
+			IrcBus.installGlobal(new IrcBus(registry, undefined, { settings: Settings.isolated() }));
+			await TEAM_HANDLE({ args: "stop Scout" }, runtime);
+			const scoutUrl = messages
+				.find(message => message.to === "Scout")!
+				.body.match(/team:\/\/audit\/stop\/[\w-]+/)![0];
+			const scoutTools = {
+				getSessionInstanceKey: () => scoutSession.instanceKey,
+				teamIdentity: { ...identity, memberId: "Scout" },
+			} as ToolSession;
+			await new InternalUrlRouter().write(scoutUrl, "ack", { session: scoutTools });
+			expect(release).toHaveBeenCalledTimes(1);
+			expect(teamRuntimeState.listTeams(lead)).toEqual(["audit"]);
+			expect(notices.filter(message => message.body.includes("finished"))).toHaveLength(0);
+			await TEAM_HANDLE({ args: "stop Reviewer" }, runtime);
+			const reviewerUrl = messages
+				.find(message => message.to === "Reviewer")!
+				.body.match(/team:\/\/audit\/stop\/[\w-]+/)![0];
+			const reviewerTools = {
+				getSessionInstanceKey: () => reviewerSession.instanceKey,
+				teamIdentity: { ...identity, memberId: "Reviewer" },
+			} as ToolSession;
+			await new InternalUrlRouter().write(reviewerUrl, "ack", { session: reviewerTools });
+			expect(release).toHaveBeenCalledTimes(2);
+			expect(outputs.join("\n")).not.toContain("no live team or member");
+			expect(teamRuntimeState.listTeams(lead)).toEqual([]);
+			expect(teamRuntimeState.identity(lead, "audit")).toBeUndefined();
+			const finished = notices.filter(message => message.body.includes("finished"));
+			expect(finished).toHaveLength(1);
+			expect(finished[0]!.body).toBe("Team audit finished: no members left.");
 		} finally {
 			await cleanup();
 		}
@@ -1271,7 +1345,9 @@ describe("/team start and stop", () => {
 				expect(outputs.at(-1)).toContain("stop pending registration");
 				// Terminal spawn outcome without a registered ref: the promise rejects,
 				// or the registration it stands for fails like an aborted run.
-				registration.reject(new Error(outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"));
+				registration.reject(
+					new Error(outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"),
+				);
 				await starting;
 				await registration.promise.catch(() => {});
 				// Without advancing timers to the ack timeout, the intent is gone and
@@ -1290,7 +1366,9 @@ describe("/team start and stop", () => {
 				// The intent is gone: a later stop reports the recorded failure instead of
 				// staying pending, and the lead is not notified a second time.
 				await TEAM_HANDLE({ args: "stop Scout" }, runtime);
-				expect(outputs.at(-1)).toContain(`failed before registering: ${outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"}`);
+				expect(outputs.at(-1)).toContain(
+					`failed before registering: ${outcome === "aborts" ? "the run was aborted before it registered" : "spawn failed"}`,
+				);
 				expect(notices.filter(body => body.includes("never registered"))).toHaveLength(1);
 				expect(teamRuntimeState.listTeams(lead)).toEqual(["audit"]);
 			} finally {
