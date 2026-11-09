@@ -518,11 +518,49 @@ mod tests {
 			compositor_pid:    None,
 		}
 	}
+	/// Holds `LIBEI_ENV_LOCK` with `LIBEI_SOCKET` set to a test's value (removed
+	/// for `None`) and puts the previous value back when dropped, also while a
+	/// failing test unwinds, so no later test sees a leaked value.
+	struct LibeiSocket {
+		previous: Option<std::ffi::OsString>,
+		_lock:    std::sync::MutexGuard<'static, ()>,
+	}
+
+	impl LibeiSocket {
+		fn set(value: Option<&std::ffi::OsStr>) -> Self {
+			let lock = LIBEI_ENV_LOCK
+				.lock()
+				.unwrap_or_else(std::sync::PoisonError::into_inner);
+			let previous = std::env::var_os("LIBEI_SOCKET");
+			// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes
+			// LIBEI_SOCKET or asserts on what it reads takes it first; std
+			// serializes the other env reads.
+			unsafe {
+				match value {
+					Some(value) => std::env::set_var("LIBEI_SOCKET", value),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+			Self { previous, _lock: lock }
+		}
+	}
+
+	impl Drop for LibeiSocket {
+		fn drop(&mut self) {
+			// SAFETY: as in `set`; the lock field is released only after this
+			// body.
+			unsafe {
+				match self.previous.take() {
+					Some(previous) => std::env::set_var("LIBEI_SOCKET", previous),
+					None => std::env::remove_var("LIBEI_SOCKET"),
+				}
+			}
+		}
+	}
+
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
-		let _guard = LIBEI_ENV_LOCK
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		let socket = std::env::temp_dir().join(format!("omp-libei-test-{}", std::process::id()));
+		let _env = LibeiSocket::set(Some(socket.as_os_str()));
 		let _ = std::fs::remove_file(&socket);
 		let listener = UnixListener::bind(&socket).expect("bind fake libei socket");
 		listener
@@ -545,16 +583,9 @@ mod tests {
 				}
 			}
 		});
-		let previous = std::env::var_os("LIBEI_SOCKET");
-		unsafe { std::env::set_var("LIBEI_SOCKET", &socket) };
 		let mut backend = WaylandBackend::new(DisplaySelector::All);
 		action(&mut backend);
 		let _ = stop_tx.send(());
-		if let Some(previous) = previous {
-			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
-		} else {
-			unsafe { std::env::remove_var("LIBEI_SOCKET") };
-		}
 		let connected = accepted.join().expect("fake libei listener");
 		let _ = std::fs::remove_file(socket);
 		connected
@@ -575,19 +606,38 @@ mod tests {
 	/// so a fake socket from a test on another thread would otherwise report
 	/// input as reachable.
 	fn without_libei_socket(action: impl FnOnce()) {
-		let _guard = LIBEI_ENV_LOCK
+		let _env = LibeiSocket::set(None);
+		action();
+	}
+
+	/// A failing env test must not leave `LIBEI_SOCKET` changed for the tests
+	/// after it.
+	#[test]
+	fn a_failing_env_test_restores_libei_socket() {
+		let sentinel = std::ffi::OsString::from("/omp-libei-sentinel");
+		let original = {
+			let _lock = LIBEI_ENV_LOCK
+				.lock()
+				.unwrap_or_else(std::sync::PoisonError::into_inner);
+			let original = std::env::var_os("LIBEI_SOCKET");
+			// SAFETY: LIBEI_ENV_LOCK is held.
+			unsafe { std::env::set_var("LIBEI_SOCKET", &sentinel) };
+			original
+		};
+		let failed = std::panic::catch_unwind(|| without_libei_socket(|| panic!("test failure")));
+		assert!(failed.is_err());
+		let _lock = LIBEI_ENV_LOCK
 			.lock()
 			.unwrap_or_else(std::sync::PoisonError::into_inner);
-		let previous = std::env::var_os("LIBEI_SOCKET");
-		// SAFETY: LIBEI_ENV_LOCK is held, and every test that writes LIBEI_SOCKET
-		// or asserts on what it reads takes it first; std serializes the other
-		// env reads.
-		unsafe { std::env::remove_var("LIBEI_SOCKET") };
-		action();
-		if let Some(previous) = previous {
-			// SAFETY: as above; the lock is still held.
-			unsafe { std::env::set_var("LIBEI_SOCKET", previous) };
+		let after = std::env::var_os("LIBEI_SOCKET");
+		// SAFETY: LIBEI_ENV_LOCK is held.
+		unsafe {
+			match original {
+				Some(original) => std::env::set_var("LIBEI_SOCKET", original),
+				None => std::env::remove_var("LIBEI_SOCKET"),
+			}
 		}
+		assert_eq!(after, Some(sentinel));
 	}
 
 	#[test]
