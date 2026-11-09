@@ -25,7 +25,7 @@ function prop(node: NativeNode | TspPropNode | NativeChild | undefined, name: st
 }
 
 const decode: JobWidgetView = {
-	title: "verb-bench · decode",
+	title: "loadtest · decode",
 	headline: { text: "186 tok/s", label: "decode", trend: { text: "▲ 15%", tone: "success" } },
 	blocks: [
 		{
@@ -106,7 +106,7 @@ describe("InteractiveMode HUD pills", () => {
 		expect(spark?.p).toMatchObject({ kind: "spark", min: 0, max: 220 });
 		expect(prop(spark, "series")).toHaveLength(16);
 		expect(prop(segment, "title")).toBe(
-			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  verb-bench · decode — decode 186 tok/s ▲ 15%",
+			"2 jobs running  /jobs\nbg_1  eval · per model — trials 7/9 trials\nbg_2  loadtest · decode — decode 186 tok/s ▲ 15%",
 		);
 		const card = prop(segment, "hovercard") as TspPropNode;
 		expect(card).toMatchObject({ k: "col", p: { role: "omp.jobs.hovercard" } });
@@ -122,6 +122,25 @@ describe("InteractiveMode HUD pills", () => {
 		const next = jobsSegment()!;
 		expect(next).not.toBe(segment);
 		expect(JSON.stringify(next)).toContain("191 tok/s");
+	});
+
+	// A refresh recomputes the view from the wall clock (rate decay) even when no data moved:
+	// updatedAt and state stand still while the view object is swapped for a fresh one.
+	it("re-describes the segment when a refresh swaps the view object without moving updatedAt or state", () => {
+		let entries: JobWidgetEntry[] = [{ id: "bg_1", type: "bash", view: decode }];
+		spyOn(mode.statusLine, "runningBackgroundJobCount").mockReturnValue(1);
+		spyOn(session, "getRunningJobWidgets").mockImplementation(() => entries);
+
+		const segment = jobsSegment()!;
+		expect(prop(segment, "title")).toContain("bg_1  loadtest · decode — decode 186 tok/s ▲ 15%");
+
+		entries = [{ id: "bg_1", type: "bash", view: { ...decode, headline: { text: "171 tok/s" } } }];
+
+		const next = jobsSegment()!;
+		expect(next).not.toBe(segment);
+		const glance = nodes(next).find(node => prop(node, "role") === "omp.hud.glance");
+		expect(prop(glance, "spans")).toEqual([{ t: "171 tok/s", s: "num strong" }]);
+		expect(prop(next, "title")).toBe("1 job running  /jobs\nbg_1  loadtest · decode — 171 tok/s");
 	});
 
 	it("keeps the bare count segment while no running job draws a widget", () => {

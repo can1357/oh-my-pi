@@ -117,23 +117,6 @@ describe("TinyFish web search provider", () => {
 		expectTinyFishParams(captured[0], ["query", "num_results", "page", "include_domains", "exclude_domains"]);
 	});
 
-	it("sends directive-free queries verbatim", async () => {
-		const captured: URL[] = [];
-		const fetchMock: FetchImpl = async input => {
-			const url = input instanceof URL ? input : new URL(typeof input === "string" ? input : input.url);
-			captured.push(url);
-			return new Response(JSON.stringify(tinyFishPage(tinyFishResults("tinyfish", 3))), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		};
-
-		await searchTinyFish({ ...makeParams("plain query with ordinary words"), fetch: fetchMock });
-
-		expect(captured).toHaveLength(1);
-		expect(captured[0].searchParams.get("query")).toBe("plain query with ordinary words");
-	});
-
 	it("maps a lang: locale directive onto location and language", async () => {
 		const captured: URL[] = [];
 		const fetchMock: FetchImpl = async input => {

@@ -264,10 +264,21 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{ name: "set_auto_retry", doc: "Enable or disable auto-retry.", params: { enabled: "boolean" } },
 	{ name: "abort_retry", doc: "Abort a pending auto-retry." },
-	{ name: "bash", doc: "Run a shell command.", params: { command: "string" }, result: "BashResult" },
+	{
+		name: "bash",
+		doc: "Run a shell command. Before excluding output, require ready.supportsBashExcludeFromContext to be true.",
+		params: { command: "string", "excludeFromContext?": "boolean" },
+		result: "BashResult",
+	},
 	{ name: "abort_bash", doc: "Abort the running shell command." },
 
 	{ name: "get_session_stats", doc: "Session statistics.", result: "SessionStats" },
+	{
+		name: "get_session_lease",
+		doc: "Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed.",
+		params: { sessionIds: "string[]" },
+		result: { held: "string[]", unknown: "string[]" },
+	},
 	{
 		name: "export_html",
 		doc: "Export the session as HTML; returns the written path.",

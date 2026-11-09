@@ -79,6 +79,27 @@ describe("context overflow evidence", () => {
 	});
 });
 
+describe("isContextOverflow - a rate-limit status vetoes token-cap wording", () => {
+	// Bedrock's per-minute throttle reads like window excess to the text patterns;
+	// flagged as overflow, the turn skips retry and the fallback chain.
+	const throttle = "429 Too many tokens, please wait before trying again. (type=rate_limit_error)";
+
+	it.each([
+		{ source: "errorStatus", message: { errorMessage: throttle, errorStatus: 429 } },
+		{ source: "a raw-status errorId", message: { errorMessage: throttle, errorId: 429 } },
+		{ source: "the message text", message: { errorMessage: throttle } },
+	])("is not overflow when the 429 comes from $source", ({ message }) => {
+		expect(isContextOverflow({ stopReason: "error", ...message })).toBe(false);
+		expect(AIError.is(AIError.classifyMessage(message), AIError.Flag.ContextOverflow)).toBe(false);
+	});
+
+	it("is still overflow on a 400", () => {
+		const message = { errorMessage: "400 Too many tokens in the request", errorStatus: 400 };
+		expect(isContextOverflow({ stopReason: "error", ...message })).toBe(true);
+		expect(AIError.is(AIError.classifyMessage(message), AIError.Flag.ContextOverflow)).toBe(true);
+	});
+});
+
 describe("isContextOverflow - model_context_window_exceeded", () => {
 	it("detects model_context_window_exceeded in finish_reason error message", () => {
 		const message = createErrorMessage("Provider finish_reason: model_context_window_exceeded");

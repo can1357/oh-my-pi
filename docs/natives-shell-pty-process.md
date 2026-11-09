@@ -22,7 +22,7 @@ This document covers execution/process/terminal primitives in `@oh-my-pi/pi-nati
 
 - **Package entrypoint** (`packages/natives/native/index.js`): loads the `.node` addon and exports generated N-API bindings.
 - **Rust N-API module layer** (`crates/pi-natives/src/*`): JS-facing shell/PTY/process/key exports and callback bridging.
-- **Runtime core** (`crates/pi-shell/src/*`): brush shell execution, cancellation cleanup, minimizer integration, command fixups, and cross-platform process references.
+- **Runtime core** (`crates/pi-shell/src/*`): the embedded bash engine and its session execution (`bash`, `sys`, `vfs`, `host`, `session`, `tools`, `extras`), cancellation cleanup, minimizer integration, command fixups, and cross-platform process references.
 - **Consumers** (`packages/coding-agent`, `packages/tui`): higher-level session policy, output artifact/minimizer handling, render policy, and UI key handling.
 
 ## Shell subsystem (`shell`)
@@ -36,29 +36,30 @@ Shell execution modes:
 
 Both stream merged stdout/stderr text through a threadsafe callback and return `{ exitCode?, cancelled, timedOut, minimized?, workingDir? }`.
 
-Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Builtin `nohup <command> &` is special: brush detaches and reparents the operand so it survives shell teardown; this is not the behavior of the system `nohup` binary.
+Persistent `Shell` also exposes `liveBackgroundJobCount()`, which silently reaps completed jobs and returns the number of live jobs tracked by the session. Hosts can retain per-call shells while ordinary background jobs remain alive. Only jobs that still run an external process count; exited ones are reaped between commands and keep their status for a later `wait`. Builtin `nohup <command> &` is special: the operand is detached so it survives shell teardown; this is not the behavior of the system `nohup` binary.
 
 `ShellOptions` supports `sessionEnv`, `snapshotPath`, output `minimizer`, and `filesystem`. `ShellExecuteOptions` additionally supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, and `signal`. `ShellRunOptions` supports `command`, `cwd`, command-scoped `env`, `timeoutMs`, `signal`, and a run-only `filesystem` override.
 
 ### Session creation and environment model
 
-Rust creates `brush_core::Shell` with:
+Rust starts a `pi_shell::session::Session` (the bash engine driven by a task on the supplied Tokio runtime, `crates/pi-shell/src/session.rs`) with:
 
-- inherited environment disabled (`do_not_inherit_env: true`), followed by explicit environment reconstruction from host env,
-- profile and rc loading skipped,
-- bash-mode builtins, with `exec` and `suspend` disabled,
-- process builtins registered unconditionally from `pi_builtins::process_builtins()` — `nohup`, `pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `timeout`, and `top` (`nohup` is withheld when `PI_DISABLE_NOHUP_BUILTIN` is set; `kill` comes from the default bash-mode set, where `pi-builtins`' richer implementation replaces brush's original),
-- in-process utility builtins registered from `pi_builtins::utility_builtins()` (see the next section),
-- an opt-in `git` builtin (`crates/pi-shell/src/git.rs`), registered when either layer below is on; anything a layer does not take runs the git binary with the original arguments:
+- an explicitly reconstructed environment: the host env (non-UTF-8 entries dropped, duplicate `PATH`s merged), then `sessionEnv`, both through the skip-list below; nothing else is inherited and no profile or rc file is read,
+- the session `filesystem` behind the engine's filesystem seam (`pi_shell::vfs::VfsFs`); `scheme://` paths are absolute to the engine, and externals receive the host files that backed URL arguments and working directories alias (an unbacked or read-only URL working directory refuses the external),
+- the engine's bash builtins (`exec` never replaces this process; `suspend` refuses),
+- pi's in-process utilities and process commands (`pgrep`, `pkill`, `pidwait`, `ps`, `sleep`, `top`) as engine commands from `pi_builtins::extras` (see the next section); `kill` is the engine builtin and refuses to signal this process, its process group or its ancestors,
+- `timeout`, `nohup` (detaches its operand so it survives shell teardown; withheld when `PI_DISABLE_NOHUP_BUILTIN` is set) and an opt-in `git` as host callouts (`crates/pi-shell/src/tools`); anything a `git` layer does not take runs the git binary with the original arguments:
    - `PI_SMART_GIT` serves supported `git worktree add` invocations through `pi-vcs`: copy-on-write clone, worktree registration, and reconciliation to the target commit, with an in-process checkout fallback when cloning is unavailable;
    - `PI_GIT_GUARD` (set by the coding agent from `bash.gitGuard`; `crates/pi-shell/src/git/guard.rs`) judges git commands that discard or move work by the checkout they run in. In a repository's main checkout, which other sessions may share, it refuses with exit status 1: `stash` other than `list`/`show`/`create`, `reset --hard`, `reset` to a commit other than HEAD's, `switch` and `checkout` of a branch or commit, and `checkout` of paths and working-tree `restore` unless the repository is mid-merge/rebase/cherry-pick/revert (unmerged index entries or the operation's state files; a finished rebase's leftover `REBASE_HEAD` does not count), and even then not forced or whole-tree forms. A linked worktree of a non-bare repository, and a submodule inside one, run everything: a command that discards uncommitted tracked changes first records them as a `git stash create` commit on the `refs/omp/discarded` reflog and says so on stderr (refused instead when it recurses into submodules, through `--recurse-submodules` or `submodule.recurse`, since that record does not hold their changes), and `stash pop`/`apply`/`drop`/`branch`/`clear` refuse a stash-list entry whose `WIP on <branch>:`/`On <branch>:` subject names another branch, a detached HEAD, or no branch. It judges the expanded argv in the directory git actually runs in (`cd` and `-C` applied); `--git-dir`/`--work-tree`/`GIT_DIR`-style redirection is refused, since the repository it changes is not the one found from the directory,
 - skip-list for shell-sensitive vars (`PS1`, `PWD`, `SHLVL`, bash function exports, etc.),
-- a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives brush parameter expansion unless the user shadows `env`.
+- a non-exported `env="$env"` fallback so PowerShell-style `$env:NAME` survives parameter expansion unless the user shadows `env`.
+
+URL-backed external spawns return an owned `SpawnFuture`, which the VM polls without blocking the driver. Cancelling a pending spawn drops its provider request before launching a process. External I/O pumps and decoding relays are cooperative state machines polled with the process; they do not park threads around engine I/O. Shared process-substitution feeds retain one OS pipe per engine descriptor and return unread bytes when their last holder closes. The standalone `obash` driver uses the same pollable operations without requiring a Tokio runtime.
 
 Session env behavior:
 
 - `ShellOptions.sessionEnv` / one-shot `sessionEnv` is applied at session creation.
-- `ShellRunOptions.env` / one-shot `env` is command-scoped (`EnvironmentScope::Command`) and popped after the command.
+- `ShellRunOptions.env` / one-shot `env` is command-scoped: exported for the command, and every named variable is restored afterwards.
 - `PATH` is merged specially on Windows with case-insensitive dedupe.
 - Host and forwarded session environments omit Git repository-location overrides (`GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`), so Git rediscovers the repository from cwd. Explicit command-scoped `env` can supply them again.
 - Windows-only path enrichment (`crates/pi-shell/src/windows.rs`) appends discovered Git-for-Windows paths when present and not already included.
@@ -74,7 +75,7 @@ The session filesystem is restored after a run-only override. Provider waits are
 
 ### In-process utility builtins (uutils-derived)
 
-Beyond the bash builtins, session creation registers the in-process command-line utility builtins implemented in the `pi-builtins` crate (`crates/pi-builtins`) — in-house ports of uutils coreutils/findutils/sed and jaq built on `uucore` 0.8.0. The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `cp`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `pi_builtins::utility_builtins()` is the authoritative list.
+Beyond the bash builtins, the session runs the in-process command-line utilities implemented in the `pi-builtins` crate (`crates/pi-builtins`) — in-house ports of uutils coreutils/findutils/sed and jaq built on `uucore` 0.8.0. The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `cp`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `pi_builtins::extras::extras()` is the authoritative list.
 
 Three search-related builtins are worth calling out:
 
@@ -83,13 +84,21 @@ Three search-related builtins are worth calling out:
 - `fd` is backed by `pi-walker`'s ordered `walk::tree` traversal, `globset`, and `regex`.
 - `ast-grep` (also `sg`) runs ast-grep 0.50's `run` command (`-p`/`-r`/`-U`, `--json`, context, `--heading`, `--files-with-matches`, `--stdin`) on the `pi-ast` search engine with ast-grep's piped (uncolored) output; `scan`, `test`, `new`, `lsp`, `outline`, `--config`, `--interactive`, `--kind`, `--debug-query`, and `--inspect` exit 2 as unsupported.
 
-Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated in `crates/pi-shell/src/shell.rs`:
+Each builtin runs inside the shell process (no `fork`/`exec`) against the `pi-builtins` `Host` view of the shell (`src/host.rs`): stdio routes through the command's (possibly piped/redirected) file descriptors, path operands resolve against the shell working directory, the shell's exported environment is visible, and abort/timeout cancellation is honored. Because these builtins shadow system binaries, registration is gated (`ExtrasGate` in `crates/pi-shell/src/extras.rs`, built in `crates/pi-shell/src/tools/mod.rs`):
 
 - `PI_DISABLE_UUTILS_BUILTINS` disables the whole utility set (bare names resolve to system binaries again),
 - `PI_DISABLE_UUTILS_DESTRUCTIVE` disables the destructive shadows (`rm`, `mv`, `cp`, which overwrites existing files, and `ln`, which can clobber via `-f`) together,
 - `PI_DISABLE_RM_BUILTIN` / `PI_DISABLE_MV_BUILTIN` disable `rm`/`mv` individually.
 
 Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
+
+`omp zsh` on Windows (the process shell, `crates/pi-shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a program on `PATH` keeps running and the Unix tools Windows lacks are still there. A defined `command_not_found_handler` wins over the fallback. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found. On Linux and macOS a missing command stays not found.
+
+On Windows, `omp zsh` takes zsh's function library (`fpath`, for `compinit`) from an MSYS2, Cygwin or Git for Windows zsh: the root of a `…\usr\bin` (or Cygwin `…\bin`) on `PATH`, then `C:\msys64`, `C:\cygwin64` and `C:\cygwin`. A console `read` that Ctrl-C ends is not end of input: when the shell traps or ignores `INT`, the read resumes after the trap, as a Unix read interrupted by `SIGINT` does. `read -k`/`-q` read the terminal in cbreak mode on every platform.
+
+Windows has no process groups or terminal foreground, so the spawner maps them onto console process groups. A foreground program stays in the shell's console group, so the keyboard's Ctrl-C reaches it as `SIGINT` reaches a Unix foreground group. A program whose `INT` is ignored (a background job without job control) or a job-control job gets a group of its own, so the keyboard's Ctrl-C passes it by. `fg` makes the shell forward the next Ctrl-C to that job's group as `CTRL_BREAK_EVENT`, and the shell itself is not interrupted, which emulates `tcsetpgrp`. `jobs`/`fg`/`bg` work, and `kill -STOP`/`-CONT` pause and resume a job. Ctrl-Z does not suspend the foreground program: Windows programs read the console themselves, so the key reaches the program (often as end of input) and never the shell. Catching it would mean running every foreground program behind a pseudoconsole the shell relays.
+
+A `<(…)`/`>(…)` passed to a Windows program becomes a named pipe `\\.\pipe\obash-pump-…` in place of `/dev/fd/N`. Programs often open a path once just to inspect it (`cmd`'s `type`, the MSYS runtime's `stat`), so the pipe keeps instances listening, from the spawn on, until the connection that moves data is known: for the child's reading, the newest connection still open once it settled (the MSYS runtime's path check opens first and never reads); for its writing, the first that delivers bytes. Builtins and functions keep reading `/dev/fd/N` in-process. MSYS and Cygwin programs (Git for Windows' `diff`, `cmp`, …) see such a path as a regular file whose size is what the pipe holds when they `stat` it: one that trusts the size may take a pipe whose producer has not written yet for an empty file (`diff <(slow) <(slow)` reporting no difference). Native Windows programs just read.
 
 ### Runtime lifecycle and state transitions
 
@@ -108,6 +117,7 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 
 - Stdout/stderr are routed into a shared pipe and read concurrently.
 - Reader decodes UTF-8 incrementally; invalid byte sequences emit `U+FFFD` replacement chunks.
+- On Windows with a non-UTF-8 ANSI code page, encoding is decided per producer. Each external program writing into the capture or a command substitution writes into its own relay pipe (`crates/pi-shell/src/sys/relay.rs`, started by `PiHost::spawn`) and is decoded on its own: UTF-8 until its first invalid sequence, then the ANSI code page for the rest of that program's output. A program's stdout and stderr share one relay, so their interleaving survives. The relay is no thread: the program's `ExtProc` polls it on the shell's own task (the shell's end of the relay pipe is overlapped, and its completions wake that task), and nothing else reads the pipe, so when the program exits the shell sizes its output exactly: what the relay read plus what the pipe holds then. The exit is reported once the relay has forwarded that much, however long a slow capture reader takes. Bytes the decoder holds for a character the program ended inside wait for end of stream; the exit waits at most 50ms for it when a process the program left running keeps the pipe open. The relay goes on forwarding what such a process writes until the end of the stream, after the exit was reported (as a task on the session's runtime once the program's `ExtProc` is gone), and releases held bytes there. What builtins write (`printf`, `cut`, `cat` of a legacy file, a native program's output passed through `| head`) is judged per line: valid UTF-8 stays UTF-8; a line that strict-decodes in the ANSI code page and reads worse as UTF-8 is decoded from it, unless, in a multibyte code page, its only flaw is a character cut short at its end; anything else gets `U+FFFD`. ASCII streams at once; a line holding other bytes is emitted at its newline, after 50ms without output, or at 64 KiB, keeping a character split across writes for its next bytes, and the encoding chosen for a partly emitted line holds to its newline. Pipeline pipes and files are never decoded, so binary data passes byte for byte.
 - The N-API output bridge has a bounded 64-chunk queue and awaits callback execution, backpressuring pipe readers and the child. Queued chunks are coalesced before forwarding. A single callback stalled for 30 seconds disconnects the bridge so readers can continue draining.
 - The command runs with `ProcessGroupPolicy::NewProcessGroup`.
 - After the foreground command completes, the reader drains until EOF, 250ms of idle output, or 2s maximum; reader shutdown then gets a 250ms timeout.

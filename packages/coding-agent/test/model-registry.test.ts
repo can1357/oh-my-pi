@@ -335,7 +335,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[cachedChat],
 				true,
-				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
@@ -689,6 +689,92 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("provider compat overrides", () => {
+		test("discovered model WebSocket overrides survive refresh and cache restoration", async () => {
+			const config = {
+				api: "openai-responses",
+				baseUrl: "https://discovery.example.com/v1",
+				apiKey: "TEST_KEY",
+				authHeader: true,
+				discovery: { type: "openai-models-list" },
+				modelOverrides: {
+					"explicit-http": { preferWebsockets: false },
+					"explicit-ws": { preferWebsockets: true },
+				},
+			};
+			const fetch = mockOpenAiCompatibleModels("https://discovery.example.com/v1/models", [
+				"discovered",
+				"explicit-http",
+				"explicit-ws",
+			]);
+			writeRawModelsJson({ "discovery-provider": config });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			await registry.refresh("offline");
+			await registry.refreshProvider("discovery-provider", "online");
+			const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			for (const current of [registry, reopened]) {
+				const discovered = current.find("discovery-provider", "discovered");
+				expect(discovered).toMatchObject({ id: "discovered", api: "openai-responses" });
+				expect(discovered?.preferWebsockets).toBeUndefined();
+				expect(current.find("discovery-provider", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(current.find("discovery-provider", "explicit-ws")?.preferWebsockets).toBe(true);
+			}
+		});
+
+		test("runtime models preserve explicit WebSocket preferences before and after materialization", () => {
+			for (const materialized of [false, true]) {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const base = registry.find("openai", "gpt-5-mini");
+				if (!base) throw new Error("Expected bundled Responses model");
+				if (materialized) registry.getAll();
+				registry.registerProvider("runtime-ws", {
+					api: "openai-responses",
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "test-key",
+					models: [
+						{ ...base, id: "default", contextWindow: 32000, maxTokens: 1024, preferWebsockets: undefined },
+						{ ...base, id: "explicit-http", contextWindow: 32000, maxTokens: 1024, preferWebsockets: false },
+						{ ...base, id: "explicit-ws", contextWindow: 32000, maxTokens: 1024, preferWebsockets: true },
+					],
+				});
+				expect(registry.find("runtime-ws", "default")?.preferWebsockets).toBeUndefined();
+				expect(registry.find("runtime-ws", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(registry.find("runtime-ws", "explicit-ws")?.preferWebsockets).toBe(true);
+				registry.unregisterProvider("runtime-ws");
+				expect(registry.find("runtime-ws", "default")).toBeUndefined();
+			}
+		});
+
+		test("models.yml preserves standard Responses WebSocket preferences and explicit HTTP overrides", async () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  responses-proxy:
+    api: openai-responses
+    baseUrl: https://proxy.example.com/v1
+    apiKey: test-key
+    models:
+      - id: websocket-model
+      - id: http-model
+        preferWebsockets: true
+      - id: default-model
+    modelOverrides:
+      websocket-model:
+        preferWebsockets: true
+      http-model:
+        preferWebsockets: false
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const websocketModel = registry.find("responses-proxy", "websocket-model");
+			const httpModel = registry.find("responses-proxy", "http-model");
+			const defaultModel = registry.find("responses-proxy", "default-model");
+			expect(websocketModel?.api).toBe("openai-responses");
+			expect(websocketModel?.preferWebsockets).toBe(true);
+			expect(httpModel?.preferWebsockets).toBe(false);
+			expect(defaultModel?.preferWebsockets).toBeUndefined();
+		});
+
 		test("models.yml can opt a Responses provider in while opting one model out of stored chaining", async () => {
 			const modelsPath = path.join(tempDir, "models.yml");
 			await Bun.write(
@@ -1664,17 +1750,22 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"gpt-5.4": {
 							contextWindow: 512000,
+							preferWebsockets: true,
 						},
+						"gpt-5.5": { preferWebsockets: false },
 					},
 				},
 			});
-			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4"]);
+			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4", "gpt-5.5"]);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
 
 			await registry.refreshProvider("openai", "online");
 
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
+			expect(registry.find("openai", "gpt-5.5")?.preferWebsockets).toBe(false);
 		});
 
 		test("newly discovered ids inherit provider fields, not another model's custom fields", async () => {
@@ -3259,9 +3350,9 @@ describe("ModelRegistry", () => {
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
-						for (const [providerId, dynamicModelsAuthoritative] of [
-							["zai", false],
-							["anthropic", true],
+						for (const [providerId, policy] of [
+							["zai", { additive: true }],
+							["anthropic", { authoritative: true, additive: true }],
 						] as const) {
 							const bundledModels = getBundledModels(providerId);
 							writeModelCache(
@@ -3269,7 +3360,7 @@ describe("ModelRegistry", () => {
 								Date.now(),
 								bundledModels,
 								false,
-								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								fingerprintStaticModels(bundledModels, policy),
 								dbPath,
 							);
 						}
@@ -3356,7 +3447,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							fingerprintStaticModels(getBundledModels("ollama-cloud")),
+							fingerprintStaticModels(getBundledModels("ollama-cloud"), { additive: true }),
 							dbPath,
 						);
 					},
@@ -3439,7 +3530,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v5",
+							"cached-compact-proxy:openai-models-list-context-v6",
 							Date.now(),
 							[
 								buildModel({
@@ -3624,7 +3715,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[served],
 				true,
-				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				fingerprintStaticModels(getBundledModels("google-antigravity"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);

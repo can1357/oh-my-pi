@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getToolDashboardStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getFrustrationByModel, getRecentRequests, initDb, setFileOffset } from "@oh-my-pi/omp-stats/db";
 import { getToolStats, getToolStatsByModel } from "@oh-my-pi/omp-stats/rollup";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import type { ToolUsageStats } from "@oh-my-pi/omp-stats/types";
@@ -95,6 +95,7 @@ interface ToolResultOptions {
 	toolName: string;
 	text: string;
 	isError?: boolean;
+	details?: unknown;
 }
 
 function buildToolResultEntry(opts: ToolResultOptions) {
@@ -109,6 +110,7 @@ function buildToolResultEntry(opts: ToolResultOptions) {
 			toolName: opts.toolName,
 			content: [{ type: "text", text: opts.text }],
 			isError: opts.isError ?? false,
+			details: opts.details,
 			timestamp: Date.parse(opts.timestamp),
 		},
 	};
@@ -251,6 +253,85 @@ describe("tool usage stats pipeline", () => {
 		expect(seriesCalls.get("read")).toBe(1);
 		expect(seriesErrors.get("grep")).toBe(0);
 		expect(seriesErrors.get("read")).toBe(1);
+	});
+
+	it.each([
+		{ name: "a skipped call that never executed", details: { __synthetic: true, executed: false }, expected: false },
+		{ name: "a synthetic result marked executed", details: { __synthetic: true, executed: true }, expected: true },
+		{ name: "executed: false without the synthetic marker", details: { executed: false }, expected: true },
+		{
+			name: "an interrupted call that had started",
+			details: { __interrupted: true, source: "interrupt_skipped", execution: "started" },
+			expected: true,
+		},
+	])("counts $name as error=$expected", async ({ details, expected }) => {
+		const sessionFile = await writeSessionFile("session.jsonl", { id: "synthetic" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [{ id: "call-1", name: "wait", arguments: {} }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1,
+				toolCallId: "call-1",
+				toolName: "wait",
+				text: "Skipped due to queued user message.",
+				isError: true,
+				details,
+			}),
+		]);
+
+		const parsed = await parseSessionFile(sessionFile);
+		expect(parsed.toolCalls.map(call => call.isError)).toEqual([expected]);
+	});
+
+	it("excludes skipped non-executions from error totals without dropping calls or real errors", async () => {
+		const entries = buildStandardEntries();
+		entries.push(
+			buildAssistantEntry({
+				entryId: "asst-skipped",
+				timestamp: TS2,
+				toolCalls: [{ id: "call-skipped", name: "wait", arguments: {} }],
+				totalTokens: TURN2_TOTAL_TOKENS,
+				outputTokens: TURN2_OUTPUT_TOKENS,
+				costTotal: TURN2_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-skipped",
+				parentId: "asst-skipped",
+				timestamp: TS2,
+				toolCallId: "call-skipped",
+				toolName: "wait",
+				text: "Skipped due to queued user message.",
+				isError: true,
+				details: { __synthetic: true, source: "interrupt_skipped", executed: false },
+			}),
+		);
+		await writeSessionFile("session.jsonl", { id: "skipped" }, entries);
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		expect(toolRow(stats, "wait").calls).toBe(1);
+		expect(toolRow(stats, "wait").errors).toBe(0);
+		expect(toolRow(stats, "read").errors).toBe(1);
+
+		// Model a database last synced before non-executions were classified separately.
+		const database = await initDb();
+		database.run("UPDATE tool_calls SET is_error = 1 WHERE tool_call_id = 'call-skipped'");
+		database.run("INSERT OR REPLACE INTO meta VALUES ('tool_calls_v2', 'complete')");
+		database.run("DELETE FROM meta WHERE key = 'tool_calls_v3'");
+		closeDb();
+
+		await syncAllSessions({ workers: 1 });
+		const repaired = getToolStats();
+		expect(toolRow(repaired, "wait").calls).toBe(1);
+		expect(toolRow(repaired, "wait").errors).toBe(0);
+		expect(toolRow(repaired, "read").errors).toBe(1);
 	});
 
 	it("links a result that lands in a later sync pass without duplicating the call", async () => {

@@ -9,6 +9,7 @@ import type { SessionEntry, SessionHeader } from "../../session/session-entries"
 import { SessionManager } from "../../session/session-manager";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
+import { writeBase64Json } from "./payload";
 import templateHtml from "./template.html.txt" with { type: "text" };
 import viewerAsset from "./viewer.generated.json" with { type: "json" };
 import { exportThemeStyles, webExportThemeVars } from "./web-palette";
@@ -16,6 +17,7 @@ import { exportThemeStyles, webExportThemeVars } from "./web-palette";
 export { type ExportThemeNames, parseExportArgs } from "./args";
 
 let cachedTemplate: string | undefined;
+const SESSION_DATA_MARKER = "{{SESSION_DATA}}";
 
 /** Create an export document with a checkout viewer or an integrity-pinned release viewer. */
 export function getTemplate(): string {
@@ -33,7 +35,9 @@ export function getTemplate(): string {
 			viewer = fs.readFileSync(viewerPath, "utf8");
 		} catch (err) {
 			if (isEnoent(err)) {
-				throw new Error(`Development export viewer not found: ${viewerPath}. Run bun gen:export-viewer.`);
+				throw new Error(
+					`Development export viewer not found: ${viewerPath}. Run bun gen:export-viewer (packages/collab-web/scripts/build-export-viewer.ts).`,
+				);
 			}
 			throw err;
 		}
@@ -204,21 +208,48 @@ async function collectExportSubSessions(sessionFile: string): Promise<Record<str
 	return subSessions;
 }
 
-/** Generate HTML from bundled template with runtime substitutions. */
-async function generateHtml(
-	sessionData: SessionData,
-	palette: "web" | "theme",
-	themeNames?: ExportThemeNames,
-	themeName?: string,
-): Promise<string> {
-	const themeStyles = palette === "theme" ? await generateThemeStyles(palette, themeNames, themeName) : "";
-	const sessionDataBase64 = Buffer.from(JSON.stringify(sessionData)).toBase64();
+/**
+ * Write the export document for `sessionData` to `outputPath`, streaming the
+ * base64 payload so no string ever holds the whole session (#17741). A failed
+ * write removes the partial file.
+ */
+async function writeExportHtml(sessionData: SessionData, outputPath: string, opts: ExportOptions): Promise<void> {
+	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
+	const themeStyles = palette === "theme" ? await generateThemeStyles(palette, opts.themeNames, opts.themeName) : "";
+	// Function replacement so `$'`, `$&`, `$$`, `$n` in the CSS are not substitution patterns.
+	const page = getTemplate().replace("<theme-vars/>", () => (themeStyles ? `<style>${themeStyles}</style>` : ""));
+	const marker = page.indexOf(SESSION_DATA_MARKER);
 
-	// Use function replacements so `$'`, `$&`, `$$`, `$n`, etc. in the
-	// substituted CSS/base64 are not interpreted as substitution patterns.
-	return getTemplate()
-		.replace("<theme-vars/>", () => (themeStyles ? `<style>${themeStyles}</style>` : ""))
-		.replace("{{SESSION_DATA}}", () => sessionDataBase64);
+	// Unlike `Bun.write`, a `FileSink` does not create missing parent directories.
+	await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+	const writer = Bun.file(outputPath).writer();
+	try {
+		writer.write(page.slice(0, marker));
+		await writeBase64Json(sessionData, writer);
+		writer.write(page.slice(marker + SESSION_DATA_MARKER.length));
+		await writer.end();
+	} catch (err) {
+		// Close the handle so the partial file can be removed; the original failure is the one to report.
+		await Promise.try(() => writer.end()).catch(() => undefined);
+		await fs.promises.rm(outputPath, { force: true });
+		throw err;
+	}
+}
+
+/** Attach sub-sessions and the trace, then write the export; returns the output path. */
+async function exportSessionData(sessionData: SessionData, sessionFile: string, opts: ExportOptions): Promise<string> {
+	if (opts.includeSubSessions !== false) {
+		const subSessions = await collectExportSubSessions(sessionFile);
+		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
+	}
+	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
+
+	// Resolve once: Bun on Windows fails to mkdir relative paths that normalize to cwd (oven-sh/bun#45059).
+	const outputPath = path.resolve(
+		opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`,
+	);
+	await writeExportHtml(sessionData, outputPath, opts);
+	return outputPath;
 }
 
 /** Export session to HTML using SessionManager and AgentState. */
@@ -232,19 +263,7 @@ export async function exportSessionToHtml(
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
 
-	const sessionData = buildSessionData(sm, state);
-	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(sessionFile);
-		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
-	}
-	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
-
-	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
-	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
-
-	await Bun.write(outputPath, html);
-	return outputPath;
+	return exportSessionData(buildSessionData(sm, state), sessionFile, opts);
 }
 
 /** Export session file to HTML (standalone). */
@@ -262,21 +281,5 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
-	};
-	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(inputPath);
-		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
-	}
-	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
-
-	const palette = opts.palette ?? (opts.themeName ? "theme" : "web");
-	const html = await generateHtml(sessionData, palette, opts.themeNames, opts.themeName);
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(inputPath, ".jsonl")}.html`;
-
-	await Bun.write(outputPath, html);
-	return outputPath;
+	return exportSessionData(buildSessionData(sm), inputPath, opts);
 }

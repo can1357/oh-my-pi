@@ -1,4 +1,4 @@
-import type { AgentStorage } from "../../../session/agent-storage";
+import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
 import { decodeBody, readBodyCapped } from "../../response-body";
@@ -18,7 +18,7 @@ import { dateToAgeSeconds } from "../utils";
  * @param storageProviders - Provider names to look up in AgentStorage
  */
 export function findCredential(
-	storage: AgentStorage | null | undefined,
+	storage: AgentStorageApi | null | undefined,
 	envKey: string | null | undefined,
 	...storageProviders: string[]
 ): string | null {
@@ -166,4 +166,18 @@ export async function readLimitedText(
 		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);
 	}
 	return decodeBody(body.bytes, response.headers.get("content-type") ?? "");
+}
+
+/**
+ * Parse a provider-supplied result URL, keeping only absolute http(s) URLs.
+ * Returns the normalized string, or `undefined` for anything else.
+ */
+export function normalizeHttpUrl(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+	} catch {
+		return undefined;
+	}
 }

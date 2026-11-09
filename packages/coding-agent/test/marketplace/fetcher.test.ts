@@ -167,6 +167,23 @@ describe("parseMarketplaceCatalog", () => {
 		expect(catalog.plugins[0].name).toBe("p1");
 	});
 
+	it("keeps bare-name sources only when metadata.pluginRoot is set", () => {
+		const plugins = [
+			{ name: "bare", source: "formatter" },
+			{ name: "nested", source: "team-a/formatter" },
+		];
+		const withRoot = parseMarketplaceCatalog(
+			JSON.stringify({ name: "m", owner: { name: "x" }, metadata: { pluginRoot: "./plugins" }, plugins }),
+			"/f.json",
+		);
+		expect(withRoot.plugins.map(plugin => plugin.name)).toEqual(["bare"]);
+		const withoutRoot = parseMarketplaceCatalog(
+			JSON.stringify({ name: "m", owner: { name: "x" }, plugins }),
+			"/f.json",
+		);
+		expect(withoutRoot.plugins).toHaveLength(0);
+	});
+
 	it("throws on invalid JSON", () => {
 		expect(() => parseMarketplaceCatalog("{not json", "/f.json")).toThrow(
 			"Failed to parse marketplace catalog at /f.json",

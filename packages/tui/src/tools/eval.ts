@@ -117,9 +117,15 @@ export interface EvalCellResult {
 export interface EvalToolDetails {
 	cells?: EvalCellResult[];
 	images?: ImageContent[];
+	/**
+	 * Call-level status events, written by older builds beside or instead of `cells`; current results
+	 * keep them on each cell only.
+	 */
 	statusEvents?: EvalStatusEvent[];
 	/** Evictable events dropped from the front of `statusEvents` (see {@link recordStatusEvent}). */
 	statusEventsElided?: number;
+	/** Text the cell's tool calls sent to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
 	isError?: boolean;
 	meta?: OutputMeta;
 	/** First backend that produced cells. Kept for transcript compatibility. */

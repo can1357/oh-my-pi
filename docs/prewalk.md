@@ -2,7 +2,7 @@
 
 Prewalk is a one-shot handoff from the active model to a faster or cheaper model after planning reaches implementation. It lets the starting model inspect the repository, create a todo list, and begin the change before the target model continues the session.
 
-Prewalk is off by default. Its default target is the model assigned to the `@smol` role. To have OMP decide per task whether a prompt is worth it, see [Auto-prewalk](#auto-prewalk).
+Prewalk is off by default. Its target is `prewalk.into`, which defaults to the model assigned to the `@smol` role. To have OMP decide per task whether a prompt is worth it, see [Auto-prewalk](#auto-prewalk).
 
 ## Enable prewalk
 
@@ -19,13 +19,21 @@ prewalk:
    enabled: true
 ```
 
+`prewalk.into` (default `@smol`) sets the handoff target, and `prewalk.from` (default `@default`) sets the planning model `/prewalk restart` returns to. Both take a model pattern or role. For example, to plan on a slower model and hand off to your default model:
+
+```yaml
+prewalk:
+   from: "@slow"
+   into: "@default"
+```
+
 The configured setting arms new sessions, not resumed/imported sessions. Explicit session flags can arm either:
 
 | Flag                             | Effect                                                                                                                                                                      |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--prewalk`                      | Arm prewalk for the new session.                                                                                                                                            |
 | `--no-prewalk`                   | Leave prewalk disabled for the startup session, even when `prewalk.enabled` is `true`, and keep [auto-prewalk](#auto-prewalk) out of it. `/new` still follows the settings. |
-| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `@smol`.                                                                                                  |
+| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `prewalk.into`.                                                                                           |
 
 For example:
 
@@ -39,7 +47,7 @@ At startup, OMP resolves the target with the normal model-role and model-matchin
 
 `--no-prewalk` cannot be combined with `--prewalk` or `--prewalk-into`. An explicit `--prewalk-into @default` resolves against the default role from before `--model` overrides it.
 
-`/new` starts a fresh cycle using `prewalk.enabled` and the current `@smol` assignment, rather than inheriting a consumed handoff or the previous todo gate. Startup flags (`--prewalk`, `--no-prewalk`, `--prewalk-into`) apply only to the startup session; `/new` always uses the configured setting. When prewalk is enabled, the new session restores the previous planning model and thinking level after a handoff unless a later selection replaced them. If the planning model can no longer be used (for example, its credentials were removed), `/new` warns and stays on the current model. Resuming an existing session does not automatically re-arm prewalk.
+`/new` starts a fresh cycle using `prewalk.enabled` and `prewalk.into`, rather than inheriting a consumed handoff or the previous todo gate. Startup flags (`--prewalk`, `--no-prewalk`, `--prewalk-into`) apply only to the startup session; `/new` always uses the configured setting. When prewalk is enabled, the new session restores the previous planning model and thinking level after a handoff unless a later selection replaced them. If the planning model can no longer be used (for example, its credentials were removed), `/new` warns and stays on the current model. Resuming an existing session does not automatically re-arm prewalk.
 
 Any model or thinking-level change made after the handoff counts as a replacement, including the switches plan mode makes on entry and exit. Automatic retry fallback, fallback restoration, and context promotion do not; if the session is back on the handoff model and thinking level when you run `/new`, it still restores the planning model.
 
@@ -58,24 +66,24 @@ The handoff is recorded in the session, so resuming it, restoring it with `--res
 ## Arm from an active session
 
 In a top-level session, changing `prewalk.enabled` live also takes effect:
-turning it on arms the current `@smol` target when none is armed; turning it off
+turning it on arms the `prewalk.into` target when none is armed; turning it off
 disarms a pending handoff. This does not control subagent prewalk.
 
 Run these slash commands without restarting OMP:
 
 ```text
-/prewalk
-/prewalk restart
+/prewalk [into]
+/prewalk restart [from] [into]
 /prewalk off
 ```
 
-`/prewalk` arms a one-shot handoff from the active model to the current `@smol` assignment.
+`/prewalk` arms a one-shot handoff from the active model to `into` (any model pattern or role; default `prewalk.into`).
 
 `/prewalk off` cancels a pending handoff and clears its planning steering without changing the active model, saved configuration, or already-delivered continuation history. It is safe to run when already off or after a handoff; it does not switch back to the planning model. Cancellation applies only to the current session: `/new` re-arms prewalk when the configured setting is enabled. It also keeps [auto-prewalk](#auto-prewalk) from arming again until `/new`.
 
-After a handoff, `/prewalk restart` immediately returns the session to the current `@default` assignment and re-arms the handoff to `@smol`. Both roles are resolved when the command runs, so the cycle is independent of concrete model names and does not alter either role's persisted configuration.
+After a handoff, `/prewalk restart` immediately returns the session to `from` and re-arms the handoff to `into`; omitted arguments use `prewalk.from` and `prewalk.into`. Arguments apply to that command only and are not remembered. Selectors are resolved when the command runs, so role reassignments take effect, and neither role's persisted configuration changes.
 
-If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` also preserves a matching arm; if its existing target differs from the current `@smol` resolution, restart is rejected before changing the active model. To choose a different target at startup, use `--prewalk-into`.
+If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` also preserves a matching arm; if its existing target differs from the requested `into`, restart is rejected before changing the active model. To choose a different target at startup, use `--prewalk-into`.
 
 ## Auto-prewalk
 

@@ -182,6 +182,11 @@ function createSettingsTextField(
 	});
 }
 
+/** An enum setting's values as choices, each labelled by its value. */
+function enumOptions(def: SettingDef & { type: "enum" }): SelectItem[] {
+	return def.values.map(value => ({ value, label: value }));
+}
+
 /**
  * Single-choice setting field backed by the shared select form field.
  * Preserves the current selection, live async previews, footer previews,
@@ -925,7 +930,7 @@ export class SettingsSelectorComponent implements Component {
 			case "boolean":
 				return { k: "switch", on: value === true };
 			case "enum":
-				return { k: "choice", value: shown, options: def.values.map(v => ({ value: v, label: v })) };
+				return { k: "choice", value: shown, options: enumOptions(def) };
 			case "submenu": {
 				const labels = numberSteps(def);
 				if (labels) {
@@ -1071,7 +1076,10 @@ export class SettingsSelectorComponent implements Component {
 				if (typeof value === "boolean") list.applyValue(id, String(value));
 				return;
 			case "enum":
-				if (typeof value === "string") list.applyValue(id, value);
+				if (typeof value !== "string") return;
+				// A pick from the row's open menu closes it.
+				if (list.openSubmenu?.id === id) list.handleInput(ESCAPE);
+				list.applyValue(id, value);
 				return;
 			case "submenu": {
 				const choice =
@@ -1487,7 +1495,13 @@ export class SettingsSelectorComponent implements Component {
 				return { ...item, currentValue: currentValue ? "true" : "false", values: ["true", "false"] };
 
 			case "enum":
-				return { ...item, currentValue: String(currentValue ?? ""), values: [...def.values] };
+				return {
+					...item,
+					currentValue: String(currentValue ?? ""),
+					values: [...def.values],
+					menu: (cv, done) =>
+						createSettingsSelectField(def.label, def.description, enumOptions(def), cv, done, () => done()),
+				};
 
 			case "submenu":
 				return {

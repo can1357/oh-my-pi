@@ -80,9 +80,9 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - `pkg[a,b]` -> enable named features
 - `@scope/pkg@1.2.3[feat]` -> scoped + versioned package with explicit feature selection
 
-`PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
+`PluginManager.install` also accepts git sources (validated by `validateGitSpec` instead of the npm regex): namespaced shorthands `github:user/repo[#ref]`, `gitlab:`, `bitbucket:`, `codeberg:`, `sourcehut:`/`srht:`, pi-style `git:github.com/user/repo` and `git:git@github.com:user/repo`, and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, `ssh://…`, `git+https://…`). Git specs do not encode the package name, so install diffs `plugins/package.json#dependencies` before/after `bun install` to resolve it.
 
-Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball); GitHub specs are forwarded unchanged. Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from those `git+` specs: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
+Pi-style `git:` GitHub sources are normalized to HTTPS or SSH URLs before calling bun, which otherwise treats `git` as the host. Other GitHub specs are forwarded unchanged. Non-GitHub `https://`/`ssh://` specs are passed to bun with a `git+` prefix (bun only auto-detects git for GitHub-hosted URLs, so without it the spec is misread as an npm tarball). Inline userinfo credentials (`https://user:token@host/group/repo.git`) are stripped from those `git+` specs: `bun install` persists the spec verbatim into `plugins/package.json` and `bun.lock`, and a long-lived repository token must not land in those user files. Private repositories authenticate via SSH, a git credential helper, or `.netrc` instead — bun honors all of them natively.
 
 `extractPackageName` strips an optional `npm:` prefix and version suffix for on-disk path lookup after install.
 
@@ -208,7 +208,7 @@ Manifest entries may point to a file. Tool/hook/command directories require a di
 ## Current runtime wiring
 
 - Manifest-declared **tools** feed `discoverAndLoadCustomTools` through `getAllPluginToolPaths(cwd)`.
-- Manifest-declared **extensions** feed `discoverAndLoadExtensions` through `getAllPluginExtensionPaths(cwd)`.
+- Manifest-declared **extensions** feed `discoverAndLoadExtensions` through `listPackageExtensionModules()` (which `/extensions` also lists).
 - The `omp-plugins` capability provider separately scans conventional `skills/`, `hooks/pre|post/`, `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json`/`mcp.json` under enabled npm/link plugin roots. Task-agent discovery scans the same roots' `agents/`. Marketplace roots are excluded there and handled through `claude-plugins` plus marketplace task-agent discovery instead.
 - Packages whose root `plugin.json` targets Agent Plugins 1.0.0 use `agent-plugins` for portable `skills/` and root `mcp.json`, from both marketplace and extension-package roots. Legacy providers skip those two surfaces but can still load client-specific content from hybrid packages; fatally invalid standard manifests suppress legacy discovery.
 - Manifest hook/command path resolvers remain exported, but runtime hook/slash discovery uses the conventional capability-provider scans rather than `getAllPluginHookPaths()` or `getAllPluginCommandPaths()`.

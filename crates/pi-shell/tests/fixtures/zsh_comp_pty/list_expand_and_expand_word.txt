@@ -1,0 +1,8 @@
+### "echo f*\u{18}g"
+% echo f*
+file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{18}*"
+% echo file1 file2 foo.c foo.h
+file1  file2  foo.c  foo.h
+@ 0,31
