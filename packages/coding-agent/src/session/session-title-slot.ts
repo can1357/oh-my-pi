@@ -125,7 +125,7 @@ export function latestTitleChangeFromContent(content: string): SessionTitleUpdat
 		const { values, error, read, done } = Bun.JSONL.parseChunk(content.slice(start, end));
 		for (const entry of values as TitleChangeEntry[]) {
 			if (entry?.type === "title_change") {
-				latest = { title: entry.title, source: entry.source, updatedAt: entry.timestamp };
+				latest = { title: entry.title || undefined, source: entry.source, updatedAt: entry.timestamp };
 			}
 		}
 		if (error) {

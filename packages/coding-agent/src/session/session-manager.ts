@@ -127,7 +127,7 @@ import {
 	type SessionStorageWriter,
 	SessionWriteConflictError,
 } from "./session-storage";
-import { serializeTitleSlot } from "./session-title-slot";
+import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -1354,12 +1354,14 @@ export class SessionManager {
 	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number, beforeTitleId?: string): void {
 		const leaf = this.#index.leafId();
 		let adopted = 0;
+		let adoptedTitle = false;
 		for (const entry of foreign) {
 			// A recovery that raced this one may already have kept it.
 			if (this.#index.has(entry.id)) continue;
 			this.#entries.push(entry);
 			this.#index.insert(entry);
 			adopted++;
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) adoptedTitle = true;
 		}
 		if (beforeTitleId && adopted > 0) {
 			this.#index.moveForeignBefore(this.#entries, beforeTitleId, adopted);
@@ -1369,14 +1371,11 @@ export class SessionManager {
 				adopted,
 			);
 		}
-		const title = this.#latestTitleChange();
-		if (title) {
-			this.#sessionName = title.title;
-			this.#titleSource = title.source;
-			this.#titleUpdatedAt = title.timestamp;
-			this.#header.title = title.title;
-			this.#header.titleSource = title.source;
-		}
+		// Another writer's rename becomes this session's title, unless a local one not yet on disk follows it. With
+		// no rename adopted the title stays as loaded: it can be an indexed backend's metadata title, newer than
+		// every journal title.
+		const title = adoptedTitle ? this.#latestTitleChange() : undefined;
+		if (title) this.#applyJournalTitle(title);
 		this.#index.setLeaf(leaf);
 		this.#expectedDiskSize = diskSize;
 		if (adopted > 0)
@@ -1867,7 +1866,7 @@ export class SessionManager {
 		const body = this.#serializeBody();
 		const options = {
 			expectedSize: this.#expectedDiskSize,
-			slotTitleIsCurrent: true,
+			currentTitle: this.#currentTitle(),
 			commitGuard: () => this.#isCurrentWriterState(writerStateGen, target) && (commitGuard?.() ?? true),
 		};
 		try {
@@ -2023,12 +2022,53 @@ export class SessionManager {
 			});
 	}
 
-	#titleSlotLine(): string {
-		return serializeTitleSlot({
+	/** Take a journal title change as this session's title: `""` is a cleared title, and a missing source unknown. */
+	#applyJournalTitle(title: TitleChangeEntry): void {
+		this.#sessionName = title.title || undefined;
+		this.#titleSource = title.source;
+		this.#titleUpdatedAt = title.timestamp;
+		this.#header.title = this.#sessionName;
+		this.#header.titleSource = title.source;
+	}
+
+	/**
+	 * The title change a copy holding `entries` needs, so a reload, which folds the newest journal title over the
+	 * header, lands on this session's title: `undefined` when the copy has no journal title or its newest matches.
+	 * It records a cleared title as `""` and leaves an unknown source out.
+	 */
+	#titleCorrection(
+		entries: readonly SessionEntry[],
+		parentId: string | null,
+		timestamp: string,
+	): TitleChangeEntry | undefined {
+		const newest = entries.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
+		if (newest?.type !== TITLE_CHANGE_ENTRY_TYPE) return undefined;
+		const title = this.#sessionName ?? "";
+		if (newest.title === title && newest.source === this.#titleSource) return undefined;
+		const entry: TitleChangeEntry = {
+			type: TITLE_CHANGE_ENTRY_TYPE,
+			id: generateId(new Set(entries.map(candidate => candidate.id))),
+			parentId,
+			timestamp,
+			runtime: currentRuntimeIdentity(),
+			title,
+		};
+		if (newest.title) entry.previousTitle = newest.title;
+		if (this.#titleSource) entry.source = this.#titleSource;
+		return entry;
+	}
+
+	/** This session's complete title state, which the slot holds truncated. */
+	#currentTitle(): SessionTitleUpdate {
+		return {
 			title: this.#sessionName,
 			source: this.#titleSource,
 			updatedAt: this.#titleUpdatedAt || this.#header.timestamp,
-		});
+		};
+	}
+
+	#titleSlotLine(): string {
+		return serializeTitleSlot(this.#currentTitle());
 	}
 
 	/** Serialize the whole file — title slot, header, entries — as lines, stamped with the state they came from. */
@@ -2151,7 +2191,7 @@ export class SessionManager {
 			this.#closeWriterEventually();
 			for (let recoveries = 0; ; recoveries++) {
 				try {
-					const options = { expectedSize: this.#expectedDiskSize, slotTitleIsCurrent: true };
+					const options = { expectedSize: this.#expectedDiskSize, currentTitle: this.#currentTitle() };
 					if (this.#storage.writeLinesSync) this.#storage.writeLinesSync(targetPath, body.lines, options);
 					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
 					break;
@@ -2301,7 +2341,7 @@ export class SessionManager {
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
-					slotTitleIsCurrent: true,
+					currentTitle: this.#currentTitle(),
 					commitGuard: () =>
 						!this.#released &&
 						this.#diskEpoch === epoch &&
@@ -3375,7 +3415,12 @@ export class SessionManager {
 			manager.#header.additionalDirectories =
 				manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
 			manager.#entries = structuredClone(this.#entries);
-			manager.#prospectiveDiskSize = this.#persist ? this.#prospectiveDiskSize : this.#estimateBodyBytes();
+			// A reload folds the newest journal title over the header, so journal the copied title after the others.
+			const titleEntry = this.#titleCorrection(manager.#entries, this.#index.leafId(), nowIso());
+			if (titleEntry) manager.#entries.push(titleEntry);
+			manager.#prospectiveDiskSize =
+				(this.#persist ? this.#prospectiveDiskSize : this.#estimateBodyBytes()) +
+				(titleEntry ? estimateJsonBytes(titleEntry) + 1 : 0);
 			manager.#index.rebuild(manager.#entries);
 			manager.#forceFileCreation = true;
 			await manager.#rewriteAtomically();
@@ -4226,6 +4271,8 @@ export class SessionManager {
 	 * `id`/`parentId`. Used by collab guests to mirror the host session.
 	 */
 	ingestReplicatedEntry(entry: SessionEntry): void {
+		// A host rename is this session's title too: take it before recording, so whole-body writes carry it.
+		if (entry.type === TITLE_CHANGE_ENTRY_TYPE && !this.#released) this.#applyJournalTitle(entry);
 		this.#recordEntry(entry);
 	}
 
@@ -4869,29 +4916,9 @@ export class SessionManager {
 		}
 
 		const keptEntries = [...entriesToKeep, ...labels];
-		// The title is session-wide, but the kept path can end before a later rename. Journal the title the
-		// header carries after it, so the newest title change a reload folds over the header is that one. A
-		// title without a source, or a cleared one, only comes from an indexed backend's metadata: there the
-		// body's slot is indexed as current when written, and resume applies that authority over the journal.
-		const keptTitle = entriesToKeep.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
-		if (
-			keptTitle?.type === TITLE_CHANGE_ENTRY_TYPE &&
-			this.#sessionName &&
-			this.#titleSource &&
-			(keptTitle.title !== this.#sessionName || keptTitle.source !== this.#titleSource)
-		) {
-			const titleEntry: TitleChangeEntry = {
-				type: TITLE_CHANGE_ENTRY_TYPE,
-				id: generateId(new Set(keptEntries.map(entry => entry.id))),
-				parentId,
-				timestamp,
-				runtime: currentRuntimeIdentity(),
-				title: this.#sessionName,
-				previousTitle: keptTitle.title,
-				source: this.#titleSource,
-			};
-			keptEntries.push(titleEntry);
-		}
+		// The title is session-wide, but the kept path can end before a later rename.
+		const titleEntry = this.#titleCorrection(keptEntries, parentId, timestamp);
+		if (titleEntry) keptEntries.push(titleEntry);
 		const branchSize = this.#estimateBodyBytes(header, keptEntries);
 		if (this.#persist) this.#assertRoomForRewrite(newSessionFile, branchSize);
 

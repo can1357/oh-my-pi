@@ -102,11 +102,11 @@ export interface SessionStorageWriteOptions {
 	/** Current UTF-8 byte length, or `null` when the target must not exist. */
 	expectedSize?: number | null;
 	/**
-	 * The writer serialized its current title, source and update time into the body's title slot. Indexed
-	 * backends index that rather than the body's newest journal title, which can predate a metadata-only
-	 * title the writer loaded. A slot left by another writer can be stale, so it is otherwise not preferred.
+	 * The writer's current title for this body, complete (the slot holds it truncated). Indexed backends index it
+	 * rather than the body's newest journal title, which can predate a metadata-only title the writer loaded.
+	 * Without it the journal outranks the slot, which another writer can have left stale.
 	 */
-	slotTitleIsCurrent?: boolean;
+	currentTitle?: SessionTitleUpdate;
 }
 
 /**

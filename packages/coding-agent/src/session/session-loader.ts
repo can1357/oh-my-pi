@@ -168,7 +168,7 @@ function applySessionTitle(entry: FileEntry | undefined, slot: SessionTitleUpdat
 
 function titleUpdateFromEntry(entry: FileEntry): SessionTitleUpdate | undefined {
 	if (entry?.type !== "title_change") return undefined;
-	return { title: entry.title, source: entry.source, updatedAt: entry.timestamp };
+	return { title: entry.title || undefined, source: entry.source, updatedAt: entry.timestamp };
 }
 
 /** Parse session JSONL, folding journal title changes over the optional fixed title slot. */

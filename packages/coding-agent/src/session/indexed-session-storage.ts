@@ -134,13 +134,13 @@ function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined 
 }
 
 /**
- * The title a full body carries: its newest journal title over the slot, unless the writer marks the slot
- * current. A current slot with no title is a cleared title, indexed without one rather than as "".
+ * The title a full body carries: the writer's current title when it gives one, else the newest journal title over
+ * the slot. A current title without a title is a cleared one, indexed without a title rather than as "".
  */
 function bodyTitle(content: string, options?: SessionStorageWriteOptions): SessionTitleUpdate | undefined {
-	const slot = titleUpdateFromSlot(parseTitleSlotFromContent(content));
-	if (options?.slotTitleIsCurrent && slot) return { ...slot, title: slot.title || undefined };
-	return latestTitleChangeFromContent(content) ?? slot;
+	const current = options?.currentTitle;
+	if (current) return { ...current, title: current.title || undefined };
+	return latestTitleChangeFromContent(content) ?? titleUpdateFromSlot(parseTitleSlotFromContent(content));
 }
 
 export class IndexedSessionStorage implements SessionStorage {

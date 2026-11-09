@@ -85,11 +85,12 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
+/** `title` is `""` for a cleared title and `source` is absent when unknown (see the coding agent's entry). */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: "title_change";
 	title: string;
 	previousTitle?: string;
-	source: "auto" | "user";
+	source?: "auto" | "user";
 	trigger?: string;
 }
 

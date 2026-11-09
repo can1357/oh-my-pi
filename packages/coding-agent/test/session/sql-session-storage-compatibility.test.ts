@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { SQL } from "bun";
 import { listSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import {
 	SqlSessionStorage,
@@ -10,6 +10,7 @@ import {
 	type SqlSessionStorageClient,
 	type SqlSessionStorageResult,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface CapturedQuery {
 	sql: string;
@@ -456,5 +457,128 @@ describe("SqlSessionStorage optional authority dialect contracts", () => {
 				expect(queries).toHaveLength(1);
 			});
 		}
+	}
+});
+
+describe("SqlSessionStorage titles through SessionManager writes", () => {
+	const JOURNAL_BODY =
+		serializeTitleSlot({ title: "Older journal", source: "auto", updatedAt: "2026-01-01T00:00:00.000Z" }) +
+		'{"type":"session","id":"manager-writes","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo"}\n' +
+		'{"type":"title_change","id":"older","parentId":null,"title":"Older journal","source":"auto","timestamp":"2026-01-01T00:00:00.000Z"}\n' +
+		'{"type":"message","id":"branch-point","parentId":"older","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hello","timestamp":1}}\n';
+	const titleOf = (session: SessionManager) => ({ title: session.getSessionName(), source: session.titleSource });
+
+	async function withSession(
+		file: string,
+		prepare: (storage: SqlSessionStorage) => Promise<void>,
+		run: (
+			session: SessionManager,
+			storage: SqlSessionStorage,
+			reopen: () => Promise<SessionManager>,
+		) => Promise<void>,
+	): Promise<void> {
+		const client = new SQL("sqlite::memory:");
+		const opened: SessionManager[] = [];
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			await storage.writeText(file, JOURNAL_BODY);
+			await prepare(storage);
+			const reopen = async () => {
+				const session = await SessionManager.open(file, undefined, storage, { suppressBreadcrumb: true });
+				opened.push(session);
+				return session;
+			};
+			await run(await reopen(), storage, reopen);
+		} finally {
+			for (const session of opened.reverse()) await session.close();
+			await client.end();
+		}
+	}
+
+	for (const metadataOnly of [false, true]) {
+		it(`indexes a title longer than the slot in full across a rewrite (${metadataOnly ? "metadata-only" : "journaled"})`, async () => {
+			const long = "A long session title ".repeat(30).trim();
+			await withSession(
+				"/sessions/w/long.jsonl",
+				async storage => {
+					if (metadataOnly)
+						await storage.updateSessionTitle("/sessions/w/long.jsonl", { title: long, updatedAt: "x" });
+				},
+				async (session, storage, reopen) => {
+					if (!metadataOnly) await session.setSessionName(long, "user");
+					await session.setTaskPromptCacheKey("rewrite");
+					expect((await storage.readLatestTitle("/sessions/w/long.jsonl"))?.title).toBe(long);
+					expect((await reopen()).getSessionName()).toBe(long);
+				},
+			);
+		});
+	}
+
+	it("keeps a replicated host title across the guest's rewrite", async () => {
+		await withSession(
+			"/sessions/w/replicated.jsonl",
+			async () => {},
+			async (session, _storage, reopen) => {
+				session.ingestReplicatedEntry({
+					type: "title_change",
+					id: "host-title",
+					parentId: "branch-point",
+					timestamp: "2026-02-01T00:00:00.000Z",
+					title: "Host title",
+					source: "user",
+				});
+				expect(titleOf(session)).toEqual({ title: "Host title", source: "user" });
+				await session.setTaskPromptCacheKey("rewrite");
+				expect(titleOf(await reopen())).toEqual({ title: "Host title", source: "user" });
+			},
+		);
+	});
+
+	for (const authority of [DIRECT_TITLE, { title: undefined, source: "user" as const, updatedAt: "clear" }]) {
+		const label = authority.title ?? "cleared";
+		it(`keeps a metadata title (${label}) when a rewrite adopts another writer's non-title entry`, async () => {
+			const file = `/sessions/w/adopt-${label}.jsonl`;
+			await withSession(
+				file,
+				storage => storage.updateSessionTitle(file, authority),
+				async (session, _storage, reopen) => {
+					const clone = session.cloneCurrentSession({ persist: true });
+					try {
+						session.appendCustomEntry("other-writer", { note: "kept" });
+						await session.flush();
+						await clone.setTaskPromptCacheKey("conflicting rewrite");
+						expect(clone.getEntries().some(entry => entry.type === "custom")).toBe(true);
+						expect(titleOf(clone)).toEqual({ title: authority.title, source: authority.source });
+						expect(titleOf(await reopen())).toEqual({ title: authority.title, source: authority.source });
+					} finally {
+						await clone.close();
+					}
+				},
+			);
+		});
+
+		it(`copies a metadata title (${label}) to file storage, past the older journal title`, async () => {
+			const file = `/sessions/w/copy-${label}.jsonl`;
+			using dir = TempDir.createSync("@omp-sql-title-copy-");
+			await withSession(
+				file,
+				storage => storage.updateSessionTitle(file, authority),
+				async session => {
+					const copy = await session.persistCopy(
+						{ sessionDir: dir.path(), suppressBreadcrumb: true },
+						new FileSessionStorage(),
+					);
+					await copy.close();
+					const reopened = await SessionManager.open(copy.getSessionFile()!, undefined, undefined, {
+						suppressBreadcrumb: true,
+					});
+					try {
+						expect(titleOf(reopened)).toEqual({ title: authority.title, source: authority.source });
+					} finally {
+						await reopened.close();
+					}
+				},
+			);
+		});
 	}
 });

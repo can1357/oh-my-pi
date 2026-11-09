@@ -233,12 +233,15 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
-/** Append-only audit entry recording a session title change. */
+/**
+ * Append-only audit entry recording a session title change. `title` is `""` for a cleared title and `source` is
+ * absent when it is unknown; both only occur when a copy records a title that came from an indexed backend's metadata.
+ */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: typeof TITLE_CHANGE_ENTRY_TYPE;
 	title: string;
 	previousTitle?: string;
-	source: SessionTitleSource;
+	source?: SessionTitleSource;
 	trigger?: string;
 }
 
