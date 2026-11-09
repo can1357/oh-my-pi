@@ -147,6 +147,7 @@ fn reports() -> (Vec<Lost>, Vec<Lost>, Vec<Lost>) {
 	let (mut recovered, recovery) =
 		Shell::restore(&engine, &mut Cx { host, store: &mut recovery_store }, RestoreOpts {
 			drop_frames: true,
+			..Default::default()
 		})
 		.unwrap();
 	assert_eq!(recovery.vprocs, 0, "explicit recovery does not rebuild frames");

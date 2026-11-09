@@ -801,6 +801,18 @@ fn cached(term: &[u8], env: &TermEnv<'_>, tgetent: bool) -> Option<Arc<TermInfo>
 	found
 }
 
+/// ncurses 6.4's compiled `xterm-256color` entry, the description of a
+/// Windows console ([`find`]).
+const WINDOWS_CONSOLE_ENTRY: &[u8] = include_bytes!("terminfo/xterm-256color");
+
+/// A terminal name of the xterm family (`xterm`, `xterm-256color`,
+/// `xterm-kitty`, …, and the multiplexers that emulate it).
+fn is_xterm_family(term: &[u8]) -> bool {
+	[&b"xterm"[..], b"screen", b"tmux", b"ms-terminal", b"vt100", b"vt220"]
+		.iter()
+		.any(|p| term.starts_with(p))
+}
+
 /// The uncached search behind [`load`] (`tgetent`) and [`load_raw`].
 fn find(term: &[u8], env: &TermEnv<'_>, tgetent: bool) -> Option<TermInfo> {
 	if term.is_empty()
@@ -813,7 +825,16 @@ fn find(term: &[u8], env: &TermEnv<'_>, tgetent: bool) -> Option<TermInfo> {
 	{
 		return None;
 	}
-	let mut info = search_dirs(env).iter().find_map(|d| read_from(d, term))?;
+	let mut info = match search_dirs(env).iter().find_map(|d| read_from(d, term)) {
+		Some(info) => info,
+		// Windows has no terminfo database, and every console there takes
+		// xterm's escape sequences (virtual-terminal processing): a name of
+		// the xterm family (what the shell sets, and what terminals that
+		// emulate it export) reads as ncurses' `xterm-256color`. Any other
+		// name (`dumb`, a typo) stays unknown, as without its entry.
+		None if cfg!(windows) && is_xterm_family(term) => parse(WINDOWS_CONSOLE_ENTRY)?,
+		None => return None,
+	};
 	// `_nc_setupterm` refuses a generic type unless it can address the
 	// cursor and clear the screen.
 	if info.flag("gn")
@@ -1732,6 +1753,15 @@ mod tests {
 
 	const SETAF: &[u8] = b"\x1b[%?%p1%{8}%<%t3%p1%d%e%p1%{16}%<%t9%p1%{8}%-%d%e38;5;%p1%d%;m";
 	const SGR: &[u8] = b"%?%p9%t\x1b(0%e\x1b(B%;\x1b[0%?%p6%t;1%;%?%p5%t;2%;%?%p2%t;4%;%?%p1%p3%|%t;7%;%?%p4%t;5%;%?%p7%t;8%;m";
+
+	/// Without a database (Windows) ZLE had no cursor motion and left every
+	/// edit on screen: the embedded entry must parse with what it needs.
+	#[test]
+	fn embedded_console_entry_has_cursor_motion() {
+		let info = parse(WINDOWS_CONSOLE_ENTRY).expect("parses");
+		assert_eq!(info.s("cub1"), Some(&b"\x08"[..]));
+		assert!(info.s("cup").is_some() && info.s("el").is_some());
+	}
 
 	#[test]
 	fn tparm_xterm_caps() {

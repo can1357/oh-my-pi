@@ -20,6 +20,8 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
 5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
 
+`OTEL_*` entries in the agent, config-root and home `.env` files are not part of `$env`: omp's telemetry reads them privately (see [OpenTelemetry export](#11-opentelemetry-export)). Their precedence among themselves, and below a shell export or project `.env`, is unchanged.
+
 The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Whole dotenv files are parsed with Bun's `node:util.parseEnv`, including quoted multiline values, escaped newlines, and inline comments. Names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. Variable references remain literal in this parser; only Bun's launch-directory dotenv autoload performs variable expansion before this module runs. Child-shell filtering uses the same parser to identify project dotenv values across `.env`, `.env.<NODE_ENV>` (default `development`), `.env.local`, and `.env.<NODE_ENV>.local`. It removes project-dotenv credentials from shell subprocesses while preserving launcher-owned variables; Linux's original exec environment provides the authoritative launch snapshot, with best-effort value matching elsewhere.
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
@@ -123,6 +125,8 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `SINGULARITYAPI_DEV_API_KEY`          | SingularityAPI universal gateway auth              | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`                                                     |
 | `SINGULARITYAPI_TECH_API_KEY`         | SingularityAPI reserved lanes auth                 | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models`                                                  |
 | `SCW_SECRET_KEY`                      | Scaleway Generative APIs auth                      | Using `scaleway` provider                                      | Serverless open-weight chat models; validated against `https://api.scaleway.ai/v1/models`; `SCW_API_KEY` is accepted as a legacy alias       |
+| `OTARI_API_KEY`                       | Otari gateway auth                                 | Using `otari` provider                                         | Workspace key; validated against `${OTARI_BASE_URL:-https://api.otari.ai/api/v1}/models` |
+| `OTARI_BASE_URL`                      | Otari self-hosted API root                         | Using `otari` provider                                         | Self-hosted deployment's API root including its prefix (`https://host.example.com/api/v1`); used by `/login otari` validation, model discovery, and requests |
 
 ### GitHub/Copilot tokens
 
@@ -226,11 +230,12 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
    - a filesystem path to PEM content, or
    - inline PEM (including escaped `\n` sequences).
 
-   `NODE_EXTRA_CA_CERTS` is honoured for every provider fetch (OpenAI-compatible,
-   Codex, Ollama, Azure Responses, Google, Anthropic), not just Foundry — Bun's
-   `fetch` does not consume the env var natively, so the bundle is merged into
-   `RequestInit.tls.ca` alongside the system root store. The `CLAUDE_CODE_*` mTLS
-   material remains Anthropic-Foundry-specific.
+   `NODE_EXTRA_CA_CERTS` is honoured for provider fetches (OpenAI-compatible,
+   Codex, Ollama, Azure Responses, Google, Anthropic) and remote MCP HTTP/SSE
+   transports. Bun's `fetch` does not consume the env var natively, so the
+   bundle is merged into `RequestInit.tls.ca` alongside the system root store,
+   including when loaded from the agent `.env` after process startup. The
+   `CLAUDE_CODE_*` mTLS material remains Anthropic-Foundry-specific.
 
 | Variable                                 | Value type                                     | Behavior                                                                                                                                                                                              |
 | ---------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -726,6 +731,8 @@ OMP initializes OTLP export only when at least one signal has an endpoint. Set `
 | `OTEL_EXPORTER_OTLP_PROTOCOL` and per-signal `..._PROTOCOL` variants                                            | Only `http/protobuf` is enabled by this runtime; another explicit protocol disables that signal |
 | `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`                                                                 | OpenTelemetry resource metadata                                                                 |
 | `OTEL_LOG_LEVEL`                                                                                                | Minimum exported OMP log level                                                                  |
+
+`OTEL_*` entries in OMP's own `.env` files (agent dir, config root, home `.env`) configure OMP's exporter only. OMP keeps them in a private map instead of `Bun.env`/`process.env`, so they are absent from the process environment of the programs omp launches (bash and PTY commands, subagent shells, JS eval and tab workers, LSP/DAP/MCP servers, installers) and from `process.env` seen by extensions and hooks. This is isolation from inheritance, not confidentiality: the files remain readable on disk, and in-process code that imports `$otelEnv` from `@oh-my-pi/pi-utils` can read the values. While omp constructs its OpenTelemetry exporters at startup, the values are placed in `process.env` for the duration of that synchronous step only. A variable exported in the launching shell wins over the file and stays visible to children, and the project `.env` is unchanged. One limitation: when omp starts in a directory whose `.env` is itself one of omp's own files (for example `$HOME`), that file is applied to the environment before omp's loader runs (by Bun's dotenv autoload, or by omp's own loader when autoload is off), so its values are treated like project `.env` values and stay visible; start omp from a project directory, or keep `OTEL_*` in the agent-dir file (`~/.omp/agent/.env`), which Bun does not auto-load unless that directory is the working directory. Because these values are not in `process.env`, secret masking, which collects secrets from `process.env`, does not see a credential embedded in such a value, such as the password in `scheme://user:pass@host`. An extension that needs its own OpenTelemetry configuration should get it from the shell environment. A child `omp` process re-reads the same files and exports with its own configuration.
 
 Header values are percent-decoded, so encode spaces and the `,`/`=` delimiters:
 

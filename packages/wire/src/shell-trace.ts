@@ -6,6 +6,13 @@
  * when the script is not ASCII. Fields at their default are omitted.
  */
 
+/**
+ * Bytes a run produced (expansions, assignments, eval bodies, diagnostics):
+ * a string when they are UTF-8, else the raw byte values. Nothing is replaced,
+ * so values and byte offsets stay exactly what the engine recorded.
+ */
+export type ShellTraceBytes = string | number[];
+
 /** NodeKind of the engine's AST, snake_case. `assign` and `word` are not statements. */
 export type ShellTraceNodeKind =
 	| "and_or"
@@ -45,12 +52,12 @@ export type ShellTraceState = "pending" | "running" | "ok" | "fail" | "skipped";
 export interface ShellTraceRedir {
 	fd: number;
 	op: string;
-	target: string;
+	target: ShellTraceBytes;
 }
 
 export interface ShellTraceDiag {
 	code: string;
-	message: string;
+	message: ShellTraceBytes;
 }
 
 /** One AST node of a unit; the unit's `nodes` index is the AstNodeId. */
@@ -75,11 +82,11 @@ export interface ShellTraceNode {
 	/** `t_ns` of the last CmdStart, relative to RunStart. */
 	at?: number;
 	/** Last CmdExpanded argv (each arg ≤ 256 bytes, ≤ 64 args). */
-	argv?: string[];
+	argv?: ShellTraceBytes[];
 	/** The full argv length when `argv` was cut. */
 	argc?: number;
 	/** Last CmdExpanded assigns. */
-	env?: [string, string][];
+	env?: [ShellTraceBytes, ShellTraceBytes][];
 	res?: ShellTraceResolved;
 	redirs?: ShellTraceRedir[];
 	/** Pipestatus of the last CmdEnd. */
@@ -107,8 +114,8 @@ export interface ShellTraceUnit {
 	line: number;
 	/** Exact UTF-8 source byte length, including heredocs; absent in older traces. */
 	bytes?: number;
-	/** The unit's source; present only for unlocated units. */
-	source?: string;
+	/** The unit's source; present only for unlocated units (an eval or function body). */
+	source?: ShellTraceBytes;
 	/** Opaque canonical native syntax archive. Only pi-shell may interpret it. */
 	syntax?: unknown;
 	/** Compiler-known wrapper bytes removed from this unit's displayed source. */
@@ -181,19 +188,20 @@ export interface ShellTraceHistoryEvent {
 	status?: number;
 	dur_ns?: number;
 	pipestatus?: number[];
-	argv?: string[];
-	assigns?: [string, string][];
+	argv?: ShellTraceBytes[];
+	assigns?: [ShellTraceBytes, ShellTraceBytes][];
 	resolved?: ShellTraceResolved;
 	redirs?: ShellTraceRedir[];
-	name?: string;
-	value?: string;
+	name?: ShellTraceBytes;
+	value?: ShellTraceBytes;
 	full_len?: number;
 	scope?: string;
 	iteration?: number;
 	iterations?: number;
 	taken?: boolean;
 	construct?: string;
-	text?: string;
+	/** `Output` text is always a string (undecodable bytes arrive as U+FFFD); `Diag` text is run bytes. */
+	text?: ShellTraceBytes;
 	contributors?: ShellTraceOutputContributor[];
 	/** Final visible capture descriptor; merged stderr uses stdout's descriptor. */
 	fd?: number;
@@ -232,21 +240,29 @@ function finite(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
-function strings(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item: unknown) => typeof item === "string");
+function byteValues(value: unknown): value is number[] {
+	return (
+		Array.isArray(value) &&
+		value.every((byte: unknown) => finite(byte) && Number.isInteger(byte) && byte >= 0 && byte <= 255)
+	);
+}
+
+function bytes(value: unknown): value is ShellTraceBytes {
+	return typeof value === "string" || byteValues(value);
+}
+
+function byteList(value: unknown): value is ShellTraceBytes[] {
+	return Array.isArray(value) && value.every(bytes);
 }
 
 function numbers(value: unknown): value is number[] {
 	return Array.isArray(value) && value.every(finite);
 }
 
-function pairs(value: unknown): value is [string, string][] {
+function bytePairs(value: unknown): value is [ShellTraceBytes, ShellTraceBytes][] {
 	return (
 		Array.isArray(value) &&
-		value.every(
-			(item: unknown) =>
-				Array.isArray(item) && item.length === 2 && typeof item[0] === "string" && typeof item[1] === "string",
-		)
+		value.every((item: unknown) => Array.isArray(item) && item.length === 2 && bytes(item[0]) && bytes(item[1]))
 	);
 }
 
@@ -277,7 +293,7 @@ function resolved(value: unknown): value is ShellTraceResolved {
 }
 
 function redirection(value: unknown): value is ShellTraceRedir {
-	return record(value) && finite(value.fd) && string(value.op) && string(value.target);
+	return record(value) && finite(value.fd) && string(value.op) && bytes(value.target);
 }
 
 function redirections(value: unknown): value is ShellTraceRedir[] {
@@ -322,8 +338,8 @@ function traceNode(value: unknown): value is ShellTraceNode {
 		if (!optional(value, key, finite)) return false;
 	}
 	return (
-		optional(value, "argv", strings) &&
-		optional(value, "env", pairs) &&
+		optional(value, "argv", byteList) &&
+		optional(value, "env", bytePairs) &&
 		optional(value, "res", resolved) &&
 		optional(value, "redirs", redirections) &&
 		optional(value, "pipe", numbers) &&
@@ -338,7 +354,7 @@ function traceUnit(value: unknown): value is ShellTraceUnit {
 		finite(value.line) &&
 		optional(value, "at", finite) &&
 		optional(value, "bytes", finite) &&
-		optional(value, "source", string) &&
+		optional(value, "source", bytes) &&
 		optional(value, "callout", boolean) &&
 		Array.isArray(value.nodes) &&
 		value.nodes.every(traceNode)
@@ -353,8 +369,7 @@ function outputContributor(value: unknown): value is ShellTraceOutputContributor
 	return (
 		record(value) &&
 		finite(value.t_ns) &&
-		Array.isArray(value.bytes) &&
-		value.bytes.every((byte: unknown) => finite(byte) && Number.isInteger(byte) && byte >= 0 && byte <= 255) &&
+		byteValues(value.bytes) &&
 		optional(value, "u", finite) &&
 		optional(value, "n", finite) &&
 		optional(value, "vpid", finite) &&
@@ -405,12 +420,15 @@ function historyEntry(value: unknown): value is ShellTraceHistoryEvent {
 	]) {
 		if (!optional(value, key, finite)) return false;
 	}
-	for (const key of ["name", "value", "scope", "construct", "text"]) {
+	for (const key of ["name", "value", "text"]) {
+		if (!optional(value, key, bytes)) return false;
+	}
+	for (const key of ["scope", "construct"]) {
 		if (!optional(value, key, string)) return false;
 	}
 	return (
-		optional(value, "argv", strings) &&
-		optional(value, "assigns", pairs) &&
+		optional(value, "argv", byteList) &&
+		optional(value, "assigns", bytePairs) &&
 		optional(value, "redirs", redirections) &&
 		optional(value, "resolved", resolved) &&
 		optional(value, "pipestatus", numbers) &&
@@ -420,7 +438,7 @@ function historyEntry(value: unknown): value is ShellTraceHistoryEvent {
 		optional(value, "contributors", items => Array.isArray(items) && items.every(outputContributor)) &&
 		(value.kind !== "Output" || (string(value.text) && finite(value.fd))) &&
 		(value.kind !== "Assign" ||
-			(string(value.name) && string(value.value) && finite(value.full_len) && string(value.scope)))
+			(bytes(value.name) && bytes(value.value) && finite(value.full_len) && string(value.scope)))
 	);
 }
 
@@ -440,7 +458,7 @@ export function isShellTrace(value: unknown): value is ShellTrace {
 			"diags",
 			items =>
 				Array.isArray(items) &&
-				items.every((item: unknown) => record(item) && string(item.code) && string(item.message)),
+				items.every((item: unknown) => record(item) && string(item.code) && bytes(item.message)),
 		) &&
 		optional(value, "history", items => Array.isArray(items) && items.every(historyEntry)) &&
 		optional(value, "historyTruncated", boolean)

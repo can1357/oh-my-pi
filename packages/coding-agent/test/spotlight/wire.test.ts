@@ -235,9 +235,12 @@ describe("spotlight shaping hooks", () => {
 		expect(trace.savedTokens).toBeGreaterThan(0);
 		const id = trace.original.url.replace("artifact://", "");
 		expect(manager.getArtifactContent(id)).toBe(LONG_LOG);
-		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not.
-		expect(trace.original.heat[200]).toBe("9");
-		expect(trace.original.heat[0]).toBe("1");
+		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not. The rest tie, so
+		// they share one rank.
+		const heat = trace.original.heat;
+		expect(heat[200]).toBe("9");
+		expect(new Set([...heat.slice(0, 200), ...heat.slice(201)])).toEqual(new Set([heat[0]]));
+		expect(heat[0]).not.toBe("9");
 		const kept = trace.original.kept;
 		expect(kept.some(([from, to]) => from <= 201 && 201 <= to)).toBe(true);
 		expect(kept.reduce((n, [from, to]) => n + to - from + 1, 0)).toBeLessThan(200);

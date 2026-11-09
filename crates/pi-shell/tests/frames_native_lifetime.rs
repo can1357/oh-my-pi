@@ -303,7 +303,7 @@ async fn both_restore_modes_report_an_active_native_once_from_identical_snapshot
 		let (mut restored, report) = Shell::restore(
 			&native.engine,
 			&mut Cx { host: &mut host, store: &mut store },
-			RestoreOpts { drop_frames },
+			RestoreOpts { drop_frames, ..Default::default() },
 		)
 		.unwrap();
 		println!("drop_frames={drop_frames} expected={expected:?} report={report:?}");

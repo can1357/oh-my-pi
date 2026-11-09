@@ -1,10 +1,14 @@
-//! Recovery keeps root state and abandons saved execution, whether the image
-//! matches this engine or uses upstream 88a69582's Frames layout 29.
+//! Recovery keeps root state and abandons saved execution when the image
+//! differs from this engine only in Frames layout or build. Upstream
+//! 88a69582's released image (Frames layout 29, IR 15) now also differs in IR
+//! record schema, so every mode refuses it.
 
 use pi_shell::{
 	bash::{
 		Budget, Cx, Engine, EngineConfig, Incompatibility, MemStore, RestoreError, RestoreOpts,
-		RunId, Script, Shell, Step,
+		RunId, Script, Shell, StateStore, Step,
+		ir::IR_VERSION,
+		store::BlobSlot,
 	},
 	testkit::{
 		FakeHost, Rig,
@@ -18,27 +22,65 @@ fn older_frames_are_refused_without_changing_the_store() {
 	let before = store.to_bytes();
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
+	for opts in [RestoreOpts::default(), RestoreOpts { drop_frames: true, ..Default::default() }] {
+		let error = Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts)
+			.err()
+			.expect("the old execution layout is incompatible");
+		println!("{opts:?}: {error:?}: {error}");
+		let RestoreError::Incompatible { why: Incompatibility::IrVersion { found, expected } } =
+			error
+		else {
+			panic!("a released image of another IR record schema must be refused as such");
+		};
+		assert_eq!((found, expected), (15, IR_VERSION), "upstream 88a69582 wrote IR 15");
+		assert_eq!(
+			store.to_bytes(),
+			before,
+			"refusal must not perform recovery or erase the image"
+		);
+	}
+}
+
+#[test]
+fn another_frames_layout_is_refused_and_recovers_only_with_drop_frames() {
+	let (mut store, saved) = suspended_image();
+	let mut frames = store.get_blob(BlobSlot::Frames).unwrap().unwrap();
+	assert_eq!(&frames[..4], b"OBF1", "the header starts with the magic");
+	assert_eq!(
+		u32::from(frames[4]),
+		IR_VERSION,
+		"this fixture is written by this engine, and the IR version is a one-byte varint"
+	);
+	assert!(frames[5] < 0x7f, "the layout version is a one-byte varint");
+	frames[5] += 1;
+	store.put_blob(BlobSlot::Frames, &frames).unwrap();
+	let before = store.to_bytes();
+	let engine = Engine::new(EngineConfig::default());
+	let mut host = FakeHost::new();
 	let error = Shell::restore(
 		&engine,
 		&mut Cx { host: &mut host, store: &mut store },
 		RestoreOpts::default(),
 	)
 	.err()
-	.expect("the old execution layout is incompatible");
+	.expect("another Frames layout is incompatible");
 	println!("{error:?}: {error}");
 	assert!(matches!(error, RestoreError::Incompatible { why: Incompatibility::Build }));
 	assert_eq!(store.to_bytes(), before, "refusal must not perform recovery or erase the image");
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..Default::default()
 		})
 		.unwrap();
-	assert_eq!(report.abandoned, [RunId(1)]);
-	assert_recovery_keeps_root_state(&mut shell, &mut host, &mut store, RunId(1));
+	println!("layout recovery={report:?}");
+	assert_eq!(report.abandoned, [saved]);
+	assert_eq!(report.runs, 0, "explicit recovery must not resume saved execution");
+	assert_recovery_keeps_root_state(&mut shell, &mut host, &mut store, saved);
 }
 
-#[test]
-fn same_identity_recovery_keeps_root_state_and_abandons_saved_runs() {
+/// A store this engine wrote, holding `saved=kept` and one suspended run.
+fn suspended_image() -> (MemStore, RunId) {
 	let mut rig = Rig::new(FakeHost::new(), skeleton_init(&[]));
 	assert_eq!(rig.run(Script::command(&b"saved=kept"[..]), Fault::None), 0);
 	let run = rig
@@ -50,12 +92,18 @@ fn same_identity_recovery_keeps_root_state_and_abandons_saved_runs() {
 	shell.control().request_suspend();
 	assert!(matches!(shell.step(&mut cx, Budget::default()), Step::SuspendReady));
 	shell.externalize(&mut cx).unwrap();
-	let mut store = MemStore::from_bytes(&rig.store.to_bytes()).unwrap();
+	(MemStore::from_bytes(&rig.store.to_bytes()).unwrap(), run)
+}
+
+#[test]
+fn same_identity_recovery_keeps_root_state_and_abandons_saved_runs() {
+	let (mut store, run) = suspended_image();
 	let engine = Engine::new(EngineConfig::default());
 	let mut host = FakeHost::new();
 	let (mut recovered, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..Default::default()
 		})
 		.unwrap();
 	println!("same-identity recovery={report:?}");

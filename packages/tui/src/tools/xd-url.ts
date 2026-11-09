@@ -9,6 +9,11 @@ export function stripXdUrlPrefix(name: string): string {
 /**
  * Parse an `xd://` URL into its device target.
  * Returns `null` for other or malformed URLs and `name: null` for the root.
+ *
+ * Trailing `:raw` / `:conflicts` stay in the name. Device URLs advertise
+ * `selectors: "none"`, and peeling them here would also widen write dispatch
+ * (`write xd://ast_edit:raw` would run the device). Cursor skips appending
+ * `:raw` for `xd://` instead.
  */
 export function parseXdUrl(input: string): { name: string | null } | null {
 	const trimmed = input.trim();

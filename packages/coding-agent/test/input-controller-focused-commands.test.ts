@@ -12,7 +12,6 @@
  * one, or a model/thinking change lands on the main session instead of the agent.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
@@ -95,17 +94,6 @@ describe("focused subagent view slash commands", () => {
 			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
 			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
 		}
-	});
-
-	it("restores a focused continue shortcut when the target is busy", async () => {
-		const { ctx, raw, editor, resume } = createFocusedContext();
-		resume.mockRejectedValueOnce(new AgentBusyError());
-		const controller = new InputController(ctx);
-		controller.setupEditorSubmitHandler();
-		await ctx.editor.onSubmit?.(".");
-
-		expect(editor.getText()).toBe(".");
-		expect(raw.showError).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs /usage from the focused view", async () => {

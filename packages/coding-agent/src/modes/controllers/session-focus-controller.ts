@@ -189,11 +189,7 @@ export class SessionFocusController {
 					await this.ctx.eventController.handleEvent({ type: "message_start", message });
 					if (generation !== this.#attachGeneration) return;
 				}
-				await this.ctx.eventController.handleEvent({
-					type: "message_update",
-					message,
-					assistantMessageEvent: { type: "start", partial: message },
-				});
+				await this.ctx.eventController.syncAssistantMessage(message);
 				if (generation === this.#attachGeneration) this.ctx.eventController.restorePendingToolResults();
 			};
 			this.ctx.unsubscribe = target.subscribe(async event => {
@@ -208,7 +204,10 @@ export class SessionFocusController {
 					if (event.type === "message_end") await restoreAssistant(event.message);
 					else {
 						assistantStreamSynced = true;
-						await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+						// A replay `start` opens the message itself via the restart path.
+						if (event.assistantMessageEvent?.type !== "start") {
+							await this.ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+						}
 					}
 					if (generation !== this.#attachGeneration) return;
 				}

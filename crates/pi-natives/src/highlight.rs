@@ -186,6 +186,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["jl", "julia"], "Julia"),
 	(&["nix"], "Nix"),
 	(&["mermaid", "mmd"], "Mermaid"),
+	(&["zig", "zon"], "Zig"),
 	(&["rs", "rust"], "Rust"),
 	(&["go", "golang"], "Go"),
 	(&["java"], "Java"),
@@ -945,6 +946,23 @@ mod tests {
 		assert!(out.contains("<s>Start"));
 		assert!(out.contains("<k>-->"));
 		assert!(out.contains("<c> note"));
+	}
+
+	#[test]
+	fn highlights_zig_vendored_syntax() {
+		assert!(get_supported_languages().contains(&"Zig".to_string()));
+		assert!(supports_language_impl("zig"));
+		assert!(supports_language_impl("zon"));
+
+		let out = highlight_code_impl(
+			"const std = @import(\"std\");\npub fn main() void {\n    // greet\n    \
+			 std.debug.print(\"hello\", .{});\n}\n",
+			Some("zig"),
+			&test_colors(),
+		);
+		assert!(out.contains("<k>const"));
+		assert!(out.contains("<s>\"hello\""));
+		assert!(out.contains("<c>// greet"));
 	}
 
 	/// A Markdown table header must stay recognisable however long its first

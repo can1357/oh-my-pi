@@ -1,6 +1,6 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
@@ -68,6 +68,7 @@ import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/for
 import { previewModelCompactionPoint, setModelCompactionPoint } from "../../session/model-compaction-threshold";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import type { TurnAct, TurnMessage } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -91,7 +92,7 @@ import {
 	parseConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../../tools";
-import { AskTool, type AskToolInput } from "../../tools/ask";
+import { AskTool } from "../../tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
@@ -186,6 +187,11 @@ interface OpenMenu {
 	handle?: OverlayHandle;
 	/** Shows `component` as a new overlay and focuses it; also raises a covered menu. */
 	mount?: () => OverlayHandle;
+}
+
+/** Return input to the current editor-slot owner after a fullscreen overlay closes. */
+export function focusActiveEditorArea(ctx: InteractiveModeContext): void {
+	ctx.ui.setFocus(ctx.editorContainer.children[0] ?? ctx.editor);
 }
 
 export class SelectorController {
@@ -289,8 +295,7 @@ export class SelectorController {
 	 * overlay hides to re-target focus at the visible slot owner.
 	 */
 	focusActiveEditorArea(): void {
-		const visible = this.ctx.editorContainer.children[0] ?? this.ctx.editor;
-		this.ctx.ui.setFocus(visible);
+		focusActiveEditorArea(this.ctx);
 	}
 
 	/**
@@ -608,6 +613,7 @@ export class SelectorController {
 			runtime: createExtensionDashboardRuntime({
 				cwd: getProjectDir(),
 				settings: this.ctx.settings,
+				extensionRoots: () => this.ctx.session.effectiveExtensionRoots,
 				mcpManager: this.ctx.mcpManager,
 				eventBus: this.ctx.eventBus,
 				onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
@@ -788,7 +794,10 @@ export class SelectorController {
 			switched = true;
 			await apply();
 		};
-		const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction);
+		// The target reads what this pass writes: no provider-native method it cannot replay.
+		const outcome = await this.ctx.handleCompactCommand(undefined, undefined, switchAfterCompaction, {
+			readerModel: model,
+		});
 		await switchAfterCompaction(outcome);
 	}
 
@@ -1129,6 +1138,10 @@ export class SelectorController {
 					done();
 					void this.#loginThenReopenModelHub(providerId);
 				},
+				onCatalogRefreshed: async () => {
+					await this.ctx.session.refreshScopedModels();
+					return this.ctx.session.scopedModels;
+				},
 				onCycleOrderChange: order => {
 					try {
 						cfgCycleOrder.set(this.ctx.settings, order);
@@ -1306,7 +1319,8 @@ export class SelectorController {
 		});
 	}
 
-	showUserMessageSelector(): void {
+	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
+	showUserMessageSelector(startAt?: string): void {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
@@ -1331,6 +1345,7 @@ export class SelectorController {
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+			startAt,
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
 		});
@@ -1395,9 +1410,11 @@ export class SelectorController {
 	 * replaces the editor text, so it is a real move even when it is the
 	 * current leaf; every other target lands the leaf on the entry. `done`
 	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript.
+	 * alternate screen never flashes a stale transcript. `resend` sends a user
+	 * target's prompt again at once (a turn's Retry) instead of leaving it in
+	 * the editor; otherwise the status toast offers Undo ({@link #undoRewind}).
 	 */
-	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
+	async #rewindFromTranscript(entryId: string, done: () => void, resend = false): Promise<void> {
 		const entry = this.ctx.sessionManager.getEntry(entryId);
 		if (!entry || !isTranscriptEntry(entry)) {
 			done();
@@ -1412,6 +1429,10 @@ export class SelectorController {
 			return;
 		}
 		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
+		const branch = this.ctx.sessionManager.getBranch();
+		const at = branch.findIndex(e => e.id === entryId);
+		const dropped = at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+		const draft = { text: this.ctx.editor.getText(), images: [...this.ctx.editor.pendingImages] };
 		try {
 			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
 			if (result.cancelled) {
@@ -1429,13 +1450,113 @@ export class SelectorController {
 			await this.ctx.reloadTodos();
 			if (result.editorText && (isUserTarget || !this.ctx.editor.getText().trim())) {
 				this.ctx.editor.setDraft(result.editorText, result.editorImages);
+				if (resend && isUserTarget) this.ctx.editor.submit();
 			}
 			done();
-			this.ctx.showStatus("Rewound to selected point");
+			if (resend) {
+				this.ctx.showStatus("Retrying the turn");
+				return;
+			}
+			this.ctx.showStatus(
+				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point",
+				{
+					action: {
+						act: "undo",
+						label: "Undo",
+						run: () => void this.#undoRewind(realLeafId, isUserTarget ? draft : undefined),
+					},
+				},
+			);
 		} catch (error) {
 			done();
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	/**
+	 * Undo of a transcript rewind: the leaf goes back to `leafId`, where it was (the rewind kept that path as a
+	 * branch), and `draft`, what the editor held before the rewind put a prompt there, comes back.
+	 */
+	async #undoRewind(
+		leafId: string | null,
+		draft: { text: string; images: ImageContent[] } | undefined,
+	): Promise<void> {
+		if (!leafId) return;
+		try {
+			const result = await this.ctx.session.navigateTree(leafId, { summarize: false });
+			if (result.cancelled) {
+				this.ctx.showStatus("Navigation cancelled");
+				return;
+			}
+			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await this.ctx.reloadTodos();
+			if (draft) this.ctx.editor.setDraft(draft.text, draft.images);
+			this.ctx.showStatus("Rewind undone");
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/**
+	 * A transcript turn's hold-menu action on `message`, found on the current branch by role and timestamp:
+	 * `rewind` opens the rewind selector on it; `edit` rewinds past the turn's prompt and puts it in the editor,
+	 * as Esc Esc does; `retry` rewinds past the prompt and sends it again; `fork` moves onto a new session
+	 * holding the conversation up to the message, the old one kept on disk.
+	 */
+	async runTurnAction(turn: TurnAct, message: TurnMessage): Promise<void> {
+		const branch = this.ctx.sessionManager.getBranch();
+		const index = branch.findLastIndex(
+			e => e.type === "message" && e.message.role === message.role && e.message.timestamp === message.at,
+		);
+		const entry = branch[index];
+		if (!entry) {
+			this.ctx.showStatus("That message is no longer on this branch");
+			return;
+		}
+		if (turn === "rewind") {
+			this.showUserMessageSelector(entry.id);
+			return;
+		}
+		if (turn === "fork") {
+			await this.#forkAt(entry.id);
+			return;
+		}
+		// The turn's prompt: the message itself, or the last one asked before the answer.
+		const prompt = message.role === "user" ? entry : branch.slice(0, index).findLast(e => isUserRequestEntry(e));
+		if (!prompt) {
+			this.ctx.showStatus("No prompt to resend before this answer");
+			return;
+		}
+		// Retry sends the prompt through the editor, which holds the user's unsent draft.
+		if (turn === "retry" && (this.ctx.editor.getText().trim() || this.ctx.editor.pendingImages.length > 0)) {
+			this.ctx.showStatus("Send or clear the draft to retry this turn");
+			return;
+		}
+		await this.#rewindFromTranscript(prompt.id, () => this.ctx.ui.requestRender(), turn === "retry");
+	}
+
+	/** Fork from here: the session moves onto a new file holding the conversation up to `entryId`. */
+	async #forkAt(entryId: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
+			return;
+		}
+		const previous = this.ctx.sessionManager.isSessionOnDisk() ? this.ctx.sessionManager.getSessionId() : undefined;
+		try {
+			if (!(await this.ctx.session.fork(entryId))) {
+				this.ctx.showError("Fork failed (session not persisted or cancelled)");
+				return;
+			}
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.reloadTodos();
+		this.ctx.statusLine.invalidate();
+		this.ctx.showStatus(
+			previous ? `Forked into a new session · /resume ${previous} returns` : "Forked into a new session",
+		);
 	}
 
 	showCopySelector(): void {
@@ -1598,10 +1719,10 @@ export class SelectorController {
 						});
 
 						// Selecting an `ask` toolResult doesn't land the leaf directly —
-						// re-open the picker with the original questions first, then
+						// re-open the original form first, then
 						// complete the navigation as a new sibling branch (issue #5642).
 						if (result.reopenAsk) {
-							const reanswer = await this.#reanswerAsk(result.reopenAsk.questions);
+							const reanswer = await this.#reanswerAsk(result.reopenAsk.html);
 							if (!reanswer) {
 								this.ctx.showStatus("Re-answer cancelled");
 								return;
@@ -1718,13 +1839,13 @@ export class SelectorController {
 	}
 
 	/**
-	 * Re-open the `ask` picker with the original `questions` (issue #5642):
+	 * Re-open the `ask` form with the original `html` (issue #5642):
 	 * runs a standalone `AskTool.execute()` outside a normal agent turn,
-	 * reusing the same picker/dialog primitives a live `ask` tool call gets.
+	 * reusing the same dialog primitives a live `ask` tool call gets.
 	 * Returns `undefined` when the user cancels — mirrors `navigateTree`'s
 	 * cancellation contract instead of throwing.
 	 */
-	async #reanswerAsk(questions: AskToolInput["questions"]): Promise<AgentToolResult<AskToolDetails> | undefined> {
+	async #reanswerAsk(html: string): Promise<AgentToolResult<AskToolDetails> | undefined> {
 		const uiContext = this.ctx.getToolUIContext();
 		if (!uiContext) {
 			this.ctx.showError("Ask tool UI is not ready");
@@ -1740,26 +1861,12 @@ export class SelectorController {
 		};
 		const askTool = new AskTool(toolSession);
 		const context = this.ctx.session.buildAskReanswerContext(uiContext);
-		let result: AgentToolResult<AskToolDetails>;
 		try {
-			result = await askTool.execute("tree-reanswer", { questions }, undefined, undefined, context);
+			return await askTool.execute("tree-reanswer", { html }, undefined, undefined, context);
 		} catch (error) {
 			if (error instanceof ToolAbortError) return undefined;
 			throw error;
 		}
-		// The rich ask dialog can race a collab guest choosing "Chat about this"
-		// (`AskTool`'s `chatRedirect` result); that's meaningful inside a live
-		// agent turn, where the model sees the redirect and starts a
-		// conversation, but this standalone re-answer has no turn to hand it
-		// to — completing the navigation with it would silently drop the
-		// user's intent to chat (roboomp review on #5895).
-		if (result.details?.chatRedirect) {
-			this.ctx.showError(
-				"Chat about this isn't available when re-answering from the tree — pick an option or type a custom answer instead.",
-			);
-			return undefined;
-		}
-		return result;
 	}
 
 	async showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): Promise<void> {
@@ -2191,11 +2298,7 @@ export class SelectorController {
 			// are left untouched. `refreshProvider` swallows discovery failures, so
 			// awaiting cannot reject the login.
 			await this.ctx.session.modelRegistry.refreshProvider(getOAuthCredentialProvider(providerId), "online");
-			try {
-				await this.ctx.refreshScopedModelsAfterLogin?.();
-			} catch (error) {
-				logger.warn("Scoped model refresh after login failed", { error: String(error) });
-			}
+			await this.ctx.session.refreshScopedModels();
 			const block = new TranscriptBlock();
 			// Name the account (and Anthropic organization) that was stored so a
 			// login that lands on an unintended account/subscription is visible
@@ -2230,10 +2333,9 @@ export class SelectorController {
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
 		try {
 			const { removed, remainingSource } = await logoutCredential(
-				this.ctx.session.modelRegistry,
+				this.ctx.session,
 				providerId,
 				account.credentialId,
-				this.ctx.session.sessionId,
 			);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
