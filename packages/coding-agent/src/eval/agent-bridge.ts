@@ -20,6 +20,7 @@ import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
+import { normalizeModelSelector } from "./model-selector";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";
@@ -93,9 +94,10 @@ function parseAgentArgs(args: unknown, settings: Settings): EvalAgentArgs {
 	if (result instanceof type.errors) {
 		throw new ToolError(`agent() received invalid arguments: ${result.summary}`);
 	}
-	const selectorProblem = invalidModelSelectorReason(result.model, "agent()", { settings, invocationKind: "eval" });
+	const model = normalizeModelSelector(result.model);
+	const selectorProblem = invalidModelSelectorReason(model, "agent()", { settings, invocationKind: "eval" });
 	if (selectorProblem) throw new ToolError(selectorProblem);
-	return result;
+	return { ...result, model };
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {

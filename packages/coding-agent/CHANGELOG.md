@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Eval `agent()` and `workpool()` treat a blank `model` (`""` or whitespace) as omitted instead of failing the per-call-model gate, so callers that pad optional strings use the agent's configured model
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 ### Added
 
