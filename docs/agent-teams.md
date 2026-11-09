@@ -185,17 +185,21 @@ malformed ledger rows also fail closed; they are not silently replaced.
 
 ## Idle notices and messaging
 
-On each real `running → idle` transition, the runtime sends the current member's
-actual lead one non-request notice containing the member ID and an
-`agent://<actual-id>` link. When the registered session exposes the completed
-assistant turn, the notice includes its first three lines, capped at 500
-characters. If that turn has no text, the excerpt comes from its final
-`yield`/`handback` call arguments; without either, the summary line is omitted.
-Repeated idle events do not duplicate a notice; a later completed running turn
-produces a new one. A text stop followed by a yield-reminder turn can therefore
-produce two notices. Delayed events from replaced refs or old team generations
-do not notify for replacements. Delivery can fail under the ordinary IRC guard
-or recipient availability constraints.
+When a member's turn finally settles idle — its run reached a terminal decision
+(an accepted `yield`/`handback`, reminders exhausted, or a wake turn ended) —
+the runtime sends the current member's actual lead one non-request notice
+containing the member ID and an `agent://<actual-id>` link. When the registered
+session exposes the completed assistant turn, the notice includes its first
+three lines, capped at 500 characters. If that turn has no text, the excerpt
+comes from its final `yield`/`handback` call arguments; when the run yielded a
+summary, that summary stands in for an empty excerpt. Without either, the
+summary line is omitted. Intermediate running→idle transitions — a structured
+member's first text stop before the executor's yield reminder, or a wake turn's
+run-state mirror idle — do not notify: only the settle does, exactly one notice
+per finished turn. A repeated settle or a later turn produces a fresh notice;
+notices are progress, so dedup does not apply. Delayed events from replaced
+refs or old team generations do not notify for replacements. Delivery can
+fail under the ordinary IRC guard or recipient availability constraints.
 
 Idle notices, plan submissions, approval/rejection notices and stop
 decline/timeout notices are displayed as **team notices, no reply needed**.

@@ -36,6 +36,7 @@ export type AgentRegistryProtocol = {
 	setHistory: RpcMethod<[id: string, history: AgentHistorySummary, expectedSessionFile?: string], boolean>;
 	setStatus: RpcMethod<[id: string, status: AgentStatus, expected?: AgentRefExpectation], boolean>;
 	markResultAccepted: RpcMethod<[id: string, expected?: AgentRefExpectation, responseAt?: number], boolean>;
+	markTurnSettled: RpcMethod<[id: string, expected?: AgentRefExpectation, summary?: string], boolean>;
 	staleAcceptedRuns: RpcMethod<[], AgentRef[]>;
 	setActivity: RpcMethod<[id: string, activity: string], void>;
 	attachSession: RpcMethod<

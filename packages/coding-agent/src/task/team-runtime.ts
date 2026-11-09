@@ -135,8 +135,14 @@ export class TeamRuntime {
 					}
 				}
 			}
-			if (event.type !== "status_changed" || event.previousStatus !== "running" || event.ref.status !== "idle")
-				return;
+			// The idle notice fires on "turn finally idle": the run reached its
+			// terminal decision (accepted yield/handback, reminders exhausted, or a
+			// wake turn ended) and the ref is idle. That is the settle event the
+			// executor publishes via `markTurnSettled` — NOT every running→idle the
+			// run-state mirror reports mid-run (a structured member's first text
+			// stop is followed by a yield reminder; a wake turn's mirror idle is
+			// not its settle). `final: true` alone gates the notice.
+			if (event.type !== "status_changed" || event.final !== true) return;
 			const current = registry.get(event.ref.id);
 			if (!current || current.generation !== event.ref.generation) return;
 			for (const state of this.#generations.values()) {

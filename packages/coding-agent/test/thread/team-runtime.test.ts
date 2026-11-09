@@ -67,7 +67,7 @@ describe("team idle notifications", () => {
 		const runtime = new TeamRuntime();
 		const started = await runtime.start(lead, team);
 		started.members.set("worker", { id: "worker", ref });
-		registry.setStatus("worker", "idle", ref);
+		registry.markTurnSettled("worker", ref);
 		await delivered.promise;
 		expect(notices[0]).toContain("Finished inspection");
 		expect(notices[0]!.length).toBeLessThan(550);
@@ -96,7 +96,7 @@ describe("team idle notifications", () => {
 			const runtime = new TeamRuntime();
 			const started = await runtime.start(lead, team);
 			started.members.set("worker", { id: "worker", ref });
-			registry.setStatus("worker", "idle", ref);
+			registry.markTurnSettled("worker", ref);
 			await delivered.promise;
 			expect(notices[0]).toBe("worker is idle.\nagent://worker");
 			await runtime.stop(lead, "audit");
@@ -126,7 +126,7 @@ describe("team idle notifications", () => {
 		const runtime = new TeamRuntime();
 		const started = await runtime.start(lead, team);
 		started.members.set("worker", { id: "worker", ref: { ...ref } });
-		registry.setStatus("worker", "idle", ref);
+		registry.markTurnSettled("worker", ref);
 		await Bun.sleep(0);
 		expect(received).toHaveLength(1);
 		expect(received[0]).toMatchObject({ from: "worker", progress: true });
@@ -135,22 +135,25 @@ describe("team idle notifications", () => {
 		expect(received[0]!.body).toContain("agent://worker");
 		expect(received[0]!.body).not.toContain("Fourth line");
 		expect(received[0]!.body.length).toBeLessThan(550);
-		registry.setStatus("worker", "idle", ref);
+		// A repeated settle is progress again: notices are never deduped.
+		registry.markTurnSettled("worker", ref);
 		await Bun.sleep(0);
-		expect(received).toHaveLength(1);
+		expect(received).toHaveLength(2);
+		// A new turn runs, then settles: a fresh notice.
 		registry.setStatus("worker", "running", ref);
-		registry.setStatus("worker", "idle", ref);
+		registry.markTurnSettled("worker", ref);
 		await Bun.sleep(0);
-		expect(received).toHaveLength(2);
+		expect(received).toHaveLength(3);
 		const replacement = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
-		registry.setStatus("worker", "idle", replacement);
+		registry.markTurnSettled("worker", replacement);
 		await Bun.sleep(0);
-		expect(received).toHaveLength(2);
+		expect(received).toHaveLength(3);
 		await runtime.stop(lead, "audit");
+		// Old member's late settle after its team stopped: no notice.
 		registry.setStatus("worker", "running", replacement);
-		registry.setStatus("worker", "idle", replacement);
+		registry.markTurnSettled("worker", replacement);
 		await Bun.sleep(0);
-		expect(received).toHaveLength(2);
+		expect(received).toHaveLength(3);
 	});
 	it("notifies when a reserved member completes before its ref is recorded", async () => {
 		IrcBus.resetGlobalForTests();
@@ -170,10 +173,142 @@ describe("team idle notifications", () => {
 			messages: [{ role: "assistant", content: [{ type: "text", text: "Done" }] }],
 		} as unknown as AgentSessionHandle;
 		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: worker });
-		registry.setStatus("worker", "idle", ref);
+		registry.markTurnSettled("worker", ref);
 		await Bun.sleep(0);
 		expect(received).toHaveLength(1);
 		expect(received[0]).toContain("Done");
+		await runtime.stop(lead, "audit");
+	});
+});
+
+describe("team final-turn idle notices", () => {
+	it("sends exactly one idle notice for a structured member whose first text stop is followed by a yield reminder", async () => {
+		// The executor's yield-reminder ladder re-prompts a structured member
+		// whose first turn ended in text; the run-state mirror therefore
+		// reports two running→idle transitions for one logical turn. Only the
+		// turn's final settle (the accepted yield) may notify.
+		const registry = AgentRegistry.global();
+		const received: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				received.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		// The reminder turn's assistant message is a tool-only `yield` — the
+		// real executor's final turn after the ladder. The yield carries no
+		// text, so the notice excerpt falls back to the run's yielded summary.
+		const child = {
+			messages: [
+				{ role: "assistant", content: [{ type: "text", text: "First draft, still working" }] },
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "terminal",
+							name: "yield",
+							arguments: { data: { summary: "Finished inspection" } },
+						},
+					],
+				},
+			],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref });
+		// Turn 1 ends with text (running→idle); the reminder ladder follows it.
+		registry.setStatus("worker", "running", ref);
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toEqual([]);
+		// Reminder turn settles the run: exactly one notice, excerpt from the yield.
+		registry.markTurnSettled("worker", ref, "Finished inspection");
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		expect(received[0]).toContain("worker is idle.");
+		expect(received[0]).toContain("Finished inspection");
+		expect(received[0]).not.toContain("First draft");
+		expect(received[0]).toEndWith("agent://worker");
+		await runtime.stop(lead, "audit");
+	});
+
+	it("sends exactly one idle notice when a plain member's turn settles without a yield", async () => {
+		// A plain member's reminders exhaust without a yield: the run-state
+		// mirror's running→idle is not the settle; only settlement notifies.
+		const registry = AgentRegistry.global();
+		const received: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				received.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		const child = {
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Prose report" }] }],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref });
+		registry.setStatus("worker", "running", ref);
+		registry.setStatus("worker", "idle", ref);
+		await Bun.sleep(0);
+		expect(received).toEqual([]);
+		registry.markTurnSettled("worker", ref, "Prose report");
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		expect(received[0]).toContain("Prose report");
+		await runtime.stop(lead, "audit");
+	});
+
+	it("sends one idle notice per wake turn of a kept-alive member, two turns yielding two notices", async () => {
+		// Wake turns settle through the same run-state path; each finished turn
+		// is progress, so consecutive settle notices must not be deduped.
+		const registry = AgentRegistry.global();
+		const received: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				received.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		// The transcript grows per wake turn; each settle reads the turn's
+		// own last assistant message.
+		const turns: Array<{ role: string; content: Array<{ type: string; text: string }> }> = [];
+		const child = {
+			get messages() {
+				return turns;
+			},
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref });
+		// Wake turn 1: the lead message wakes the member, it answers, ends idle.
+		registry.setStatus("worker", "running", ref);
+		turns.push({ role: "assistant", content: [{ type: "text", text: "Answer to wake one" }] });
+		registry.setStatus("worker", "idle", ref);
+		// The mirror's idle is not the wake turn's settle: no notice yet.
+		expect(received).toEqual([]);
+		// The wake-turn observer's finish settles the turn.
+		registry.markTurnSettled("worker", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(1);
+		expect(received[0]).toContain("Answer to wake one");
+		// Wake turn 2 on the same member: another settle, another notice.
+		registry.setStatus("worker", "running", ref);
+		turns.push({ role: "assistant", content: [{ type: "text", text: "Answer to wake two" }] });
+		registry.setStatus("worker", "idle", ref);
+		expect(received).toHaveLength(1);
+		registry.markTurnSettled("worker", ref);
+		await Bun.sleep(0);
+		expect(received).toHaveLength(2);
+		expect(received[1]).toContain("Answer to wake two");
 		await runtime.stop(lead, "audit");
 	});
 });
@@ -211,9 +346,9 @@ describe("team notice rate budget", () => {
 		const started = await runtime.start(lead, { ...team, planApproval: true });
 		started.members.set("worker", { id: "worker", ref });
 		registry.setStatus("worker", "running", ref);
-		registry.setStatus("worker", "idle", ref);
-		// `setStatus` emits synchronously, but `send` is async: await a microtask
+		// Settlement emits synchronously, but `send` is async: await a microtask
 		// tick so the notice is delivered before the budget is asserted.
+		registry.markTurnSettled("worker", ref);
 		await Promise.resolve();
 		// The idle notice reached the lead; its body costs 11 tokens, over
 		// three times the budget, without the runtime-authored exemption.

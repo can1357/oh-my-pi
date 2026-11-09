@@ -105,7 +105,7 @@ export function isResumable(ref: AgentRef | undefined): boolean {
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
-	| { type: "status_changed"; ref: AgentRef; previousStatus: AgentStatus; summary?: string }
+	| { type: "status_changed"; ref: AgentRef; previousStatus: AgentStatus; summary?: string; final?: boolean }
 	| { type: "metadata_changed"; ref: AgentRef }
 	| { type: "removed"; ref: AgentRef };
 
@@ -148,6 +148,8 @@ export interface AgentRegistryApi {
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
 	/** Record that the current run handed over its final result. */
 	markResultAccepted(id: string, expected?: AgentRefExpectation, responseAt?: number): boolean;
+	/** Publish a turn's final settle; see {@link AgentRegistry.markTurnSettled}. */
+	markTurnSettled(id: string, expected?: AgentRefExpectation, summary?: string): boolean;
 	/** Accepted-but-running refs whose run already finished. */
 	staleAcceptedRuns(): AgentRef[];
 	/** Record a short activity gist for the work-aware roster. */
@@ -314,24 +316,8 @@ export class AgentRegistry implements AgentRegistryApi {
 		}
 		if (ref.status === status) return true;
 		const previousStatus = ref.status;
-		const assistant =
-			previousStatus === "running" && status === "idle"
-				? ref.session?.messages?.findLast(message => message.role === "assistant")
-				: undefined;
-		let excerpt: string | undefined;
-		if (assistant?.role === "assistant") {
-			excerpt = assistant.content
-				.filter(part => part.type === "text")
-				.map(part => part.text)
-				.join("\n");
-			if (!excerpt.trim()) {
-				const terminal = assistant.content.findLast(
-					part => part.type === "toolCall" && (part.name === "yield" || part.name === "handback"),
-				);
-				if (terminal?.type === "toolCall") excerpt = JSON.stringify(terminal.arguments);
-			}
-		}
-		const summary = excerpt?.trim() ? excerpt.split(/\r?\n/, 4).slice(0, 3).join("\n").slice(0, 500) : undefined;
+		// Only a transition out of `running` carries a completed turn's excerpt.
+		const summary = previousStatus === "running" && status === "idle" ? this.#idleExcerpt(ref) : undefined;
 		const leftRunning = previousStatus === "running";
 		ref.status = status;
 		// Activity describes current work; it is meaningless once the agent
@@ -381,6 +367,62 @@ export class AgentRegistry implements AgentRegistryApi {
 			this.#emit({ type: "metadata_changed", ref });
 		}
 		return true;
+	}
+
+	/**
+	 * Publish a turn's final settle: the run reached its terminal decision
+	 * (an accepted `yield`/`handback`, reminders exhausted, or a wake turn
+	 * ended) and the ref is idle. Emits a `status_changed` carrying
+	 * `final: true` — the one transition per finished turn that consumers
+	 * (the team runtime's idle notice) key on instead of every
+	 * running→idle the run-state mirror reports mid-run.
+	 *
+	 * A ref still `running` with nothing streaming is terminalized first, the
+	 * same missed-transition reconciliation {@link markResultAccepted} performs;
+	 * a genuinely streaming session (a wake turn started at the boundary)
+	 * keeps its settle pending and returns false — callers re-issue it once the
+	 * run-state mirror delivers the missing transition.
+	 *
+	 * `summary` is the turn's yielded summary, used as the notice excerpt when
+	 * the final turn itself carries no text (an empty excerpt after a `yield`).
+	 * A ref that is no longer owned by `expected` settles nothing.
+	 */
+	markTurnSettled(id: string, expected?: AgentRefExpectation, summary?: string): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || ref.status === "aborted" || !this.#matchesExpected(ref, expected)) return false;
+		if (ref.status === "running" && ref.session?.isStreaming !== true) {
+			this.setStatus(id, "idle", ref);
+		}
+		if (ref.status !== "idle") return false;
+		this.#emit({
+			type: "status_changed",
+			ref,
+			previousStatus: "running",
+			summary: this.#idleExcerpt(ref) ?? summary,
+			final: true,
+		});
+		return true;
+	}
+
+	/**
+	 * Bounded excerpt of `ref`'s last assistant turn: its text, else its final
+	 * `yield`/`handback` call arguments. First three lines, 500 chars max —
+	 * shared by every idle/status transition and the final-turn settle.
+	 */
+	#idleExcerpt(ref: AgentRef): string | undefined {
+		const assistant = ref.session?.messages?.findLast(message => message.role === "assistant");
+		if (assistant?.role !== "assistant") return undefined;
+		let excerpt = assistant.content
+			.filter(part => part.type === "text")
+			.map(part => part.text)
+			.join("\n");
+		if (!excerpt.trim()) {
+			const terminal = assistant.content.findLast(
+				part => part.type === "toolCall" && (part.name === "yield" || part.name === "handback"),
+			);
+			if (terminal?.type === "toolCall") excerpt = JSON.stringify(terminal.arguments);
+		}
+		return excerpt.trim() ? excerpt.split(/\r?\n/, 4).slice(0, 3).join("\n").slice(0, 500) : undefined;
 	}
 
 	/**
