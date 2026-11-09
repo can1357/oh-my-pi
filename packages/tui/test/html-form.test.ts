@@ -270,6 +270,22 @@ describe("html form", () => {
 	});
 
 	describe("dialog", () => {
+		it("keeps decoded placeholder newlines inside framed textarea and input rows", () => {
+			const { form } = dialog(`<form>
+				<label>Copy<textarea name="copy" rows="3" placeholder="A2 → yes&#10;A5 → done"></textarea></label>
+				<label>Reason<input name="reason" placeholder="first&#10;second"></label>
+			</form>`);
+			const textareaRows = form.render(100);
+			expect(textareaRows.every(row => !row.includes("\n"))).toBe(true);
+			expect(textareaRows.some(row => row.includes("A2 → yes A5 → done"))).toBe(true);
+
+			form.handleInput(TAB);
+			const inputRows = form.render(100);
+			expect(inputRows.every(row => !row.includes("\n"))).toBe(true);
+			expect(inputRows.some(row => row.includes("A2 → yes A5 → done"))).toBe(true);
+			expect(inputRows.some(row => row.includes("first second"))).toBe(true);
+		});
+
 		it("submits what the keys chose: Enter picks a radio and moves on, Space toggles, ←/→ change a dropdown", () => {
 			const { form, onSubmit } = dialog(DB_FORM);
 			form.handleInput(DOWN); // Postgres

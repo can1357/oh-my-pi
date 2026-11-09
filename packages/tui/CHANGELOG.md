@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `ask` forms with multi-line text placeholders spilling outside the dialog frame ([#18605](https://github.com/can1357/oh-my-pi/issues/18605)).
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
