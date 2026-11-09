@@ -15171,6 +15171,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * `/fresh` and context resets route through a rotated provider id, but resume
+	 * re-adopts the transcript's own id, whose persisted affinity row from before
+	 * the rotation would outrank the newer journaled choice. Apply a routing
+	 * change made on the rotated id to the transcript's id as well.
+	 */
+	#mirrorRoutingToTranscriptSessionId(apply: (sessionId: string) => void): void {
+		if (this.#freshProviderSessionId === undefined) return;
+		const transcriptSessionId = this.#providerSessionId ?? this.sessionManager.getSessionId();
+		if (transcriptSessionId !== this.sessionId) apply(transcriptSessionId);
+	}
+
+	/**
 	 * Pin a stored OAuth account to the current model provider for this session.
 	 * Strict pins never rotate to a sibling account. The choice is journaled at
 	 * once, so a later non-strict pin also replaces a saved strict lock before the
@@ -15183,6 +15195,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const authStorage = this.#modelRegistry.authStorage;
 		const strict = options?.strict === true;
 		if (!authStorage.sessions.pin(provider, this.sessionId, credentialId, { strict })) return false;
+		this.#mirrorRoutingToTranscriptSessionId(sessionId =>
+			authStorage.sessions.pin(provider, sessionId, credentialId, { strict }),
+		);
 		const account = authStorage.oauth.accounts(provider, this.sessionId).find(item => item.credentialId === credentialId);
 		const hash = account ? credentialPinHash(provider, account) : undefined;
 		if (hash) {
@@ -15207,7 +15222,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	useAutomaticProviderAccountRouting(): boolean {
 		const provider = this.model?.provider;
 		if (!provider || this.isStreaming) return false;
-		if (!this.#modelRegistry.authStorage.sessions.automatic(provider, this.sessionId)) return false;
+		const sessions = this.#modelRegistry.authStorage.sessions;
+		if (!sessions.automatic(provider, this.sessionId)) return false;
+		this.#mirrorRoutingToTranscriptSessionId(sessionId => sessions.automatic(provider, sessionId));
 		this.sessionManager.appendCredentialPin(provider, undefined, "automatic");
 		return true;
 	}

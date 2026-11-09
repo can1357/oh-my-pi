@@ -16,11 +16,25 @@
 
 - In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 - `task.eager` (`preferred`/`always`) now shapes only the main agent's system prompt; subagents fall back to their model's own delegation policy instead of being pushed to spawn further subagents
+- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback.
+- Added `/account auto` to return the current provider to automatic account routing for this session; the choice is journaled, so resume and `/fresh` keep it and `auth.defaultAccounts` does not re-lock the session.
+- Added per-handler deadlines through `pi.on(event, handler, { timeoutMs })`, including zero for cancellable waits without a deadline. Input and assistant-message handlers can exceed 30 seconds without changing unrelated defaults, the 2-second shutdown cap, or fail-closed input/tool-call behavior.
+- Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
+- Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
+- Added an opt-in bidirectional translator extension: Chinese editor prose is translated to English before the main model, English response history stays English, and Chinese is projected only in the original assistant display.
+- Added `/translator input` for input-only Chinese-to-English translation, leaving assistant replies in their original English without output-translation requests; `/translator both` restores bidirectional translation.
 
 ### Fixed
 
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 - Standalone CLI builds reuse the committed, published export viewer manifest instead of regenerating an unpublished hosted asset that breaks exported sessions.
+- Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
+- An `auth.defaultAccounts` selector that matches no stored account, or several, now shows a config warning (without the selector) instead of silently leaving the session on automatic routing.
+- `/fresh` and in-place context resets keep a strict `/account` lock (even on an account removed since) and an `/account auto` choice on the new provider session id, and an `/account`, `/account auto` or `/session pin` choice made after them survives resume instead of reverting to the earlier lock or the `auth.defaultAccounts` account; if the new id cannot be routed safely, the session stays on the old id instead of continuing unlocked
+- `/session pin` (and the account selector) now saves its choice immediately, so a resume before the next reply no longer restores a strict lock the pin replaced
+- `/account` on an OAuth account with no email or account id says the lock lasts until omp exits instead of reporting a lock that resume cannot restore
+- Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
+- Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
 ### Added
 
 - `ask` forms can show pictures: `<img src>` from an http(s) URL, a `data:` URI or a local file (relative to the session's working directory), and inline `<svg>` diagrams, drawn in the terminal form and natively in Tern
@@ -128,13 +142,6 @@
 ### Added
 
 - RPC `bash` accepts `excludeFromContext: true` to keep a run out of model context like terminal `!!`; runtimes advertise support with `supportsBashExcludeFromContext` in the `ready` frame, and the Python SDK exposes that frame as `client.ready` ([#18206](https://github.com/can1357/oh-my-pi/pull/18206) by [@andrebrait](https://github.com/andrebrait))
-- Added `/account` for inspecting and strictly selecting a session's OAuth account, plus `auth.defaultAccounts` for strict per-provider defaults that persist across resume and subagents without sibling-account fallback.
-- Added `/account auto` to return the current provider to automatic account routing for this session; the choice is journaled, so resume and `/fresh` keep it and `auth.defaultAccounts` does not re-lock the session.
-- Added per-handler deadlines through `pi.on(event, handler, { timeoutMs })`, including zero for cancellable waits without a deadline. Input and assistant-message handlers can exceed 30 seconds without changing unrelated defaults, the 2-second shutdown cap, or fail-closed input/tool-call behavior.
-- Added `omp.registerAssistantTextDisplay()` for display-only assistant text projections in the existing native and classic transcript component, while preserving source messages and withholding pending prose from immutable history.
-- Exposed `ctx.abortSignal` so extension handlers can cancel external work when their handler times out or the main turn is cancelled.
-- Added an opt-in bidirectional translator extension: Chinese editor prose is translated to English before the main model, English response history stays English, and Chinese is projected only in the original assistant display.
-- Added `/translator input` for input-only Chinese-to-English translation, leaving assistant replies in their original English without output-translation requests; `/translator both` restores bidirectional translation.
 
 ### Changed
 
@@ -159,13 +166,6 @@
 - Mistral Vibe browser sign-in shows subscription billing in the status line and advisor spend instead of pay-as-you-go pricing ([#18374](https://github.com/can1357/oh-my-pi/issues/18374))
 - Native OpenAI compaction no longer waits for a Hindsight memory recall it cannot use; fallback summaries still recall memory ([#18327](https://github.com/can1357/oh-my-pi/issues/18327))
 - An eval `wait()` on jobs owned by a worker returns finished jobs and consumes their results instead of reporting them as running or delivering them again ([#18363](https://github.com/can1357/oh-my-pi/issues/18363))
-- Subagents hosted on worker threads keep a strict `/account` lock: the worker auth proxy now carries strict pins, `sessions.mode()` and `sessions.automatic()`, and a revived subagent copies its live parent's lock (including a worker-hosted parent)
-- An `auth.defaultAccounts` selector that matches no stored account, or several, now shows a config warning (without the selector) instead of silently leaving the session on automatic routing.
-- `/fresh` and in-place context resets keep a strict `/account` lock (even on an account removed since) and an `/account auto` choice on the new provider session id; if the new id cannot be routed safely, the session stays on the old id instead of continuing unlocked
-- `/session pin` (and the account selector) now saves its choice immediately, so a resume before the next reply no longer restores a strict lock the pin replaced
-- `/account` on an OAuth account with no email or account id says the lock lasts until omp exits instead of reporting a lock that resume cannot restore
-- Translator failures now write structured warning records with direction, selected model, elapsed time, source size, timeout/cancellation state, and the underlying error without logging translated content.
-- Input hooks can now reject a submission with `reject`, restoring the original draft and attachments; hook errors and timeouts fail closed instead of dispatching untranslated input. Delayed hooks cannot submit or restore drafts into another session.
 - `/restart` no longer drops running subagents: they go on with their interrupted turns in the relaunched process and deliver their results to the agent that spawned them, as `omp --restore` now also does after a normal quit
 - A shell command nested hundreds of levels deep (subshells, groups, command substitutions) is now a syntax error in the built-in shell instead of crashing omp with a stack overflow.
 - Eval `wait()` progress rows for agents spawned by one `task` call show each agent's own tool count, context, cost and activity instead of the first agent's ([#18393](https://github.com/can1357/oh-my-pi/issues/18393))

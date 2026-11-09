@@ -377,7 +377,11 @@ describe("credential pins", () => {
 		}
 	});
 
-	function createAnthropicSession(manager: SessionManager, registry: ModelRegistry): AgentSession {
+	function createAnthropicSession(
+		manager: SessionManager,
+		registry: ModelRegistry,
+		settings: Settings = Settings.isolated({}),
+	): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
 		return new AgentSession({
@@ -387,7 +391,7 @@ describe("credential pins", () => {
 			}),
 			sessionManager: manager,
 			modelRegistry: registry,
-			settings: Settings.isolated({}),
+			settings,
 		});
 	}
 
@@ -503,6 +507,55 @@ describe("credential pins", () => {
 		const resumed = createSession(resumedStorage, await SessionManager.open(file));
 		try {
 			expect(resumedStorage.sessions.mode("anthropic", resumed.sessionId)).toBe("automatic");
+		} finally {
+			await resumed.dispose();
+		}
+	});
+
+	test.each([
+		["a strict lock on another account", "strict"],
+		["automatic routing", "automatic"],
+	] as const)("%s chosen after /fresh survives resume despite a configured default account", async (_label, choice) => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		manager.appendMessage(assistantMessage("anthropic", Date.now()));
+		const settings = Settings.isolated({ "auth.defaultAccounts": { anthropic: "b" } });
+		const modelsPath = path.join(tempDir.path(), "models.yml");
+		const session = createAnthropicSession(manager, new ModelRegistry(storage, modelsPath), settings);
+		try {
+			expect(storage.sessions.mode("anthropic", session.sessionId)).toBe("strict");
+			session.freshSession();
+			if (choice === "strict") {
+				const accountA = storage.oauth
+					.accounts("anthropic", session.sessionId)
+					.find(account => account.accountId === "account-a")!;
+				expect(session.pinCurrentProviderOAuthAccount(accountA.credentialId, { strict: true })).toEqual({
+					persisted: true,
+				});
+			} else {
+				expect(session.useAutomaticProviderAccountRouting()).toBe(true);
+			}
+			await manager.flush();
+		} finally {
+			await session.dispose();
+		}
+
+		// A new process resumes on the transcript's own provider id, whose persisted
+		// affinity row predates the choice made on the rotated `/fresh` id.
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("expected a persisted session file");
+		const resumedStorage = new AuthStorage(store);
+		await resumedStorage.credentials.reload();
+		const resumed = createAnthropicSession(
+			await SessionManager.open(file),
+			new ModelRegistry(resumedStorage, modelsPath),
+			settings,
+		);
+		try {
+			const sessionId = resumed.sessionId;
+			expect(resumedStorage.sessions.mode("anthropic", sessionId)).toBe(choice);
+			const active = resumedStorage.oauth.accounts("anthropic", sessionId).find(account => account.active);
+			expect(active?.accountId).toBe(choice === "strict" ? "account-a" : undefined);
 		} finally {
 			await resumed.dispose();
 		}
