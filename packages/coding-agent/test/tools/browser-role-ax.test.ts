@@ -112,7 +112,9 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			await page.setContent("<h1>First</h1>");
 			const waiting = page.waitForSelector('role/heading[name="Next" exact]', { timeout: 10_000 });
 			await page.goto("data:text/html,<h1>Next</h1>");
-			expect(await (await waiting)?.evaluate(heading => heading.textContent)).toBe("Next");
+			const heading = await waiting;
+			expect(await page.evaluate(element => element?.textContent, heading)).toBe("Next");
+			await heading?.dispose();
 		} finally {
 			await browser.close();
 		}
@@ -207,7 +209,9 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			inputs.map(type => `<input type="${type}"><input type="${type}" list="options" aria-label="L">`).join("") +
 			'<datalist id="options"><option>o</option></datalist>' +
 			// An implicit editing host is generic in Chrome, not the textbox that Tern's rules infer.
-			'<div contenteditable="true" aria-label="Notes">Draft</div>';
+			'<div contenteditable="true" aria-label="Notes">Draft</div>' +
+			// Chrome exposes the annotation as Ruby's description and ignores the native rt node.
+			"<ruby>漢<rt>かん</rt></ruby>";
 		// Contexts that change an element's role: tables and grids, lists and menus, landmarks and sections.
 		const contexts = [
 			(content: string) => content,
