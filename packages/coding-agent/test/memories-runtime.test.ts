@@ -524,7 +524,7 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 
 		const payload = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
 		expect(payload).toBeDefined();
-		expect(payload).toContain("memory://root/memory_summary.md");
+		expect(payload).toContain("Read `memory://root` first.");
 		expect(payload).not.toContain(memoryRoot);
 		expect(payload).toContain("...[truncated]...");
 	});
