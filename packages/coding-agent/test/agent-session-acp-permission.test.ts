@@ -94,6 +94,7 @@ async function createSession(
 		xdev?: XdevState;
 		builtInToolNames?: string[];
 		persist?: boolean;
+		extensionRunner?: ExtensionRunner;
 	},
 ): Promise<AgentSession> {
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -126,6 +127,7 @@ async function createSession(
 		toolRegistry,
 		xdev: options?.xdev,
 		builtInToolNames: options?.builtInToolNames,
+		extensionRunner: options?.extensionRunner,
 	});
 
 	if (bridge) sess.setClientBridge(bridge);
@@ -1596,4 +1598,75 @@ it("parks a steer submitted before the owning prompt's dispatch preprocessing", 
 	expect(await steer).toBe(true);
 	expect(await dispatched).toBe(true);
 	await session.waitForIdle();
+});
+
+/** Runner stub that records approval events and reports no other handlers. */
+function approvalRecordingRunner(events: Array<Record<string, unknown>>): ExtensionRunner {
+	return {
+		hasHandlers: (event: string) => event === "tool_approval_requested" || event === "tool_approval_resolved",
+		consumeToolCallEmitted: () => false,
+		hasUI: () => false,
+		hasSessionApproval: () => false,
+		sessionId: "acp-approval-events-test",
+		runScoped<T>(fn: () => T): T {
+			return fn();
+		},
+		async emit(event: Record<string, unknown>) {
+			events.push(event);
+			return undefined;
+		},
+	} as unknown as ExtensionRunner;
+}
+
+it("ACP permission waits emit tool_approval_requested before the answer and tool_approval_resolved after it", async () => {
+	const bashTool = makeFakeTool("bash");
+	const events: Array<Record<string, unknown>> = [];
+	const pending = Promise.withResolvers<ClientBridgePermissionOutcome>();
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission() {
+			return pending.promise;
+		},
+	};
+	session = await createSession([bashTool], bridge, {}, { extensionRunner: approvalRecordingRunner(events) });
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	const executing = gatedBash!.execute(
+		"call-acp-events",
+		{ command: "echo hi" },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+	// The requested event must land while the ACP answer is still pending:
+	// extensions learn about the wait without delaying the client's card.
+	await new Promise(resolve => setTimeout(resolve, 10));
+	expect(events.map(event => event.type)).toEqual(["tool_approval_requested"]);
+	expect(events[0]).toMatchObject({ toolName: "bash", toolCallId: "call-acp-events" });
+	expect(bashTool.executeCalls).toBe(0);
+
+	pending.resolve({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	await executing;
+
+	expect(events.map(event => event.type)).toEqual(["tool_approval_requested", "tool_approval_resolved"]);
+	expect(events[1]).toMatchObject({ toolName: "bash", toolCallId: "call-acp-events", approved: true });
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("ACP permission rejections emit tool_approval_resolved with approved=false and never execute", async () => {
+	const bashTool = makeFakeTool("bash");
+	const events: Array<Record<string, unknown>> = [];
+	const bridge = makeBridge({ outcome: "selected", optionId: "reject_once", kind: "reject_once" });
+	session = await createSession([bashTool], bridge, {}, { extensionRunner: approvalRecordingRunner(events) });
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	await expect(
+		gatedBash!.execute("call-acp-reject", { command: "echo hi" }, undefined, undefined as never, undefined as never),
+	).rejects.toThrow(/Tool call rejected by user/);
+
+	expect(events.map(event => event.type)).toEqual(["tool_approval_requested", "tool_approval_resolved"]);
+	expect(events[1]).toMatchObject({ toolName: "bash", toolCallId: "call-acp-reject", approved: false });
+	expect(bashTool.executeCalls).toBe(0);
 });

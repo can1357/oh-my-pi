@@ -39,6 +39,7 @@ import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" wit
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
+	type ApprovalMode,
 	approvalRestrictions,
 	denyError,
 	resolveApproval,
@@ -1191,13 +1192,16 @@ export class SessionTools {
 					const restrictions = approvalRestrictions(this.#host.settings, this.#host.sessionManager.getCwd());
 					// A restricted call is approved per call: a remembered ACP answer never covers it.
 					let cacheable = restrictedFolderReason(target, args, restrictions) === undefined;
+					const { approvalMode: configuredApprovalMode, userPolicies } = resolveApprovalFromContext({
+						autoApprove: this.#autoApprove,
+						settings: this.#host.settings,
+					});
+					let approvalMode: ApprovalMode = configuredApprovalMode;
 					if (target.name === "bash") {
 						const explicitAutoApprove = this.#isExplicitAutoApproveMode();
-						const { approvalMode, userPolicies } = resolveApprovalFromContext({
-							autoApprove: this.#autoApprove,
-							settings: this.#host.settings,
-						});
-						const mode = approvalMode === "yolo" && !explicitAutoApprove ? "always-ask" : approvalMode;
+						const mode =
+							configuredApprovalMode === "yolo" && !explicitAutoApprove ? "always-ask" : configuredApprovalMode;
+						approvalMode = mode;
 						const resolved = resolveApproval(
 							target,
 							args,
@@ -1240,6 +1244,40 @@ export class SessionTools {
 					if (signal?.aborted) {
 						throw new ToolAbortError("Permission request cancelled");
 					}
+					// Extensions never see the inner gate in ACP mode (the grant
+					// satisfies it via acpApprovedArgs), so report the wait here.
+					// The requested event is started, not awaited: gate-style
+					// handlers may hold it awaiting an external verdict, and the
+					// ACP client's own permission card must not wait on them.
+					const extensionRunner = this.#host.extensionRunner();
+					const hasApprovalHandlers =
+						extensionRunner !== undefined &&
+						(extensionRunner.hasHandlers("tool_approval_requested") ||
+							extensionRunner.hasHandlers("tool_approval_resolved"));
+					const approvalSessionId = this.#host.sessionManager.getSessionId() ?? "";
+					if (hasApprovalHandlers) {
+						void extensionRunner
+							.emit({
+								type: "tool_approval_requested",
+								sessionId: approvalSessionId,
+								toolName: target.name,
+								toolCallId,
+								approvalMode,
+								input: args,
+							})
+							.catch(() => {});
+					}
+					const emitApprovalResolved = async (approved: boolean, reason?: string): Promise<void> => {
+						if (!hasApprovalHandlers) return;
+						await extensionRunner.emit({
+							type: "tool_approval_resolved",
+							sessionId: approvalSessionId,
+							toolName: target.name,
+							toolCallId,
+							approved,
+							...(reason ? { reason } : {}),
+						});
+					};
 					type PermissionRaceResult =
 						| { kind: "permission"; outcome: ClientBridgePermissionOutcome }
 						| { kind: "aborted" }
@@ -1365,6 +1403,9 @@ export class SessionTools {
 							).then(outcome => ({ kind: "permission" as const, outcome }));
 							return Promise.race([permissionPromise, abortPromise, steerPromise]);
 						});
+					} catch (err) {
+						await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+						throw err;
 					} finally {
 						signal?.removeEventListener("abort", onAbort);
 						steeringSignal.removeEventListener("abort", onLoopSteer);
@@ -1375,17 +1416,21 @@ export class SessionTools {
 						this.#host.steeringArrivalRelease(arrivalParkSeq);
 					}
 					if (raced.kind === "steered") {
+						await emitApprovalResolved(false, "superseded by user steering");
 						throw new ToolAbortError("Permission request superseded by user steering");
 					}
 					if (raced.kind === "aborted" || signal?.aborted) {
+						await emitApprovalResolved(false, "cancelled");
 						throw new ToolAbortError("Permission request cancelled");
 					}
 					const outcome = raced.outcome;
 					if (outcome.outcome === "cancelled") {
+						await emitApprovalResolved(false, "cancelled");
 						throw new ToolAbortError("Permission request cancelled");
 					}
 					const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
 					if (!selectedOption) {
+						await emitApprovalResolved(false, "permission request failed");
 						throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
 					}
 					if (cacheable && selectedOption.kind === "allow_always") {
@@ -1394,8 +1439,10 @@ export class SessionTools {
 						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "reject_always");
 					}
 					if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
+						await emitApprovalResolved(false, "denied by user");
 						throw new ToolError(`Tool call rejected by user (${target.name})`);
 					}
+					await emitApprovalResolved(true);
 					return await target.execute(toolCallId, args as never, signal, onUpdate, approvedCtx);
 				};
 			},

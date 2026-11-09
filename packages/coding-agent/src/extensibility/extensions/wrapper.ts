@@ -428,6 +428,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					toolCallId,
 					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 					approvalMode,
+					input: normalizeToolEventInput(
+						this.tool.name,
+						resolveToolEventInput(this.tool, toolEventArgs(resolvedArgs, context)),
+					),
 				});
 			}
 

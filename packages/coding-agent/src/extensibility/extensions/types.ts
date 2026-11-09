@@ -1428,6 +1428,8 @@ export interface ToolApprovalRequestedEvent {
 	toolName: string;
 	reason?: string;
 	approvalMode: ApprovalMode;
+	/** Tool input awaiting approval, so consumers can render what is being approved. */
+	input?: unknown;
 }
 
 export interface ToolApprovalResolvedEvent {
