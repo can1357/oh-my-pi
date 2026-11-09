@@ -78,6 +78,10 @@
       "types": "./src/core/index.ts",
       "import": "./src/core/index.ts"
     },
+    "./core/content-sanitizer": {
+      "types": "./src/core/content-sanitizer.ts",
+      "import": "./src/core/content-sanitizer.ts"
+    },
     "./core/beam": {
       "types": "./src/core/beam/index.ts",
       "import": "./src/core/beam/index.ts"

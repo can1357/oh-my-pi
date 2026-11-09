@@ -9,6 +9,8 @@
  *   - retention transcript framing
  */
 
+import { stripInjectedMemoryTags } from "@oh-my-pi/pi-mnemopi/core/content-sanitizer";
+
 export interface HindsightMessage {
 	role: string;
 	content: string;
@@ -22,11 +24,6 @@ export interface RecallResultLike {
 	mentioned_at?: string | null;
 }
 
-const MEMORIES_REGEX = /<memories>[\s\S]*?<\/memories>/g;
-const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsight_memories>/g;
-const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
-const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
-
 const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0-9]+:end|timestamp:\s+.+)\]$/;
 /**
  * Strip `<memories>`, `<mental_models>`, and legacy memory blocks.
@@ -39,11 +36,7 @@ const RETENTION_PROTOCOL_MARKER_REGEX = /^\[(?:role:\s*[-_a-zA-Z0-9]+|[-_a-zA-Z0
  * retaining.
  */
 export function stripMemoryTags(content: string): string {
-	return content
-		.replace(MEMORIES_REGEX, "")
-		.replace(MENTAL_MODELS_REGEX, "")
-		.replace(LEGACY_HINDSIGHT_MEMORIES_REGEX, "")
-		.replace(LEGACY_RELEVANT_MEMORIES_REGEX, "");
+	return stripInjectedMemoryTags(content).content;
 }
 
 // At least one letter or digit means the message carries a token a retriever
