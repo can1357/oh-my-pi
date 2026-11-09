@@ -7,7 +7,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
 import { closeSessionIndex, lookupSessionTitle } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, SessionWriteConflictError } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	SessionWriteConflictError,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { overlayTitleSlotContent, type SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./helpers";
@@ -496,6 +500,94 @@ describe("deferred writer callbacks belong to their session state", () => {
 			expect(manager.getSessionName()).toBeUndefined();
 			expect(lookupSessionTitle(manager.getSessionId())).toBeUndefined();
 		} finally {
+			await manager.close();
+		}
+	});
+	it("indexes a replicated rename and clear as their appended lines land", async () => {
+		const manager = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"));
+		try {
+			manager.appendMessage(user("first"));
+			manager.appendMessage(assistant("first reply"));
+			await manager.setSessionName("Guest title", "user");
+			const replicate = (id: string, title: string) =>
+				manager.ingestReplicatedEntry({
+					type: "title_change",
+					id,
+					parentId: manager.getLeafId(),
+					timestamp: "2026-01-01T00:00:00.000Z",
+					title,
+					source: "user",
+				});
+			replicate("host-rename", "Host title");
+			await manager.flush();
+			expect(lookupSessionTitle(manager.getSessionId())).toBe("Host title");
+			replicate("host-clear", "");
+			await manager.flush();
+			expect(lookupSessionTitle(manager.getSessionId())).toBeUndefined();
+		} finally {
+			await manager.close();
+		}
+	});
+	it("indexes an observer's later rename, not the earlier one it reacted to", async () => {
+		const manager = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"));
+		let inner: Promise<boolean> | undefined;
+		manager.onEntryAppended = entry => {
+			if (entry.type === "title_change" && entry.title === "Earlier")
+				inner = manager.setSessionName("Later", "user");
+		};
+		try {
+			manager.appendMessage(user("first"));
+			manager.appendMessage(assistant("first reply"));
+			await manager.setSessionName("Earlier", "user");
+			await inner;
+			expect(manager.getSessionName()).toBe("Later");
+			expect(lookupSessionTitle(manager.getSessionId())).toBe("Later");
+		} finally {
+			manager.onEntryAppended = undefined;
+			await manager.close();
+		}
+	});
+	it("rolls a batch rename back to a rename adopted from another writer during the batch", async () => {
+		class ForeignRenameStorage extends FileSessionStorage {
+			armed = false;
+			writes = 0;
+			foreignParent: string | null = null;
+			override async writeTextAtomic(file: string, content: string, options?: WriteTextAtomicOptions) {
+				if (this.armed && ++this.writes === 1) {
+					// A writer without the ownership lease appends a rename before the batch's first publish.
+					fs.appendFileSync(
+						file,
+						`${JSON.stringify({ type: "title_change", id: "foreign-rename", parentId: this.foreignParent, timestamp: "2026-01-01T00:00:00.000Z", title: "Foreign title", source: "user" })}\n`,
+					);
+				} else if (this.armed && this.writes === 2) {
+					throw new Error("publish failed after adoption");
+				}
+				return super.writeTextAtomic(file, content, options);
+			}
+		}
+		const storage = new ForeignRenameStorage();
+		const manager = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"), storage);
+		let rename: Promise<unknown> | undefined;
+		try {
+			manager.appendMessage(user("first"));
+			manager.appendMessage(assistant("first reply"));
+			await manager.setSessionName("Before batch", "auto");
+			storage.foreignParent = manager.getLeafId();
+			storage.armed = true;
+			await expect(
+				manager.appendEntriesAtomically(() => {
+					rename = manager.setSessionName("Cancelled", "user").catch(() => undefined);
+				}),
+			).rejects.toThrow("publish failed after adoption");
+			await rename;
+			storage.armed = false;
+			expect(manager.getEntries().flatMap(entry => (entry.type === "title_change" ? [entry.title] : []))).toEqual([
+				"Before batch",
+				"Foreign title",
+			]);
+			expect(manager.getSessionName()).toBe("Foreign title");
+		} finally {
+			storage.armed = false;
 			await manager.close();
 		}
 	});

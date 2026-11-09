@@ -878,8 +878,8 @@ interface AtomicEntryBatch {
 	/** The title when the batch started, and whether the batch staged a rename, which rollback then undoes. */
 	preBatchTitle: SessionTitleUpdate;
 	stagedTitle: boolean;
-	/** The newest rename recorded during the batch but outside it, which survives a rollback. */
-	externalTitle?: TitleChangeEntry;
+	/** Renames that joined during the batch from outside it (recorded or adopted from another writer); they survive rollback. */
+	keptTitleIds: Set<string>;
 }
 
 /**
@@ -1368,7 +1368,10 @@ export class SessionManager {
 			this.#entries.push(entry);
 			this.#index.insert(entry);
 			adopted++;
-			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) adoptedTitle = true;
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) {
+				adoptedTitle = true;
+				this.#atomicEntryBatch?.keptTitleIds.add(entry.id);
+			}
 		}
 		if (beforeTitleId && adopted > 0) {
 			this.#index.moveForeignBefore(this.#entries, beforeTitleId, adopted);
@@ -2529,6 +2532,8 @@ export class SessionManager {
 			if (writer.appendSync && !this.#storage.defersSyncPublish) {
 				writer.appendSync(line);
 				this.#recordDurableAppend(line);
+				// The journal's newest title is now this line's.
+				if (entry.type === TITLE_CHANGE_ENTRY_TYPE) this.#indexDurableTitle(this.#sessionId, entry.title);
 			} else {
 				// A backend that only queues the publish (indexed) has no synchronous
 				// durability, so the durable size may advance only once it confirms
@@ -2549,6 +2554,7 @@ export class SessionManager {
 							this.#pendingDeferredAppends--;
 						}
 						this.#recordDurableAppend(line);
+						if (entry.type === TITLE_CHANGE_ENTRY_TYPE) this.#indexDurableTitle(this.#sessionId, entry.title);
 					})
 					.catch(err => {
 						if (!this.#isCurrentWriterState(writerStateGen, sessionFile)) return;
@@ -2715,7 +2721,7 @@ export class SessionManager {
 			batch.externalLeafChanged = true;
 			// An off-branch entry replays to the leaf it captured, not to itself.
 			batch.externalLeafId = sessionEntryLeafId(entry);
-			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) batch.externalTitle = entry;
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) batch.keptTitleIds.add(entry.id);
 		}
 		this.#appendToSessionFile(entry);
 		if (batch) {
@@ -2762,10 +2768,15 @@ export class SessionManager {
 		this.#entries = retained;
 		this.#index.rebuild(retained);
 		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
-		// A rolled-back rename takes its title with it: back to the newest rename kept, else the batch's start.
+		// A rolled-back rename takes its title with it: back to the newest rename that joined during the batch from
+		// outside it and survives, in journal order, else the batch's start.
 		if (batch.stagedTitle) {
-			if (batch.externalTitle) {
-				this.#applyJournalTitle(batch.externalTitle);
+			const kept = retained.findLast(
+				(entry): entry is TitleChangeEntry =>
+					entry.type === TITLE_CHANGE_ENTRY_TYPE && batch.keptTitleIds.has(entry.id),
+			);
+			if (kept) {
+				this.#applyJournalTitle(kept);
 			} else {
 				const { title, source, updatedAt } = batch.preBatchTitle;
 				this.#sessionName = title;
@@ -3507,6 +3518,7 @@ export class SessionManager {
 			externalLeafId: null,
 			preBatchTitle: { title: this.#sessionName, source: this.#titleSource, updatedAt: this.#titleUpdatedAt },
 			stagedTitle: false,
+			keptTitleIds: new Set(),
 		};
 		this.#atomicEntryBatch = batch;
 		let result!: T;
@@ -4246,10 +4258,15 @@ export class SessionManager {
 		this.#recordEntry(entry, written.resolve);
 		await this.flush();
 		const sessionId = await written.promise;
-		// Keep the recent-sessions title index current so welcome-screen lookups
-		// never have to content-scan this session's file. A line the full volume
-		// held back is indexed where it lands (#indexDurableTitle).
-		if (sessionId && this.#persist && this.#storage instanceof FileSessionStorage) {
+		// Keep the recent-sessions title index current so welcome-screen lookups never have to content-scan this
+		// session's file. Its line is indexed where it lands (#indexDurableTitle); this also covers a session not yet
+		// on disk, unless a later rename (or a switch) has replaced this one's title meanwhile.
+		if (
+			sessionId === this.#sessionId &&
+			this.#sessionName === title &&
+			this.#persist &&
+			this.#storage instanceof FileSessionStorage
+		) {
 			recordSessionTitle(sessionId, title);
 		}
 
