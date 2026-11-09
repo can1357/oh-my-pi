@@ -191,6 +191,13 @@ behavior {
 	// (reference-content/openai-compatibility recommends the Responses API).
 	exclude-models provider="scaleway" prefix="whisper-" prefix="qwen3-embedding-" prefix="bge-" prefix="lightonocr-" \
 		exact="gpt-oss-120b"
+	// Otari's roster carries every model a workspace enables. Rows with
+	// metadata are filtered on `architecture.output_modalities` in the mapper;
+	// these catch metadata-less non-chat rows. Ids are `<upstream>/<model>`, so
+	// model-name prefixes match after the slash (live hosted roster, 2026-11-02).
+	exclude-models provider="otari" substring="embed" substring="rerank" substring="-tts" substring="transcribe" \
+		substring="realtime" substring="minilm" substring="mpnet" substring="/bge-" substring="/e5-" substring="/flux-" \
+		prefix="openai/gpt-image-" prefix="alibaba/qwen-image"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
@@ -455,6 +462,11 @@ behavior {
 	role-defaults "slow" {
 		model "openai-codex/gpt-5.6-sol"
 		model "gpt-5.6-sol"
+		model "anthropic/claude-fable-5-2"
+		model "claude-fable-5-2"
+		model "claude-fable-5.2"
+		model "fable-5.2"
+		model "fable-5-2"
 		model "anthropic/claude-fable-5-1"
 		model "claude-fable-5-1"
 		model "claude-fable-5.1"
