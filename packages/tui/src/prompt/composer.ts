@@ -610,7 +610,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#lastViewportRows = rows;
 		this.#lastViewportWidth = width;
 		this.#syncLinkHints(rows, width);
-		return this.#paintLinkHints([...rows], width);
+		const painted = [...rows];
+		return this.#linkHints?.hints.paint(painted, width) ?? painted;
 	}
 
 	/**
