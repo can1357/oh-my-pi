@@ -2141,6 +2141,7 @@ describe("addressed A2A reply jobs", () => {
 		const { bridge } = await registerFrom(server);
 		await IncomingRequests.global().note({ from: "main", messageId: "owed-1", to: OWNER, at: 1 });
 		await IncomingRequests.global().note({ from: "main", messageId: "owed-2", to: OWNER, at: 2 });
+		await IncomingRequests.global().note({ from: "main", messageId: "main-owed", to: "Main", at: 0 });
 		const manager = managerFor();
 		const registered = captureOutgoing();
 		const tool = await createTaskTool(bridge, Settings.isolated(), {
@@ -2150,6 +2151,7 @@ describe("addressed A2A reply jobs", () => {
 		const reply = await tool.execute("tc-reply", { agent: "a2a:main", task: "the answer" } as TaskParams);
 		expect(server.calls[0]?.params.metadata).toMatchObject({ inReplyTo: "owed-1" });
 		expect((await IncomingRequests.global().list(OWNER)).map(request => request.messageId)).toEqual(["owed-2"]);
+		expect((await IncomingRequests.global().list("Main")).map(request => request.messageId)).toEqual(["main-owed"]);
 		expect(registered).toEqual([]);
 		expect(manager.getAllJobs({ ownerId: OWNER })).toEqual([]);
 		expect(replyJob(reply)).toBeUndefined();

@@ -10,7 +10,7 @@ import {
 	type SpawnA2aAgentResult,
 } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
-import { installA2aReplyRelay } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
+import { installA2aReplyRelay, sendA2aReply } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
 import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 
@@ -70,6 +70,55 @@ function harness(options: { rescan?: (bridge: A2aAgentBridge) => void } = {}) {
 	};
 	return { bridge, sent, end, nextDelivery };
 }
+
+describe("sendA2aReply", () => {
+	it("rescans and sends a correlated reply with the supplied identity and timeout", async () => {
+		const bridge = new A2aAgentBridge();
+		const sent: SpawnA2aAgentOptions[] = [];
+		let rescans = 0;
+		await sendA2aReply({
+			bridge,
+			request: { from: "builder", messageId: "req-sub", to: "Scout", at: 100 },
+			answer: "review complete",
+			identity: async () => ({ name: "reviewer", url: "http://127.0.0.1:2/" }),
+			rescan: async () => {
+				rescans++;
+				peer(bridge, "builder");
+			},
+			timeoutMs: 1234,
+			send: async options => {
+				sent.push(options);
+				return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
+			},
+		});
+
+		expect(rescans).toBe(1);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({
+			agent: { skillId: "builder" },
+			prompt: "review complete",
+			inReplyTo: "req-sub",
+			fromIdentity: { name: "reviewer", url: "http://127.0.0.1:2/" },
+			timeoutMs: 1234,
+		});
+	});
+
+	it("does not send when a rescan cannot find the originating peer", async () => {
+		const sent: SpawnA2aAgentOptions[] = [];
+		await sendA2aReply({
+			bridge: new A2aAgentBridge(),
+			request: { from: "missing", messageId: "req-1", to: "Scout", at: 100 },
+			answer: "answer",
+			identity: async () => ({ name: "reviewer" }),
+			rescan: async () => {},
+			send: async options => {
+				sent.push(options);
+				return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
+			},
+		});
+		expect(sent).toEqual([]);
+	});
+});
 
 describe("A2A reply relay", () => {
 	it("sends the last text after the request back to the sender, correlated, exactly once", async () => {

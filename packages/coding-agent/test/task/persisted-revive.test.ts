@@ -13,6 +13,8 @@ import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capabili
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -122,6 +124,8 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
+		a2aBridge: new A2aAgentBridge(),
+		settings: Settings.isolated(),
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
@@ -263,6 +267,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	IncomingRequests.resetGlobalForTests();
 	MCPManager.resetForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
@@ -1651,6 +1656,148 @@ describe("persisted subagent revival", () => {
 			details: { id: "irc-42", from, message: "send me the full table", ...(hops ? { hops } : {}) },
 			attribution: "agent",
 			timestamp: Date.now(),
+		});
+
+		const externalRecord = (messageId: string, extra: Record<string, unknown> = {}): CustomMessage => ({
+			...wakeRecord("a2a"),
+			details: { id: `irc-${messageId}`, from: "a2a", external: true, a2aMessageId: messageId, ...extra },
+		});
+
+		async function externalHarness() {
+			const cwd = makeTempDir("@pi-revive-a2a-wake-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const calls: Array<{
+				method: string;
+				params: { message: { parts: Array<{ text: string }> }; metadata: Record<string, unknown> };
+			}> = [];
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					const body = (await request.json()) as {
+						id: unknown;
+						method: string;
+						params: (typeof calls)[number]["params"];
+					};
+					calls.push(body);
+					return Response.json({
+						jsonrpc: "2.0",
+						id: body.id,
+						result: {
+							task: {
+								id: "peer",
+								status: { state: "TASK_STATE_WORKING" },
+								metadata: { delivery: { outcome: "injected" } },
+							},
+						},
+					});
+				},
+			});
+			handle.session.a2aBridge.add({
+				name: "a2a:peer",
+				skillId: "peer",
+				description: "peer",
+				cardName: "peer",
+				url: `http://127.0.0.1:${server.port}/`,
+			});
+			const busSend = vi.spyOn(IrcBus.global(), "send");
+			const note = (messageId: string) =>
+				IncomingRequests.global().note({ to: ref.id, from: "peer", messageId, at: Date.now() });
+			const finish = async (
+				records: CustomMessage[],
+				stop: LastAssistantStop = { stopReason: "stop", content: [{ type: "text", text: "answer" }] },
+				duringTurn?: () => Promise<void>,
+			) => {
+				const observer = handle.observer();
+				if (!observer) throw new Error("wake observer missing");
+				const complete = observer(records);
+				await duringTurn?.();
+				handle.setLastAssistantStop(stop);
+				await complete?.();
+			};
+			return { ref, calls, server, busSend, note, finish };
+		}
+
+		it("sends an external wake answer to the peer without relaying to the pseudo-sender", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				await h.finish([externalRecord("req-1")]);
+				expect(h.calls).toHaveLength(1);
+				expect(h.calls[0]).toMatchObject({
+					method: "SendMessage",
+					params: { metadata: { to: "peer", inReplyTo: "req-1" }, message: { parts: [{ text: "answer" }] } },
+				});
+				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
+				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("answers each distinct request from the same peer in record order", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				await h.note("req-2");
+				await h.finish([externalRecord("req-1"), externalRecord("req-1"), externalRecord("req-2")]);
+				expect(h.calls.map(call => call.params.metadata.inReplyTo)).toEqual(["req-1", "req-2"]);
+				expect(h.calls.map(call => call.params.message.parts[0]?.text)).toEqual(["answer", "answer"]);
+				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("does not automatically answer a request explicitly consumed during the wake", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				await h.finish([externalRecord("req-1")], undefined, async () => {
+					await IncomingRequests.global().consume({ to: h.ref.id, from: "peer", messageId: "req-1" });
+				});
+				expect(h.calls).toEqual([]);
+				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		for (const [name, stop] of [
+			[
+				"failed",
+				{ stopReason: "error", errorMessage: "provider failed", content: [{ type: "text", text: "partial" }] },
+			],
+			["aborted", { stopReason: "aborted", content: [{ type: "text", text: "partial" }] }],
+			["empty", { stopReason: "stop", content: [] }],
+		] satisfies Array<[string, LastAssistantStop]>) {
+			it(`leaves external requests open after a ${name} turn`, async () => {
+				const h = await externalHarness();
+				try {
+					await h.note("req-1");
+					await h.finish([externalRecord("req-1")], stop);
+					expect(h.calls).toEqual([]);
+					expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
+						"req-1",
+					]);
+					expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
+				} finally {
+					h.server.stop(true);
+				}
+			});
+		}
+
+		it("does not answer external replies or misidentified records", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				await h.finish([externalRecord("req-1", { a2aInReplyTo: "earlier" })]);
+				expect(h.calls).toEqual([]);
+				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
+				expect(await IncomingRequests.global().list(h.ref.id)).toHaveLength(1);
+			} finally {
+				h.server.stop(true);
+			}
 		});
 
 		it("delivers the turn's final text to the waker when the agent never replied itself", async () => {

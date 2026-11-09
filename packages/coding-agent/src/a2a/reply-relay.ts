@@ -44,6 +44,14 @@ export interface A2aReplyRelayOptions {
 	send?: (options: SpawnA2aAgentOptions) => Promise<SpawnA2aAgentResult>;
 }
 
+export interface SendA2aReplyOptions extends Pick<
+	A2aReplyRelayOptions,
+	"bridge" | "identity" | "rescan" | "timeoutMs" | "send"
+> {
+	request: A2aIncomingRequest;
+	answer: string;
+}
+
 /** Install the relay on a main session; returns the unsubscribe. */
 export function installA2aReplyRelay(options: A2aReplyRelayOptions): () => void {
 	// Requests whose relay chance was used up, kept open for a manual reply.
@@ -65,7 +73,7 @@ export function installA2aReplyRelay(options: A2aReplyRelayOptions): () => void 
 						from: request.from,
 						messageId: request.messageId,
 					});
-					if (consumed !== undefined) void relayAnswer(options, consumed, answer);
+					if (consumed !== undefined) void sendA2aReply({ ...options, request: consumed, answer });
 				}
 			})
 			.catch(error => {
@@ -98,7 +106,9 @@ function findPeer(bridge: A2aBridgeApi, from: string): A2aRuntimeAgent | undefin
 	return bridge.list().find(agent => agent.skillId === from);
 }
 
-async function relayAnswer(options: A2aReplyRelayOptions, request: A2aIncomingRequest, answer: string): Promise<void> {
+/** Send a correlated reply to the peer that originated a request. */
+export async function sendA2aReply(options: SendA2aReplyOptions): Promise<void> {
+	const { request, answer } = options;
 	try {
 		let peer = findPeer(options.bridge, request.from);
 		if (peer === undefined) {

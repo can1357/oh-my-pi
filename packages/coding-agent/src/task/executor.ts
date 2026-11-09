@@ -19,6 +19,8 @@ import {
 	type AsyncJobManagerApi,
 	type AsyncJobRunResult,
 } from "../async";
+import { IncomingRequests } from "../a2a/incoming-requests";
+import { sendA2aReply } from "../a2a/reply-relay";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
@@ -149,6 +151,8 @@ import { yieldSectionShapes } from "./yield-assembly";
 import { assertPerCallModelApproved, PerCallModelError, type PerCallModelGrants } from "./model-approval";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import {
+	cfgA2aClientTimeoutMs,
+	cfgA2aMaxPeerSkills,
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
 	cfgTaskMaxEffort,
@@ -3229,6 +3233,7 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 	for (const record of records) {
 		if (record.role !== "custom") continue;
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
+		if (details && Reflect.get(details, "external") === true) continue;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
 		// Automated wake-turn relays are answers, not wake sources: relaying one
@@ -3308,6 +3313,66 @@ async function relayWakeTurnOutput(args: {
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}
+	}
+}
+
+/** Relay successful external requests independently, claiming each exact request once. */
+async function relayA2aWakeTurnOutput(args: {
+	session: AgentSession;
+	id: string;
+	records: AgentMessage[];
+	yielded: boolean;
+	result: SingleResult | undefined;
+	turnText: string;
+	error: string | undefined;
+	aborted: boolean;
+	finalizeError: unknown;
+}): Promise<void> {
+	if (wakeTurnFailed(args)) return;
+	const answer =
+		args.yielded && args.result?.outputPath
+			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
+			: args.turnText.trim();
+	if (!answer) return;
+	const ids = new Set<string>();
+	for (const record of args.records) {
+		if (record.role !== "custom" || !record.details || typeof record.details !== "object") continue;
+		const details = record.details;
+		const messageId = Reflect.get(details, "a2aMessageId");
+		if (
+			Reflect.get(details, "external") !== true ||
+			typeof messageId !== "string" ||
+			Reflect.get(details, "a2aInReplyTo") !== undefined ||
+			ids.has(messageId)
+		)
+			continue;
+		ids.add(messageId);
+		const request = await IncomingRequests.global().consume({ to: args.id, messageId });
+		if (!request) continue;
+		const { session } = args;
+		await sendA2aReply({
+			bridge: session.a2aBridge,
+			request,
+			answer,
+			identity: async () => {
+				try {
+					const { readOwnA2aIdentity } = await import("../a2a/server");
+					return await readOwnA2aIdentity(session.settings.getAgentDir());
+				} catch {
+					return {};
+				}
+			},
+			rescan: async () => {
+				const { rescanLocalBridges } = await import("../a2a/agent-bridge");
+				await rescanLocalBridges({
+					bridge: session.a2aBridge,
+					agentDir: session.settings.getAgentDir(),
+					settings: session.settings,
+					maxPeerSkills: cfgA2aMaxPeerSkills.get(session.settings),
+				});
+			},
+			timeoutMs: cfgA2aClientTimeoutMs.get(session.settings),
+		});
 	}
 }
 
@@ -3706,6 +3771,24 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						error: relayError instanceof Error ? relayError.message : String(relayError),
 					});
 				} finally {
+					try {
+						await relayA2aWakeTurnOutput({
+							session,
+							id,
+							records,
+							yielded,
+							result,
+							turnText,
+							error: errorForPeer,
+							aborted: aborted || lastAssistant?.stopReason === "aborted",
+							finalizeError,
+						});
+					} catch (relayError) {
+						logger.warn("A2A wake-turn relay threw", {
+							id,
+							error: relayError instanceof Error ? relayError.message : String(relayError),
+						});
+					}
 					relay.resolve();
 				}
 			}

@@ -111,7 +111,7 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.content).toContain("sent to the sender automatically");
 	});
 
-	it("tells a subagent that a plain-text answer to a bridge request is not relayed", async () => {
+	it("offers a subagent the same automatic reply guidance for a bridge request", async () => {
 		const { bridge, woken } = makeBridge();
 		await bridge.deliver({
 			id: "irc-4",
@@ -125,7 +125,8 @@ describe("IrcBridge wake-relay marking", () => {
 
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).toMatchObject({ external: true, a2aMessageId: "request-scout-1" });
-		expect(record.content).toContain("never reaches the sender");
+		expect(record.content).toContain("sent to the sender automatically");
+		expect(record.content).not.toContain("never reaches the sender");
 		expect(record.content).toContain("with the `task` tool to the `a2a:` agent");
 	});
 
@@ -145,6 +146,24 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.details).toMatchObject({ external: true, a2aInReplyTo: "req-1" });
 		expect(record.details).not.toHaveProperty("a2aMessageId");
 		expect(record.content).toContain("total() skips line 1");
+		expect(record.content).not.toContain("If response expected");
+		expect(record.content).not.toContain("sent to the sender automatically");
+	});
+
+	it("does not request a reply from a subagent receiving an A2A answer", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "irc-sub-reply",
+			from: "a2a",
+			to: "Scout",
+			body: "[A2A reply to your request req-1 from peer terminal reviewer. ...]\n\nreview complete",
+			ts: Date.now(),
+			external: true,
+			a2aInReplyTo: "req-1",
+		});
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.details).toMatchObject({ external: true, a2aInReplyTo: "req-1" });
 		expect(record.content).not.toContain("If response expected");
 		expect(record.content).not.toContain("sent to the sender automatically");
 	});
