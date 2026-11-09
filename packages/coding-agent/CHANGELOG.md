@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A bash call whose direnv load times out or is aborted no longer leaves direnv's stdlib bash and `devenv direnv-export` running as orphans that pile up with every later call ([#18656](https://github.com/can1357/oh-my-pi/pull/18656) by [@vizanto](https://github.com/vizanto))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
