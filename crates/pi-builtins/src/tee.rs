@@ -13,12 +13,12 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::PossibleValue};
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, matches_parser, util};
+use crate::host::{Host, Utility, matches_parser};
 
 mod options {
 	pub const APPEND: &str = "append";
@@ -375,11 +375,6 @@ fn app() -> Command {
 		)
 }
 
-/// Creates the `tee` builtin registration.
-pub(crate) fn tee_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Tee, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{
@@ -388,7 +383,7 @@ mod tests {
 	};
 
 	#[cfg(unix)]
-	use brush_core::openfiles::OpenFile;
+	use crate::openfile::OpenFile;
 	use pi_vfs::OpenOptions;
 
 	use super::{MultiWriter, NamedWriter, OutputErrorMode, Tee, Writer};

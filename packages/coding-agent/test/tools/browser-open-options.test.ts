@@ -8,9 +8,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browser/open-options";
+import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { DownloadManager } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
 import {
 	buildHeadlessLaunchArgs,
+	closeLaunchedBrowser,
 	launchHeadlessBrowser,
 	removeUserDataDir,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
@@ -25,7 +27,7 @@ import { chromiumAvailable } from "./chromium-probe";
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const tempDirs: string[] = [];
 
-function browserHost(cwd: string = process.cwd()) {
+function browserHost(cwd: string = process.cwd(), settings: Record<string, unknown> = {}) {
 	const session: ToolSession = {
 		cwd,
 		hasUI: false,
@@ -37,6 +39,7 @@ function browserHost(cwd: string = process.cwd()) {
 			"browser.cmux": false,
 			"browser.tern": false,
 			"tools.maxTimeout": 0,
+			...settings,
 		}),
 	};
 	const prelude = createBrowserPrelude(session);
@@ -66,14 +69,21 @@ describe("browser open options CDP helpers", () => {
 		expect(args).toContain("--allow-file-access-from-files");
 	});
 
-	it("rejects ignore_https_errors on the relay before opening a tab", async () => {
-		const name = `relay-tls-${crypto.randomUUID()}`;
-		const error = await rejectionOf(
-			browserHost()({ action: "open", name, app: { relay: true }, ignore_https_errors: true }),
-		);
-		expect(error).toBeInstanceOf(ToolError);
-		expect(error).toMatchObject({ message: expect.stringContaining("Security domain") });
-		expect(getTab(name)).toBeUndefined();
+	it("rejects ignore_https_errors and a downloads folder on the relay before opening a tab", async () => {
+		// No relay listens here, so an option refused only after connecting fails differently, and no test reaches a real one.
+		const port = await findFreeCdpPort();
+		const host = browserHost(process.cwd(), { "browser.relayUrl": `http://127.0.0.1:${port}` });
+		for (const option of [{ ignore_https_errors: true }, { downloads: "relay-downloads" }]) {
+			const name = `relay-option-${crypto.randomUUID()}`;
+			const error = await rejectionOf(host({ action: "open", name, app: { relay: true }, ...option }));
+			expect(error).toBeInstanceOf(ToolError);
+			expect(error).toMatchObject({
+				message: expect.stringContaining(
+					"downloads" in option ? "cannot choose where Chrome saves downloads" : "Security domain",
+				),
+			});
+			expect(getTab(name)).toBeUndefined();
+		}
 	});
 
 	it("omits per-open launch switches unless requested", () => {
@@ -110,7 +120,7 @@ describe("browser open options CDP helpers", () => {
 		};
 		const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
 		const page = { frames: () => [{ _id: "frame" }], browserContext: () => ({}) } as unknown as Page;
-		const downloads = new DownloadManager(browser, page, "tab", { perTab });
+		const downloads = new DownloadManager(browser, page, "tab", { perTab, pageEvents: false });
 		const complete = async (
 			guid: unknown,
 			filePath: string | undefined,
@@ -293,6 +303,91 @@ describe("browser open options CDP helpers", () => {
 		expect(await waiting).toBe(reason);
 		enabling.resolve();
 	});
+
+	/** A relay tab's downloads: page events on each frame's session, and `OMP.downloadPath` answered by `savedPath`. */
+	function fakePageDownloads(savedPath: (guid: string) => Promise<unknown>) {
+		const fakeSession = () => {
+			const listeners = new Map<string, (event: unknown) => void>();
+			return {
+				listeners,
+				on: (event: string, listener: (event: unknown) => void) => listeners.set(event, listener),
+				off: (event: string) => listeners.delete(event),
+				send: (_method: string, params: { guid: string }) => savedPath(params.guid),
+			};
+		};
+		const main = { _id: "main", client: fakeSession() };
+		const frame = { _id: "frame", client: fakeSession() };
+		const frames = [main, frame];
+		const pageListeners = new Map<string, () => void>();
+		const page = {
+			frames: () => frames,
+			mainFrame: () => main,
+			on: (event: string, listener: () => void) => pageListeners.set(event, listener),
+			off: (event: string) => pageListeners.delete(event),
+		} as unknown as Page;
+		const downloads = new DownloadManager({} as Browser, page, "tab", { perTab: false, pageEvents: true });
+		return { downloads, main, frame, frames, pageListeners };
+	}
+
+	it("fails the next wait on a relay download whose saved file was not found before any wait", async () => {
+		const asked = Promise.withResolvers<void>();
+		const { downloads, main } = fakePageDownloads(async () => {
+			asked.resolve();
+			throw new Error("the omp relay extension in this browser predates download tracking");
+		});
+		await downloads.start();
+		const guid = crypto.randomUUID();
+		main.client.listeners.get("Page.downloadWillBegin")!({
+			guid,
+			url: "https://example.com/r.csv",
+			suggestedFilename: "r.csv",
+			frameId: "main",
+		});
+		main.client.listeners.get("Page.downloadProgress")!({ guid, state: "completed", receivedBytes: 5 });
+		await asked.promise;
+		// Let the lookup's rejection settle before anything waits.
+		await Bun.sleep(0);
+		const error = await rejectionOf(downloads.wait());
+		expect(error).toBeInstanceOf(ToolError);
+		expect((error as ToolError).message).toContain("predates download tracking");
+		expect(downloads.list()).toEqual([]);
+	});
+
+	it("gives waiters relay downloads in the order they ended while a lookup is still out", async () => {
+		const saved = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-order-")), "a.csv");
+		tempDirs.push(path.dirname(saved));
+		await Bun.write(saved, "a");
+		const lookup = Promise.withResolvers<unknown>();
+		const { downloads, main } = fakePageDownloads(() => lookup.promise);
+		await downloads.start();
+		const first = downloads.wait();
+		const second = rejectionOf(downloads.wait());
+		const emit = (event: string, params: object) => main.client.listeners.get(`Page.${event}`)!(params);
+		for (const guid of ["a", "b"]) {
+			emit("downloadWillBegin", {
+				guid,
+				url: `https://example.com/${guid}.csv`,
+				suggestedFilename: guid,
+				frameId: "main",
+			});
+		}
+		emit("downloadProgress", { guid: "a", state: "completed", receivedBytes: 1 });
+		emit("downloadProgress", { guid: "b", state: "canceled", receivedBytes: 0 });
+		lookup.resolve({ filePath: saved });
+		expect((await first).path).toBe(saved);
+		expect(String(await second)).toContain("Download canceled: https://example.com/b.csv");
+	});
+
+	it("stops hearing a relay frame's session once the frame detaches", async () => {
+		const { downloads, frame, frames, pageListeners } = fakePageDownloads(async () => ({}));
+		await downloads.start();
+		expect([...frame.client.listeners.keys()]).toEqual(["Page.downloadWillBegin", "Page.downloadProgress"]);
+		frames.pop();
+		pageListeners.get("framedetached")!();
+		expect(frame.client.listeners.size).toBe(0);
+		await downloads.close();
+		expect(pageListeners.size).toBe(0);
+	});
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
@@ -404,7 +499,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 		const later = serveUntrusted();
 		// Launched without --ignore-certificate-errors and attached over app.cdp_url, as the shared
 		// browser is: only the tab's CDP override can accept the certificate.
-		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
+		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		try {
 			const [page] = await browser.pages();
 			if (!page) throw new Error("Expected the launched browser to expose a page");
@@ -414,7 +509,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 				action: "open",
 				name,
 				url: server.url.href,
-				app: { cdp_url: `http://${new URL(browser.wsEndpoint()).host}` },
+				app: { cdp_url: `http://${new URL(wsEndpoint).host}` },
 				ignore_https_errors: true,
 			});
 			expect(
@@ -459,7 +554,7 @@ await Promise.withResolvers().promise;`;
 			server.stop(true);
 			recycled.stop(true);
 			later.stop(true);
-			await browser.close();
+			await closeLaunchedBrowser(browser);
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
@@ -725,5 +820,42 @@ await Promise.withResolvers().promise;`;
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	it("answers a click beside a direct waitForDownload with a run that downloads the file", async () => {
+		const invoke = browserHost();
+		const name = `download-busy-${crypto.randomUUID()}`;
+		const link = '<a id="export" href="data:text/plain,export payload" download="export.txt">export</a>';
+		await invoke({ action: "open", name, url: `data:text/html,${encodeURIComponent(link)}` });
+		const tab = getTab(name);
+		if (!tab) throw new Error("Expected the opened tab");
+		// The wait holds the tab a few host awaits after its call starts.
+		const holding = Promise.withResolvers<void>();
+		const register = tab.pending.set.bind(tab.pending);
+		const registered = spyOn(tab.pending, "set").mockImplementation((id, run) => {
+			holding.resolve();
+			return register(id, run);
+		});
+		const stopWaiting = new AbortController();
+		let refused: unknown;
+		try {
+			const waiting = invoke(
+				{ action: "call", name, chain: [{ method: "waitForDownload", args: [] }] },
+				stopWaiting.signal,
+			).catch(() => undefined);
+			await holding.promise;
+			registered.mockRestore();
+			refused = await rejectionOf(invoke({ action: "call", name, chain: [{ method: "click", args: ["#export"] }] }));
+			stopWaiting.abort();
+			await waiting;
+		} finally {
+			registered.mockRestore();
+		}
+		// The refusal's own run, as an agent would paste it.
+		const code = /tab\.run\("(.+)"\)$/.exec(refused instanceof Error ? refused.message : "")?.[1];
+		if (!code) throw new Error(`Expected a tab.run to paste in: ${String(refused)}`);
+		const download = returnedValue(await invoke({ action: "run", name, code })) as { path: string };
+		tempDirs.push(path.dirname(download.path));
+		expect(await Bun.file(download.path).text()).toBe("export payload");
 	});
 });

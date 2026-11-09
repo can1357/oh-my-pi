@@ -14,7 +14,7 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
@@ -390,10 +390,120 @@ describe("task.batch validation", () => {
 		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
 	});
 
+	it.each([
+		{ batch: false, structured: true, isolation: false, seance: false, model: "" },
+		{ batch: true, structured: false, isolation: true, seance: true, model: [] },
+	])(
+		"routes empty model placeholders through the agent loop: $batch $structured $isolation $seance",
+		async options => {
+			const configuredAgent = { ...taskAgent, model: ["default/route"] };
+			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
+			mockDiscovery(options.seance ? [configuredAgent, bundledSeance] : configuredAgent);
+			const seen: Array<{ model: unknown; grants: unknown }> = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async spawn => {
+				seen.push({ model: spawn.modelOverride, grants: spawn.perCallModelGrants });
+				return makeResult(spawn.id ?? "?");
+			});
+			const tool = await TaskTool.create(
+				createSession({
+					settings: {
+						"async.enabled": false,
+						"task.batch": options.batch,
+						"task.structured": options.structured,
+						"task.isolation.enabled": options.isolation,
+						"task.perCallModel": "off",
+					},
+				}),
+			);
+			const item = { agent: "task", task: "Do A.", solutionSpace: "bounded", model: options.model };
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "empty-model",
+								name: "task",
+								arguments: options.batch ? { context: "ctx", tasks: [item] } : item,
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			const agent = new Agent({
+				initialState: {
+					model: mock.model,
+					systemPrompt: ["Test"],
+					tools: [tool as unknown as AgentTool],
+					messages: [],
+				},
+				streamFn: mock.stream,
+			});
+			await agent.prompt("go");
+			const result = agent.state.messages.find(message => message.role === "toolResult");
+			expect(result?.role === "toolResult" && result.isError).toBe(false);
+			const omitted = { agent: "task", task: "Do B.", solutionSpace: "bounded" };
+			const baseline = await tool.execute(
+				"omitted-model",
+				options.batch ? { context: "ctx", tasks: [omitted] } : omitted,
+			);
+			expect(baseline.isError).not.toBe(true);
+			expect(seen).toEqual([
+				{ model: ["default/route"], grants: undefined },
+				{ model: ["default/route"], grants: undefined },
+			]);
+		},
+	);
+
+	it("refuses a whitespace model before any batch spawn", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "off" } }),
+		);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "restricted-model",
+							name: "task",
+							arguments: {
+								context: "ctx",
+								tasks: [
+									{ task: "Allowed", solutionSpace: "bounded", model: [] },
+									{ task: "Restricted", solutionSpace: "bounded", model: " " },
+								],
+							},
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool as unknown as AgentTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		await agent.prompt("go");
+		const result = agent.state.messages.find(message => message.role === "toolResult");
+		expect(result?.role === "toolResult" && result.isError).toBe(true);
+		expect(result?.role === "toolResult" ? getFirstText(result) : "").toContain("task.perCallModel: off");
+		expect(run).not.toHaveBeenCalled();
+	});
+
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. A seance-only field on an ordinary
-	// agent must still be refused by every call form instead of being dropped,
-	// leaving the child on its own model while the caller believes it pinned another.
+	// and that schema deletes undeclared keys. With per-call model off, `model` and
+	// `sourceSession` on an ordinary agent must still be refused by every call form
+	// instead of being dropped, leaving the child on its own model while the caller
+	// believes it pinned another.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
@@ -402,6 +512,9 @@ describe("task.batch validation", () => {
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
 		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "sourceSession" },
+		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "sourceSession" },
 		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
 		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
 	])(
@@ -451,7 +564,12 @@ describe("task.batch validation", () => {
 
 			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
-			expect(text).toContain(`\`${field}\` is only accepted for the \`seance\` agent.`);
+			// `model` doubles as the per-call selector, whose disabled gate is reported first.
+			expect(text).toContain(
+				field === "model"
+					? "Per-call model is disabled for task calls (task.perCallModel: off)."
+					: `\`${field}\` is only accepted for the \`seance\` agent.`,
+			);
 			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
@@ -907,4 +1025,71 @@ describe("task.batch spawning", () => {
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
 	});
+});
+
+describe("batch model placement", () => {
+	afterEach(() => vi.restoreAllMocks());
+	it.each([{ model: "" }, { model: [] as string[] }])(
+		"ignores an empty batch-root model without mutating submitted items (%p)",
+		async ({ model }) => {
+			mockDiscovery();
+			const run = vi
+				.spyOn(executorModule, "runSubprocess")
+				.mockImplementation(async options => makeResult(options.id ?? "?"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "off" } }),
+			);
+			const item = { task: "work", solutionSpace: "bounded", model: [] as string[] };
+			const params = { context: "ctx", model, tasks: [item] };
+			const snapshot = structuredClone(params);
+			const result = await tool.execute("batch-root-placeholder", params);
+			expect(result.isError).not.toBe(true);
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(params).toEqual(snapshot);
+			expect(params.tasks[0]).toBe(item);
+		},
+	);
+
+	it("rejects a top-level model before dispatch even when wire validation is bypassed", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("batch-model", {
+			context: "Shared context",
+			model: "p/requested",
+			tasks: [{ task: "Do work" }],
+		});
+		expect(getFirstText(result)).toMatch(/model.*tasks|model.*item/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// `off` and `eval` refuse task calls through the same gate; one mode per shape covers it.
+	it.each([
+		["off", "batch"],
+		["eval", "flat"],
+	] as const)(
+		"rejects a task call's model before dispatch while task.perCallModel is %s (%s call)",
+		async (mode, shape) => {
+			const batch = shape === "batch";
+			mockDiscovery();
+			const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "task.batch": batch, "async.enabled": false, "task.perCallModel": mode } }),
+			);
+			// A role alias is not an exact selector, but the disabled gate is what the caller must hear first.
+			const work = { task: "Do work", solutionSpace: "c", model: "@smol" };
+			// Through shared argument validation, as a model's tool call arrives: `model` must reach preflight in both shapes.
+			const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+				type: "toolCall",
+				id: "task-model",
+				name: tool.name,
+				arguments: batch ? { context: "Shared context", tasks: [work] } : work,
+			});
+			const result = await tool.execute("task-model", args as TaskParams);
+			expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+			expect(result.isError).toBe(true);
+			expect(run).not.toHaveBeenCalled();
+		},
+	);
 });

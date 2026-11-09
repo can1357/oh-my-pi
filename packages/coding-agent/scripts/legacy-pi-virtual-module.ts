@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
 /** Build-time specifier resolved to bundled legacy Pi module namespaces. */
 export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
@@ -32,7 +33,7 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	// pi-tui keeps stateful singletons (`TERMINAL`, theme, figure settings) in
 	// root-level and nested modules; extensions must share the host's records.
 	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: null },
+	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";
@@ -54,10 +55,6 @@ interface WildcardPattern {
 	readonly exportSuffix: string;
 	readonly sourcePrefix: string;
 	readonly sourceSuffix: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function bindingForSubpath(identifier: string, subpath: string): string {
@@ -149,7 +146,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
 			const rootWildcard = pattern.exportPrefix === "" || pattern.exportPrefix === "/";
-			if (rootWildcard && (exportKey !== "./*" || !pkg.rootWildcard)) continue;
+			if (rootWildcard && !pkg.rootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {

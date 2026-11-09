@@ -8,7 +8,7 @@ import { isPromise } from "node:util/types";
 import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
-import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
+import { isRecord, ptree, readJsonl, toError } from "@oh-my-pi/pi-utils";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { FileSink } from "bun";
@@ -362,6 +362,7 @@ export class RpcClient {
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
+	#supportsBashExcludeFromContext = false;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
@@ -387,6 +388,7 @@ export class RpcClient {
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
 		this.#protocolVersion = 1;
+		this.#supportsBashExcludeFromContext = false;
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -450,6 +452,7 @@ export class RpcClient {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
 					protocolV2Supported = supportsRpcProtocolV2(line);
+					this.#supportsBashExcludeFromContext = line.supportsBashExcludeFromContext === true;
 					readySettled = true;
 					readyResolve();
 					continue;
@@ -491,7 +494,7 @@ export class RpcClient {
 							});
 			await reapAfterOutputFailure(error);
 		})().catch(async (cause: unknown) => {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			if (!readySettled) {
 				readySettled = true;
 				readyReject(error);
@@ -543,7 +546,7 @@ export class RpcClient {
 		} catch (cause) {
 			// Startup failed after spawning the child. Reap it before returning
 			// so a retry cannot inherit a live worker or its session lock.
-			const error = cause instanceof Error ? cause : new Error(String(cause));
+			const error = toError(cause);
 			await reapAfterOutputFailure(error);
 			throw cause;
 		} finally {
@@ -1125,10 +1128,14 @@ export class RpcClient {
 	}
 
 	/**
-	 * Execute a bash command.
+	 * Execute a bash command, optionally keeping its output out of model context.
+	 * Excluded commands require an explicitly advertised runtime capability.
 	 */
-	async bash(command: string): Promise<BashResult> {
-		const response = await this.#send({ type: "bash", command });
+	async bash(command: string, options?: { excludeFromContext?: boolean }): Promise<BashResult> {
+		if (options?.excludeFromContext === true && !this.#supportsBashExcludeFromContext) {
+			throw new Error("RPC runtime does not support bash context exclusion");
+		}
+		const response = await this.#send({ type: "bash", command, excludeFromContext: options?.excludeFromContext });
 		return this.#getData(response);
 	}
 
@@ -1708,7 +1715,7 @@ export class RpcClient {
 		try {
 			this.#writeFrame(fullCommand, fail);
 		} catch (err) {
-			fail(err instanceof Error ? err : new Error(String(err)));
+			fail(toError(err));
 		}
 		return promise;
 	}
@@ -1781,7 +1788,7 @@ export class RpcClient {
 		const line = `${JSON.stringify(frame)}\n`;
 		// A broken stdin pipe is terminal: fail this frame's request, then stop so start() can relaunch.
 		const failed = (err: unknown) => {
-			onError?.(err instanceof Error ? err : new Error(String(err)));
+			onError?.(toError(err));
 			if (this.#process === child) void this.stop();
 		};
 		try {

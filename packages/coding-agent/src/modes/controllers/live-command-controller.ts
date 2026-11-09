@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
 import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
@@ -26,16 +26,13 @@ const LIVE_MESSAGE_USAGE: AssistantMessage["usage"] = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
-function errorFrom(cause: unknown): Error {
-	return cause instanceof Error ? cause : new Error(String(cause));
-}
 
 /** Runs an extension's live observer; its failures are logged, never turned into a session failure. */
 function notifyRemote(callback: () => void): void {
 	try {
 		callback();
 	} catch (cause) {
-		logger.warn("Live session observer threw", { error: errorFrom(cause).message });
+		logger.warn("Live session observer threw", { error: toError(cause).message });
 	}
 }
 
@@ -115,7 +112,7 @@ export class LiveCommandController {
 		try {
 			await session.stop();
 		} catch (cause) {
-			this.#finish(session, errorFrom(cause));
+			this.#finish(session, toError(cause));
 		} finally {
 			this.#finish(session);
 		}
@@ -127,7 +124,7 @@ export class LiveCommandController {
 		if (session) {
 			this.#finish(session);
 			void session.stop().catch(cause => {
-				logger.debug("Live session teardown failed", { error: errorFrom(cause).message });
+				logger.debug("Live session teardown failed", { error: toError(cause).message });
 			});
 		} else {
 			this.#restoreEditor();
@@ -144,7 +141,7 @@ export class LiveCommandController {
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({
 			onStop: () => {
-				void this.stop().catch(cause => this.#ctx.showError(errorFrom(cause).message));
+				void this.stop().catch(cause => this.#ctx.showError(toError(cause).message));
 			},
 			onToggleMute: () => this.#session?.toggleMute(),
 			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
@@ -202,7 +199,7 @@ export class LiveCommandController {
 		try {
 			await session.start();
 		} catch (cause) {
-			const error = errorFrom(cause);
+			const error = toError(cause);
 			if (this.#session === session) {
 				await session.stop();
 				this.#finish(session, error);
@@ -290,7 +287,7 @@ export class LiveCommandController {
 		this.#restoreEditor();
 		if (error) this.#ctx.showError(error.message);
 		const settling = session.stop().catch(cause => {
-			logger.debug("Live session cleanup failed", { error: errorFrom(cause).message });
+			logger.debug("Live session cleanup failed", { error: toError(cause).message });
 		});
 		this.#settling = settling;
 		void settling.finally(() => {

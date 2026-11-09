@@ -466,6 +466,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "OTHER":
 		case "LANGUAGE":
 		case "MALFORMED_FUNCTION_CALL":
+		case "MALFORMED_RESPONSE":
 		case "UNEXPECTED_TOOL_CALL":
 		case "NO_IMAGE":
 			return "error";

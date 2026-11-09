@@ -718,6 +718,9 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "org-scoped-identity":
 				result.orgScopedIdentity = singleBool(child);
 				break;
+			case "login-subscription":
+				result.loginSubscription = singleBool(child);
+				break;
 			case "oauth-token-env": {
 				leaf(child, []);
 				const vars = positionalStrings(child);

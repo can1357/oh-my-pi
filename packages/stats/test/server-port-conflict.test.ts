@@ -56,6 +56,8 @@ async function startBunHolder(responseExpr: string, options?: { hostname?: strin
 	const args = [process.execPath, "-e", source];
 	if (options?.statsOwned) args.push("omp-stats");
 	const child = Bun.spawn(args, {
+		// The isolated environment, passed explicitly: a child must never resolve the user's stats database.
+		env: { ...process.env },
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
@@ -170,6 +172,7 @@ describe("startServer port conflicts", () => {
 		try {
 			const server = await startServer(existing.port);
 			expect(server.port).toBe(existing.port);
+			expect(server.reused).toBe(true);
 			server.stop();
 
 			// The existing dashboard is untouched: it still answers on the port.

@@ -18,7 +18,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{NonEmptyStringValueParser, PossibleValue, ValueParser},
@@ -37,7 +37,7 @@ use uucore::{
 use crate::{
 	fsmeta::metadata_get_time,
 	host::{
-		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util,
+		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy,
 	},
 };
 
@@ -1173,6 +1173,8 @@ pub mod options {
 	pub static DIRED: &str = "dired";
 	pub static DIRED_SEEN: &str = "__dired-seen";
 	pub static HYPERLINK: &str = "hyperlink";
+	/// `-O`: the file-flags column. No long spelling, as on the BSDs.
+	pub static FILE_FLAGS: &str = "O";
 }
 
 const DEFAULT_TERM_WIDTH: u16 = 80;
@@ -1222,6 +1224,8 @@ pub struct Config {
 	pub(crate) color: Option<LsColors>,
 	pub(crate) ls_colors: Option<String>,
 	pub(crate) long: LongFormat,
+	/// `-O`: the BSD file-flags column, right of the group.
+	pub(crate) file_flags: bool,
 	pub(crate) alloc_size: bool,
 	pub(crate) file_size_block_size: u64,
 	#[allow(dead_code)]
@@ -2068,6 +2072,7 @@ impl Config {
 			#[cfg(unix)]
 			inode: options.get_flag(options::INODE),
 			long,
+			file_flags: super::file_flags::SUPPORTED && options.get_flag(options::FILE_FLAGS),
 			alloc_size: options.get_flag(options::size::ALLOCATION_SIZE),
 			file_size_block_size,
 			block_size,
@@ -2473,6 +2478,137 @@ mod tests {
 	}
 }
 }
+/// The BSD file-flags column behind `ls -O`.
+///
+/// macOS `ls` renders `st_flags` with `fflagstostr`: the named bits in that
+/// function's order, comma separated, `-` when nothing is named. Bits the table
+/// does not name (`UF_TRACKED`, `SF_FIRMLINK`, …) are dropped — unlike
+/// `find -flags`, the column is lossy.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod file_flags {
+	use std::os::darwin::fs::MetadataExt;
+
+	use pi_vfs::Metadata;
+
+	/// Whether `-O` exists here: this target's `stat` reports `st_flags`.
+	pub(super) const SUPPORTED: bool = true;
+
+	// `sys/stat.h` flags the `libc` crate does not export.
+	const UF_DATAVAULT: u32 = 0x0000_0080;
+	const SF_RESTRICTED: u32 = 0x0008_0000;
+	const SF_NOUNLINK: u32 = 0x0010_0000;
+	const SF_DATALESS: u32 = 0x4000_0000;
+
+	/// `fflagstostr`'s `(bit, name)` table, in the order it prints them.
+	const NAMES: &[(u32, &str)] = &[
+		(libc::SF_APPEND, "sappnd"),
+		(libc::SF_ARCHIVED, "arch"),
+		(libc::SF_IMMUTABLE, "schg"),
+		(SF_RESTRICTED, "restricted"),
+		(SF_NOUNLINK, "sunlnk"),
+		(libc::UF_APPEND, "uappnd"),
+		(libc::UF_IMMUTABLE, "uchg"),
+		(libc::UF_NODUMP, "nodump"),
+		(libc::UF_OPAQUE, "opaque"),
+		(libc::UF_HIDDEN, "hidden"),
+		(libc::UF_COMPRESSED, "compressed"),
+		(UF_DATAVAULT, "datavault"),
+		(SF_DATALESS, "dataless"),
+	];
+
+	/// `st_flags` as `fflagstostr` prints it, `-` when it names nothing.
+	pub(super) fn names(mut flags: u32) -> String {
+		let mut out = String::new();
+		for &(bit, name) in NAMES {
+			if flags & bit == 0 {
+				continue;
+			}
+			flags &= !bit;
+			if !out.is_empty() {
+				out.push(',');
+			}
+			out.push_str(name);
+		}
+		if out.is_empty() {
+			out.push('-');
+		}
+		out
+	}
+
+	/// The flags column of `metadata`. Provider metadata reports no flags, so it
+	/// renders as `-`, like a host object with none set.
+	pub(super) fn display(metadata: &Metadata) -> String {
+		names(metadata.native().map_or(0, |meta| meta.st_flags()))
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::ffi::CString;
+
+		use super::*;
+		use crate::{
+			host::{Host, Utility},
+			ls::{Ls, uu_app},
+		};
+
+		#[test]
+		fn names_fflagstostr_bits_in_order() {
+			// A file with every owner-settable bit set: `ls -lO` prints these in
+			// `fflagstostr`'s order, not by bit value.
+			let user =
+				libc::UF_NODUMP | libc::UF_IMMUTABLE | libc::UF_APPEND | libc::UF_OPAQUE | libc::UF_HIDDEN;
+			assert_eq!(names(user), "uappnd,uchg,nodump,opaque,hidden");
+			// `/usr/lib/dyld`: restricted, compressed.
+			assert_eq!(names(SF_RESTRICTED | libc::UF_COMPRESSED), "restricted,compressed");
+			// Unnamed bits are dropped, not rendered as hex.
+			assert_eq!(names(libc::UF_TRACKED | 0x0000_0100), "-");
+			assert_eq!(names(0), "-");
+		}
+
+		/// Failure mode: `ls -lO` failed with "unexpected argument '-O'", so a
+		/// caller could not see which files are compressed, immutable, or hidden.
+		#[test]
+		fn long_format_shows_the_flags_column() {
+			let dir = tempfile::tempdir().unwrap();
+			let file = dir.path().join("flagged");
+			std::fs::write(&file, b"x").unwrap();
+			// SAFETY: the path is a valid NUL-terminated C string for a file this
+			// test owns, and `chflags` only reads it.
+			let path = CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+			let set = unsafe { libc::chflags(path.as_ptr(), libc::UF_HIDDEN) };
+			assert_eq!(set, 0, "cannot set UF_HIDDEN: {}", std::io::Error::last_os_error());
+
+			let matches = uu_app().try_get_matches_from(["ls", "-lO", "flagged"]).unwrap();
+			let (mut host, capture) = Host::for_test("ls", "", dir.path());
+			assert_eq!(Ls { matches }.run(&mut host), 0);
+
+			let out = capture.out();
+			let fields: Vec<&str> = out.split_whitespace().collect();
+			// BSD puts the flags right of the group: mode, links, owner, group,
+			// flags, size, date…
+			assert_eq!(fields.get(4), Some(&"hidden"), "{out}");
+			assert_eq!(fields.last(), Some(&"flagged"), "{out}");
+
+			let cleared = unsafe { libc::chflags(path.as_ptr(), 0) };
+			assert_eq!(cleared, 0, "cannot clear UF_HIDDEN: {}", std::io::Error::last_os_error());
+		}
+	}
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+mod file_flags {
+	use pi_vfs::Metadata;
+
+	/// `-O` needs `st_flags` in `stat`: no other target's `uu_app` defines the
+	/// option, so `Config::file_flags` never becomes true.
+	pub(super) const SUPPORTED: bool = false;
+
+	/// Unreachable without the option; those targets never print a column.
+	pub(super) fn display(_metadata: &Metadata) -> String {
+		"-".to_owned()
+	}
+}
+
 mod display {
 //! Output formatting for the `ls` builtin.
 
@@ -2550,6 +2686,7 @@ pub(crate) struct PaddingCollection {
 	pub(crate) link_count: usize,
 	pub(crate) uname:      usize,
 	pub(crate) group:      usize,
+	pub(crate) file_flags: usize,
 	pub(crate) context:    usize,
 	pub(crate) size:       usize,
 	#[cfg(unix)]
@@ -3415,6 +3552,13 @@ fn display_item_long(
 				.extend_pad_right(display_group(md, config, &mut state.gid_cache), padding.group);
 		}
 
+		if config.file_flags {
+			state.display_buf.push(b' ');
+			state
+				.display_buf
+				.extend_pad_right(&super::file_flags::display(md), padding.file_flags);
+		}
+
 		if config.context {
 			state.display_buf.push(b' ');
 			state
@@ -3630,12 +3774,50 @@ fn classify_file(path: &PathData) -> Option<char> {
 }
 
 fn create_hyperlink(name: &OsStr, path: &PathData) -> OsString {
-	// The `hostname` crate does not support WASI (no OS-level hostname API),
-	// so we use an empty string for hyperlinks on WASI.
-	#[cfg(not(target_os = "wasi"))]
-	static HOSTNAME: LazyLock<OsString> = LazyLock::new(|| hostname::get().unwrap_or_default());
-	#[cfg(target_os = "wasi")]
-	static HOSTNAME: LazyLock<OsString> = LazyLock::new(OsString::new);
+	static HOSTNAME: LazyLock<OsString> = LazyLock::new(|| {
+		#[cfg(unix)]
+		{
+			use std::os::unix::ffi::OsStringExt;
+
+			let limit = unsafe { uucore::libc::sysconf(uucore::libc::_SC_HOST_NAME_MAX) }.max(255);
+			let mut buffer = vec![0; limit as usize + 1];
+			if unsafe {
+				uucore::libc::gethostname(buffer.as_mut_ptr().cast(), limit as usize)
+			} != 0
+			{
+				return OsString::new();
+			}
+			buffer.truncate(buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len()));
+			OsString::from_vec(buffer)
+		}
+		#[cfg(windows)]
+		{
+			use std::os::windows::ffi::OsStringExt;
+			use windows_sys::Win32::System::SystemInformation::{
+				ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+			};
+
+			let mut size = 0;
+			unsafe {
+				GetComputerNameExW(ComputerNamePhysicalDnsHostname, std::ptr::null_mut(), &mut size);
+			}
+			if size == 0 {
+				return OsString::new();
+			}
+			let mut buffer = Vec::with_capacity(size as usize);
+			if unsafe {
+				GetComputerNameExW(ComputerNamePhysicalDnsHostname, buffer.as_mut_ptr(), &mut size)
+			} == 0
+			{
+				return OsString::new();
+			}
+			// Only the code units written by the API become initialized elements.
+			unsafe { buffer.set_len(size as usize) };
+			OsString::from_wide(&buffer)
+		}
+		#[cfg(not(any(unix, windows)))]
+		OsString::new()
+	});
 
 	// OSC 8 hyperlink format: \x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
 	// \x1b = ESC, \x1b\\ = ESC backslash
@@ -3746,6 +3928,7 @@ fn calculate_padding_collection(
 		link_count: 1,
 		uname:      1,
 		group:      1,
+		file_flags: 1,
 		context:    1,
 		size:       1,
 		major:      1,
@@ -3769,6 +3952,13 @@ fn calculate_padding_collection(
 		{
 			let block_size_len = display_size(size, config).len();
 			padding_collections.block_size = block_size_len.max(padding_collections.block_size);
+		}
+
+		if config.file_flags
+			&& let Some(md) = item.metadata()
+		{
+			padding_collections.file_flags =
+				super::file_flags::display(md).len().max(padding_collections.file_flags);
 		}
 
 		if config.format == Format::Long {
@@ -3829,6 +4019,7 @@ fn calculate_padding_collection(
 		link_count: 1,
 		uname:      1,
 		group:      1,
+		file_flags: 1,
 		context:    1,
 		size:       1,
 		block_size: 1,
@@ -4007,7 +4198,7 @@ impl Utility for Ls {
 
 
 pub fn uu_app() -> Command {
-	Command::new("ls")
+	let command = Command::new("ls")
 		.version("0.8.0")
 		.override_usage(format_usage("ls [OPTION]... [FILE]..."))
 		.about(
@@ -4731,12 +4922,19 @@ pub fn uu_app() -> Command {
 			"The TIME_STYLE argument can be full-iso, long-iso, iso, locale or +FORMAT. FORMAT is \
 			 interpreted like in date. Also the TIME_STYLE environment variable sets the default \
 			 style to use.",
+		);
+	// `-O` needs `st_flags` in `stat`; where a target has none the option stays
+	// unknown to clap, as it is to GNU `ls`.
+	if file_flags::SUPPORTED {
+		command.arg(
+			Arg::new(options::FILE_FLAGS)
+				.short('O')
+				.help("Include the file flags in a long (-l) output.")
+				.action(ArgAction::SetTrue),
 		)
-}
-
-/// Creates the `ls` builtin registration.
-pub(crate) fn ls_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ls, SE>()
+	} else {
+		command
+	}
 }
 
 /// Represents the possible values of [`PathData::display_name`]. The reason

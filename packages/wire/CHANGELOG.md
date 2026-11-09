@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [18.18.0] - 2026-11-07
+
+### Changed
+
+- `ShellTrace` fields that carry values from the run (argv, assignments, redirect targets, unlocated unit sources, diagnostics) are `ShellTraceBytes`: a string when the bytes are UTF-8, otherwise the raw byte values. `isShellTrace` accepts both forms
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added shell trace visualization: `ShellTrace` model and TSP `shell` kind for shell runs, node state, and layout.
+- Code views gain score-based line shading, labeled collapsible folds with notes, tones, and hover cards, and an overview strip.
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added the collab envelope helpers `packEnvelope`, `unpackEnvelope` and `rewriteEnvelopePeer`
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `nums` to `code` props (`TspCodeProps`): each line's number, so one block can show non-contiguous lines with `…` gap rows where the numbers jump.
+- Added the TSP `button` kind (`TspButtonProps`: label, icon, keycaps, `default`/`primary`/`quiet`/`danger` variants, `sm`/`md` sizes, pressed, disabled with a reason, busy) and `tabs` `variant: "segmented"`.
+
 ## [18.14.0] - 2026-10-29
 
 ### Added

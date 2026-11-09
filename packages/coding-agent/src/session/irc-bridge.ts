@@ -27,6 +27,9 @@ export class IrcBridge {
 	/** A subagent's records from anyone but its parent: answered in their own turn, never by
 	 *  extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
+	/** Queued broadcast legs and progress notes: they ask nothing of the recipient, so they
+	 *  inject at the next step boundary like any record but never cut a `wait` short. */
+	readonly #quietRecords = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
 	#interrupts: AgentMessage[] = [];
@@ -53,9 +56,9 @@ export class IrcBridge {
 		return this.#peerMessages.has(record);
 	}
 
-	/** Whether an incoming peer message can interrupt a wait. */
+	/** Whether an incoming message can interrupt a wait: anything queued but a broadcast or progress note. */
 	hasInterrupts(): boolean {
-		return this.#interrupts.length > 0;
+		return this.#interrupts.some(record => !this.#quietRecords.has(record));
 	}
 
 	/** Whether an aside is ready for step-boundary injection (not a parked wake). */
@@ -79,6 +82,19 @@ export class IrcBridge {
 					record.details.from === from,
 			),
 		);
+	}
+
+	/** Distinct senders with an IRC message still queued for a turn yet to run (see {@link hasQueuedFrom}). */
+	queuedSenders(): string[] {
+		const senders = new Set<string>();
+		for (const queue of [this.#interrupts, this.#asides, this.#deferredWakes]) {
+			for (const record of queue) {
+				if (record.role !== "custom" || record.customType !== "irc:incoming" || !isRecord(record.details)) continue;
+				const from = record.details.from;
+				if (typeof from === "string") senders.add(from);
+			}
+		}
+		return [...senders];
 	}
 
 	/** Waits until every in-flight wake-turn relay has settled. */
@@ -160,8 +176,9 @@ export class IrcBridge {
 		return records;
 	}
 
-	/** Surfaces and consumes queued incoming records before automatic injection. */
-	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+	/** Surfaces and consumes every queued incoming record before automatic injection; with
+	 *  `ifAny`, takes nothing unless at least one of them satisfies it. */
+	drainInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
@@ -194,14 +211,6 @@ export class IrcBridge {
 					queue.remaining.push(record);
 					continue;
 				}
-				if (opts?.from !== undefined && from !== opts.from) {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (opts?.limit !== undefined && messages.length >= opts.limit) {
-					queue.remaining.push(record);
-					continue;
-				}
 				messages.push({
 					id,
 					from,
@@ -214,6 +223,7 @@ export class IrcBridge {
 				});
 			}
 		}
+		if (opts?.ifAny && !messages.some(opts.ifAny)) return [];
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
 		return messages;
@@ -255,6 +265,9 @@ export class IrcBridge {
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
 			msg.progress !== true;
+		// A broadcast leg or progress note asks nothing of the recipient, so a
+		// busy one reads it at its next step boundary without being interrupted.
+		const quiet = msg.broadcast === true || msg.progress === true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -268,10 +281,12 @@ export class IrcBridge {
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
 				progress: msg.progress === true,
-				interrupting: streaming,
+				interrupting: streaming && !quiet,
 				relayOnStop,
 			}),
-			display: true,
+			// The parent steer becomes the transcript card when consumed; keep this
+			// observation available to listeners without also painting a live card.
+			display: !(streaming && fromParent && !peerMessage),
 			details: {
 				id: msg.id,
 				from: msg.from,
@@ -292,6 +307,7 @@ export class IrcBridge {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+					parentIrc: { from: msg.from, body: msg.body },
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,
@@ -299,6 +315,7 @@ export class IrcBridge {
 				this.#parentSteers.add(steer);
 				this.#host.agent.steer(steer);
 			} else {
+				if (quiet) this.#quietRecords.add(record);
 				this.#interrupts.push(record);
 			}
 			return "injected";

@@ -138,6 +138,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 				py: false,
 				js: true,
 				freshAgents: true,
+				perCallModel: false,
 			}),
 		);
 		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });

@@ -8,7 +8,6 @@ import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	extensionLinkLabels,
 	formatExtensionLink,
-	linkHintTags,
 	setExtensionLinks,
 	stripExtensionLinkMarkers,
 } from "@oh-my-pi/pi-tui/render/extension-links";
@@ -18,6 +17,8 @@ import {
 	setTerminalTextSizing,
 	TERMINAL,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { LinkHints } from "@oh-my-pi/pi-tui/render/link-hints";
+import { sliceByColumn } from "@oh-my-pi/pi-tui/utils";
 import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -41,6 +42,14 @@ function linkCells(rows: readonly string[]): string[] {
 	return rows.flatMap((row, index) =>
 		extensionLinkLabels(row).map(label => `${index}:${label.start}-${label.end - 1}=${label.url}`),
 	);
+}
+
+/** Hint tags painted on a row (bold inverse, see `LinkHints.paint`), with the cell each starts at. */
+function drawnTags(line: string): { tag: string; col: number }[] {
+	return [...line.matchAll(/\x1b\[1;7m(.*?)\x1b\[22;27m/g)].map(match => ({
+		tag: plain(match[1]!),
+		col: Bun.stringWidth(plain(line.slice(0, match.index))),
+	}));
 }
 
 describe("extension-owned links", () => {
@@ -251,16 +260,6 @@ class StaticBlock implements Component {
 describe("extension link hints", () => {
 	const SIZE = { columns: 80, rows: 24 };
 
-	it("tags with single letters while they suffice, else two letters, never one a prefix of another", () => {
-		const single = linkHintTags(26);
-		expect(single.every(tag => tag.length === 1)).toBe(true);
-		expect(new Set(single).size).toBe(26);
-		const double = linkHintTags(27);
-		expect(double.every(tag => tag.length === 2)).toBe(true);
-		expect(new Set(double).size).toBe(27);
-		expect(double.some(tag => double.some(other => other !== tag && other.startsWith(tag)))).toBe(false);
-	});
-
 	/** A started composer showing `block` in its transcript; stop it when done. */
 	function composerShowing(block: StaticBlock): Composer {
 		const composer = new Composer({
@@ -285,19 +284,17 @@ describe("extension link hints", () => {
 			expect(composer.viewportLinkCount()).toBe(2);
 			let ended = 0;
 			composer.startLinkHints(() => ended++);
-			const painted = composer.renderFrame(SIZE).viewport.map(plain);
+			const painted = composer.renderFrame(SIZE).viewport;
 			const first = before.findIndex(line => line.includes("the much"));
 			const second = before.findIndex(line => line.includes("again"));
 			expect(second).toBe(first + 1);
-			// Tag `a` covers the wrapped label's first cell on its first row; its continuation stays plain.
-			expect(painted[first]!.slice(before[first]!.indexOf("the much"))).toStartWith("ahe much");
-			expect(painted[second]!.slice(0, before[second]!.indexOf(" and"))).toBe(
-				before[second]!.slice(0, before[second]!.indexOf(" and")),
-			);
-			expect(painted[second]!.slice(before[second]!.indexOf("again"))).toStartWith("sgain");
+			// Each tag is the letter it covers: `t` on the wrapped label's first cell on its first row
+			// (its continuation stays untagged), `a` on `again`.
+			expect(drawnTags(painted[first]!)).toEqual([{ tag: "t", col: before[first]!.indexOf("the much") }]);
+			expect(drawnTags(painted[second]!)).toEqual([{ tag: "a", col: before[second]!.indexOf("again") }]);
 
 			// `again` shares its URL with the wrapped label: the pick is told apart by where it is drawn.
-			expect(composer.typeLinkHint("s")).toEqual({
+			expect(composer.typeLinkHint("a")).toEqual({
 				url: "demo:open/8",
 				row: second,
 				start: before[second]!.indexOf("again"),
@@ -350,9 +347,12 @@ describe("extension link hints", () => {
 			const row = before.findIndex(line => line.includes("Go x"));
 			composer.startLinkHints(() => {});
 			const raw = composer.renderFrame(SIZE).viewport[row]!;
-			// Each tag is drawn whole, side by side, starting at the first label.
+			// 27 labels outnumber the letters, so every tag has two: the `x` each covers first while
+			// it lasts, then the home row; none is a prefix of another.
+			const expected = ["xx", ..."asdfghjklqwertyuiopzcvbnm".split("").map(letter => `x${letter}`), "ax"];
+			// Each tag is drawn whole, side by side, starting at the first label, in its own highlight.
 			const start = before[row]!.indexOf("x");
-			expect(plain(raw).slice(start, start + 54)).toBe(linkHintTags(27).join(""));
+			expect(plain(raw).slice(start, start + 54)).toBe(expected.join(""));
 			expect(raw).toContain("\x1b[1;7m");
 		} finally {
 			composer.stop();
@@ -392,5 +392,57 @@ describe("extension link hints", () => {
 		} finally {
 			composer.stop();
 		}
+	});
+});
+
+describe("link hint tags", () => {
+	/** The tag `hints` draws over each label on `rows`, by the label's text. */
+	function tagsOf(hints: LinkHints, rows: readonly string[]): Record<string, string> {
+		const tags: Record<string, string> = {};
+		for (const [index, line] of hints.paint(rows, 80).entries()) {
+			const labels = extensionLinkLabels(rows[index]!);
+			for (const { tag, col } of drawnTags(line)) {
+				const label = labels.find(candidate => candidate.start === col);
+				if (label) tags[plain(sliceByColumn(rows[index]!, label.start, label.end - label.start))] = tag;
+			}
+		}
+		return tags;
+	}
+
+	it("tags a label with the letter it starts with, else its next free letter", () => {
+		setExtensionLinks(["demo"]);
+		const hints = new LinkHints();
+		const rows = render("[the details](demo:1), [tango](demo:2) and [toast](demo:3)");
+		hints.assign(rows);
+		// `tango` and `toast` find `t` taken and fall back to their own next letters.
+		expect(tagsOf(hints, rows)).toEqual({ "the details": "t", tango: "a", toast: "o" });
+	});
+
+	it("keeps every tag as labels join, tagging all with two letters only once no letter is left", () => {
+		setExtensionLinks(["demo"]);
+		// One label per paragraph: label `n` is drawn on row `2n`.
+		const rows = render(Array.from({ length: 27 }, (_, index) => `[link${index}](demo:${index})`).join("\n\n"));
+		const firstLinks = (count: number) => rows.slice(0, 2 * count - 1);
+		const hints = new LinkHints();
+		hints.update(firstLinks(25));
+		const before = tagsOf(hints, rows);
+		expect(Object.values(before).every(tag => tag.length === 1)).toBe(true);
+		// A 26th label still finds a free letter: the 25 tags drawn stay as they were.
+		hints.update(firstLinks(26));
+		const after = tagsOf(hints, rows);
+		expect(Object.keys(after)).toHaveLength(26);
+		for (const [label, tag] of Object.entries(before)) expect(after[label]).toBe(tag);
+		expect(after.link25).toHaveLength(1);
+
+		// A 27th finds every letter taken: all 27 are tagged afresh with two letters each.
+		hints.update(rows);
+		const tags = Object.values(tagsOf(hints, rows));
+		expect(tags).toHaveLength(27);
+		expect(tags.every(tag => tag.length === 2)).toBe(true);
+		expect(new Set(tags).size).toBe(27);
+		// The first letter of a two-letter tag narrows; the second picks.
+		const link7 = tagsOf(hints, rows).link7!;
+		expect(hints.type(link7[0]!)).toBe(true);
+		expect(hints.type(link7[1]!)).toMatchObject({ url: "demo:7" });
 	});
 });
