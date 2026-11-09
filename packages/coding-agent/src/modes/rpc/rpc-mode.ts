@@ -79,6 +79,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcBtwController } from "./rpc-btw";
+import { RpcNextMessagePredictor } from "./rpc-next-message-prediction";
 import { RpcGoalController } from "./rpc-goal";
 import { RpcDictationBridge, type RpcDictationControllerFactory } from "./rpc-dictation";
 import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
@@ -1454,6 +1455,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 	const wordPredictor = new RpcWordPredictor();
 	const btw = new RpcBtwController(session, output);
+	// Frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
+	const nextMessagePredictor = new RpcNextMessagePredictor(session, output);
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
@@ -1765,6 +1768,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			withSessionChange(async () => {
 				await stopDictationForSessionChange();
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: T | undefined;
 				try {
@@ -1808,6 +1812,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		goalController.observe(event);
 		promptResults.observe(event);
 		settleWatcher.observe(event);
+		nextMessagePredictor.observe(event);
 	});
 	await goalController.reconcile();
 	await goalController.settled();
@@ -1838,6 +1843,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				logger.error(message);
 				output({ type: "notice", level: "error", message, source: "btw-history" });
 			});
+			nextMessagePredictor.close();
 			// Close the realtime call (microphone, socket) before the session it delegates into.
 			dictationBridge.dispose();
 			await liveBridge.stop();
@@ -2137,6 +2143,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// Validation first: a refused change must not cancel the running side question.
 				await stopDictationForSessionChange();
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: RpcSessionChangeResult | undefined;
 				try {
@@ -2176,6 +2183,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					return error(id, "navigate_tree", busy.message, "session_busy");
 				}
 				await btw.close();
+				nextMessagePredictor.close();
 				// A goal continuation waiting to start is held until the navigation ends, then resumes (same session).
 				await goalController.beginSessionChange();
 				let result: NavigateTreeResult;
@@ -2231,6 +2239,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				await stopDictationForSessionChange();
 				const fileBeforeOpen = session.sessionFile;
 				await btw.close();
+				nextMessagePredictor.close();
 				await goalController.beginSessionChange();
 				let result: RpcOpenSessionResult | undefined;
 				try {
@@ -2900,6 +2909,34 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					}
 				}
 				return success(id, "predict_word_feedback");
+			}
+
+			// =================================================================
+			// Composer next-message prediction
+			// =================================================================
+
+			case "predict_next_message":
+				return success(id, "predict_next_message", { predictionId: nextMessagePredictor.request() });
+
+			case "predict_next_message_feedback": {
+				if (typeof command.predictionId !== "string") {
+					return error(id, "predict_next_message_feedback", "predictionId must be a string");
+				}
+				try {
+					nextMessagePredictor.feedback(command.predictionId, command.event, command.rank);
+				} catch (err) {
+					return error(id, "predict_next_message_feedback", toError(err).message);
+				}
+				return success(id, "predict_next_message_feedback");
+			}
+
+			case "predict_next_message_cancel": {
+				if (command.predictionId !== undefined && typeof command.predictionId !== "string") {
+					return error(id, "predict_next_message_cancel", "predictionId must be a string");
+				}
+				return success(id, "predict_next_message_cancel", {
+					cancelled: nextMessagePredictor.cancel(command.predictionId),
+				});
 			}
 
 			default: {

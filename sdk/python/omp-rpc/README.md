@@ -300,7 +300,7 @@ At `"events"`, `on_subagent_event()` delivers each subagent's own session
 events as `SubagentEvent.payload.event` (an `UnknownNotification` when it cannot
 be parsed).
 
-## Live Voice, Login, Handoff, and Word Prediction
+## Live Voice, Login, Handoff, and Prediction
 
 - `live_start(voice=None, instructions=None)` starts a GPT live voice session
   bound to this session and returns the voice in use; `live_mute(muted=None)`
@@ -321,6 +321,12 @@ be parsed).
   `predict_word_feedback(text, cursor, suggestion, accepted=...)`. It waits up to
   155 seconds regardless of `request_timeout`, since a cold prediction daemon can
   take that long; treat `RpcCommandError` as "no suggestion".
+- `predict_next_message()` starts a composer next-message prediction and returns
+  its id, or `None` when none started; `on_next_message_prediction()` receives
+  its settled `choices` and later `retired` frame. Report display and acceptance
+  with `predict_next_message_feedback(prediction_id, "shown")` or
+  `predict_next_message_feedback(prediction_id, "accepted", rank=i)`, and
+  withdraw it with `predict_next_message_cancel(prediction_id=None)`.
 
 ## Host-Owned Custom Tools
 

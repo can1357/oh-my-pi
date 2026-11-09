@@ -399,6 +399,28 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		params: { text: "string", cursor: "number.integer", suggestion: "string", accepted: "boolean" },
 	},
 	{
+		name: "predict_next_message",
+		doc: "Start a composer next-message prediction for the conversation as it stands, superseding any earlier one; null when none started. It settles as a `next_message_prediction` frame.",
+		result: { predictionId: "string | null" },
+		unwrap: "predictionId",
+	},
+	{
+		name: "predict_next_message_feedback",
+		doc: "Report that an offered prediction was shown, or that its alternative at `rank` was accepted.",
+		params: {
+			predictionId: "string",
+			event: "NextMessagePredictionFeedbackEvent",
+			"rank?": doc("number.integer", "Index into the offered `choices`; required for `accepted`."),
+		},
+	},
+	{
+		name: "predict_next_message_cancel",
+		doc: "Cancel the pending or offered prediction (only `predictionId` when given); false when none matches.",
+		params: { "predictionId?": "string" },
+		result: { cancelled: "boolean" },
+		unwrap: "cancelled",
+	},
+	{
 		name: "btw",
 		doc: "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
 		params: { question: "string", "recordId?": "string" },

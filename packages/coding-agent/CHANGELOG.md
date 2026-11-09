@@ -295,6 +295,9 @@
 
 - In Tern, a turn's long-press menu on a phone can edit and resend a prompt, retry the turn, open the rewind page on it, or fork the session from it into a new session
 - A rewind from the transcript says how many turns it dropped and offers Undo on its toast in Tern, which puts the turns and your draft back
+### Added
+
+- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452))
 
 ### Changed
 

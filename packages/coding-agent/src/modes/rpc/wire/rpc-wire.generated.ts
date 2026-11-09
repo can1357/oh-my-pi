@@ -1231,6 +1231,20 @@ export interface BtwRecordEvent {
 	record: BtwHistoryRecord;
 }
 
+/** How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted. */
+export type NextMessagePredictionStatus = "offered" | "skipped" | "stale" | "cancelled" | "timeout" | "error" | "retired";
+
+export type NextMessagePredictionFeedbackEvent = "shown" | "accepted";
+
+/** One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`. */
+export interface NextMessagePredictionEvent {
+	type: "next_message_prediction";
+	predictionId: string;
+	status: NextMessagePredictionStatus;
+	/** Alternatives, most likely first; present only with `offered`. */
+	choices?: string[];
+}
+
 /** Output of a builtin slash command. */
 export interface CommandOutputEvent {
 	type: "command_output";
@@ -1545,7 +1559,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | DictationStateEvent | DictationTranscriptEvent | DictationEndEvent | BtwDeltaEvent | BtwRecordEvent | NextMessagePredictionEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1905,6 +1919,25 @@ export interface PredictWordFeedbackParams {
 	accepted: boolean;
 }
 
+export interface PredictNextMessageResult {
+	predictionId: string | null;
+}
+
+export interface PredictNextMessageFeedbackParams {
+	predictionId: string;
+	event: NextMessagePredictionFeedbackEvent;
+	/** Index into the offered `choices`; required for `accepted`. */
+	rank?: number;
+}
+
+export interface PredictNextMessageCancelParams {
+	predictionId?: string;
+}
+
+export interface PredictNextMessageCancelResult {
+	cancelled: boolean;
+}
+
 export interface BtwParams {
 	question: string;
 	recordId?: string;
@@ -1999,6 +2032,9 @@ export interface RpcWireCommands {
 	logout: { params: LogoutParams; result: LogoutResult };
 	predict_word: { params: PredictWordParams; result: PredictWordResult };
 	predict_word_feedback: { params: PredictWordFeedbackParams; result: undefined };
+	predict_next_message: { params: undefined; result: PredictNextMessageResult };
+	predict_next_message_feedback: { params: PredictNextMessageFeedbackParams; result: undefined };
+	predict_next_message_cancel: { params: PredictNextMessageCancelParams; result: PredictNextMessageCancelResult };
 	btw: { params: BtwParams; result: BtwResult };
 	btw_cancel: { params: BtwCancelParams; result: BtwCancelResult };
 	get_btw_history: { params: undefined; result: GetBtwHistoryResult };

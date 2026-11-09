@@ -80,6 +80,7 @@ const notificationDefs = {
 			"DictationEndEvent",
 			"BtwDeltaEvent",
 			"BtwRecordEvent",
+			"NextMessagePredictionEvent",
 			"CommandOutputEvent",
 			"SessionInfoUpdateEvent",
 			"ConfigUpdateEvent",

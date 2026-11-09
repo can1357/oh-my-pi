@@ -131,6 +131,20 @@ export const frameDefs = {
 		{ type: "'btw_record'", record: "BtwHistoryRecord" },
 		"Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.",
 	),
+	NextMessagePredictionStatus: doc(
+		"'offered' | 'skipped' | 'stale' | 'cancelled' | 'timeout' | 'error' | 'retired'",
+		"How a prediction request settled, or `retired`: an offered prediction must no longer be shown or accepted.",
+	),
+	NextMessagePredictionFeedbackEvent: "'shown' | 'accepted'",
+	NextMessagePredictionEvent: doc(
+		{
+			type: "'next_message_prediction'",
+			predictionId: "string",
+			status: "NextMessagePredictionStatus",
+			"choices?": doc("string[]", "Alternatives, most likely first; present only with `offered`."),
+		},
+		"One step of a `predict_next_message` request: one settling status, then one `retired` after `offered`.",
+	),
 	CommandOutputEvent: doc({ type: "'command_output'", text: "string" }, "Output of a builtin slash command."),
 	SessionInfoUpdateEvent: doc(
 		{ type: "'session_info_update'", "title?": "string", sessionId: "string" },

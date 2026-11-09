@@ -46,6 +46,7 @@ import type {
 	RpcLiveLevelsFrame,
 	RpcLivePhaseFrame,
 	RpcLiveTranscriptFrame,
+	RpcNextMessagePredictionFrame,
 	RpcOpenSessionResult,
 	RpcPromptError,
 	RpcPromptResultFrame,
@@ -219,6 +220,8 @@ export type Frames = Assert<
 		dictationEnd: Outbound<RpcDictationEndFrame, Wire.DictationEndEvent>;
 		btwDelta: Outbound<RpcBtwDeltaFrame, Wire.BtwDeltaEvent>;
 		btwRecord: Outbound<RpcBtwRecordFrame, Wire.BtwRecordEvent>;
+		nextMessagePrediction: Outbound<RpcNextMessagePredictionFrame, Wire.NextMessagePredictionEvent>;
+		nextMessagePredictionStatuses: Same<RpcNextMessagePredictionFrame["status"], Wire.NextMessagePredictionStatus>;
 		hostToolCall: Outbound<RpcHostToolCallRequest, Wire.HostToolCallRequest>;
 		hostToolCancel: Outbound<RpcHostToolCancelRequest, Wire.HostToolCancelRequest>;
 		hostUriRequest: Outbound<RpcHostUriRequest, Wire.HostUriRequest>;
