@@ -715,37 +715,39 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 
 export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
 	const now = toUtcIso();
-	const working = beam.db.run(
-		`
-			UPDATE working_memory
-			SET valid_until = ?, superseded_by = ?
-			WHERE id = ? AND (session_id = ? OR scope = 'global')
-		`,
-		[now, replacementId, memoryId, beam.sessionId],
-	);
-	if (working.changes > 0) {
-		// Recall filters `valid_until`/`superseded_by` in SQL, but the enhanced path consults the
-		// query cache BEFORE it reaches SQL. Without this the row a caller just retired keeps being
-		// served to an identical query for the rest of the cache TTL -- the one thing an explicit
-		// invalidation is supposed to guarantee against. Every other mutator here already does this;
-		// this one was the omission. Gated on an actual row change, like `forgetWorking`, so a
-		// no-op invalidation never discards a valid cache.
-		invalidateCaches(beam);
-		return true;
-	}
-	const episodic = beam.db.run(
-		`
-			UPDATE episodic_memory
-			SET valid_until = ?, superseded_by = ?
-			WHERE id = ? AND (session_id = ? OR scope = 'global')
-		`,
-		[now, replacementId, memoryId, beam.sessionId],
-	);
-	if (episodic.changes > 0) {
-		invalidateCaches(beam);
-		return true;
-	}
-	return false;
+	const changed = transaction(beam.db, () => {
+		const working = beam.db.run(
+			`
+				UPDATE working_memory
+				SET valid_until = ?, superseded_by = ?
+				WHERE id = ? AND (session_id = ? OR scope = 'global')
+			`,
+			[now, replacementId, memoryId, beam.sessionId],
+		);
+		if (working.changes > 0) {
+			// Retire episodic summaries built from this source: they still carry its text. Siblings
+			// covered by the same summary stay recallable via their (consolidated, never TTL-trimmed)
+			// working rows.
+			beam.db.run(
+				`UPDATE episodic_memory SET valid_until = ?, superseded_by = ?
+				 WHERE (session_id = ? OR scope = 'global')
+				   AND instr(',' || summary_of || ',', ',' || ? || ',') > 0`,
+				[now, replacementId, beam.sessionId, memoryId],
+			);
+			return true;
+		}
+		const episodic = beam.db.run(
+			`
+				UPDATE episodic_memory
+				SET valid_until = ?, superseded_by = ?
+				WHERE id = ? AND (session_id = ? OR scope = 'global')
+			`,
+			[now, replacementId, memoryId, beam.sessionId],
+		);
+		return episodic.changes > 0;
+	});
+	if (changed) invalidateCaches(beam);
+	return changed;
 }
 
 export function getWorkingStats(

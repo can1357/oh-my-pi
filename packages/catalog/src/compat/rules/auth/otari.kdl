@@ -1,0 +1,12 @@
+auth "otari" {
+	name "Otari"
+	login "api-key" {
+		auth-url "https://app.otari.ai/settings/api-keys"
+		instructions "Create a workspace API key in Otari (Settings → API keys) and paste it here"
+		prompt "Paste your Otari workspace API key" placeholder="tk_..."
+		// Key-protected (401 without a key and with a bad one, verified
+		// 2026-11-02), so the probe validates the key and bills nothing.
+		// OTARI_BASE_URL keeps a self-hosted key off the hosted gateway.
+		validate "models-endpoint" label="Otari" url="https://api.otari.ai/api/v1/models" base-url-env="OTARI_BASE_URL"
+	}
+}

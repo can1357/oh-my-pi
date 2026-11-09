@@ -44,6 +44,7 @@ import {
 	describeJobWidgetMiniSpark,
 	describeJobWidgetsHovercard,
 	type JobWidgetEntry,
+	type JobWidgetView,
 	jobWidgetGlance,
 	jobWidgetGlanceSpans,
 	jobWidgetSummary,
@@ -257,6 +258,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	settleStartupRun,
 } from "../utils/run-status";
 import {
 	disposeTerminalTitleState,
@@ -857,9 +859,10 @@ const JOBS_SEGMENT: RunningSegmentSpec = {
 	act: "jobs.open",
 };
 
-/** The jobs segment with the widgets it was described from (`id:updatedAt:state` per widget). */
+/** The jobs segment with the widgets it was described from (`id:updatedAt:state` per widget) and their view refs. */
 interface JobsSegment extends RunningSegment {
 	readonly widgets: string;
+	readonly views: readonly JobWidgetView[];
 }
 
 /**
@@ -874,10 +877,13 @@ function jobsSegment(
 	if (running === 0) return undefined;
 	let widgets = "";
 	for (const entry of entries) widgets += `${entry.id}:${entry.view.updatedAt}:${entry.view.state};`;
-	if (prev?.running === running && prev.widgets === widgets) return prev;
+	// A refresh recomputes the view from the wall clock (rate decay) even when no data moved, swapping each
+	// `view` for a fresh object; the refs see that, the fields above do not.
+	const views = entries.map(entry => entry.view);
+	if (prev?.running === running && prev.widgets === widgets && sameItems(prev.views, views)) return prev;
 	const described =
 		entries.length > 0 ? describeJobsSegment(running, entries) : describeRunningSegment(JOBS_SEGMENT, running);
-	return { running, widgets, node: described };
+	return { running, widgets, views, node: described };
 }
 
 /**
@@ -1371,7 +1377,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
-	refreshScopedModelsAfterLogin?: () => Promise<void>;
 	settings: Settings;
 	keybindings: KeybindingsManager;
 	agent: Agent;
@@ -2096,9 +2101,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		eventBus?: EventBus,
 		composer?: Composer,
 		subagentEventBus?: EventBus,
-		refreshScopedModelsAfterLogin?: () => Promise<void>,
 	) {
-		this.refreshScopedModelsAfterLogin = refreshScopedModelsAfterLogin;
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
@@ -2686,7 +2689,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
-		initProgramStatus();
+		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
@@ -6899,12 +6902,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				// so it reaches native summarization without leaking into the public
 				// `customInstructions` channel on `session_before_compact` — extensions
 				// there treat that field as user focus and would query-bias the
-				// summary toward the plan boilerplate (issue #4359).
+				// summary toward the plan boilerplate (issue #4359). The model the
+				// transition below restores reads the summary.
+				const readerModel =
+					options.executionModel?.model ?? this.#planModePreviousModelState?.model ?? this.session.model;
 				compactOutcome = await this.handleCompactCommand(
 					undefined,
 					undefined,
 					outcome => this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
-					compactionPrompt,
+					{ internalGuidance: compactionPrompt, readerModel },
 				);
 			}
 		} finally {
@@ -7607,6 +7613,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.session.prompt(objective, { streamingBehavior: "steer" });
 	}
 
+	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
+	settleStartupRun(): void {
+		settleStartupRun();
+	}
+
 	async #startGoalFromObjective(
 		objective: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
@@ -8210,6 +8221,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
+		setWordPredictionHost(undefined);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
 		this.#hideSessionInfo();
@@ -9289,16 +9301,28 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * Whether {@link maybeAutoCreateWorktree} may stop to ask the user (`worktree.onStart: ask`).
+	 * It answers before the async git check, so it also says yes in a folder where the question
+	 * never shows.
+	 */
+	mayAskForStartupWorktree(): boolean {
+		return cfgWorktreeOnStart.get(this.settings) === "ask";
+	}
+
+	/**
 	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
 	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
 	 * failures become a warning so startup continues.
 	 */
 	async maybeAutoCreateWorktree(): Promise<void> {
 		try {
-			const policy = cfgWorktreeOnStart.get(this.settings);
-			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
 			if (
-				policy === "ask" &&
+				cfgWorktreeOnStart.get(this.settings) === "off" ||
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+			)
+				return;
+			if (
+				this.mayAskForStartupWorktree() &&
 				!(await this.showHookConfirm(
 					"Create a worktree for this session?",
 					"Work happens on a new wt/* branch; this checkout stays untouched.",
@@ -9491,9 +9515,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
-		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, internalGuidance);
+		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
 	}
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {

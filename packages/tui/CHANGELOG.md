@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+## [18.18.3] - 2026-11-09
+
+### Breaking Changes
+
+- The `ask` tool renderer now draws `{ html }` form calls and `AskToolDetails { answers, timedOut }` results; `QuestionResult` and the question-list detail fields were removed.
+
+### Added
+
+- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+- Added `HtmlFormDialog`, which renders an HTML form as an interactive terminal form, splits long forms into pages, and returns the answers as JSON. Single `<select>`s are one-row dropdowns, radio and checkbox groups get a free-text "Other" answer, `<img>` (URL, `data:` URI or local file) and inline `<svg>` pictures load in the background, an optional inactivity timeout submits the current values, and Tern terminals get the form natively.
+- Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
+
+### Changed
+
+- The ask dialog's Note right after a pointer click now annotates the highlighted answer of the question shown instead of the answer just clicked, and the Note button no longer names a redirect target ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed the ask dialog's `n` right after a keyboard pick annotating the previous question's answer instead of the highlighted row shown; only a pointer click still redirects Note to the answer just picked, and the Note button then names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
+- Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+
+### Changed
+
+- Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
+
+### Fixed
+
+- Fixed streaming and scrolling display issues in terminals without synchronized output, including duplicated rows and blank screens or status lines.
+- Fixed Markdown rendering while streaming list items, preserving bold text and heading formatting.
+- Fixed wrapping of long embedded Bash arguments so indentation and the gutter remain aligned.
+- Fixed prompts and Enter presses entered while the application was starting so they submit normally instead of leaving Enter as a newline.
+- Fixed restored transcripts so aliased tool calls use the same rendering as live tool calls.
+- Fixed debugger tool cards with tabs and control characters in arguments so their displayed width remains accurate.
+- Fixed LaTeX styling in nested content, including bold and italic resets, radical and optional-argument styling, color scoping, and inline math in headings.
+- Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
+- Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
+- Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+
 ## [18.18.1] - 2026-11-08
 
 ### Added

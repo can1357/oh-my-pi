@@ -99,7 +99,7 @@ import {
 	readReactTree,
 } from "./react/tree";
 import { collectVitals, installVitalsObservers, type VitalsOptions, type VitalsResult } from "./react/vitals";
-import { registerSemanticQueryHandlers } from "./query-handlers";
+import { queryByRole, registerSemanticQueryHandlers } from "./query-handlers";
 import {
 	type ElementQueryHelpers,
 	enrichElementQueries,
@@ -543,6 +543,15 @@ export function normalizeSelector(selector: string): string {
 		const name = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
 		if (name) return `aria/${name.trim()}`;
 		return `aria/${rest}`;
+	}
+	if (selector.startsWith("role/")) {
+		// The page-side handler refuses a selector it cannot fully read. Running it over no elements surfaces that
+		// before the op, so a wait fails at once instead of at its timeout.
+		try {
+			queryByRole({ querySelectorAll: () => [] } as unknown as Parameters<typeof queryByRole>[0], selector.slice(5));
+		} catch (error) {
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		}
 	}
 	return selector;
 }
@@ -1817,8 +1826,9 @@ export class WorkerCore {
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
+				pageEvents: payload.mode === "attach" && payload.relay === true,
 			});
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,

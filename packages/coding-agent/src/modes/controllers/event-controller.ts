@@ -58,7 +58,9 @@ import {
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
-import { recoverAskQuestions } from "../../tools/ask";
+import { recoverAskHtml } from "../../tools/ask";
+import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -112,11 +114,17 @@ const MAX_LIVE_IRC_CARDS = 4;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
-function hasNestedTodo(details: unknown): boolean {
+function hasCommittedTodo(events: unknown): boolean {
 	return (
-		isRecord(details) &&
-		Array.isArray(details.statusEvents) &&
-		details.statusEvents.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+		Array.isArray(events) && events.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+	);
+}
+
+/** Eval status events live on each cell. */
+function hasNestedTodo(details: unknown): boolean {
+	if (!isRecord(details)) return false;
+	return (
+		Array.isArray(details.cells) && details.cells.some(cell => isRecord(cell) && hasCommittedTodo(cell.statusEvents))
 	);
 }
 
@@ -1392,6 +1400,7 @@ export class EventController {
 	}
 
 	async #handleIrcMessage(event: Extract<AgentSessionEvent, { type: "irc_message" }>): Promise<void> {
+		if (!event.message.display) return;
 		const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 		if (this.#renderedCustomMessages.has(signature)) {
 			return;
@@ -2125,8 +2134,14 @@ export class EventController {
 	 */
 	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
 		if (toolName === "ask") {
-			const questions = recoverAskQuestions(args)?.map(question => question.question);
-			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
+			const html = recoverAskHtml(args);
+			const form = html === undefined ? undefined : parseHtmlForm(html);
+			const question = form?.fields.find(field => field.name);
+			return {
+				state: "blocked",
+				kind: "question",
+				msg: form && question ? fieldQuestions(form).get(question) : undefined,
+			};
 		}
 		const session = this.ctx.viewSession;
 		const tool = session.getToolByName(toolName);
