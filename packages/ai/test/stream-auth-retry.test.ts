@@ -219,11 +219,54 @@ describe("streamSimple resolver auth retry", () => {
 			expect((await stream.result()).stopReason).toBe("error");
 			expect(requests).toBe(1);
 			expect(contexts.at(-1)?.lastChance).toBe(true);
-			expect(contexts.at(-1)?.previousHeaderCommands).toEqual(
-				replacement === "duplicate" || replacement === "opaque" ? null : [],
-			);
+			expect(contexts.at(-1)?.previousHeaderCommands).toBeNull();
 		},
 	);
+
+	it("clears the preceding header snapshot when the next attempt uses an opaque replacement resolver", async () => {
+		const contexts: ApiKeyResolveContext[] = [];
+		const requestModel = model();
+		let materializations = 0;
+		requestModel.resolveHeaders = async () => {
+			materializations += 1;
+			const headers: ModelHeaders = { "X-Test": "test-first-header" };
+			Object.defineProperty(headers, modelHeaderCommandGenerations, {
+				value: { "X-Test": { command: "printf %s test-first-command", generation: 1 } },
+			});
+			return headers;
+		};
+		let requests = 0;
+		registerCustomApi(
+			API,
+			() => {
+				requests += 1;
+				requestModel.resolveHeaders = async () => {
+					materializations += 1;
+					return { "X-Test": "test-opaque-header" };
+				};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "error", reason: "error", error: assistantError("401 authentication_error", 401) });
+				});
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const stream = streamSimple(requestModel, context, {
+			apiKey: ctx => {
+				contexts.push(ctx);
+				return ctx.lastChance ? undefined : { apiKey: "test-not-a-secret", afterRemint: true };
+			},
+		});
+		for await (const _event of stream) {
+			// drain
+		}
+		expect((await stream.result()).stopReason).toBe("error");
+		expect(requests).toBe(2);
+		expect(materializations).toBe(2);
+		expect(contexts.at(-1)?.lastChance).toBe(true);
+		expect(contexts.at(-1)?.previousHeaderCommands).toBeNull();
+	});
 
 	it("retries with a refreshed key when a 401 is thrown before the first event", async () => {
 		const keys: unknown[] = [];

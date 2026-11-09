@@ -5,7 +5,14 @@ import * as path from "node:path";
 import { registerCustomApi, streamSimple, unregisterCustomApis } from "@oh-my-pi/pi-ai";
 import { type ApiKeyResolution, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import type { Api, AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	type FetchImpl,
+	type Model,
+	modelHeaderCommandGenerations,
+} from "@oh-my-pi/pi-ai/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	clearConfigValueCache,
@@ -205,6 +212,156 @@ describe("a `!command` credential the provider refuses", () => {
 			turn,
 		};
 	}
+
+	test.each(
+		[
+			...(["google-generative-ai", "openai-completions"] as const).flatMap(api =>
+				["X-B", "x-b", "X-b", "x-B"].flatMap(caller =>
+					[true, false].map(control => [api, caller, control, false] as const),
+				),
+			),
+			...[true, false].map(control => ["openai-completions", "", control, true] as const),
+			...[true, false].map(control => ["openai-completions", "", control, "partial"] as const),
+		].map(row => [`${row[0]} caller=${row[1]} control=${row[2]} throwing=${row[3]}`, row] as const),
+	)("recovers unobserved headers: %s", async (_name, [api, caller, control, throwing]) => {
+		const partial = throwing === "partial";
+		const throws = throwing === true;
+		const issuers = ["a", "b", "c"].map(name => {
+			const count = path.join(tempDir, `${name}.count`);
+			const value = path.join(tempDir, `${name}.value`);
+			fs.writeFileSync(count, "");
+			fs.writeFileSync(value, "test-old");
+			return {
+				config: mintFromFile(count, value),
+				count: () => fs.readFileSync(count, "utf8").length,
+				set: () => fs.writeFileSync(value, "test-new"),
+			};
+		});
+		const [a, b, c] = issuers;
+		let next = false;
+		const requests: Array<{ next: boolean; pathname: string; b: string | null; c: string | null }> = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requests.push({
+					next,
+					pathname: new URL(request.url).pathname,
+					b: request.headers.get("x-b"),
+					c: request.headers.get("x-c"),
+				});
+				if (
+					next &&
+					!control &&
+					request.headers.get("x-b") === "test-new" &&
+					request.headers.get("x-c") === "test-new"
+				) {
+					return api === "openai-completions"
+						? okStream()
+						: new Response(
+								`data: ${JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}\n\n`,
+								{ headers: { "Content-Type": "text/event-stream" } },
+							);
+				}
+				return next
+					? new Response(
+							JSON.stringify({ error: { type: "permission_error", message: "test permission refusal" } }),
+							{
+								status: 403,
+								headers: { "Content-Type": "application/json" },
+							},
+						)
+					: gatewayRefusal();
+			},
+		});
+		try {
+			const modelsPath = path.join(tempDir, "models.json");
+			fs.writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						"probe-gw": {
+							baseUrl: `http://127.0.0.1:${server.port}/v1`,
+							api,
+							apiKey: a.config,
+							headers: { "X-B": b.config, "X-C": partial ? b.config : c.config },
+							models: [{ id: "test-model", name: "Test model" }],
+						},
+					},
+				}),
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const requestModel = registry.find("probe-gw", "test-model");
+			if (!requestModel?.resolveHeaders) throw new Error("Expected a test header resolver");
+			const original = requestModel.resolveHeaders;
+			let materializations = 0;
+			if (throws || partial)
+				requestModel.resolveHeaders = async signal => {
+					materializations += 1;
+					const headers = await original(signal);
+					if (!next && materializations === 2) {
+						if (partial) {
+							await registry.getApiKeyWithCredentialForProvider("probe-gw", undefined, {
+								forceRefresh: true,
+								remintApiKeyCommand: false,
+							});
+							const fresh = await original(signal);
+							const observed = headers?.[modelHeaderCommandGenerations]?.["X-C"];
+							if (!observed) throw new Error("Expected an observed test command");
+							const result = { ...headers, "X-B": fresh?.["X-B"] ?? "" };
+							Object.defineProperty(result, modelHeaderCommandGenerations, { value: { "X-C": observed } });
+							return result;
+						}
+						const response = await fetch(`http://127.0.0.1:${server.port}/header-check`, {
+							headers: new Headers(headers),
+						});
+						throw new ProviderHttpError(await response.text(), response.status);
+					}
+					return headers;
+				};
+			const turn = async () => {
+				const resolver = registry.resolver(requestModel);
+				let seeded: ApiKeyResolution;
+				const key = await resolveApiKeyOnce(resolver, undefined, value => {
+					seeded = value;
+				});
+				const stream = streamSimple(requestModel, CONTEXT, {
+					apiKey: seedApiKeyResolver(seeded ?? key, resolver),
+					headers: !next && caller ? { [caller]: "test-caller" } : undefined,
+					maxTokens: 16,
+					maxRetryDelayMs: 1,
+				});
+				for await (const _event of stream) {
+					/* drain */
+				}
+				return stream.result();
+			};
+			await original();
+			await registry.getApiKeyForProvider("probe-gw");
+			a.set();
+			if (throws) await expect(turn()).rejects.toMatchObject({ status: 401 });
+			else expect((await turn()).stopReason).toBe("error");
+			expect(requests).toHaveLength(2);
+			if (throws) expect(requests[1].pathname).toBe("/header-check");
+			else if (partial) expect(requests[0].b).toBe("test-old");
+			else
+				expect(requests[0].b).toBe(
+					api === "google-generative-ai" && caller !== "X-B" ? "test-old, test-caller" : "test-caller",
+				);
+			b.set();
+			c.set();
+			next = true;
+			const before = issuers.map(issuer => issuer.count());
+			expect((await turn()).stopReason).toBe(control ? "error" : "stop");
+			expect(b.count() - before[1]).toBe(1);
+			expect(c.count() - before[2]).toBe(partial ? 0 : 1);
+			expect(requests).toHaveLength(3);
+			expect(requests[2].b).toBe("test-new");
+			expect(requests[2].c).toBe("test-new");
+		} finally {
+			server.stop(true);
+		}
+	});
 
 	test("a provider header command refreshes on the operation after a 401", async () => {
 		const counterFile = path.join(tempDir, "mints");

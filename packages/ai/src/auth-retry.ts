@@ -38,7 +38,7 @@ export interface ApiKeyResolveContext {
 	 * which mint the provider refused, which the bytes cannot say.
 	 */
 	previousGeneration?: number;
-	/** Complete materialized slots after refresh-same; null is unknown, [] proves none were sent. */
+	/** Positive observations after refresh-same; unobserved commands require conservative invalidation. */
 	previousHeaderCommands?: readonly CommandConfigGeneration[] | null;
 	/** Caller cancel signal, threaded into any credential refresh / rotation work. */
 	signal?: AbortSignal;
@@ -282,7 +282,7 @@ export interface AuthRetryKeyState {
 	 * this request sent from the one that replaced it.
 	 */
 	lastGeneration?: number;
-	/** Passive snapshot taken when the most recent request's headers were materialized. */
+	/** Positive observations for the current attempt, cleared before header materialization starts. */
 	lastHeaderCommands?: readonly CommandConfigGeneration[];
 	/** Whether the current credential already consumed its 401 refresh-same retry. */
 	refreshedCurrent: boolean;

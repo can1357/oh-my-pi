@@ -837,26 +837,30 @@ function withResolvedModelHeaders<TApi extends Api>(
 			let headerCommands: CommandConfigGeneration[] | undefined;
 			const commands = headers?.[modelHeaderCommandGenerations];
 			if (commands && headers) {
-				headerCommands = [];
 				const materializedNames = new Map<string, number>();
+				let ambiguous = false;
 				for (const key in headers) {
 					if (!Object.hasOwn(headers, key)) continue;
 					const name = key.toLowerCase();
+					if (!Object.hasOwn(commands, key) && !(name === "authorization" && derivedKey)) ambiguous = true;
 					materializedNames.set(name, (materializedNames.get(name) ?? 0) + 1);
 				}
 				if (requestHeaders) {
 					for (const key in requestHeaders) {
-						if (Object.hasOwn(requestHeaders, key)) materializedNames.set(key.toLowerCase(), 0);
+						// Provider merge rules differ: a colliding caller name leaves no positive observation.
+						if (Object.hasOwn(requestHeaders, key)) materializedNames.set(key.toLowerCase(), 2);
 					}
 				}
 				for (const key in commands) {
 					if (!Object.hasOwn(commands, key)) continue;
-					if (!Object.hasOwn(headers, key) || (materializedNames.get(key.toLowerCase()) ?? 0) > 1) {
-						headerCommands = undefined;
-						break;
+					if (!Object.hasOwn(headers, key) || materializedNames.get(key.toLowerCase()) !== 1) {
+						ambiguous = true;
+						continue;
 					}
-					if (materializedNames.get(key.toLowerCase()) === 1) headerCommands.push(commands[key]);
+					(headerCommands ??= []).push(commands[key]);
 				}
+				// An unobserved field may have sent another generation of an observed command.
+				if (ambiguous) headerCommands = undefined;
 			}
 			const inner = run(
 				{ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined },
@@ -1296,6 +1300,8 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
+				// Failed materialization must not inherit another attempt's observations.
+				if (retryState) retryState.lastHeaderCommands = undefined;
 				const inner = withResolvedModelHeaders(
 					model,
 					signal,

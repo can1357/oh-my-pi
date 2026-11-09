@@ -28,7 +28,7 @@ export interface ApiKeyResolverOptions {
 export interface ApiKeyResolverRequestOptions extends AuthApiKeyOptions {
 	/** A non-authentication error can skip the selected API-key command, not other provider refresh. */
 	remintApiKeyCommand?: boolean;
-	/** Complete local header evidence, or null for upstream fallback; absent before refresh-same. */
+	/** Positive local header observations, or null when unavailable; absent before refresh-same. */
 	rejectedHeaderCommands?: readonly CommandConfigGeneration[] | null;
 }
 

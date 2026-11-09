@@ -200,12 +200,28 @@ describe("async config header materialization", () => {
 		expect(retained?.[modelHeaderCommandGenerations]?.["X-Test"].generation).toBe(2);
 	});
 
-	it.each([false, true])("distinguishes unknown from complete empty snapshots: %s", async complete => {
-		const config = `!printf %s test-snapshot-${complete ? "complete" : "unknown"}`;
-		await resolveConfigHeaders({ "X-Test": config });
-		invalidateCommandConfig(config, undefined, complete ? [] : undefined);
-		const next = await resolveConfigHeaders({ "X-Test": config });
-		expect(next?.[modelHeaderCommandGenerations]?.["X-Test"].generation).toBe(complete ? 1 : 2);
+	it.each([false, true])(
+		"invalidates without a positive observation, including an empty snapshot: %s",
+		async empty => {
+			const config = `!printf %s test-snapshot-${empty ? "empty" : "unknown"}`;
+			await resolveConfigHeaders({ "X-Test": config });
+			invalidateCommandConfig(config, undefined, empty ? [] : undefined);
+			const next = await resolveConfigHeaders({ "X-Test": config });
+			expect(next?.[modelHeaderCommandGenerations]?.["X-Test"].generation).toBe(2);
+		},
+	);
+
+	it("does not treat another command's positive observation as proof of omission", async () => {
+		const a = "!printf %s test-unobserved-command";
+		const b = "!printf %s test-observed-command";
+		const first = await resolveConfigHeaders({ "X-A": a, "X-B": b });
+		const observed = first?.[modelHeaderCommandGenerations]?.["X-B"];
+		if (!observed) throw new Error("Expected a positive observation");
+		invalidateCommandConfig(a, undefined, [observed]);
+		invalidateCommandConfig(b, undefined, [observed]);
+		const next = await resolveConfigHeaders({ "X-A": a, "X-B": b });
+		expect(next?.[modelHeaderCommandGenerations]?.["X-A"].generation).toBe(2);
+		expect(next?.[modelHeaderCommandGenerations]?.["X-B"].generation).toBe(2);
 	});
 
 	it("does not invent command generations from prototype header names", async () => {
@@ -221,13 +237,15 @@ describe("async config header materialization", () => {
 		expect(Object.keys(headers?.[modelHeaderCommandGenerations] ?? {})).toEqual([]);
 	});
 
-	it("marks a composed snapshot unknown when an opaque layer contributes values", async () => {
+	it("retains only positive command observations through opaque composition", async () => {
 		const config = "!printf %s test-composed-header";
 		const inner = createConfigHeaderResolver([{ "X-Test": config, "X-Shared": config }]);
 		const outer = createConfigHeaderResolver([inner, async () => ({ "X-Test": "test-composed-header" })]);
 		const headers = await outer?.();
 		expect(headers?.["X-Test"]).toBe("test-composed-header");
-		expect(headers?.[modelHeaderCommandGenerations]).toBeUndefined();
+		expect(headers?.[modelHeaderCommandGenerations]).toEqual({
+			"X-Shared": { command: "printf %s test-composed-header", generation: 1 },
+		});
 		expect(Object.keys(headers ?? {})).toEqual(["X-Test", "X-Shared"]);
 		expect(JSON.stringify(headers)).toBe('{"X-Test":"test-composed-header","X-Shared":"test-composed-header"}');
 	});
@@ -236,7 +254,7 @@ describe("async config header materialization", () => {
 		setEnv("OMP_TEST_HEADER_COMMAND_BYTES", "!printf %s test-not-a-command");
 		const headers = await resolveConfigHeaders({ "X-Test": "OMP_TEST_HEADER_COMMAND_BYTES" });
 		expect(headers?.["X-Test"]).toBe("!printf %s test-not-a-command");
-		expect(headers?.[modelHeaderCommandGenerations]).toEqual({});
+		expect(headers?.[modelHeaderCommandGenerations]).toBeUndefined();
 	});
 
 	it("records only the authHeader command that replaced an explicit Authorization command", async () => {
