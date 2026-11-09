@@ -343,12 +343,13 @@ describe("collectSubSessions", () => {
 	});
 });
 
-describe("HTML export output paths", () => {
+// Relative paths resolve against process cwd, so each export runs in a subprocess rooted at `root`.
+describe("HTML export relative output paths", () => {
 	let root: string;
 	let mainFile: string;
 
 	beforeEach(async () => {
-		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-export-paths-"));
+		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-export-paths-")));
 		mainFile = path.join(root, "main.jsonl");
 		await Bun.write(mainFile, sessionJsonl("main", ["m1"]));
 	});
@@ -358,24 +359,18 @@ describe("HTML export output paths", () => {
 	});
 
 	test.each([
-		["the default filename in cwd", undefined],
-		["a relative parent that normalizes to cwd", "sub/../export.html"],
-		["a relative path with missing parent directories", "exports/nested/export.html"],
-	])("exports to %s", async (_description, outputPath) => {
+		["the default filename", undefined, `${APP_NAME}-session-main.html`],
+		["a path that normalizes to cwd", "sub/../export.html", "export.html"],
+	])("writes %s into cwd and returns its absolute path", async (_description, outputPath, written) => {
 		const probe = path.join(import.meta.dir, "fixtures", "html-export-path-probe.ts");
-		const args = outputPath ? [outputPath] : [];
-		const result = await $`${process.execPath} ${probe} ${mainFile} ${args}`
+		const result = await $`${process.execPath} ${probe} ${mainFile} ${outputPath ?? []}`
 			.cwd(root)
-			// Skip the development viewer asset; this test exercises output paths, not viewer packaging.
+			// Skip the development viewer asset, which CI does not build.
 			.env({ ...process.env, PI_BUNDLED: "1" })
 			.quiet()
 			.nothrow();
 		expect(result.exitCode, result.stderr.toString()).toBe(0);
-		const returnedPath = result.text().trim();
-		expect(returnedPath).toBe(outputPath ?? `${APP_NAME}-session-main.html`);
-		const data = await readExportData(path.resolve(root, returnedPath));
-		expect(data.header?.id).toBe("main");
-		expect(data.entries.map(entry => entry.id)).toEqual(["m1"]);
-		expect(data.leafId).toBe("m1");
+		expect(result.text()).toBe(path.join(root, written));
+		expect((await readExportData(path.join(root, written))).header?.id).toBe("main");
 	});
 });

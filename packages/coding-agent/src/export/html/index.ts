@@ -221,8 +221,7 @@ async function writeExportHtml(sessionData: SessionData, outputPath: string, opt
 	const marker = page.indexOf(SESSION_DATA_MARKER);
 
 	// Unlike `Bun.write`, a `FileSink` does not create missing parent directories.
-	// Resolve first: Bun on Windows mis-normalizes relative cwd paths (oven-sh/bun#45059).
-	await fs.promises.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true });
+	await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
 	const writer = Bun.file(outputPath).writer();
 	try {
 		writer.write(page.slice(0, marker));
@@ -245,7 +244,10 @@ async function exportSessionData(sessionData: SessionData, sessionFile: string, 
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
 
-	const outputPath = opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`;
+	// Resolve once: Bun on Windows fails to mkdir relative paths that normalize to cwd (oven-sh/bun#45059).
+	const outputPath = path.resolve(
+		opts.outputPath || `${APP_NAME}-session-${path.basename(sessionFile, ".jsonl")}.html`,
+	);
 	await writeExportHtml(sessionData, outputPath, opts);
 	return outputPath;
 }
