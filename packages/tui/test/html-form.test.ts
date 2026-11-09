@@ -491,6 +491,21 @@ describe("html form", () => {
 			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
 		});
 
+		it("natively: a field between a loose group's options keeps the context before it", () => {
+			const { form } = dialog(`<form>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
+				<p>Choose a compliant region</p>
+				<label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
+				<label><input type="radio" name="plan" value="premium"> Premium</label>
+			</form>`);
+			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
+			expect(textsOf(form.describe(CX))).not.toContain("Choose a compliant region");
+			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
+			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Choose a compliant region", "Region"]));
+		});
+
 		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
 			const { form } = dialog(`<form>
 				<label><input type="checkbox" name="locked" disabled> Locked</label>
@@ -503,6 +518,9 @@ describe("html form", () => {
 			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
 			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
 			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			// The shared tab is named after Name, the question the keyboard reaches.
+			const first = items[0];
+			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
 			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
 			expect(textsOf(root)).toContain("Name");
 		});

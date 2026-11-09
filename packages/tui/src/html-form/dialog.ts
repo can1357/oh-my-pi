@@ -232,6 +232,11 @@ function nativeSpans(spans: readonly FormSpan[], extra?: string): TspSpan[] {
 	});
 }
 
+/** Whether the keyboard can reach `field`: a text field, or a choice with an enabled option or an Other answer. */
+function reachable(field: FormField): boolean {
+	return field.kind === "text" || field.other || field.options.some(option => !option.disabled);
+}
+
 /**
  * Native question tabs: one per section holding fields, labeled by its legend
  * (else its first field's question). Sections of context alone join the next
@@ -251,19 +256,19 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 			return;
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
-		// Where each tab of this section ends: after each loose field (and the text between a group's
-		// options), but never past the next field; the last one at the section's end. A field the
-		// keyboard cannot reach (only disabled options) gets no tab of its own: it joins the next one.
+		// Where each tab of this section ends: after each loose field, the last one at the section's end.
+		// A group's tab also keeps the text between its options, unless its options straddle the next
+		// field: then that field keeps the context before it. A field the keyboard cannot reach (only
+		// disabled options) gets no tab of its own: it joins the next one.
 		const fieldBlocks = section.blocks.flatMap((block, at) =>
 			block.kind === "field" ? [{ at, through: Math.max(at + 1, block.optionsEnd ?? 0), field: block.field }] : [],
 		);
 		const cuts =
 			tabbed && !section.fieldset
-				? fieldBlocks.flatMap(({ through, field }, nth) =>
-						field.kind === "text" || field.other || field.options.some(option => !option.disabled)
-							? [Math.min(through, fieldBlocks[nth + 1]?.at ?? through)]
-							: [],
-					)
+				? fieldBlocks.flatMap(({ at, through, field }, nth) => {
+						if (!reachable(field)) return [];
+						return [through <= (fieldBlocks[nth + 1]?.at ?? end) ? through : at + 1];
+					})
 				: [];
 		if (cuts.length === 0) cuts.push(end);
 		else cuts[cuts.length - 1] = end;
@@ -272,7 +277,8 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 			const fields = section.blocks
 				.slice(start, cut)
 				.flatMap(block => (block.kind === "field" ? [block.field] : []));
-			const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
+			const question = questions.get(fields.find(reachable) ?? fields[0]!) ?? "";
+			const label = title || sanitize(question) || `Question ${tabs.length + 1}`;
 			tabs.push({
 				label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
 				parts: [...lead, { section: index, start, end: cut }],
