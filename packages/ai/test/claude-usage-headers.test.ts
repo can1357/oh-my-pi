@@ -128,7 +128,6 @@ describe("claude usage request headers", () => {
 		expect(betaTokens).toContain("redact-thinking-2026-02-12");
 		expect(betaTokens).toContain("context-management-2025-06-27");
 		expect(betaTokens).toContain("prompt-caching-scope-2026-01-05");
-		expect(betaTokens).toContain("mid-conversation-system-2026-04-07");
 		expect(betaTokens).toContain("advanced-tool-use-2025-11-20");
 		expect(betaTokens).toContain("effort-2025-11-24");
 		expect(betaTokens).toContain("extended-cache-ttl-2025-04-11");

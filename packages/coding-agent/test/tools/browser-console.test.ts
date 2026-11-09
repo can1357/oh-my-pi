@@ -150,6 +150,36 @@ await wait(5_000);`,
 		}
 	}, 30_000);
 
+	it("keeps the fields of non-Error rejections in page errors, bounded like console arguments", async () => {
+		await invoke({ action: "open", name: "console", url: "data:text/html,<title>rejections</title>" });
+		try {
+			await call("evaluate", [
+				`(() => {
+					setTimeout(() => {
+						Promise.reject({ name: "ProbeObject", message: "OMP_OBJECT_DETAILS", code: "SAFE_TEST", detail: { stage: "synthetic" } });
+						Promise.reject("plain rejection reason");
+						Promise.reject({ blob: "x".repeat(20000) });
+					}, 0);
+					return true;
+				})()`,
+			]);
+			let entries: CaptureEntry[] = [];
+			for (let attempt = 0; attempt < 50 && entries.length < 3; attempt++) {
+				await Bun.sleep(20);
+				entries = ((await call("errors")) as CaptureResult).entries;
+			}
+			expect(entries.map(entry => entry.text).slice(0, 2)).toEqual([
+				'{"name":"ProbeObject","message":"OMP_OBJECT_DETAILS","code":"SAFE_TEST","detail":{"stage":"synthetic"}}',
+				"plain rejection reason",
+			]);
+			const oversized = entries[2]?.text ?? "";
+			expect(oversized.startsWith('{"blob":"xxx')).toBe(true);
+			expect(oversized.length).toBe(8_193);
+		} finally {
+			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
 	it("keeps the cmux page hook from throwing on values whose text conversion throws", async () => {
 		await invoke({ action: "open", name: "console", url: "data:text/html,<title>cmux hook</title>" });
 		try {
@@ -174,6 +204,30 @@ await wait(5_000);`,
 					text: "revoked [unserializable]",
 					args: ["revoked", "[unserializable]"],
 				}),
+			]);
+		} finally {
+			await invoke({ action: "close", name: "console" });
+		}
+	}, 30_000);
+
+	it("keeps the fields of non-Error rejections in the cmux page hook", async () => {
+		await invoke({ action: "open", name: "console", url: "data:text/html,<title>cmux rejections</title>" });
+		try {
+			const result = await call("evaluate", [
+				`(async () => {
+					${CMUX_CONSOLE_CAPTURE_SCRIPT};
+					Promise.reject({ name: "ProbeObject", message: "OMP_OBJECT_DETAILS", code: "SAFE_TEST" });
+					Promise.reject(new Error("native rejection"));
+					const capture = globalThis.__ompConsoleCapture;
+					for (let attempt = 0; attempt < 100 && capture.entries.length < 2; attempt++) {
+						await new Promise(resolve => setTimeout(resolve, 10));
+					}
+					return capture.entries.map(entry => entry.text);
+				})()`,
+			]);
+			expect(result).toEqual([
+				'{"name":"ProbeObject","message":"OMP_OBJECT_DETAILS","code":"SAFE_TEST"}',
+				"native rejection",
 			]);
 		} finally {
 			await invoke({ action: "close", name: "console" });

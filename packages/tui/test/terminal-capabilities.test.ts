@@ -156,6 +156,14 @@ describe("detectTerminalId", () => {
 		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
 	});
 
+	it("does not treat an inherited REX_SESSION as Rex", () => {
+		// Any program launched from a Rex pane inherits REX_SESSION, including
+		// emulators omp does not recognize (VTE, Zed, JetBrains). Rex itself
+		// sets TERM_PROGRAM=rex, so the session ID must not pick the profile.
+		const env = { REX_SESSION: "s1", TERM: "xterm-256color", COLORTERM: "truecolor", VTE_VERSION: "8400" };
+		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+
 	it("falls back to trueColor on VTE/Ptyxis environments — VTE OSC 9 is ConEmu progress, not a notification protocol", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
@@ -171,6 +179,10 @@ it("selects Kitty graphics for Rex via TERM_PROGRAM or TERM=xterm-rex (over SSH)
 		const id = detectTerminalId(env);
 		expect(id).toBe("rex");
 		expect(resolveImageProtocol(id, env, true)).toBe(ImageProtocol.Kitty);
+		// Rex renders OSC 8 and opens the link on command-click. With the
+		// hyperlink capability off, every path and URL in the transcript is
+		// plain text instead of a link the terminal would open.
+		expect(shouldEnableHyperlinksByDefault(env, id)).toBe(true);
 	}
 });
 

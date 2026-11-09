@@ -589,7 +589,11 @@ fn bang_opts(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<BangOpts, St
 		verify:       zopt(&mut k.root, cx.store, vp, ZshOpt::Histverify)?,
 		substpattern: zopt(&mut k.root, cx.store, vp, ZshOpt::Histsubstpattern)?,
 		cwd:          vp.cwd.clone(),
-		path:         var(&k.root, cx.store, vp, b"PATH")?.unwrap_or_default(),
+		path:         var(&k.root, cx.store, vp, b"PATH")?
+			.unwrap_or_default()
+			.split(|&c| c == crate::bash::vm::probe::path_separator(k.engine.config().platform))
+			.map(BString::from)
+			.collect(),
 		bash:         false,
 		multibyte:    zopt(&mut k.root, cx.store, vp, ZshOpt::Multibyte)?
 			&& crate::bash::vm::locale::is_utf8(k, cx.store, vp),
@@ -777,15 +781,18 @@ pub fn before_line(
 
 /// [`ProgInfo`] of a parsed event whose source is `src`.
 pub fn prog_info(cc: &crate::bash::syntax::CompleteCommand, src: &[u8]) -> ProgInfo {
-	use crate::bash::syntax::CommandKind;
-	let Some(item) = cc.list.items.first() else {
+	use crate::bash::syntax::tree::CommandKind;
+	let Some(item) = cc.list().items().first() else {
 		return ProgInfo::default();
 	};
-	let ao = &item.and_or;
-	let funcdef = ao.rest.is_empty()
-		&& ao.first.stages.len() == 1
-		&& matches!(ao.first.stages[0].cmd.kind, CommandKind::FuncDef(_));
-	let (lo, hi) = (ao.span.lo as usize, ao.span.hi as usize);
+	let ao = item.and_or();
+	let funcdef = ao.rest().len() == 0
+		&& ao
+			.first()
+			.stages()
+			.one()
+			.is_some_and(|c| matches!(c.kind(), CommandKind::FuncDef(_)));
+	let (lo, hi) = (ao.span().lo as usize, ao.span().hi as usize);
 	let text = BString::from(src.get(lo..hi.min(src.len())).unwrap_or_default());
 	ProgInfo { funcdef, text }
 }

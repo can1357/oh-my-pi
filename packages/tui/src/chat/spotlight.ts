@@ -25,8 +25,9 @@ export interface SpotlightOriginal {
 	/** The file a `read` showed (picks the sheet's grammar). */
 	path?: string;
 	/**
-	 * One character per original line, from its first (at most {@link SPOTLIGHT_VIEW_LINES}): Spotlight's score as
-	 * `0`–`9` relative to the result's hottest line, `-` for a line it never scored. Lines past the end are unscored.
+	 * One character per original line, from its first (at most {@link SPOTLIGHT_VIEW_LINES}): the line's rank among
+	 * the lines Spotlight scored, `0` (coldest) to `9` (hottest), `-` for a line it never scored. Lines past the end
+	 * are unscored.
 	 */
 	heat: string;
 	/** Runs of original lines the model was shown verbatim, `[first, last]` 1-based positions in the original. */
@@ -194,17 +195,28 @@ export function spotlightDetails(details: unknown): SpotlightDetails | undefined
 	return s as unknown as SpotlightDetails;
 }
 
-/** The {@link SpotlightOriginal.heat} of per-line scores: each relative to the best, in ten steps. */
+/**
+ * The {@link SpotlightOriginal.heat} of per-line scores: each scored line's rank among them in ten steps, ties sharing
+ * their mean place. Spotlight's attention is heavy-tailed (a line or two take most of it), so a share of the hottest
+ * line would put nearly every line at `0`.
+ */
 export function encodeHeat(scores: readonly (number | null)[]): string {
 	const n = Math.min(scores.length, SPOTLIGHT_VIEW_LINES);
-	let top = 0;
-	for (let i = 0; i < n; i++) top = Math.max(top, scores[i] ?? 0);
-	let out = "";
+	const order: { score: number; line: number }[] = [];
 	for (let i = 0; i < n; i++) {
-		const s = scores[i];
-		out += s === null || s === undefined ? "-" : String(top > 0 ? Math.round((Math.max(0, s) / top) * 9) : 0);
+		const score = scores[i];
+		if (score !== null && score !== undefined) order.push({ score, line: i });
 	}
-	return out.replace(/-+$/, "");
+	order.sort((a, b) => a.score - b.score);
+	const digits = Array.from<string>({ length: n }).fill("-");
+	for (let i = 0; i < order.length;) {
+		let j = i;
+		while (j + 1 < order.length && order[j + 1].score === order[i].score) j++;
+		const digit = String(order.length > 1 ? Math.round(((i + j) / 2 / (order.length - 1)) * 9) : 9);
+		for (let k = i; k <= j; k++) digits[order[k].line] = digit;
+		i = j + 1;
+	}
+	return digits.join("").replace(/-+$/, "");
 }
 
 /** The heat of original line `i` (0-based) in [0, 1], or undefined when Spotlight never scored it. */
@@ -226,8 +238,8 @@ export function keptRanges(kept: readonly boolean[]): [number, number][] {
 	return out;
 }
 
-/** Heat digit from which a line counts as hot: a hidden one was cut though hot. */
-const HOT_DIGIT = 6;
+/** Heat digit from which a line counts as hot (its output's top ~6 %): a hidden one was cut though hot. */
+const HOT_DIGIT = 9;
 
 /** Whether original line `i` (0-based) scored hot: a heat digit of {@link HOT_DIGIT} or more. */
 export function spotlightHot(heat: string, i: number): boolean {

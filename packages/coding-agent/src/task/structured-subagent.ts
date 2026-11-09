@@ -268,8 +268,19 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
+/** Stands in for the assignment while the template is formatted; `format()` leaves it untouched. */
+const ASSIGNMENT_SLOT = "\u0000assignment\u0000";
+
+/**
+ * Render the subagent user prompt. Only the template is formatted: the assignment is inserted
+ * afterwards with its interior whitespace intact (paragraph breaks, Markdown hard breaks, table
+ * padding), so inline and file-backed instructions reach the subagent identically.
+ */
 export function renderSubagentUserPrompt(assignment: string): string {
-	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
+	const text = assignment.trim().replace(/\r\n?/g, "\n");
+	return prompt
+		.render(subagentUserPromptTemplate, { assignment: ASSIGNMENT_SLOT })
+		.replace(ASSIGNMENT_SLOT, () => text);
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
@@ -362,6 +373,15 @@ function perCallModelDisabledReason(settings: Settings, invocationKind: "task" |
 }
 
 /**
+ * A blank `model` is absence, not a selector: callers that emit JSON pad optional
+ * fields with `""` or `[]`, and whitespace alone names no model.
+ */
+export function normalizeModelSelector<T>(model: T): T | undefined {
+	if (typeof model === "string") return model.trim() === "" ? undefined : model;
+	return Array.isArray(model) && model.length === 0 ? undefined : model;
+}
+
+/**
  * Why a per-call `model` cannot be used before dispatch: the `task.perCallModel` gate first, so a
  * caller is never told to fix a selector it may not send, then anything but one exact
  * `provider/model-id[:level]` selector. `undefined` when there is no problem.
@@ -371,7 +391,7 @@ export function invalidModelSelectorReason(
 	label: string,
 	gate: { settings: Settings; invocationKind: "task" | "eval" },
 ): string | undefined {
-	if (model === undefined) return undefined;
+	if (normalizeModelSelector(model) === undefined) return undefined;
 	const disabled = perCallModelDisabledReason(gate.settings, gate.invocationKind);
 	if (disabled) return disabled;
 	if (

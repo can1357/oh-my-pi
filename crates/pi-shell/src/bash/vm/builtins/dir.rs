@@ -33,6 +33,18 @@ fn physical(ctx: &mut Ctx<'_, '_>, o: &Opts<'_>) -> Result<bool, Need> {
 /// (`cd -L`). A URL path ([`url_root_len`]) keeps its `scheme://` root, which
 /// `..` never climbs above.
 pub fn logical(cwd: &[u8], dir: &[u8]) -> BString {
+	#[cfg(windows)]
+	if url_root_len(dir).is_none()
+		&& let (Ok(cwd), Ok(dir)) = (cwd.to_path(), dir.to_path())
+		&& (matches!(cwd.components().next(), Some(std::path::Component::Prefix(_)))
+			|| matches!(dir.components().next(), Some(std::path::Component::Prefix(_))))
+	{
+		let path = pi_vfs::absolute_path(cwd, dir);
+		return pi_vfs::normalize_lexically(&path)
+			.into_os_string()
+			.into_encoded_bytes()
+			.into();
+	}
 	let mut parts: Vec<&[u8]> = Vec::new();
 	let full: Vec<u8>;
 	let path = if dir.starts_with(b"/") || url_root_len(dir).is_some() {
@@ -105,7 +117,8 @@ pub fn cd(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	let relative =
 		!target.starts_with(b"/") && !target.starts_with(b".") && url_root_len(&target).is_none();
 	if relative && let Some(cdpath) = ctx.scalar(b"CDPATH")? {
-		for dir in cdpath.split(|&c| c == b':') {
+		let sep = crate::bash::vm::probe::path_separator(ctx.k.engine.config().platform);
+		for dir in cdpath.split(|&c| c == sep) {
 			if dir.is_empty() {
 				continue;
 			}
@@ -365,6 +378,21 @@ mod tests {
 		assert_eq!(logical(b"/a/b", b"../c/./d"), "/a/c/d");
 		assert_eq!(logical(b"/a", b"/x/../y"), "/y");
 		assert_eq!(logical(b"/", b".."), "/");
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn logical_windows_paths_preserve_drive_and_share_roots() {
+		assert_eq!(logical(br"C:\work\app", br"..\src\.\module"), br"C:\work\src\module".as_slice());
+		assert_eq!(logical(br"C:\work\app", br"D:\other\..\target"), br"D:\target".as_slice());
+		assert_eq!(
+			logical(br"\\server\share\a", br"..\..\..\target"),
+			br"\\server\share\target".as_slice()
+		);
+		assert_eq!(logical(br"\\?\C:\work\a", br"..\target"), br"\\?\C:\work\target".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"C:\work"), br"C:\work".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"C:\work\..\target"), br"C:\target".as_slice());
+		assert_eq!(logical(b"virtual://dir", br"\\server\share\a"), br"\\server\share\a".as_slice());
 	}
 
 	#[test]

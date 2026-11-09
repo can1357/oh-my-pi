@@ -24,7 +24,7 @@ import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
 import { base64ImageNode, openableImageProps } from "../native/blobs";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -279,18 +279,33 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		if (this.#reaction !== undefined) badges.push(node("badge", { text: this.#reaction, role: "omp.reaction" }));
 		if (badges.length > 0)
 			children.push(node("row", { gap: "xs", justify: "end", role: "omp.user.badges" }, badges, "badges"));
+		// A phone's long press lists the turn's actions (a desktop keeps the hover toolbar): they need the
+		// prompt's timestamp to find its entry.
+		const hold =
+			!this.#synthetic && hasTranscriptActions() && this.#timestamp !== undefined
+				? {
+						actions: {
+							hold: turnHoldEntries("user", { id: "copy-message", label: "Copy message", icon: "copy" }),
+						},
+					}
+				: {};
 		this.#native = card(
-			{ role: this.#synthetic ? "omp.user.synthetic" : "omp.user", tone: this.#synthetic ? "muted" : "user" },
+			{
+				role: this.#synthetic ? "omp.user.synthetic" : "omp.user",
+				tone: this.#synthetic ? "muted" : "user",
+				...hold,
+			},
 			children,
 		);
 		return this.#native;
 	}
 
-	/** Hover toolbar clicks: omp's own copy and rewind commands. */
+	/** Hover toolbar and hold-menu choices: omp's own copy, rewind, edit, retry and fork commands. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
 		if (event.act === "copy-message") runTranscriptAction({ act: "copy", text: this.#text });
 		else if (event.act === "rewind") runTranscriptAction({ act: "rewind" });
+		else if (this.#timestamp !== undefined) runTurnAction(event.act, { role: "user", at: this.#timestamp });
 	}
 
 	/**

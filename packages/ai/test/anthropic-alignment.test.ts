@@ -208,8 +208,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
-		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.128.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
 		expect(headers["anthropic-client-version"]).toBeUndefined();
@@ -236,7 +236,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		]);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(headers["x-client-request-id"]).toBeUndefined();
 	});
@@ -291,7 +291,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["anthropic-beta"]).toBe(
-			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24,fallback-credit-2026-06-01",
+			"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,fallback-credit-2026-06-01",
 		);
 		expect(options.defaultHeaders["anthropic-beta"]).not.toContain("context-1m-2025-08-07");
 	});
@@ -1080,7 +1080,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers["anthropic-beta"]).not.toBe("custom-beta-token");
 		expect(headers["x-app"]).toBe("cli");
-		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
+		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.12.1");
 	});
 
 	it("suppresses the client-level X-Api-Key when model.headers carries a custom Authorization (#3391)", () => {

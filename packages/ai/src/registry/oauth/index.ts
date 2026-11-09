@@ -2,7 +2,7 @@
 // High-level API
 // ============================================================================
 
-import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor, providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -18,8 +18,10 @@ export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
 
+// A provider turned off in its auth rules (`disabled "<reason>"`) is no login choice.
 const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
-	provider => provider.login && provider.showInLoginList !== false,
+	provider =>
+		provider.login && provider.showInLoginList !== false && providerDisabledReason(provider.id) === undefined,
 ).map(provider => ({
 	id: provider.id,
 	name: provider.name,
@@ -51,6 +53,21 @@ export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | 
 }
 
 /**
+ * Why `provider` is paused by its auth rules (`disabled "<reason>"`), or
+ * undefined when it may be reached. An extension that registers its own OAuth
+ * login under the paused id takes the id back: that is the end user's choice.
+ */
+export function providerPauseReason(provider: string): string | undefined {
+	return customOAuthProviders.has(provider) ? undefined : providerDisabledReason(provider);
+}
+
+/** Throws {@link AIError.ProviderDisabledError} when {@link providerPauseReason} pauses `provider`. */
+export function assertProviderEnabled(provider: string): void {
+	const reason = providerPauseReason(provider);
+	if (reason !== undefined) throw new AIError.ProviderDisabledError(provider, reason);
+}
+
+/**
  * Remove all custom OAuth providers registered by a source.
  */
 export function unregisterOAuthProviders(sourceId: string): void {
@@ -75,6 +92,8 @@ export async function refreshOAuthToken(
 			provider,
 		});
 	}
+	// A paused provider never starts a token exchange, even for an SDK caller holding an old credential.
+	assertProviderEnabled(provider);
 	const def = getProviderDefinition(provider);
 	if (!def?.login) {
 		throw new AIError.OAuthError(`Unknown OAuth provider: ${provider}`, {
@@ -158,6 +177,8 @@ export async function getOAuthApiKey(
  * Get list of OAuth providers.
  */
 export function getOAuthProviders(): OAuthProviderInfo[] {
+	// Extension-registered logins are listed as-is: registering one is the end user's choice,
+	// even under an id the auth rules pause (see providerPauseReason).
 	const customProviders = Array.from(customOAuthProviders.values(), provider => ({
 		id: provider.id,
 		name: provider.name,
