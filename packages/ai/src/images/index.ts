@@ -30,6 +30,8 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	// A provider turned off in its auth rules is never called, even with a key passed in directly.
+	AIError.assertProviderEnabled(model.provider);
 	if (isFactoryDroidModel(model)) return generateFactoryDroidImage(model, request, options);
 	switch (model.api) {
 		case "openai-images":

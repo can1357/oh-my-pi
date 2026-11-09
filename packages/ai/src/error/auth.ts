@@ -1,3 +1,4 @@
+import { providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
 import { attach, create, Flag } from "./flags";
 
 /**
@@ -17,6 +18,23 @@ export class MissingApiKeyError extends Error {
 		this.provider = provider;
 		attach(this, create(Flag.AuthFailed));
 	}
+}
+
+/** The provider is turned off in its auth rules (`disabled "<reason>"`), so nothing may call it. */
+export class ProviderDisabledError extends MissingApiKeyError {
+	readonly reason: string;
+
+	constructor(provider: string, reason: string) {
+		super(provider, `${provider} is turned off: ${reason}`);
+		this.name = "ProviderDisabledError";
+		this.reason = reason;
+	}
+}
+
+/** Throws {@link ProviderDisabledError} when `provider`'s auth rules turn it off. */
+export function assertProviderEnabled(provider: string): void {
+	const reason = providerDisabledReason(provider);
+	if (reason !== undefined) throw new ProviderDisabledError(provider, reason);
 }
 
 /**

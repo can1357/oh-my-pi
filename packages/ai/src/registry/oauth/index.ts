@@ -2,7 +2,7 @@
 // High-level API
 // ============================================================================
 
-import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor, providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -18,8 +18,10 @@ export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
 
+// A provider turned off in its auth rules (`disabled "<reason>"`) is no login choice.
 const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
-	provider => provider.login && provider.showInLoginList !== false,
+	provider =>
+		provider.login && provider.showInLoginList !== false && providerDisabledReason(provider.id) === undefined,
 ).map(provider => ({
 	id: provider.id,
 	name: provider.name,
