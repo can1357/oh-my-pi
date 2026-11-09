@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { type DatabasePath, openDatabase } from "../db";
+import { unicodeCaseVariants } from "../util/regex";
 
 export const VERACITY_WEIGHTS = Object.freeze({
 	stated: 1.0,
@@ -293,11 +294,27 @@ export class VeracityConsolidator {
 			const now = nowIso();
 
 			if (existing !== null) {
+				const sources = parseSources(existing.sources_json);
+				const hasSource = source !== undefined && source !== null && source !== "";
+				const isDuplicateSource = hasSource && sources.includes(source);
+				if (isDuplicateSource) {
+					return {
+						subject,
+						predicate,
+						object,
+						confidence: existing.confidence,
+						mention_count: existing.mention_count,
+						first_seen: existing.first_seen,
+						last_seen: existing.last_seen,
+						sources,
+						veracity: existing.veracity,
+						superseded: existing.superseded_by !== null,
+						id: existing.id,
+					};
+				}
+				if (hasSource) sources.push(source);
 				const newConfidence = this.bayesianUpdate(existing.confidence, veracity);
 				const newCount = existing.mention_count + 1;
-				const sources = parseSources(existing.sources_json);
-				if (source !== undefined && source !== null && source !== "" && !sources.includes(source))
-					sources.push(source);
 				this.conn
 					.query(`
 						UPDATE consolidated_facts
@@ -427,8 +444,9 @@ export class VeracityConsolidator {
 	 * lower-case query word finds `PostgreSQL` or `Alice`.
 	 */
 	getConsolidatedFactsBySubjects(subjects: readonly string[], minConfidence = 0.5): ConsolidatedFact[] {
-		const lowered = [...new Set(subjects.map(subject => subject.toLowerCase()).filter(subject => subject !== ""))];
-		if (lowered.length === 0) return [];
+		const lowered = [
+			...new Set(subjects.filter(subject => subject !== "").flatMap(subject => unicodeCaseVariants(subject))),
+		];
 		const placeholders = lowered.map(() => "?").join(", ");
 		const rows = this.conn
 			.query(`

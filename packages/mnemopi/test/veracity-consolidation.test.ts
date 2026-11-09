@@ -32,4 +32,35 @@ describe("VeracityConsolidator", () => {
 			consolidator.close();
 		}
 	});
+
+	it("does not inflate mention_count, confidence, or updated_at on duplicate source ID", () => {
+		const db = new Database(":memory:", { create: true, readwrite: true, strict: true });
+		const consolidator = new VeracityConsolidator(":memory:", db);
+		try {
+			const initial = consolidator.consolidateFact("Alice", "likes", "tea", "stated", "m1");
+			expect(initial.mention_count).toBe(1);
+			const initialConfidence = initial.confidence;
+			const sentinelUpdatedAt = "2000-01-01T00:00:00.000Z";
+			db.query("UPDATE consolidated_facts SET updated_at = ? WHERE id = ?").run(sentinelUpdatedAt, initial.id!);
+
+			const dupe = consolidator.consolidateFact("Alice", "likes", "tea", "unknown", "m1");
+			expect(dupe.mention_count).toBe(1);
+			expect(dupe.confidence).toBe(initialConfidence);
+			expect(dupe.veracity).toBe("stated");
+			expect(dupe.sources).toEqual(["m1"]);
+			const afterDupeRow = db
+				.query("SELECT updated_at, last_seen FROM consolidated_facts WHERE id = ?")
+				.get(initial.id!) as { updated_at: string; last_seen: string | null };
+			expect(afterDupeRow.updated_at).toBe(sentinelUpdatedAt);
+			expect(afterDupeRow.last_seen).toBe(initial.last_seen);
+
+			const distinct = consolidator.consolidateFact("Alice", "likes", "tea", "stated", "m2");
+			expect(distinct.mention_count).toBe(2);
+			expect(distinct.confidence).toBeGreaterThan(initialConfidence);
+			expect(distinct.sources).toEqual(["m1", "m2"]);
+		} finally {
+			consolidator.close();
+			db.close();
+		}
+	});
 });

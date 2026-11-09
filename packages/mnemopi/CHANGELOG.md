@@ -6,6 +6,7 @@
 
 - Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
 - Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `PolyphonicRecallEngine` (`factVoice`, `temporalVoice`, `diversityRerank`) and `memoriaRetrieve` failing on unspaced CJK queries, and `VeracityConsolidator.consolidateFact` inflating `mention_count` and confidence on duplicate source IDs ([#17424](https://github.com/can1357/oh-my-pi/pull/17424) by [@GTanger](https://github.com/GTanger))
 
 ## [18.18.2] - 2026-11-08
 
