@@ -58,9 +58,10 @@ on demand:
    envelope, so it does not start an unbounded request/reply chain.
    Outstanding requests are shared across the process, including worker
    sessions, and are consumed only by their addressed agent. Main and
-   subagent wake turns automatically relay their final text when no explicit
-   reply has consumed the request; failed, aborted, or empty turns leave it
-   open.
+   subagent wake turns automatically relay their final text, or a yield result
+   summary, when no explicit reply has consumed the request. Failed, cancelled,
+   or empty turns leave it open. The request is claimed before the reply is
+   dispatched; waiting for the remote peer does not block wake-turn settlement.
 
 Terminals that start later become visible on demand: a bare `read agent://`
 roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced

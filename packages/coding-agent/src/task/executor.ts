@@ -3350,7 +3350,7 @@ async function relayA2aWakeTurnOutput(args: {
 		const request = await IncomingRequests.global().consume({ to: args.id, messageId });
 		if (!request) continue;
 		const { session } = args;
-		await sendA2aReply({
+		void sendA2aReply({
 			bridge: session.a2aBridge,
 			request,
 			answer,
@@ -3780,7 +3780,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 							result,
 							turnText,
 							error: errorForPeer,
-							aborted: aborted || lastAssistant?.stopReason === "aborted",
+							aborted,
 							finalizeError,
 						});
 					} catch (relayError) {

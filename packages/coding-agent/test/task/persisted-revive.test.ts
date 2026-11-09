@@ -98,6 +98,7 @@ interface RevivedSessionHandle {
 	setLastAssistantText: (text: string) => void;
 	/** Report a terminal wake turn: provider error, abort, or empty completion. */
 	setLastAssistantStop: (stop: LastAssistantStop) => void;
+	emit: (event: AgentSessionEvent) => void;
 }
 
 /** Shape of a terminal assistant message the stub can report from a failed/cancelled wake turn. */
@@ -121,6 +122,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 				model?: string;
 		  }
 		| undefined;
+	const listeners = new Set<(event: AgentSessionEvent) => void>();
 	const trackedReplies: Promise<void>[] = [];
 	const session = {
 		...createSessionDefaults(),
@@ -130,7 +132,12 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
-		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
@@ -144,6 +151,9 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	return {
 		session,
 		observer: () => observer,
+		emit: event => {
+			for (const listener of listeners) listener(event);
+		},
 		trackedReplies,
 		setLastAssistantText: text => {
 			lastAssistant = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
@@ -1663,13 +1673,16 @@ describe("persisted subagent revival", () => {
 			details: { id: `irc-${messageId}`, from: "a2a", external: true, a2aMessageId: messageId, ...extra },
 		});
 
-		async function externalHarness() {
+		async function externalHarness(blockSend = false) {
 			const cwd = makeTempDir("@pi-revive-a2a-wake-");
 			const { ref, handle } = await reviveWithWaker(cwd);
 			const calls: Array<{
 				method: string;
 				params: { message: { parts: Array<{ text: string }> }; metadata: Record<string, unknown> };
 			}> = [];
+			const { promise: blocked, resolve: unblock } = Promise.withResolvers<void>();
+			const { promise: called, resolve: notifyCall } = Promise.withResolvers<void>();
+			const { promise: calledTwice, resolve: notifySecondCall } = Promise.withResolvers<void>();
 			const server = Bun.serve({
 				hostname: "127.0.0.1",
 				port: 0,
@@ -1680,6 +1693,9 @@ describe("persisted subagent revival", () => {
 						params: (typeof calls)[number]["params"];
 					};
 					calls.push(body);
+					notifyCall();
+					if (calls.length === 2) notifySecondCall();
+					if (blockSend) await blocked;
 					return Response.json({
 						jsonrpc: "2.0",
 						id: body.id,
@@ -1715,7 +1731,7 @@ describe("persisted subagent revival", () => {
 				handle.setLastAssistantStop(stop);
 				await complete?.();
 			};
-			return { ref, calls, server, busSend, note, finish };
+			return { ref, handle, calls, server, busSend, note, finish, called, calledTwice, unblock };
 		}
 
 		it("sends an external wake answer to the peer without relaying to the pseudo-sender", async () => {
@@ -1723,6 +1739,7 @@ describe("persisted subagent revival", () => {
 			try {
 				await h.note("req-1");
 				await h.finish([externalRecord("req-1")]);
+				await h.called;
 				expect(h.calls).toHaveLength(1);
 				expect(h.calls[0]).toMatchObject({
 					method: "SendMessage",
@@ -1735,13 +1752,60 @@ describe("persisted subagent revival", () => {
 			}
 		});
 
-		it("answers each distinct request from the same peer in record order", async () => {
+		it("sends the yield summary after an aborted yield wake turn", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				const localReply = IrcBus.global().wait("Main", { from: h.ref.id }, 5000);
+				await h.finish([externalRecord("req-1"), wakeRecord("Main")], { stopReason: "aborted" }, async () => {
+					h.handle.emit({
+						type: "tool_execution_end",
+						toolCallId: "yield-1",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: { report: "yielded answer" } },
+						},
+						isError: false,
+					} as AgentSessionEvent);
+				});
+				const local = await localReply;
+				expect(local?.body).toContain('"report": "yielded answer"');
+				await h.called;
+				expect(h.calls).toHaveLength(1);
+				expect(h.calls[0]).toMatchObject({
+					params: { metadata: { inReplyTo: "req-1" }, message: { parts: [{ text: local?.body }] } },
+				});
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("settles the relay without waiting for an unresponsive peer", async () => {
+			const h = await externalHarness(true);
+			try {
+				await h.note("req-1");
+				const finished = h.finish([externalRecord("req-1")]);
+				await h.called;
+				const settled = await Promise.race([finished.then(() => true), Bun.sleep(250).then(() => false)]);
+				expect(settled).toBe(true);
+				expect(
+					await Promise.race([h.handle.trackedReplies[0].then(() => true), Bun.sleep(250).then(() => false)]),
+				).toBe(true);
+			} finally {
+				h.unblock();
+				h.server.stop(true);
+			}
+		});
+
+		it("answers each distinct request from the same peer", async () => {
 			const h = await externalHarness();
 			try {
 				await h.note("req-1");
 				await h.note("req-2");
 				await h.finish([externalRecord("req-1"), externalRecord("req-1"), externalRecord("req-2")]);
-				expect(h.calls.map(call => call.params.metadata.inReplyTo)).toEqual(["req-1", "req-2"]);
+				await h.calledTwice;
+				expect(h.calls.map(call => call.params.metadata.inReplyTo).sort()).toEqual(["req-1", "req-2"]);
 				expect(h.calls.map(call => call.params.message.parts[0]?.text)).toEqual(["answer", "answer"]);
 				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
 			} finally {
@@ -1791,10 +1855,15 @@ describe("persisted subagent revival", () => {
 			const h = await externalHarness();
 			try {
 				await h.note("req-1");
-				await h.finish([externalRecord("req-1", { a2aInReplyTo: "earlier" })]);
+				await h.note("req-2");
+				await h.finish([
+					externalRecord("req-1", { a2aInReplyTo: "earlier" }),
+					{ ...wakeRecord("a2a"), details: { from: "a2a", external: true } },
+					{ ...wakeRecord("Main"), details: { from: "Main", a2aMessageId: "req-2" } },
+				]);
 				expect(h.calls).toEqual([]);
 				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
-				expect(await IncomingRequests.global().list(h.ref.id)).toHaveLength(1);
+				expect(await IncomingRequests.global().list(h.ref.id)).toHaveLength(2);
 			} finally {
 				h.server.stop(true);
 			}
