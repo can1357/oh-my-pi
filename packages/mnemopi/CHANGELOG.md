@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.2] - 2026-11-08
 
 ### Fixed
