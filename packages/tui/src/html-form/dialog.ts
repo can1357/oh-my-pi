@@ -563,15 +563,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
-			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
-			// Natively a radio group follows the arrows, as a browser's does: the option moved
-			// to within the group is the answer. Entering the group from another field picks nothing.
-			const next = this.#stops[this.#focus]!;
-			if (stop.kind === "option" && !stop.field.multi && isNativeRendering()) {
-				if (next !== stop && next.kind === "option" && next.field === stop.field) {
-					this.#choose(next.field, next.option);
-				}
-			}
+			const delta = matchesSelectDown(data) ? 1 : -1;
+			if (stop.kind === "option" && !stop.field.multi && isNativeRendering()) this.#arrowInGroup(stop.field, delta);
+			else this.#moveStop(delta);
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "right")) {
@@ -982,10 +976,13 @@ export class HtmlFormDialog implements Component, Focusable {
 	/**
 	 * The Other row is a text field: keys type into it (typing in a radio group's
 	 * Other drops the picked option), ↑/↓ leave it, Enter moves to the next field.
+	 * Natively a radio group's ↑/↓ stay inside the group, as on its options.
 	 */
 	#otherInput(field: ChoiceField, data: string): void {
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
-			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
+			const delta = matchesSelectDown(data) ? 1 : -1;
+			if (!field.multi && isNativeRendering()) this.#arrowInGroup(field, delta);
+			else this.#moveStop(delta);
 			return;
 		}
 		const input = this.#others.get(field)!;
@@ -1007,21 +1004,25 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/**
 	 * A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option.
-	 * Natively its options are listed like a radio group's: ↑/↓ step the answer through them
-	 * (as a browser's select does), leaving the field past either end, and ←/→ turn tabs.
+	 * Natively its options are listed like a radio group's: ↑/↓ step the answer through them and
+	 * stop at either end, as a browser's select does, and ←/→ turn tabs on a tabbed form.
 	 */
 	#selectInput(field: ChoiceField, data: string): void {
 		const current = this.#current(field) ?? -1;
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
 			const delta = matchesSelectDown(data) ? 1 : -1;
-			const next = isNativeRendering() ? this.#step(field, current, delta) : current;
+			if (!isNativeRendering()) {
+				this.#moveStop(delta);
+				return;
+			}
+			const next = this.#step(field, current, delta);
 			if (next !== current && next >= 0) this.#choose(field, next);
-			else this.#moveStop(delta);
+			else this.#scrollTab(delta);
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "right")) {
 			const delta = matchesKey(data, "right") ? 1 : -1;
-			if (isNativeRendering()) {
+			if (isNativeRendering() && this.#tabbed()) {
 				this.#turnPage(delta);
 				return;
 			}
@@ -1086,11 +1087,32 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (isNativeRendering() && this.#tabbed() && (past || this.#tabOfStop(target) !== this.#tabOfStop(this.#focus))) {
 			// Tabs change on Enter, Tab, Next or ←/→; the arrows reach what lies past the edge
 			// stops instead (Review has only Submit, so they always scroll its answers).
-			this.#tabScroll = { by: delta > 0 ? "line-down" : "line-up", n: this.#tabScroll.n + 1 };
-			this.#changed();
+			this.#scrollTab(delta);
 			return;
 		}
 		this.#setFocus(target);
+	}
+
+	/**
+	 * Natively ↑/↓ in a radio group move within it, as a browser's do: an option moved to is the
+	 * answer, the Other row takes the focus without changing it, and past either end the arrows
+	 * scroll the tab instead of leaving. Only Tab, Enter or a click leave the group, so arrowing
+	 * never rewrites the answer of a group the user is not in.
+	 */
+	#arrowInGroup(field: ChoiceField, delta: number): void {
+		const target = this.#stops[this.#focus + delta];
+		if (!target || target.kind === "submit" || target.field !== field) {
+			this.#scrollTab(delta);
+			return;
+		}
+		this.#setFocus(this.#focus + delta);
+		if (target.kind === "option") this.#choose(field, target.option);
+	}
+
+	/** Scrolls the shown tab's body (or the Review answers) a line, leaving the focus where it is. */
+	#scrollTab(delta: number): void {
+		this.#tabScroll = { by: delta > 0 ? "line-down" : "line-up", n: this.#tabScroll.n + 1 };
+		this.#changed();
 	}
 
 	/** Jump to the first stop of the next (or previous) field; Submit counts as a field. */
@@ -1648,8 +1670,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		let start = 0;
 		let end = count;
 		if (!labels && numbers.reduce((sum, label, index) => sum + width(label, index), 0) > room) {
-			// Room for the two paging arrows (`‹ 12`, `12 ›`) and as many numbered tabs as fit.
-			const slot = 3 * TAB_SANS + TAB_CHROME;
+			// Room for the two paging arrows (`‹ 12`, `12 ›`) and as many numbered tabs as fit, each
+			// sized for a three-digit number behind a `✓ ` check.
+			const slot = (3 + 2) * TAB_SANS + TAB_CHROME;
 			const fit = Math.max(1, Math.floor((room - 2 * (5 * TAB_SANS + TAB_CHROME)) / slot));
 			const active = Math.min(this.#tab, count - 1);
 			start = Math.max(0, Math.min(count - fit, active - Math.floor(fit / 2)));

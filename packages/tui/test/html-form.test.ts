@@ -430,8 +430,12 @@ describe("html form", () => {
 			expect(windowed[0]).toMatchObject({ id: "prev" });
 			expect(windowed.at(-2)).toMatchObject({ id: "next" });
 			expect(windowed.some(entry => entry.id === "t20")).toBe(true);
+			// The arrow opens the first hidden tab, and the window moves past the first shown one.
+			const hidden = Number(windowed.at(-3)!.id.slice(1)) + 1;
 			forty.handleNativeEvent({ type: "select", key: strip, item: "next" });
-			expect(tabItems(forty).some(entry => entry.id === "t20")).toBe(false);
+			const paged = tabItems(forty).map(entry => entry.id);
+			expect(paged).toContain(`t${hidden}`);
+			expect(paged).not.toContain(windowed[1]!.id);
 		});
 
 		it("natively: a tab's leading prose is a Markdown context card and its legend the question heading", () => {
@@ -472,7 +476,7 @@ describe("html form", () => {
 			expect(checked()).toEqual(["t0"]);
 		});
 
-		it("natively: ↑/↓ pick radios and stay on the tab, scrolling past its edges; ←/→ turn tabs", () => {
+		it("natively: ↑/↓ pick radios inside their group and scroll past its ends; ←/→ turn tabs", () => {
 			const { form } = dialog(DB_FORM);
 			const activeTab = () => {
 				const root = form.describe(CX);
@@ -486,9 +490,9 @@ describe("html form", () => {
 				expect(activeTab()).toBe("t0");
 				form.handleInput(DOWN); // Postgres: a radio group follows the arrows
 				expect(form.data()).toMatchObject({ db: "pg" });
-				form.handleInput(DOWN); // Other: typed text, so the pick stays
+				form.handleInput(DOWN); // Other: focus moves, the pick stays
 				const body = () => (form.describe(CX).c ?? []).filter(isNode).find(child => child.k === "list");
-				form.handleInput(DOWN); // past the tab's last stop: scrolls instead of leaving
+				form.handleInput(DOWN); // past the group's end: scrolls instead of leaving
 				expect(activeTab()).toBe("t0");
 				expect(body()?.scroll).toMatchObject({ by: "line-down" });
 				form.handleInput("\x1b[A"); // back on Postgres, where ←/→ turn tabs
@@ -504,6 +508,32 @@ describe("html form", () => {
 				expect(answers()?.scroll).toMatchObject({ by: "line-down" });
 				form.handleInput("\x1b[D");
 				expect(activeTab()).toBe("t1");
+			} finally {
+				setNativeRendering(false);
+			}
+		});
+
+		it("natively: arrowing never leaves a radio group or select, so it cannot rewrite another field's answer", () => {
+			const { form } = dialog(`<form>
+				<label><input type="radio" name="db" value="sqlite" checked> SQLite</label>
+				<label><input type="radio" name="db" value="pg"> Postgres</label>
+				<label><input type="radio" name="db" value="mysql"> MySQL</label>
+				<label>Region <select name="region"><option value="us" selected>US</option><option value="eu">EU</option><option value="ap">AP</option></select></label>
+				<label>Notes <textarea name="notes"></textarea></label>
+			</form>`);
+			setNativeRendering(true);
+			try {
+				for (let press = 0; press < 6; press++) form.handleInput(DOWN);
+				// Still in the db group (on Other): its own pick follows, the dropdown is untouched.
+				expect(form.data()).toMatchObject({ db: "mysql", region: "us" });
+				expect(form.debugState()).toMatchObject({ focus: "db=other" });
+				form.handleInput(TAB);
+				for (let press = 0; press < 6; press++) form.handleInput(DOWN);
+				expect(form.data()).toMatchObject({ db: "mysql", region: "ap" });
+				expect(form.debugState()).toMatchObject({ focus: "region" });
+				// Untabbed, ←/→ step the dropdown too.
+				form.handleInput("\x1b[D");
+				expect(form.data()).toMatchObject({ region: "eu" });
 			} finally {
 				setNativeRendering(false);
 			}
