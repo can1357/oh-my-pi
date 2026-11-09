@@ -26,8 +26,9 @@ const STDIO_PEER = "stdio";
 /**
  * The models a request naming `selector` may run on, in order: the model
  * `--model` would pick (the first entry of a comma list that resolves), then
- * that model's `retry.fallbackChains` (its role's chain or built-in priority
- * list when the entry named a role). Empty when no entry resolves.
+ * that model's configured `retry.fallbackChains` (its role's chain when the
+ * entry named a role; never the role's built-in priority list). Empty when no
+ * entry resolves.
  */
 export function selectorCandidates(
 	selector: string,

@@ -23,31 +23,28 @@ describe("auth-gateway stdio model selectors", () => {
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast, vertex]);
 	});
 
-	it("uses built-in fallbacks when the role has no configured primary or chain", () => {
-		expect(selectorCandidates("@smol", Settings.isolated({}), registry)).toEqual([fast, mini]);
-	});
-
-	it("uses built-in fallbacks after a configured role primary", () => {
+	// The gateway must never reach a model the user did not select: a role's
+	// built-in priority list would retry on any logged-in provider.
+	it("never falls back to a role's built-in priority models", () => {
 		const settings = Settings.isolated({});
+		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast]);
 		settings.setModelRole("smol", key(vertex));
-		expect(selectorCandidates("@smol", settings, registry)).toEqual([vertex, fast, mini]);
+		expect(selectorCandidates("@smol", settings, registry)).toEqual([vertex]);
 	});
 
-	it("prefers the inherited default chain over built-in fallbacks for a role without its own chain", () => {
+	it("uses the inherited default chain for a role without its own chain", () => {
 		const settings = Settings.isolated({ "retry.fallbackChains": { default: [key(vertex)] } });
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast, vertex]);
 		settings.setModelRole("smol", key(fast));
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast, vertex]);
 	});
 
-	it("does not append built-in fallbacks to an explicitly empty role chain", () => {
-		const settings = Settings.isolated({ "retry.fallbackChains": { smol: [] } });
+	it("keeps an explicitly empty role chain from inheriting the default chain", () => {
+		const settings = Settings.isolated({ "retry.fallbackChains": { smol: [], default: [key(vertex)] } });
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast]);
-		settings.setModelRole("smol", key(vertex));
-		expect(selectorCandidates("@smol", settings, registry)).toEqual([vertex]);
 	});
 
-	it("keeps model-keyed chains ahead of built-in and configured role chains", () => {
+	it("keeps model-keyed chains ahead of configured role chains", () => {
 		const settings = Settings.isolated({ "retry.fallbackChains": { [key(fast)]: [key(vertex)] } });
 		settings.setModelRole("smol", key(fast));
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast, vertex]);

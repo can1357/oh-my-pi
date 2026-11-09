@@ -1,10 +1,5 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import {
-	formatModelStringWithRouting,
-	resolveModelOverride,
-	resolveRoleChain,
-	resolveRoleSelection,
-} from "../config/model-resolver";
+import { formatModelStringWithRouting, resolveModelOverride, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
 	expandDefaultRetryFallbackChains,
@@ -174,10 +169,11 @@ export function collectOnlineTinyCandidates(
  * Expand one model's own `retry.fallbackChains` transitively.
  *
  * With a role hint, use the role's configured chain even when the role has no
- * configured primary; else the configured `default` chain, which roles that
- * are not model kinds inherit as in `collectOnlineTinyCandidates`; else the
- * role's resolved built-in priority list. Model-keyed and wildcard chains
- * retain their precedence.
+ * configured primary, else the configured `default` chain, which roles that are
+ * not model kinds inherit as in `collectOnlineTinyCandidates`. Only configured
+ * chains apply: a role's built-in priority list never adds fallbacks, so a
+ * request cannot reach a model the user did not select. Model-keyed and
+ * wildcard chains retain their precedence.
  * Without a role hint, consult only the configured model-keyed / wildcard /
  * matching-role keys that `resolveRetryFallbackChainKey` already selects.
  */
@@ -194,15 +190,7 @@ export function expandOnlineTinyModelFallbacks(
 	const configuredChains = cfgRetryFallbackChains.get(settings);
 	if (!configuredChains || typeof configuredChains !== "object") return [model];
 
-	let chains = role ? expandDefaultRetryFallbackChains(configuredChains, [role]) : configuredChains;
-	if (role && !Array.isArray(chains[role])) {
-		chains = {
-			...chains,
-			[role]: resolveRoleChain(role, settings, availableModels).map(candidate =>
-				formatModelStringWithRouting(candidate.model),
-			),
-		};
-	}
+	const chains = role ? expandDefaultRetryFallbackChains(configuredChains, [role]) : configuredChains;
 	const context = createFallbackContext(chains, settings, availableModels);
 	expandFallbackCandidates(
 		[
