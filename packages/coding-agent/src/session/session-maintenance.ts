@@ -3602,6 +3602,25 @@ export class SessionMaintenance {
 			shouldCompact: shouldThresholdCompact,
 			contextPromotionEnabled: cfgContextPromotionEnabled.get(this.#host.settings) === true,
 		});
+		// A compaction that already left the context above the threshold cannot do
+		// better on the next turn: the residue is tool schemas, the system prompt, or
+		// kept history that summarizing will not shrink. Re-running it every turn
+		// loops (#18589: 231 passes of ~215k → ~195k against a 180k threshold), so
+		// leave the turn alone and let overflow recovery handle a real overflow.
+		const lastTokensAfter = compactionEntry?.tokensAfter;
+		if (
+			shouldThresholdCompact &&
+			typeof lastTokensAfter === "number" &&
+			thresholdTokens > 0 &&
+			lastTokensAfter >= thresholdTokens
+		) {
+			logger.warn("Skipping threshold compaction: the last compaction left the context above the threshold", {
+				lastTokensAfter,
+				thresholdTokens,
+				contextTokens,
+			});
+			return COMPACTION_CHECK_NONE;
+		}
 		if (shouldThresholdCompact) {
 			// Grace band: a live (or just-started) background speculation absorbs
 			// the blocking summarization; the session stays responsive and the

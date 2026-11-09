@@ -291,6 +291,23 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(noProgress[0].level).toBe("warning");
 	});
 
+	it("skips threshold compaction when the last compaction already left the context above the threshold", async () => {
+		const thresholdTokens = 150_000;
+		cfgCompactionThresholdTokens.set(session.settings, thresholdTokens);
+		const firstKept = sessionManager.getBranch()[0];
+		sessionManager.appendCompaction("compacted", undefined, firstKept.id, thresholdTokens + 20_000, {
+			tokensAfter: thresholdTokens + 5_000,
+		});
+		const startCount = countCompactionStarts();
+
+		const assistantMsg = { ...highUsageAssistant(), timestamp: Date.now() + 1_000 };
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		await session.waitForIdle();
+
+		expect(startCount()).toBe(0);
+	});
+
 	it("blocks todo continuations after no-headroom compaction when auto-continue is disabled", async () => {
 		cfgCompactionAutoContinue.set(session.settings, false);
 		session.setTodoPhases([{ name: "Work", tasks: [{ content: "Finish task", status: "in_progress" }] }]);
