@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use super::{
 	model::{Effect, EffectKind, NodeKey},
 	runtime::VizSource,
+	source::{self, SourceMap},
 };
 use crate::bash::{
 	syntax::{
@@ -51,6 +52,9 @@ pub struct Analysis {
 	pub leaves:            HashSet<NodeKey>,
 	/// Canonical byte spans; source projection belongs to the renderer.
 	pub colors:            Vec<(NodeKey, Span, String)>,
+	/// Here-document bodies through their closing delimiter, by the command
+	/// reading them: source that runs with the command outside its span.
+	pub heredocs:          Vec<(NodeKey, Span)>,
 }
 
 impl Analysis {
@@ -94,6 +98,26 @@ fn append_literal(parts: Seq<'_, WordPart<'_>>, quoted: bool, out: &mut Vec<u8>)
 		}
 	}
 	Some(())
+}
+
+/// The literal text `word` ends with (`"$dir/main.rs"` → `/main.rs`): enough
+/// to tell a file's extension when the rest expands at run time.
+pub fn literal_tail(word: Word<'_>) -> String {
+	let mut out = Vec::new();
+	append_tail(word.parts(), &mut out);
+	String::from_utf8_lossy_owned(out)
+}
+
+fn append_tail(parts: Seq<'_, WordPart<'_>>, out: &mut Vec<u8>) {
+	for part in parts {
+		match part.get() {
+			Part::Lit(bytes) | Part::Escaped(bytes) | Part::SQuote(bytes) => {
+				out.extend_from_slice(bytes);
+			},
+			Part::DQuote(parts) => append_tail(parts, out),
+			_ => out.clear(),
+		}
+	}
 }
 
 fn contains_parameter(parts: Seq<'_, WordPart<'_>>) -> bool {
@@ -152,6 +176,8 @@ struct Walker<'a> {
 	function_arity:  Vec<u32>,
 	command_stack:   Vec<NodeKey>,
 	source_slot:     Option<u32>,
+	/// The walked unit's byte coordinates and source, locating heredoc bodies.
+	located:         Option<(SourceMap, &'a [u8])>,
 }
 
 pub fn analyze(source: &impl VizSource) -> Analysis {
@@ -173,6 +199,7 @@ pub fn analyze(source: &impl VizSource) -> Analysis {
 				.push(unit.index);
 		}
 		walker.unit = unit.index;
+		walker.located = Some((source::unit_bytes(&unit), unit.source.as_ref()));
 		walker.root(syntax);
 	}
 	walker
@@ -322,6 +349,27 @@ impl<'a> Walker<'a> {
 			self.color(owner, Span::new(span.lo, span.lo + keyword.len() as u32), "kw");
 		}
 		let redirs = command.redirs();
+		if let Some((map, bytes)) = &self.located
+			&& redirs
+				.iter()
+				.any(|redir| matches!(redir.target(), RedirTarget::HereDoc(_)))
+		{
+			for body in source::heredoc_spans(map, bytes, redirs)
+				.into_iter()
+				.flatten()
+			{
+				let delimiter = map.bytes(body).map_or(0, |[_, end]| {
+					bytes[end..]
+						.iter()
+						.position(|byte| *byte == b'\n')
+						.unwrap_or(bytes.len() - end)
+				});
+				self
+					.result
+					.heredocs
+					.push((owner, Span::new(body.lo, body.hi + delimiter as u32)));
+			}
+		}
 		match kind {
 			CommandKind::Simple(simple) => {
 				self.simple(simple, owner, context, redirs.is_empty());
@@ -915,6 +963,52 @@ fn secret_name(name: &str) -> bool {
 		.any(|suffix| upper.ends_with(suffix))
 }
 
+/// Whether an `sd` command line rewrites files in place: it names files after
+/// `FIND` and `REPLACE_WITH` and does not ask for `-p`/`--preview`. `words` is
+/// the argv after `sd`, `None` where a word expands at run time; such a word
+/// counts as an operand, so a dynamic file list still reads as a write.
+fn sd_edits_files(words: impl IntoIterator<Item = Option<String>>) -> bool {
+	let mut words = words.into_iter();
+	let mut operands = 0;
+	let mut options = true;
+	while let Some(word) = words.next() {
+		let Some(word) = word.filter(|word| options && word.len() > 1 && word.starts_with('-'))
+		else {
+			operands += 1;
+			continue;
+		};
+		if word == "--" {
+			options = false;
+		} else if let Some(long) = word.strip_prefix("--") {
+			match long {
+				"preview" => return false,
+				// `--flags=i` carries its value; the bare form takes the next word.
+				"max-replacements" | "flags" => {
+					words.next();
+				},
+				_ => {},
+			}
+		} else {
+			// A short cluster (`-pF`, `-n1`, `-fi`): `-n`/`-f` take the rest of
+			// the cluster as their value, or the next word when nothing is left.
+			let cluster = &word[1..];
+			for (at, flag) in cluster.char_indices() {
+				match flag {
+					'p' => return false,
+					'n' | 'f' => {
+						if at + 1 == cluster.len() {
+							words.next();
+						}
+						break;
+					},
+					_ => {},
+				}
+			}
+		}
+	}
+	operands > 2
+}
+
 fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>) -> Vec<Effect> {
 	let mut result = Vec::new();
 	let simple = match call.command.kind() {
@@ -971,6 +1065,8 @@ fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>)
 	}
 	if matches!(name.as_str(), "mkdir" | "touch" | "cp" | "mv" | "ln" | "tee" | "install")
 		|| (name == "sed" && args.iter().any(|arg| arg.starts_with("-i")))
+		|| (name == "sd"
+			&& simple.is_some_and(|simple| sd_edits_files(simple.words().iter().skip(1).map(literal))))
 		|| (name == "git"
 			&& has(&[
 				"add",

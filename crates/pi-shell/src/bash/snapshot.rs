@@ -61,7 +61,11 @@ pub struct RestoreOpts {
 	/// Ignore the frames blob: keep root state, abandon the scripts that were
 	/// running (each reports `Done` with status 255). The fallback after
 	/// [`RestoreError::Incompatible`](crate::bash::RestoreError::Incompatible).
-	pub drop_frames: bool,
+	pub drop_frames:   bool,
+	/// Seed `$RANDOM` from the host instead of continuing the snapshot's
+	/// sequence, as bash reseeds a forked subshell: shells restored from one
+	/// image next to each other would otherwise draw the same numbers.
+	pub reseed_random: bool,
 }
 
 /// Result of [`Shell::externalize`](crate::bash::Shell::externalize).
