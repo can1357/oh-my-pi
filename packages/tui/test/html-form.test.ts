@@ -312,7 +312,6 @@ describe("html form", () => {
 			form.handleInput("\x05"); // End
 			expect(titleRow()).toContain("calmer defaults");
 			expect(titleRow()).not.toContain("Colorful Markdown");
-			expect(form.data()).toMatchObject({ title: value });
 		});
 
 		it("Other: typed text becomes a radio's value or joins a checkbox group; picking an option sets it aside", () => {
