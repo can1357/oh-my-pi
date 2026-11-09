@@ -99,7 +99,8 @@ async function withCli(
 		provider: "openai",
 		model: "gpt-5-mini",
 		sessionDir: tempDir.join("sessions"),
-		args: ["--no-title", "--no-lsp", "--no-extensions", "--no-context-files", "--tools", "bash"],
+		// Session-reset transport cases own their RPC session, not a shared terminal viewer.
+		args: ["--no-ui", "--no-title", "--no-lsp", "--no-extensions", "--no-context-files", "--tools", "bash"],
 		spawn: args => ptree.spawn([process.execPath, cliEntry, ...args], { cwd: project, env, stdin: "pipe" }),
 	});
 	const events: AgentEvent[] = [];

@@ -257,10 +257,10 @@ export class ComposerCache {
 	 * write only costs the next launch its speculation.
 	 */
 	#put(projects: readonly string[], kind: EntryKind, value: unknown): void {
-		const json = JSON.stringify(value);
-		const keys = projects.map(project => `${project}\0${kind}`);
-		if (keys.every(key => this.#known.get(key) === json)) return;
 		try {
+			const json = JSON.stringify(value);
+			const keys = projects.map(project => `${project}\0${kind}`);
+			if (keys.every(key => this.#known.get(key) === json)) return;
 			this.#db.transaction(() => {
 				for (const project of projects) this.#upsert.run(project, kind, json);
 			})();

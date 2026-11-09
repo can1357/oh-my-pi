@@ -51,6 +51,10 @@ interface CleanupPassDeadline {
 // Active cleanup callbacks in registration order. Registrations survive
 // keep-alive passes; `lastPass` enforces at-most-once invocation per pass.
 const callbackList: CleanupRegistration[] = [];
+// SIGHUP owners that keep the process serving instead of running the exit path.
+// They are consulted only by the signal handler; the set is empty for every
+// process that has no detachable view.
+const hangupHandlers = new Set<HangupHandler>();
 // Tracks cleanup run state (to prevent recursion/reentry issues).
 let cleanupStage: "idle" | "running" | "complete" = "idle";
 let cleanupPass = 0;
@@ -848,6 +852,7 @@ export function installProcessHandlers(): void {
 			await exitAfterSignal(Reason.SIGTERM, "\n[Stopped by SIGTERM]", 143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
+			if (await runHangupHandlers()) return;
 			// Same report as SIGTERM: a runtime that stops the program with a hangup
 			// keeps its screen, so the resume command survives the death.
 			await exitAfterSignal(Reason.SIGHUP, "\n[Stopped by SIGHUP]", 129); // 128 + SIGHUP (1)
@@ -949,6 +954,37 @@ export function register(
 	logger.debug("Cleanup already started; running late callback once", { id });
 	invokeLate(reason, false);
 	return cancel;
+}
+
+/** A SIGHUP owner: detach the terminal side and resolve once the process can keep serving. */
+export type HangupHandler = () => void | Promise<void>;
+
+/**
+ * Register an owner of SIGHUP. While at least one handler is registered, a
+ * hangup runs every handler instead of `runCleanup` + exit 129; when they all
+ * settle the process keeps running. A handler that throws (or an empty set)
+ * falls back to the normal exit path, so a failed detach still exits 129 with
+ * cleanup done. SIGINT/SIGTERM never consult handlers: a real quit keeps
+ * disposing. Returns an unregister function; a detached process leaves its
+ * handler armed so repeated hangups stay detached.
+ */
+export function registerHangupHandler(handler: HangupHandler): () => void {
+	hangupHandlers.add(handler);
+	return () => hangupHandlers.delete(handler);
+}
+
+/** Runs the registered SIGHUP owners; true only when every one settled. */
+async function runHangupHandlers(): Promise<boolean> {
+	if (hangupHandlers.size === 0) return false;
+	for (const handler of [...hangupHandlers]) {
+		try {
+			await handler();
+		} catch (error) {
+			logger.warn("Hangup handler failed; falling back to exit", { error: toError(error).message });
+			return false;
+		}
+	}
+	return true;
 }
 
 /**

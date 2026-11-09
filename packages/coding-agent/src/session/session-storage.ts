@@ -242,6 +242,15 @@ export interface SessionStorage {
 	 */
 	claimSession?(sessionId: string, sessionPath: string): (() => void) | null;
 	/**
+	 * Strict {@link claimSession} for an owner path about to adopt
+	 * `sessionPath`: returns an idempotent reservation sharing this process's
+	 * holder count, or throws {@link SessionReservationBusyError} /
+	 * {@link SessionReservationUnavailableError}. Never downgrades an
+	 * indeterminate ownership state to permission to write. Optional for the
+	 * same reason as {@link claimSession}.
+	 */
+	reserveSession?(sessionId: string, sessionPath: string): SessionReservation;
+	/**
 	 * Atomically delete a session and its artifacts only when `shouldDelete`
 	 * accepts the current session content. Optional because backends without a
 	 * cross-process conditional-delete primitive must skip opportunistic GC.
@@ -538,7 +547,19 @@ function publishLockPid(content: string): number | undefined {
  * session and only ever contend with other processes. The OS reclaims a lease
  * when its process exits, so a crashed owner never blocks a later claim.
  */
-const sessionLeases = new Map<string, { lease: FileLockHandle; holders: number }>();
+const sessionLeases = new Map<string, SessionLeaseEntry>();
+
+interface SessionLeaseEntry {
+	lease: FileLockHandle;
+	holders: number;
+}
+
+/** Drop one holder of `entry`, releasing the OS lease with the last one. */
+function releaseSessionLeaseHolder(sessionId: string, entry: SessionLeaseEntry): void {
+	if (--entry.holders > 0) return;
+	if (sessionLeases.get(sessionId) === entry) sessionLeases.delete(sessionId);
+	entry.lease.release();
+}
 
 const TEST_SESSION_OWNERS_DIR_ENV = "PI_TEST_SESSION_OWNERS_DIR";
 
@@ -626,6 +647,42 @@ function sessionLeasePath(sessionId: string, createDir: boolean): string {
 		}
 	}
 	return path.join(dir, name);
+}
+
+/**
+ * Another live process holds the session's ownership lease, so a strict
+ * reservation cannot be taken. The caller must not write that session.
+ */
+export class SessionReservationBusyError extends Error {
+	readonly sessionId: string;
+
+	constructor(sessionId: string) {
+		super(`Session "${sessionId}" is owned by another process.`);
+		this.name = "SessionReservationBusyError";
+		this.sessionId = sessionId;
+	}
+}
+
+/**
+ * Strict ownership could not be established: the lease probe or acquisition
+ * failed, or the journal at the path does not identify this session. A caller
+ * must treat this as a refusal; it is never a licence to write.
+ */
+export class SessionReservationUnavailableError extends Error {
+	readonly sessionId: string;
+
+	constructor(sessionId: string, reason: string, options?: { cause?: unknown }) {
+		super(`Cannot reserve session "${sessionId}": ${reason}.`, options);
+		this.name = "SessionReservationUnavailableError";
+		this.sessionId = sessionId;
+	}
+}
+
+/** A strict ownership reservation of one session, held until its idempotent `release`. */
+export interface SessionReservation {
+	readonly sessionId: string;
+	readonly sessionPath: string;
+	release(): void;
 }
 
 /**
@@ -1350,9 +1407,54 @@ export class FileSessionStorage implements SessionStorage {
 		return () => {
 			if (released) return;
 			released = true;
-			if (--claim.holders > 0) return;
-			sessionLeases.delete(sessionId);
-			claim.lease.release();
+			releaseSessionLeaseHolder(sessionId, claim);
+		};
+	}
+
+	/**
+	 * Take this session's ownership lease for a strict owner path that is about
+	 * to adopt `sessionPath` as its own transcript. Unlike {@link claimSession},
+	 * an ownership state this process cannot establish is a refusal, never a
+	 * licence to write: a lease it cannot take is a typed error. The holder
+	 * count is the same one {@link claimSession} uses, so the manager's claim for
+	 * this session adopts the reservation instead of locking against it.
+	 */
+	reserveSession(sessionId: string, sessionPath: string): SessionReservation {
+		const onDisk = readSessionHeaderIdSync(sessionPath);
+		if (onDisk !== undefined && onDisk !== sessionId) {
+			throw new SessionReservationUnavailableError(sessionId, `${sessionPath} holds session "${onDisk}"`);
+		}
+		if (onDisk === undefined && this.existsSync(sessionPath)) {
+			throw new SessionReservationUnavailableError(
+				sessionId,
+				`the journal at ${sessionPath} does not identify a session`,
+			);
+		}
+		let held = sessionLeases.get(sessionId);
+		if (!held) {
+			let lease: FileLockHandle | null;
+			try {
+				lease = tryAcquireSessionLease(sessionId);
+			} catch (error) {
+				throw new SessionReservationUnavailableError(sessionId, "the ownership lease could not be taken", {
+					cause: error,
+				});
+			}
+			if (!lease) throw new SessionReservationBusyError(sessionId);
+			held = { lease, holders: 0 };
+			sessionLeases.set(sessionId, held);
+		}
+		const entry = held;
+		entry.holders++;
+		let released = false;
+		return {
+			sessionId,
+			sessionPath,
+			release: () => {
+				if (released) return;
+				released = true;
+				releaseSessionLeaseHolder(sessionId, entry);
+			},
 		};
 	}
 

@@ -298,7 +298,7 @@ async function askText(
  * Walk the form's named fields in order. Undefined when the user cancels; a
  * deadline stops the walk and leaves the remaining fields at their defaults.
  */
-async function askFieldByField(
+export async function askFieldByField(
 	ui: FallbackUI,
 	form: HtmlForm,
 	timeout: number | undefined,

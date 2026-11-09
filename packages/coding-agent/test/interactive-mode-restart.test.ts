@@ -2,9 +2,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { SESSION_OWNER_WORKER_ARG } from "@oh-my-pi/pi-coding-agent/cli/worker-selectors";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionManager } from "@oh-my-pi/pi-coding-agent/main";
+import {
+	consumeSessionOwnerContext,
+	resetSessionOwnerContextForTest,
+	SESSION_OWNER_CONTEXT_ENV,
+} from "@oh-my-pi/pi-coding-agent/launch/session-owner";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -143,6 +149,33 @@ describe("InteractiveMode restart", () => {
 			]);
 		} finally {
 			await resumed.close();
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("reenters the existing owner route with its broker context", async () => {
+		const owner = { projectDir: tempDir.path(), name: "original-owner", id: "broker-generation" };
+		consumeSessionOwnerContext({ [SESSION_OWNER_CONTEXT_ENV]: JSON.stringify(owner) });
+		try {
+			sessionManager.appendMessage({ role: "user", content: "saved request", timestamp: 1 });
+			await sessionManager.ensureOnDisk();
+			const file = sessionManager.getSessionFile();
+			if (!file) throw new Error("expected persisted owner journal");
+			const command = await restart([
+				SESSION_OWNER_WORKER_ARG,
+				"--model",
+				"anthropic/claude-sonnet-4-5",
+				"initial request",
+			]);
+			expect(command.filter(arg => arg === SESSION_OWNER_WORKER_ARG)).toEqual([SESSION_OWNER_WORKER_ARG]);
+			const context = command.find(arg => arg.startsWith(`${SESSION_OWNER_CONTEXT_ENV}=`));
+			expect(context).toBeDefined();
+			expect(JSON.parse(context!.slice(SESSION_OWNER_CONTEXT_ENV.length + 1))).toEqual(owner);
+			const parsed = parseArgs(command.slice(command.indexOf(SESSION_OWNER_WORKER_ARG) + 1));
+			expect(parsed.restore).toBe(true);
+			expect(parsed.resume).toBe(path.resolve(file));
+			expect(parsed.messages).toEqual([]);
+		} finally {
+			resetSessionOwnerContextForTest();
 		}
 	});
 

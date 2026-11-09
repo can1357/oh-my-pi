@@ -40,6 +40,7 @@ import {
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
+	SESSION_OWNER_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
@@ -316,6 +317,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// Worker selectors must dispatch before the normal command graph loads.
 		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
 		await startDaemonBrokerFromEnvironment();
+		return true;
+	}
+	if (arg === SESSION_OWNER_WORKER_ARG) {
+		const { runSessionOwner } = await import("./launch/session-owner");
+		await runSessionOwner(process.argv.slice(process.argv.indexOf(SESSION_OWNER_WORKER_ARG) + 1));
 		return true;
 	}
 	if (arg === LSP_MUX_WORKER_ARG) {

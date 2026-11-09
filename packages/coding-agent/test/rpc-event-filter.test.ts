@@ -71,6 +71,7 @@ describe("set_event_filter over RPC", () => {
 					XDG_CONFIG_HOME: home,
 					XDG_DATA_HOME: home,
 					PI_CODING_AGENT_DIR: join(home, ".omp/agent"),
+					OMP_RUN_DIR: join(home, "run"),
 					NO_COLOR: "1",
 				},
 				stdin: "pipe",

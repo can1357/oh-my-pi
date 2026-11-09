@@ -128,6 +128,10 @@ export function createSessionStub(
 		getEnabledToolNames: () => [],
 		getContextUsage: () => undefined,
 		getGoalModeState: () => undefined,
+		setGoalModeState: vi.fn(),
+		goalRuntime: {
+			clearAccounting: vi.fn(),
+		},
 		refreshMCPTools: vi.fn(async () => {}),
 		setMCPPromptCommands: vi.fn(),
 		setActiveToolsByName: vi.fn(async () => {}),

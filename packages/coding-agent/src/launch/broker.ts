@@ -15,6 +15,7 @@ import {
 	truncateTailBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
+import { SESSION_OWNER_CONTEXT_ENV, type SessionOwnerContext } from "./session-owner";
 import {
 	DAEMON_META_FILE,
 	DAEMON_SPEC_FILE,
@@ -30,6 +31,7 @@ import {
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
+	DAEMON_TERMINAL_PROTOCOL_VERSION,
 	type DaemonCompletionNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
@@ -48,6 +50,9 @@ const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
+const MAX_TERMINAL_FRAME_BYTES = 64 * 1024;
+const MAX_TERMINAL_OUTSTANDING_BYTES = 1024 * 1024;
+const TERMINAL_BACKPRESSURE_REASON = "terminal-backpressure";
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
@@ -101,6 +106,8 @@ interface ManagedDaemon {
 	process?: ManagedProcess;
 	input?: Bun.FileSink;
 	pty?: PtySession;
+	terminalColumns?: number;
+	terminalRows?: number;
 	generation: number;
 	stopRequested: boolean;
 	logReady: boolean;
@@ -128,6 +135,18 @@ interface BrokerLease {
 	lock: FileLock;
 }
 
+interface TerminalSubscription {
+	readonly socket: IpcConnection;
+	readonly subscriptionId: string;
+	readonly name: string;
+	readonly id: string;
+	generation: number;
+	sequence: number;
+	ackedSequence: number;
+	outstandingBytes: number;
+	readonly pending: { sequence: number; bytes: number }[];
+}
+
 interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
@@ -144,6 +163,25 @@ function settledState(state: DaemonSnapshot["state"]): boolean {
 
 function publishesCompletionOwners(request: DaemonWireRequest): boolean {
 	return request.completionEvents === true && (request.completionAcks?.length ?? 0) === 0;
+}
+
+function splitTerminalFrames(data: string): string[] {
+	if (Buffer.byteLength(data, "utf8") <= MAX_TERMINAL_FRAME_BYTES) return [data];
+	const frames: string[] = [];
+	let frame = "";
+	let bytes = 0;
+	for (const codePoint of data) {
+		const size = Buffer.byteLength(codePoint, "utf8");
+		if (bytes + size > MAX_TERMINAL_FRAME_BYTES && frame.length > 0) {
+			frames.push(frame);
+			frame = "";
+			bytes = 0;
+		}
+		frame += codePoint;
+		bytes += size;
+	}
+	if (frame.length > 0) frames.push(frame);
+	return frames;
 }
 
 /**
@@ -447,6 +485,7 @@ class DaemonBroker {
 	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
+	readonly #terminalSubscriptions = new Map<string, Map<string, TerminalSubscription>>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<IpcConnection>();
 	/** Abortable `wait`/follow-`logs` requests, keyed by wire request id, so a client can cancel its own poll. */
@@ -504,6 +543,7 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		this.#terminalSubscriptions.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -532,6 +572,11 @@ class DaemonBroker {
 				this.#scheduleIdleShutdown();
 				for (const [owner, registration] of this.#ownerSockets) {
 					if (registration.socket === socket) this.#ownerSockets.delete(owner);
+				}
+				for (const subscriptions of this.#terminalSubscriptions.values()) {
+					for (const subscription of subscriptions.values()) {
+						if (subscription.socket === socket) this.#dropTerminalSubscription(subscription);
+					}
 				}
 				// Nobody can read these answers any more; stop polling for them.
 				for (const [requestId, inFlight] of this.#inFlight) {
@@ -646,7 +691,11 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation, socket: IpcConnection, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return {
+					op: "ping",
+					projectDir: this.#projectDir,
+					terminalProtocolVersion: DAEMON_TERMINAL_PROTOCOL_VERSION,
+				};
 			case "start":
 				return this.#start(operation.spec, operation.owner, operation.replace, operation.awaitReady);
 			case "list": {
@@ -685,12 +734,28 @@ class DaemonBroker {
 				await this.#refreshDetached(record);
 				return { op: "describe", daemon: record.snapshot, spec: record.spec };
 			}
+			case "terminal_start":
+				return this.#terminalStart(operation, socket);
+			case "terminal_attach":
+				return this.#terminalAttach(operation, socket);
+			case "terminal_resize":
+				return this.#terminalResize(operation, socket);
+			case "terminal_detach":
+				return this.#terminalDetach(operation, socket);
+			case "terminal_ack":
+				return this.#terminalAck(operation, socket);
 			case "shutdown":
 				return { op: "shutdown" };
 		}
 	}
 
-	async #start(spec: DaemonSpec, owner?: string, replace = false, awaitReady = true): Promise<DaemonRpcResult> {
+	async #start(
+		spec: DaemonSpec,
+		owner?: string,
+		replace = false,
+		awaitReady = true,
+		prepare?: (record: ManagedDaemon) => void,
+	): Promise<DaemonRpcResult> {
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -764,6 +829,7 @@ class DaemonBroker {
 			};
 			syncReadyPending(record);
 			this.#records.set(spec.name, record);
+			prepare?.(record);
 		} finally {
 			this.#startingNames.delete(spec.name);
 		}
@@ -820,14 +886,243 @@ class DaemonBroker {
 		}
 	}
 
+	async #terminalStart(
+		operation: Extract<DaemonOperation, { op: "terminal_start" }>,
+		socket: IpcConnection,
+	): Promise<DaemonRpcResult> {
+		const { spec } = operation;
+		if (!spec.pty || !spec.persist || spec.detached) {
+			throw new Error("terminal_start requires a persistent, non-detached PTY daemon");
+		}
+		for (const subscriptions of this.#terminalSubscriptions.values()) {
+			for (const subscription of subscriptions.values()) {
+				if (subscription.name === spec.name) {
+					throw new Error(
+						`Terminal ${spec.name} is already attached by subscription ${subscription.subscriptionId}`,
+					);
+				}
+			}
+		}
+		let installed: TerminalSubscription | undefined;
+		const started = await this.#start(spec, undefined, false, true, record => {
+			record.spec.env[SESSION_OWNER_CONTEXT_ENV] = JSON.stringify({
+				projectDir: record.spec.cwd,
+				name: record.spec.name,
+				id: record.snapshot.id,
+			} satisfies SessionOwnerContext);
+			installed = this.#subscribeTerminal(
+				record,
+				socket,
+				operation.subscriptionId,
+				operation.columns,
+				operation.rows,
+			);
+		});
+		if (!installed) throw new Error(`Terminal ${spec.name} did not install its subscription`);
+		if (started.op !== "start") throw new Error("terminal_start produced a non-start result");
+		return { op: "terminal_start", daemon: started.daemon };
+	}
+
+	async #terminalAttach(
+		operation: Extract<DaemonOperation, { op: "terminal_attach" }>,
+		socket: IpcConnection,
+	): Promise<DaemonRpcResult> {
+		const record = this.#record(operation.name);
+		await this.#refreshDetached(record);
+		if (terminalState(record.snapshot.state) || record.snapshot.state === "stopping") {
+			throw new Error(`Daemon ${operation.name} is ${record.snapshot.state}`);
+		}
+		if (record.snapshot.id !== operation.id) {
+			throw new Error(`Daemon ${operation.name} is generation ${record.snapshot.id}, not ${operation.id}`);
+		}
+		if (!record.spec.pty || !record.pty) {
+			throw new Error(`Daemon ${operation.name} has no PTY to attach`);
+		}
+		const subscription = this.#subscribeTerminal(
+			record,
+			socket,
+			operation.subscriptionId,
+			operation.columns,
+			operation.rows,
+		);
+		try {
+			record.pty.resize(operation.columns, operation.rows);
+		} catch (error) {
+			this.#dropTerminalSubscription(subscription);
+			throw error;
+		}
+		return {
+			op: "terminal_attach",
+			daemon: record.snapshot,
+			columns: operation.columns,
+			rows: operation.rows,
+		};
+	}
+
+	#terminalResize(
+		operation: Extract<DaemonOperation, { op: "terminal_resize" }>,
+		socket: IpcConnection,
+	): DaemonRpcResult {
+		const record = this.#record(operation.name);
+		this.#ownedTerminal(operation, socket);
+		if (!record.pty) throw new Error(`Daemon ${operation.name} has no PTY to resize`);
+		record.pty.resize(operation.columns, operation.rows);
+		record.terminalColumns = operation.columns;
+		record.terminalRows = operation.rows;
+		return {
+			op: "terminal_resize",
+			subscriptionId: operation.subscriptionId,
+			name: operation.name,
+			id: operation.id,
+			columns: operation.columns,
+			rows: operation.rows,
+		};
+	}
+
+	#terminalDetach(
+		operation: Extract<DaemonOperation, { op: "terminal_detach" }>,
+		socket: IpcConnection,
+	): DaemonRpcResult {
+		if (this.#terminalSubscriptions.has(operation.id)) {
+			this.#dropTerminalSubscription(this.#ownedTerminal(operation, socket));
+		}
+		return {
+			op: "terminal_detach",
+			subscriptionId: operation.subscriptionId,
+			name: operation.name,
+			id: operation.id,
+		};
+	}
+
+	#terminalAck(operation: Extract<DaemonOperation, { op: "terminal_ack" }>, socket: IpcConnection): DaemonRpcResult {
+		const result: DaemonRpcResult = {
+			op: "terminal_ack",
+			subscriptionId: operation.subscriptionId,
+			name: operation.name,
+			id: operation.id,
+			sequence: operation.sequence,
+		};
+		if (!this.#terminalSubscriptions.has(operation.id)) return result;
+		const subscription = this.#ownedTerminal(operation, socket);
+		if (operation.sequence > subscription.sequence) {
+			throw new Error(
+				`Terminal acknowledgment ${operation.sequence} exceeds sent sequence ${subscription.sequence}`,
+			);
+		}
+		subscription.ackedSequence = Math.max(subscription.ackedSequence, operation.sequence);
+		while (subscription.pending.length > 0 && subscription.pending[0]!.sequence <= operation.sequence) {
+			const frame = subscription.pending.shift()!;
+			subscription.outstandingBytes -= frame.bytes;
+		}
+		return result;
+	}
+
+	#subscribeTerminal(
+		record: ManagedDaemon,
+		socket: IpcConnection,
+		subscriptionId: string,
+		columns: number,
+		rows: number,
+	): TerminalSubscription {
+		let subscriptions = this.#terminalSubscriptions.get(record.snapshot.id);
+		if (subscriptions?.has(subscriptionId)) {
+			throw new Error(`Terminal ${record.snapshot.name} is already attached by subscription ${subscriptionId}`);
+		}
+		record.terminalColumns = columns;
+		record.terminalRows = rows;
+		const subscription: TerminalSubscription = {
+			socket,
+			subscriptionId,
+			name: record.snapshot.name,
+			id: record.snapshot.id,
+			generation: record.generation,
+			sequence: 0,
+			ackedSequence: 0,
+			outstandingBytes: 0,
+			pending: [],
+		};
+		if (!subscriptions) {
+			subscriptions = new Map();
+			this.#terminalSubscriptions.set(record.snapshot.id, subscriptions);
+		}
+		subscriptions.set(subscriptionId, subscription);
+		return subscription;
+	}
+
+	#ownedTerminal(
+		operation: { subscriptionId: string; name: string; id: string },
+		socket: IpcConnection,
+	): TerminalSubscription {
+		const subscription = this.#terminalSubscriptions.get(operation.id)?.get(operation.subscriptionId);
+		if (!subscription || subscription.name !== operation.name) {
+			throw new Error(
+				`Terminal subscription ${operation.subscriptionId} does not own daemon ${operation.name} generation ${operation.id}`,
+			);
+		}
+		if (subscription.socket !== socket) {
+			throw new Error(`Terminal subscription ${operation.subscriptionId} belongs to another connection`);
+		}
+		return subscription;
+	}
+
+	#dropTerminalSubscription(
+		subscription: TerminalSubscription,
+		notification?: { exitCode?: number; reason?: string },
+	): void {
+		const subscriptions = this.#terminalSubscriptions.get(subscription.id);
+		if (subscriptions?.get(subscription.subscriptionId) !== subscription) return;
+		subscriptions.delete(subscription.subscriptionId);
+		if (subscriptions.size === 0) this.#terminalSubscriptions.delete(subscription.id);
+		if (!notification || subscription.socket.closed) return;
+		subscription.socket.send(
+			JSON.stringify({
+				event: "terminal_exit",
+				subscriptionId: subscription.subscriptionId,
+				name: subscription.name,
+				id: subscription.id,
+				...notification,
+			}),
+		);
+	}
+
+	#publishTerminalOutput(record: ManagedDaemon, generation: number, chunk: string): void {
+		const subscriptions = this.#terminalSubscriptions.get(record.snapshot.id);
+		if (!subscriptions) return;
+		for (const data of splitTerminalFrames(chunk)) {
+			const bytes = Buffer.byteLength(data, "utf8");
+			for (const subscription of subscriptions.values()) {
+				if (subscription.generation !== 0 && subscription.generation !== generation) continue;
+				subscription.generation = generation;
+				const sequence = ++subscription.sequence;
+				subscription.outstandingBytes += bytes;
+				subscription.pending.push({ sequence, bytes });
+				if (!subscription.socket.closed) {
+					subscription.socket.send(
+						JSON.stringify({
+							event: "terminal_output",
+							subscriptionId: subscription.subscriptionId,
+							name: subscription.name,
+							id: subscription.id,
+							sequence,
+							data,
+						}),
+					);
+				}
+				if (subscription.outstandingBytes > MAX_TERMINAL_OUTSTANDING_BYTES) {
+					this.#dropTerminalSubscription(subscription, { reason: TERMINAL_BACKPRESSURE_REASON });
+				}
+			}
+		}
+	}
+
 	async #launchPty(record: ManagedDaemon, generation: number): Promise<void> {
 		const session = new PtySession();
 		record.pty = session;
 		const options = {
 			cwd: record.spec.cwd,
 			env: workerEnvFromParent({ TERM: "xterm-256color", ...record.spec.env }),
-			cols: DAEMON_PTY_COLUMNS,
-			rows: DAEMON_PTY_ROWS,
+			cols: record.terminalColumns ?? DAEMON_PTY_COLUMNS,
+			rows: record.terminalRows ?? DAEMON_PTY_ROWS,
 		};
 		// Nothing plays terminal for a supervised PTY, so a program probing for
 		// cursor position or device attributes would block on the reply. Answer
@@ -849,14 +1144,17 @@ class DaemonBroker {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
 			if (!chunk) return;
-			const reply = responder.feed(chunk);
-			if (reply) {
-				try {
-					session.write(reply);
-				} catch {
-					// The PTY may exit between emitting its final output and receiving the reply.
+			if (!this.#terminalSubscriptions.has(record.snapshot.id)) {
+				const reply = responder.feed(chunk);
+				if (reply) {
+					try {
+						session.write(reply);
+					} catch {
+						// The PTY may exit between emitting its final output and receiving the reply.
+					}
 				}
 			}
+			this.#publishTerminalOutput(record, generation, chunk);
 			this.#onOutput(record, generation, chunk);
 		};
 		const started = Promise.withResolvers<number | undefined>();
@@ -1079,6 +1377,12 @@ class DaemonBroker {
 		record.snapshot.exitCode = exitCode;
 		record.snapshot.exitReason = error;
 		record.snapshot.readyPending = undefined;
+		const terminalSubscriptions = this.#terminalSubscriptions.get(record.snapshot.id);
+		if (terminalSubscriptions) {
+			for (const subscription of terminalSubscriptions.values()) {
+				this.#dropTerminalSubscription(subscription, { exitCode, reason: error });
+			}
+		}
 		const failed = error !== undefined || (exitCode !== undefined && exitCode !== 0);
 		const shouldRestart =
 			!record.stopRequested &&
@@ -1252,6 +1556,9 @@ class DaemonBroker {
 
 	async #send(operation: Extract<DaemonOperation, { op: "send" }>): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
+		if (operation.id !== undefined && operation.id !== record.snapshot.id) {
+			throw new Error(`Daemon ${operation.name} is generation ${record.snapshot.id}, not ${operation.id}`);
+		}
 		await this.#refreshDetached(record);
 		if (terminalState(record.snapshot.state) || record.snapshot.state === "stopping") {
 			throw new Error(`Daemon ${operation.name} is ${record.snapshot.state}`);
@@ -1487,7 +1794,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not a completion event");
+								}
 								return message;
 							});
 						}

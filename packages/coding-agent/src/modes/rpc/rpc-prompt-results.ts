@@ -22,6 +22,8 @@ import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rp
 /** A prompt accepted by RPC mode whose `prompt_result` is still owed; see {@link RpcPromptResults.begin}. */
 export interface RpcPromptTicket {
 	readonly id: string | undefined;
+	/** The accepting connection's sink; absent for the stdio host's own output. */
+	readonly send?: (frame: RpcPromptResultFrame) => void;
 }
 
 interface RunOutcome {
@@ -84,9 +86,13 @@ export class RpcPromptResults {
 		this.#settledWithoutRun = hooks?.settledWithoutRun;
 	}
 
-	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
-	begin(id: string | undefined): RpcPromptTicket {
-		const ticket: RpcPromptTicket = { id };
+	/**
+	 * Open a ticket before the prompt starts any work. Close it with exactly one
+	 * report or {@link discard}. `send` routes the terminal frame to the
+	 * connection that accepted the prompt; omit it for the stdio host.
+	 */
+	begin(id: string | undefined, send?: (frame: RpcPromptResultFrame) => void): RpcPromptTicket {
+		const ticket: RpcPromptTicket = { id, send };
 		this.#open.set(ticket, {
 			startsAtBegin: this.#agentStarts,
 			refusalAtBegin: this.#costCapRefusal?.(),
@@ -190,7 +196,7 @@ export class RpcPromptResults {
 				sessionSettled: isSessionSettled(this.#session, this.#scheduledTurn),
 			};
 			if (outcome.error) frame.error = outcome.error;
-			this.#output(frame);
+			(ticket.send ?? this.#output)(frame);
 		});
 	}
 }

@@ -56,6 +56,27 @@ describe("composer startup cache", () => {
 		reader.close();
 	});
 
+	it("survives a status payload that cannot be serialized and stays usable", () => {
+		const project = path.join(root, "project");
+		const cache = ComposerCache.open(dbPath);
+		const status = statusFor(ThinkingLevel.High);
+		const circular: Record<string, unknown> = { statusLine: status.statusLine };
+		circular.self = circular;
+
+		cache.writeStatus(project, status);
+		expect(() => cache.writeStatus(project, circular as unknown as ComposerStatusCache)).not.toThrow();
+		expect(() =>
+			cache.writeStatus(project, { statusLine: { elapsed: 1n } } as unknown as ComposerStatusCache),
+		).not.toThrow();
+		// The failed writes leave the last good row intact instead of clobbering it.
+		expect(cache.read(project).status).toEqual(status);
+
+		const updated = statusFor(ThinkingLevel.Low);
+		cache.writeStatus(project, updated);
+		expect(cache.read(project).status).toEqual(updated);
+		cache.close();
+	});
+
 	it("prefers a project's own status over the last status written elsewhere", () => {
 		const cache = ComposerCache.open(dbPath);
 		cache.writeStatus(path.join(root, "a"), statusFor(ThinkingLevel.Low));

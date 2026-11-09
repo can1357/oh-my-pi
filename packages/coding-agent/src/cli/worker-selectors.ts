@@ -21,6 +21,8 @@ export const MNEMOPI_EMBED_SERVER_WORKER_ARG = "__omp_worker_mnemopi_embed_serve
 export const LSP_MUX_WORKER_ARG = "__omp_worker_lsp_mux";
 /** Parent-death watchdog thread selector shared by the CLI dispatcher and `startParentWatchdog`. */
 export const PARENT_WATCHDOG_WORKER_ARG = "__omp_worker_parent_watchdog";
+/** Session-owner selector shared by the CLI dispatcher and the owner launch spec. */
+export const SESSION_OWNER_WORKER_ARG = "__omp_worker_session_owner";
 /** Subagent host worker selector shared by the CLI dispatcher and `SubagentWorker`. */
 export const SUBAGENT_WORKER_ARG = "__omp_worker_subagent";
 /** Activity-worker selector shared by the CLI dispatcher and worker launcher. */

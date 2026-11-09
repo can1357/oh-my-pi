@@ -60,6 +60,7 @@ export interface Args {
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
+	attach?: string;
 	/**
 	 * `--restore`: resume the session {@link resume} names, then go on with what its last
 	 * process left unfinished (the turn it was in, the subagents it was running).
@@ -264,6 +265,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	// literal positional text, so flag-shaped messages are not parsed or rejected.
 	let sawSeparator = false;
 	let trustedFlagCount = 0;
+	let attachFlagCount = 0;
 	for (let i = 0; i < args.length; i++) {
 		let arg = args[i];
 		if (sawSeparator) {
@@ -309,6 +311,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			}
 		} else if (STRING_VALUE_FLAGS.has(arg)) {
 			if (arg === "--trusted-extension") trustedFlagCount++;
+			if (arg === "--attach") attachFlagCount++;
 			// Built-in string flags consume the next token even when it is flag-looking
 			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile").
 			// The one token they must never absorb is the profile bootstrap's internal
@@ -448,6 +451,30 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 		if (!path.isAbsolute(trustedPath)) {
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
+		}
+	}
+
+	if (attachFlagCount > 0) {
+		if (attachFlagCount !== 1) throw new CliUsageError("--attach requires exactly one transcript path");
+		if (!result.attach || !path.isAbsolute(result.attach)) {
+			throw new CliUsageError("--attach requires an absolute transcript path");
+		}
+		for (let i = 0; i < inputArgs.length; i++) {
+			const arg = inputArgs[i];
+			if (arg === PROFILE_BOOTSTRAP_BOUNDARY_ARG) continue;
+			if (arg === "--profile") {
+				i++;
+				continue;
+			}
+			if (arg.startsWith("--profile=")) continue;
+			if (arg === "--attach") {
+				i++;
+				continue;
+			}
+			if (arg.startsWith("--attach=")) {
+				continue;
+			}
+			throw new CliUsageError(`--attach cannot be combined with other launch arguments: ${arg}`);
 		}
 	}
 

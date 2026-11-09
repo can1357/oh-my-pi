@@ -79,11 +79,35 @@ import {
 	type MarketplaceAutoUpdateOptions,
 } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { sanitizeTerminalGeometry } from "./launch/protocol";
+import {
+	decideRpcSessionAttach,
+	probeSessionAttach,
+	resolveSessionEndpointDir,
+	type SessionAttachTerminal,
+} from "./launch/session-attach";
+import {
+	describeSessionAttachRefusal,
+	gateSessionTarget,
+	resolveStartupSessionGate,
+	type ResolvedSessionTarget,
+} from "./launch/session-attach-gate";
+import { runAttachOnly, runLiveSessionAttach } from "./launch/session-attach-run";
+import {
+	type BrokeredLaunchSelection,
+	ownerArgvForSession,
+	type PersistentLaunchTarget,
+	runInteractiveOwnerLaunch,
+	runPersistentRpcLaunch,
+	shouldBootBrokeredSession,
+} from "./launch/session-boot";
+import { isSessionOwnerProcess } from "./launch/session-owner";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import { formatSessionContinuationNotice } from "./modes/persistence-failure";
 import type { PrintModeOptions } from "./modes/print-mode";
 import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
+import type { RpcSessionSocket } from "./modes/rpc/rpc-socket";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
@@ -128,7 +152,14 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import {
+	type ContinueRecentTarget,
+	ForkSourceNotFoundError,
+	SessionManager,
+	SessionMoveRefusedError,
+	type SessionOwnershipPolicy,
+} from "./session/session-manager";
+import type { SessionReservation } from "./session/session-storage";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -658,6 +689,7 @@ async function runInteractiveMode(
 	startupLease?: ComposerLease,
 	startupGoal?: string,
 	startupRestore?: () => Promise<RestoreOutcome>,
+	sessionSocket?: RpcSessionSocket,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -677,6 +709,8 @@ async function runInteractiveMode(
 		startupLease?.dispose();
 		throw error;
 	}
+
+	await mode.attachSessionSocket(sessionSocket);
 
 	let setupWizard: typeof SetupWizardModule | undefined;
 	let setupScenes: SetupScene[] = [];
@@ -939,12 +973,19 @@ type MissingCwdMoveResult =
 	| { status: "declined" }
 	| { status: "moved"; manager: SessionManager };
 
+/** Strict-owner reservation handed from the attach gate to the manager that opens its target. */
+interface OwnershipHandoff {
+	readonly ownershipPolicy?: SessionOwnershipPolicy;
+	readonly ownershipReservation?: SessionReservation;
+}
+
 async function moveMissingCwdSessionIfNeeded(
 	sessionArg: string,
 	session: SessionInfo,
 	cwd: string,
 	sessionDir: string | undefined,
 	askToMoveSession: SessionPrompt,
+	ownership?: OwnershipHandoff,
 ): Promise<MissingCwdMoveResult> {
 	const sourceCwd = session.cwd;
 	if (!sourceCwd || fsSync.existsSync(sourceCwd)) {
@@ -963,7 +1004,7 @@ async function moveMissingCwdSessionIfNeeded(
 			return { status: "declined" };
 		}
 	}
-	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir) };
+	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir, ownership) };
 }
 
 /** {@link SessionManager.openRelocated} into `cwd`, reporting a live-writer refusal as a CLI error. */
@@ -971,9 +1012,10 @@ async function openRelocatedSession(
 	session: SessionInfo,
 	cwd: string,
 	sessionDir: string | undefined,
+	ownership?: OwnershipHandoff,
 ): Promise<SessionManager> {
 	try {
-		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
+		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir, ownership);
 	} catch (err) {
 		if (!(err instanceof SessionMoveRefusedError)) throw err;
 		// Its directory is gone, so it cannot be resumed in place either.
@@ -1252,6 +1294,15 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
 	}
 }
 /**
+ * A startup target the attach gate resolved as cold, with the strict
+ * reservation that must carry it through the first write. The manager that
+ * opens the target adopts the reservation; every other exit releases it.
+ */
+export interface SessionOwnerAttachSelection extends ResolvedSessionTarget {
+	readonly reservation: SessionReservation;
+}
+
+/**
  * Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager.
  *
  * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
@@ -1267,6 +1318,8 @@ export async function createSessionManager(
 	options: {
 		nativeFlagOwnership?: "preliminary" | "resolved";
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+		/** The startup gate's cold target and its strict reservation. */
+		ownerAttach?: SessionOwnerAttachSelection;
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
@@ -1311,22 +1364,30 @@ export async function createSessionManager(
 	}
 	normalizeContinueSessionArgs(parsed);
 
+	// A brokered child cannot inherit its parent's process-local reservation.
+	// Keep the strict policy across that handoff: a competing owner must cause
+	// refusal at the first claim, never a silent continuation in a sibling file.
+	const ownerOptions =
+		options.ownerAttach !== undefined || isSessionOwnerProcess()
+			? {
+					ownershipPolicy: "require-owner" as const,
+					ownershipReservation: options.ownerAttach?.reservation,
+				}
+			: undefined;
+
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
 			// The conversation may have gone on in a sibling file while another process held this one.
-			const continuation = await findSessionContinuation(sessionArg);
+			const continuation = options.ownerAttach?.continuation ?? (await findSessionContinuation(sessionArg));
 			if (continuation) options.onSessionContinuation?.(continuation);
+			const sessionPath = options.ownerAttach?.session.path ?? continuation?.session.path ?? sessionArg;
 			let manager: SessionManager;
 			try {
-				manager = await SessionManager.open(
-					continuation?.session.path ?? sessionArg,
-					parsed.sessionDir,
-					undefined,
-					{
-						throwIfMissing: true,
-					},
-				);
+				manager = await SessionManager.open(sessionPath, parsed.sessionDir, undefined, {
+					throwIfMissing: true,
+					...ownerOptions,
+				});
 			} catch (err) {
 				if (isEnoent(err) || isEnotdir(err)) {
 					throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
@@ -1336,7 +1397,9 @@ export async function createSessionManager(
 			// A copy whose conversation moved to another machine continues as a fork.
 			return await forkIfMovedAway(manager, parsed.sessionDir);
 		}
-		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
+		const target = options.ownerAttach
+			? { session: options.ownerAttach.session, continuation: options.ownerAttach.continuation }
+			: await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
 		if (!target) {
 			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
@@ -1348,6 +1411,7 @@ export async function createSessionManager(
 			cwd,
 			parsed.sessionDir,
 			askToMoveSession,
+			ownerOptions,
 		);
 		if (moveResult.status === "moved") {
 			return await forkIfMovedAway(moveResult.manager, parsed.sessionDir);
@@ -1355,12 +1419,24 @@ export async function createSessionManager(
 		if (moveResult.status === "declined") {
 			return undefined;
 		}
-		return await forkIfMovedAway(await SessionManager.open(session.path, parsed.sessionDir), parsed.sessionDir);
+		return await forkIfMovedAway(
+			await SessionManager.open(session.path, parsed.sessionDir, undefined, ownerOptions),
+			parsed.sessionDir,
+		);
 	}
+	const preselected: ContinueRecentTarget | undefined =
+		options.ownerAttach === undefined
+			? undefined
+			: (options.ownerAttach.recent ?? {
+					sessionPath: options.ownerAttach.session.path,
+					continuation: options.ownerAttach.continuation,
+				});
 	if (parsed.continue) {
 		return await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
+				...ownerOptions,
+				preselected,
 			}),
 			parsed.sessionDir,
 		);
@@ -1379,6 +1455,8 @@ export async function createSessionManager(
 		const manager = await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
+				...ownerOptions,
+				preselected,
 			}),
 			parsed.sessionDir,
 		);
@@ -1830,6 +1908,10 @@ export async function runRootCommand(
 	rawArgs: string[],
 	deps: RunRootCommandDependencies = DEFAULT_RUN_ROOT_DEPENDENCIES,
 ): Promise<void> {
+	if (parsed.attach !== undefined) {
+		await runAttachOnly(parsed.attach);
+		return;
+	}
 	logger.startTiming();
 	startStartupWatchdog();
 	try {
@@ -1932,6 +2014,62 @@ export async function runRootCommand(
 		// transcripts (or an opened picker) behind a usage error.
 		validateGoalLaunch(parsedArgs, isInteractive);
 		validateRestoreLaunch(parsedArgs, isInteractive);
+
+		const brokeredSelection: BrokeredLaunchSelection = {
+			mode,
+			print: parsedArgs.print === true,
+			noSession: parsedArgs.noSession === true,
+			noUi: parsedArgs.noUi === true,
+			resume: parsedArgs.resume,
+			continue: parsedArgs.continue === true,
+			fork: parsedArgs.fork !== undefined,
+			fromClaude: parsedArgs.fromClaude === true,
+			fromCodex: parsedArgs.fromCodex === true,
+		};
+		// Decided here, dispatched after the ownership gate resolves the exact
+		// target: the outer process must never open a transcript the owner hosts.
+		const brokersPersistentSession =
+			deps === DEFAULT_RUN_ROOT_DEPENDENCIES && shouldBootBrokeredSession(brokeredSelection, isInteractive);
+
+		const runBrokeredOwnerLaunch = async (target: PersistentLaunchTarget, sessionSource?: string): Promise<never> => {
+			const projectDir = parsedArgs.cwd || getProjectDir();
+			const argv = sessionSource === undefined ? rawArgs : ownerArgvForSession(rawArgs, sessionSource);
+			const geometry = sanitizeTerminalGeometry(process.stdout.columns, process.stdout.rows);
+			try {
+				if (isInteractive) {
+					stopPendingStartupComposer();
+					stopStartupWatchdog();
+					logger.endTiming();
+					const code = await runInteractiveOwnerLaunch({
+						projectDir,
+						argv,
+						target,
+						endpointDir: resolveSessionEndpointDir(),
+						columns: geometry.columns,
+						rows: geometry.rows,
+					});
+					process.exit(code);
+				}
+				const endpointDir = resolveSessionEndpointDir();
+				stopStartupWatchdog();
+				process.exit(
+					await runPersistentRpcLaunch({
+						projectDir,
+						argv,
+						target,
+						endpointDir,
+						columns: geometry.columns,
+						rows: geometry.rows,
+						input: rpcInput,
+					}),
+				);
+			} catch (error) {
+				stopStartupWatchdog();
+				const message = error instanceof Error ? error.message : String(error);
+				process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+				process.exit(1);
+			}
+		};
 		// Without piped text the prompt must come from argv, which only the
 		// post-extension reparse can settle: an extension string flag's value
 		// (`--spawn-peer reviewer`) looks like a prompt here, and a boolean flag
@@ -2127,6 +2265,10 @@ export async function runRootCommand(
 		);
 		let sessionManager: SessionManager | undefined;
 		let foreignSource: ForeignSessionSource | undefined;
+		// The startup target this process may open cold under its strict reservation.
+		let ownerAttach: SessionOwnerAttachSelection | undefined;
+		// A live target this terminal must mirror instead of opening.
+		let liveAttach: { sessionId: string; terminal: SessionAttachTerminal } | undefined;
 		// A resumed session whose conversation went on in another file resumes that file; say so.
 		const resumedContinuations: SessionContinuation[] = [];
 		try {
@@ -2189,24 +2331,109 @@ export async function runRootCommand(
 					throw new SessionResolutionError(`Failed to import ${sourceName} session: ${message}`);
 				}
 			} else {
-				sessionManager = await logger.time(
-					"createSessionManager",
-					createSessionManager,
-					parsedArgs,
-					cwd,
-					settingsInstance,
-					promptMoveSession,
-					{
-						nativeFlagOwnership: "preliminary",
-						onSessionContinuation: continuation => resumedContinuations.push(continuation),
-					},
-				);
+				if (!isSessionOwnerProcess()) {
+					const explicitRpcResumeId =
+						brokersPersistentSession &&
+						!isInteractive &&
+						parsedArgs.fork === undefined &&
+						parsedArgs.fromClaude !== true &&
+						parsedArgs.fromCodex !== true &&
+						typeof parsedArgs.resume === "string" &&
+						/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parsedArgs.resume)
+							? parsedArgs.resume
+							: undefined;
+					if (explicitRpcResumeId !== undefined) {
+						const decision = decideRpcSessionAttach(await probeSessionAttach(explicitRpcResumeId));
+						if (decision.kind === "attach") {
+							await runBrokeredOwnerLaunch({ kind: "attach", sessionId: explicitRpcResumeId });
+						}
+						if (decision.kind === "refuse") {
+							throw new SessionResolutionError(
+								describeSessionAttachRefusal(explicitRpcResumeId, decision.code),
+								"Attach to the running process, or stop it, then retry.",
+							);
+						}
+						await runBrokeredOwnerLaunch({ kind: "cold", sessionId: explicitRpcResumeId }, explicitRpcResumeId);
+					}
+					const gate = await logger.time("resolveStartupSessionGate", resolveStartupSessionGate, {
+						cwd,
+						sessionDir: parsedArgs.sessionDir,
+						resume: parsedArgs.resume,
+						continue: parsedArgs.continue,
+						fork: parsedArgs.fork,
+						noSession: parsedArgs.noSession,
+						goal: parsedArgs.goal,
+						fromClaude: parsedArgs.fromClaude,
+						fromCodex: parsedArgs.fromCodex,
+						autoResume: cfgAutoResume.get(settingsInstance),
+					});
+					if (gate.kind === "refuse") {
+						throw new SessionResolutionError(
+							describeSessionAttachRefusal(gate.sessionId, gate.code),
+							"Attach to the running process, or stop it, then retry.",
+						);
+					}
+					if (gate.kind === "attach") {
+						if (brokersPersistentSession) {
+							await runBrokeredOwnerLaunch({
+								kind: "attach",
+								sessionId: gate.target.session.id,
+								terminal: gate.terminal,
+							});
+						}
+						if (!isInteractive) {
+							throw new SessionResolutionError(
+								`Session "${gate.target.session.id}" is live in another omp process; refusing to open a second transcript.`,
+								"Resume it from an interactive terminal to attach, or use its RPC/Web endpoint.",
+							);
+						}
+						liveAttach = { sessionId: gate.target.session.id, terminal: gate.terminal };
+					}
+					if (gate.kind === "cold") {
+						if (brokersPersistentSession) {
+							gate.reservation.release();
+							await runBrokeredOwnerLaunch(
+								{ kind: "cold", sessionId: gate.target.session.id },
+								gate.target.session.path,
+							);
+						}
+						ownerAttach = {
+							session: gate.target.session,
+							continuation: gate.target.continuation,
+							reservation: gate.reservation,
+							recent: gate.target.recent,
+						};
+					}
+					if (gate.kind === "none" && brokersPersistentSession && typeof parsedArgs.resume !== "string") {
+						await runBrokeredOwnerLaunch({ kind: "none" });
+					}
+				}
+				if (!liveAttach) {
+					sessionManager = await logger.time(
+						"createSessionManager",
+						createSessionManager,
+						parsedArgs,
+						cwd,
+						settingsInstance,
+						promptMoveSession,
+						{
+							nativeFlagOwnership: "preliminary",
+							onSessionContinuation: continuation => resumedContinuations.push(continuation),
+							ownerAttach,
+						},
+					);
+				}
 			}
 		} catch (error: unknown) {
+			ownerAttach?.reservation.release();
 			if (error instanceof SessionResolutionError) {
 				exitForSessionResolutionError(error);
 			}
 			throw error;
+		}
+		if (liveAttach) {
+			stopStartupWatchdog();
+			process.exit(await runLiveSessionAttach(liveAttach.sessionId, liveAttach.terminal));
 		}
 		// Only createSessionManager's implicit auto-resume promotes continue here.
 		const autoResumed = !explicitSessionSelection && parsedArgs.continue === true;
@@ -2298,14 +2525,46 @@ export async function runRootCommand(
 			const continuation = await findSessionContinuation(selected.path);
 			if (continuation) resumedContinuations.push(continuation);
 			const chosen = continuation?.session ?? selected;
-			try {
-				sessionManager = await forkIfMovedAway(
-					(await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
-						? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir)
-						: await SessionManager.open(chosen.path),
-					parsedArgs.sessionDir,
+			let pickedAttach: SessionOwnerAttachSelection | undefined;
+			if (!isSessionOwnerProcess()) {
+				const gate = await logger.time(
+					"gatePickedSession",
+					gateSessionTarget,
+					{ session: chosen, continuation },
+					{
+						cwd,
+						sessionDir: parsedArgs.sessionDir,
+						autoResume: false,
+					},
 				);
+				if (gate.kind === "refuse") {
+					throw new SessionResolutionError(
+						describeSessionAttachRefusal(gate.sessionId, gate.code),
+						"Attach to the running process, or stop it, then retry.",
+					);
+				}
+				if (gate.kind === "attach") {
+					if (!isInteractive) {
+						throw new SessionResolutionError(
+							`Session "${gate.target.session.id}" is live in another omp process; refusing to open a second transcript.`,
+							"Resume it from an interactive terminal to attach, or use its RPC/Web endpoint.",
+						);
+					}
+					stopStartupWatchdog();
+					process.exit(await runLiveSessionAttach(gate.target.session.id, gate.terminal));
+				}
+				if (gate.kind === "cold") pickedAttach = { ...gate.target, reservation: gate.reservation };
+			}
+			try {
+				const ownership = pickedAttach
+					? { ownershipPolicy: "require-owner" as const, ownershipReservation: pickedAttach.reservation }
+					: undefined;
+				const opened = (await SessionManager.isFromRemovedWorktree(chosen, cwd, parsedArgs.sessionDir))
+					? await openRelocatedSession(chosen, cwd, parsedArgs.sessionDir, ownership)
+					: await SessionManager.open(chosen.path, undefined, undefined, ownership);
+				sessionManager = await forkIfMovedAway(opened, parsedArgs.sessionDir);
 			} catch (error: unknown) {
+				pickedAttach?.reservation.release();
 				if (error instanceof SessionResolutionError) exitForSessionResolutionError(error);
 				throw error;
 			}
@@ -2826,6 +3085,18 @@ export async function runRootCommand(
 				postmortem.register("settings-file-watcher", () => settingsInstance.stopWatching(), { exitOnly: true });
 			}
 
+			// The live session is fully initialized here, before any mode owns stdio or
+			// the terminal. Persistent RPC and terminal sessions publish an attach
+			// endpoint; the listener starts when the runner wires its command surface.
+			// `--no-session` sessions have no on-disk transcript to resume or attach
+			// to, so publishing an endpoint for them only leaves dead sidecars behind.
+			const sessionSocket =
+				(mode === "rpc" || mode === "rpc-ui" || isInteractive) &&
+				parsedArgs.noSession !== true &&
+				session.sessionFile !== undefined
+					? (await import("./modes/rpc/rpc-socket")).createAgentSessionSocket(session)
+					: undefined;
+
 			if (mode === "rpc" || mode === "rpc-ui") {
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
@@ -2837,6 +3108,7 @@ export async function runRootCommand(
 					subagentEventBus,
 					mcpManager,
 					input: rpcInput,
+					sessionSocket,
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
@@ -2888,6 +3160,7 @@ export async function runRootCommand(
 						startupLease,
 						initialArgs.goal,
 						parsedArgs.restore ? () => restoreSession(session, { eventBus, subagentEventBus }) : undefined,
+						sessionSocket,
 					);
 				} finally {
 					startupLease?.dispose();

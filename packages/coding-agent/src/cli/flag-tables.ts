@@ -127,6 +127,9 @@ function parseCostUsd(flag: string, value: string): number {
  * a registered boolean extension can shadow them before profile bootstrap.
  */
 export const STRING_SETTERS: Record<string, StringSetter> = {
+	"--attach": (result, value) => {
+		result.attach = value;
+	},
 	"--cwd": (result, value) => {
 		result.cwd = value;
 	},

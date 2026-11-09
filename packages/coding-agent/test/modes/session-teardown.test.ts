@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
-import { createSessionTeardown } from "../../src/modes/session-teardown";
+import { createSessionDetach, createSessionTeardown } from "../../src/modes/session-teardown";
 
 /**
  * Signal-safe session teardown contract (issue #4080). The callback body
@@ -191,5 +191,89 @@ describe("createSessionTeardown", () => {
 		await Promise.all([first, second]);
 
 		expect(received).toEqual([postmortem.Reason.SIGTERM]);
+	});
+});
+
+describe("createSessionDetach", () => {
+	it("persists the draft, then stops the view — and touches nothing session-scoped", async () => {
+		const order: string[] = [];
+
+		const detach = createSessionDetach({
+			getDraftText: () => {
+				order.push("snapshot");
+				return "draft";
+			},
+			saveDraft: async text => {
+				order.push(`saveDraft:${text}`);
+			},
+			stopView: () => {
+				order.push("stopView");
+			},
+		});
+
+		await detach();
+
+		expect(order).toEqual(["snapshot", "saveDraft:draft", "stopView"]);
+	});
+
+	it("stops the view even when the draft write fails — the terminal is gone either way", async () => {
+		let stopped = false;
+
+		const detach = createSessionDetach({
+			getDraftText: () => "draft",
+			saveDraft: async () => {
+				throw new Error("disk full");
+			},
+			stopView: () => {
+				stopped = true;
+			},
+		});
+
+		await detach();
+
+		expect(stopped).toBe(true);
+	});
+
+	it("memoizes: a repeated hangup saves and stops the view exactly once", async () => {
+		let saves = 0;
+		let stops = 0;
+
+		const detach = createSessionDetach({
+			getDraftText: () => "draft",
+			saveDraft: async () => {
+				saves++;
+			},
+			stopView: () => {
+				stops++;
+			},
+		});
+
+		await Promise.all([detach(), detach()]);
+		await detach();
+
+		expect(saves).toBe(1);
+		expect(stops).toBe(1);
+	});
+
+	it("snapshots the draft at first call — a late edit cannot overwrite the persisted draft", async () => {
+		let editorText = "before";
+		const release = Promise.withResolvers<void>();
+		let captured: string | undefined;
+
+		const detach = createSessionDetach({
+			getDraftText: () => editorText,
+			saveDraft: async text => {
+				captured = text;
+				await release.promise;
+			},
+			stopView: () => {},
+		});
+
+		const running = detach();
+		editorText = "after";
+		release.resolve();
+		await running;
+
+		expect(captured).toBe("before");
 	});
 });

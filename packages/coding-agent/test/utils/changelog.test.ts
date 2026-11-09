@@ -127,6 +127,93 @@ async function withTempAgentDir<T>(callback: (agentDir: string) => Promise<T>): 
 	}
 }
 
+async function terminateProcessGroup(proc: Bun.Subprocess<"pipe", "pipe", "pipe">): Promise<void> {
+	const signal = (name: NodeJS.Signals): void => {
+		try {
+			process.kill(-proc.pid, name);
+		} catch {
+			try {
+				proc.kill(name);
+			} catch {}
+		}
+	};
+	signal("SIGTERM");
+	const deadline = Date.now() + 5_000;
+	while (Date.now() < deadline) {
+		try {
+			process.kill(-proc.pid, 0);
+		} catch {
+			if (proc.exitCode !== null) return;
+		}
+		await Bun.sleep(50);
+	}
+	signal("SIGKILL");
+	await Promise.race([proc.exited, Bun.sleep(2_000)]);
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === "object" && value !== null && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+async function detachedProcessIds(root: string): Promise<number[]> {
+	const pids = new Set<number>();
+	const runDir = path.join(root, "run");
+	for (const entry of await fs.readdir(runDir).catch(() => [])) {
+		if (!entry.endsWith(".json") || entry.startsWith("bridge-")) continue;
+		try {
+			const record = recordOf(JSON.parse(await fs.readFile(path.join(runDir, entry), "utf8")));
+			if (typeof record?.pid === "number" && Number.isInteger(record.pid) && record.pid > 0) pids.add(record.pid);
+		} catch {}
+	}
+	const daemonRoot = path.join(runDir, "daemons");
+	for (const projectDir of await fs.readdir(daemonRoot).catch(() => [])) {
+		const base = path.join(daemonRoot, projectDir);
+		try {
+			const brokerPid = Number((await fs.readFile(path.join(base, "broker.pid"), "utf8")).trim());
+			if (Number.isInteger(brokerPid) && brokerPid > 0) pids.add(brokerPid);
+		} catch {}
+		for (const daemonDir of await fs.readdir(path.join(base, "daemons")).catch(() => [])) {
+			try {
+				const record = recordOf(
+					JSON.parse(await fs.readFile(path.join(base, "daemons", daemonDir, "meta.json"), "utf8")),
+				);
+				const daemon = recordOf(record?.daemon);
+				if (typeof daemon?.pid === "number" && Number.isInteger(daemon.pid) && daemon.pid > 0) {
+					pids.add(daemon.pid);
+				}
+			} catch {}
+		}
+	}
+	return Array.from(pids);
+}
+
+async function stopDetachedProcesses(root: string): Promise<void> {
+	const pids = await detachedProcessIds(root);
+	for (const pid of pids) {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {}
+	}
+	const deadline = Date.now() + 5_000;
+	for (const pid of pids) {
+		while (Date.now() < deadline) {
+			try {
+				process.kill(pid, 0);
+			} catch {
+				break;
+			}
+			await Bun.sleep(25);
+		}
+	}
+	for (const pid of pids) {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {}
+	}
+}
+
 describe("selectStartupChangelog", () => {
 	const currentVersion = CURRENT_VERSION;
 	const history = [
@@ -414,6 +501,8 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 						cwd: repoRoot,
 						stdout: "pipe",
 						stderr: "pipe",
+						stdin: "pipe",
+						detached: true,
 						env: {
 							...process.env,
 							// ci-test-ts children inherit PI_TEST_RUNTIME=1, which makes the CLI
@@ -424,6 +513,8 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
 							XDG_STATE_HOME: path.join(root, "xdg-state"),
 							XDG_DATA_HOME: path.join(root, "xdg-data"),
+							OMP_RUN_DIR: path.join(root, "run"),
+							OMP_DAEMON_RUNTIME_DIR: path.join(root, "run", "daemons"),
 							PI_CODING_AGENT_DIR: agentDir,
 							PI_PACKAGE_DIR: packageDir,
 							PI_NO_TITLE: "1",
@@ -454,7 +545,8 @@ describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () =>
 						}
 						exitedBeforeStop = exited;
 					} finally {
-						proc.kill();
+						await terminateProcessGroup(proc);
+						await stopDetachedProcesses(root);
 					}
 					const [stdout, stderr] = await outputs;
 					await proc.exited;

@@ -67,6 +67,7 @@ describe("CLI RPC MCP discovery", () => {
 				XDG_CONFIG_HOME: path.join(home, ".config"),
 				PI_CONFIG_DIR: ".omp",
 				PI_CODING_AGENT_DIR: agentDir,
+				OMP_RUN_DIR: path.join(root, "run"),
 				PI_NO_TITLE: "1",
 			};
 			using model = ptree.spawn([process.execPath, fakeModel, agentDir], {
@@ -103,6 +104,7 @@ describe("CLI RPC MCP discovery", () => {
 							cli,
 							"--mode",
 							mode,
+							"--no-ui",
 							"--model",
 							"fake/fake-model",
 							"--no-extensions",

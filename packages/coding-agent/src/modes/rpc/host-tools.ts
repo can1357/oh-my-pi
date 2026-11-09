@@ -4,6 +4,7 @@ import { Snowflake } from "@oh-my-pi/pi-utils";
 import { applyToolProxy } from "../../extensibility/tool-proxy";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { RpcClientConnection, type RpcClientConn } from "./client-connection";
 import type {
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
@@ -18,7 +19,12 @@ type PendingHostToolCall = {
 	resolve: (result: AgentToolResult<unknown>) => void;
 	reject: (error: Error) => void;
 	onUpdate?: AgentToolUpdateCallback<unknown>;
+	conn: RpcClientConn;
 };
+
+type RegisteredHostTool = { definition: RpcHostToolDefinition; sequence: number };
+
+type ResolvedHostTool = { conn: RpcClientConn; definition: RpcHostToolDefinition };
 
 function isAgentToolResult(value: unknown): value is AgentToolResult<unknown> {
 	if (!value || typeof value !== "object") return false;
@@ -52,10 +58,12 @@ class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme
 	readonly loadMode: ToolLoadMode;
 	#bridge: RpcHostToolBridge;
 	#definition: RpcHostToolDefinition;
+	#conn: RpcClientConn;
 
-	constructor(definition: RpcHostToolDefinition, bridge: RpcHostToolBridge) {
+	constructor(definition: RpcHostToolDefinition, bridge: RpcHostToolBridge, conn: RpcClientConn) {
 		this.#definition = definition;
 		this.#bridge = bridge;
+		this.#conn = conn;
 		applyToolProxy(definition, this);
 		this.loadMode = defaultLoadModeForToolName(definition.name, definition.loadMode);
 	}
@@ -67,6 +75,7 @@ class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme
 		onUpdate?: AgentToolUpdateCallback<unknown>,
 	): Promise<AgentToolResult<unknown>> {
 		return this.#bridge.requestExecution(
+			this.#conn,
 			this.#definition,
 			toolCallId,
 			params as Record<string, unknown>,
@@ -77,27 +86,73 @@ class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme
 }
 
 export class RpcHostToolBridge {
-	#output: RpcHostToolOutput;
-	#definitions = new Map<string, RpcHostToolDefinition>();
+	#defaultConn: RpcClientConn;
+	#clients = new Map<RpcClientConn, Map<string, RegisteredHostTool>>();
+	#resolved = new Map<string, ResolvedHostTool>();
 	#pendingCalls = new Map<string, PendingHostToolCall>();
-	#closedError: Error | undefined;
+	#closedConns = new WeakMap<RpcClientConn, Error>();
+	#sequence = 0;
 
-	constructor(output: RpcHostToolOutput) {
-		this.#output = output;
+	constructor(clientOrOutput: RpcClientConn | RpcHostToolOutput) {
+		this.#defaultConn =
+			typeof clientOrOutput === "function"
+				? new RpcClientConnection({
+						id: "stdio",
+						send: frame => clientOrOutput(frame as RpcHostToolCallRequest | RpcHostToolCancelRequest),
+					})
+				: clientOrOutput;
+		this.#clients.set(this.#defaultConn, new Map());
+	}
+
+	/** Attach a client whose `set_host_tools` joins the merged union. */
+	registerClient(conn: RpcClientConn): void {
+		if (this.#clients.has(conn)) return;
+		this.#clients.set(conn, new Map());
 	}
 
 	getToolNames(): string[] {
-		return Array.from(this.#definitions.keys());
+		return Array.from(this.#resolved.keys());
 	}
 
-	setTools(tools: RpcHostToolDefinition[]): AgentTool[] {
-		this.#definitions = new Map(tools.map(tool => [tool.name, tool]));
-		return tools.map(tool => new RpcHostToolAdapter(tool, this));
+	/** Replaces the tools one client owns; the session sees the merged union of every client. */
+	setTools(tools: RpcHostToolDefinition[], conn: RpcClientConn = this.#defaultConn): AgentTool[] {
+		let registrations = this.#clients.get(conn);
+		if (!registrations) {
+			registrations = new Map();
+			this.#clients.set(conn, registrations);
+		}
+		registrations.clear();
+		for (const tool of tools) {
+			registrations.set(tool.name, { definition: tool, sequence: ++this.#sequence });
+		}
+		this.#recompute();
+		return Array.from(this.#resolved.values(), entry => new RpcHostToolAdapter(entry.definition, this, entry.conn));
 	}
 
-	handleResult(frame: RpcHostToolResult): boolean {
+	/** Rebuilds the merged map; `sequence` makes the latest registration of a name win. */
+	#recompute(): void {
+		const winners = new Map<string, ResolvedHostTool & { sequence: number }>();
+		for (const [conn, registrations] of this.#clients) {
+			for (const [name, registration] of registrations) {
+				const current = winners.get(name);
+				if (!current || registration.sequence > current.sequence) {
+					winners.set(name, {
+						conn,
+						definition: registration.definition,
+						sequence: registration.sequence,
+					});
+				}
+			}
+		}
+		this.#resolved = new Map(
+			Array.from(winners, ([name, winner]) => [name, { conn: winner.conn, definition: winner.definition }]),
+		);
+	}
+
+	handleResult(frame: RpcHostToolResult, conn?: RpcClientConn): boolean {
 		const pending = this.#pendingCalls.get(frame.id);
 		if (!pending) return false;
+		if (conn && pending.conn !== conn) return false;
 		this.#pendingCalls.delete(frame.id);
 		if (frame.isError) {
 			const text = frame.result.content
@@ -114,14 +169,16 @@ export class RpcHostToolBridge {
 		return true;
 	}
 
-	handleUpdate(frame: RpcHostToolUpdate): boolean {
+	handleUpdate(frame: RpcHostToolUpdate, conn?: RpcClientConn): boolean {
 		const pending = this.#pendingCalls.get(frame.id);
 		if (!pending) return false;
+		if (conn && pending.conn !== conn) return false;
 		pending.onUpdate?.(frame.partialResult);
 		return true;
 	}
 
 	requestExecution(
+		conn: RpcClientConn,
 		definition: RpcHostToolDefinition,
 		toolCallId: string,
 		args: Record<string, unknown>,
@@ -132,8 +189,9 @@ export class RpcHostToolBridge {
 			return Promise.reject(new Error(`Host tool "${definition.name}" was aborted`));
 		}
 
-		if (this.#closedError) {
-			return Promise.reject(this.#closedError);
+		const closedError = this.#closedConns.get(conn);
+		if (closedError) {
+			return Promise.reject(closedError);
 		}
 
 		const id = Snowflake.next() as string;
@@ -149,7 +207,7 @@ export class RpcHostToolBridge {
 			if (settled) return;
 			settled = true;
 			cleanup();
-			this.#output({
+			conn.send({
 				type: "host_tool_cancel",
 				id: Snowflake.next() as string,
 				targetId: id,
@@ -172,9 +230,10 @@ export class RpcHostToolBridge {
 				reject(error);
 			},
 			onUpdate,
+			conn,
 		});
 
-		this.#output({
+		conn.send({
 			type: "host_tool_call",
 			id,
 			toolCallId,
@@ -194,13 +253,26 @@ export class RpcHostToolBridge {
 		}
 	}
 
-	/** Reject active and future host tool requests after the RPC client disconnects. */
-	close(message: string): void {
-		if (!this.#closedError) this.#closedError = new Error(message);
-		const pendingCalls = Array.from(this.#pendingCalls.values());
-		this.#pendingCalls.clear();
-		for (const pending of pendingCalls) {
-			pending.reject(this.#closedError);
+	/**
+	 * Detaches one client: fails its in-flight calls, rejects its future
+	 * executions, drops its tools from the union, and returns the refreshed
+	 * merged adapters for the session.
+	 */
+	removeClient(conn: RpcClientConn, message: string): AgentTool[] {
+		const error = new Error(message);
+		if (!this.#closedConns.has(conn)) this.#closedConns.set(conn, error);
+		this.#clients.delete(conn);
+		this.#recompute();
+		const pendingCalls = Array.from(this.#pendingCalls.entries()).filter(([, pending]) => pending.conn === conn);
+		for (const [id, pending] of pendingCalls) {
+			this.#pendingCalls.delete(id);
+			pending.reject(error);
 		}
+		return Array.from(this.#resolved.values(), entry => new RpcHostToolAdapter(entry.definition, this, entry.conn));
+	}
+
+	/** Reject active and future host tool requests after the only RPC client disconnects. */
+	close(message: string): void {
+		this.removeClient(this.#defaultConn, message);
 	}
 }

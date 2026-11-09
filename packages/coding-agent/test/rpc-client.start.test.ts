@@ -1,15 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
 import { type RpcAgentProcess, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("RpcClient.start", () => {
 	test("rejects when RPC process exits immediately", async () => {
+		using temp = TempDir.createSync("@omp-rpc-start-");
 		using client = new RpcClient({
 			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
 			cwd: path.join(import.meta.dir, ".."),
 			provider: "__missing_provider__",
 			model: "claude-sonnet-4-5",
-			env: { PI_NO_TITLE: "1" },
+			args: ["--no-session"],
+			env: {
+				PI_NO_TITLE: "1",
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				OMP_RUN_DIR: temp.join("run"),
+			},
 		});
 
 		await expect(client.start()).rejects.toThrow(/Unknown provider.*__missing_provider__/);

@@ -28,11 +28,34 @@ Behavior notes:
 - `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and extension presentation updates are dropped. With `rpc-ui`, tool UI such as `ask` remains enabled. With `rpc`, no UI requests are emitted except for a host-issued `login`. See [Extension UI Sub-Protocol](#extension-ui-sub-protocol) for the exact boundaries.
 - CLI RPC modes disable automatic session title generation (`PI_NO_TITLE=1`) to avoid an extra model call. `rpc-ui` also sets `PI_NO_PTY=1`.
 - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
-- The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
+- The in-process RPC runner claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop. A brokered launch also claims stdin before discovery, but forwards every line to the owner's session socket.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
 - Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
+- When stdin closes in the in-process lifecycle, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame. A brokered launch's bridge closes only its socket connection on stdin EOF; the owner keeps its session, socket, and turn alive.
 - Responses/events are written as one JSON object per line.
+
+## Session ownership on startup
+
+Before opening an existing session, startup reads that session's owner publication (socket + discovery sidecar). The result is the launch's only decision:
+
+- **LIVE**: attach. `--resume <id>`, `--resume <path>`, `--continue`, auto-resume, and a picker selection mirror the owner's PTY and request a full repaint. Attach needs an interactive terminal; `-p` refuses, while `--mode rpc`/`rpc-ui` bridge stdio to the owner's session socket instead (see [Persistent RPC launches](#persistent-rpc-launches)).
+- **STALE** (publication present, endpoint unreachable, publisher pid not provably gone) or **UNKNOWN** (ownership unreadable): refuse with a non-zero exit; no session is opened. A publication whose publisher pid is provably dead falls to the **ABSENT** bullets: the ownership lease decides between a cold strict reservation and an `owner-busy` refusal.
+- **ABSENT** with a free ownership lease: open cold under a strict reservation.
+- **ABSENT** with the lease held: refuse as `owner-busy`; the reservation is never bypassed.
+- `--fork`, `--from-claude`/`--from-codex`, `--no-session`, and a process re-entering its own owner role do not consult the decision.
+
+### Persistent RPC launches
+
+A CLI `--mode rpc` / `--mode rpc-ui` launch without `--no-session` and without `--no-ui` is a client of the same brokered owner that hosts interactive sessions:
+
+- When the resolved target (`--resume`, `--continue`, auto-resume) already has a live reachable `<session-id>.sock`, the outer process connects stdio to that socket. No session manager and no second owner are created, whether the owner was born from a terminal or from RPC.
+- Otherwise the process starts a detached brokered PTY owner with `--mode rpc` / `--mode=rpc` / `--mode rpc-ui` / `--mode=rpc-ui` removed from its argv, so the owner boots `InteractiveMode` and publishes both `terminal` and `<session-id>.sock`. It waits for that publication before bridging.
+- The bridge forwards each JSONL frame in both directions, including the endpoint's own `ready` frame. EOF on stdin closes only the bridge: the owner, its socket, its terminal publication, and any running turn survive. If the socket closes because the owner quit, the bridge exits `0`. A WebUI client must connect to `<session-id>.sock` directly; the stdio bridge is a command channel, not a WebUI attach surface.
+- The bridge writes an owner-only (`0600`) `bridge-<pid>.json` sidecar in the endpoint directory (`{ pid, sessionId, ownerPid, startedAt }`) before forwarding `ready`, and removes it on exit, so detached-keeper launchers can find the session by the bridge process id instead of parsing `<session-id>.json`.
+- When the owner's socket closes while stdin is still open and the published `ownerPid` is still alive, the bridge keeps reconnecting to the same `<session-id>.sock` for up to 15 seconds. An owner `/restart` re-executes in place (same pid) and rebinds the socket, so the bridge and its clients ride through the image replacement without losing the session.
+- `--no-ui` and `--no-session` keep the historical in-process stdio lifecycle; so do print mode, ACP, and re-entry into an owner process. Only brokered sockets refuse transcript swaps (`new_session`, `switch_session`, `open_session`, `fork`, `handoff`); `set_event_filter`, `set_ask_dialog`, branch navigation, `/btw`, goals, live voice, dictation, login, and `mcp_*` are served per view.
+- When an interactive owner has attached socket clients, its TUI dialogs (`select`, `confirm`, `input`, `editor`, and opt-in `ask`) also broadcast as `extension_ui_request` frames. The first answer settles the dialog and cancels the other presentation; a client disconnect never cancels a dialog the terminal or another client can still answer.
+- HTML `formDialog` prompts keep the complete form on the terminal and walk named fields on attached sockets using the standard `select`, `input`, and `editor` fallback. The first surface to submit or cancel the form settles it and closes the other presentation; `set_ask_dialog` only gates the legacy extension `askDialog` request.
 
 ## Transport and Framing
 

@@ -14,6 +14,7 @@ import {
 	type ScopedModelSink,
 	toSessionScopedModels,
 } from "@oh-my-pi/pi-coding-agent/main";
+import { loginOverRpc } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-login";
 import { createSetupHost } from "@oh-my-pi/pi-coding-agent/modes/setup";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -215,6 +216,31 @@ describe("rebuildScopedModels after login", () => {
 		// An OAuth alias refreshes the provider its credential is stored under.
 		await createSetupHost(ctx as unknown as InteractiveModeContext).refreshProvider("openai-codex-device");
 		expect(refreshed).toEqual(["prov", "openai-codex"]);
+	});
+	it("makes newly discovered scoped models selectable before rpc login acknowledges success", async () => {
+		const settings = Settings.isolated({ enabledModels: ["prov/*"] });
+		const registry = Object.assign(new FakeRegistry([model("a")]), {
+			authStorage: { oauth: { login: async () => {} } },
+			async refreshProvider(this: FakeRegistry) {
+				this.available = [model("a"), model("b")];
+			},
+		});
+		const session = new FakeSession(await startupScope(["prov/*"], registry, settings));
+
+		const response = await loginOverRpc({
+			session: {
+				modelRegistry: registry as unknown as ModelRegistry,
+				refreshScopedModels: async () => {
+					await rebuildScopedModels(session, parseArgs([]), registry, settings);
+				},
+			},
+			command: { type: "login", providerId: "anthropic" },
+			pendingExtensionRequests: new Map(),
+			output: () => {},
+		});
+
+		expect(response).toMatchObject({ command: "login", success: true });
+		expect(session.scopedModels.map(entry => entry.model.id)).toEqual(["a", "b"]);
 	});
 });
 

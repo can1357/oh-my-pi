@@ -52,6 +52,7 @@ async function serveDaemon(version: string): Promise<string[]> {
 	vi.spyOn(launchClient, "daemonClientForGlobal").mockResolvedValue({
 		projectDir: runtimeDir,
 		onCompletion: () => () => {},
+		subscribeTerminal: () => () => {},
 		request: async operation => {
 			if (operation.op === "ping") return { op: "ping", projectDir: runtimeDir };
 			throw new launchClient.DaemonBrokerRejectedError(`no daemon ${operation.op} in this test`);
