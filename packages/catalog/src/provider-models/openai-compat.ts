@@ -66,7 +66,11 @@ import {
 } from "../wire/singularityapi";
 import { isXiaomiTokenPlanKey } from "../wire/xiaomi-token-plan";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
-import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
+import {
+	getDefaultModelDiscoveryBaseUrl,
+	resolveLiteLLMDiscoveryTimeoutMs,
+	resolveModelCacheProviderId,
+} from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
 import type { ModelManagerConfig } from "./descriptor-types";
 import { filterModelsDevCatalogRows } from "./models-dev-policies";
@@ -5674,6 +5678,14 @@ export interface LiteLLMModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/**
+	 * Deadline in milliseconds for each of the rich metadata walk and the
+	 * `/v1/models` fallback. Large proxies stream `/model/info` for several
+	 * seconds; when the walk is abandoned, discovery degrades to rows without
+	 * reasoning or context metadata. Non-positive or non-finite values fall back
+	 * to {@link DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS}.
+	 */
+	discoveryTimeoutMs?: number;
 }
 
 export interface FetchLiteLLMRichModelsOptions<TApi extends Api> {
@@ -6434,6 +6446,7 @@ export async function fetchLiteLLMRichModels<TApi extends Api>(
 export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
+	const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(config?.discoveryTimeoutMs);
 	return {
 		providerId: "litellm",
 		// rich-v14 fetches all /v2/model/info pages so cached proxy rosters
@@ -6451,7 +6464,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 		// stripped reseller usage suffixes, filtered placeholder rows, and mapped
 		// rich pricing. Bump the version whenever these mappers change, or warm
 		// authoritative caches keep serving pre-change rows for the full TTL.
-		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl, discoveryTimeoutMs: timeoutMs }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
 		// management metadata, then enrich ids against models.dev with the bundled
@@ -6467,7 +6480,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				fetch: config?.fetch,
 				referenceResolver: resolveReference,
 				resolveApi: resolveLiteLLMApi,
-				timeoutMs: 10_000,
+				timeoutMs,
 			});
 			const models =
 				richModels ??
@@ -6479,6 +6492,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 					mapModel: (entry, defaults) =>
 						mapLiteLLMOpenAICompatibleModel(entry, defaults, resolveReference(defaults.id)),
 					fetch: config?.fetch,
+					timeoutMs,
 				}));
 			// Bare catalog names can label proxy namespaces, but their pricing,
 			// limits and request routing must never enrich a different deployment.

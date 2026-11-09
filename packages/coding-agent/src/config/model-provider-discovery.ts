@@ -1,8 +1,13 @@
 import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { authProviders } from "@oh-my-pi/pi-catalog/compat/auth";
+import { DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS } from "@oh-my-pi/pi-catalog/discovery/openai-compatible";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
-import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
+import {
+	MODELS_DEV_CATALOG_PROVIDER_IDS,
+	PROVIDER_DESCRIPTORS,
+	resolveLiteLLMDiscoveryTimeoutMs,
+} from "@oh-my-pi/pi-catalog/provider-models";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
 /**
@@ -40,6 +45,16 @@ const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(
  * so a successful fast path does not leave an armed timeout signal for concurrent GC.
  */
 export const RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS = 15_000;
+
+/** Slack for mapping, cache persistence, and model-manager work around the network stages. */
+const BUILT_IN_DISCOVERY_OVERHEAD_MS = 5_000;
+
+/** Keep the outer race above every sequential LiteLLM stage, including the default deadline. */
+export function resolveBuiltInDiscoveryBudgetMs(providerId: string, configuredTimeoutMs: number | undefined): number {
+	if (providerId !== "litellm") return RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS;
+	const timeoutMs = resolveLiteLLMDiscoveryTimeoutMs(configuredTimeoutMs);
+	return DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS + 2 * timeoutMs + BUILT_IN_DISCOVERY_OVERHEAD_MS;
+}
 // Built-in discovery preflight mirror of the catalog model-manager's private
 // cache timings (model-manager.ts: DEFAULT_CACHE_TTL_MS / NON_AUTHORITATIVE_RETRY_MS).
 // Built-in descriptors never override cacheTtlMs, so agreeing with these values
