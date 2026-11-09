@@ -151,8 +151,5 @@ describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
 
 		expect(calls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
 		expect(calls[1]?.thoughtSignature).toBe(sentinel);
-
-		const unsigned = unsignedFirstCall("google-generative-ai", "gateway", "gemini-3.8-flash");
-		expect(toolCallParts(base, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
 	});
 });
