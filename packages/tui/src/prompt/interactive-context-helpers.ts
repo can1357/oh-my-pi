@@ -22,6 +22,7 @@ export interface AssistantMessageHost {
 	readonly effectiveHideThinkingBlock: boolean;
 	readonly proseOnlyThinking: boolean;
 	readonly expandThinkingBlocks: boolean;
+	readonly linkUrls?: boolean;
 	readonly assistantImagesVisible: boolean;
 	/** Whether the viewed session's tables get charts: the main session's do, a focused subagent's do not. */
 	readonly tableChartsVisible: boolean;
@@ -134,6 +135,7 @@ export function createAssistantMessageComponent(
 		linkTargets,
 		ctx.expandThinkingBlocks,
 		{ renderers: ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.() ?? [], contentOffset },
+		ctx.linkUrls ?? true,
 	);
 	applyHostDisplay(ctx, component);
 	return component;
@@ -154,6 +156,7 @@ export function createReplyWriteComponent(ctx: AssistantMessageHost): ReplyWrite
 function applyHostDisplay(ctx: AssistantMessageHost, component: AssistantMessageComponent): void {
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setTableChartsVisible(ctx.tableChartsVisible);
+	component.linkUrls = ctx.linkUrls ?? true;
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
 	component.setExpanded(ctx.toolOutputExpanded);
 	// A wire the `stream-revision` axis marks `possible` can rewrite text it has

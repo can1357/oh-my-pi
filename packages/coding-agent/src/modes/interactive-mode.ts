@@ -440,6 +440,7 @@ import {
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
 	cfgTuiHyperlinks,
+	cfgTuiShowLinkUrl,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiAutoGraph,
@@ -529,6 +530,7 @@ const cfgLiveUiSettings = combine({
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
+	"tui.showLinkUrl": cfgTuiShowLinkUrl,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
 	motion: cfgMotionResolved,
@@ -1506,6 +1508,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	proseOnlyThinking = true;
 	expandThinkingBlocks = false;
+	get linkUrls(): boolean {
+		return cfgTuiShowLinkUrl.get(this.settings);
+	}
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	yieldCompaction: YieldCompaction | undefined = undefined;
 	compactionQueueOrigin: ConversationPosition | undefined = undefined;
@@ -4389,6 +4394,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.hyperlinks")) {
 			// The tui.hyperlinks effect already re-applied the flag; repaint cached rows.
 			this.statusLine.invalidate();
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
+		if (any("tui.showLinkUrl")) {
+			// The value is read live per instance; only the repaint is needed.
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}
@@ -9026,6 +9036,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						0,
 					)
 				: new Markdown(selection.markdown?.trim() ?? "", 1, 0, getMarkdownTheme());
+		if (notes instanceof Markdown) notes.linkUrls = this.linkUrls;
 		this.#headerAfter = [
 			new DynamicBorder(),
 			new Text("What's New", 1, 0).setStyleFn(t => theme.bold(theme.fg("accent", t))),
