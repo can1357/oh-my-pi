@@ -5,8 +5,10 @@ Nothing here is chosen by hand: the rows are picked from the generated matrix
 by axis, and the axis lists come from the engine's own enum declarations.
 
 Two columns are recorded per row. `out`/`status` is Bash 5.3.0's own answer for
-the same `-c` string, which is what the engine ought to give; Bash 5.2.21 must
-agree on every row, and a row they disagree on ends this script. `engine_out`/
+the same `-c` string, which is what the engine ought to give; Bash 5.2.21 agrees
+on every row EXCEPT the no-fork ones (`${ ;}` and `${| ;}`), which it cannot
+parse at all — each of those carries `bash_peer_lacks_nofork` and 5.3.0 is the
+only answer; any OTHER disagreement ends this script. `engine_out`/
 `engine_status` is what the baseline tree answers today, which is what the
 committed test asserts: a row where the two columns differ is a site the engine
 does not match bash on yet, and the test says so instead of failing. That makes

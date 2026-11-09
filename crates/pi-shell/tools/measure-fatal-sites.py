@@ -30,7 +30,9 @@ import subprocess
 import sys
 import tempfile
 
-ADDON = "packages/natives/native/pi_natives.linux-x64-modern.node"
+# The TS batch runner validates the loaded addon via nativeAddonStatus(); this
+# script checks only that the tree directory exists (not a platform-specific
+# filename).
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -47,6 +49,17 @@ def pairs(values: list[str], what: str) -> dict[str, str]:
 def bash_column(label: str, binary: str, rows: list[dict], cwd: str) -> dict:
 	if not os.path.isfile(binary):
 		sys.exit(f"measure-fatal-sites: the {label} bash binary is missing: {binary}")
+	# Run each reference under a controlled environment: strip BASH_ENV,
+	# SHELLOPTS and other inherited bash state that `Shell::new` also filters
+	# (crates/pi-shell/src/shell.rs `should_skip_env_var`), so the committed
+	# ground truth cannot depend on the caller's options or startup files.
+	clean_env = {
+		k: v for k, v in os.environ.items()
+		if k not in (
+			"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "BASH_XTRACEFD",
+			"HISTFILE", "HISTTIMEFORMAT", "PS0", "PS1", "PS2", "PS4",
+		)
+	}
 	out = {}
 	for r in rows:
 		p = subprocess.run(
@@ -56,20 +69,15 @@ def bash_column(label: str, binary: str, rows: list[dict], cwd: str) -> dict:
 			stdout=subprocess.PIPE,
 			stderr=subprocess.DEVNULL,
 			timeout=30,
+			env=clean_env,
 		)
 		out[r["id"]] = {"out": p.stdout.decode("utf-8", "replace"), "rc": p.returncode}
 	return out
 
 
 def engine_column(label: str, tree: str, rows: list[dict], cwd: str, args) -> dict:
-	addon = os.path.join(tree, ADDON)
 	if not os.path.isdir(tree):
 		sys.exit(f"measure-fatal-sites: the {label} tree is missing: {tree}")
-	if not os.path.isfile(addon):
-		sys.exit(
-			f"measure-fatal-sites: the {label} tree has no built addon at {addon}; "
-			"build it with `bun run build` in its packages/natives"
-		)
 	cf = os.path.join(args.tmp, f"{label}.cases.json")
 	rf = os.path.join(args.tmp, f"{label}.results.jsonl")
 	with open(cf, "w") as fh:
@@ -90,7 +98,22 @@ def engine_column(label: str, tree: str, rows: list[dict], cwd: str, args) -> di
 		for line in fh:
 			if line.strip():
 				d = json.loads(line)
-				got[d["id"]] = {"out": d.get("out", ""), "rc": d.get("rc"), **d}
+				# Reject rows the batch could not measure: an error, a timeout
+				# or a missing exit code is not a measured baseline.
+				if d.get("error"):
+					sys.exit(
+						f"measure-fatal-sites: the {label} batch returned an error for "
+						f"row {d['id']}: {d['error']}"
+					)
+				if d.get("timedOut"):
+					sys.exit(
+						f"measure-fatal-sites: row {d['id']} timed out in the {label} batch"
+					)
+				if d.get("rc") is None:
+					sys.exit(
+						f"measure-fatal-sites: row {d['id']} has no exit code in the {label} batch"
+					)
+				got[d["id"]] = {"out": d.get("out", ""), "rc": d["rc"]}
 	missing = [r["id"] for r in rows if r["id"] not in got]
 	if missing:
 		sys.exit(f"measure-fatal-sites: the {label} batch returned {len(missing)} fewer rows")

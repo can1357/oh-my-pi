@@ -1,6 +1,8 @@
 //! Every element of every axis the fatal-jump model has, with Bash 5.3.0's own
-//! answer for the same `-c` string (Bash 5.2.21 agrees on all of them) and the
-//! answer the engine gave when the fixture was measured.
+//! answer for the same `-c` string and the answer the engine gave when the
+//! fixture was measured.  Bash 5.2.21 agrees on all rows EXCEPT the 537
+//! no-fork ones (`${ ;}` and `${| ;}`), which it cannot parse at all — each
+//! of those carries `bash_peer_lacks_nofork` and 5.3.0 is the only answer.
 //!
 //! The rows come from a generated pass: the axis lists are read out of the
 //! engine's own enum declarations (`Opcode`, `DeclareKind`, `Stop`,
@@ -45,8 +47,9 @@ struct Fixture {
 const FIXTURE: &str = include_str!("fatal-site-matrix.json");
 
 /// Run `script` (its diagnostics discarded) in a fresh shell, in `cwd`: some
-/// rows write a script file and source or run it.
-async fn run(script: &str, cwd: &str) -> (String, Option<i32>) {
+/// rows write a script file and source or run it.  Returns `(stdout,
+/// exit_code, timed_out)`.
+async fn run(script: &str, cwd: &str) -> (String, Option<i32>, bool) {
 	let (tx, rx) = flume::unbounded::<String>();
 	let command = format!("exec 2>/dev/null\n{script}");
 	let result = Shell::new(None)
@@ -57,7 +60,7 @@ async fn run(script: &str, cwd: &str) -> (String, Option<i32>) {
 		)
 		.await
 		.expect("run");
-	(rx.drain().collect(), result.exit_code)
+	(rx.drain().collect(), result.exit_code, result.timed_out)
 }
 
 /// A scratch directory this run alone owns.
@@ -106,9 +109,15 @@ async fn every_site_of_the_jump_model_answers_as_the_measured_baseline_does() {
 	assert!(!fixture.rows.is_empty(), "the fixture has no rows");
 	let dir = fresh_scratch_dir(&std::env::temp_dir());
 	let cwd = dir.to_string_lossy().into_owned();
-	let (mut regressions, mut stale, mut drift) = (Vec::new(), Vec::new(), Vec::new());
+	let (mut regressions, mut stale, mut drift, mut timeouts) =
+		(Vec::new(), Vec::new(), Vec::new(), Vec::new());
 	for row in &fixture.rows {
-		let got = run(&row.script, &cwd).await;
+		let (out, exit_code, timed_out) = run(&row.script, &cwd).await;
+		if timed_out {
+			timeouts.push(format!("{}: timed out (got ({out:?}, {exit_code:?}))", row.id));
+			continue;
+		}
+		let got = (out, exit_code);
 		let baseline = (row.engine_out.clone(), row.engine_status);
 		if got == baseline {
 			continue;
@@ -129,6 +138,7 @@ async fn every_site_of_the_jump_model_answers_as_the_measured_baseline_does() {
 	let _ = std::fs::remove_dir_all(&dir);
 	let mut report = String::new();
 	for (what, rows) in [
+		("TIMEOUT (the row did not finish; this is not a measured answer)", &timeouts),
 		("REGRESSION (the baseline matched Bash 5.3.0 and this tree does not)", &regressions),
 		("STALE FIXTURE (this tree now matches Bash 5.3.0; re-measure and commit)", &stale),
 		("DRIFT (neither the baseline's answer nor bash's)", &drift),
