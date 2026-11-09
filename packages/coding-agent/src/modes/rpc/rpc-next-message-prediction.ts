@@ -13,6 +13,7 @@ import {
 	ComposerPredictionController,
 	type ComposerPredictionOptions,
 } from "../controllers/composer-prediction-controller";
+import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "../settings";
 import type { RpcNextMessagePredictionFeedbackEvent, RpcNextMessagePredictionFrame } from "./rpc-types";
 
 /** Session events that end any pending or offered prediction: a new run, or a compaction rewriting the history it read. */
@@ -54,6 +55,16 @@ export class RpcNextMessagePredictor {
 				},
 			},
 		);
+		// As the TUI, for settings reloaded or changed while the process runs: predictions turned off end
+		// every pending or offered one; alternatives turned off end a pending request (it asked for
+		// alternatives) and a multi-choice offer. Both listeners end with the session.
+		cfgComposerPredictions.listen(session, enabled => {
+			if (!enabled) this.#controller.cancel();
+		});
+		cfgComposerPredictionAlternatives.listen(session, enabled => {
+			if (enabled || this.#controller.activeId === undefined) return;
+			if ((this.#controller.choices?.length ?? 0) !== 1) this.#controller.cancel();
+		});
 	}
 
 	/** Start a prediction for the conversation as it stands, superseding any earlier one; null when none started. */

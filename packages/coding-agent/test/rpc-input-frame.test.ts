@@ -384,6 +384,36 @@ describe("RpcInputDispatcher", () => {
 		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["after", "predict"]);
 	});
 
+	test("predict_next_message_cancel overtakes a long serial command", async () => {
+		const releaseCompact = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "compact") {
+				await releaseCompact.promise;
+				return { id: command.id, type: "response", command: "compact", success: false, error: "done" };
+			}
+			if (command.type === "predict_next_message_cancel") {
+				return {
+					id: command.id,
+					type: "response",
+					command: "predict_next_message_cancel",
+					success: true,
+					data: { cancelled: true },
+				};
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "compact", type: "compact" });
+		dispatcher.dispatch({ id: "cancel", type: "predict_next_message_cancel", predictionId: "1" });
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["cancel"]);
+
+		releaseCompact.resolve();
+		await dispatcher.drain();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["cancel", "compact"]);
+	});
+
 	test("a prompt waits for an earlier session change without blocking a later abort", async () => {
 		const reset = Promise.withResolvers<void>();
 		const admission = Promise.withResolvers<void>();

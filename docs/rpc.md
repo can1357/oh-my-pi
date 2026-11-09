@@ -1284,7 +1284,11 @@ which the host must stop showing it and must not accept it. It retires when
 the host cancels it or requests another, when a new message lands, when a run or
 a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
 `fork`, `navigate_tree`, `open_session`, extension-initiated session changes,
-and shutdown. These frames bypass `set_event_filter`.
+and shutdown. Turning `composer.predictions` off while the process runs (a
+settings write or reload) cancels a pending prediction and retires an offered
+one; turning `composer.predictionAlternatives` off does the same for a pending
+prediction and for an offered one with more than one choice. These frames
+bypass `set_event_filter`.
 
 Feedback drives the prediction metrics. Send `event: "shown"` once the host
 first displays the prediction, and `event: "accepted"` with the alternative's
@@ -1293,9 +1297,13 @@ retirement counts. Cancel with `predict_next_message_cancel` when the user
 dismisses it or starts typing their own message. A shown prediction that
 retires without an accepted rank counts as ignored. Feedback for a prediction
 that is no longer offered is ignored. An `accepted` event without a rank, or
-with a rank outside `choices`, fails. `predict_next_message_cancel` answers
-`cancelled: false` when nothing is pending or offered, or when `predictionId`
-names another prediction.
+with a rank outside `choices`, fails.
+
+`predict_next_message_cancel` bypasses the command queue, so it lands while a
+long command such as `compact` or `login` still runs. It answers
+`cancelled: false` when nothing is pending or offered, when `predictionId`
+names another prediction, or when the `predict_next_message` it targets is
+still queued behind other commands.
 
 ## Prompt/Queue Concurrency and Ordering
 

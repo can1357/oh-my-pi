@@ -9,6 +9,7 @@ import {
 	PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { RpcNextMessagePredictor } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-next-message-prediction";
 import type { RpcNextMessagePredictionFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -58,6 +59,7 @@ function harness(options: { enabled?: boolean; alternatives?: boolean; meterProv
 	});
 	return {
 		predictor,
+		settings: session.settings,
 		frames,
 		turns,
 		async reply(index: number, replyText: string) {
@@ -154,6 +156,49 @@ describe("RpcNextMessagePredictor", () => {
 		predictor.observe({ type: "manual_compaction_start" } as AgentSessionEvent);
 		await settled(1);
 		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: pending, status: "cancelled" });
+	});
+
+	it("cancels when composer.predictions is turned off, even before the reply arrives", async () => {
+		const { predictor, frames, reply, settled, settings } = harness();
+		const offered = predictor.request()!;
+		await reply(0, "ship it");
+		const pending = predictor.request()!;
+		cfgComposerPredictions.override(settings, false);
+		await settled(1);
+
+		expect(frames.map(frame => [frame.predictionId, frame.status])).toEqual([
+			[offered, "offered"],
+			[offered, "retired"],
+			[pending, "cancelled"],
+		]);
+	});
+
+	it("turning alternatives off ends a multi-choice or pending prediction but keeps a single choice", async () => {
+		const multi = harness();
+		const multiId = multi.predictor.request()!;
+		await multi.reply(0, "run the tests\nship it");
+		cfgComposerPredictionAlternatives.override(multi.settings, false);
+		await Promise.resolve();
+		expect(multi.frames.at(-1)).toEqual({
+			type: "next_message_prediction",
+			predictionId: multiId,
+			status: "retired",
+		});
+
+		const pending = harness();
+		const pendingId = pending.predictor.request()!;
+		cfgComposerPredictionAlternatives.override(pending.settings, false);
+		await pending.settled(0);
+		expect(pending.frames).toEqual([
+			{ type: "next_message_prediction", predictionId: pendingId, status: "cancelled" },
+		]);
+
+		const single = harness();
+		single.predictor.request();
+		await single.reply(0, "ship it");
+		cfgComposerPredictionAlternatives.override(single.settings, false);
+		await Promise.resolve();
+		expect(single.frames.map(frame => frame.status)).toEqual(["offered"]);
 	});
 
 	it("supersedes an offered prediction with a new request, retiring it first", async () => {
