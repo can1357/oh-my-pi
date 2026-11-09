@@ -446,35 +446,57 @@ describe("deferred writer callbacks belong to their session state", () => {
 			await manager.close();
 		}
 	});
-	it("leaves the leaf of the session an entry observer switches to during model usage", async () => {
-		const manager = SessionManager.inMemory();
-		const other = SessionManager.inMemory();
-		const parentId = manager.appendMessage({ role: "user", content: "request", timestamp: 1 });
-		manager.appendMessage({ role: "user", content: "later", timestamp: 2 });
-		const otherLeaf = other.appendMessage({ role: "user", content: "other session", timestamp: 3 });
-		const otherState = other.captureState();
-		manager.onEntryAppended = entry => {
-			if (entry.type === "model_usage") manager.restoreState(otherState);
-		};
+	for (const restored of ["another session", "an earlier state of this session"] as const) {
+		it(`leaves the leaf of ${restored} an entry observer restores during model usage`, async () => {
+			const manager = SessionManager.inMemory();
+			const other = SessionManager.inMemory();
+			const parentId = manager.appendMessage({ role: "user", content: "request", timestamp: 1 });
+			const earlier = manager.captureState();
+			manager.appendMessage({ role: "user", content: "later", timestamp: 2 });
+			const otherLeaf = other.appendMessage({ role: "user", content: "other session", timestamp: 3 });
+			const state = restored === "another session" ? other.captureState() : earlier;
+			manager.onEntryAppended = entry => {
+				if (entry.type === "model_usage") manager.restoreState(state);
+			};
+			try {
+				manager.appendModelUsage(
+					{
+						purpose: "auto-thinking",
+						role: "smol",
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-haiku-4-5",
+						stopReason: "stop",
+						usage: makeAssistantMessage().usage,
+					},
+					{ sessionId: manager.getSessionId(), parentId },
+				);
+				expect(manager.getLeafId()).toBe(restored === "another session" ? otherLeaf : parentId);
+			} finally {
+				manager.onEntryAppended = undefined;
+				await manager.close();
+				await other.close();
+			}
+		});
+	}
+	it("forgets the recent-session title when a replicated clear is written", async () => {
+		const manager = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"));
 		try {
-			manager.appendModelUsage(
-				{
-					purpose: "auto-thinking",
-					role: "smol",
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-haiku-4-5",
-					stopReason: "stop",
-					usage: makeAssistantMessage().usage,
-				},
-				{ sessionId: manager.getSessionId(), parentId },
-			);
-			expect(manager.getSessionId()).toBe(other.getSessionId());
-			expect(manager.getLeafId()).toBe(otherLeaf);
+			manager.appendMessage(user("first"));
+			manager.appendMessage(assistant("first reply"));
+			await manager.setSessionName("Title before clear", "user");
+			manager.ingestReplicatedEntry({
+				type: "title_change",
+				id: "replicated-clear",
+				parentId: manager.getLeafId(),
+				timestamp: "2026-01-01T00:00:00.000Z",
+				title: "",
+			});
+			await manager.setTaskPromptCacheKey("rewrite");
+			expect(manager.getSessionName()).toBeUndefined();
+			expect(lookupSessionTitle(manager.getSessionId())).toBeUndefined();
 		} finally {
-			manager.onEntryAppended = undefined;
 			await manager.close();
-			await other.close();
 		}
 	});
 });

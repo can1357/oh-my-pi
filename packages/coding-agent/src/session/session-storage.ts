@@ -196,11 +196,16 @@ export interface SessionStorage {
 	 */
 	writeLinesSync?(path: string, lines: readonly string[], options?: SessionStorageWriteOptions): void;
 	/**
-	 * Update the current session title through the storage backend.
+	 * Update the current session title through the storage backend, without a journal line.
 	 *
 	 * File-like backends rewrite the fixed-width JSONL title slot; indexed
 	 * backends can store the semantic title fields and synthesize the slot when
-	 * reading.
+	 * reading. An indexed backend's title outranks the body's journal titles,
+	 * across later appends: a manager resuming the session takes it. A manager
+	 * already holding the session does not see it, and supersedes it with its
+	 * next whole-body write or a rename it adopts from another writer: the body
+	 * records no position for a title set here, so nothing orders it against
+	 * entries written meanwhile. `setSessionName` journals its title instead.
 	 */
 	updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void>;
 	statSync(path: string): SessionStorageStat;

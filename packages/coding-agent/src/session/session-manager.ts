@@ -127,7 +127,7 @@ import {
 	type SessionStorageWriter,
 	SessionWriteConflictError,
 } from "./session-storage";
-import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import { parseTitleSlotLine, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -875,6 +875,11 @@ interface AtomicEntryBatch {
 	preBatchLeafId: string | null;
 	externalLeafChanged: boolean;
 	externalLeafId: string | null;
+	/** The title when the batch started, and whether the batch staged a rename, which rollback then undoes. */
+	preBatchTitle: SessionTitleUpdate;
+	stagedTitle: boolean;
+	/** The newest rename recorded during the batch but outside it, which survives a rollback. */
+	externalTitle?: TitleChangeEntry;
 }
 
 /**
@@ -1959,16 +1964,18 @@ export class SessionManager {
 				return index < 0 || index >= stamp.entryCount;
 			});
 		}
-		// The body's title slot is the session's title as serialized, whatever the live title is now.
-		if (stamp.title !== undefined) this.#indexDurableTitle(stamp.sessionId, stamp.title);
+		// The body's title slot is the session's title as serialized, whatever the live title is now; no title
+		// forgets an indexed one (a cleared title).
+		this.#indexDurableTitle(stamp.sessionId, stamp.title);
 	}
 
 	/**
 	 * Keep the recent-sessions title index on the title the file now holds. setSessionName indexes
 	 * a title its flush landed; a line the full volume held back lands later, by the queued-tail
-	 * append or a whole-file rewrite, possibly from a clone or a restored snapshot.
+	 * append or a whole-file rewrite, possibly from a clone or a restored snapshot. An empty or
+	 * absent title forgets the indexed one.
 	 */
-	#indexDurableTitle(sessionId: string, title: string): void {
+	#indexDurableTitle(sessionId: string, title: string | undefined): void {
 		if (!this.#persist || !(this.#storage instanceof FileSessionStorage) || sessionId !== this.#sessionId) return;
 		recordSessionTitle(sessionId, title);
 	}
@@ -2034,19 +2041,23 @@ export class SessionManager {
 	}
 
 	/**
-	 * The title change a copy holding `entries` needs, so a reload, which folds the newest journal title over the
-	 * header, lands on this session's title: `undefined` when the copy has no journal title or its newest matches.
-	 * It records a cleared title as `""` and leaves an unknown source out.
+	 * The title change a copy holding `entries` needs, so a reload lands on this session's complete title: a reload
+	 * takes the newest journal title, else the slot, which holds the title truncated. `undefined` when that already
+	 * matches. It records a cleared title as `""` and leaves an unknown source out.
 	 */
 	#titleCorrection(
 		entries: readonly SessionEntry[],
 		parentId: string | null,
 		timestamp: string,
 	): TitleChangeEntry | undefined {
-		const newest = entries.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
-		if (newest?.type !== TITLE_CHANGE_ENTRY_TYPE) return undefined;
 		const title = this.#sessionName ?? "";
-		if (newest.title === title && newest.source === this.#titleSource) return undefined;
+		const found = entries.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
+		const newest = found?.type === TITLE_CHANGE_ENTRY_TYPE ? found : undefined;
+		const reloaded = newest ?? {
+			title: parseTitleSlotLine(this.#titleSlotLine())?.title ?? "",
+			source: this.#titleSource,
+		};
+		if (reloaded.title === title && reloaded.source === this.#titleSource) return undefined;
 		const entry: TitleChangeEntry = {
 			type: TITLE_CHANGE_ENTRY_TYPE,
 			id: generateId(new Set(entries.map(candidate => candidate.id))),
@@ -2055,7 +2066,7 @@ export class SessionManager {
 			runtime: currentRuntimeIdentity(),
 			title,
 		};
-		if (newest.title) entry.previousTitle = newest.title;
+		if (reloaded.title) entry.previousTitle = reloaded.title;
 		if (this.#titleSource) entry.source = this.#titleSource;
 		return entry;
 	}
@@ -2696,11 +2707,15 @@ export class SessionManager {
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
-		if (batch?.collecting) batch.entryIds.add(entry.id);
+		if (batch?.collecting) {
+			batch.entryIds.add(entry.id);
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) batch.stagedTitle = true;
+		}
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
 			// An off-branch entry replays to the leaf it captured, not to itself.
 			batch.externalLeafId = sessionEntryLeafId(entry);
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) batch.externalTitle = entry;
 		}
 		this.#appendToSessionFile(entry);
 		if (batch) {
@@ -2747,6 +2762,19 @@ export class SessionManager {
 		this.#entries = retained;
 		this.#index.rebuild(retained);
 		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
+		// A rolled-back rename takes its title with it: back to the newest rename kept, else the batch's start.
+		if (batch.stagedTitle) {
+			if (batch.externalTitle) {
+				this.#applyJournalTitle(batch.externalTitle);
+			} else {
+				const { title, source, updatedAt } = batch.preBatchTitle;
+				this.#sessionName = title;
+				this.#titleSource = source;
+				this.#titleUpdatedAt = updatedAt;
+				this.#header.title = title;
+				this.#header.titleSource = source;
+			}
+		}
 	}
 
 	#draftPath(): string | null {
@@ -3477,6 +3505,8 @@ export class SessionManager {
 			preBatchLeafId: this.#index.leafId(),
 			externalLeafChanged: false,
 			externalLeafId: null,
+			preBatchTitle: { title: this.#sessionName, source: this.#titleSource, updatedAt: this.#titleUpdatedAt },
+			stagedTitle: false,
 		};
 		this.#atomicEntryBatch = batch;
 		let result!: T;
@@ -4384,14 +4414,14 @@ export class SessionManager {
 			...usage,
 			...(activeLeafId !== owner.parentId ? { activeLeafId } : {}),
 		};
-		const written: { known: boolean; sessionId?: string } = { known: false };
+		const written: { known: boolean; writerState?: number } = { known: false };
 		this.#recordEntry(entry, sessionId => {
 			written.known = true;
-			written.sessionId = sessionId;
+			if (sessionId !== undefined) written.writerState = this.#writerStateGen;
 		});
 		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the usage entry, on rollback. An
-		// append observer can switch this manager to another session; the leaf belongs to the one written to.
-		if (activeLeafId !== owner.parentId && (!written.known || written.sessionId === this.#sessionId)) {
+		// append observer can restore another state, even of this session; the leaf belongs to the state written.
+		if (activeLeafId !== owner.parentId && (!written.known || written.writerState === this.#writerStateGen)) {
 			this.#setLeaf(activeLeafId);
 		}
 		return entry.id;

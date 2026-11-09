@@ -476,12 +476,13 @@ describe("SqlSessionStorage titles through SessionManager writes", () => {
 			storage: SqlSessionStorage,
 			reopen: () => Promise<SessionManager>,
 		) => Promise<void>,
+		body = JOURNAL_BODY,
 	): Promise<void> {
 		const client = new SQL("sqlite::memory:");
 		const opened: SessionManager[] = [];
 		try {
 			const storage = await SqlSessionStorage.create({ client });
-			await storage.writeText(file, JOURNAL_BODY);
+			await storage.writeText(file, body);
 			await prepare(storage);
 			const reopen = async () => {
 				const session = await SessionManager.open(file, undefined, storage, { suppressBreadcrumb: true });
@@ -581,4 +582,52 @@ describe("SqlSessionStorage titles through SessionManager writes", () => {
 			);
 		});
 	}
+
+	it("copies a long metadata title with no journal title to file storage in full", async () => {
+		const file = "/sessions/w/copy-long.jsonl";
+		const long = "A long metadata title ".repeat(30).trim();
+		using dir = TempDir.createSync("@omp-sql-title-copy-");
+		await withSession(
+			file,
+			storage => storage.updateSessionTitle(file, { title: long, updatedAt: "x" }),
+			async session => {
+				const copy = await session.persistCopy(
+					{ sessionDir: dir.path(), suppressBreadcrumb: true },
+					new FileSessionStorage(),
+				);
+				await copy.close();
+				const reopened = await SessionManager.open(copy.getSessionFile()!, undefined, undefined, {
+					suppressBreadcrumb: true,
+				});
+				try {
+					expect(titleOf(reopened)).toEqual({ title: long, source: undefined });
+				} finally {
+					await reopened.close();
+				}
+			},
+			'{"type":"session","id":"no-journal","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo"}\n' +
+				'{"type":"message","id":"first","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"hello","timestamp":1}}\n',
+		);
+	});
+
+	it("rolls a batch's rename back with the batch", async () => {
+		const file = "/sessions/w/batch-rollback.jsonl";
+		await withSession(
+			file,
+			async () => {},
+			async (session, storage, reopen) => {
+				let rename: Promise<unknown> | undefined;
+				await expect(
+					session.appendEntriesAtomically(() => {
+						rename = session.setSessionName("Rolled back", "user").catch(() => undefined);
+						throw new Error("cancel the batch");
+					}),
+				).rejects.toThrow("cancel the batch");
+				await rename;
+				expect(titleOf(session)).toEqual({ title: "Older journal", source: "auto" });
+				expect((await storage.readLatestTitle(file))?.title).toBe("Older journal");
+				expect(titleOf(await reopen())).toEqual({ title: "Older journal", source: "auto" });
+			},
+		);
+	});
 });

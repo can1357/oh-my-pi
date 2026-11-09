@@ -870,13 +870,15 @@ async function indexedSessions(files: readonly string[], titles: ReadonlyMap<str
 
 /**
  * Upsert the scanned titles history.db lacks or holds differently, e.g. of
- * sessions titled before the index existed, so the next listing pre-populates them.
+ * sessions titled before the index existed, so the next listing pre-populates
+ * them; forget an indexed title the session file no longer holds (a clear).
  */
 function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyMap<string, string>): void {
-	const changed = new Map<string, string>();
+	const changed = new Map<string, string | undefined>();
 	for (const session of sessions) {
 		const title = sanitizeSessionName(session.title);
-		if (title && indexed.get(session.id) !== title) changed.set(session.id, title);
+		if (title ? indexed.get(session.id) !== title : indexed.has(session.id))
+			changed.set(session.id, title || undefined);
 	}
 	recordSessionTitles(changed);
 }

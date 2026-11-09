@@ -55,6 +55,7 @@ interface SessionIndexHandle {
 	identity: SqliteFileIdentity;
 	db: Database;
 	upsertTitle: Statement;
+	deleteTitle: Statement;
 	selectTitle: Statement;
 	insertRecap: Statement;
 }
@@ -67,6 +68,7 @@ function closeHandle(): void {
 	if (!handle) return;
 	try {
 		handle.upsertTitle.finalize();
+		handle.deleteTitle.finalize();
 		handle.selectTitle.finalize();
 		handle.insertRecap.finalize();
 		handle.db.close();
@@ -110,6 +112,7 @@ ON CONFLICT(session_id) DO UPDATE SET
 	title = excluded.title,
 	updated_at = excluded.updated_at
 			`),
+			deleteTitle: db.prepare("DELETE FROM session_titles WHERE session_id = ?"),
 			selectTitle: db.prepare("SELECT title FROM session_titles WHERE session_id = ? AND typeof(title) = 'text'"),
 			insertRecap: db.prepare("INSERT INTO session_recaps (session_id, cwd, recap) VALUES (?, ?, ?)"),
 		};
@@ -126,14 +129,16 @@ ON CONFLICT(session_id) DO UPDATE SET
 }
 
 /**
- * Record (or replace) the indexed title for a session id. Best-effort: index
- * failures must never break a rename, so errors are logged and swallowed.
+ * Record (or replace) the indexed title for a session id; an empty or absent
+ * title forgets the entry (a cleared title). Best-effort: index failures must
+ * never break a rename, so errors are logged and swallowed.
  */
-export function recordSessionTitle(sessionId: string, title: string): void {
+export function recordSessionTitle(sessionId: string, title: string | undefined): void {
 	const index = openSessionIndex();
 	if (!index) return;
 	try {
-		index.upsertTitle.run(sessionId, title);
+		if (title) index.upsertTitle.run(sessionId, title);
+		else index.deleteTitle.run(sessionId);
 	} catch (error) {
 		logger.debug("Session title index write failed", { sessionId, error: String(error) });
 	}
@@ -142,15 +147,19 @@ export function recordSessionTitle(sessionId: string, title: string): void {
 /**
  * Record (or replace) many indexed titles in one transaction, so a picker
  * scan backfilling thousands of sessions pays one commit instead of one per
- * row. Best-effort like {@link recordSessionTitle}.
+ * row; an empty or absent title forgets the session's entry (a cleared title).
+ * Best-effort like {@link recordSessionTitle}.
  */
-export function recordSessionTitles(titles: ReadonlyMap<string, string>): void {
+export function recordSessionTitles(titles: ReadonlyMap<string, string | undefined>): void {
 	if (titles.size === 0) return;
 	const index = openSessionIndex();
 	if (!index) return;
 	try {
 		index.db.transaction(() => {
-			for (const [sessionId, title] of titles) index.upsertTitle.run(sessionId, title);
+			for (const [sessionId, title] of titles) {
+				if (title) index.upsertTitle.run(sessionId, title);
+				else index.deleteTitle.run(sessionId);
+			}
 		})();
 	} catch (error) {
 		logger.debug("Session title index write failed", { count: titles.size, error: String(error) });
