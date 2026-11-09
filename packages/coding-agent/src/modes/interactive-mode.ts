@@ -2628,6 +2628,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "rewind":
 					this.showUserMessageSelector();
 					return;
+				case "turn":
+					void this.#selectorController.runTurnAction(action.turn, action.message);
+					return;
 				case "resume":
 					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
 						this.showError(error instanceof Error ? error.message : String(error)),
@@ -9586,8 +9589,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(): void {
-		this.#selectorController.showUserMessageSelector();
+	showUserMessageSelector(startAt?: string): void {
+		this.#selectorController.showUserMessageSelector(startAt);
 	}
 
 	showCopySelector(): void {

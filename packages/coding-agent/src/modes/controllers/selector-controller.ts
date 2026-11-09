@@ -1,6 +1,6 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
@@ -68,6 +68,7 @@ import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/for
 import { previewModelCompactionPoint, setModelCompactionPoint } from "../../session/model-compaction-threshold";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import type { TurnAct, TurnMessage } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -1318,7 +1319,8 @@ export class SelectorController {
 		});
 	}
 
-	showUserMessageSelector(): void {
+	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
+	showUserMessageSelector(startAt?: string): void {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
@@ -1343,6 +1345,7 @@ export class SelectorController {
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
 			siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+			startAt,
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
 		});
@@ -1407,9 +1410,11 @@ export class SelectorController {
 	 * replaces the editor text, so it is a real move even when it is the
 	 * current leaf; every other target lands the leaf on the entry. `done`
 	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript.
+	 * alternate screen never flashes a stale transcript. `resend` sends a user
+	 * target's prompt again at once (a turn's Retry) instead of leaving it in
+	 * the editor; otherwise the status toast offers Undo ({@link #undoRewind}).
 	 */
-	async #rewindFromTranscript(entryId: string, done: () => void): Promise<void> {
+	async #rewindFromTranscript(entryId: string, done: () => void, resend = false): Promise<void> {
 		const entry = this.ctx.sessionManager.getEntry(entryId);
 		if (!entry || !isTranscriptEntry(entry)) {
 			done();
@@ -1424,6 +1429,10 @@ export class SelectorController {
 			return;
 		}
 		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
+		const branch = this.ctx.sessionManager.getBranch();
+		const at = branch.findIndex(e => e.id === entryId);
+		const dropped = at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+		const draft = { text: this.ctx.editor.getText(), images: [...this.ctx.editor.pendingImages] };
 		try {
 			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
 			if (result.cancelled) {
@@ -1441,13 +1450,113 @@ export class SelectorController {
 			await this.ctx.reloadTodos();
 			if (result.editorText && (isUserTarget || !this.ctx.editor.getText().trim())) {
 				this.ctx.editor.setDraft(result.editorText, result.editorImages);
+				if (resend && isUserTarget) this.ctx.editor.submit();
 			}
 			done();
-			this.ctx.showStatus("Rewound to selected point");
+			if (resend) {
+				this.ctx.showStatus("Retrying the turn");
+				return;
+			}
+			this.ctx.showStatus(
+				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point",
+				{
+					action: {
+						act: "undo",
+						label: "Undo",
+						run: () => void this.#undoRewind(realLeafId, isUserTarget ? draft : undefined),
+					},
+				},
+			);
 		} catch (error) {
 			done();
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	/**
+	 * Undo of a transcript rewind: the leaf goes back to `leafId`, where it was (the rewind kept that path as a
+	 * branch), and `draft`, what the editor held before the rewind put a prompt there, comes back.
+	 */
+	async #undoRewind(
+		leafId: string | null,
+		draft: { text: string; images: ImageContent[] } | undefined,
+	): Promise<void> {
+		if (!leafId) return;
+		try {
+			const result = await this.ctx.session.navigateTree(leafId, { summarize: false });
+			if (result.cancelled) {
+				this.ctx.showStatus("Navigation cancelled");
+				return;
+			}
+			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			await this.ctx.reloadTodos();
+			if (draft) this.ctx.editor.setDraft(draft.text, draft.images);
+			this.ctx.showStatus("Rewind undone");
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/**
+	 * A transcript turn's hold-menu action on `message`, found on the current branch by role and timestamp:
+	 * `rewind` opens the rewind selector on it; `edit` rewinds past the turn's prompt and puts it in the editor,
+	 * as Esc Esc does; `retry` rewinds past the prompt and sends it again; `fork` moves onto a new session
+	 * holding the conversation up to the message, the old one kept on disk.
+	 */
+	async runTurnAction(turn: TurnAct, message: TurnMessage): Promise<void> {
+		const branch = this.ctx.sessionManager.getBranch();
+		const index = branch.findLastIndex(
+			e => e.type === "message" && e.message.role === message.role && e.message.timestamp === message.at,
+		);
+		const entry = branch[index];
+		if (!entry) {
+			this.ctx.showStatus("That message is no longer on this branch");
+			return;
+		}
+		if (turn === "rewind") {
+			this.showUserMessageSelector(entry.id);
+			return;
+		}
+		if (turn === "fork") {
+			await this.#forkAt(entry.id);
+			return;
+		}
+		// The turn's prompt: the message itself, or the last one asked before the answer.
+		const prompt = message.role === "user" ? entry : branch.slice(0, index).findLast(e => isUserRequestEntry(e));
+		if (!prompt) {
+			this.ctx.showStatus("No prompt to resend before this answer");
+			return;
+		}
+		// Retry sends the prompt through the editor, which holds the user's unsent draft.
+		if (turn === "retry" && (this.ctx.editor.getText().trim() || this.ctx.editor.pendingImages.length > 0)) {
+			this.ctx.showStatus("Send or clear the draft to retry this turn");
+			return;
+		}
+		await this.#rewindFromTranscript(prompt.id, () => this.ctx.ui.requestRender(), turn === "retry");
+	}
+
+	/** Fork from here: the session moves onto a new file holding the conversation up to `entryId`. */
+	async #forkAt(entryId: string): Promise<void> {
+		if (this.ctx.session.isStreaming) {
+			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
+			return;
+		}
+		const previous = this.ctx.sessionManager.isSessionOnDisk() ? this.ctx.sessionManager.getSessionId() : undefined;
+		try {
+			if (!(await this.ctx.session.fork(entryId))) {
+				this.ctx.showError("Fork failed (session not persisted or cancelled)");
+				return;
+			}
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.reloadTodos();
+		this.ctx.statusLine.invalidate();
+		this.ctx.showStatus(
+			previous ? `Forked into a new session · /resume ${previous} returns` : "Forked into a new session",
+		);
 	}
 
 	showCopySelector(): void {
