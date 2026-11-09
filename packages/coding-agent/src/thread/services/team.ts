@@ -8,6 +8,7 @@ import { TEAM_SERVICE_KIND, type TeamProtocol } from "./team-protocol";
 import { RemoteTeamClient } from "./team-remote";
 
 const serve: RpcServe<TeamEndpoint, TeamProtocol> = {
+	listTeams: (endpoint, key) => endpoint.listTeams(key),
 	start: (endpoint, key, team) => endpoint.start(key, team),
 	members: (endpoint, key, team) => endpoint.members(key, team),
 	putMember: (endpoint, key, team, generation, handle, expected, entry) =>
@@ -15,7 +16,12 @@ const serve: RpcServe<TeamEndpoint, TeamProtocol> = {
 	deleteMember: (endpoint, key, team, generation, handle, expected) =>
 		endpoint.deleteMember(key, team, generation, handle, expected),
 	stop: (endpoint, key, team, generation) => endpoint.stop(key, team, generation),
+	requestStop: (endpoint, key, team, generation, handle, expected, force, timeoutMs) =>
+		endpoint.requestStop(key, team, generation, handle, expected, force, timeoutMs),
+	resolvePendingStop: (endpoint, key, team, generation, handle, expected, ref, failure) =>
+		endpoint.resolvePendingStop(key, team, generation, handle, expected, ref, failure),
 	leadIdentity: (endpoint, key, team) => endpoint.leadIdentity(key, team),
+	respondStop: (endpoint, key, identity, requestId, body) => endpoint.respondStop(key, identity, requestId, body),
 	readTasks: (endpoint, key, identity) => endpoint.readTasks(key, identity),
 	addTask: (endpoint, key, identity, title) => endpoint.addTask(key, identity, title),
 	claim: (endpoint, key, identity, id) => endpoint.claim(key, identity, id),

@@ -61,6 +61,18 @@ describe("team:// routing", () => {
 			const secondSession = tools(second);
 			const outsiderSession = tools(outsider);
 			const router = new InternalUrlRouter();
+			await expect(
+				router.write("team://audit/stop/request-123", "ack", { session: firstSession }),
+			).rejects.not.toThrow("Invalid team task URL");
+			await expect(router.resolve("team://audit/stop/request-123", { session: firstSession })).rejects.toThrow();
+			for (const url of [
+				"team://audit/stop/",
+				"team://audit/stop/id/extra",
+				"team://audit/stop/id?x=1",
+				"team://audit/stop/id#fragment",
+			]) {
+				await expect(router.write(url, "ack", { session: firstSession })).rejects.toThrow();
+			}
 			const rows = async (session = leadSession) =>
 				JSON.parse((await router.resolve("team://audit/tasks", { session })).content);
 			await router.write("team://audit/tasks", "Inspect", { session: leadSession });

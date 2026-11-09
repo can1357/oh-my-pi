@@ -1,4 +1,5 @@
 import { AgentRegistry } from "../../registry/agent-registry";
+import type { AgentRef } from "../../registry/agent-registry";
 import { isMainThread } from "node:worker_threads";
 import { teamRuntime, type TeamIdentity } from "../../task/team-runtime";
 import type { TeamDefinition } from "../../task/teams";
@@ -22,6 +23,9 @@ export class TeamEndpoint implements TeamClient {
 		const session = this.bridge ? this.bridge.session(key) : findLocalSession(key);
 		if (!session) throw new Error("Team caller session is not registered on this thread");
 		return session;
+	}
+	async listTeams(key: string) {
+		return teamRuntime.listTeams(this.#session(key));
 	}
 	async start(key: string, team: TeamDefinition) {
 		const { generation, leadId } = await teamRuntime.start(this.#session(key), team);
@@ -54,6 +58,7 @@ export class TeamEndpoint implements TeamClient {
 		const ref = entry.ref && AgentRegistry.global().get(entry.id);
 		if (entry.ref && (!ref || entry.ref.id !== entry.id || ref.generation !== entry.ref.generation)) return false;
 		members.set(handle, { ...entry, ...(ref ? { ref } : {}) });
+		teamRuntime.memberUpdated(session, team, generation, handle, current, entry);
 		return true;
 	}
 	async deleteMember(key: string, team: string, generation: number, handle: string, expected: TeamCommandMember) {
@@ -62,7 +67,9 @@ export class TeamEndpoint implements TeamClient {
 		const members = teamRuntime.members(session, team);
 		const current = members?.get(handle) as TeamCommandMember | undefined;
 		if (!members || !sameMember(current, expected)) return false;
-		return members.delete(handle);
+		members.delete(handle);
+		teamRuntime.memberUpdated(session, team, generation, handle, current, undefined);
+		return true;
 	}
 	async stop(key: string, team: string, generation: number) {
 		const session = this.#session(key);
@@ -71,8 +78,33 @@ export class TeamEndpoint implements TeamClient {
 		await teamRuntime.stop(session, team);
 		return true;
 	}
+	requestStop(
+		key: string,
+		team: string,
+		generation: number,
+		handle: string,
+		expected: TeamCommandMember,
+		force: boolean,
+		timeoutMs: number,
+	) {
+		return teamRuntime.requestStop(this.#session(key), team, generation, handle, expected, force, timeoutMs);
+	}
+	resolvePendingStop(
+		key: string,
+		team: string,
+		generation: number,
+		handle: string,
+		expected: TeamCommandMember,
+		ref?: AgentRef,
+		failure?: string,
+	) {
+		return teamRuntime.resolvePendingStop(this.#session(key), team, generation, handle, expected, ref, failure);
+	}
 	async leadIdentity(key: string, team: string) {
 		return teamRuntime.identity(this.#session(key), team);
+	}
+	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string) {
+		return teamRuntime.respondStop(this.#session(key), identity, requestId, body);
 	}
 	readTasks(key: string, identity: TeamIdentity) {
 		return teamRuntime.readTasks(this.#session(key), identity);

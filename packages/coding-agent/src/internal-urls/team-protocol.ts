@@ -10,12 +10,19 @@ import type {
 	WriteContext,
 } from "./types";
 
-function parseTarget(url: InternalUrl): { team: string; id?: string; action?: "claim" | "release" | "done" } {
+type TeamTarget =
+	| { team: string; kind: "tasks"; id?: string; action?: "claim" | "release" | "done" }
+	| { team: string; kind: "stop"; requestId: string };
+
+function parseTarget(url: InternalUrl): TeamTarget {
 	const team = url.rawHost;
 	const pathname = url.rawPathname ?? url.pathname;
+	if (!team || url.search || url.hash) throw new Error("Invalid team task URL");
+	const stop = /^\/stop\/([a-zA-Z0-9_-]+)$/.exec(pathname);
+	if (stop) return { team, kind: "stop", requestId: stop[1] };
 	const match = /^\/tasks(?:\/([1-9][0-9]*)\/(claim|release|done))?$/.exec(pathname);
-	if (!team || !match || url.search || url.hash) throw new Error("Invalid team task URL");
-	return { team, id: match[1], action: match[2] as "claim" | "release" | "done" | undefined };
+	if (!match) throw new Error("Invalid team task URL");
+	return { team, kind: "tasks", id: match[1], action: match[2] as "claim" | "release" | "done" | undefined };
 }
 
 async function caller(session: ToolSession | undefined, team: string) {
@@ -39,7 +46,7 @@ export class TeamProtocolHandler implements ProtocolHandler {
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const target = parseTarget(url);
-		if (target.id) throw new Error("Only team task lists can be read");
+		if (target.kind !== "tasks" || target.id) throw new Error("Only team task lists can be read");
 		const { client, key, identity } = await caller(context?.session, target.team);
 		const content = JSON.stringify(await client.readTasks(key, identity), null, 2);
 		return { url: url.href, content, contentType: "application/json" };
@@ -49,7 +56,8 @@ export class TeamProtocolHandler implements ProtocolHandler {
 		const target = parseTarget(url);
 		const { client, key, identity } = await caller(context?.session, target.team);
 		let result: unknown;
-		if (!target.id) result = await client.addTask(key, identity, content);
+		if (target.kind === "stop") result = await client.respondStop(key, identity, target.requestId, content);
+		else if (!target.id) result = await client.addTask(key, identity, content);
 		else if (target.action === "claim") {
 			const claim = await client.claim(key, identity, target.id);
 			if (claim.kind === "conflict") throw new Error(`Task ${target.id} is owned by ${claim.owner}`);

@@ -4,4 +4,5 @@ Shared team tasks are coordinated through the team protocol, whether or not a wo
 - Release a task with `write team://{{teamName}}/tasks/<id>/release`.
 - Complete your task with `write team://{{teamName}}/tasks/<id>/done`, using the write body for the completion note.
 - Only the team lead can add a task, by writing its title to `team://{{teamName}}/tasks`. The lead can also release or complete tasks.
+- When the lead requests a cooperative stop, reply using `write team://{{teamName}}/stop/<requestId>` with body `ack` to stop, or `decline: <reason>` to stay running. Use the request ID from the message.
 `TASKS.md`, when present in the workspace, is a generated view; do not edit it to change tasks.

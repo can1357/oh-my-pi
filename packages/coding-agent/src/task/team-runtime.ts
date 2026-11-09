@@ -1,6 +1,9 @@
 import { AgentRegistry, type AgentRef } from "../registry/agent-registry";
 import { IrcBus } from "../irc/bus";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { randomUUID } from "node:crypto";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import stopRequestTemplate from "../prompts/system/team-stop-request.md" with { type: "text" };
 import { TeamLedger, type TeamClaimResult, type TeamTask } from "./team-ledger";
 import type { TeamDefinition } from "./teams";
 
@@ -9,6 +12,12 @@ export interface TeamIdentity {
 	team: string;
 	generation: number;
 	memberId: string;
+}
+
+/** Result of a member's `write team://<team>/stop/<requestId>`. */
+export interface TeamStopResponse {
+	requestId: string;
+	outcome: "acknowledged" | "declined";
 }
 
 export interface TeamMembership {
@@ -23,12 +32,26 @@ export interface StartedTeam {
 	members: Map<string, TeamMembership>;
 }
 
+type ReservedMember = TeamMembership & { reservation: string };
+
+interface StopIntent {
+	handle: string;
+	reservation: string;
+	id: string;
+	force: boolean;
+	timeoutMs: number;
+	ref?: AgentRef;
+	requestId?: string;
+	timer?: NodeJS.Timeout;
+}
+
 interface RuntimeTeam extends StartedTeam {
 	name: string;
 	lead: object;
 	leadRef: AgentRef;
 	ledger: TeamLedger;
 	pendingRefs: Map<string, { reservation: unknown; generation: number }>;
+	stops: Map<string, StopIntent>;
 }
 
 /** Main-owned membership and authority for all team generations. */
@@ -47,6 +70,10 @@ export class TeamRuntime {
 		this.#unsubscribe = registry.onChange(event => {
 			if (event.type === "registered") {
 				for (const state of this.#generations.values()) {
+					for (const intent of state.stops.values()) {
+						if (intent.id === event.ref.id && intent.ref && intent.ref.generation !== event.ref.generation)
+							this.#clearStop(state, intent);
+					}
 					const member = [...state.members.values()].find(entry => entry.id === event.ref.id);
 					if (member && !member.ref && member.failure === undefined) {
 						const reservation = Reflect.get(member, "reservation");
@@ -57,6 +84,14 @@ export class TeamRuntime {
 					}
 				}
 				return;
+			}
+			if (event.type === "removed" || (event.type === "status_changed" && event.ref.status === "aborted")) {
+				for (const state of this.#generations.values()) {
+					for (const intent of state.stops.values()) {
+						if (intent.id === event.ref.id && intent.ref?.generation === event.ref.generation)
+							this.#clearStop(state, intent);
+					}
+				}
 			}
 			if (event.type !== "status_changed" || event.previousStatus !== "running" || event.ref.status !== "idle")
 				return;
@@ -146,6 +181,7 @@ export class TeamRuntime {
 			generation: ++this.#nextGeneration,
 			members: new Map(),
 			pendingRefs: new Map(),
+			stops: new Map(),
 		};
 		let teams = this.#sessions.get(lead);
 		if (!teams) this.#sessions.set(lead, (teams = new Map()));
@@ -157,6 +193,40 @@ export class TeamRuntime {
 
 	members(lead: object, name: string): Map<string, TeamMembership> | undefined {
 		return this.#sessions.get(lead)?.get(name)?.members;
+	}
+	listTeams(lead: object): string[] {
+		const teams = this.#sessions.get(lead);
+		if (!teams) return [];
+		return [...teams.values()]
+			.filter(state => this.isCurrentLead(lead, state.name, state.generation))
+			.map(state => state.name);
+	}
+	/** Retain stop intent only while the same spawn reservation remains active. */
+	memberUpdated(
+		lead: object,
+		name: string,
+		generation: number,
+		handle: string,
+		before: TeamMembership | undefined,
+		after: TeamMembership | undefined,
+	): void {
+		const state = this.#sessions.get(lead)?.get(name);
+		if (!state || !this.isCurrentLead(lead, name, generation) || !before) return;
+		const intent = state.stops.get(handle);
+		if (!intent) return;
+		if (
+			after &&
+			!intent.ref &&
+			intent.id === before.id &&
+			intent.reservation === Reflect.get(before, "reservation") &&
+			intent.reservation === Reflect.get(after, "reservation") &&
+			!after.ref &&
+			after.failure === undefined
+		) {
+			intent.id = after.id;
+		} else if (!after || !this.#matches(state, intent) || after.failure !== undefined) {
+			this.#clearStop(state, intent);
+		}
 	}
 
 	isCurrentLead(lead: object, name: string, generation: number): boolean {
@@ -175,9 +245,189 @@ export class TeamRuntime {
 		return state ? { team: name, generation: state.generation, memberId: state.leadId } : undefined;
 	}
 
+	#clearStop(state: RuntimeTeam, intent: StopIntent): void {
+		if (intent.timer !== undefined) clearTimeout(intent.timer);
+		if (state.stops.get(intent.handle) === intent) state.stops.delete(intent.handle);
+	}
+
+	#clearStops(state: RuntimeTeam): void {
+		for (const intent of state.stops.values()) this.#clearStop(state, intent);
+	}
+
+	#notifyLead(state: RuntimeTeam, memberId: string, body: string): void {
+		if (!this.isCurrentLead(state.lead, state.name, state.generation)) return;
+		void IrcBus.global()
+			.send({ from: memberId, to: state.leadId, body, progress: true })
+			.catch(error => logger.warn("Team stop notification failed", { error: String(error) }));
+	}
+
+	#matches(state: RuntimeTeam, intent: StopIntent): boolean {
+		const member = state.members.get(intent.handle);
+		return (
+			this.isCurrentLead(state.lead, state.name, state.generation) &&
+			member?.id === intent.id &&
+			Reflect.get(member, "reservation") === intent.reservation &&
+			(!intent.ref || (member.ref?.id === intent.ref.id && member.ref.generation === intent.ref.generation))
+		);
+	}
+
+	async #releaseStop(state: RuntimeTeam, intent: StopIntent): Promise<boolean> {
+		if (!this.#matches(state, intent) || !intent.ref) return false;
+		const current = AgentRegistry.global().get(intent.id);
+		if (!current || current.generation !== intent.ref.generation || current.id !== intent.ref.id) return false;
+		const released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
+		if (released && this.#matches(state, intent)) {
+			const member = state.members.get(intent.handle);
+			if (member?.ref?.generation === intent.ref.generation) state.members.delete(intent.handle);
+		}
+		return released;
+	}
+
+	async #dispatchStop(state: RuntimeTeam, intent: StopIntent, ref: AgentRef): Promise<string> {
+		const current = AgentRegistry.global().get(intent.id);
+		if (!this.#matches(state, intent) || !current || current.id !== ref.id || current.generation !== ref.generation) {
+			this.#clearStop(state, intent);
+			return "member changed";
+		}
+		intent.ref = current;
+		if (intent.force) {
+			this.#clearStop(state, intent);
+			return (await this.#releaseStop(state, intent)) ? "released" : "release refused";
+		}
+		const requestId = randomUUID();
+		intent.requestId = requestId;
+		intent.timer = setTimeout(() => {
+			if (state.stops.get(intent.handle) !== intent) return;
+			this.#clearStop(state, intent);
+			if (this.#matches(state, intent))
+				this.#notifyLead(state, intent.id, `Stop request for ${intent.id} timed out.`);
+		}, intent.timeoutMs);
+		intent.timer.unref?.();
+		const body = prompt.render(stopRequestTemplate, { teamName: state.name, requestId }).trim();
+		void IrcBus.global()
+			.send({ from: state.leadId, to: intent.id, body })
+			.then(receipt => {
+				if (receipt.outcome === "failed" && state.stops.get(intent.handle) === intent) {
+					this.#clearStop(state, intent);
+					this.#notifyLead(state, intent.id, `Stop request for ${intent.id} failed: ${receipt.error}`);
+				}
+			})
+			.catch(error => {
+				if (state.stops.get(intent.handle) !== intent) return;
+				this.#clearStop(state, intent);
+				this.#notifyLead(state, intent.id, `Stop request for ${intent.id} failed: ${String(error)}`);
+			});
+		return `requested (${requestId})`;
+	}
+
+	async requestStop(
+		lead: object,
+		name: string,
+		generation: number,
+		handle: string,
+		expected: ReservedMember,
+		force: boolean,
+		timeoutMs: number,
+	): Promise<string> {
+		const state = this.#sessions.get(lead)?.get(name);
+		if (!state || !this.isCurrentLead(lead, name, generation)) return "team changed";
+		const member = state.members.get(handle);
+		if (
+			!member ||
+			member.id !== expected.id ||
+			Reflect.get(member, "reservation") !== expected.reservation ||
+			member.ref?.id !== expected.ref?.id ||
+			member.ref?.generation !== expected.ref?.generation ||
+			member.failure !== expected.failure
+		)
+			return "member changed";
+		if (member.failure !== undefined) return `failed before registering: ${member.failure}`;
+		const existing = state.stops.get(handle);
+		if (existing) {
+			if (!force || existing.force) return "stop already pending";
+			this.#clearStop(state, existing);
+		}
+		const intent: StopIntent = { handle, reservation: expected.reservation, id: expected.id, force, timeoutMs };
+		state.stops.set(handle, intent);
+		return member.ref ? this.#dispatchStop(state, intent, member.ref) : "stop pending registration";
+	}
+
+	async resolvePendingStop(
+		lead: object,
+		name: string,
+		generation: number,
+		handle: string,
+		expected: ReservedMember,
+		ref?: AgentRef,
+		failure?: string,
+	): Promise<boolean> {
+		const state = this.#sessions.get(lead)?.get(name);
+		if (!state || !this.isCurrentLead(lead, name, generation)) return false;
+		const member = state.members.get(handle);
+		if (!member || member.id !== expected.id || Reflect.get(member, "reservation") !== expected.reservation)
+			return false;
+		if (ref) {
+			const current = AgentRegistry.global().get(member.id);
+			const pending = state.pendingRefs.get(member.id);
+			if (
+				!current ||
+				ref.id !== member.id ||
+				ref.generation !== current.generation ||
+				(member.ref && member.ref.generation !== ref.generation) ||
+				(pending?.reservation === expected.reservation && pending.generation !== ref.generation)
+			)
+				return false;
+			member.ref = current;
+		} else if (failure !== undefined) {
+			member.failure = failure;
+		} else return false;
+		const intent = state.stops.get(handle);
+		if (intent && this.#matches(state, intent)) {
+			if (failure !== undefined) {
+				this.#clearStop(state, intent);
+				this.#notifyLead(state, intent.id, `Stop request for ${member.id} failed during registration: ${failure}`);
+			} else if (ref && !intent.requestId) {
+				const result = await this.#dispatchStop(state, intent, ref);
+				if (result === "release refused" || result === "member changed")
+					this.#notifyLead(state, intent.id, `Stop request for ${member.id} failed: ${result}`);
+			}
+		}
+		return true;
+	}
+
+	async respondStop(
+		session: object,
+		identity: TeamIdentity,
+		requestId: string,
+		body: string,
+	): Promise<TeamStopResponse> {
+		const { state, lead } = this.#authorize(session, identity);
+		if (lead) throw new Error("Only the targeted member can respond");
+		const intent = [...state.stops.values()].find(entry => entry.requestId === requestId);
+		if (!intent || intent.id !== identity.memberId || !this.#matches(state, intent) || !intent.ref)
+			throw new Error("Unknown or stale stop request");
+		const current = AgentRegistry.global().get(intent.id);
+		if (!current || current.session !== session || current.generation !== intent.ref.generation)
+			throw new Error("Unknown or stale stop request");
+		const response = body.trim();
+		if (response !== "ack" && !/^decline:\s*\S/.test(response)) throw new Error("Expected ack or decline: <reason>");
+		this.#clearStop(state, intent);
+		if (response === "ack") {
+			if (!(await this.#releaseStop(state, intent))) throw new Error("Stop release refused");
+			return { requestId, outcome: "acknowledged" };
+		}
+		this.#notifyLead(
+			state,
+			intent.id,
+			`${intent.id} declined stop: ${response.slice(response.indexOf(":") + 1).trim()}`,
+		);
+		return { requestId, outcome: "declined" };
+	}
+
 	/** Clear test state without recycling generation numbers. */
 	resetForTests(): void {
 		this.#unsubscribe?.();
+		for (const state of this.#generations.values()) this.#clearStops(state);
 		this.#unsubscribe = undefined;
 		this.#sessions = new WeakMap();
 		this.#generations.clear();
@@ -190,6 +440,7 @@ export class TeamRuntime {
 		const teams = this.#sessions.get(lead);
 		const state = teams?.get(name);
 		if (!state) return;
+		this.#clearStops(state);
 		teams?.delete(name);
 		this.#generations.delete(state.generation);
 		this.#unobserveIfEmpty();
@@ -200,7 +451,11 @@ export class TeamRuntime {
 	sessionClosed(session: object): void {
 		this.#closedSessions.add(session);
 		const teams = this.#sessions.get(session);
-		if (teams) for (const state of teams.values()) this.#generations.delete(state.generation);
+		if (teams)
+			for (const state of teams.values()) {
+				this.#clearStops(state);
+				this.#generations.delete(state.generation);
+			}
 		this.#sessions.delete(session);
 		this.#unobserveIfEmpty();
 	}

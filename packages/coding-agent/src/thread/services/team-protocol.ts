@@ -1,5 +1,6 @@
 import type { TeamClaimResult, TeamTask } from "../../task/team-ledger";
-import type { StartedTeam, TeamIdentity, TeamMembership } from "../../task/team-runtime";
+import type { AgentRef } from "../../registry/agent-registry";
+import type { StartedTeam, TeamIdentity, TeamMembership, TeamStopResponse } from "../../task/team-runtime";
 import type { TeamDefinition } from "../../task/teams";
 import type { RpcMethod } from "../rpc";
 
@@ -12,6 +13,7 @@ export interface TeamMembersSnapshot {
 }
 
 export type TeamProtocol = {
+	listTeams: RpcMethod<[sessionKey: string], string[]>;
 	start: RpcMethod<[sessionKey: string, team: TeamDefinition], Pick<StartedTeam, "generation" | "leadId">>;
 	members: RpcMethod<[sessionKey: string, team: string], TeamMembersSnapshot | undefined>;
 	putMember: RpcMethod<
@@ -30,7 +32,35 @@ export type TeamProtocol = {
 		boolean
 	>;
 	stop: RpcMethod<[sessionKey: string, team: string, generation: number], boolean>;
+	requestStop: RpcMethod<
+		[
+			sessionKey: string,
+			team: string,
+			generation: number,
+			handle: string,
+			expected: TeamCommandMember,
+			force: boolean,
+			timeoutMs: number,
+		],
+		string
+	>;
+	resolvePendingStop: RpcMethod<
+		[
+			sessionKey: string,
+			team: string,
+			generation: number,
+			handle: string,
+			expected: TeamCommandMember,
+			ref?: AgentRef,
+			failure?: string,
+		],
+		boolean
+	>;
 	leadIdentity: RpcMethod<[sessionKey: string, team: string], TeamIdentity | undefined>;
+	respondStop: RpcMethod<
+		[sessionKey: string, identity: TeamIdentity, requestId: string, body: string],
+		TeamStopResponse
+	>;
 	readTasks: RpcMethod<[sessionKey: string, identity: TeamIdentity], TeamTask[]>;
 	addTask: RpcMethod<[sessionKey: string, identity: TeamIdentity, title: string], TeamTask>;
 	claim: RpcMethod<[sessionKey: string, identity: TeamIdentity, id: string], TeamClaimResult>;
@@ -39,6 +69,7 @@ export type TeamProtocol = {
 };
 
 export interface TeamClient {
+	listTeams(sessionKey: string): Promise<string[]>;
 	start(sessionKey: string, team: TeamDefinition): Promise<Pick<StartedTeam, "generation" | "leadId">>;
 	members(sessionKey: string, team: string): Promise<TeamMembersSnapshot | undefined>;
 	putMember(
@@ -57,7 +88,26 @@ export interface TeamClient {
 		expected: TeamCommandMember,
 	): Promise<boolean>;
 	stop(sessionKey: string, team: string, generation: number): Promise<boolean>;
+	requestStop(
+		sessionKey: string,
+		team: string,
+		generation: number,
+		handle: string,
+		expected: TeamCommandMember,
+		force: boolean,
+		timeoutMs: number,
+	): Promise<string>;
+	resolvePendingStop(
+		sessionKey: string,
+		team: string,
+		generation: number,
+		handle: string,
+		expected: TeamCommandMember,
+		ref?: AgentRef,
+		failure?: string,
+	): Promise<boolean>;
 	readTasks(sessionKey: string, identity: TeamIdentity): Promise<TeamTask[]>;
+	respondStop(sessionKey: string, identity: TeamIdentity, requestId: string, body: string): Promise<TeamStopResponse>;
 	leadIdentity(sessionKey: string, team: string): Promise<TeamIdentity | undefined>;
 	addTask(sessionKey: string, identity: TeamIdentity, title: string): Promise<TeamTask>;
 	claim(sessionKey: string, identity: TeamIdentity, id: string): Promise<TeamClaimResult>;

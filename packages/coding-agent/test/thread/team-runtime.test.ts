@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { IrcBus } from "../../src/irc/bus";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { TeamRuntime } from "../../src/task/team-runtime";
@@ -26,7 +27,12 @@ const team: TeamDefinition = {
 };
 const session = () => ({}) as AgentSessionHandle;
 
-beforeEach(() => AgentRegistry.resetGlobalForTests());
+beforeEach(() => {
+	teamRuntime.resetForTests();
+	AgentRegistry.resetGlobalForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	IrcBus.resetGlobalForTests();
+});
 
 describe("team idle notifications", () => {
 	it("notifies the actual lead once per completed running turn and ignores replaced members", async () => {
@@ -102,6 +108,308 @@ describe("team idle notifications", () => {
 		expect(received[0]).toContain("Done");
 		await runtime.stop(lead, "audit");
 	});
+});
+
+describe("team cooperative stop", () => {
+	it("accepts only the targeted member's acknowledgement and tombstones that member once", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		const messages: string[] = [];
+		let disposed = 0;
+		const child = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				messages.push(message.body);
+				return "injected";
+			},
+			dispose: async () => {
+				disposed++;
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "reservation", ref };
+		started.members.set("worker", entry);
+		await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000);
+		expect(
+			await runtime.requestStop(
+				lead,
+				"audit",
+				started.generation,
+				"worker",
+				{ ...entry, ref: { ...ref, id: "other" } },
+				true,
+				120000,
+			),
+		).toBe("member changed");
+		expect(disposed).toBe(0);
+		const requestId = messages[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		await expect(runtime.respondStop(session(), identity, requestId, "ack")).rejects.toThrow();
+		await expect(runtime.respondStop(child, identity, requestId, "invalid")).rejects.toThrow();
+		await runtime.respondStop(child, identity, requestId, "ack");
+		expect(disposed).toBe(1);
+		expect(registry.get("worker")?.status).toBe("aborted");
+		expect(started.members.has("worker")).toBe(false);
+		await expect(runtime.respondStop(child, identity, requestId, "ack")).rejects.toThrow();
+		await runtime.stop(lead, "audit");
+	});
+
+	it.each([false, true])("retains membership when release is refused (force=%s)", async force => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "reservation", ref: { ...ref } };
+		started.members.set("worker", entry);
+		const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(false);
+		vi.useFakeTimers();
+		try {
+			const result = await runtime.requestStop(lead, "audit", started.generation, "worker", entry, force, 120000);
+			if (force) expect(result).toBe("release refused");
+			else {
+				const requestId = result.match(/requested \(([^)]+)\)/)![1]!;
+				await expect(
+					runtime.respondStop(
+						child,
+						{ team: "audit", generation: started.generation, memberId: "worker" },
+						requestId,
+						"ack",
+					),
+				).rejects.toThrow("Stop release refused");
+			}
+			expect(started.members.get("worker")?.ref?.generation).toBe(ref.generation);
+			expect(registry.get("worker")?.session).toBe(child);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			release.mockRestore();
+			await runtime.stop(lead, "audit");
+			vi.useRealTimers();
+		}
+	});
+
+	it("notifies the lead on decline and timeout without releasing the member", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const notices: Array<{ from: string; body: string; progress?: boolean }> = [];
+		const requests: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { from: string; body: string; progress?: boolean }) => {
+				notices.push(message);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const child = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				requests.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "reservation", ref };
+		started.members.set("worker", entry);
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000);
+		const first = requests[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+		await runtime.respondStop(child, identity, first, "decline: busy");
+		expect(notices.find(message => message.body.includes("busy"))).toMatchObject({ from: "worker", progress: true });
+		vi.useFakeTimers();
+		try {
+			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 10);
+			vi.advanceTimersByTime(10);
+			await Promise.resolve();
+		} finally {
+			vi.useRealTimers();
+		}
+		expect(notices.filter(message => message.body.includes("timed out"))).toEqual([
+			expect.objectContaining({ from: "worker", progress: true }),
+		]);
+		const second = requests[1]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+		await expect(runtime.respondStop(child, identity, second, "ack")).rejects.toThrow();
+		expect(registry.get("worker")?.session).toBe(child);
+		expect(started.members.has("worker")).toBe(true);
+		await runtime.stop(lead, "audit");
+	});
+
+	it("applies pending force only to the matching reservation and generation", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "original" };
+		started.members.set("worker", entry);
+		await runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000);
+		let disposed = 0;
+		const child = {
+			dispose: async () => {
+				disposed++;
+			},
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		expect(await runtime.resolvePendingStop(lead, "audit", started.generation, "worker", entry, ref)).toBe(true);
+		expect(disposed).toBe(1);
+		expect(registry.get("worker")?.status).toBe("aborted");
+		expect(started.members.has("worker")).toBe(false);
+		await runtime.stop(lead, "audit");
+		const restarted = await runtime.start(lead, team);
+		const replacement = { id: "worker", reservation: "replacement" };
+		restarted.members.set("worker", replacement);
+		expect(await runtime.resolvePendingStop(lead, "audit", started.generation, "worker", entry, ref)).toBe(false);
+		expect(restarted.members.has("worker")).toBe(true);
+		await runtime.stop(lead, "audit");
+	});
+
+	it("sends a pending cooperative request only after the reserved member registers", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const lead = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "original" };
+		started.members.set("worker", entry);
+		await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000);
+		const messages: string[] = [];
+		const child = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				messages.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		expect(await runtime.resolvePendingStop(lead, "audit", started.generation, "worker", entry, ref)).toBe(true);
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toContain("team://audit/stop/");
+		expect(registry.get("worker")?.session).toBe(child);
+		await runtime.stop(lead, "audit");
+	});
+
+	it("rejects registration for a replaced ref and reports a pending registration failure", async () => {
+		IrcBus.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		const entry = { id: "worker", reservation: "original" };
+		started.members.set("worker", entry);
+		await runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000);
+		registry.register({ id: "worker", displayName: "worker", kind: "sub", session: session() });
+		const replacement = registry.register({
+			id: "worker",
+			displayName: "replacement",
+			kind: "sub",
+			session: session(),
+		});
+		expect(await runtime.resolvePendingStop(lead, "audit", started.generation, "worker", entry, replacement)).toBe(
+			false,
+		);
+		expect(registry.get("worker")?.status).not.toBe("aborted");
+		expect(
+			await runtime.resolvePendingStop(
+				lead,
+				"audit",
+				started.generation,
+				"worker",
+				entry,
+				undefined,
+				"spawn failed",
+			),
+		).toBe(true);
+		expect(notices.some(message => message.includes("spawn failed"))).toBe(true);
+		await runtime.stop(lead, "audit");
+	});
+	it.each(["ack", "decline", "release", "replacement", "restart", "teardown", "registration failure"] as const)(
+		"cleans the stop timer on %s and rejects the old response",
+		async action => {
+			IrcBus.resetGlobalForTests();
+			const registry = AgentRegistry.global();
+			const notices: string[] = [];
+			const requests: string[] = [];
+			const lead = {
+				deliverIrcMessage: async (message: { body: string }) => {
+					notices.push(message.body);
+					return "injected";
+				},
+			} as unknown as AgentSessionHandle;
+			let disposed = 0;
+			const child = {
+				deliverIrcMessage: async (message: { body: string }) => {
+					requests.push(message.body);
+					return "injected";
+				},
+				dispose: async () => {
+					disposed++;
+				},
+			} as unknown as AgentSessionHandle;
+			registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+			const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+			const runtime = new TeamRuntime();
+			const started = await runtime.start(lead, team);
+			const entry = { id: "worker", reservation: "original", ref: { ...ref } };
+			started.members.set("worker", entry);
+			const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+			vi.useFakeTimers();
+			try {
+				await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 120000);
+				expect(vi.getTimerCount()).toBe(1);
+				const requestId = requests[0]!.match(/team:\/\/audit\/stop\/([^\s]+)/)![1]!;
+				switch (action) {
+					case "ack":
+					case "decline":
+						await runtime.respondStop(child, identity, requestId, action === "ack" ? "ack" : "decline: busy");
+						break;
+					case "release":
+						registry.setStatus("worker", "aborted", ref);
+						break;
+					case "replacement":
+						registry.register({ id: "worker", displayName: "new", kind: "sub", session: child });
+						break;
+					case "restart":
+						await runtime.stop(lead, "audit");
+						await runtime.start(lead, team);
+						break;
+					case "teardown":
+						runtime.sessionClosed(lead);
+						break;
+					case "registration failure":
+						await runtime.resolvePendingStop(
+							lead,
+							"audit",
+							started.generation,
+							"worker",
+							entry,
+							undefined,
+							"failed",
+						);
+						break;
+				}
+				expect(vi.getTimerCount()).toBe(0);
+				await expect(runtime.respondStop(child, identity, requestId, "ack")).rejects.toThrow();
+				vi.advanceTimersByTime(240000);
+				expect(notices.filter(body => body.includes("timed out"))).toHaveLength(0);
+				expect(disposed).toBe(action === "ack" ? 1 : 0);
+			} finally {
+				await runtime.stop(lead, "audit");
+				vi.useRealTimers();
+			}
+		},
+	);
 });
 
 describe("team runtime authorization", () => {
@@ -334,7 +642,25 @@ describe("team runtime authorization", () => {
 					)
 				).kind,
 			).toBe("claimed");
-			expect(await probe.command(lead, directory, "stop audit")).toContain("released");
+			expect(await probe.command(lead, directory, "stop --force audit")).toContain("released");
+			const nextMember = await probe.open("worker-member");
+			const next = await probe.start(lead, team);
+			expect(await probe.putMember(lead, next.generation, "worker-member")).toBe(true);
+			const stopped = await probe.command(lead, directory, "stop audit");
+			const requestId = stopped.match(/requested \(([^)]+)\)/)?.[1];
+			expect(requestId).toBeDefined();
+			expect(AgentRegistry.global().get("worker-member")?.status).not.toBe("aborted");
+			const identity = { team: "audit", generation: next.generation, memberId: "worker-member" };
+			await probe.respondStop(nextMember, identity, requestId!, "ack");
+			expect(AgentRegistry.global().get("worker-member")?.status).toBe("aborted");
+			// Await RPC rejection before asserting: Bun's rejects matcher blocks nested worker calls.
+			let duplicateError: unknown;
+			try {
+				await probe.respondStop(nextMember, identity, requestId!, "ack");
+			} catch (error) {
+				duplicateError = error;
+			}
+			expect(duplicateError).toBeInstanceOf(Error);
 		} finally {
 			await worker.terminate("test end");
 			await fs.rm(directory, { recursive: true, force: true });

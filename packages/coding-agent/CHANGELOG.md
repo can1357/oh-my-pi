@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `/team stop` asks teammates to acknowledge or decline before release; `--force` releases matching members immediately, including pending spawns once registered. `team.stopAckTimeoutMs` controls the acknowledgement deadline.
 - Teams can coordinate atomic task claims through `team://`; workspace ledgers persist across restarts and generate a readable `TASKS.md` view.
 - Team task mutations now distinguish a committed ledger from a failed generated view update, reject multiline titles, and preserve worker member identity by generation.
 - Agent definitions support `team` and a relative `team-prompt` for team-specific role instructions.

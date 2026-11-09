@@ -9,7 +9,7 @@ import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
-import type { TeamIdentity } from "../../src/task/team-runtime";
+import type { TeamIdentity, TeamStopResponse } from "../../src/task/team-runtime";
 import type { TeamClaimResult } from "../../src/task/team-ledger";
 import type { TeamDefinition } from "../../src/task/teams";
 import { loadedModulesChangedSince } from "../../src/thread/code-skew";
@@ -28,6 +28,7 @@ export interface TeamProbe {
 	start(key: string, team: TeamDefinition): Promise<{ generation: number; leadId: string }>;
 	claim(key: string, identity: TeamIdentity, id: string): Promise<TeamClaimResult>;
 	putMember(key: string, generation: number, memberId: string): Promise<boolean>;
+	respondStop(key: string, identity: TeamIdentity, requestId: string, body: string): Promise<TeamStopResponse>;
 	command(key: string, cwd: string, args: string): Promise<string>;
 	beforeInstall(): Promise<string>;
 }
@@ -67,6 +68,7 @@ const probe: TeamProbe = {
 	},
 	start: (key, team) => getTeamClient().start(key, team),
 	claim: (key, identity, id) => getTeamClient().claim(key, identity, id),
+	respondStop: (key, identity, requestId, body) => getTeamClient().respondStop(key, identity, requestId, body),
 	async putMember(key, generation, memberId) {
 		const ref = AgentRegistry.global().get(memberId);
 		if (!ref) throw new Error("member missing");

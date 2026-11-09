@@ -775,6 +775,18 @@ export const cfgTeamMaxTeammates = register({
 	},
 });
 
+export const cfgTeamStopAckTimeoutMs = register({
+	id: "team.stopAckTimeoutMs",
+	type: "number",
+	default: 120000,
+	ui: {
+		tab: "tasks",
+		group: "Teams",
+		label: "Stop Acknowledgement Timeout",
+		description: "Milliseconds to wait for a teammate to acknowledge or decline a cooperative stop request",
+	},
+});
+
 export const cfgSessionRetentionDays = register({
 	id: "session.retentionDays",
 	type: "number",
