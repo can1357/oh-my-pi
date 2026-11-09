@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `omp gc --strip` now keeps every response of the latest replay turn, including earlier tool-call steps joined by their tool results, instead of stripping all but the last one ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- `omp gc --strip` now keeps every response of the latest replay turn, including earlier tool-call steps joined by their tool results, instead of stripping all but the last one ([#18636](https://github.com/can1357/oh-my-pi/pull/18636) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.18.1] - 2026-11-08
 
