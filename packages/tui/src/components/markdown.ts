@@ -49,7 +49,13 @@ import {
 	stripExtensionLinkMarkers,
 } from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
-import { TERMINAL, getCellDimensions, ImageProtocol, offsetDirectPlacementLine } from "../terminal-capabilities";
+import {
+	TERMINAL,
+	getCellDimensions,
+	ImageProtocol,
+	offsetDirectPlacementLine,
+	getTerminalBackgroundColor,
+} from "../terminal-capabilities";
 import { getSymbolTheme, getThemeEpoch, theme } from "../theme/theme";
 import { canCacheMarkdownListItems } from "../theme/tui-adapters";
 import type { Component } from "../tui";
@@ -1798,6 +1804,8 @@ export interface DefaultTextStyle {
 	proseFg?: boolean;
 	/** Background color function */
 	bgColor?: (text: string) => string;
+	/** Resolved background for opaque transports such as SIXEL. */
+	backgroundRgb?: () => number;
 	/** Bold text */
 	bold?: boolean;
 	/** Italic text */
@@ -2620,6 +2628,10 @@ export class Markdown implements Component {
 			tex,
 			display,
 			inkHex: theme.getColorHex("text"),
+			backgroundRgb:
+				TERMINAL.imageProtocol === ImageProtocol.Kitty
+					? undefined
+					: (this.#defaultTextStyle?.backgroundRgb?.() ?? getTerminalBackgroundColor()),
 			cellWidthPx: cell.widthPx,
 			cellHeightPx: cell.heightPx,
 			pixelsPerEx: cell.heightPx / 2,
@@ -2636,6 +2648,7 @@ export class Markdown implements Component {
 			retained.request.tex === request.tex &&
 			retained.request.display === display &&
 			retained.request.inkHex === request.inkHex &&
+			retained.request.backgroundRgb === request.backgroundRgb &&
 			retained.request.cellWidthPx === request.cellWidthPx &&
 			retained.request.cellHeightPx === request.cellHeightPx &&
 			retained.request.maxWidthPx === request.maxWidthPx
@@ -3253,6 +3266,9 @@ export class Markdown implements Component {
 			? JSON.stringify([
 					getMathImageGeneration(),
 					theme?.getColorHex("text"),
+					TERMINAL.imageProtocol === ImageProtocol.Kitty
+						? undefined
+						: (this.#defaultTextStyle?.backgroundRgb?.() ?? getTerminalBackgroundColor()),
 					getCellDimensions(),
 					width,
 					resolveImageOptions(),
@@ -3268,6 +3284,7 @@ export class Markdown implements Component {
 			this.#tailRowCache = undefined;
 			this.#listItemRowsCache = undefined;
 			this.#fastTail = undefined;
+			this.#mathReplay = [];
 		}
 		if (this.#mathReplay.length && this.#cachedText !== this.#text) {
 			this.#mathOccurrences = enumerateMathOccurrences(this.#lexTokens(mathSource));
@@ -3930,7 +3947,28 @@ export class Markdown implements Component {
 				(!this.#mathEnabled() && TERMINAL.isImageLine(line)) ||
 				isOsc66Line(line)
 			) {
-				contentLines.push(renderedLine.mathGraphic ? prefixDirectMathLine(line, leftMargin) : line);
+				let direct = renderedLine.mathGraphic ? prefixDirectMathLine(line, leftMargin) : line;
+				if (renderedLine.mathGraphic && bgFn) {
+					const suffixAt = direct.indexOf("\r");
+					const column = Number(/\x1b\[(\d+)G/.exec(direct)?.[1] ?? 1) - 1;
+					const prefix = suffixAt < 0 ? "" : direct.slice(suffixAt + 1);
+					const imageColumns =
+						Number(/;width=(\d+)(?:;|:)/.exec(direct)?.[1] ?? 0) ||
+						Math.ceil(Number(/"\d+;\d+;(\d+);\d+/.exec(direct)?.[1] ?? 0) / getCellDimensions().widthPx);
+					// BCE fills untouched cells without writing spaces over the image pixels.
+					direct =
+						direct.slice(0, suffixAt < 0 ? direct.length : suffixAt) +
+						"\r" +
+						bgFn(prefix) +
+						bgFn(
+							TERMINAL.imageProtocol === ImageProtocol.Kitty
+								? `\x1b[${column + 1}G\x1b[K`
+								: imageColumns > 0
+									? `\x1b[${column + imageColumns + 1}G\x1b[K`
+									: "",
+						);
+				}
+				contentLines.push(direct);
 				previousLineWasOsc66 = isOsc66Line(line);
 				continue;
 			}

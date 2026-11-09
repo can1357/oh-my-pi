@@ -3,6 +3,7 @@ export interface MathImageRenderRequest {
 	tex: string;
 	display: boolean;
 	inkHex: string;
+	backgroundRgb?: number;
 	cellWidthPx: number;
 	cellHeightPx: number;
 	pixelsPerEx: number;

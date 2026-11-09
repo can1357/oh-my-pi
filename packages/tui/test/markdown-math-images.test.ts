@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
+import { directImageBackgroundPrelude } from "../src/terminal-capabilities";
 import { stripVTControlCharacters } from "node:util";
+import { inflateSync } from "node:zlib";
 import { Markdown } from "../src/components/markdown";
 import { ImageBudget, withImageRenderContext } from "../src/components/image";
 import { releaseMathImageOwner, withMathImageOwner } from "../src/components/math-image";
@@ -16,6 +18,7 @@ import { spyOn } from "bun:test";
 import { getMarkdownTheme } from "../src/theme/theme";
 import { setInlineImageMaxColumns } from "../src/render/render-utils";
 import { directPlacementLift, parseKittyDirectPlacementLine } from "../src/terminal-capabilities";
+import { encodeITerm2 } from "../src/terminal-capabilities";
 withoutTerminalMultiplexer();
 const graphics = getKittyGraphics();
 
@@ -512,3 +515,122 @@ for (const source of ["| $x$ |\n| --- |\n| first |", "- Before $x$:\n  $$y$$\n  
 		}
 	});
 }
+it("iTerm2 math explicitly leaves cursor movement to TUI", async () => {
+	TERMINAL.imageProtocol = ImageProtocol.Iterm2;
+	render();
+	await completion.promise;
+	expect(render().join("\n")).toContain("doNotMoveCursor=1");
+});
+it("direct user panel paints background after restored cursor", async () => {
+	setKittyGraphics({ unicodePlaceholders: false });
+	markdown = new Markdown("$$x$$", 1, 0, defaultMarkdownTheme, {
+		bgColor: value => `\x1b[48;2;30;30;30m${value}\x1b[49m`,
+	});
+	render();
+	await completion.promise;
+	const row = render().find(row => row.startsWith("\x1b7"));
+	expect(row?.split("\x1b8")[1]).toContain("\x1b[48;2;30;30;30m");
+	expect(row?.split("\x1b8")[1]).toContain("\x1b[K");
+});
+it("Sixel pending encoder survives final viewport admission pass", async () => {
+	TERMINAL.imageProtocol = ImageProtocol.Sixel;
+	render();
+	await completion.promise;
+	completion = Promise.withResolvers<void>();
+	render();
+	budget.setMathViewport([]);
+	while (markdown.mathImagesPending) {
+		await completion.promise;
+		completion = Promise.withResolvers<void>();
+		render();
+		budget.setMathViewport([]);
+	}
+	const rows = render();
+	budget.setMathViewport(rows);
+	expect(rows.some(row => row.includes("\x1bP"))).toBe(true);
+	expect(rows.join("\n")).not.toContain("x+y=1");
+});
+it("empty iTerm file data emits no OSC transfer", () => {
+	expect(encodeITerm2("")).toBe("");
+});
+for (const transport of [ImageProtocol.Iterm2, ImageProtocol.Sixel]) {
+	it(`panel erase stays right of image and opaque background is contextual ${JSON.stringify(transport)}`, async () => {
+		TERMINAL.imageProtocol = transport;
+		const requests: number[] = [];
+		setMathImageRenderer({
+			id: "panel",
+			render: request => {
+				requests.push(request.backgroundRgb ?? -1);
+				return svg;
+			},
+		});
+		markdown = new Markdown("$$x$$", 1, 0, defaultMarkdownTheme, {
+			bgColor: value => `\x1b[48;2;30;30;30m${value}\x1b[49m`,
+			backgroundRgb: () => 0x1e1e1e,
+		});
+		render();
+		await completion.promise;
+		while (true) {
+			completion = Promise.withResolvers<void>();
+			render();
+			if (!markdown.mathImagesPending) break;
+			await completion.promise;
+		}
+		const row = render().find(row => row.startsWith("\x1b7"))!;
+		const suffix = row.split("\x1b8")[1];
+		expect(suffix).not.toContain("\x1b[2G\x1b[K");
+		expect(requests).toContain(0x1e1e1e);
+	});
+}
+it("panel background paints every direct image row before payload", () => {
+	const background = "\x1b[48;2;30;30;30m";
+	const line = "\x1b7\x1b[2A\x1b[3G\x1b]1337;File=inline=1;width=4;height=3:AAAA\x07\x1b8";
+	const prelude = directImageBackgroundPrelude(line, 2, background);
+	expect(prelude).toBe(
+		`\x1b7\x1b[2A${background}\x1b[3G    \x1b[B${background}\x1b[3G    \x1b[B${background}\x1b[3G    \x1b8`,
+	);
+	expect((prelude + line).indexOf("    ")).toBeLessThan((prelude + line).indexOf("\x1b]1337;"));
+	expect(prelude).not.toContain("\x1b[K");
+});
+it("OSC1337 raster corners contain panel RGB while Kitty keeps alpha", async () => {
+	setMathImageRenderer({
+		id: "empty-transparent",
+		render: () => ({
+			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"></svg>',
+			widthEx: 1,
+			heightEx: 1,
+		}),
+	});
+	markdown = new Markdown("$$x$$", 1, 0, defaultMarkdownTheme, { backgroundRgb: () => 0x1e2e3e });
+	for (const transport of [ImageProtocol.Iterm2, ImageProtocol.Kitty]) {
+		budget.takeTransmits();
+		TERMINAL.imageProtocol = transport;
+		completion = Promise.withResolvers<void>();
+		render();
+		await completion.promise;
+		const rows = render();
+		const encoded =
+			transport === ImageProtocol.Iterm2
+				? /File=[^:]+:([^\x07]+)/.exec(rows.join("\n"))?.[1]
+				: /;([^\x1b]+)\x1b\\/.exec(budget.takeTransmits().join(""))?.[1];
+		expect(encoded).toBeDefined();
+		const png = Buffer.from(await new Bun.Image(Buffer.from(encoded!, "base64")).resize(1, 1).png().bytes());
+		const chunks: Buffer[] = [];
+		for (let offset = 8; offset + 12 <= png.length;) {
+			const length = png.readUInt32BE(offset);
+			if (png.subarray(offset + 4, offset + 8).toString() === "IDAT")
+				chunks.push(png.subarray(offset + 8, offset + 8 + length));
+			offset += length + 12;
+		}
+		const pixel = inflateSync(Buffer.concat(chunks));
+		if (transport === ImageProtocol.Iterm2) expect([...pixel.subarray(1)]).toEqual([30, 46, 62, 255]);
+		else expect(pixel[4]).toBe(0);
+	}
+});
+it("Kitty direct transparent placements prefill the full panel row", () => {
+	const line = "\x1b7\x1b[2A\x1b[3G\x1b_Ga=p,q=2,C=1,i=1,p=1,c=4,r=3\x1b\\\x1b8\r  ";
+	const background = "\x1b[48;2;30;30;30m";
+	const prelude = directImageBackgroundPrelude(line, 2, background, 10, true);
+	expect(prelude.match(/\x1b\[1G {10}/g)).toHaveLength(3);
+	expect(prelude).not.toContain("\x1b_G");
+});

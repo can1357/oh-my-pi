@@ -140,11 +140,21 @@ async function convert(work: Work): Promise<void> {
 			widthPx * heightPx > 16 * MiB
 		)
 			throw new Error("Math geometry exceeds layout bounds");
-		const normalized = svg.svg.replace(
+		let normalized = svg.svg.replace(
 			/^(\s*<svg\b)([^>]*)(>)/,
 			(_match: string, start: string, attrs: string, end: string) =>
 				`${start}${attrs.replace(/\s(?:width|height)\s*=\s*["'][^"']*["']/g, "")} width="${baseWidth * (request.display ? 1 : fit)}" height="${baseHeight * (request.display ? 1 : fit)}"${end}`,
 		);
+		if (request.backgroundRgb !== undefined) {
+			const color = `#${request.backgroundRgb.toString(16).padStart(6, "0")}`;
+			const fittedWidth = baseWidth * fit;
+			const fittedHeight = baseHeight * fit;
+			normalized = normalized.replace(
+				/width="[^"]*" height="[^"]*"/,
+				`width="${fittedWidth}" height="${fittedHeight}"`,
+			);
+			normalized = `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${widthPx} ${heightPx}"><rect width="${widthPx}" height="${heightPx}" fill="${color}"/>${normalized}</svg>`;
+		}
 		const bytes = await rasterizeSvg(encoder.encode(normalized), maxWidthPx, work.maxHeightPx, 1, {
 			widthPx: request.cellWidthPx,
 			heightPx: request.cellHeightPx,
@@ -413,6 +423,7 @@ export function renderMathImage(
 			{
 				budget: context.budget,
 				imageKey: slot.placement,
+				backgroundRgb: request.backgroundRgb,
 				requestRender: () => {
 					retained.pending = false;
 					owner.pending = [...owner.slots.values()].some(value => value.pending);

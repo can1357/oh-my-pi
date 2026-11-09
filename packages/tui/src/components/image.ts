@@ -24,6 +24,8 @@ export interface ImageTheme {
 export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
+	/** RGB background composited behind transparent pixels for SIXEL. */
+	backgroundRgb?: number;
 	filename?: string;
 	/** File the image was read from; its link target. Images without one link to a blob copy of their bytes. */
 	sourcePath?: string;
@@ -278,6 +280,9 @@ export class ImageBudget {
 		if (id !== undefined) this.#mathRetireHandlers.set(id, handler);
 	}
 	setMathViewport(lines: readonly string[]): void {
+		// Only Kitty placements have terminal IDs that can be matched to viewport rows.
+		// Dropping a pending Sixel Image here restarts its encoder every frame.
+		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		const visible = new Set<number>();
 		for (const line of lines) {
 			for (const match of line.matchAll(/\x1b_Ga=p,[^\x1b]*?\bi=(\d+)/g)) visible.add(Number(match[1]));
@@ -856,7 +861,8 @@ export class Image implements Component {
 		this.#sixel = request;
 		const settle = (sequence: string | null): void => {
 			request.sequence = sequence === null ? null : ensureSixelRasterWidth(sequence);
-			if (this.#sixel !== request || getTerminalBackgroundColor() !== backgroundRgb) return;
+			if (this.#sixel !== request || (this.#options.backgroundRgb ?? getTerminalBackgroundColor()) !== backgroundRgb)
+				return;
 			this.invalidate();
 			if (this.#options.requestRender) this.#options.requestRender();
 			else this.#budget?.requestRender();
@@ -905,7 +911,10 @@ export class Image implements Component {
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
 		const kittyUnicodePlaceholders = getKittyGraphics().unicodePlaceholders;
-		const sixelBackground = imageProtocol === ImageProtocol.Sixel ? getTerminalBackgroundColor() : undefined;
+		const sixelBackground =
+			imageProtocol === ImageProtocol.Sixel
+				? (this.#options.backgroundRgb ?? getTerminalBackgroundColor())
+				: undefined;
 		// observe() must run on every pass — even a cache hit — so the image keeps
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is

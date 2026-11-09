@@ -174,6 +174,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		this.#tokens = composerTokenRegex(mentionLabels);
 		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
+			backgroundRgb: () => Number.parseInt(theme.getBgHex("userMessageBg").replace(/^#/, ""), 16),
 			color: userBubbleColor(options, this.#tokens),
 		});
 		markdown.setIgnoreTight(true);

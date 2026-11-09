@@ -55,6 +55,7 @@ import {
 	synchronizedOutputUserOverride,
 	TERMINAL,
 	withDirectPlacementLift,
+	directImageBackgroundPrelude,
 } from "./terminal-capabilities";
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
@@ -3459,14 +3460,32 @@ export class TUI extends Container {
 				line = withDirectPlacementLift(clipped, lift);
 			}
 			const column = Number(/\x1b\[(\d+)G/.exec(line)?.[1] ?? 1);
+			let background =
+				line.slice(line.indexOf("\x1b8") + 2).match(/\x1b\[(?:48[;:]2[;:][^m]+|48[;:]5[;:]\d+)m/)?.[0] ?? "";
+			if (TERMINAL.imageProtocol === ImageProtocol.Sixel)
+				background = background.replace(
+					/48;2;(\d+);(\d+);(\d+)/,
+					(_match, r: string, g: string, b: string) =>
+						`48;2;${[r, g, b].map(channel => Math.round((Math.round((Number(channel) * 100) / 255) * 255) / 100)).join(";")}`,
+				);
+			if (background) return directImageBackgroundPrelude(line, lift, background, this.terminal.columns) + line;
 			return lift > 0 ? `\x1b[${lift}A${`\x1b[${column}G\x1b[K\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
 		const placementId = previous?.placementId ?? this.#nextImagePlacementId++;
 		const erase = previous ? encodeKittyDeletePlacement(previous.imageId, previous.placementId) : "";
 		placements?.set(placementRow, { imageId: parsed.imageId, placementId, line });
+		const background =
+			line.slice(line.indexOf("\x1b8") + 2).match(/\x1b\[(?:48[;:]2[;:][^m]+|48[;:]5[;:]\d+)m/)?.[0] ?? "";
 		return (
 			erase +
+			directImageBackgroundPrelude(
+				line,
+				Math.min(parsed.rows - 1, frameRow),
+				background,
+				this.terminal.columns,
+				true,
+			) +
 			encodeKittyPlacementLine({
 				imageId: parsed.imageId,
 				placementId,

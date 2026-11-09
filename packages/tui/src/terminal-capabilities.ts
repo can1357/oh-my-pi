@@ -1049,6 +1049,26 @@ export function offsetDirectPlacementLine(line: string, columns: number): string
 	);
 }
 
+/** Fill a transparent direct image's cell box before its payload is emitted. */
+export function directImageBackgroundPrelude(
+	line: string,
+	lift: number,
+	background: string,
+	fillWidth?: number,
+	fullRow = false,
+): string {
+	if (!background) return "";
+	const column = fullRow ? 1 : Number(/\x1b\[(\d+)G/.exec(line)?.[1] ?? 1);
+	const columns =
+		Number(/;width=(\d+)(?:;|:)/.exec(line)?.[1] ?? 0) ||
+		Math.ceil(Number(/"\d+;\d+;(\d+);\d+/.exec(line)?.[1] ?? 0) / getCellDimensions().widthPx) ||
+		parseKittyDirectPlacementLine(line)?.columns ||
+		0;
+	if (columns <= 0) return "";
+	const paint = `${background}\x1b[${column}G${" ".repeat(fillWidth === undefined ? columns : Math.max(columns, fillWidth - column + 1))}`;
+	return `\x1b7${lift > 0 ? `\x1b[${lift}A` : ""}${`${paint}\x1b[B`.repeat(lift)}${paint}\x1b8`;
+}
+
 /**
  * Rebuild an {@link Image} direct-placement line for the viewport row it is
  * written at. The component-rendered line encodes `CUU(rows-1)`, which clamps
@@ -1123,12 +1143,18 @@ export function encodeITerm2(
 		name?: string;
 		preserveAspectRatio?: boolean;
 		inline?: boolean;
+		doNotMoveCursor?: boolean;
 	} = {},
 ): string {
-	const params: string[] = [`inline=${options.inline !== false ? 1 : 0}`];
+	if (!base64Data) return "";
+	const params: string[] = [
+		`inline=${options.inline !== false ? 1 : 0}`,
+		`size=${Buffer.from(base64Data, "base64").length}`,
+	];
 
 	if (options.width !== undefined) params.push(`width=${options.width}`);
 	if (options.height !== undefined) params.push(`height=${options.height}`);
+	if (options.doNotMoveCursor) params.push("doNotMoveCursor=1");
 	if (options.name) {
 		const nameBase64 = Buffer.from(options.name).toBase64();
 		params.push(`name=${nameBase64}`);
@@ -1429,6 +1455,7 @@ export function renderImage(
 			width: fit.columns,
 			height: fit.rows,
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
+			doNotMoveCursor: true,
 		});
 		return { sequence, rows: fit.rows };
 	}
