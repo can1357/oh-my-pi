@@ -15,6 +15,9 @@
 ### Fixed
 
 - Panes in a background Tern tab no longer log frame-acknowledgment stall warnings.
+### Added
+
+- The composer can keep typed text on each terminal's own foreground colour instead of a fixed near-white or black when the theme `text` token is empty, so a session shared across terminals with different backgrounds stays readable (`composer.terminalForeground`, off by default) ([#18493](https://github.com/can1357/oh-my-pi/pull/18493) by [@pperezrubio](https://github.com/pperezrubio))
 
 ## [19.2.0] - 2026-11-25
 
