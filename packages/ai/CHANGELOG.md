@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `liquid-systemone` judgment wire (`liquidWire`: `POST /decisions/v1/systemone` with top-level base64 image data URLs) ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

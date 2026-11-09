@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Liquid AI (`liquid`) as a built-in judge provider with `/login liquid` (`LIQUID_API_KEY`) and the `d1-ultra` and `d1.1` decision models on the `liquid-systemone` API ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+
 ## [18.18.5] - 2026-11-09
 
 ### Added

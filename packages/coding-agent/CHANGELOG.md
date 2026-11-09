@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `liquid-systemone` to the models configuration schema and enabled Liquid AI (`liquid`) as a native judge provider ([#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

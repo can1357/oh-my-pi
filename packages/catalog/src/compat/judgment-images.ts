@@ -19,9 +19,19 @@ export interface JudgmentImageInput {
 	/** Inclusive bounds on each side, when the image header reports dimensions. */
 	minSide?: number;
 	maxSide?: number;
+	/** 32x32 patches across all images in a request. */
+	maxTotalPatches?: number;
 }
 
-type NumericField = "maxCount" | "maxBytes" | "maxTotalBytes" | "maxPixels" | "minPixels" | "minSide" | "maxSide";
+type NumericField =
+	| "maxCount"
+	| "maxBytes"
+	| "maxTotalBytes"
+	| "maxPixels"
+	| "minPixels"
+	| "minSide"
+	| "maxSide"
+	| "maxTotalPatches";
 
 const NUMERIC_FIELDS: readonly NumericField[] = [
 	"maxCount",
@@ -31,6 +41,7 @@ const NUMERIC_FIELDS: readonly NumericField[] = [
 	"minPixels",
 	"minSide",
 	"maxSide",
+	"maxTotalPatches",
 ];
 const POLICY_FIELDS: Record<string, true> = {
 	mimeTypes: true,
@@ -41,7 +52,9 @@ const POLICY_FIELDS: Record<string, true> = {
 	minPixels: true,
 	minSide: true,
 	maxSide: true,
+	maxTotalPatches: true,
 };
+
 const MIME_TYPE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/;
 
 function positiveInteger(value: unknown): value is number {

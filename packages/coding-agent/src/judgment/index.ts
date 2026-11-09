@@ -50,6 +50,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { type FittedImage, fitImage } from "../utils/image-resize";
@@ -310,11 +311,17 @@ async function fitNativeImages(model: Model, images: readonly ImageContent[]): P
 		bounds.maxBytes ?? Infinity,
 		Math.floor((bounds.maxTotalBytes ?? Infinity) / images.length),
 	);
+	const maxTotalPatches = Math.floor((bounds.maxTotalPatches ?? Infinity) / images.length);
+	const imageBounds: JudgmentImageInput = {
+		...bounds,
+		maxBytes,
+		...(Number.isFinite(maxTotalPatches) ? { maxTotalPatches } : {}),
+	};
 	const fitted: FittedImage[] = [];
 	// Sequential on purpose: each fit decodes and re-encodes a whole image.
 	for (const image of images) {
 		const within = nativeJudgmentAcceptsImages(model, [image]) && Buffer.byteLength(image.data, "base64") <= maxBytes;
-		fitted.push(within ? { image, content: WHOLE_IMAGE } : await fitImage(image, { ...bounds, maxBytes }));
+		fitted.push(within ? { image, content: WHOLE_IMAGE } : await fitImage(image, imageBounds));
 	}
 	return fitted;
 }

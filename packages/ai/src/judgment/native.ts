@@ -32,7 +32,7 @@ import { redactSensitiveInObject } from "../providers/transform-messages";
 import type { ImageContent, Model, Usage } from "../types";
 import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { openaiDecisionsWire } from "./openai-decisions";
-import { openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
+import { liquidWire, openrouterDecisionsWire, referencedImageAssets, typesafeWire, workersAiWire } from "./systemone";
 import {
 	type Answer,
 	type Judge,
@@ -54,6 +54,7 @@ const JUDGMENT_WIRES = {
 	"openrouter-decisions": openrouterDecisionsWire,
 	"workers-ai-systemone": workersAiWire,
 	"openai-decisions": openaiDecisionsWire,
+	"liquid-systemone": liquidWire,
 } as const satisfies Partial<Record<Api, JudgmentWire>>;
 
 /** APIs {@link NativeJudge} can serve. */
@@ -101,7 +102,7 @@ function intersectImageInput(a: JudgmentImageInput, b: JudgmentImageInput): Judg
 			? a.mimeTypes.filter(type => b.mimeTypes?.includes(type))
 			: (a.mimeTypes ?? b.mimeTypes);
 	if (mimeTypes !== undefined) bounds.mimeTypes = mimeTypes;
-	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide"] as const) {
+	for (const cap of ["maxCount", "maxBytes", "maxTotalBytes", "maxPixels", "maxSide", "maxTotalPatches"] as const) {
 		const limit = a[cap] === undefined ? b[cap] : b[cap] === undefined ? a[cap] : Math.min(a[cap], b[cap]);
 		if (limit !== undefined) bounds[cap] = limit;
 	}
@@ -237,14 +238,20 @@ function isAnswerOf(value: unknown, type: Answer["type"]): value is Answer {
 }
 
 /** The first documented cap `images` exceed, phrased to follow the backend label; `undefined` when within every cap. */
-function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentImageInput): string | undefined {
+export function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentImageInput): string | undefined {
 	if (limits.maxCount !== undefined && images.length > limits.maxCount) {
 		return `accepts at most ${limits.maxCount} images, got ${images.length}`;
 	}
 	let totalBytes = 0;
-	const { minPixels, maxPixels, minSide, maxSide } = limits;
+	let totalPatches = 0;
+	const { minPixels, maxPixels, minSide, maxSide, maxTotalPatches } = limits;
+	const patchNeeded = maxTotalPatches !== undefined;
 	const checkDimensions =
-		minPixels !== undefined || maxPixels !== undefined || minSide !== undefined || maxSide !== undefined;
+		minPixels !== undefined ||
+		maxPixels !== undefined ||
+		minSide !== undefined ||
+		maxSide !== undefined ||
+		patchNeeded;
 	const needsBytes = limits.maxBytes !== undefined || limits.maxTotalBytes !== undefined;
 	for (const [index, image] of images.entries()) {
 		const mimeType = image.mimeType.toLowerCase();
@@ -261,6 +268,9 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 		const metadata = parseImageMetadata(bytes);
 		if (!metadata?.width || !metadata.height) continue;
 		const { width, height } = metadata;
+		if (patchNeeded) {
+			totalPatches += Math.ceil(width / 32) * Math.ceil(height / 32);
+		}
 		const size = `images[${index}] is ${width}x${height}`;
 		if (maxPixels !== undefined && width * height > maxPixels)
 			return `accepts images up to ${maxPixels} pixels; ${size}`;
@@ -276,6 +286,9 @@ function imageLimitViolation(images: readonly ImageContent[], limits: JudgmentIm
 	}
 	if (limits.maxTotalBytes !== undefined && totalBytes > limits.maxTotalBytes) {
 		return `accepts at most ${limits.maxTotalBytes} image bytes per request, got ${totalBytes}`;
+	}
+	if (maxTotalPatches !== undefined && totalPatches > maxTotalPatches) {
+		return `accepts at most ${maxTotalPatches} image patches per request, got ${totalPatches}`;
 	}
 	return undefined;
 }

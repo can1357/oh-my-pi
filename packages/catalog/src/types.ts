@@ -54,6 +54,7 @@ export const RUNNER_APIS = [
 	"openrouter-decisions",
 	"openai-decisions",
 	"workers-ai-systemone",
+	"liquid-systemone",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
@@ -70,6 +71,7 @@ export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "loc
 	"openrouter-decisions": "judge",
 	"openai-decisions": "judge",
 	"workers-ai-systemone": "judge",
+	"liquid-systemone": "judge",
 	"openai-images": "image",
 	"openrouter-images": "image",
 	"xai-tts": "tts",
@@ -1314,11 +1316,6 @@ export interface GoogleCompat {
 	requiresSkipThoughtSignature?: boolean;
 	/** Add the bypass sentinel when a Gemini turn's first function call is unsigned. */
 	requiresSkipThoughtSignatureOnFirstFunctionCall?: boolean;
-	/**
-	 * Send the bypass sentinel base64-encoded. For gateways that decode
-	 * `thoughtSignature` as bytes and reject the raw literal.
-	 */
-	base64SkipThoughtSignature?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
@@ -1363,7 +1360,6 @@ export type ResolvedGoogleCompat = Required<
 		| "streamIdleTimeoutMs"
 		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
-		| "base64SkipThoughtSignature"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1372,7 +1368,6 @@ export type ResolvedGoogleCompat = Required<
 	streamIdleTimeoutMs?: number;
 	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
-	base64SkipThoughtSignature?: boolean;
 	maxImageDimension?: number;
 	maxImagePayloadBytes?: number;
 };
