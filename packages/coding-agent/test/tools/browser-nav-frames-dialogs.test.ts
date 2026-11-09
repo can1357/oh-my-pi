@@ -1059,14 +1059,62 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
+	test("arms loaded documents for a call before registering its new-document deadline", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const session = await page.createCDPSession();
+				const send = session.send.bind(session);
+				let checkRegistration = false;
+				let duringRegistration: unknown;
+				session.send = async (...args: Parameters<typeof send>) => {
+					if (checkRegistration && args[0] === "Page.addScriptToEvaluateOnNewDocument") {
+						duringRegistration = await page.mainFrame().mainRealm().evaluate(
+							'document.querySelector("#print").click(); globalThis.log',
+						);
+					}
+					return await send(...args);
+				};
+				const createSession = page.createCDPSession.bind(page);
+				page.createCDPSession = async () => session;
+				const hold = await PrintHold.install(page, "calls");
+				page.createCDPSession = createSession;
+				try {
+					await hold.endCall();
+					await advancePrintClock(page, 1_500);
+					checkRegistration = true;
+					await hold.beginCall(30_000);
+					expect(duringRegistration).toEqual(["afterprint", "print returned"]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	});
+
 	test("arms the loaded page, and the next one it loads, before the hold's own setup round trips", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
 				const page = await user.newPage();
 				await page.goto(`${baseUrl}/print`);
+				await page.mainFrame().mainRealm().evaluate(`{
+					const frame = document.createElement("iframe");
+					frame.src = "/print";
+					const loaded = Promise.withResolvers();
+					frame.addEventListener("load", () => loaded.resolve());
+					document.body.append(frame);
+					loaded.promise;
+				}`);
+				const child = page.frames().find(frame => frame !== page.mainFrame());
+				if (!child) throw new Error("Expected the loaded print iframe");
 				// The hold's setup stays in flight until the page shows a held print.
 				const setup = Promise.withResolvers<void>();
+				const setupStarted = Promise.withResolvers<void>();
 				const bound = (object: object, key: string | symbol): unknown => {
 					const value: unknown = Reflect.get(object, key);
 					return typeof value === "function" ? value.bind(object) : value;
@@ -1081,7 +1129,10 @@ return await tab.evaluate(() => {
 										get: (object, name) =>
 											name === "send"
 												? async (...args: Parameters<typeof send>) => {
-														if (args[0] === "Page.enable") await setup.promise;
+														if (args[0] === "Page.enable") {
+															setupStarted.resolve();
+															await setup.promise;
+														}
 														return await send(...args);
 													}
 												: bound(object, name),
@@ -1090,14 +1141,12 @@ return await tab.evaluate(() => {
 							: bound(target, key),
 				});
 				const installing = PrintHold.install(slowed, "calls");
-				await page
-					.mainFrame()
-					.mainRealm()
-					.waitForFunction(
-						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
-						{ timeout: 10_000, polling: 50 },
-					);
-				// A page that navigates meanwhile starts its next document held too, and prints as it loads.
+				await setupStarted.promise;
+				for (const frame of [page.mainFrame(), child]) {
+					expect(
+						await frame.mainRealm().evaluate('document.querySelector("#print").click(); globalThis.log'),
+					).toEqual(["afterprint", "print returned"]);
+				}
 				await page.goto(`${baseUrl}/print-on-load`);
 				expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
 					"afterprint",

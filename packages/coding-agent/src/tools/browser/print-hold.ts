@@ -295,13 +295,9 @@ export class PrintHold {
 		const printHold = new PrintHold(page, session, scope);
 		let bootstrap: Promise<string> | undefined;
 		try {
-			// The loaded document is armed with the first command, ahead of the setup round trips below, during which
-			// its own timers keep running; its frames and the current deadline follow once the setup is in.
-			void session
-				.send("Runtime.evaluate", {
-					expression: printHold.#source(scope === "tab" ? null : SETUP_HOLD_MS, null),
-				})
-				.catch(() => undefined);
+			// Arm every loaded document before setup round trips let its timers run unheld.
+			printHold.#until = scope === "tab" ? null : Date.now() + SETUP_HOLD_MS;
+			await printHold.#setInFrames();
 			// Chrome runs the scripts of the page's own session before any other session's, each session's in the order
 			// they were added: one added there first wraps `print()` before the tab's init scripts can keep the native
 			// one. It never changes, so it stays first; it holds a new document until the task running the start scripts
@@ -583,6 +579,7 @@ export class PrintHold {
 		}
 		this.#stale = false;
 		const applied = this.#applying.then(async () => {
+			await this.#setInFrames();
 			const previous = this.#scriptId;
 			const { identifier } = await this.#session.send("Page.addScriptToEvaluateOnNewDocument", {
 				source: this.#source(this.#remaining(), Date.now() + this.#clockOffset),
@@ -596,7 +593,6 @@ export class PrintHold {
 					.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous })
 					.catch(() => undefined);
 			}
-			await this.#setInFrames();
 		});
 		this.#applying = applied.catch(() => undefined);
 		return this.#unlessStopped(applied);
