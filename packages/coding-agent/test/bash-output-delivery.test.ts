@@ -19,11 +19,12 @@
  * from a timer: the chunk is the event that orders "output was lost" before
  * "the user cancelled", so the race these tests pin needs no guessed delay.
  */
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { executeBash, releaseShellSessions } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import { Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 let cwd: string;
@@ -35,6 +36,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	releaseShellSessions(sessionKey);
 	removeSyncWithRetries(cwd);
 });
@@ -145,6 +147,41 @@ for (const [label, failure] of [
 			10_000,
 		);
 	}
+}
+
+for (const [delivery, failure, reason] of [
+	["throw", new Error("consumer threw while rendering"), "consumer threw while rendering"],
+	["reject", "consumer rejected while writing", "consumer rejected while writing"],
+] as const) {
+	it.skipIf(process.platform === "win32")(
+		`reports the consumer ${delivery} reason when native cannot settle after cancellation`,
+		async () => {
+			vi.spyOn(Shell.prototype, "run").mockImplementation((_options, onChunk) => {
+				try {
+					onChunk?.(null, "first");
+				} catch {}
+				return Promise.withResolvers<ShellRunResult>().promise;
+			});
+			vi.spyOn(Shell.prototype, "abort").mockResolvedValue();
+			const controller = new AbortController();
+			const run = executeBash("printf first", {
+				cwd,
+				sessionKey,
+				timeout: 10_000,
+				chunkThrottleMs: 0,
+				signal: controller.signal,
+				onChunk: () => {
+					queueMicrotask(() => controller.abort());
+					if (delivery === "throw") throw failure;
+					return Promise.reject(failure);
+				},
+			});
+			await expect(run).rejects.toThrow("Command output was not all delivered");
+			await expect(run).rejects.toThrow(reason);
+			await expect(run).rejects.toHaveProperty("cause", failure);
+		},
+		10_000,
+	);
 }
 
 it.skipIf(process.platform === "win32")(

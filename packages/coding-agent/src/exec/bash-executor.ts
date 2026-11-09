@@ -718,8 +718,14 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	let consumerFailure: Error | undefined;
 	let pendingDeliveries: Map<Promise<void>, number> | undefined;
 	let deliveryObservation: AbortController | undefined;
-	const recordConsumerFailure = (cause: unknown): Error =>
-		(consumerFailure ??= new Error(`${OUTPUT_DELIVERY_FAILURE}: the output callback failed`, { cause }));
+	const recordConsumerFailure = (cause: unknown): Error => {
+		if (consumerFailure) return consumerFailure;
+		let message = `${OUTPUT_DELIVERY_FAILURE}: the output callback failed`;
+		try {
+			message += `: ${cause instanceof Error ? cause.message : String(cause)}`;
+		} catch {}
+		return (consumerFailure = new Error(message, { cause }));
+	};
 	const stalledDelivery = `${OUTPUT_DELIVERY_FAILURE}: the output callback did not return for ${OUTPUT_CALLBACK_STALL_MS / 1000} s`;
 	const observeElapsed = (startedAt: number) => {
 		if (performance.now() - startedAt >= OUTPUT_CALLBACK_STALL_MS) {
