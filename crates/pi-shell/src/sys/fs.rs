@@ -550,20 +550,20 @@ fn stat_path(path: &BStr, follow: bool) -> io::Result<Stat> {
 #[cfg(windows)]
 fn nul_stat() -> Stat {
 	Stat {
-		kind: StatKind::CharDev,
-		mode: 0o666,
-		size: 0,
-		uid: 0,
-		gid: 0,
-		dev: 0,
-		ino: 0,
-		nlink: 1,
+		kind:     StatKind::CharDev,
+		mode:     0o666,
+		size:     0,
+		uid:      0,
+		gid:      0,
+		dev:      0,
+		ino:      0,
+		nlink:    1,
 		mtime_ns: 0,
 		atime_ns: 0,
 		ctime_ns: 0,
-		blocks: 0,
-		rdev: 0,
-		blksize: 4096,
+		blocks:   0,
+		rdev:     0,
+		blksize:  4096,
 	}
 }
 

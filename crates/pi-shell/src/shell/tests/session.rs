@@ -2385,7 +2385,8 @@ async fn dev_null_redirects_discard_both_streams_and_exists() {
 	let stderr = tempfile::tempfile().expect("stderr capture");
 	let result = session
 		.run_test(
-			"printf x >/dev/null; { printf y >&2; } 2>/dev/null; test -e /dev/null && test -r /dev/null && test -w /dev/null",
+			"printf x >/dev/null; { printf y >&2; } 2>/dev/null; test -e /dev/null && test -r \
+			 /dev/null && test -w /dev/null",
 			&TestStdio::null().stdout(&stdout).stderr(&stderr),
 		)
 		.await
