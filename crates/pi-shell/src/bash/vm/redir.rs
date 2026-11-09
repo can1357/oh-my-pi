@@ -344,8 +344,12 @@ fn zsh_target(
 	Ok(fields)
 }
 
-/// Set fd `fd` to `h` (or close it), saving the previous object.
+/// Set fd `fd` to `h` (or close it), saving the previous object. Writes
+/// already queued on `fd` are pinned to the handle it holds NOW, before it
+/// changes: they were produced before this redirection, so they stay on
+/// the stream the script had when they were queued, as Bash writes them.
 fn set_fd(vp: &mut Vproc, fd: i32, h: Option<FdRef>) {
+	vp.pin_pending(fd);
 	let prev = vp.fds.get(fd).cloned();
 	io(vp).saved.push(Saved { fd, prev });
 	vp.fds.set(fd, h);
