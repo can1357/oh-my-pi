@@ -306,7 +306,7 @@
 
 ### Added
 
-- `/cd` is an alias of `/move`, so relocating the session to another directory reads like the shell command it mirrors.
+- Added `/cd` as an alias of `/move`, so relocating the session reads like the shell command it mirrors ([#18591](https://github.com/can1357/oh-my-pi/pull/18591) by [@iacore](https://github.com/iacore)).
 
 ## [18.18.3] - 2026-11-09
 
