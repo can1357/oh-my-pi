@@ -29,7 +29,12 @@ export interface FlakyHttpMcpServer {
 }
 
 export function startFlakyHttpMcpServer(
-	options: { port?: number; log?: (line: string) => void } = {},
+	options: {
+		port?: number;
+		log?: (line: string) => void;
+		/** When set, MCP requests whose `Authorization` header differs from its current value get 401. */
+		authorization?: () => string;
+	} = {},
 ): FlakyHttpMcpServer {
 	const log = options.log ?? (() => {});
 	const state = { down: false, generation: 1, initializes: 0, refusals: 0 };
@@ -54,6 +59,9 @@ export function startFlakyHttpMcpServer(
 			if (state.down) {
 				if (request.method === "POST") state.refusals += 1;
 				return new Response("restarting", { status: 503 });
+			}
+			if (options.authorization && request.headers.get("Authorization") !== options.authorization()) {
+				return new Response("unauthorized", { status: 401 });
 			}
 			if (request.method === "GET") {
 				let close = () => {};

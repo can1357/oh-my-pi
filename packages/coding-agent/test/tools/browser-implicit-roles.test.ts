@@ -96,8 +96,9 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				const id = attributes[attributes.indexOf("id") + 1];
 				const { nodes } = await cdp.send("Accessibility.getPartialAXTree", { nodeId, fetchRelatives: false });
 				const ax = nodes[0];
-				// A node that is not rendered is outside the accessibility tree; it only matters as a label source.
-				if (ax.ignoredReasons?.some(reason => reason.name === "notRendered")) continue;
+				// An ignored node (not rendered, or presentational like a decorative image) is outside the accessibility
+				// tree, so no Chromium role/ selector matches it; it only matters as a label source.
+				if (ax.ignored) continue;
 				const role = String(ax.role?.value).toLowerCase();
 				const name = String(ax.name?.value ?? "");
 				computed.push({ id, role, name });
@@ -115,7 +116,10 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 					const globals = globalThis as unknown as { __ompTernKit: { count(selector: unknown): number } };
 					return globals.__ompTernKit.count({ engine: "role", query });
 				}, query);
-				if (JSON.stringify(ids.filter(Boolean).sort()) !== JSON.stringify(expected) || ternCount !== ids.length) {
+				// Chrome leaves plain containers (divs, spans) out of its tree while the kit calls them all generic, so
+				// generic counts are compared through the ids above only.
+				const ternMatches = role === "generic" || ternCount === ids.length;
+				if (JSON.stringify(ids.filter(Boolean).sort()) !== JSON.stringify(expected) || !ternMatches) {
 					mismatches.push({ query, expected, ids, ternCount });
 				}
 			}
@@ -137,7 +141,9 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<table id="table"><caption aria-labelledby="table">Results</caption><tr><td>Value</td></tr></table>
 				<fieldset id="fieldset"><legend aria-labelledby="fieldset">Settings</legend></fieldset>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
-			for (const query of ['table[name="Results" exact]', 'group[name="Settings" exact]']) {
+			// Chrome names the table "Results Value" (its caption names it after the table's own text); the Tern kit, which
+			// must not recurse forever on the cycle, names it "Results". Both contain the filter.
+			for (const query of ['table[name="Results"]', 'group[name="Settings" exact]']) {
 				expect(await page.$$eval(`role/${query}`, elements => elements.length)).toBe(1);
 				expect(
 					await page.evaluate(query => {

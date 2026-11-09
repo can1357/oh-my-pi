@@ -99,7 +99,7 @@ import {
 	readReactTree,
 } from "./react/tree";
 import { collectVitals, installVitalsObservers, type VitalsOptions, type VitalsResult } from "./react/vitals";
-import { queryByRole, registerSemanticQueryHandlers } from "./query-handlers";
+import { parseRoleSelector, registerSemanticQueryHandlers } from "./query-handlers";
 import {
 	type ElementQueryHelpers,
 	enrichElementQueries,
@@ -545,10 +545,10 @@ export function normalizeSelector(selector: string): string {
 		return `aria/${rest}`;
 	}
 	if (selector.startsWith("role/")) {
-		// The page-side handler refuses a selector it cannot fully read. Running it over no elements surfaces that
-		// before the op, so a wait fails at once instead of at its timeout.
+		// The role/ handler refuses a selector it cannot fully read. Parsing it here surfaces that as a tool error before
+		// the op, so a wait fails at once instead of at its timeout.
 		try {
-			queryByRole({ querySelectorAll: () => [] } as unknown as Parameters<typeof queryByRole>[0], selector.slice(5));
+			parseRoleSelector(selector.slice(5));
 		} catch (error) {
 			throw new ToolError(error instanceof Error ? error.message : String(error));
 		}
@@ -1809,10 +1809,13 @@ export class WorkerCore {
 			client.on("Page.javascriptDialogClosed", this.#onDialogClosed);
 			client.on("OMP.debuggerDetached", this.#onDebuggerDetached);
 			this.#page.on("error", this.#onPageCrashed);
-			if (this.#ownsPage) {
+			if (this.#ownsPage || (payload.mode === "attach" && payload.userDriven)) {
 				// Background Chromium tabs stop producing frames, stalling rAF,
-				// IntersectionObserver, and input acknowledgements. Keep owned tabs
-				// interactive without raising a window; explicit settle-freeze still applies.
+				// IntersectionObserver, and input acknowledgements; in a visible browser a tab
+				// that was never selected drops trusted input outright. Keep the page
+				// interactive without selecting its tab or raising a window, including a user's
+				// page in a background tab; explicit settle-freeze still applies. It ends with
+				// this connection's session (on the relay, with the bridge's last session).
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = new WebMcpController(this.#page);
