@@ -380,12 +380,10 @@ function validateModel(
 }
 
 function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
-	if (params.agent === SEANCE_AGENT_NAME) {
-		return params.model === undefined ? {} : { seanceModel: params.model };
-	}
-	const model = normalizeModelSelector(params.model);
+	if (params.model === undefined) return {};
+	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
 	// `validateModel` rejected anything but one string before dispatch.
-	return typeof model === "string" ? { perCallModel: model } : {};
+	return typeof params.model === "string" ? { perCallModel: params.model } : {};
 }
 
 /**
@@ -496,11 +494,7 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
-	if ("model" in item) {
-		// Bundled seance's `model` is a source override; only a per-call selector collapses a blank value.
-		const model = spawn.agent === SEANCE_AGENT_NAME ? item.model : normalizeModelSelector(item.model);
-		if (model !== undefined) spawn.model = model;
-	}
+	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -516,9 +510,9 @@ interface SpawnPlan {
 	spawns: TaskParams[];
 }
 
-/** An exact `""` or `[]` model: a placeholder for "use the agent's routing", not a selector. */
+/** A present but blank `model` (see {@link normalizeModelSelector}): "use the agent's routing", not a selector. */
 function isEmptyModelPlaceholder(model: unknown): boolean {
-	return model === "" || (Array.isArray(model) && model.length === 0);
+	return model !== undefined && normalizeModelSelector(model) === undefined;
 }
 
 /**
