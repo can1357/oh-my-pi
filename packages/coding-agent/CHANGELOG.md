@@ -36,8 +36,8 @@
 
 ### Fixed
 
-- Addressed A2A requests return an owned reply job after delivery; `wait` receives the peer- and message-correlated answer. `a2a.replyTimeoutMs` sets its deadline (30 minutes by default; `0` disables it), independently of the client transport budget.
-- Incoming A2A requests share a process-wide ledger across Main, subagents and worker links. Explicit replies and automatic Main/subagent replies claim only the addressed request; successful subagent wake turns relay their yield summary or final text without blocking settlement.
+- Addressed A2A requests return an owned reply job after delivery, even when the recipient's previous run has finished; `wait` receives the peer- and message-correlated answer. `a2a.replyTimeoutMs` sets its deadline (30 minutes by default; `0` disables it), independently of the client transport budget.
+- Incoming A2A requests share a process-wide ledger across Main, subagents and worker links. Explicit replies and automatic Main/subagent replies claim only the addressed request; successful subagent wake turns relay their published output or final text without blocking settlement.
 - Interrupting an addressed A2A task before its delivery receipt cancels its local reply job, and delivery failures are reported once rather than repeated as asynchronous job results.
 - A `yield` or `handback` result ends the child only when that same result was accepted. A same-named custom tool replacing the built-in, or a result with missing details or an unknown status, no longer aborts the run without a report; a later valid terminal report is still accepted, and an earlier incremental section cannot authorize a later rejected result. `yield` and `handback` are reserved in child sessions so a custom tool cannot replace those built-ins
 - A clean schema-less structured child that never submits an accepted yield returns only its last assistant turn with exit 0, instead of concatenating earlier turns and reminder replies

@@ -55,7 +55,7 @@ on demand:
    answer. Use `wait` on that job to receive the correlated reply.
    The addressed agent can explicitly reply by spawning `a2a:<sender>` with
    the task tool; otherwise Main can relay its final text, and a subagent can
-   relay its wake-turn yield summary or final text. Failed, aborted, or empty
+   relay its wake-turn published output or final text. Failed, aborted, or empty
    turns leave the request open for an explicit reply. The process-wide incoming
    ledger covers Main, subagents, and worker links; only the addressed agent
    can claim its request. Automatic relays atomically claim before sending
@@ -107,6 +107,8 @@ A spawn of `a2a:<name>` goes through the task tool like any agent:
    labelled IRC reply, with no new reply envelope. Cancelling the reply job
    stops the local wait; it does not cancel the peer's work. If no async job
    manager or owner is available, the caller waits synchronously instead.
+   A subagent must `wait` on its reply job before its run ends; otherwise the
+   job is cancelled and a late reply arrives at Main over IRC.
 
 An explicit task-tool reply consumes the outstanding request addressed to that
 agent from that peer and attaches `metadata.inReplyTo`. Set `a2aSpawn: true`
