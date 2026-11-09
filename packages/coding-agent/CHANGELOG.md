@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Eval's `sh()` helper now applies Bash command policies, including required approval; unmatched commands in restrictive approval modes can prompt or fail without an interactive UI.
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
@@ -20,7 +24,6 @@
 
 ### Changed
 
-- Eval's `sh()` helper now applies Bash command policies, including required approval; unmatched commands in restrictive approval modes can prompt or fail without an interactive UI.
 - Clarified tool and internal-URL descriptions for `history://` concise transcripts, `proc://` job retention and parked-agent lookups, and `read` JSON query text output ([#18553](https://github.com/can1357/oh-my-pi/pull/18553) by [@xiangnan0811](https://github.com/xiangnan0811))
 - Models without a delegation rule (Claude, Gemini, …) no longer get pushed to delegate: the "map unknown code via task" rule and the "Task + scout" nudges in search tool descriptions are replaced by a light suggestion to explore unfamiliar subsystems with a scout
 - In Tern, clicking an `ask` answer and then Note now annotates the answer highlighted on the question shown instead of the one just clicked ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))

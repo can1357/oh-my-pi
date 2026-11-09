@@ -11,6 +11,7 @@ import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
 import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import { EVAL_SHELL_BRIDGE_NAME } from "../shell-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
@@ -20,6 +21,8 @@ export interface PyToolBridgeEntry {
 	 * delegated work — above all the subagents `agent()` spawns — stops at once.
 	 */
 	signal?: AbortSignal;
+	/** Non-deferred cell cancellation, including deadlines, for synchronous shell calls. */
+	shellSignal?: AbortSignal;
 	/**
 	 * Kernel-side abort, held back while a critical `agent()` phase (isolation
 	 * worktree setup, merge/cherry-pick) is in flight. Decides only when the host
@@ -126,7 +129,7 @@ async function callSessionToolPromptOnAbort(
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
-		signal: entry.signal,
+		signal: name === EVAL_SHELL_BRIDGE_NAME ? (entry.shellSignal ?? entry.signal) : entry.signal,
 		emitStatus: entry.emitStatus,
 		onReply: entry.onReply,
 		identity,

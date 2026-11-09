@@ -4,8 +4,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
-import { disposeAllKernelSessions } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { disposePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
+import { cfgPythonInterpreter } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import * as shellBridge from "@oh-my-pi/pi-coding-agent/eval/shell-bridge";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -345,6 +346,69 @@ describe("eval sh approval", () => {
 				expect(await Bun.file(marker).exists()).toBe(false);
 			} finally {
 				caller.abort();
+				answer.resolve("deny");
+				await pending?.catch(() => undefined);
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: a direct executor deadline prevents shell execution after late approval",
+		async () => {
+			const shown = Promise.withResolvers<void>();
+			const answer = Promise.withResolvers<"once" | "deny">();
+			let late = false;
+			const session = promptedSession(() => {
+				if (!late) return Promise.resolve("once");
+				shown.resolve();
+				return answer.promise;
+			});
+			const options = {
+				cwd: temp.path(),
+				sessionId: session.getEvalSessionId?.() ?? undefined,
+				toolSession: session,
+				interpreter: cfgPythonInterpreter.get(session.settings),
+			};
+			let pending: Promise<unknown> | undefined;
+			try {
+				const early = await executePython(`sh(${JSON.stringify(MARKER_COMMAND)})`, {
+					...options,
+					timeoutMs: 30_000,
+				});
+				expect(early.exitCode).toBe(0);
+				const marker = path.join(temp.path(), "guard-marker");
+				expect(await Bun.file(marker).text()).toBe("approved");
+				await fs.unlink(marker);
+
+				late = true;
+				const shellFinished = Promise.withResolvers<void>();
+				const executeShell = shellBridge.runEvalShell;
+				spyOn(shellBridge, "runEvalShell").mockImplementation(async (...args) => {
+					try {
+						return await executeShell(...args);
+					} finally {
+						shellFinished.resolve();
+					}
+				});
+				const run = executePython(`sh(${JSON.stringify(MARKER_COMMAND)})`, {
+					...options,
+					timeoutMs: 1_000,
+				});
+				pending = run;
+				await Promise.race([
+					shown.promise,
+					run.then(() => {
+						throw new Error("Cell ended before the approval request");
+					}),
+				]);
+				const result = await run;
+				expect(result.cancelled).toBe(true);
+				expect(await Bun.file(marker).exists()).toBe(false);
+				answer.resolve("once");
+				await shellFinished.promise;
+				expect(await Bun.file(marker).exists()).toBe(false);
+			} finally {
 				answer.resolve("deny");
 				await pending?.catch(() => undefined);
 			}
