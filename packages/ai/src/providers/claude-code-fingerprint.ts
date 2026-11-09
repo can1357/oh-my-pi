@@ -49,20 +49,20 @@ function compareSemver(a: string, b: string): number {
 
 /**
  * Adopts the minimum version named by an Anthropic `claude_code_version_too_old`
- * rejection for the rest of the process, so the pinned fallback going stale costs
- * one rejected request instead of a hard failure.
+ * rejection for the rest of the process. A rejected request retries if its
+ * client used an older version, even when another request adopted the required
+ * version while this one was in flight.
  *
- * Returns true only when the wire version actually increased — callers retry on
- * true, so a repeated rejection at the same version cannot loop. Always false
- * while `PI_AI_CLAUDE_CODE_VERSION` pins the version explicitly.
+ * Returns false if the client's version already satisfies the rejection or
+ * `PI_AI_CLAUDE_CODE_VERSION` explicitly pins the version.
  */
-export function adoptRequiredClaudeCodeVersion(error: unknown): boolean {
+export function adoptRequiredClaudeCodeVersion(error: unknown, clientVersion: string): boolean {
 	if (process.env.PI_AI_CLAUDE_CODE_VERSION) return false;
 	const message = error instanceof Error ? error.message : String(error);
 	if (!message.includes(VERSION_TOO_OLD_CODE)) return false;
 	const required = REQUIRED_VERSION_PATTERN.exec(message)?.[1];
-	if (!required || compareSemver(required, getClaudeCodeVersion()) <= 0) return false;
-	adoptedClaudeCodeVersion = required;
+	if (!required || compareSemver(required, clientVersion) <= 0) return false;
+	if (compareSemver(required, getClaudeCodeVersion()) > 0) adoptedClaudeCodeVersion = required;
 	return true;
 }
 
