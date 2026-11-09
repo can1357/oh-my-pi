@@ -333,6 +333,10 @@ pub struct Root {
 	/// touch them.
 	zopts_on:          ZshOpts,
 	zopts_known:       ZshOpts,
+	/// Bumped whenever a root option record changes or the option facts are
+	/// dropped: what a cache of option-derived settings is valid for
+	/// ([`Self::opts_gen`]).
+	opts_gen:          u64,
 	/// Whether the root `DisabledBuiltins` list is non-empty (`None`: not
 	/// read since the last invalidation), for `builtins_disabled()`.
 	builtins_disabled: Option<bool>,
@@ -525,6 +529,7 @@ impl Root {
 		self.zopts_known = ZshOpts::default();
 		self.builtins_disabled = None;
 		self.locale_gen += 1;
+		self.opts_gen += 1;
 		self.hist_events.lock().clear();
 		if let Err(err) = self.rescan(store) {
 			self.fail(err);
@@ -613,10 +618,12 @@ impl Root {
 				} else {
 					self.opts_on &= !bit;
 				}
+				self.opts_gen += 1;
 			},
 			KeyBuf::ZshOpt(opt) => {
 				self.zopts_known.set(*opt, true);
 				self.zopts_on.set(*opt, zsh_opt_value(*opt, rec.as_ref()));
+				self.opts_gen += 1;
 			},
 			KeyBuf::Misc(MiscKey::DisabledBuiltins) => {
 				self.builtins_disabled = Some(matches!(&rec, Some(Record::Words(w)) if !w.is_empty()));
@@ -628,6 +635,13 @@ impl Root {
 			None => Change::Del(key.as_key()),
 		};
 		self.write(store, change);
+	}
+
+	/// Changes whenever a root option record does (or the option facts are
+	/// dropped): settings derived from root options stay valid while it is
+	/// the same.
+	pub const fn opts_gen(&self) -> u64 {
+		self.opts_gen
 	}
 
 	/// The root value of `opt`: a bit test once it was read or written.

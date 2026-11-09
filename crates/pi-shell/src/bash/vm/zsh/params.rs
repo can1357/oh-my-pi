@@ -2785,15 +2785,17 @@ pub(super) fn direct_text(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Ve
 /// Store `value` (raw) as the value of the direct variable `name`
 /// ([`direct_var`]), keeping its attributes, with what the general path's
 /// store does for such a variable (a scalar naming a directory updates its
-/// named directory).
+/// named directory). The caller has just read it as a scalar: the store's
+/// change is chosen without reading it again.
 fn store_direct(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
-	state::edit_var(
+	state::edit_seen(
 		&mut ex.k.root,
 		ex.cx.store,
 		ex.vp,
 		name,
 		Level::Dynamic,
 		state::VarEdit::Set { elem: None, value, append: false },
+		Some(state::Seen::Scalar),
 	)?;
 	if ty == PmFlags::SCALAR {
 		super::nameddir::scalar_assigned(ex, name, value)?;
