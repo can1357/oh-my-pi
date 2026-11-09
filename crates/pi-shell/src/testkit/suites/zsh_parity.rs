@@ -662,17 +662,17 @@ fn element_reads_answer_as_zsh_at_every_index() {
 #[test]
 fn plain_assignments_keep_what_parameters_do() {
 	let (out, err, _) = zsh(
-		"a=one; integer n=7; typeset -i 16 h=255; float f=1.5; typeset -u U=low; typeset -L 6 \
-		 L=ab; x=pre$a-$n/$h; print -r -- \"$x\"; x=$f; print -r -- \"$x\"; x=$a:u$a[2]; print \
-		 -r -- \"$x\"; x=$U[$L]; print -r -- \"$x\"; setopt globsubst; s=\"*\"; x=$s; print -r \
-		 -- \"$x\"; unsetopt globsubst; (( n = n * 3 )); (( h = h + 1 )); (( f = f * 2 )); print \
-		 -r -- $n $h $f ${(t)n} ${(t)h}; (( u = 4 )); print -r -- $u ${(t)u}; typeset -r ro=1; \
-		 (( ro = 2 )); print -r -- after",
+		"a=one; integer n=7; typeset -i 16 h=255; float f=1.5; typeset -u U=low; typeset -L 6 L=ab; \
+		 x=pre$a-$n/$h; print -r -- \"$x\"; x=$f; print -r -- \"$x\"; x=$a:u$a[2]; print -r -- \
+		 \"$x\"; x=$U[$L]; print -r -- \"$x\"; setopt globsubst; s=\"*\"; x=$s; print -r -- \"$x\"; \
+		 unsetopt globsubst; (( n = n * 3 )); (( h = h + 1 )); (( f = f * 2 )); print -r -- $n $h \
+		 $f ${(t)n} ${(t)h}; (( u = 4 )); print -r -- $u ${(t)u}; typeset -r ro=1; (( ro = 2 )); \
+		 print -r -- after",
 	);
 	assert_eq!(
 		out,
-		"preone-7/16#FF\n1.500000000e+00\nONEn\n\n*\n21 16#100 3.000000000e+00 integer \
-		 integer\n4 integer\nafter\n"
+		"preone-7/16#FF\n1.500000000e+00\nONEn\n\n*\n21 16#100 3.000000000e+00 integer integer\n4 \
+		 integer\nafter\n"
 	);
 	assert!(err.contains("read-only variable: ro"), "{err}");
 }
