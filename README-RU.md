@@ -32,12 +32,14 @@
 
 ```mermaid
 sequenceDiagram
-    participant B as терминал builder
-    participant R as терминал reviewer
-    B->>R: SendMessage (task a2a:reviewer), messageId=m1
-    Note over R: доставлено в диалог reviewer как пользовательский ход
-    R-->>B: SendMessage, metadata.inReplyTo=m1
-    Note over B: помечено как ответ; ответа на него не требуется
+    participant B as Терминал builder
+    participant R as Терминал reviewer
+
+    B->>R: SendMessage (task: a2a:reviewer, messageId: m1)
+    Note over R: Сообщение доставляется в диалог reviewer как пользовательский ход
+
+    R-->>B: SendMessage (metadata.inReplyTo: m1)
+    Note over B: Сообщение распознаётся как ответ и не требует подтверждения
 ```
 
 - Терминал адресуется по имени: `omp --a2a-name reviewer`; без имени - автоимя `<slug-каталога>-<pid>`.
