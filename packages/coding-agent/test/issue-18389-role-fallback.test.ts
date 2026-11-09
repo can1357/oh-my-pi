@@ -8,6 +8,8 @@ import { resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 
 describe("Issue #18389: --model pi/<role> fallback chain resolution", () => {
 	function setupEnvironment() {
@@ -123,85 +125,72 @@ describe("Issue #18389: --model pi/<role> fallback chain resolution", () => {
 		expect(chainKeys).toEqual(["default"]);
 	});
 
-	it("resolves role's own fallback chain when modelRole is provided across pi/<role>, @<role>, and bare <role>", () => {
+	it("drives buildSessionOptions into createAgentSession across pi/<role>, @<role>, and bare <role>", async () => {
 		for (const cliModelArg of ["pi/lead", "@lead", "lead"]) {
-			const { modelRegistry, activeSettings } = setupEnvironment();
-
-			const resolved = resolveCliModel({
-				cliModel: cliModelArg,
-				modelRegistry,
-				availableModels: modelRegistry.getAvailable(),
-				settings: activeSettings,
-			});
-
-			expect(resolved.configuredRole).toBe("lead");
-
-			activeSettings.overrideModelRoles({
-				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model!.provider}/${resolved.model!.id}`,
-					resolved.thinkingLevel,
-				),
-			});
-
+			const { modelRegistry, activeSettings, storage } = setupEnvironment();
 			const sessionManager = SessionManager.inMemory();
-			const initialModelStr = `${resolved.model!.provider}/${resolved.model!.id}`;
 
-			// Pattern with fix:
-			sessionManager.appendModelChange(initialModelStr);
-			if (resolved.configuredRole) {
-				sessionManager.appendModelChange(initialModelStr, resolved.configuredRole);
-			}
+			const parsed = parseArgs(["--model", cliModelArg]);
+			const options = await buildSessionOptions(parsed, [], sessionManager, modelRegistry, activeSettings);
 
-			const recoveryHost = {
-				model: () => resolved.model,
-				thinkingLevel: () => resolved.thinkingLevel,
-				thinkingLevelCeiling: () => undefined,
-				sessionManager,
-				settings: activeSettings,
+			expect(options.modelRole).toBe("lead");
+			expect(options.model?.provider).toBe("devin");
+			expect(options.model?.id).toBe("claude-opus-5-5");
+
+			const { session } = await createAgentSession({
+				...options,
 				modelRegistry,
-				configWarnings: [],
-				sessionId: () => sessionManager.getSessionId(),
-				contextFitsModel: () => true,
-				isRetryFallbackSelectorSuppressed: () => false,
-			} as unknown as TurnRecoveryHost;
+				settings: activeSettings,
+				authStorage: storage,
+			});
 
-			const recovery = new TurnRecovery(recoveryHost);
-			const currentSelector = "devin/claude-opus-5-5:low";
-			const chainKeys = recovery.retryFallbackChainKeys(currentSelector, resolved.model);
-			const candidates = chainKeys.flatMap(key =>
-				recovery.findRetryFallbackCandidates(key, currentSelector, resolved.model).map(c => c.raw),
-			);
+			try {
+				expect(session.sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe("lead");
 
-			expect(chainKeys).toEqual(["lead"]);
-			expect(candidates).toEqual(["anthropic/claude-opus-5-5:low"]);
+				const recovery = new TurnRecovery({
+					model: () => session.model,
+					thinkingLevel: () => session.thinkingLevel,
+					thinkingLevelCeiling: () => undefined,
+					sessionManager: session.sessionManager,
+					settings: session.settings,
+					modelRegistry: session.modelRegistry,
+					configWarnings: [],
+					sessionId: () => session.sessionId,
+					contextFitsModel: () => true,
+					isRetryFallbackSelectorSuppressed: () => false,
+				} as unknown as TurnRecoveryHost);
+
+				const currentSelector = "devin/claude-opus-5-5:low";
+				const chainKeys = recovery.retryFallbackChainKeys(currentSelector, session.model);
+				expect(chainKeys).toEqual(["lead"]);
+
+				const candidates = chainKeys.flatMap(key =>
+					recovery.findRetryFallbackCandidates(key, currentSelector, session.model).map(c => c.raw),
+				);
+				expect(candidates).toEqual(["anthropic/claude-opus-5-5:low"]);
+			} finally {
+				await session.dispose();
+			}
 		}
 	});
 
-	it("verifies createAgentSession with modelRole resolves the role's own fallback chain end-to-end", async () => {
+	it("preserves explicit role ownership when resuming an existing session with --continue --model pi/lead", async () => {
 		const { modelRegistry, activeSettings, storage } = setupEnvironment();
-
-		const resolved = resolveCliModel({
-			cliModel: "pi/lead",
-			modelRegistry,
-			availableModels: modelRegistry.getAvailable(),
-			settings: activeSettings,
-		});
-
-		activeSettings.overrideModelRoles({
-			default: formatModelSelectorValue(
-				resolved.selector ?? `${resolved.model!.provider}/${resolved.model!.id}`,
-				resolved.thinkingLevel,
-			),
-		});
-
 		const sessionManager = SessionManager.inMemory();
+
+		// Resumed session starts with pre-existing default entries
+		sessionManager.appendModelChange("google-antigravity/gemini-4-argon");
+		expect(sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe("default");
+
+		const parsed = parseArgs(["--continue", "--model", "pi/lead"]);
+		const options = await buildSessionOptions(parsed, [], sessionManager, modelRegistry, activeSettings);
+
+		expect(options.modelRole).toBe("lead");
+
 		const { session } = await createAgentSession({
-			model: resolved.model,
-			modelRole: resolved.configuredRole,
-			thinkingLevel: resolved.thinkingLevel,
-			settings: activeSettings,
-			sessionManager,
+			...options,
 			modelRegistry,
+			settings: activeSettings,
 			authStorage: storage,
 		});
 
@@ -222,10 +211,10 @@ describe("Issue #18389: --model pi/<role> fallback chain resolution", () => {
 			} as unknown as TurnRecoveryHost);
 
 			const currentSelector = "devin/claude-opus-5-5:low";
-			const keys = recovery.retryFallbackChainKeys(currentSelector, session.model);
-			expect(keys).toEqual(["lead"]);
+			const chainKeys = recovery.retryFallbackChainKeys(currentSelector, session.model);
+			expect(chainKeys).toEqual(["lead"]);
 
-			const candidates = keys.flatMap(key =>
+			const candidates = chainKeys.flatMap(key =>
 				recovery.findRetryFallbackCandidates(key, currentSelector, session.model).map(c => c.raw),
 			);
 			expect(candidates).toEqual(["anthropic/claude-opus-5-5:low"]);
@@ -234,51 +223,94 @@ describe("Issue #18389: --model pi/<role> fallback chain resolution", () => {
 		}
 	});
 
-	it("verifies concrete model without role alias does not adopt an unrelated role chain", () => {
-		const { modelRegistry, activeSettings } = setupEnvironment();
-
-		const cliModelArg = "devin/claude-opus-5-5";
-		const resolved = resolveCliModel({
-			cliModel: cliModelArg,
-			modelRegistry,
-			availableModels: modelRegistry.getAvailable(),
-			settings: activeSettings,
-		});
-
-		expect(resolved.configuredRole).toBeUndefined();
-
-		activeSettings.overrideModelRoles({
-			default: formatModelSelectorValue(
-				resolved.selector ?? `${resolved.model!.provider}/${resolved.model!.id}`,
-				resolved.thinkingLevel,
-			),
-		});
-
+	it("preserves existing saved model and role when continuing without --model", async () => {
+		const { modelRegistry, activeSettings, storage } = setupEnvironment();
 		const sessionManager = SessionManager.inMemory();
-		const initialModelStr = `${resolved.model!.provider}/${resolved.model!.id}`;
 
-		sessionManager.appendModelChange(initialModelStr);
-		if (resolved.configuredRole) {
-			sessionManager.appendModelChange(initialModelStr, resolved.configuredRole);
-		}
+		// Resumed session starts with pre-existing role entries
+		sessionManager.appendModelChange("devin/claude-opus-5-5");
+		sessionManager.appendModelChange("devin/claude-opus-5-5", "lead");
+		expect(sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe("lead");
 
-		const recoveryHost = {
-			model: () => resolved.model,
-			thinkingLevel: () => resolved.thinkingLevel,
-			thinkingLevelCeiling: () => undefined,
+		// Continue without --model
+		const continueParsed = parseArgs(["--continue"]);
+		const continueOptions = await buildSessionOptions(
+			continueParsed,
+			[],
 			sessionManager,
-			settings: activeSettings,
 			modelRegistry,
-			configWarnings: [],
-			sessionId: () => sessionManager.getSessionId(),
-			contextFitsModel: () => true,
-			isRetryFallbackSelectorSuppressed: () => false,
-		} as unknown as TurnRecoveryHost;
+			activeSettings,
+		);
+		const resumed = await createAgentSession({
+			...continueOptions,
+			modelRegistry,
+			settings: activeSettings,
+			authStorage: storage,
+		});
 
-		const recovery = new TurnRecovery(recoveryHost);
-		const currentSelector = "devin/claude-opus-5-5:low";
-		const chainKeys = recovery.retryFallbackChainKeys(currentSelector, resolved.model);
+		try {
+			expect(resumed.session.model?.provider).toBe("devin");
+			expect(resumed.session.model?.id).toBe("claude-opus-5-5");
+			expect(resumed.session.sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe("lead");
 
-		expect(chainKeys).toEqual(["default"]);
+			const recovery = new TurnRecovery({
+				model: () => resumed.session.model,
+				thinkingLevel: () => resumed.session.thinkingLevel,
+				thinkingLevelCeiling: () => undefined,
+				sessionManager: resumed.session.sessionManager,
+				settings: resumed.session.settings,
+				modelRegistry: resumed.session.modelRegistry,
+				configWarnings: [],
+				sessionId: () => resumed.session.sessionId,
+				contextFitsModel: () => true,
+				isRetryFallbackSelectorSuppressed: () => false,
+			} as unknown as TurnRecoveryHost);
+
+			const currentSelector = "devin/claude-opus-5-5:low";
+			const chainKeys = recovery.retryFallbackChainKeys(currentSelector, resumed.session.model);
+			expect(chainKeys).toEqual(["lead"]);
+		} finally {
+			await resumed.session.dispose();
+		}
+	});
+
+	it("verifies concrete model without role alias resolves to default fallback chain", async () => {
+		const { modelRegistry, activeSettings, storage } = setupEnvironment();
+		const sessionManager = SessionManager.inMemory();
+
+		const parsed = parseArgs(["--model", "devin/claude-opus-5-5"]);
+		const options = await buildSessionOptions(parsed, [], sessionManager, modelRegistry, activeSettings);
+
+		expect(options.modelRole).toBeUndefined();
+
+		const { session } = await createAgentSession({
+			...options,
+			modelRegistry,
+			settings: activeSettings,
+			authStorage: storage,
+		});
+
+		try {
+			expect(session.sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe("default");
+
+			const recovery = new TurnRecovery({
+				model: () => session.model,
+				thinkingLevel: () => session.thinkingLevel,
+				thinkingLevelCeiling: () => undefined,
+				sessionManager: session.sessionManager,
+				settings: session.settings,
+				modelRegistry: session.modelRegistry,
+				configWarnings: [],
+				sessionId: () => session.sessionId,
+				contextFitsModel: () => true,
+				isRetryFallbackSelectorSuppressed: () => false,
+			} as unknown as TurnRecoveryHost);
+
+			const currentSelector = "devin/claude-opus-5-5:low";
+			const chainKeys = recovery.retryFallbackChainKeys(currentSelector, session.model);
+			expect(chainKeys).toEqual(["default"]);
+		} finally {
+			await session.dispose();
+		}
 	});
 });

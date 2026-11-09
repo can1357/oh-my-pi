@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed retry fallback chain selection skipping role-specific `fallbackChains.<role>` and escaping to `fallbackChains.default` when starting or continuing a session with `--model pi/<role>` ([#18389](https://github.com/can1357/oh-my-pi/issues/18389)).
+
 ## [18.18.2] - 2026-11-08
 
 ### Breaking Changes

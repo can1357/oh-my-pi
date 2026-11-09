@@ -4960,6 +4960,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
+		const recordInitialModelChange = (targetModel: Model) => {
+			const initialModel = `${targetModel.provider}/${targetModel.id}`;
+			sessionManager.appendModelChange(initialModel);
+			// An explicit role's or deferred pattern's own retry role follows the explicit default
+			// entry, as the task executor records it, so chain lookup prefers the role's chain
+			// while resume still restores this model as the default.
+			const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
+			if (retryRole && retryRole !== "default") {
+				sessionManager.appendModelChange(initialModel, retryRole);
+			}
+		};
+
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			// The restore above built its context before the session model was known: at the default frame
@@ -4976,6 +4988,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							obfuscator,
 						);
 			agent.replaceMessages(restored.messages);
+			if (model && (hasExplicitModel || options.modelRole !== undefined)) {
+				recordInitialModelChange(model);
+			}
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
@@ -4984,15 +4999,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				const initialModel = `${model.provider}/${model.id}`;
-				sessionManager.appendModelChange(initialModel);
-				// An explicit role's or deferred pattern's own retry role follows the explicit default
-				// entry, as the task executor records it, so chain lookup prefers the role's chain
-				// while resume still restores this model as the default.
-				const retryRole = options.modelRole ?? modelPatternRetryFallbackRole;
-				if (retryRole && retryRole !== "default") {
-					sessionManager.appendModelChange(initialModel, retryRole);
-				}
+				recordInitialModelChange(model);
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto
