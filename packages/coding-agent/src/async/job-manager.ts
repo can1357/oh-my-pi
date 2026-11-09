@@ -1291,10 +1291,12 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 * True while a settled job's completion is queued or in flight — its push
 	 * is on the way rather than lost. A `wait` that returns such a result
 	 * handed it over first; the delivery it raced is not a missed push
-	 * (#16052). Suppressed deliveries are acknowledged, not pending.
+	 * (#16052). Watch suppression is not consulted: `watchJobs` blocks new
+	 * enqueue attempts, but a push already queued or in flight when the watch
+	 * began is still on the way, and treating it as lost mislabels the result
+	 * this snapshot hands over (#18635).
 	 */
 	isDeliveryPending(jobId: string): boolean {
-		if (this.isDeliverySuppressed(jobId)) return false;
 		return (
 			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId)

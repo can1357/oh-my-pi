@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { type Agent, type AgentMessage, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
@@ -218,6 +219,33 @@ describe("wait", () => {
 		expect(text).toContain("Delivery: handed over by this snapshot");
 		expect(text).toContain("superseded its queued completion push");
 		expect(text).not.toContain("still on the way");
+		expect(text).not.toContain("not auto-delivered");
+		parked.resolve();
+	});
+
+	test("reports a watched job's in-flight push as superseded, not missed", async () => {
+		// A push already in flight when `watchJobs` ran is still on the way:
+		// watching suppresses new enqueue attempts, not a delivery already
+		// queued or in flight. Treating it as lost mislabels the result this
+		// snapshot hands over (#18635).
+		const parked = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		manager.registerDeliverySink("Main", () => parked.promise);
+		const id = manager.register("bash", "watched", async () => "watched result", { ownerId: "Main" });
+		await manager.getJob(id)?.promise;
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		manager.watchJobs([id]);
+		expect(manager.isDeliveryPending(id)).toBe(true);
+
+		const result = buildJobResult(session(manager), manager, "wait", [manager.getJob(id)!], [], [], {
+			startedAtMs: Date.now(),
+			settledAtEntry: new Set([id]),
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		expect(text).toContain("Delivery: handed over by this snapshot");
+		expect(text).toContain("superseded its queued completion push");
 		expect(text).not.toContain("not auto-delivered");
 		parked.resolve();
 	});

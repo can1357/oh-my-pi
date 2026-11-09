@@ -6,6 +6,7 @@
 
 - `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 - `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- The `wait` result's `JobSnapshot` now carries `settledAtMs` (epoch ms when the run settled, absent while it is still running), so a snapshot can tell a result that finished during the call from one recovered from an earlier, never-delivered completion ([#18635](https://github.com/can1357/oh-my-pi/pull/18635) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
