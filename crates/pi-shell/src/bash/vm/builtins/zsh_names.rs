@@ -1191,6 +1191,7 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 				&cwd,
 				name,
 				std::slice::from_ref(&file),
+				false,
 			)?
 		};
 		if !matches!(found, crate::bash::vm::command::FpFound::None) {
@@ -1206,7 +1207,7 @@ fn check_autoload(ctx: &mut Ctx<'_, '_>, ops: &Ops, name: &[u8]) -> Result<i32, 
 	}
 	let dir = {
 		let mut ask = |p: Probe| ctx.probe(p);
-		match crate::bash::vm::command::getfpfunc::<Need>(&mut ask, &cwd, name, &fpath)? {
+		match crate::bash::vm::command::getfpfunc::<Need>(&mut ask, &cwd, name, &fpath, false)? {
 			crate::bash::vm::command::FpFound::None => None,
 			crate::bash::vm::command::FpFound::File { dir, .. } => {
 				Some(crate::bash::vm::command::load_dir::<Need>(&mut ask, &cwd, &dir)?)

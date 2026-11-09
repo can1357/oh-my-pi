@@ -80,7 +80,15 @@ impl OsPipe {
 	/// Our end of a [`named_pipe`] the child reads, before there is data
 	/// for it: keep it listening (spares, and instances whose client left),
 	/// so the child's opens find an instance however slow the producer is.
-	#[cfg_attr(unix, allow(clippy::unused_self, reason = "Unix pipes are connected"))]
+	#[cfg_attr(
+		unix,
+		allow(
+			clippy::unused_self,
+			clippy::missing_const_for_fn,
+			clippy::needless_pass_by_ref_mut,
+			reason = "Unix pipes are connected"
+		)
+	)]
 	pub fn poll_listening(&mut self, cx: &Context<'_>) {
 		#[cfg(windows)]
 		self.0.poll_listening(cx);
@@ -90,7 +98,15 @@ impl OsPipe {
 
 	/// Our end of a [`named_pipe`] no client holds: the child never opened
 	/// it, or left without writing (no end of file comes from it).
-	#[cfg_attr(unix, allow(clippy::unused_self, reason = "Unix pipes are connected"))]
+	#[cfg_attr(
+		unix,
+		allow(
+			clippy::unused_self,
+			clippy::missing_const_for_fn,
+			clippy::needless_pass_by_ref_mut,
+			reason = "Unix pipes are connected"
+		)
+	)]
 	pub fn poll_unopened(&mut self, cx: &Context<'_>) -> bool {
 		#[cfg(windows)]
 		{
