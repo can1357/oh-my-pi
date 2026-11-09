@@ -229,3 +229,44 @@ async fn a_closed_descriptor_stays_closed_in_a_script_the_kernel_refused() {
 	}])
 	.await;
 }
+
+/// A nonfatal expansion diagnostic queued before a simple command's own
+/// redirections are installed stays on the caller's stream, not the
+/// command's redirected one. Bash 5.2.21 and 5.3.0 both write the warning
+/// to the caller's stderr and leave `err` empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_redirection_diagnostic_stays_on_the_callers_stream() {
+	let row = |script, output, status, files| Row { script, fifos: &[], output, status, files };
+	check(&[
+		// Assignment-only command: the expansion diagnostic is queued before
+		// the command's own `2>err` is installed.
+		row(
+			r#"declare -A a; x=; y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// Multiple assignments: same class.
+		row(
+			r#"declare -A a; x=; z=1 y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// `declare` with argv: the expansion diagnostic is still pre-redirect.
+		row(
+			r#"declare -A a; x=; declare y=${a[$x]} 2>err; echo "s=$?""#,
+			"a: bad array subscript\ns=0\n",
+			0,
+			&[("err", Some(""))],
+		),
+		// Contrast: a compound command's redirect sees the diagnostic.
+		row(
+			r#"declare -A a; x=; { y=${a[$x]}; } 2>err; echo "s=$?""#,
+			"s=0\n",
+			0,
+			&[("err", Some("a: bad array subscript\n"))],
+		),
+	])
+	.await;
+}
