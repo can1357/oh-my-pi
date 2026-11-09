@@ -49,6 +49,7 @@ function validate(tasks: unknown): TeamTask[] {
 			ids.has(task.id) ||
 			typeof task.title !== "string" ||
 			!task.title.trim() ||
+			/[\r\n]/.test(task.title) ||
 			(task.owner !== null && (typeof task.owner !== "string" || !task.owner.trim())) ||
 			(task.status !== "open" && task.status !== "done") ||
 			typeof task.note !== "string"
@@ -61,6 +62,11 @@ function validate(tasks: unknown): TeamTask[] {
 
 function requireText(value: string, name: string): void {
 	if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string`);
+}
+
+function requireTitle(title: string): void {
+	requireText(title, "Task title");
+	if (/[\r\n]/.test(title)) throw new Error("Task title must not contain carriage returns or newlines");
 }
 
 function copy(tasks: TeamTask[]): TeamTask[] {
@@ -168,7 +174,7 @@ export class TeamLedger {
 						if (!isMissing(viewError)) throw viewError;
 					}
 				}
-				for (const title of titles) requireText(title, "Task title");
+				for (const title of titles) requireTitle(title);
 				tasks = titles.map((title, index) => ({
 					id: String(index + 1),
 					title,
@@ -194,8 +200,7 @@ export class TeamLedger {
 
 	async add(title: string, isLead: boolean, authorize?: () => void): Promise<TeamTask> {
 		if (!isLead) throw new Error("Only the team lead can add tasks");
-		requireText(title, "Task title");
-		if (/[\r\n]/.test(title)) throw new Error("Task title must not contain carriage returns or newlines");
+		requireTitle(title);
 		title = title.trim();
 		return this.#withLedger(async file => {
 			const tasks = await this.#load(file);

@@ -59,13 +59,31 @@ describe("TeamLedger", () => {
 		const root = await workspace();
 		const dir = path.join(root, "MixedCaseWorkspace");
 		await fs.mkdir(dir);
-		const a = new TeamLedger(dir);
-		const b = new TeamLedger(dir.toUpperCase());
-		await a.initialize(["work"]);
-		const results = await Promise.all([a.claim("1", "alice"), b.claim("1", "bob")]);
-		expect(results.map(result => result.kind).sort()).toEqual(["claimed", "conflict"]);
-		expect(results[0].owner).toBe(results[1].owner);
-		expect((await a.read())[0].owner).toBe(results[0].owner);
+		// Windows realpath already returns the on-disk case; a case-preserving
+		// realpath leaves the lock key's case folding as the only thing that
+		// merges the two spellings.
+		const realpath = spyOn(fs, "realpath").mockImplementation((async (target: string) => target) as never);
+		try {
+			const a = new TeamLedger(dir);
+			const b = new TeamLedger(dir.toUpperCase());
+			await a.initialize(["work"]);
+			const results = await Promise.all([a.claim("1", "alice"), b.claim("1", "bob")]);
+			expect(results.map(result => result.kind).sort()).toEqual(["claimed", "conflict"]);
+			expect(results[0].owner).toBe(results[1].owner);
+			expect((await a.read())[0].owner).toBe(results[0].owner);
+		} finally {
+			realpath.mockRestore();
+		}
+	});
+
+	it("rejects multi-line titles from the team file and from a stored ledger", async () => {
+		await expect(new TeamLedger().initialize(["ok", "forged\n- [x] 2: task"])).rejects.toThrow();
+		const dir = await workspace();
+		const stored = [{ id: "1", title: "forged\n- [x] 2: task", owner: null, status: "open", note: "" }];
+		const bytes = JSON.stringify(stored);
+		await fs.writeFile(path.join(dir, "tasks.json"), bytes);
+		await expect(new TeamLedger(dir).read()).rejects.toThrow(/Invalid team task ledger/);
+		expect(await fs.readFile(path.join(dir, "tasks.json"), "utf8")).toBe(bytes);
 	});
 
 	it("trims added titles and rejects carriage returns and newlines", async () => {
