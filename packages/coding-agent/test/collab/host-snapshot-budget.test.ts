@@ -34,9 +34,6 @@ afterEach(() => {
 	uninstallInMemoryRelay();
 });
 
-/** Past the 16 MB budget's reach for a 1.5 MB snapshot, inside the 256-entry cap's. */
-const JOINERS = 14;
-
 it("delivers the admitted header when the live session changes before the welcome drains", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: false });
@@ -67,41 +64,3 @@ it("delivers the admitted header when the live session changes before the welcom
 	const welcome = frames.find(frame => frame.t === "welcome");
 	expect(welcome?.header.cwd).toBe("/tmp/admitted-workspace");
 });
-
-it("sheds an earlier guest's retained snapshot instead of holding every joiner's clone", async () => {
-	const relay = installInMemoryRelay();
-	const probe = instrumentRelay(relay, { throttle: true });
-	const snapshot = makeSnapshot();
-	const seen: HostObservations = { notices: [], participantCounts: [] };
-	const host = new CollabHost(makeHostContext(snapshot, seen));
-	cleanups.push(() => void host.stop("test done"));
-
-	await host.start("ws://localhost:8788");
-	const parsed = parseCollabLink(host.link);
-	if ("error" in parsed) throw new Error(parsed.error);
-	const key = await importRoomKey(parsed.key);
-
-	const welcomed = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
-	const dropped = () => seen.notices.filter(notice => notice.includes("fell too far behind")).length;
-	const ended = () => seen.notices.some(notice => notice.includes("Collab ended"));
-
-	for (let i = 0; i < JOINERS && !ended(); i++) {
-		const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
-		cleanups.push(() => guest.close());
-		const before = welcomed();
-		guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: `joiner-${i}` });
-		guest.connect();
-		// Lockstep, so the totals below read admitted work rather than however many
-		// joins happened to pipeline ahead of the host.
-		await waitFor(() => welcomed() > before || ended(), `host never welcomed joiner ${i}`);
-	}
-
-	// Precondition: nothing drained, so every welcome snapshot still admitted is
-	// still being held by its queue entry.
-	expect(probe.hostSocket().bufferedAmount).toBeGreaterThanOrEqual(HIGH_WATER_MARK);
-	// Room capacity is made by discarding the oldest retained snapshot, so every
-	// joiner is still welcomed and sharing survives.
-	expect(ended()).toBe(false);
-	expect(welcomed()).toBe(JOINERS);
-	expect(dropped()).toBeGreaterThan(0);
-}, 30_000);

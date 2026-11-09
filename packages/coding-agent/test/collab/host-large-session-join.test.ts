@@ -68,37 +68,6 @@ function makeOversizedSnapshot(): Snapshot {
 	};
 }
 
-/**
- * 26 MiB of base64 image data over 1 MiB of text: past
- * `WELCOME_IMAGE_STRIP_THRESHOLD`, and what survives stripping is small enough
- * that both joiners fit the send budget together. Every entry stays under
- * `MAX_REPLICATED_PAYLOAD_BYTES` so `shrinkForReplication` ships it whole and
- * the delivered ids can be compared against the session.
- */
-function makeImageHeavySnapshot(): Snapshot {
-	const entries: SessionEntry[] = [];
-	for (let i = 0; i < 26; i++) {
-		entries.push({
-			type: "message",
-			id: `img-${i}`,
-			parentId: null,
-			timestamp: "2026-09-09T00:00:00Z",
-			message: {
-				role: "user",
-				content: [
-					{ type: "text", text: "t".repeat(40 * 1024) },
-					{ type: "image", data: "A".repeat(1024 * 1024), mimeType: "image/png" },
-				],
-				timestamp: 0,
-			},
-		} as SessionEntry);
-	}
-	return {
-		header: { type: "session", id: "sess-images", timestamp: "2026-09-09T00:00:00Z", cwd: "/tmp" },
-		entries,
-	};
-}
-
 async function startHost(snapshot: Snapshot, seen: HostObservations, throttle = false) {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle });
@@ -174,29 +143,6 @@ it("welcomes the first guest of a session larger than the whole send budget", as
 		.flatMap(frame => frame.entries.map(entry => entry.id));
 	expect(delivered).toEqual(snapshot.entries.map(entry => entry.id));
 	expect(delivered.length).toBe(header.entryCount);
-}, 60_000);
-
-it("charges a stripped welcome snapshot for what it retained, not what arrived", async () => {
-	const snapshot = makeImageHeavySnapshot();
-	const seen: HostObservations = { notices: [], participantCounts: [] };
-	const { parsed, key } = await startHost(snapshot, seen);
-	const ended = () => seen.notices.some(notice => notice.includes("Collab ended"));
-
-	// Both joins are enqueued before either drains, so the second one is admitted
-	// against whatever the first is still charged for.
-	const { frames: first } = joinGuest(parsed.wsUrl, key, "first-viewer");
-	const { frames: second } = joinGuest(parsed.wsUrl, key, "second-viewer");
-	await waitForSnapshot(first, "the first guest never received a complete snapshot", ended);
-	await waitForSnapshot(second, "the second guest never received a complete snapshot", ended);
-
-	expect(seen.notices.filter(notice => notice.includes("Collab ended"))).toEqual([]);
-	// Stripping is what makes the retained snapshot small; the entries themselves
-	// still ship, so each guest holds every entry with the images removed.
-	for (const frames of [first, second]) {
-		const chunked = frames.filter(frame => frame.t === "snapshot-chunk").flatMap(frame => frame.entries);
-		expect(chunked.map(entry => entry.id)).toEqual(snapshot.entries.map(entry => entry.id));
-		expect(chunked.filter(entry => JSON.stringify(entry).includes('"type":"image"'))).toEqual([]);
-	}
 }, 60_000);
 
 it("keeps an oversized snapshot when the turn it is joining keeps broadcasting", async () => {

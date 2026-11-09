@@ -128,7 +128,6 @@ export class GuestClient {
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
-	#helloAt = 0;
 	#autoRejoins: number[] = [];
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
@@ -266,7 +265,6 @@ export class GuestClient {
 	}
 
 	#handleOpen(): void {
-		this.#helloAt = Date.now();
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
@@ -281,14 +279,29 @@ export class GuestClient {
 		return true;
 	}
 
-	#rejoin(): void {
+	/**
+	 * Say hello again after the host dropped this guest, within the auto-rejoin
+	 * budget. A welcome that does not follow retries through the same budget.
+	 * @returns false, with an error notice, once the budget is spent.
+	 */
+	#rejoin(message: string): boolean {
+		if (!this.#takeAutoRejoin()) {
+			this.#pushNotice("error", message);
+			return false;
+		}
 		this.#clearSnapshotProgressTimer();
 		this.#pendingSnapshot = null;
 		this.#clearUiRequests();
 		this.#phase = "reconnecting";
-		this.#helloAt = Date.now();
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(() => {
+			this.#welcomeTimer = null;
+			if (this.#phase === "live" || this.#phase === "ended") return;
+			if (!this.#rejoin("timed out waiting for the host's welcome")) this.#commit();
+		}, WELCOME_TIMEOUT_MS);
 		this.#commit();
+		return true;
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
@@ -489,15 +502,10 @@ export class GuestClient {
 			case "error":
 				if (frame.resync) {
 					// The host dropped this guest but the relay link is intact. A hello
-					// still awaiting its welcome is not repeated until the welcome timeout.
-					if (this.#phase === "ended") break;
-					if (this.#phase !== "live" && Date.now() - this.#helloAt < WELCOME_TIMEOUT_MS) break;
-					if (!this.#takeAutoRejoin()) {
-						this.#pushNotice("error", frame.message);
-						break;
-					}
-					this.#rejoin();
-					return; // #rejoin already committed
+					// still awaiting its welcome is retried by the welcome timer.
+					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
+					if (this.#rejoin(frame.message)) return; // #rejoin already committed
+					break;
 				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our

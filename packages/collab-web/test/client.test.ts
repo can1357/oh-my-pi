@@ -446,6 +446,36 @@ describe("GuestClient frame apply", () => {
 		}
 	});
 
+	it("says hello again when a rejoin's welcome never arrives", () => {
+		const sent: GuestFrame[] = [];
+		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {
+			sent.push(frame);
+		});
+		const welcomeTimeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) welcomeTimeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			const client = liveClient();
+			const hellos = () => sent.filter(frame => frame.t === "hello").length;
+			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
+			expect(hellos()).toBe(1);
+			welcomeTimeouts.at(-1)!();
+			expect(hellos()).toBe(2);
+			expect(client.getSnapshot().phase).toBe("reconnecting");
+			client.close();
+		} finally {
+			timerSpy.mockRestore();
+			sendSpy.mockRestore();
+		}
+	});
+
 	it("tracks host UI requests and sends responses", () => {
 		const sent: GuestFrame[] = [];
 		const sendSpy = vi.spyOn(CollabSocket.prototype, "send").mockImplementation((frame: GuestFrame) => {

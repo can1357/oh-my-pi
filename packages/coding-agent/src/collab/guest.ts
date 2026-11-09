@@ -22,7 +22,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
-import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, logger, toError } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -42,16 +42,9 @@ import {
 	type CollabFrame,
 	type CollabSessionState,
 	type CollabUiRequest,
-	describeThrown,
 	parseCollabLink,
 } from "./protocol";
 import { CollabSocket } from "./relay-client";
-/**
- * Ceiling, in UTF-16 code units, on a thrown value quoted into a log line or
- * rejection. Every use sits in a `catch` where a throwing `String` would become an
- * unhandled rejection, and one of them settles the join.
- */
-const THROWN_VALUE_MAX = 512;
 
 /** Commands a guest may run locally; everything else is host-only. */
 export const COLLAB_GUEST_ALLOWED_COMMANDS: Record<string, true> = {
@@ -253,7 +246,6 @@ export class CollabGuestLink {
 	#applyChain: Promise<void> = Promise.resolve();
 	/** True after the initial snapshot has been written to disk and resumed. */
 	#welcomed = false;
-	#introducedAt = 0;
 	#autoRejoins: number[] = [];
 	#left = false;
 	#replicaActivated = false;
@@ -383,16 +375,33 @@ export class CollabGuestLink {
 		// will resend the full chunk train.
 		const introduce = (): void => {
 			this.#welcomed = false;
-			this.#introducedAt = Date.now();
 			this.#pendingSnapshot = null;
 			this.#clearSnapshotProgressTimer();
-			this.#armWelcomeTimer();
+			this.#armWelcomeTimer(onWelcomeTimeout);
 			socket.send({
 				t: "hello",
 				proto: COLLAB_PROTO,
 				name: collabDisplayName(this.#ctx),
 				writeToken: this.#writeToken,
 			});
+		};
+		// The host dropped us (or never answered) while the relay link stayed up: say
+		// hello again, within the auto-rejoin budget.
+		const rejoin = (message: string): void => {
+			if (this.#left) return;
+			if (!takeAutoRejoin(this.#autoRejoins)) {
+				this.#ctx.showError(`Collab host: ${message}`);
+				return;
+			}
+			this.#ctx.showStatus(`Collab host: ${message}; rejoining…`, { dim: true });
+			// The host no longer counts us as a recipient of its open dialogs.
+			this.#clearUiRequests();
+			introduce();
+		};
+		const onWelcomeTimeout = (): void => {
+			const message = "timed out waiting for the host's welcome";
+			if (joined) rejoin(message);
+			else firstWelcome.reject(new Error(message));
 		};
 		socket.onOpen = () => {
 			if (this.#left) return;
@@ -420,15 +429,8 @@ export class CollabGuestLink {
 						return;
 					}
 					if (frame.t === "error" && frame.resync) {
-						// The host dropped us but the relay link is intact. A hello still
-						// awaiting its welcome is not repeated until the welcome timeout.
-						if (!this.#welcomed && Date.now() - this.#introducedAt < WELCOME_TIMEOUT_MS) return;
-						if (!takeAutoRejoin(this.#autoRejoins)) {
-							this.#ctx.showError(`Collab host: ${frame.message}`);
-							return;
-						}
-						this.#ctx.showStatus(`Collab host: ${frame.message}; rejoining…`, { dim: true });
-						introduce();
+						// A hello still awaiting its welcome is retried by the welcome timer.
+						if (this.#welcomeTimer === null) rejoin(frame.message);
 						return;
 					}
 					if (frame.t === "error" && !this.#welcomed && !this.#left) {
@@ -445,13 +447,9 @@ export class CollabGuestLink {
 					this.#applyFrame(frame);
 				})
 				.catch(err => {
-					logger.warn("collab guest frame apply failed", {
-						type: frame.t,
-						error: describeThrown(err, THROWN_VALUE_MAX),
-					});
+					logger.warn("collab guest frame apply failed", { type: frame.t, error: String(err) });
 					if (frame.t === "welcome" || frame.t === "snapshot-chunk") {
-						if (!joined)
-							firstWelcome.reject(err instanceof Error ? err : new Error(describeThrown(err, THROWN_VALUE_MAX)));
+						if (!joined) firstWelcome.reject(toError(err));
 						else this.#restoreAfterDisconnect();
 					}
 				});
@@ -475,7 +473,7 @@ export class CollabGuestLink {
 		try {
 			socket.connect();
 			// Cover a blackholed WebSocket handshake too; onOpen resets the timer.
-			this.#armWelcomeTimer();
+			this.#armWelcomeTimer(onWelcomeTimeout);
 			await firstWelcome.promise;
 			if (this.#left) throw new Error("Collab join cancelled");
 		} catch (err) {
@@ -647,12 +645,11 @@ export class CollabGuestLink {
 		);
 	}
 
-	#armWelcomeTimer(): void {
-		if (this.#joinReject === null) return;
+	#armWelcomeTimer(onTimeout: () => void): void {
 		this.#clearWelcomeTimer();
 		this.#welcomeTimer = setTimeout(() => {
 			this.#welcomeTimer = null;
-			this.#joinReject?.(new Error("timed out waiting for the host's welcome"));
+			onTimeout();
 		}, WELCOME_TIMEOUT_MS);
 	}
 
@@ -945,7 +942,7 @@ export class CollabGuestLink {
 				}
 				logger.warn("collab guest ui-request presentation failed", {
 					reqId: request.reqId,
-					error: describeThrown(err, THROWN_VALUE_MAX),
+					error: String(err),
 				});
 			});
 	}

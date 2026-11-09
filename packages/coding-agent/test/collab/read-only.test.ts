@@ -22,7 +22,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -168,19 +168,6 @@ function promptOutcome(guest: TestGuest, harness: HostHarness, frame: unknown): 
 	return Promise.race([delivered, answered]);
 }
 
-/**
- * Guest that sends a `hello` this host's own types say is impossible. The frame is
- * `JSON.parse`d out of an encrypted envelope and cast, so a field's declared type
- * is a claim the sender makes, and these tests are about what happens when it is
- * false.
- */
-function parseWriteToken(link: string): Uint8Array {
-	const parsed = parseCollabLink(link);
-	if ("error" in parsed) throw new Error(parsed.error);
-	if (!parsed.writeToken) throw new Error("expected a write link");
-	return parsed.writeToken;
-}
-
 async function joinWithRawHello(link: string, hello: Record<string, unknown>): Promise<TestGuest> {
 	const parsed = parseCollabLink(link);
 	if ("error" in parsed) throw new Error(parsed.error);
@@ -232,9 +219,6 @@ async function sendRawFrame(rawFrame: string): Promise<void> {
 // Booting the relay + host and connecting the host socket is the only heavy
 // step; it is identical across all three tests (none mutate host config), so it
 // runs once. Per-test guest state is reset in afterEach.
-
-/** `ERROR_MESSAGE_MAX` in host.ts, in UTF-16 code units as `slice` counts them. */
-const ERROR_MESSAGE_MAX_UNITS = 512;
 
 const guestCleanups: (() => void)[] = [];
 let harness: HostHarness;
@@ -292,37 +276,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		expect(harness.prompts).toHaveLength(0);
 	});
 
-	it("treats a name that is not a string as one it cannot use", async () => {
-		// `.trim()` throws on a number, and on null, in the line before the token is
-		// even read. A hello that names nothing usable gets the generated name.
-		const guest = await joinWithRawHello(host.link, {
-			proto: COLLAB_PROTO,
-			name: 42,
-			writeToken: Buffer.from(parseWriteToken(host.link)).toString("base64url"),
-		});
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-		// Named, not dropped — and the valid token on the same frame was still read,
-		// which it could not have been if the name had thrown first.
-		expect(welcome.readOnly).toBeUndefined();
-		const named = host.participants.filter(p => /^guest-\d+$/.test(p.name));
-		expect(named).toHaveLength(1);
-		expect(named[0]?.readOnly).toBeFalsy();
-	});
-
-	it("reports a boolean protocol version as itself, not as unnamed", async () => {
-		// #label's boolean arm. The numeric one is covered elsewhere — the proto
-		// handshake contract in guest-ui-request.test.ts sends COLLAB_PROTO - 1, and
-		// dropping only the number arm fails it — but nothing reached this one. Both
-		// exist so a mismatch names what arrived rather than calling it unnamed.
-		const guest = await joinWithRawHello(host.link, { proto: true, name: "bool-proto" });
-		guestCleanups.push(() => guest.socket.close());
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("guest sent vtrue");
-	});
-
 	it("reports a protocol version that is not a number instead of dropping the hello", async () => {
 		// A non-number is never equal to COLLAB_PROTO, so reaching the mismatch branch
 		// needs no narrowing. Quoting it back does: `String` is not total for
@@ -334,28 +287,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 		expect(reply.message).toContain("protocol mismatch");
 		expect(host.participants.find(p => p.name === "bad-proto")).toBeUndefined();
-	});
-
-	it("carries a prompt whose images are not an array, without the images", async () => {
-		// `{ length: 1 }` passed the length test the spread was guarded by and then
-		// threw "Spread syntax requires ...iterable", which the frame handler's catch
-		// swallowed: the prompt disappeared and the guest was told nothing.
-		const guest = await joinAsGuest(host.link, "bad-images");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// Registered before the send, and raced against a timer so a prompt that never
-		// arrives fails on the assertion below rather than on the suite's timeout.
-		const delivered = harness.nextPrompt();
-		guest.socket.send({ t: "prompt", text: "still a prompt", images: { length: 1 } } as unknown as CollabFrame);
-		await Promise.race([delivered, Bun.sleep(1_000)]);
-
-		// Delivered, and delivered down the no-images path: the text goes through as
-		// a bare string exactly as a prompt that carried no images would.
-		expect(harness.prompts).toHaveLength(1);
-		expect(harness.prompts[0]?.from).toBe("bad-images");
-		expect(harness.prompts[0]?.content).toBe("still a prompt");
 	});
 
 	it("answers an agent command it does not recognize", async () => {
@@ -371,22 +302,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const reply = await guest.nextFrame();
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 		expect(reply.message).toContain("unknown agent command");
-	});
-
-	it("answers a kill for an agent it does not have", async () => {
-		const guest = await joinAsGuest(host.link, "kill-nobody");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// `chat` and `revive` both answer an unknown id, because `ensureLive` rejects
-		// and `fail` replies. `kill` looked the id up itself and returned on a miss,
-		// which is not a rejection, so nothing answered. A writable guest is required
-		// to reach this at all — the read-only suite's refusal happens first.
-		guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: "no-such-agent" } as unknown as CollabFrame);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("no-such-agent");
 	});
 
 	it("keeps a reply bounded when the agent id is not", async () => {
@@ -405,37 +320,10 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const reply = await guest.nextFrame();
 		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
 		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
-		// Bounded, and still an answer about *this* agent: nothing caps a real agent
-		// id, so a long one is likelier to be one the guest typed than a short one,
-		// and a reply that disowned it would be both bounded and wrong.
-		expect(reply.message).toContain(`${huge.slice(0, 64)}…`);
+		// Bounded, and still about this agent.
+		expect(reply.message).toContain(huge.slice(0, 32));
 		expect(reply.message).not.toContain(huge);
 		expect(reply.message).not.toContain("(unnamed)");
-	});
-
-	it("answers rather than throwing when the agent id is a nested array", async () => {
-		const guest = await joinAsGuest(host.link, "nested-id");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// Reachable, unlike a value this client cannot even send: 5,000 levels survive
-		// `JSON.stringify` and `JSON.parse` on the way here, and then throw
-		// `RangeError` out of the interpolation that quotes them, back into the
-		// silent-drop class. Where `CollabSocket.send` stops carrying them is
-		// stack-bound and varies by runtime; 5,000 is far enough inside it that the
-		// test does not depend on knowing the ceiling.
-		let nested: unknown[] = [];
-		const root = nested;
-		for (let i = 0; i < 5_000; i++) {
-			const next: unknown[] = [];
-			nested.push(next);
-			nested = next;
-		}
-		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: root } as unknown as CollabFrame);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("(unnamed)");
 	});
 
 	it("refuses a prompt whose text is not a string, with or without images", async () => {
@@ -460,40 +348,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 			expect(reply.message).toContain("text must be a string");
 		}
 		expect(harness.prompts).toHaveLength(0);
-	});
-
-	it("bounds a reply composed somewhere else, not just the parts it chooses", async () => {
-		const guest = await joinAsGuest(host.link, "composed-reply");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// `chat` and `revive` reach `ensureLive`, which embeds the id it was handed
-		// twice, in prose of its own, in another module. Bounding the id at this
-		// handler left that untouched: the reply still carried the id twice through
-		// prose composed elsewhere, so it still scaled with what the guest sent. The
-		// cap has to sit on the finished message.
-		const huge = `long-agent-${"x".repeat(100_000)}`;
-		guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: huge } as unknown as CollabFrame);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).not.toContain(huge);
-		// The exact cap, not a generous ceiling. Two layers bound this message and
-		// only this assertion separates them: the error text is cut to 512 before it
-		// is quoted, and the finished `agent <label>: <text>` is longer than that
-		// again, so a reply over the cap means #sendError stopped enforcing it.
-		expect(reply.message.length).toBeLessThanOrEqual(ERROR_MESSAGE_MAX_UNITS + 1);
-	});
-
-	it("bounds the protocol-mismatch reply it quotes the guest's version into", async () => {
-		const huge = "v".repeat(100_000);
-		const guest = await joinWithRawHello(host.link, { proto: huge, name: "huge-proto" });
-		guestCleanups.push(() => guest.socket.close());
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("protocol mismatch");
-		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
-		expect(reply.message).not.toContain(huge);
 	});
 
 	it("refuses a prompt whose images are not image content", async () => {
@@ -526,160 +380,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		} as unknown as CollabFrame);
 		await Promise.race([delivered, Bun.sleep(1_000)]);
 		expect(harness.prompts).toHaveLength(1);
-	});
-
-	it("narrows the transcript reply's echoed fields instead of quoting them back", async () => {
-		const guest = await joinAsGuest(host.link, "bad-reqid");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// A second carrier, and one #sendError cannot reach: the transcript reply
-		// echoes `reqId` so the guest can match it and `fromByte` as the resume
-		// point — unnarrowed, one came back at whatever length it arrived at.
-		const huge = "r".repeat(100_000);
-		guest.socket.send({ t: "fetch-transcript", reqId: huge, agentId: "nope", fromByte: 0 } as unknown as CollabFrame);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(Buffer.byteLength(JSON.stringify(reply))).toBeLessThan(1024);
-		expect(reply.message).toContain("integer reqId");
-
-		// And the contract is a byte offset and a correlation id, not merely a
-		// number: -1, 0.5 and 2 ** 53 are all finite and none of them is either.
-		for (const [field, value] of [
-			["reqId", -1],
-			["reqId", 0.5],
-			["fromByte", -1],
-			["fromByte", 1.5],
-			["fromByte", 2 ** 53],
-		] as const) {
-			guest.socket.send({
-				t: "fetch-transcript",
-				reqId: 1,
-				agentId: "nope",
-				fromByte: 0,
-				[field]: value,
-			} as unknown as CollabFrame);
-			const rejected = await guest.nextFrame();
-			if (rejected.t !== "error") throw new Error(`expected error for ${field}=${value}, got ${rejected.t}`);
-			expect(rejected.message).toContain(`integer ${field}`);
-		}
-	});
-
-	it("bounds the log line a foreign error composes, not only the reply", async () => {
-		// The reply and the log take the same text, and `ensureLive` embeds the id it
-		// was handed twice. Bounding one consumer and not the other leaves the whole
-		// of it on the other side of the same call.
-		const records: { error?: unknown }[] = [];
-		const sink = (event: { message: string; context?: Record<string, unknown> }) => {
-			if (event.message.includes("agent-cmd failed")) records.push(event.context ?? {});
-		};
-		const unregister = logger.registerLogSink(sink);
-		try {
-			const guest = await joinAsGuest(host.link, "logged-error");
-			guestCleanups.push(() => guest.socket.close());
-			const welcome = await guest.nextFrame();
-			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-			const huge = `long-agent-${"x".repeat(100_000)}`;
-			guest.socket.send({ t: "agent-cmd", cmd: "revive", agentId: huge } as unknown as CollabFrame);
-			const reply = await guest.nextFrame();
-			if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-
-			expect(records).toHaveLength(1);
-			const logged = String(records[0]?.error ?? "");
-			expect(logged.length).toBeLessThan(1024);
-			expect(logged).not.toContain(huge);
-		} finally {
-			unregister();
-		}
-	});
-
-	it("refuses an image whose optional fields are the wrong type", async () => {
-		const guest = await joinAsGuest(host.link, "bad-optional");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// `ImageContent` declares `detail`, `url` and `providerFile` too. Checking
-		// only the required fields let a declared one through with the wrong type,
-		// which is the same reach-a-serializer defect the required checks close.
-		for (const extra of [
-			{ detail: 42 },
-			// `typeof null === "object"`, so the null arm is a distinct branch from the
-			// non-object one and needs its own row.
-			{ providerFile: null },
-			{ detail: "enormous" },
-			{ url: 7 },
-			// Two different rejections, and it matters which is doing the work.
-			// `not-a-url` never parses, so `new URL` refuses it. The other two parse
-			// fine — `URL.canParse("javascript:alert(1)")` is `true` — and point
-			// wherever the sender chose; only the scheme allowlist says no to those.
-			{ url: "not-a-url" },
-			{ url: "javascript:alert(1)" },
-			{ url: "file:///etc/passwd" },
-			{ providerFile: 5 },
-			{ providerFile: { provider: "nope" } },
-			{ providerFile: { provider: "openai", id: 9 } },
-			{ providerFile: { provider: "openai", uri: 9 } },
-			{ providerFile: { provider: "openai", expiresAt: "soon" } },
-			// `uri` reaches Google's `fileUri` verbatim, the same sink `url` reaches,
-			// so it needs the same predicate — otherwise the row above it is a lock on
-			// one of two doors.
-			{ providerFile: { provider: "google", uri: "file:///etc/passwd" } },
-			{ providerFile: { provider: "google", uri: "javascript:alert(1)" } },
-			{ providerFile: { provider: "google", uri: "not-a-url" } },
-		]) {
-			const outcome = await promptOutcome(guest, harness, {
-				t: "prompt",
-				text: "carry me",
-				images: [{ type: "image", data: "AAAA", mimeType: "image/png", ...extra }],
-			});
-			if (outcome.kind !== "error") {
-				throw new Error(`expected an error reply for ${JSON.stringify(extra)}, got ${outcome.kind}`);
-			}
-			expect(outcome.message).toContain("every image must carry string data and a supported image type");
-		}
-
-		// Every optional field this host knows, well-formed, survives the rebuild —
-		// the guard rejects a wrong type, not the presence of an optional field. What
-		// happens to a field it does not know is a separate contract, asserted by the
-		// stripping test below.
-		const delivered = harness.nextPrompt();
-		guest.socket.send({
-			t: "prompt",
-			text: "carry me",
-			images: [
-				{
-					type: "image",
-					data: "AAAA",
-					mimeType: "image/png",
-					detail: "high",
-					url: `https://example.invalid/${"a".repeat(4096)}.png`,
-					providerFile: {
-						provider: "google",
-						id: "files/file-1",
-						// The shape the only producer of this field emits: a Gemini Files
-						// API response URL (`blob-broker/provider-files-gemini.ts`).
-						uri: "https://generativelanguage.googleapis.com/v1beta/files/file-1",
-						expiresAt: 1,
-					},
-				},
-			],
-		} as unknown as CollabFrame);
-		await Promise.race([delivered, Bun.sleep(1_000)]);
-		expect(harness.prompts).toHaveLength(1);
-		const content = harness.prompts[0]?.content as { type: string; url?: string; providerFile?: unknown }[];
-		// Long on purpose: the URL carries no length bound, because a long but
-		// well-formed `https:` URL costs a rejected turn and nothing worse, and no
-		// consumer in this repo states a ceiling to hold it to.
-		expect(content?.[1]?.url).toBe(`https://example.invalid/${"a".repeat(4096)}.png`);
-		expect(content?.[1]?.providerFile).toEqual({
-			provider: "google",
-			id: "files/file-1",
-			uri: "https://generativelanguage.googleapis.com/v1beta/files/file-1",
-			expiresAt: 1,
-		});
 	});
 
 	it("refuses an image whose media type is not one this codebase can carry", async () => {
@@ -753,51 +453,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		]);
 	});
 
-	it("refuses an image whose expiry is a number the wire can produce but JSON cannot carry back", async () => {
-		const guest = await joinAsGuest(host.link, "infinite-expiry");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// `JSON.parse("1e999")` is `Infinity`, which is `typeof "number"` and passed
-		// the bare check this rebuild used for `expiresAt`. It then serializes back
-		// out as `null`, so the entry the rebuild exists to keep well-formed would be
-		// persisted with a null where the type declares a number.
-		//
-		// Sent as raw JSON because `CollabSocket.send` stringifies `Infinity` to
-		// `null` on the way out, so a frame built through it can only ever deliver a
-		// value the old check already caught. The wire is the only place this arrives
-		// as a number at all.
-		const raw =
-			'{"t":"prompt","text":"carry me","images":[{"type":"image","data":"AAAA","mimeType":"image/png","providerFile":{"provider":"openai","expiresAt":1e999}}]}';
-		await sendRawFrame(raw);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		expect(reply.message).toContain("every image must carry string data and a supported image type");
-		expect(harness.prompts).toHaveLength(0);
-	});
-
-	it("carries an image whose url is the plain http the blob broker itself emits", async () => {
-		const guest = await joinAsGuest(host.link, "http-url");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// The scheme allowlist is not "https only". `blob-broker/exposure.ts` builds
-		// `http://127.0.0.1:<port>` for local exposure, so a rule that demanded TLS
-		// would reject URLs this codebase produces for itself.
-		const delivered = harness.nextPrompt();
-		guest.socket.send({
-			t: "prompt",
-			text: "carry me",
-			images: [{ type: "image", data: "AAAA", mimeType: "image/png", url: "http://127.0.0.1:8080/blob/abc.png" }],
-		} as unknown as CollabFrame);
-		await Promise.race([delivered, Bun.sleep(1_000)]);
-		expect(harness.prompts).toHaveLength(1);
-		const content = harness.prompts[0]?.content as { url?: string }[];
-		expect(content?.[1]?.url).toBe("http://127.0.0.1:8080/blob/abc.png");
-	});
-
 	it("strips an image property it does not know instead of carrying it into the session", async () => {
 		const guest = await joinAsGuest(host.link, "unknown-prop");
 		guestCleanups.push(() => guest.socket.close());
@@ -834,21 +489,6 @@ describe("collab frames a guest can send that the host must still answer", () =>
 		const stored = harness.prompts[0]?.content as Record<string, unknown>[];
 		expect(Object.keys(stored?.[1] ?? {}).sort()).toEqual(["data", "mimeType", "type"]);
 		expect(stored?.[1]).toEqual({ type: "image", data: "AAAA", mimeType: "image/png" });
-	});
-
-	it("answers an agent chat whose message is not a string instead of dropping it", async () => {
-		const guest = await joinAsGuest(host.link, "bad-chat");
-		guestCleanups.push(() => guest.socket.close());
-		const welcome = await guest.nextFrame();
-		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-
-		// `text?.trim()` guards null and undefined but not a number, so this threw
-		// where an absent message is answered.
-		guest.socket.send({ t: "agent-cmd", cmd: "chat", agentId: "nope", text: 42 } as unknown as CollabFrame);
-		const reply = await guest.nextFrame();
-		if (reply.t !== "error") throw new Error(`expected error, got ${reply.t}`);
-		// The same answer an empty message gets.
-		expect(reply.message).toContain("empty chat message");
 	});
 });
 

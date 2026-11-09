@@ -12,7 +12,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, ProviderFileReference, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, truncate } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
 	CollabUiRequest,
@@ -38,7 +38,6 @@ import {
 	type CollabParticipant,
 	type CollabPromptDetails,
 	type CollabSessionState,
-	describeThrown,
 	encodeEntryFrame,
 	encodeEventFrame,
 	encodeFrame,
@@ -469,7 +468,11 @@ export class CollabHost {
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
-		const recipients = new Set<number>();
+		// The queue can refuse a targeted frame and the caller has no timeout, so track
+		// who actually holds the dialog. With no writer connected yet, the ask waits for
+		// the first one to join; writers that all refused it can never answer.
+		const hadWritable = [...this.#peers.values()].some(peer => peer.canWrite);
+		const recipients = new Set(this.#sendWritablePeers({ t: "ui-request", request: fullRequest }));
 		this.#pendingUi.set(reqId, {
 			request: fullRequest,
 			promise,
@@ -477,25 +480,8 @@ export class CollabHost {
 			settle,
 			retainOnReconnect: options?.retainOnReconnect,
 		});
-		// The queue can refuse a targeted frame and the caller has no timeout, so an ask
-		// no writable peer received settles below. Recipients are tracked, not counted:
-		// one guest holding the dialog can answer it.
-		const hadWritable = this.#hasWritablePeers();
-		for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: fullRequest })) {
-			recipients.add(peerId);
-		}
-		// Nobody connected yet: keep the ask for the first writer that joins.
-		// Writable peers that all refused the frame cannot answer it, and the
-		// caller awaits this with no timeout of its own.
 		if (hadWritable && recipients.size === 0) settle({ kind: "unavailable" });
 		return promise;
-	}
-
-	#hasWritablePeers(): boolean {
-		for (const peer of this.#peers.values()) {
-			if (peer.canWrite) return true;
-		}
-		return false;
 	}
 
 	/** @returns the writable peers the frame was admitted for. */
@@ -512,8 +498,7 @@ export class CollabHost {
 	/**
 	 * Drop {@link peer} from every outstanding ask once it can no longer answer
 	 * (departure, shed, or demotion), so no caller waits on it. A departure retains an
-	 * emptied ask for the next writer; a shed or demotion settles it. See ADMISSION.md,
-	 * "An exchange the host started has to end".
+	 * emptied ask for the next writer; a shed or demotion settles it.
 	 */
 	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
 		for (const pending of this.#pendingUi.values()) {
@@ -756,12 +741,10 @@ export class CollabHost {
 		}
 	}
 
-	/** @returns false when a saturated queue discarded an advisory frame. */
+	/** @returns whether the queue admitted the frame. */
 	#broadcast(frame: CollabFrame, advisory = false): boolean {
 		if (this.#stopped || !this.#socket || this.#sendSuppressed(frame)) return false;
-		if (advisory) return this.#socket.broadcastAdvisory(frame);
-		this.#socket.send(frame);
-		return true;
+		return advisory ? this.#socket.broadcastAdvisory(frame) : this.#socket.send(frame);
 	}
 
 	/**
@@ -831,18 +814,13 @@ export class CollabHost {
 	 * which applies the same liveness/session checks.
 	 */
 	#send(frame: CollabFrame, toPeer = 0): void {
-		// Ending an existing dialog contains only its old-room request ID, never
-		// current-session data. Do not strand guests if it settles during a
-		// provisional /resume that later rolls back. All other traffic stays gated.
 		if (this.#sendSuppressed(frame)) return;
 		this.#socket?.send(frame, toPeer);
 	}
 
 	/**
-	 * The outbound gate every guest-bound frame passes, whichever helper builds it.
-	 * Ending an existing dialog contains only its old-room request ID, never
-	 * current-session data, so `ui-request-end` alone may leave during a
-	 * provisional `/resume` that later rolls back.
+	 * The outbound gate for every guest-bound frame. `ui-request-end` carries only an
+	 * old request id, so it alone may leave during a provisional `/resume`.
 	 */
 	#sendSuppressed(frame: CollabFrame): boolean {
 		return this.ending || (!this.#sessionStillCurrent() && frame.t !== "ui-request-end");
@@ -943,7 +921,7 @@ export class CollabHost {
 	 * Frames of other types that echo guest values bound them at their own site.
 	 */
 	#sendError(message: string, toPeer: number, resync = false): boolean {
-		const bounded = message.length <= ERROR_MESSAGE_MAX ? message : `${message.slice(0, ERROR_MESSAGE_MAX)}…`;
+		const bounded = truncate(message, ERROR_MESSAGE_MAX);
 		const frame: CollabFrame = resync
 			? { t: "error", message: bounded, resync: true }
 			: { t: "error", message: bounded };
@@ -951,12 +929,9 @@ export class CollabHost {
 		return this.#socket?.send(frame, toPeer) ?? false;
 	}
 
-	/**
-	 * A foreign error rendered once, bounded, for both the reply and the log line,
-	 * since errors raised elsewhere embed guest input. Call once per handler.
-	 */
+	/** A foreign error, bounded: errors raised elsewhere embed guest input. */
 	#reason(err: unknown): string {
-		return describeThrown(err, ERROR_MESSAGE_MAX);
+		return truncate(err instanceof Error ? err.message : String(err), ERROR_MESSAGE_MAX);
 	}
 
 	/**
@@ -967,7 +942,7 @@ export class CollabHost {
 	#label(value: unknown): string {
 		if (typeof value === "number" || typeof value === "boolean") return String(value);
 		if (typeof value !== "string" || value.length === 0) return "(unnamed)";
-		return value.length <= GUEST_LABEL_MAX ? value : `${value.slice(0, GUEST_LABEL_MAX)}…`;
+		return truncate(value, GUEST_LABEL_MAX);
 	}
 
 	/** Reject a mutating frame from a read-only peer with a targeted error. */
@@ -1074,9 +1049,9 @@ export class CollabHost {
 	}
 
 	/**
-	 * Welcome and chunks from the same {@link entries} as one queue entry, so a partial
-	 * admission cannot be expressed and nothing queues ahead of a snapshot only the
-	 * empty-queue floor can admit. See ADMISSION.md, atomicity invariant.
+	 * Welcome, chunks and replayed asks as one queue entry, so a partial admission
+	 * cannot be expressed and nothing queues ahead of a snapshot only the
+	 * empty-queue floor can admit.
 	 */
 	*#welcomeWithSnapshot(
 		welcome: EncodedFrame,
@@ -1264,8 +1239,6 @@ export class CollabHost {
 		}
 		const normalized = supplied as ImageContent[];
 		const name = peer.name;
-		// `Array.isArray`, not a length test: `{ length: 1 }` throws out of the spread and
-		// loses the whole prompt. A non-array carries no images; the text still goes.
 		const content: string | (TextContent | ImageContent)[] =
 			normalized.length > 0 ? [{ type: "text", text }, ...normalized] : text;
 		const details: CollabPromptDetails = { from: name };
@@ -1274,10 +1247,8 @@ export class CollabHost {
 			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
 		}
-		// Best-effort: a turn can outlast the guest by minutes, too long to pin a
-		// retirement record. Still room-scoped, so a reissued id is not charged stale
-		// errors. See ADMISSION.md, "An exchange the host started has to end".
-		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
+		// A turn can outlast the guest by minutes; past a reconnect this id is somebody else's.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
 		this.#ctx.session
 			.promptCustomMessage(
 				{
@@ -1377,8 +1348,6 @@ export class CollabHost {
 		if (this.#stopped) return;
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
-		// Before the resync error, so the `ui-request-end` frames a settle fans out
-		// are not addressed to the peer that just lost its backlog.
 		this.#dropAskRecipient(peer);
 		this.#sendError(RESYNC_MESSAGE, peer, true);
 		if (name) {
@@ -1389,9 +1358,7 @@ export class CollabHost {
 			);
 		}
 		this.#updateStatusSegment();
-		// Deliberately no state broadcast: into a still-full queue it would shed the next
-		// peer, whose report changes state again, cascading through the roster. `state`
-		// is level-triggered, so the next real change re-sends it.
+		this.#scheduleStateBroadcast();
 	}
 
 	#buildState(): CollabSessionState {
@@ -1480,9 +1447,8 @@ export class CollabHost {
 			this.#sendError(`agent ${quoted}: advisor transcripts are read-only`, fromPeer);
 			return;
 		}
-		// Best-effort and room-scoped for the same reason as a failed prompt: agent
-		// work has no bound, and past a reconnect this id is somebody else's.
-		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
+		// Agent work has no bound either; same check as a failed prompt.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
 		const fail = (err: unknown) => {
 			const reason = this.#reason(err);
 			logger.warn("collab agent-cmd failed", { cmd, agentId: quoted, error: reason });
@@ -1551,15 +1517,8 @@ export class CollabHost {
 		// The read is asynchronous, so the peer can leave — or the whole room can be
 		// recreated — before there is anything to reply with.
 		const stillTheAsker = this.#socket?.addressee(fromPeer);
-		// #sendError cannot reach a `transcript` frame's error string, so it is bounded
-		// here. Intentionally uncovered: today's only dynamic error is already capped by
-		// #reason, so no test fails if this is deleted. Keep it: whatever last touches a
-		// frame bounds it.
 		const reply = (text: string, newSize: number, error?: string) => {
-			if (!stillTheAsker?.()) return;
-			const bounded =
-				error === undefined || error.length <= ERROR_MESSAGE_MAX ? error : `${error.slice(0, ERROR_MESSAGE_MAX)}…`;
-			this.#send({ t: "transcript", reqId, text, newSize, error: bounded }, fromPeer);
+			if (stillTheAsker?.()) this.#send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
 		};
 		const ref = AgentRegistry.global().get(typeof agentId === "string" ? agentId : "");
 		if (!ref?.sessionFile || ref.kind === "advisor") {

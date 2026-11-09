@@ -160,28 +160,6 @@ export function encodeSnapshotChunk(entryJsons: readonly string[], final: boolea
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Thrown values: total conversion, bounded output
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * `String(value)` that cannot throw, with output bounded to {@link maxUnits}.
- * `String` throws on a hostile `toString`/`valueOf` and on an array nested deep
- * enough to exhaust the stack, which is reachable across the wire. An `Error` is
- * read through `message` so its `toString` never runs. {@link maxUnits} is the
- * caller's own constant and is assumed finite and non-negative.
- */
-export function describeThrown(value: unknown, maxUnits: number): string {
-	let text: unknown;
-	try {
-		text = value instanceof Error ? value.message : String(value);
-	} catch {
-		return "(unprintable error)";
-	}
-	if (typeof text !== "string" || text.length === 0) return "(unprintable error)";
-	return text.length <= maxUnits ? text : `${text.slice(0, maxUnits)}…`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // Link format: wss://<host[:port]>/r/<roomId>.<base64url-32-byte-key>
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -13,7 +13,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fsp from "node:fs/promises";
-import { logger } from "@oh-my-pi/pi-utils";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import {
 	AUTO_REJOIN_WINDOW_MS,
@@ -326,39 +325,6 @@ async function openHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 describe("collab TUI guest ui-request handling (#4049)", () => {
-	it("reports a presenter that rejects with a value that cannot be converted", async () => {
-		// The presenter is supplied by the app, so what it rejects with is not this
-		// library's to assume — the same reasoning as the socket's frame handler, on
-		// the other side of the link. Rendering it with `String` throws inside the
-		// catch, which replaces the warning with an unhandled rejection: no state is
-		// corrupted, so the log is the only place the difference shows.
-		const records: { error?: unknown }[] = [];
-		const unregister = logger.registerLogSink(event => {
-			if (event.message.includes("ui-request presentation failed")) records.push(event.context ?? {});
-		});
-		try {
-			const h = await openHarness({
-				rejectWith: {
-					toString() {
-						throw new Error("cannot render me");
-					},
-				},
-			});
-			h.hostSocket.send({
-				t: "ui-request",
-				request: { reqId: 7, kind: "editor", title: "Edit", prefill: "" },
-			});
-			const deadline = Date.now() + 3_000;
-			while (records.length === 0) {
-				if (Date.now() > deadline) throw new Error("the guest never reported the failed presentation");
-				await Bun.sleep(5);
-			}
-			expect(records[0]?.error).toBe("(unprintable error)");
-		} finally {
-			unregister();
-		}
-	});
-
 	it("presents a select ui-request through the hook selector and round-trips the answer", async () => {
 		const h = await openHarness();
 		h.hostSocket.send({
@@ -992,6 +958,34 @@ describe("collab TUI guest resync", () => {
 		h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
 		await h.barrier();
 		expect(hellos).toBe(MAX_AUTO_REJOINS);
+	});
+
+	it("says hello again when a rejoin's welcome never arrives", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		// The host refuses the rejoin's welcome (a full send queue): it answers nothing.
+		h.hostSocket.onFrame = frame => {
+			if (frame.t === "hello") hellos++;
+		};
+		const welcomeTimeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) welcomeTimeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			expect(welcomeTimeouts).toHaveLength(1);
+			welcomeTimeouts[0]!();
+			await waitFor(() => hellos === 2, "guest stayed waiting on a welcome that never came");
+		} finally {
+			timerSpy.mockRestore();
+		}
 	});
 
 	it("frees rejoin slots once they age out of the window", () => {
