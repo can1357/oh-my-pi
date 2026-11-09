@@ -6932,6 +6932,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			previousPresentation.registered,
 		);
 		this.session.setPlanReferencePath(options.planFilePath);
+		this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
 		try {
 			const autosaved = await autosaveApprovedPlan({
 				settings: this.session.settings,
