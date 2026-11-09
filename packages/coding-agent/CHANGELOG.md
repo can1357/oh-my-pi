@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Threshold auto-compaction no longer re-runs every turn when the previous compaction already left the context above `compaction.thresholdTokens`, for example when tool schemas alone fill most of the budget ([#18589](https://github.com/can1357/oh-my-pi/issues/18589)).
+- Threshold auto-compaction no longer runs every turn when the system prompt and tool schemas alone exceed the recovery band: every threshold caller and both compaction strategies now skip the pass, warn once per session, and block automatic continuation ([#18589](https://github.com/can1357/oh-my-pi/issues/18589)).
 
 ## [18.18.3] - 2026-11-09
 

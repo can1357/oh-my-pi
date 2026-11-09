@@ -291,21 +291,25 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(noProgress[0].level).toBe("warning");
 	});
 
-	it("skips threshold compaction when the last compaction already left the context above the threshold", async () => {
-		const thresholdTokens = 150_000;
-		cfgCompactionThresholdTokens.set(session.settings, thresholdTokens);
-		const firstKept = sessionManager.getBranch()[0];
-		sessionManager.appendCompaction("compacted", undefined, firstKept.id, thresholdTokens + 20_000, {
-			tokensAfter: thresholdTokens + 5_000,
-		});
+	it("skips threshold compaction and warns once when fixed context alone exceeds the recovery band", async () => {
+		cfgCompactionThresholdTokens.set(session.settings, 150_000);
+		// Tool schemas and the system prompt are never compacted; past the band no pass can help.
+		session.agent.state.systemPrompt = ["word ".repeat(150_000)];
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const notices = collectNotices();
 		const startCount = countCompactionStarts();
 
-		const assistantMsg = { ...highUsageAssistant(), timestamp: Date.now() + 1_000 };
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
-		await session.waitForIdle();
+		for (let turn = 0; turn < 2; turn++) {
+			const assistantMsg = highUsageAssistant();
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+			await session.waitForIdle();
+		}
 
 		expect(startCount()).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+		const deadEnd = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("always-sent tool schemas"));
+		expect(deadEnd.length).toBe(1);
 	});
 
 	it("blocks todo continuations after no-headroom compaction when auto-continue is disabled", async () => {

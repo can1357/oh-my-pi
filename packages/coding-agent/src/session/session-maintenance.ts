@@ -1885,22 +1885,6 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
 		const settings = this.#compactionSettings;
-		if (reason === "threshold" && !options.explicitNewContextRequest) {
-			const fixedContextExceedsBand = this.#fixedContextExceedsRecoveryBand();
-			if (fixedContextExceedsBand) {
-				const sessionId = this.#host.sessionManager.getSessionId();
-				if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
-					this.#host.emitNotice(
-						"warning",
-						this.#compactionDeadEndWarning("clear large tool output"),
-						"compaction",
-					);
-					this.#fixedContextDeadEndNotifiedSessionId = sessionId;
-				}
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
-			}
-			this.#fixedContextDeadEndNotifiedSessionId = undefined;
-		}
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -3602,25 +3586,6 @@ export class SessionMaintenance {
 			shouldCompact: shouldThresholdCompact,
 			contextPromotionEnabled: cfgContextPromotionEnabled.get(this.#host.settings) === true,
 		});
-		// A compaction that already left the context above the threshold cannot do
-		// better on the next turn: the residue is tool schemas, the system prompt, or
-		// kept history that summarizing will not shrink. Re-running it every turn
-		// loops (#18589: 231 passes of ~215k → ~195k against a 180k threshold), so
-		// leave the turn alone and let overflow recovery handle a real overflow.
-		const lastTokensAfter = compactionEntry?.tokensAfter;
-		if (
-			shouldThresholdCompact &&
-			typeof lastTokensAfter === "number" &&
-			thresholdTokens > 0 &&
-			lastTokensAfter >= thresholdTokens
-		) {
-			logger.warn("Skipping threshold compaction: the last compaction left the context above the threshold", {
-				lastTokensAfter,
-				thresholdTokens,
-				contextTokens,
-			});
-			return COMPACTION_CHECK_NONE;
-		}
 		if (shouldThresholdCompact) {
 			// Grace band: a live (or just-started) background speculation absorbs
 			// the blocking summarization; the session stays responsive and the
@@ -5236,6 +5201,25 @@ export class SessionMaintenance {
 		const explicitNewContextRequest = options.explicitNewContextRequest === true;
 		if (reason !== "idle" && !compactionSettings.enabled && !explicitNewContextRequest) {
 			return COMPACTION_CHECK_NONE;
+		}
+		// When the system prompt and tool schemas alone exceed the recovery band, no
+		// threshold pass can land under it, and re-running one every turn loops
+		// (#18589). Every threshold caller and strategy goes through here, so gate
+		// once: warn once per session and block automatic continuation.
+		if (reason === "threshold" && !explicitNewContextRequest) {
+			if (this.#fixedContextExceedsRecoveryBand()) {
+				const sessionId = this.#host.sessionManager.getSessionId();
+				if (this.#fixedContextDeadEndNotifiedSessionId !== sessionId) {
+					this.#host.emitNotice(
+						"warning",
+						this.#compactionDeadEndWarning("clear large tool output"),
+						"compaction",
+					);
+					this.#fixedContextDeadEndNotifiedSessionId = sessionId;
+				}
+				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			}
+			this.#fixedContextDeadEndNotifiedSessionId = undefined;
 		}
 		if (this.#usesExperimentalContextManagement()) {
 			return await this.#runExperimentalContextRollover(reason, willRetry, options);
