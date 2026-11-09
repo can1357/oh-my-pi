@@ -1106,7 +1106,7 @@ The result's `details.spotlight` trace carries the same sizes and coins, `savedT
 The fork's A2A bridge exposes each omp session to the other omp processes on
 the same machine over the Agent2Agent v1.0 protocol (JSON-RPC 2.0 on HTTP,
 loopback only, bearer-token auth). Every terminal can act as server and
-client; peers are discovered through a shared registry file and registered as
+client; peers are discovered through per-process registry files and registered as
 spawnable `a2a:<name>` agents. **Addressing, the reply channel, and safeguards
 are covered in [A2A inter-terminal agent networking](./a2a.md).** See
 [Agent Teams](./agent-teams.md) for teams built on top of this messaging.
@@ -1115,11 +1115,12 @@ are covered in [A2A inter-terminal agent networking](./a2a.md).** See
 a2a:
    enabled: true
    port: 0 # 0 = a free ephemeral port per terminal
-   name: "" # empty keeps "Main"
+   name: "" # empty = unique cwd-based name and process ID
    token: "" # empty = generated token file
    maxPeerSkills: 8
    autoRegister: true
-   clientTimeoutMs: 0 # 0 = wait indefinitely
+   clientTimeoutMs: 0 # 0 = no total transport budget
+   replyTimeoutMs: 1800000 # 30 minutes; 0 = no reply deadline
 ```
 
 | Key                    | Type    | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -1127,10 +1128,11 @@ a2a:
 | `a2a.enabled`         | boolean | `true`  | Serve the A2A bridge on `127.0.0.1`. On by default (fork behavior): every terminal becomes reachable by its peers. The server is loopback-only with bearer auth; nothing is exposed off-host. A startup failure is reported as a notice and never blocks the session.                                                                                                                                                                                                                                                              |
 | `a2a.port`            | number  | `0`     | Loopback port for the bridge. `0` (the default) asks the OS for a free ephemeral port each launch, so several terminals never collide; `--a2a-port` pins a port for one run. A fixed port serves one terminal at a time.                                                                                                                                                                                                                                                                                                          |
 | `a2a.token`           | string  | `""`    | Bearer token for the bridge. Empty (the default) generates and reuses `<agent dir>/a2a.token` (32 random bytes hex, mode 600); with the default shared profile every terminal reuses the same token file, which is what makes passwordless `/a2a auto` work. An explicit value overrides the file. Clients never mint a token file; they only read one.                                                                                                                                                                            |
-| `a2a.name`            | string  | `""`    | Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (`a2a:<name>` on peers), and the agent card carries it. Empty keeps the default (`Main`). `--a2a-name` overrides it for one run. Same-name peers on the same URL refresh in place; on different URLs they get `-2`/`-3` suffixes.                                                                                                                                                                                           |
+| `a2a.name`            | string  | `""`    | Public name for this terminal's agents in the A2A network: the main agent's skill id becomes this name (`a2a:<name>` on peers), and the agent card carries it. Empty generates a unique `<slug(basename(cwd))>-<pid>` name. `--a2a-name` overrides it for one run. Same-name peers on the same URL refresh in place; on different URLs they get `-2`/`-3` suffixes. |
 | `a2a.maxPeerSkills`   | number  | `8`     | Cap on skills registered from one peer bridge's agent card. Guards the roster against a peer advertising swarms of finished one-shot workers: only the first N skills of the card are taken (card order, main first). An empty-skill card still yields a single entry from its card name.                                                                                                                                                                                                                                                                                                    |
 | `a2a.autoRegister`    | boolean | `true`  | At session start, register every live local bridge (one `<agent dir>/a2a-bridges/<pid>.json` file per process, dead entries pruned by pid liveness) as spawnable `a2a:` agents, so peer terminals are available from the first turn with no manual `/a2a auto`. No effect when no other bridges run. `--no-a2a-auto-register` disables it for one run.                                                                                                                                                                                                                                 |
-| `a2a.clientTimeoutMs` | number  | `0`     | Total budget for a remote `a2a:` spawn in milliseconds. `0` (the default) waits indefinitely — A2A tasks can run for hours. The per-request connect timeout is always a fixed 10 s, unaffected by this setting. A timed-out spawn fails with a timeout error; the remote task itself keeps running.                                                                                                                                                                                                                                                                                                |
+| `a2a.clientTimeoutMs` | number  | `0`     | Total transport budget in milliseconds for `SendMessage` and any `GetTask` polls. `0` means no total transport deadline; the per-request connect timeout remains 10 s. This does not set the separate addressed-reply deadline. A timeout does not cancel remote work. |
+| `a2a.replyTimeoutMs` | number | `1_800_000` | Deadline in milliseconds for an addressed A2A reply (30 minutes by default); `0` means no deadline. Expiry ends the local wait, not the peer's work. |
 | `session.retentionDays` | number | `30`   | Prune session transcripts and custom-session files older than this many days at startup; `0` disables the GC. Colocated with the A2A settings in the tasks tab because long-lived multi-terminal workloads are what accumulate stale session files. (Registered by the session GC, not the A2A module.)                                                                                                                                                                                                                                                                               |
 
 ### Peer messaging guard (IrcBus)

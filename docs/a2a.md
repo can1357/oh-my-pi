@@ -50,18 +50,16 @@ on demand:
    `Main` name.
 2. In A, ask the agent to spawn a peer's main agent by its `a2a:` name, e.g.
    "spawn `a2a:<B's name>` with the prompt: what are you working on?".
-3. The task travels to terminal B, lands in its conversation, and B's answer
-   returns to A as a **correlated reply**. When B sends to A with an
-   outstanding request from A, the task tool automatically attaches
-   `metadata.inReplyTo = <request messageId>` and consumes that outstanding
-   request. The reply is labelled as an answer and receives no new reply
-   envelope, so it does not start an unbounded request/reply chain.
-   Outstanding requests are shared across the process, including worker
-   sessions, and are consumed only by their addressed agent. Main and
-   subagent wake turns automatically relay their final text, or a yield result
-   summary, when no explicit reply has consumed the request. Failed, cancelled,
-   or empty turns leave it open. The request is claimed before the reply is
-   dispatched; waiting for the remote peer does not block wake-turn settlement.
+3. The task travels to B and lands in the addressed agent's conversation. A
+   successful delivery returns a receipt and a running reply-job ID, not the
+   answer. Use `wait` on that job to receive the correlated reply.
+   The addressed agent can explicitly reply by spawning `a2a:<sender>` with
+   the task tool; otherwise Main can relay its final text, and a subagent can
+   relay its wake-turn yield summary or final text. Failed, aborted, or empty
+   turns leave the request open for an explicit reply. The process-wide incoming
+   ledger covers Main, subagents, and worker links; only the addressed agent
+   can claim its request. Automatic relays atomically claim before sending
+   detached, so remote transport does not hold up turn settlement.
 
 Terminals that start later become visible on demand: a bare `read agent://`
 roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced
@@ -101,15 +99,27 @@ A spawn of `a2a:<name>` goes through the task tool like any agent:
    answer will be correlated automatically. The request is recorded as
    outstanding for that peer; a *reply* is labelled as the answer to that
    request with no new envelope.
-3. The caller's spawn settles on the delivery receipt — the addressed delivery
-   is fire-and-forget; the reply arrives later as a spawn from the peer.
+3. For an addressed request, a successful delivery receipt leaves an owned
+   reply job running. `wait` returns its answer when both the original message
+   ID and expected peer match `metadata.inReplyTo` and the sender identity.
+   A matched reply completes the job without a duplicate IRC delivery. A
+   mismatched or late reply instead enters the addressed conversation as a
+   labelled IRC reply, with no new reply envelope. Cancelling the reply job
+   stops the local wait; it does not cancel the peer's work. If no async job
+   manager or owner is available, the caller waits synchronously instead.
 
-Task states follow the A2A task model: `SUBMITTED` -> `WORKING` ->
-`COMPLETED`/`FAILED` (a poll loop with backoff, or SSE task updates via
-`SendStreamingMessage`). A terminal's configured or auto name addresses
-its main agent rather than its registry id; the identity alias resolves `to`
-in `SendMessage`, `GetTask`, and `CancelTask`, but does not make Main
-cancelable. `CancelTask` refuses Main even when addressed by that alias.
+An explicit task-tool reply consumes the outstanding request addressed to that
+agent from that peer and attaches `metadata.inReplyTo`. Set `a2aSpawn: true`
+to spawn a new remote agent instead: this bypasses reply matching and follows
+the remote task's result rather than opening an addressed reply job.
+
+For remote spawns, task states follow the A2A task model: `SUBMITTED` ->
+`WORKING` -> `COMPLETED`/`FAILED` (via `GetTask` polling or SSE updates).
+If a reserved spawn has not registered yet, it remains `SUBMITTED`; registration
+failure becomes `FAILED`. A cancellation requested while registration is
+pending is applied to that exact agent once it registers. `CancelTask` only
+cancels bridge-created tasks; Main and local subagents are not cancelable
+through the bridge, including when Main is addressed by its identity alias.
 
 ## JSON-RPC surface
 
@@ -134,7 +144,8 @@ cancelable. `CancelTask` refuses Main even when addressed by that alias.
 | Card filtering | The card lists only the main and currently running agents; finished one-shot workers never appear. |
 | Ingress guard | Inbound A2A deliveries are `external` IRC messages, exempt from the rate/dedup/hop guard applied to in-session traffic. |
 | Output cap | Published task output is inlined as an artifact capped at 100 k characters; files themselves never travel. |
-| Client budget | `a2a.clientTimeoutMs` (default 0, unlimited) bounds the **whole** remote spawn - the initial `SendMessage` and all `GetTask` polls - through one combined abort signal; the per-request connect timeout stays a fixed 10 s. |
+| Reply deadline | `a2a.replyTimeoutMs` defaults to `1_800_000` ms (30 minutes); `0` means no deadline for an addressed reply. A timeout ends the local wait, not the remote work. |
+| Client budget | `a2a.clientTimeoutMs` (default 0, no total budget) bounds transport for the initial `SendMessage` and any `GetTask` polls, not the separate addressed-reply wait. The per-request connect timeout remains 10 s. |
 | Plan mode | Every `a2a:` dispatch is refused in plan mode: a remote terminal cannot be held read-only. |
 
 ## Settings
