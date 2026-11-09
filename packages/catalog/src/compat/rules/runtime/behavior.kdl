@@ -462,6 +462,11 @@ behavior {
 	role-defaults "slow" {
 		model "openai-codex/gpt-5.6-sol"
 		model "gpt-5.6-sol"
+		model "anthropic/claude-fable-5-2"
+		model "claude-fable-5-2"
+		model "claude-fable-5.2"
+		model "fable-5.2"
+		model "fable-5-2"
 		model "anthropic/claude-fable-5-1"
 		model "claude-fable-5-1"
 		model "claude-fable-5.1"

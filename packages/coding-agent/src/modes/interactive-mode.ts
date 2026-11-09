@@ -2628,6 +2628,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "rewind":
 					this.showUserMessageSelector();
 					return;
+				case "turn":
+					void this.#selectorController.runTurnAction(action.turn, action.message);
+					return;
 				case "resume":
 					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
 						this.showError(error instanceof Error ? error.message : String(error)),
@@ -6939,6 +6942,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			previousPresentation.registered,
 		);
 		this.session.setPlanReferencePath(options.planFilePath);
+		this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.planFilePath });
 		try {
 			const autosaved = await autosaveApprovedPlan({
 				settings: this.session.settings,
@@ -7087,6 +7091,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 				if (!confirmed) return false;
 			}
+			// An open review must not outlive the plan mode it approves: a later pick
+			// would autosave and dispatch the plan while plan mode is paused.
+			this.#hidePlanReview();
 			await this.#exitPlanMode({ paused: true, interruptActiveTurn: true });
 			return false;
 		}
@@ -9586,8 +9593,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showPluginSelector(mode);
 	}
 
-	showUserMessageSelector(): void {
-		this.#selectorController.showUserMessageSelector();
+	showUserMessageSelector(startAt?: string): void {
+		this.#selectorController.showUserMessageSelector(startAt);
 	}
 
 	showCopySelector(): void {

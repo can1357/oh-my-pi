@@ -162,6 +162,14 @@ pub(crate) fn read_at(h: &Handle, buf: &mut [u8], off: u64) -> io::Result<usize>
 	usize::try_from(n).map_err(|_| io::Error::last_os_error())
 }
 
+/// Identity of an open file, read from its descriptor rather than from the
+/// path it was opened by.
+pub(crate) fn handle_metadata(h: &Handle) -> io::Result<pi_vfs::Metadata> {
+	use std::os::fd::AsFd;
+	let owned = h.as_fd().try_clone_to_owned()?;
+	pi_vfs::Metadata::from_file(&std::fs::File::from(owned))
+}
+
 pub(crate) fn stat(s: &mut Scratch, path: &Path, follow: bool) -> io::Result<FileInfo> {
 	let path = s.cstr(path.as_os_str().as_bytes())?;
 	sys::stat_path(path, follow)
