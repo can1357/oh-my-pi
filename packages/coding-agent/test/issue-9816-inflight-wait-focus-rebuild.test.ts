@@ -1049,4 +1049,191 @@ describe("live Cursor focus recovery without another delta", () => {
 			dispose();
 		}
 	});
+	it("drops a tool-calling message update whose link check finishes after a focus switch", async () => {
+		const mainPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "MAIN_AFTER_SWITCH" }],
+			timestamp: 20,
+		} as unknown as AgentMessage;
+		const main = makeSession([mainPrompt], false);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const started: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_HEAD [h](head.md)" }],
+			timestamp: 21,
+		};
+		const toolUpdate: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "text", text: "WORKER_HEAD [h](head.md)" },
+				{ type: "toolCall", id: "stale-grep", name: "grep", arguments: { pattern: "STALE_TOOL" } },
+			],
+			timestamp: 21,
+		};
+		const linkStarted = Promise.withResolvers<void>();
+		const linkGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async () => {
+			linkStarted.resolve();
+			return linkGate.promise;
+		};
+		try {
+			await focus.focusAgent("Worker");
+			await worker.emit({ type: "message_start", message: started });
+			// The update's first tool call makes `syncAssistantMessage` await link
+			// resolution before finalizing the streaming block.
+			const stuckUpdate = worker.emit({
+				type: "message_update",
+				message: toolUpdate,
+				assistantMessageEvent: {
+					type: "toolcall_end",
+					contentIndex: 1,
+					toolCall: { type: "toolCall", id: "stale-grep", name: "grep", arguments: { pattern: "STALE_TOOL" } },
+					partial: toolUpdate,
+				},
+			});
+			await linkStarted.promise;
+
+			// The switch resets the streaming state synchronously, then queues its
+			// rebuild behind this in-flight update.
+			const returning = focus.unfocus();
+			linkGate.resolve(new Map());
+			await Promise.all([returning, stuckUpdate]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("MAIN_AFTER_SWITCH");
+			expect(rendered).not.toContain("WORKER_HEAD");
+			expect(rendered).not.toContain("STALE_TOOL");
+			expect(ctx.pendingTools.has("stale-grep")).toBe(false);
+			expect(ctx.streamingMessage).toBeUndefined();
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	it("drops a post-tool segment whose link check finishes after a focus switch", async () => {
+		const mainPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "MAIN_SEGMENT_HOME" }],
+			timestamp: 22,
+		} as unknown as AgentMessage;
+		const main = makeSession([mainPrompt], false);
+		const worker = makeSession([], true);
+		const { ctx, focus } = createFixture(main, worker);
+		ctx.settings = Settings.isolated({ "display.smoothStreaming": false });
+		const started: AssistantMessage = {
+			...paused,
+			content: [{ type: "text", text: "WORKER_SEG_HEAD [h](head.md)" }],
+			timestamp: 23,
+		};
+		const toolUpdate: AssistantMessage = {
+			...paused,
+			content: [
+				{ type: "text", text: "WORKER_SEG_HEAD [h](head.md)" },
+				{ type: "toolCall", id: "seg-grep-1", name: "grep", arguments: { pattern: "SEG_ONE" } },
+				{ type: "text", text: "STALE_SEGMENT [s](segment.md)" },
+				{ type: "toolCall", id: "seg-grep-2", name: "grep", arguments: { pattern: "SEG_TWO" } },
+			],
+			timestamp: 23,
+		};
+		const segmentStarted = Promise.withResolvers<void>();
+		const segmentGate = Promise.withResolvers<ReadonlyMap<string, string>>();
+		ctx.resolveAssistantMessageLinkHrefs = async hrefs => {
+			// Only the closed post-tool segment's own link check is held; the
+			// before-tools check ahead of it resolves immediately.
+			if (hrefs.includes("segment.md")) {
+				segmentStarted.resolve();
+				return segmentGate.promise;
+			}
+			return new Map();
+		};
+		try {
+			await focus.focusAgent("Worker");
+			await worker.emit({ type: "message_start", message: started });
+			const stuckUpdate = worker.emit({
+				type: "message_update",
+				message: toolUpdate,
+				assistantMessageEvent: {
+					type: "toolcall_end",
+					contentIndex: 3,
+					toolCall: { type: "toolCall", id: "seg-grep-2", name: "grep", arguments: { pattern: "SEG_TWO" } },
+					partial: toolUpdate,
+				},
+			});
+			await segmentStarted.promise;
+
+			const returning = focus.unfocus();
+			segmentGate.resolve(new Map());
+			await Promise.all([returning, stuckUpdate]);
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("MAIN_SEGMENT_HOME");
+			expect(rendered).not.toContain("STALE_SEGMENT");
+			expect(ctx.pendingTools.has("seg-grep-1")).toBe(false);
+			expect(ctx.pendingTools.has("seg-grep-2")).toBe(false);
+			expect(ctx.streamingMessage).toBeUndefined();
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
+
+	it("draws a later message that only collides with a replayed one on its timestamp key", async () => {
+		const firstNote = {
+			role: "custom",
+			customType: "ext-note",
+			content: "FIRST_NOTE",
+			display: true,
+			timestamp: 30,
+		} as unknown as AgentMessage;
+		const firstPrompt = {
+			role: "user",
+			content: [{ type: "text", text: "FIRST_PROMPT" }],
+			timestamp: 31,
+		} as unknown as AgentMessage;
+		const main = makeSession([firstNote, firstPrompt], false);
+		const worker = makeSession([], false);
+		const { ctx, focus } = createFixture(main, worker);
+		try {
+			await focus.focusAgent("Worker");
+			await focus.unfocus();
+
+			// Same custom type and timestamp as the replayed note, and same
+			// timestamp/attribution as the replayed prompt — the cheap identity
+			// keys collide, but these are different messages.
+			const secondNote = {
+				role: "custom",
+				customType: "ext-note",
+				content: "SECOND_NOTE",
+				display: true,
+				timestamp: 30,
+			} as unknown as AgentMessage;
+			const secondPrompt = {
+				role: "user",
+				content: [{ type: "text", text: "SECOND_PROMPT" }],
+				timestamp: 31,
+			} as unknown as AgentMessage;
+			for (const message of [secondNote, secondPrompt]) {
+				await main.emit({ type: "message_start", message });
+				await main.emit({ type: "message_end", message });
+			}
+
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered.match(/FIRST_NOTE/g)).toHaveLength(1);
+			expect(rendered.match(/SECOND_NOTE/g)).toHaveLength(1);
+			expect(rendered.match(/FIRST_PROMPT/g)).toHaveLength(1);
+			expect(rendered.match(/SECOND_PROMPT/g)).toHaveLength(1);
+		} finally {
+			focus.dispose();
+			ctx.unsubscribe?.();
+			ctx.eventController.dispose();
+			for (const component of ctx.pendingTools.values()) component.seal();
+		}
+	});
 });

@@ -10,7 +10,7 @@ import {
 } from "../../registry/agent-registry";
 import { type AgentViewSession, isAgentViewSession } from "../../session/agent-session-handle";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { sessionMessagePersistenceKey } from "../../session/turn-persistence";
+import { sameMessageContent, sessionMessagePersistenceKey } from "../../session/turn-persistence";
 import { setRunStatus } from "../../utils/run-status";
 import type { InteractiveModeContext } from "../types";
 
@@ -18,14 +18,21 @@ import type { InteractiveModeContext } from "../types";
 type ShownByRebuild = (event: AgentSessionEvent, arrival: number) => boolean;
 
 /**
- * A message's identity in both the rebuilt transcript and live events. An extension message
- * (`custom` or `hookMessage`) is persisted as a custom entry under its own timestamp and rebuilt as
- * a new `custom` object, so it is keyed by type and timestamp; the rest by persistence key, else the object.
+ * A message's identity candidate in both the rebuilt transcript and live events. An extension
+ * message (`custom` or `hookMessage`) is persisted as a custom entry under its own timestamp and
+ * rebuilt as a new `custom` object, so it is keyed by type and timestamp; the rest by persistence
+ * key, else the object. The key can collide for distinct messages minted in the same millisecond,
+ * so {@link replayedIncludes} confirms a hit by content, mirroring the persistence path.
  */
 function transcriptKey(message: AgentMessage): unknown {
 	if (message.role === "custom" || message.role === "hookMessage")
 		return `custom:${message.customType}:${message.timestamp}`;
 	return sessionMessagePersistenceKey(message) ?? message;
+}
+
+/** Whether the rebuilt transcript (grouped by {@link transcriptKey}) already shows this exact message. */
+function replayedIncludes(replayed: ReadonlyMap<unknown, readonly AgentMessage[]>, message: AgentMessage): boolean {
+	return replayed.get(transcriptKey(message))?.some(candidate => sameMessageContent(candidate, message)) ?? false;
 }
 
 /**
@@ -311,13 +318,16 @@ export class SessionFocusController {
 			this.ctx.eventController.markViewIdle();
 		}
 		if (generation !== this.#attachGeneration) return undefined;
-		const replayed = new Set<unknown>();
+		const replayed = new Map<unknown, AgentMessage[]>();
 		const resultTools = new Set<string>();
 		await this.ctx.renderInitialMessages({
 			clearTerminalHistory: true,
 			onCommit: context => {
 				for (const message of context.messages) {
-					replayed.add(transcriptKey(message));
+					const key = transcriptKey(message);
+					const colliding = replayed.get(key);
+					if (colliding) colliding.push(message);
+					else replayed.set(key, [message]);
 					if (message.role === "toolResult") resultTools.add(message.toolCallId);
 				}
 			},
@@ -356,7 +366,7 @@ export class SessionFocusController {
 					// The replay drew this message as persisted. A reply still streaming at `liveRead`
 					// is `live`, drawn by the restore; one that ended by then is drawn by its own end.
 					return (
-						replayed.has(transcriptKey(event.message)) ||
+						replayedIncludes(replayed, event.message) ||
 						(event.message.role === "assistant" && event.type !== "message_end" && arrival <= liveRead)
 					);
 				default:
