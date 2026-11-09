@@ -153,7 +153,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -5934,10 +5934,7 @@ export function convertAnthropicMessages(
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
 					: undefined;
-			const hasProviderControls =
-				payload?.clearAt !== undefined ||
-				payload?.effort !== undefined ||
-				(payload?.toolChanges !== undefined && payload.toolChanges.length > 0);
+			const hasProviderControls = hasAnthropicMessageControls(msg);
 
 			let content: string | ContentBlockParam[];
 			if (typeof msg.content === "string") {

@@ -125,6 +125,8 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `SINGULARITYAPI_DEV_API_KEY`          | SingularityAPI universal gateway auth              | Using `singularityapi-dev` provider                            | Pay-as-you-go, 300+ models; validated against `https://api.singularityapi.dev/v1/models`                                                     |
 | `SINGULARITYAPI_TECH_API_KEY`         | SingularityAPI reserved lanes auth                 | Using `singularityapi-tech` provider                           | Slot-reserved DeepSeek lanes; validated against `https://api.singularityapi.tech/v1/models`                                                  |
 | `SCW_SECRET_KEY`                      | Scaleway Generative APIs auth                      | Using `scaleway` provider                                      | Serverless open-weight chat models; validated against `https://api.scaleway.ai/v1/models`; `SCW_API_KEY` is accepted as a legacy alias       |
+| `OTARI_API_KEY`                       | Otari gateway auth                                 | Using `otari` provider                                         | Workspace key; validated against `${OTARI_BASE_URL:-https://api.otari.ai/api/v1}/models` |
+| `OTARI_BASE_URL`                      | Otari self-hosted API root                         | Using `otari` provider                                         | Self-hosted deployment's API root including its prefix (`https://host.example.com/api/v1`); used by `/login otari` validation, model discovery, and requests |
 
 ### GitHub/Copilot tokens
 

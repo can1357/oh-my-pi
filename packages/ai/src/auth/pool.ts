@@ -1,4 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { providerPauseReason } from "../registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-credential-store";
 import type { BlockStoreHealth } from "./blocks";
@@ -330,10 +331,14 @@ export class CredentialPool implements CredentialsApi {
 	/**
 	 * Updates in-memory credential cache for a provider.
 	 * Removes the provider entry entirely if credentials array is empty.
+	 * A provider turned off in its auth rules (`disabled "<reason>"`) caches
+	 * nothing: its stored rows stay on disk untouched, but no read, selection,
+	 * refresh, usage probe or broker snapshot ever sees them.
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
-	 * @param credentials - Array of stored credentials to cache
+	 * @param stored - Array of stored credentials to cache
 	 */
-	replace(provider: string, credentials: StoredCredential[]): void {
+	replace(provider: string, stored: StoredCredential[]): void {
+		const credentials = providerPauseReason(provider) === undefined ? stored : [];
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
 		const trackedBearerFingerprints = this.#oauthBearerFingerprints.get(provider);

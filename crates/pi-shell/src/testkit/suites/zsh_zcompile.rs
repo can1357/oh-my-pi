@@ -148,3 +148,21 @@ fn zcompile_c_of_a_loaded_function_is_unsupported() {
 	assert!(err.contains("not supported by this engine yet"), "{err}");
 	assert_eq!(st, 0);
 }
+
+/// A function the `$fpath` digest gains when it is compiled again is found
+/// there: what a search learned of the digest's functions holds only
+/// while the file is unchanged.
+#[test]
+fn a_rewritten_digest_is_searched_again() {
+	let (out, err, _) = zsh(
+		"fpath=(/tmp/zt/w); zcompile /tmp/zt/w.zwc /tmp/zt/one.zsh; autoload -Uz g; g; print st=$?; \
+		 zcompile /tmp/zt/w.zwc /tmp/zt/one.zsh /tmp/zt/fn/g; unfunction g; autoload -Uz g; g; \
+		 print st=$?",
+	);
+	assert_eq!(out, "st=1\nst=1\n");
+	assert_eq!(
+		err,
+		"zsh:1: g: function definition file not found\nzsh:1: running the word code of \
+		 `/tmp/zt/w.zwc' (no source file): not supported by this engine yet\n"
+	);
+}

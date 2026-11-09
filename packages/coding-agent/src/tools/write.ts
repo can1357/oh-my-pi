@@ -87,6 +87,7 @@ import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 import {
 	cfgLspDiagnosticsDeduplicate,
 	cfgLspDiagnosticsOnWrite,
+	cfgLspEnabled,
 	cfgLspFormatOnWrite,
 	cfgLspRequestTimeout,
 } from "../lsp/settings";
@@ -645,7 +646,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	/** Resolves the LSP writethrough from the current `lsp.*` settings so changes apply to the next write. */
 	#lspWritethrough(): { writethrough: WritethroughCallback; deferred: DeferredDiagnostics | undefined } {
-		if (!(this.session.enableLsp ?? true)) return { writethrough: writethroughNoop, deferred: undefined };
+		if (!(this.session.enableLsp ?? true) || !cfgLspEnabled.get(this.session.settings)) {
+			return { writethrough: writethroughNoop, deferred: undefined };
+		}
 		const { settings } = this.session;
 		const enableDiagnostics = cfgLspDiagnosticsOnWrite.get(settings);
 		const dedup = enableDiagnostics && cfgLspDiagnosticsDeduplicate.get(settings);
