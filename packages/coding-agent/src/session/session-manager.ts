@@ -4120,7 +4120,6 @@ export class SessionManager {
 		const title = SessionManager.#cleanTitle(name);
 		if (!title) return false;
 
-		const sessionId = this.#sessionId;
 		const previousTitle = this.#sessionName;
 		const timestamp = nowIso();
 		this.#sessionName = title;
@@ -4141,6 +4140,9 @@ export class SessionManager {
 		if (trigger) entry.trigger = trigger;
 		// Journal titles in the same physical order as every other entry.
 		this.#recordEntry(entry);
+		// Recording can move this manager to a sibling session when another process owns the file; the title
+		// belongs to the session that took it, and a switch after this point is not this rename's.
+		const sessionId = this.#sessionId;
 		await this.flush();
 		// Keep the recent-sessions title index current so welcome-screen lookups
 		// never have to content-scan this session's file. A line the full volume

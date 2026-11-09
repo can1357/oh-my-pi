@@ -357,6 +357,34 @@ describe("deferred writer callbacks belong to their session state", () => {
 		expect(manager.getSessionName()).toBeUndefined();
 		await manager.close();
 	});
+	it("records a File title under the sibling a rename moved to, leaving the owned original's title", async () => {
+		const sessionDir = path.join(dir.path(), "sessions");
+		const owner = SessionManager.create(dir.path(), sessionDir);
+		owner.appendMessage(user("first"));
+		owner.appendMessage(assistant("first reply"));
+		await owner.setSessionName("Owner's title", "user");
+		const originalId = owner.getSessionId();
+		const storage = new FileSessionStorage();
+		const claim = storage.claimSession.bind(storage);
+		// Same-process claims are reentrant; refuse the original as another process holding it would.
+		spyOn(storage, "claimSession").mockImplementation((id, file) => (id === originalId ? null : claim(id, file)));
+		const visitor = await SessionManager.open(owner.getSessionFile()!, sessionDir, storage, {
+			suppressBreadcrumb: true,
+		});
+		const notifications: string[] = [];
+		visitor.onSessionNameChanged(() => notifications.push(visitor.getSessionId()));
+		try {
+			await visitor.setSessionName("Visitor's title", "user");
+			const siblingId = visitor.getSessionId();
+			expect(siblingId).not.toBe(originalId);
+			expect(lookupSessionTitle(siblingId)).toBe("Visitor's title");
+			expect(lookupSessionTitle(originalId)).toBe("Owner's title");
+			expect(notifications).toEqual([siblingId]);
+		} finally {
+			await visitor.close();
+			await owner.close();
+		}
+	});
 });
 
 describe("real Indexed persistent clones reconcile on the async disk queue", () => {
