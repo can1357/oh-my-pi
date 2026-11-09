@@ -387,6 +387,7 @@ import type {
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
+	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
 	SessionPickHandler,
@@ -9128,10 +9129,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#uiHelpers.renderSessionContextIncrementally(sessionContext, options, renderChunk);
 	}
 
-	async renderInitialMessages(options?: {
-		preserveExistingChat?: boolean;
-		clearTerminalHistory?: boolean;
-	}): Promise<void> {
+	async renderInitialMessages(options?: RenderInitialMessagesOptions): Promise<void> {
 		// A focus switch replays another session's transcript: claim that session's link schemes first.
 		this.#applyExtensionLinks();
 		this.#applyTranscriptPresenters();
