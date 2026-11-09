@@ -451,26 +451,41 @@ describe("team cooperative stop", () => {
 		}
 	});
 
-	it("does not dispatch a stop to an already aborted current ref", async () => {
-		const registry = AgentRegistry.global();
-		const lead = session();
-		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
-		const ref = registry.register({
-			id: "worker",
-			displayName: "worker",
-			kind: "sub",
-			session: session(),
-			status: "aborted",
-		});
-		const runtime = new TeamRuntime();
-		const started = await runtime.start(lead, team);
-		const entry = { id: "worker", reservation: "registered", ref };
-		started.members.set("worker", entry);
-		expect(await runtime.requestStop(lead, "audit", started.generation, "worker", entry, true, 120000)).toBe(
-			"stop already pending",
-		);
-		await runtime.stop(lead, "audit");
-	});
+	it.each([false, true])(
+		"releases an already aborted member without a stop request and retires the team (force=%s)",
+		async force => {
+			const registry = AgentRegistry.global();
+			const lead = session();
+			registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+			const ref = registry.register({
+				id: "worker",
+				displayName: "worker",
+				kind: "sub",
+				session: session(),
+				status: "aborted",
+			});
+			const runtime = new TeamRuntime();
+			const started = await runtime.start(lead, team);
+			const entry = { id: "worker", reservation: "registered", ref };
+			started.members.set("worker", entry);
+			const release = vi.spyOn(AgentLifecycleManager.global(), "release").mockResolvedValue(true);
+			const send = vi.spyOn(IrcBus.global(), "send");
+			try {
+				expect(
+					await runtime.requestStop(lead, "audit", started.generation, "worker", entry, force, 120000, true),
+				).toBe("released");
+				expect(release).toHaveBeenCalledTimes(1);
+				expect(release).toHaveBeenCalledWith("worker", ref, { tombstone: true });
+				expect(send).not.toHaveBeenCalled();
+				expect(started.members.has("worker")).toBe(false);
+				expect(runtime.listTeams(lead)).toEqual([]);
+			} finally {
+				send.mockRestore();
+				release.mockRestore();
+				await runtime.stop(lead, "audit");
+			}
+		},
+	);
 
 	it.each([0, -10, Number.NaN, 1])("clamps a short or invalid stop timeout (%s) to one second", async timeout => {
 		const registry = AgentRegistry.global();

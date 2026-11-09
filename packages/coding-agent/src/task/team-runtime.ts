@@ -277,7 +277,7 @@ export class TeamRuntime {
 		if (!this.#matches(state, intent) || !intent.ref) return false;
 		const current = AgentRegistry.global().get(intent.id);
 		if (!current || current.generation !== intent.ref.generation || current.id !== intent.ref.id) return false;
-		if (state.releasing.has(intent.handle) || current.status === "aborted") return false;
+		if (state.releasing.has(intent.handle)) return false;
 		state.releasing.set(intent.handle, intent);
 		try {
 			const released = await AgentLifecycleManager.global().release(intent.id, current, { tombstone: true });
@@ -356,9 +356,23 @@ export class TeamRuntime {
 			releasing.wholeTeam ||= wholeTeam;
 			return "stop already pending";
 		}
-		if (current?.generation === member.ref?.generation && current?.status === "aborted")
-			return "stop already pending";
 		const existing = state.stops.get(handle);
+		const priorWholeTeam = existing?.wholeTeam === true;
+		if (member.ref && current?.generation === member.ref.generation && current.status === "aborted") {
+			// Cancelled, killed or crashed outside `/team stop`: it cannot acknowledge, so release it now.
+			if (existing) this.#clearStop(state, existing);
+			const intent: StopIntent = {
+				handle,
+				reservation: expected.reservation,
+				id: expected.id,
+				force: true,
+				wholeTeam: wholeTeam || priorWholeTeam,
+				timeoutMs: 0,
+				requestId: randomUUID(),
+				ref: current,
+			};
+			return (await this.#releaseStop(state, intent)) ? "released" : "release refused";
+		}
 		if (existing) {
 			existing.wholeTeam ||= wholeTeam;
 			if (!force || existing.force) return "stop already pending";
@@ -369,7 +383,7 @@ export class TeamRuntime {
 			reservation: expected.reservation,
 			id: expected.id,
 			force,
-			wholeTeam: wholeTeam || existing?.wholeTeam === true,
+			wholeTeam: wholeTeam || priorWholeTeam,
 			timeoutMs: Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 1000,
 			requestId: randomUUID(),
 		};
