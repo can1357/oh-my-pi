@@ -1234,13 +1234,14 @@ function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | un
 	return choiceValue(field, checked, other);
 }
 
-/** Value a text field's submitted entry gives: a string, or a number for numeric inputs; absent counts as empty. */
+/** Value a text field's submitted entry gives: a string, or a number for `number`/`range` inputs; absent counts as empty. */
 function parseFormText(field: TextField, value: unknown): HtmlFormValue {
 	if (value === undefined) return textValue(field, "");
-	if (typeof value === "string" || (typeof value === "number" && Number.isFinite(value))) {
+	const numeric = field.type === "number" || field.type === "range";
+	if (typeof value === "string" || (numeric && typeof value === "number" && Number.isFinite(value))) {
 		return textValue(field, String(value));
 	}
-	throw new Error(`Form field ${JSON.stringify(field.name)} must carry a string or a number`);
+	throw new Error(`Form field ${JSON.stringify(field.name)} must carry a string${numeric ? " or a number" : ""}`);
 }
 
 /** Validates submitted `form` data against the parsed form; any mismatch throws instead of guessing. */
@@ -1257,22 +1258,20 @@ function parseFormDialogResponse(
 	if (!isRecord(submitted)) throw new Error("Form dialog response must carry a data object");
 
 	// Reject names the form does not have; hidden inputs may be echoed but keep the form's own values.
-	const fields = new Map(form.fields.flatMap(field => (field.name ? [[field.name, field] as const] : [])));
-	const hidden = new Set(form.hidden.map(([name]) => name));
+	const named = form.fields.filter(field => field.name);
+	const names = new Set([...named.map(field => field.name), ...form.hidden.map(([name]) => name)]);
 	for (const name of Object.keys(submitted)) {
-		if (!fields.has(name) && !hidden.has(name)) {
-			throw new Error(`Form dialog data carries unknown field ${JSON.stringify(name)}`);
-		}
+		if (!names.has(name)) throw new Error(`Form dialog data carries unknown field ${JSON.stringify(name)}`);
 	}
 
-	// Rebuild the data field by field, enforcing the same rules the form dialogs apply on submit.
+	// Check the value against every field of its name, enforcing the same rules the form dialogs apply on submit.
 	const data: HtmlFormData = Object.fromEntries(form.hidden);
-	for (const [name, field] of fields) {
-		const value =
-			field.kind === "choice" ? parseFormChoice(field, submitted[name]) : parseFormText(field, submitted[name]);
+	for (const field of named) {
+		const entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
+		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
 		const problem = fieldError(field, value);
-		if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
-		if (value !== undefined) data[name] = value;
+		if (problem) throw new Error(`Form field ${JSON.stringify(field.name)}: ${problem}`);
+		if (value !== undefined) data[field.name] = value;
 	}
 	return { data };
 }

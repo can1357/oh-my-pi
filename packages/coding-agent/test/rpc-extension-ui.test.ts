@@ -591,6 +591,7 @@ const DEPLOY_FORM = `<form>
   <label><input type="checkbox" name="checks" value="smoke"> Smoke</label>
   <label><input type="checkbox" name="checks" value="e2e" disabled> End-to-end</label>
   <label>Replicas <input type="number" name="replicas" value="2" min="1"></label>
+  <label>Owner <input type="text" name="owner"></label>
   <input type="hidden" name="release" value="r7">
 </form>`;
 
@@ -611,10 +612,10 @@ describe("RPC form dialog", () => {
 
 		// Free text stands in as "Other", numbers arrive as text, and hidden inputs keep the form's value.
 		respond(pendingRequests, request.id, {
-			data: { target: "staging", checks: ["smoke", "Rollback"], replicas: "3", release: "tampered" },
+			data: { target: "staging", checks: ["smoke", "Rollback"], replicas: "3", owner: "ops", release: "tampered" },
 		});
 		expect(await result).toEqual({
-			data: { release: "r7", target: "staging", checks: ["smoke", "Rollback"], replicas: 3 },
+			data: { release: "r7", target: "staging", checks: ["smoke", "Rollback"], replicas: 3, owner: "ops" },
 		});
 	});
 
@@ -628,6 +629,7 @@ describe("RPC form dialog", () => {
 		["a number below the input's min", { data: { replicas: 0 } }],
 		["a disabled radio option", { data: { target: "legacy" } }],
 		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }],
+		["a number for a text input", { data: { owner: 7 } }],
 	])("rejects %s", async (_case, response) => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -637,6 +639,35 @@ describe("RPC form dialog", () => {
 
 		await expect(result).rejects.toThrow(Error);
 		expect(pendingRequests.size).toBe(0);
+	});
+
+	it("checks a shared name against every field that carries it", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label>Name <input type="text" name="name" required></label>
+  <label>Nickname <input type="text" name="name"></label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, html);
+
+		// The optional second field must not hide the required first one.
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: {} });
+
+		await expect(result).rejects.toThrow("Required");
+	});
+
+	it("treats an omitted field named like an Object.prototype member as absent", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label>Constructor <input type="text" name="constructor"></label>
+  <label>Target <input type="text" name="target"></label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { target: "prod" } });
+
+		expect(await result).toEqual({ data: { constructor: "", target: "prod" } });
 	});
 
 	it.each([
@@ -650,7 +681,7 @@ describe("RPC form dialog", () => {
 		if (response) respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, response);
 
 		expect(await result).toEqual({
-			data: { release: "r7", target: "prod", checks: [], replicas: 2 },
+			data: { release: "r7", target: "prod", checks: [], replicas: 2, owner: "" },
 			timedOut: true,
 		});
 		expect(onTimeout).toHaveBeenCalledTimes(1);
