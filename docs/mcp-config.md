@@ -39,13 +39,13 @@ processes global, configure `mcp.workspaceRoots` in the active profile's **user*
 ```yaml
 mcp:
   workspaceRoots:
-    - ~/Documents/canetoad
+    - ~/Documents/projects
     - ~/Documents/eda
 ```
 
 Place shared definitions in `<workspace>/.omp/mcp.json`. A launch beneath
-`canetoad/frontend/src` can then inherit `canetoad/.omp/mcp.json` even when
-`frontend` is a separate Git repository and `canetoad` is not a repository.
+`projects/frontend/src` can then inherit `projects/.omp/mcp.json` even when
+`frontend` is a separate Git repository and `projects` is not a repository.
 The unrelated EDA workspace is not scanned.
 
 Only the owning profile's user settings grant this trust. Project settings,
@@ -54,7 +54,7 @@ or broaden it. Named profiles configure their own roots. The setting defaults
 to `[]`. Edit the user file, or run:
 
 ```sh
-omp config set mcp.workspaceRoots '["~/Documents/canetoad","~/Documents/eda"]'
+omp config set mcp.workspaceRoots '["~/Documents/projects","~/Documents/eda"]'
 ```
 
 There is no interactive panel editor for this trust setting.
