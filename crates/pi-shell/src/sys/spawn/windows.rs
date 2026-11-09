@@ -14,8 +14,12 @@
 //!   one gets a pseudoconsole the spawner holds ([`Pty`]), open while the job's
 //!   processes run ([`Watcher`] closes it when the last exits); a released
 //!   (`nohup`) one gets a hidden console of its own (`CREATE_NO_WINDOW`), which
-//!   lives as long as its processes. Other layouts share the host's console in
-//!   a new process group per stage.
+//!   lives as long as its processes. Other layouts share the host's console: a
+//!   stage that must not get the keyboard's Ctrl-C (it starts with `SIGINT`
+//!   ignored, or is a background job under job control) leads a process group
+//!   of its own, which turns Ctrl-C off in it; the others stay in the shell's
+//!   group, where Ctrl-C reaches them as `SIGINT` reaches the foreground of a
+//!   Unix terminal.
 //! - **Jobs.** `PgroupSpec::New` creates a job; `Join(pid)` adds the stage to
 //!   the job led by `pid` (and its console). Signals map to the job: KILL =
 //!   `TerminateJobObject` (members exit 137, reported as `Signaled(KILL)`). On
@@ -23,12 +27,16 @@
 //!   can ignore; the system ends holdouts after 5 s) and INT and QUIT send
 //!   `CTRL_C` (ignored by a child that inherited an ignored Ctrl-C); on the
 //!   shared console TERM, INT, HUP and QUIT send `CTRL_BREAK_EVENT` to each
-//!   stage's process group; nothing reaches a hidden console. After TERM a KILL
-//!   follows once the grace expires (console programs often ignore the event);
-//!   when the event cannot be delivered the job is killed at once. Pause =
-//!   `NtSuspendProcess` per member, resume = `NtResumeProcess` on exactly those
+//!   stage's process group, which a stage left in the shell's group does not
+//!   have; nothing reaches a hidden console. After TERM a KILL follows once the
+//!   grace expires (console programs often ignore the event); when the event
+//!   cannot be delivered the job is killed at once. Pause = `NtSuspendProcess`
+//!   per member, resume = `NtResumeProcess` on exactly those
 //!   ([`crate::sys::job`]).
-//! - **Fds.** Extra fds (> 2) fail with `Unsupported` ([`UnsupportedFd`]).
+//! - **Fds.** No fd beyond the three standard ones is inherited. A `/dev/fd/N`
+//!   the arguments name (a process substitution's) becomes a named pipe
+//!   `\\.\pipe\obash-pump-…` the child opens by path, pumped from or to fd N's
+//!   engine object ([`bridge_fds`]); other extra fds stay with the shell.
 
 use std::{
 	collections::HashMap,
@@ -81,14 +89,14 @@ use windows_sys::Win32::{
 	},
 };
 
-use super::{Dir, Leftover, Sessions, Shared, UnsupportedFd, child_end};
+use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{EnvView, ExitStatus, ExtProc, OsHandle, PgroupSpec, Signal, SpawnSpec, StdioSpec},
 	sys::{
 		cmdline,
 		job::{self, JobOps, JobPause},
 		lifecycle::{Abandon, Tracker},
-		pump::{Feed, Pump, Pumps},
+		pump::{End, Feed, Pump, Pumps, os},
 	},
 };
 
@@ -154,7 +162,7 @@ impl State {
 		pgroup: PgroupSpec,
 		console: impl FnOnce() -> JobConsole,
 	) -> io::Result<Arc<Job>> {
-		if let PgroupSpec::Join(leader) = pgroup
+		if let PgroupSpec::Join(leader) | PgroupSpec::Job { join: Some(leader), .. } = pgroup
 			&& let Some(job) = self.jobs.lock().list.iter().find(|j| j.leader() == leader)
 		{
 			return Ok(Arc::clone(job));
@@ -293,19 +301,22 @@ impl Watcher {
 
 /// One Job Object: a pipeline or a single command.
 struct Job {
-	handle:  OwnedHandle,
+	handle:       OwnedHandle,
 	/// Pid of the first process (the job's `pgid`).
-	leader:  AtomicU32,
-	/// Console process groups of the stages (each stage's pid), on the shared
-	/// console.
-	roots:   Mutex<Vec<u32>>,
-	pause:   Mutex<JobPause<OwnedHandle>>,
-	killed:  AtomicBool,
+	leader:       AtomicU32,
+	/// Console process groups of the stages that lead one (each such
+	/// stage's pid), on the shared console.
+	roots:        Mutex<Vec<u32>>,
+	/// A stage stays in the shell's console process group, where no event
+	/// can be aimed at it alone.
+	shared_group: AtomicBool,
+	pause:        Mutex<JobPause<OwnedHandle>>,
+	killed:       AtomicBool,
 	/// The signal last mapped to a console control event, to name the exit
 	/// it causes.
-	console: Mutex<Option<Signal>>,
+	console:      Mutex<Option<Signal>>,
 	/// Where the job's processes attach.
-	con:     JobConsole,
+	con:          JobConsole,
 }
 
 impl Job {
@@ -316,6 +327,7 @@ impl Job {
 			handle,
 			leader: AtomicU32::new(0),
 			roots: Mutex::new(Vec::new()),
+			shared_group: AtomicBool::new(false),
 			pause: Mutex::new(JobPause::default()),
 			killed: AtomicBool::new(false),
 			console: Mutex::new(None),
@@ -335,11 +347,15 @@ impl Job {
 
 	/// A console control event to every stage. On a pseudoconsole TERM and HUP
 	/// hang it up (`CTRL_CLOSE`), INT and QUIT send `CTRL_C`; on the shared
-	/// console each stage's group gets `CTRL_BREAK_EVENT`; a hidden console is
-	/// out of reach (`Unsupported`).
+	/// console each stage's group gets `CTRL_BREAK_EVENT`; a hidden console,
+	/// or a stage in the shell's own group (an event to its pid would not be
+	/// its alone), is out of reach (`Unsupported`).
 	fn interrupt(&self, sig: Signal) -> io::Result<()> {
 		*self.console.lock() = Some(sig);
 		match &self.con {
+			JobConsole::Shared if self.shared_group.load(Ordering::Acquire) => {
+				return Err(io::ErrorKind::Unsupported.into());
+			},
 			JobConsole::Shared => {},
 			JobConsole::Private(pty) if matches!(sig, Signal::Term | Signal::Hup) => {
 				pty.hang_up();
@@ -782,10 +798,62 @@ impl Inner {
 	}
 }
 
-pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
-	if let Some(&(fd, _)) = spec.extra_fds.first() {
-		return Err(io::Error::new(io::ErrorKind::Unsupported, UnsupportedFd { fd }));
+/// `argv` with each `/dev/fd/N` of an extra fd (a process substitution's)
+/// replaced by a named pipe the child opens by path, pumped from fd N's
+/// engine object when the engine reads it (`<(…)`: the child reads), else
+/// into it (`>(…)`). Extra fds the arguments do not name stay behind: no
+/// Windows program takes an inherited fd by number.
+fn bridge_fds(
+	argv: &[BString],
+	extra: Vec<(i32, StdioSpec)>,
+	pumps: &mut Vec<Pump>,
+) -> io::Result<Vec<BString>> {
+	let mut argv = argv.to_vec();
+	for (fd, spec) in extra {
+		let word = format!("/dev/fd/{fd}");
+		if !argv
+			.iter()
+			.any(|a| fd_path_at(a, word.as_bytes()).is_some())
+		{
+			continue;
+		}
+		let mut end = match spec {
+			StdioSpec::Pipe(f) => End::Fd(f),
+			StdioSpec::File(f) => End::File(f),
+			StdioSpec::Inherit(_) | StdioSpec::Null | StdioSpec::Closed => continue,
+		};
+		let child_reads = end.direction().0;
+		let (ours, name) = os::named_pipe(child_reads)?;
+		pumps.push(if child_reads {
+			Pump::In(end, ours)
+		} else {
+			Pump::Out(ours, end)
+		});
+		for a in &mut argv {
+			while let Some(at) = fd_path_at(a, word.as_bytes()) {
+				a.splice(at..at + word.len(), name.bytes());
+			}
+		}
 	}
+	Ok(argv)
+}
+
+/// Where `arg` names `word` (`/dev/fd/N`) whole, not as the start of a
+/// longer number (`/dev/fd/63` for `/dev/fd/6`).
+fn fd_path_at(arg: &[u8], word: &[u8]) -> Option<usize> {
+	let mut from = 0;
+	while let Some(i) = arg[from..].find(word) {
+		let at = from + i;
+		let end = at + word.len();
+		if !arg.get(end).is_some_and(u8::is_ascii_digit) {
+			return Some(at);
+		}
+		from = end;
+	}
+	None
+}
+
+pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
 	if !spec.rlimits.is_empty() {
 		// No per-process resource limits on Windows.
 		return Err(io::ErrorKind::Unsupported.into());
@@ -799,14 +867,23 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 		// No controlling terminals on Windows.
 		return Err(io::ErrorKind::Unsupported.into());
 	}
-	let SpawnSpec { path, argv, env, cwd, stdio, pgroup, lineage, .. } = spec;
-	let (app, mut line) = command(path, argv)?;
+	let SpawnSpec { path, argv, env, cwd, stdio, pgroup, lineage, sigmask_ign, extra_fds, .. } =
+		spec;
+	// On the shared console a stage that must not get the keyboard's Ctrl-C
+	// leads a group of its own (Ctrl-C off in it): it ignores `SIGINT` (an
+	// asynchronous command without job control) or is a background job of
+	// job control. Others stay in the shell's group, as a Unix terminal's
+	// foreground gets `SIGINT`.
+	let own_group =
+		sigmask_ign.contains(Signal::Int) || matches!(pgroup, PgroupSpec::Job { terminal: None, .. });
+	let mut pumps = Vec::new();
+	let argv = bridge_fds(argv, extra_fds, &mut pumps)?;
+	let (app, mut line) = command(path, &argv)?;
 	let env = env_block(env)?;
 	let cwd = wide(cwd)?;
 	let job = shared
 		.state
 		.job_for(pgroup, || JobConsole::new(shared.config.sessions, lineage.detached))?;
-	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
 	let [stdin, stdout, stderr] = stdio;
 	let handles = [
@@ -818,7 +895,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
-	let created = create(&app, &mut line, &env, &cwd, &handles, &job);
+	let created = create(&app, &mut line, &env, &cwd, &handles, &job, own_group);
 	// Our copies of the child's ends: pumps see end of file when it closes
 	// its own.
 	drop(handles);
@@ -826,7 +903,14 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let _ = job
 		.leader
 		.compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire);
-	job.roots.lock().push(pid);
+	match job.con {
+		JobConsole::Shared if own_group => {
+			job.roots.lock().push(pid);
+			GROUP_LEADERS.lock().push((job.leader(), pid));
+		},
+		JobConsole::Shared => job.shared_group.store(true, Ordering::Release),
+		_ => job.roots.lock().push(pid),
+	}
 	// A detached external is meant to outlive the shell: not a leak.
 	if !lineage.detached {
 		shared.state.record(&job);
@@ -870,6 +954,7 @@ fn create(
 	cwd: &[u16],
 	handles: &[OwnedHandle; 3],
 	job: &Job,
+	own_group: bool,
 ) -> io::Result<(OwnedHandle, u32)> {
 	let mut list: Vec<HANDLE> = Vec::with_capacity(3);
 	for h in handles {
@@ -893,9 +978,10 @@ fn create(
 	si.lpAttributeList = attrs.list();
 	let mut pi = PROCESS_INFORMATION::default();
 	let console = match job.con {
-		// A group of its own keeps the host's Ctrl-C away and CTRL_BREAK
-		// targetable.
-		JobConsole::Shared => CREATE_NEW_PROCESS_GROUP,
+		// A group of its own keeps the keyboard's Ctrl-C away and
+		// CTRL_BREAK targetable.
+		JobConsole::Shared if own_group => CREATE_NEW_PROCESS_GROUP,
+		JobConsole::Shared => 0,
 		// Ctrl-C reaches every process of the pseudoconsole.
 		JobConsole::Private(_) => 0,
 		JobConsole::Own => CREATE_NO_WINDOW,
@@ -936,6 +1022,31 @@ fn create(
 		return Err(e);
 	}
 	Ok((process, pi.dwProcessId))
+}
+
+/// The shared-console stages that lead a console process group of their
+/// own, as (job leader, stage pid), while their `ExtProc` lives (so a pid
+/// here is never reused).
+static GROUP_LEADERS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+/// Whether the job led by `pgid` has stages leading console process groups
+/// of their own: a job `fg` brought to the foreground, which the keyboard's
+/// Ctrl-C does not reach ([`break_console_groups`] forwards it).
+pub(crate) fn has_console_groups(pgid: u32) -> bool {
+	GROUP_LEADERS.lock().iter().any(|&(job, _)| job == pgid)
+}
+
+/// Send `CTRL_BREAK_EVENT` to every console group the stages of the job
+/// led by `pgid` lead (each pipeline stage leads its own); false when none
+/// is left. An event to a group reaches it and nothing else.
+pub(crate) fn break_console_groups(pgid: u32) -> bool {
+	let leaders = GROUP_LEADERS.lock();
+	let mut sent = false;
+	for &(_, pid) in leaders.iter().filter(|&&(job, _)| job == pgid) {
+		// SAFETY: plain call with scalar arguments.
+		sent |= unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) } != 0;
+	}
+	sent
 }
 
 /// Wait for the exit; meanwhile fire a due KILL. After the exit, a pending
@@ -1027,6 +1138,14 @@ impl ExtProc for WinProc {
 		self.pid
 	}
 
+	/// The job's first process: what later stages join
+	/// ([`PgroupSpec::Join`], [`PgroupSpec::Job`]) and what job control
+	/// hands the terminal to ([`has_console_groups`] when its stages lead
+	/// console groups of their own).
+	fn pgid(&self) -> Option<u32> {
+		Some(self.inner.job.leader())
+	}
+
 	fn poll_wait(&mut self, cx: &mut Context<'_>) -> Poll<ExitStatus> {
 		self.pumps.poll(cx, &self.tracker);
 		self.tracker.poll(cx)
@@ -1059,6 +1178,7 @@ impl ExtProc for WinProc {
 
 impl Drop for WinProc {
 	fn drop(&mut self) {
+		GROUP_LEADERS.lock().retain(|&(_, p)| p != self.pid);
 		// The pumps (and the feeds) stop when the fields drop, after this.
 		let mut life = self.tracker.lock();
 		if self.detached {

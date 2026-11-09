@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.18.3] - 2026-11-09
+
+### Changed
+
+- `ask` tool cards show the HTML form's fieldset legends and field count while pending, and each question with its submitted answer (or "(no answer)") once answered, flagging submissions made by the timeout
+
 ## [18.15.0] - 2026-11-01
 
 ### Changed

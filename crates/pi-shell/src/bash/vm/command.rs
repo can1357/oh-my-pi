@@ -2073,7 +2073,19 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 			},
 			Some(Search::NotFound) => {
 				sc.io().search = None;
-				sc.exec.as_mut().expect("exec").target = Some(Target::NotFound);
+				// The host's stand-in for a missing tool, unless a not-found
+				// hook handles it; `exec` keeps its not-found handling (a
+				// process image cannot be a native).
+				let exec = sc.exec.as_ref().expect("exec");
+				let target = if exec.exec_as.is_none()
+					&& !has_not_found_hook(cx, vp)
+					&& let Some(native) = cx.host.fallback(BStr::new(&name))
+				{
+					Target::Native(native)
+				} else {
+					Target::NotFound
+				};
+				sc.exec.as_mut().expect("exec").target = Some(target);
 				None
 			},
 			Some(Search::Pending(key)) => Some(Flow::Block(key)),
@@ -2407,13 +2419,13 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				env: &env,
 				cwd: BStr::new(&vp.cwd),
 				stdio: [
-					stdio_spec(&vp.fds.handle(0)),
-					stdio_spec(&vp.fds.handle(1)),
-					stdio_spec(&vp.fds.handle(2)),
+					stdio_spec(&vp.fds.handle(0), false),
+					stdio_spec(&vp.fds.handle(1), true),
+					stdio_spec(&vp.fds.handle(2), true),
 				],
 				extra_fds: extra_fds(vp)
 					.iter()
-					.map(|(fd, h)| (*fd, stdio_spec(h)))
+					.map(|(fd, h)| (*fd, stdio_spec(h, false)))
 					.collect(),
 				pgroup,
 				tag,
@@ -2817,7 +2829,7 @@ fn autoload(
 	let fpath = state::lookup(&k.root, cx.store, vp, b"FPATH")
 		.ok()
 		.flatten();
-	let fpath = fpath_dirs(fpath.as_ref().and_then(|v| v.as_scalar()));
+	let fpath = fpath_dirs(fpath.as_ref().and_then(|v| v.as_scalar()), k.engine.config().platform);
 	let cwd = vp.cwd.clone();
 	let found = {
 		let mut ask = |p: Probe| command_probe(k, cx, vp, &p);
@@ -3017,12 +3029,14 @@ fn parse_autoload(
 	Ok(first)
 }
 
-/// The directories of `$fpath` (its `FPATH` text): none when empty; an
-/// empty element is the working directory.
-pub fn fpath_dirs(fpath: Option<&[u8]>) -> Vec<BString> {
+/// The directories of `$fpath` (its `FPATH` text, joined with `platform`'s
+/// separator, as the tie keeps it): none when empty; an empty element is
+/// the working directory.
+pub fn fpath_dirs(fpath: Option<&[u8]>, platform: crate::bash::ids::Platform) -> Vec<BString> {
+	let sep = probe::path_separator(platform);
 	match fpath {
 		None | Some([]) => Vec::new(),
-		Some(f) => f.split(|&c| c == b':').map(BString::from).collect(),
+		Some(f) => f.split(|&c| c == sep).map(BString::from).collect(),
 	}
 }
 
@@ -3043,7 +3057,11 @@ pub enum FpFound {
 }
 
 /// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
-/// `cwd`), answered through `ask`.
+/// `cwd`), answered through `ask`; its text when `read` (zsh's
+/// `test_only` when not: `autoload -r` needs only where it is). The
+/// search's `stat`s are asked in stretches ([`Probe::StatAll`], each up to
+/// the first file it finds), not one probe per path, each of which would
+/// restart the asking builtin.
 ///
 /// # Errors
 /// What `ask` fails with (a probe in flight).
@@ -3052,31 +3070,98 @@ pub fn getfpfunc<E>(
 	cwd: &[u8],
 	name: &[u8],
 	dirs: &[BString],
+	read: bool,
 ) -> Result<FpFound, E> {
-	for dir in dirs {
-		let mut rel = BString::from(dir.as_slice());
-		if !rel.is_empty() {
-			rel.push(b'/');
-		}
-		rel.extend_from_slice(name);
-		let path = absolute(cwd, &rel);
+	use super::builtins::zsh_zcompile::{fpath_dump, fpath_stat_paths};
+	// Each directory's paths: `dir/name`, then the word code files.
+	let mut paths: Vec<BString> = Vec::with_capacity(dirs.len() * 3);
+	let mut spans = Vec::with_capacity(dirs.len());
+	for d in dirs {
+		let start = paths.len();
+		paths.extend(fpath_stat_paths(cwd, d, name));
+		spans.push(start..paths.len());
+	}
+	// A definition file ends the search; a word code file it passes does
+	// not (its directory may hold the function after all).
+	let ends: Vec<u32> = spans
+		.iter()
+		.filter_map(|s| u32::try_from(s.start).ok())
+		.collect();
+	let mut search =
+		StatSearch { paths: &paths, ends: &ends, known: hashbrown::HashMap::new(), asked: 0 };
+	for (dir, span) in dirs.iter().zip(spans) {
+		let path = &paths[span.start];
 		let regular = matches!(
-			ask(Probe::Stat { path: path.clone(), follow: true })?,
+			search.stat(ask, Probe::Stat { path: path.clone(), follow: true })?,
 			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
 		);
 		if !regular {
 			// zsh loads a definition from word code alone (`DIR.zwc`,
-			// `DIR/NAME.zwc`, a digest in `$fpath`).
-			if let Some(dump) = super::builtins::zsh_zcompile::fpath_dump::<E>(ask, cwd, dir, name)? {
+			// `DIR/NAME.zwc`, a digest in `$fpath`): none when the search
+			// found no such file here.
+			if paths[span.start + 1..span.end]
+				.iter()
+				.all(|p| matches!(search.known.get(p), Some(None)))
+			{
+				continue;
+			}
+			let mut ask = |p: Probe| search.stat(ask, p);
+			if let Some(dump) = fpath_dump::<E>(&mut ask, cwd, dir, name)? {
 				return Ok(FpFound::Dump(dump));
 			}
 			continue;
 		}
-		if let ProbeResult::Bytes(Ok(text)) = ask(Probe::Read { path })? {
+		if !read {
+			return Ok(FpFound::File { dir: dir.clone(), text: BString::default() });
+		}
+		if let ProbeResult::Bytes(Ok(text)) = ask(Probe::Read { path: path.clone() })? {
 			return Ok(FpFound::File { dir: dir.clone(), text });
 		}
 	}
 	Ok(FpFound::None)
+}
+
+/// The `stat`s of a [`getfpfunc`] search, asked in stretches.
+struct StatSearch<'p> {
+	paths: &'p [BString],
+	/// Indices of the paths a file at ends a stretch, ascending.
+	ends:  &'p [u32],
+	known: hashbrown::HashMap<BString, Option<crate::bash::fs::Stat>>,
+	/// `paths[..asked]` are in `known`.
+	asked: usize,
+}
+
+impl StatSearch<'_> {
+	/// `p` answered: a `stat` of the search from the stretches (one past
+	/// them asks for the next stretch), anything else by `ask`.
+	fn stat<E>(
+		&mut self,
+		ask: &mut super::builtins::zsh_zcompile::Ask<'_, E>,
+		p: Probe,
+	) -> Result<ProbeResult, E> {
+		let Probe::Stat { path, follow: true } = &p else {
+			return ask(p);
+		};
+		if !self.known.contains_key(path)
+			&& self.paths[self.asked..].contains(path)
+			&& let ProbeResult::Stats(stats) = ask(Probe::StatAll {
+				paths: self.paths[self.asked..].to_vec(),
+				ends:  self
+					.ends
+					.iter()
+					.filter_map(|&e| e.checked_sub(u32::try_from(self.asked).unwrap_or(u32::MAX)))
+					.collect(),
+			})? {
+			for (q, st) in self.paths[self.asked..].iter().zip(&stats) {
+				self.known.insert(q.clone(), *st);
+			}
+			self.asked += stats.len().max(1);
+		}
+		match self.known.get(path) {
+			Some(st) => Ok(ProbeResult::Stat(*st)),
+			None => ask(p),
+		}
+	}
 }
 
 /// zsh `loadautofn`'s search for the definition of stub `name` with
@@ -3096,13 +3181,13 @@ pub fn find_autoload<E>(
 	current_fpath: bool,
 ) -> Result<FpFound, E> {
 	if dir.first() == Some(&b'/') {
-		let found = getfpfunc(ask, cwd, name, &[BString::from(dir)])?;
+		let found = getfpfunc(ask, cwd, name, &[BString::from(dir)], true)?;
 		if !matches!(found, FpFound::None) || !(current_fpath || attrs.contains(Attrs::ZSH_CUR_FPATH))
 		{
 			return Ok(found);
 		}
 	}
-	getfpfunc(ask, cwd, name, fpath)
+	getfpfunc(ask, cwd, name, fpath, true)
 }
 
 /// zsh `dircache_set`'s directory: `dir` if absolute, else the working
@@ -4805,22 +4890,43 @@ fn exec_failed(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
+/// The not-found hook function of `vp`'s dialect: bash's
+/// `command_not_found_handle`, zsh's `command_not_found_handler`.
+fn not_found_hook_name(vp: &Vproc) -> &'static [u8] {
+	if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
+		b"command_not_found_handler"
+	} else {
+		b"command_not_found_handle"
+	}
+}
+
+/// Whether `hook` is the function running (it does not handle itself).
+fn in_not_found_hook(vp: &Vproc, hook: &[u8]) -> bool {
+	vp.frames
+		.iter()
+		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == hook))
+}
+
+/// Whether a not-found hook would handle a missing command (it is defined
+/// and not the one running): it wins over [`crate::bash::Host::fallback`],
+/// as on a system whose tools are missing.
+fn has_not_found_hook(cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	let hook = not_found_hook_name(vp);
+	!in_not_found_hook(vp, hook)
+		&& matches!(
+			state::record(cx.store, vp, Key::Func(BStr::new(hook))),
+			Ok(Some(Record::Func { .. }))
+		)
+}
+
 /// bash's `command_not_found_handle` (zsh's `command_not_found_handler`,
 /// zsh `commandnotfound` in the forked child): when that function exists
 /// (and is not the one running), it runs in a subshell with the command's
 /// words as its arguments, and its status is the command's. `None`: no
 /// handler, else the flow that waits for it.
 fn not_found_hook(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
-	let hook: &[u8] = if vp.mode.dialect() == crate::bash::ids::Dialect::Zsh {
-		b"command_not_found_handler"
-	} else {
-		b"command_not_found_handle"
-	};
-	if vp
-		.frames
-		.iter()
-		.any(|f| matches!(&f.kind, FrameKind::Function { name, .. } if name.as_slice() == hook))
-	{
+	let hook = not_found_hook_name(vp);
+	if in_not_found_hook(vp, hook) {
 		return None;
 	}
 	match state::record(cx.store, vp, Key::Func(BStr::new(hook))) {
@@ -5046,15 +5152,20 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 	}
 }
 
-/// How an external gets fd object `h`: a slot the script closed stays
-/// closed (bash's child inherits it so); an object a restore lost reads as
-/// the null device.
-fn stdio_spec(h: &FdRef) -> StdioSpec {
+/// How an external gets fd object `h`, as its input or its `output`: a
+/// slot the script closed stays closed (bash's child inherits it so); an
+/// object a restore lost reads as the null device.
+fn stdio_spec(h: &FdRef, output: bool) -> StdioSpec {
+	let os = if output {
+		h.os_output_handle()
+	} else {
+		h.os_handle()
+	};
 	if h.origin() == FdOrigin::Closed {
 		StdioSpec::Closed
 	} else if !h.is_open() {
 		StdioSpec::Null
-	} else if let Some(os) = h.os_handle() {
+	} else if let Some(os) = os {
 		StdioSpec::Inherit(os)
 	} else {
 		StdioSpec::Pipe(h.clone())
@@ -5128,7 +5239,17 @@ fn build_env(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Result<EnvView, StoreEr
 
 #[cfg(test)]
 mod tests {
-	use super::looks_binary;
+	use super::{fpath_dirs, looks_binary};
+	use crate::bash::ids::Platform;
+
+	/// `$fpath` joins Windows directories with `;`; the autoload search
+	/// split `FPATH` on `:` and looked in `C` and `/fn`, never finding the
+	/// function.
+	#[test]
+	fn fpath_dirs_split_on_the_platform_separator() {
+		assert_eq!(fpath_dirs(Some(b"C:/a/fn;D:/b"), Platform::Windows), ["C:/a/fn", "D:/b"]);
+		assert_eq!(fpath_dirs(Some(b"/a:/b"), Platform::Linux), ["/a", "/b"]);
+	}
 
 	// bash `check_binary_file`: only a NUL on the first line (within 80
 	// bytes) makes a file binary.

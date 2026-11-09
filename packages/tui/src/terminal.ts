@@ -1428,7 +1428,11 @@ export class ProcessTerminal implements Terminal {
 				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
 				if (decoder.hasPendingSequence) {
 					this.#win32PendingFlushTimer = setTimeout(
-						() => this.#releaseWin32PendingSequence(),
+						() => {
+							// An overdue timer runs before poll delivers relayed tail records.
+							// Give stdin one poll pass before releasing a held ESC or string.
+							this.#win32PendingFlushTimer = setTimeout(() => this.#releaseWin32PendingSequence());
+						},
 						decoder.hasPendingString ? WIN32_RELAYED_STRING_TIMEOUT_MS : WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
 					);
 				}
