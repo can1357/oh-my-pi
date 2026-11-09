@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
+import type { LoadOptions } from "./capability/types";
 import { findConfigFile } from "./config";
 import type { SkillsSettings } from "./extensibility/settings";
 import type { Personality } from "./session/settings";
@@ -50,7 +51,7 @@ import { cfgEvalAutoBackgroundEnabled } from "./eval/settings";
 import { cfgTtsrBuiltinRules, cfgTtsrDisabledRules, cfgTtsrEnabled } from "./export/ttsr-settings";
 import { cfgTuiAutoGraph, cfgTuiReactions, cfgTuiRenderMermaid, cfgTuiRenderSvg } from "./modes/settings";
 import { cfgSecretsEnabled } from "./secrets/settings";
-import { cfgToolsFormat } from "./session/context-settings";
+import { cfgContextStopAtRepoRoot, cfgToolsFormat } from "./session/context-settings";
 import {
 	cfgIncludeModelInPrompt,
 	cfgIncludeWorkspaceTree,
@@ -74,6 +75,7 @@ import {
  * roots rebuild through their own reconcile instead.
  */
 export const cfgSystemPromptInputs = combine({
+	contextStopAtRepoRoot: cfgContextStopAtRepoRoot,
 	personality: cfgPersonality,
 	includeModelInPrompt: cfgIncludeModelInPrompt,
 	includeWorkspaceTree: cfgIncludeWorkspaceTree,
@@ -312,7 +314,7 @@ export async function resolvePromptInput(input: string | undefined, description:
 	}
 }
 
-export interface LoadContextFilesOptions {
+export interface LoadContextFilesOptions extends Pick<LoadOptions, "agentDir" | "extensionRoots" | "stopAtRepoRoot"> {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
 	/** Disabled extension IDs to honor instead of the process-global settings. */
@@ -371,6 +373,9 @@ export async function loadProjectContextFiles(
 
 	const result = await loadCapability(contextFileCapability.id, {
 		cwd: resolvedCwd,
+		agentDir: options.agentDir,
+		stopAtRepoRoot: options.stopAtRepoRoot,
+		extensionRoots: options.extensionRoots,
 		disabledExtensions: options.disabledExtensions,
 	});
 
@@ -506,6 +511,8 @@ export function projectSystemPromptToolMetadata(
 }
 
 export interface BuildSystemPromptOptions {
+	/** Per-session inputs for primary and additional workspace context discovery. */
+	contextDiscovery?: Omit<LoadContextFilesOptions, "cwd">;
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
 	/** Already-loaded custom system prompt text; bypasses path resolution. */
@@ -796,12 +803,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const contextFilesPromise = (async () => {
 		const primary = providedContextFiles
 			? providedContextFiles
-			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, {
+					...options.contextDiscovery,
+					cwd: resolvedCwd,
+				});
 		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
 		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 		if (additionalRoots.length === 0 || noContextFiles) return excludeAgentsMd ? withoutAgentsMd(primary) : primary;
 		const extra = await Promise.all(
-			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
+			additionalRoots.map(root =>
+				loadProjectContextFiles({ ...options.contextDiscovery, cwd: root }).catch(() => []),
+			),
 		);
 		const merged = dedupeContainedContextFiles([...primary, ...extra.flat()]);
 		return excludeAgentsMd ? withoutAgentsMd(merged) : merged;

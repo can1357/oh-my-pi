@@ -13,6 +13,8 @@ import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles, loadCliExtensionProviders } from "../../sdk";
 import type { AuthStorage } from "../../session/auth-storage";
+import { cfgContextStopAtRepoRoot } from "../../session/context-settings";
+import { cfgDisabledExtensions } from "../../extensibility/settings";
 import { abortOnGitFailure, pushOrAbort } from "../execute";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
@@ -83,7 +85,9 @@ async function runAgenticCommitWithAuth(
 	}
 	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
 		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
-		discoverContextFiles(cwd),
+		discoverContextFiles(cwd, undefined, [...cfgDisabledExtensions.get(settings)], {
+			stopAtRepoRoot: cfgContextStopAtRepoRoot.get(settings),
+		}),
 		repo
 			.numstat({ cached: true })
 			.then(entries =>

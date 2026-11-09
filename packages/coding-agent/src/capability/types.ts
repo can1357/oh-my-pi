@@ -37,6 +37,13 @@ export interface LoadContext {
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
 	/**
+	 * When true, standalone AGENTS.md / CLAUDE.md discovery clamps at
+	 * {@link repoRoot} instead of raising the boundary to `$HOME` for a
+	 * nested repository. Default (unset / false) keeps the walk-to-home
+	 * contract from #7703. Threaded from `context.stopAtRepoRoot`.
+	 */
+	stopAtRepoRoot?: boolean;
+	/**
 	 * Native user config dir for this load. Unset means the process-global
 	 * `getAgentDir()`; an SDK session created with its own `agentDir` passes it
 	 * so user-level rules and tools come from that dir.
@@ -110,6 +117,8 @@ export interface LoadOptions<T = unknown> {
 	includeDisabledProviders?: boolean;
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
+	/** Stop standalone context discovery at the repository root. Default: false. */
+	stopAtRepoRoot?: boolean;
 	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */
 	agentDir?: string;
 	/** Include items even if they fail validation. Default: false */

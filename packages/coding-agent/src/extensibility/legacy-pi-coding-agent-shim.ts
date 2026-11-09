@@ -64,6 +64,7 @@ import {
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { SessionEntry } from "../session/session-entries";
+import { cfgContextStopAtRepoRoot } from "../session/context-settings";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
@@ -1159,7 +1160,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 				this.#loadAdditionalSkills(),
 				options.noPromptTemplates ? Promise.resolve([]) : discoverPromptTemplates(cwd, agentDir),
 				this.#loadAdditionalPromptTemplates(),
-				options.noContextFiles ? Promise.resolve([]) : discoverContextFiles(cwd, agentDir),
+				options.noContextFiles
+					? Promise.resolve([])
+					: discoverContextFiles(cwd, agentDir, [...cfgDisabledExtensions.get(settings)], {
+							stopAtRepoRoot: cfgContextStopAtRepoRoot.get(settings),
+						}),
 			]);
 
 		this.#extensionsResult = options.extensionsOverride
