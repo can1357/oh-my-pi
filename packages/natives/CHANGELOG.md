@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `grep` no longer searches the file its own output is redirected into, nor standard input redirected from that same file: both are refused with `input file is also the output`, as GNU grep does ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
