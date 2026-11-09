@@ -1369,7 +1369,9 @@ export class AssistantMessageComponent extends Container {
 				// Closed child: only the streaming tail may mutate in place, so
 				// everything before it is final. Same form as the frozen prefix it
 				// published while streaming, so the snapshot still extends.
-				parts.push({ kind: item.blockType, text: streamingMarkdownSource(item.lastText) });
+				const stable = md.getMathImageStableSource();
+				if (stable.trim()) parts.push({ kind: item.blockType, text: stable });
+				if (stable.length < streamingMarkdownSource(item.lastText).length) break;
 				itemIndex++;
 				continue;
 			}
@@ -1454,12 +1456,19 @@ export class AssistantMessageComponent extends Container {
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
 	#createMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+		const markdown =
+			kind === "text"
+				? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		return markdown.setMathImagesAllowed(kind !== "thinking").setMathImageChangeHandler(() => {
+			this.#blockVersion++;
+			this.#stableHeadRenderer = undefined;
+			this.#stableReplayRenderer = undefined;
+			this.#onImageUpdate?.();
+		});
 	}
 
 	/**

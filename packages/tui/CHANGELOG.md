@@ -50,6 +50,7 @@
 
 ### Added
 
+- Added opt-in Markdown math images through a host-supplied renderer: in-place display graphics on Kitty, iTerm2, and Sixel, one-row inline graphics (scripts and simple fractions, fitted down to 0.6×) on proven Kitty-placeholder clients, and Unicode fallback. Math placements have separate 512-entry retention rather than consuming ordinary-image limits. Source and native TSP Markdown remain unchanged.
 - Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
 ### Changed

@@ -28,6 +28,7 @@ import {
 	Loader,
 	Markdown,
 	minFrameIntervalMs,
+	releaseMathImages,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -74,6 +75,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { registerCodingAgentMathImageRenderer } from "./math-image-renderer";
 import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
@@ -446,6 +448,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderMath,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiCompleteScrollback,
@@ -523,6 +526,7 @@ const cfgLiveUiSettings = combine({
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.renderMath": cfgTuiRenderMath,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -548,6 +552,7 @@ const cfgLiveUiSettings = combine({
 	"tier.advisor": cfgTierAdvisor,
 });
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
+let mathImageRendererRegistered = false;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
@@ -2167,6 +2172,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 
+		if (!mathImageRendererRegistered) {
+			registerCodingAgentMathImageRenderer();
+			mathImageRendererRegistered = true;
+		}
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
@@ -4307,8 +4316,17 @@ export class InteractiveMode implements InteractiveModeContext {
 					child.setImagesVisible(visible);
 				}
 			}
-			if (!visible) this.ui.clearInlineImages();
-			this.ui.requestRender(true);
+			if (!visible) {
+				releaseMathImages();
+				this.ui.clearInlineImages();
+			}
+			rebuildChat = true;
+			this.ui.invalidate();
+		}
+		if (any("tui.renderMath")) {
+			releaseMathImages();
+			this.ui.invalidate();
+			rebuildChat = true;
 		}
 		const hideThinkingBlock = cfgHideThinkingBlock.get(this.settings);
 		if (any("hideThinkingBlock") && hideThinkingBlock !== this.hideThinkingBlock) {

@@ -1074,6 +1074,8 @@ struct BreakClass {
 	no_start:    bool,
 	/// Must not end a row: opening punctuation.
 	no_end:      bool,
+	/// Kitty image cells form one atomic run, separate from surrounding prose.
+	placeholder: bool,
 }
 
 impl BreakClass {
@@ -1088,11 +1090,15 @@ impl BreakClass {
 			ideographic: width == 2 && !is_hangul(cp),
 			no_start:    width == 0 || is_kinsoku_no_start(cp),
 			no_end:      is_kinsoku_no_end(cp),
+			placeholder: cp == 0x10eeee,
 		}
 	}
 
 	/// Whether a row may break between `self` and the grapheme after it.
 	const fn breaks_before(self, next: Self) -> bool {
+		if self.placeholder || next.placeholder {
+			return self.placeholder != next.placeholder;
+		}
 		(self.ideographic || next.ideographic) && !self.no_end && !next.no_start
 	}
 }
@@ -1180,7 +1186,7 @@ impl TokenSplitter {
 		}
 	}
 
-	fn push_ansi(&mut self, seq: &[u16]) {
+	fn push_ansi(&mut self, seq: &[u16], opens_placeholder: bool) {
 		// A sequence that follows visible content closes it (color reset,
 		// underline off) and must ride along with that token so the closer
 		// cannot migrate into whitespace discarded at a soft wrap (#8582).
@@ -1188,7 +1194,10 @@ impl TokenSplitter {
 		// waits for it: gluing it to the whitespace token would keep that
 		// space alive past the wrap point and open the style on the line
 		// being broken instead of the one carrying the styled word.
-		if self.tokens.buf.len() == self.token_start || self.in_whitespace {
+		if self.tokens.buf.len() == self.token_start
+			|| self.in_whitespace
+			|| (opens_placeholder && !self.prev.is_some_and(|class| class.placeholder))
+		{
 			self.pending_ansi.extend_from_slice(seq);
 		} else {
 			self.tokens.buf.extend_from_slice(seq);
@@ -1244,7 +1253,14 @@ fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> LineTokens {
 		if line[i] == ESC
 			&& let Some(seq_len) = ansi_seq_len_u16(line, i)
 		{
-			splitter.push_ansi(&line[i..i + seq_len]);
+			let mut next = i + seq_len;
+			while next < line.len() && line[next] == ESC {
+				let Some(len) = ansi_seq_len_u16(line, next) else {
+					break;
+				};
+				next += len;
+			}
+			splitter.push_ansi(&line[i..i + seq_len], is_kitty_placeholder(&line[next..]));
 			i += seq_len;
 			continue;
 		}
@@ -1274,12 +1290,35 @@ fn split_into_tokens_with_ansi(line: &[u16], tab_width: usize) -> LineTokens {
 	splitter.finish()
 }
 
+/// U+10EEEE in UTF-16. Keep this recognition confined to paragraph wrapping;
+/// viewport slicing and truncation intentionally remain cell-based.
+fn is_kitty_placeholder(text: &[u16]) -> bool {
+	text.starts_with(&[0xdbfb, 0xdeee])
+}
+
 fn break_long_word(
 	word: &[u16],
 	width: usize,
 	tab_width: usize,
 	state: &mut WrapState,
 ) -> SmallVec<[Vec<u16>; 4]> {
+	let mut visible_start = 0;
+	while visible_start < word.len() && word[visible_start] == ESC {
+		let Some(len) = ansi_seq_len_u16(word, visible_start) else {
+			break;
+		};
+		visible_start += len;
+	}
+	if is_kitty_placeholder(&word[visible_start..]) {
+		// Invalid overlong placements still stay intact: the caller must select
+		// a fallback before wrapping, rather than corrupting an image's grid.
+		let mut line = Vec::with_capacity(word.len());
+		write_active_codes(state, &mut line);
+		line.extend_from_slice(word);
+		update_state_from_text(word, state);
+		return smallvec![line];
+	}
+
 	let mut lines = SmallVec::<[Vec<u16>; 4]>::new();
 	let mut current_line = Vec::<u16>::new();
 	write_active_codes(state, &mut current_line);
@@ -2425,5 +2464,43 @@ mod tests {
 		assert_eq!(rows.len(), 2);
 		assert!(rows[0].starts_with("\x1b[31m一二三"));
 		assert!(rows[1].starts_with("\x1b[31m四五六"));
+	}
+
+	fn kitty_grid(columns: usize) -> String {
+		let cells = "\u{10eeee}\u{305}\u{30d}\u{30e}".repeat(columns);
+		format!(
+			"\x1b_Ga=p,U=1,i=16909060,p=66051,c={columns},r=1\x1b\\\x1b[38;2;2;3;4m\x1b[58;2;1;2;\
+			 3m{cells}\x1b[39;59m"
+		)
+	}
+
+	#[test]
+	fn test_wrap_kitty_placeholder_exact_fit_and_adjacent_prose() {
+		let grid = kitty_grid(3);
+		let rows = wrap(&format!("ab{grid},cd"), 5);
+		assert_eq!(rows, [format!("ab{grid}"), ",cd".to_owned()]);
+	}
+
+	#[test]
+	fn test_wrap_kitty_placeholder_moves_carriers_and_marks_intact() {
+		let grid = kitty_grid(3);
+		let rows = wrap(&format!("abc{grid},z"), 5);
+		assert_eq!(rows, ["abc".to_owned(), format!("{grid},z")]);
+		assert_eq!(wrap(&format!("a {grid} end"), 4), ["a".to_owned(), grid, "end".to_owned()]);
+	}
+
+	#[test]
+	fn test_wrap_kitty_placeholder_overlong_run_is_not_split() {
+		let grid = kitty_grid(5);
+		assert_eq!(wrap(&format!("a{grid}b"), 3), ["a".to_owned(), grid, "b".to_owned()]);
+	}
+
+	#[test]
+	fn test_kitty_placeholder_native_width_counts_cells_not_marks_or_carriers() {
+		assert_eq!(visible_width_u16(&to_u16("\u{10eeee}"), DEFAULT_TAB_WIDTH), 1);
+		assert_eq!(visible_width_u16(&to_u16("\u{305}\u{30d}\u{30e}"), DEFAULT_TAB_WIDTH), 0);
+		for columns in [1, 3, 9, 297] {
+			assert_eq!(visible_width_u16(&to_u16(&kitty_grid(columns)), DEFAULT_TAB_WIDTH), columns);
+		}
 	}
 }

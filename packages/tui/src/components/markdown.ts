@@ -22,6 +22,21 @@ import {
 	mathStartIndex,
 } from "@oh-my-pi/pi-utils/math-delimiters";
 import { listMayContinueAt } from "@oh-my-pi/pi-utils/marked-list";
+import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
+import { getKittyGraphics } from "../kitty-graphics";
+import { getMathImageGeneration, getMathImageRenderer, type MathImageRenderRequest } from "../math-image-renderer";
+import { resolveImageOptions } from "../render/render-utils";
+import { getImageRenderContext, type ImagePresentation } from "./image";
+import {
+	beginMathImageDocument,
+	renderMathImage,
+	getMathImageOwnerChangeHandler,
+	hasMathImageOwner,
+	withMathImageOwner,
+	releaseMathImageDocument,
+	releaseMathImageOccurrence,
+} from "./math-image";
+import { measureMathImage } from "./math-image";
 import { latexToBlock } from "../latex-block";
 import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
@@ -34,8 +49,8 @@ import {
 	stripExtensionLinkMarkers,
 } from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
-import { TERMINAL } from "../terminal-capabilities";
-import { getSymbolTheme, getThemeEpoch } from "../theme/theme";
+import { TERMINAL, getCellDimensions, ImageProtocol, offsetDirectPlacementLine } from "../terminal-capabilities";
+import { getSymbolTheme, getThemeEpoch, theme } from "../theme/theme";
 import { canCacheMarkdownListItems } from "../theme/tui-adapters";
 import type { Component } from "../tui";
 import {
@@ -1270,6 +1285,7 @@ const EMPTY_RENDER_LINES: readonly string[] = [];
 interface RenderedLine {
 	text: string;
 	literalCode?: true;
+	mathGraphic?: true;
 }
 
 interface RenderedListItemLine extends RenderedLine {
@@ -2029,6 +2045,37 @@ function isMathToken(token: Token): token is Token & { text: string; display: bo
 	return (token as { type: string }).type === "math";
 }
 
+function prefixDirectMathLine(line: string, prefix: string): string {
+	const suffixAt = line.indexOf("\r");
+	const graphic = suffixAt < 0 ? line : line.slice(0, suffixAt);
+	const innerPrefix = suffixAt < 0 ? "" : line.slice(suffixAt + 1);
+	return offsetDirectPlacementLine(graphic, visibleWidth(prefix)) + "\r" + prefix + innerPrefix;
+}
+
+function enumerateMathOccurrences(tokens: readonly Token[]): Map<Token, string> {
+	const occurrences = new Map<Token, string>();
+	const visit = (values: readonly Token[], path: string): void => {
+		for (let i = 0; i < values.length; i++) {
+			const token = values[i];
+			const key = `${path}/token:${i}`;
+			if (isMathToken(token)) {
+				occurrences.set(token, `${key}/math:${token.display ? "display" : "inline"}:${token.text}`);
+				continue;
+			}
+			if (token.type === "list")
+				for (let j = 0; j < token.items.length; j++) visit(token.items[j].tokens, `${key}/item:${j}`);
+			else if (token.type === "table") {
+				for (let j = 0; j < token.header.length; j++) visit(token.header[j].tokens, `${key}/header:${j}`);
+				for (let r = 0; r < token.rows.length; r++)
+					for (let c = 0; c < token.rows[r].length; c++)
+						visit(token.rows[r][c].tokens, `${key}/row:${r}/cell:${c}`);
+			} else if ("tokens" in token && Array.isArray(token.tokens)) visit(token.tokens, key);
+		}
+	};
+	visit(tokens, "");
+	return occurrences;
+}
+
 /** Convert a `math` token's LaTeX to single-line Unicode for inline rendering. */
 function renderMathToken(text: string): string {
 	return latexToUnicode(text).replace(MATH_NEWLINES, " ");
@@ -2247,6 +2294,7 @@ interface RenderSignature {
 	headingProbe: string;
 	/** Fallback glyphs for themes without `symbols`; their identity alone cannot tell presets apart. */
 	symbolsProbe: string;
+	math: string;
 }
 
 /** A shorter prefix the cached rows grew from: its length, its token count and the row count its rows end at. */
@@ -2499,6 +2547,128 @@ export class Markdown implements Component {
 	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
+	#mathAllowed = true;
+	#mathChangeHandler?: () => void;
+	#mathSignature = "";
+	#mathDocument = 0;
+	#mathWidth = 1;
+	#mathPending = false;
+	#mathBarrier?: number;
+	#mathTokenStart = 0;
+	#mathMeasurement = false;
+	#mathSpeculatedToken?: Token;
+	#mathSpeculative = false;
+	#mathTokenRawLength = 0;
+	#mathReset = false;
+	#mathFrame = 0;
+	#mathOccurrences = new Map<Token, string>();
+	#mathReplay: {
+		request: MathImageRenderRequest;
+		height: number;
+		occurrence: string;
+		sourceEnd: number;
+		sourceStart: number;
+		presentation: ImagePresentation;
+		frame: number;
+	}[] = [];
+	setMathImagesAllowed(allowed: boolean): this {
+		this.#mathAllowed = allowed;
+		this.#invalidateMathPresentation();
+		return this;
+	}
+	setMathImageChangeHandler(handler: (() => void) | undefined): this {
+		this.#mathChangeHandler = handler;
+		return this;
+	}
+	get mathImagesPending(): boolean {
+		return this.#mathPending;
+	}
+	getMathImageStableSource(): string {
+		return streamingMarkdownSource(this.#text).slice(0, this.#mathBarrier);
+	}
+	#invalidateMathPresentation = (): void => {
+		this.invalidate();
+		this.#streamPrefixLineCache = undefined;
+		this.#tailRowCache = undefined;
+		this.#listItemRowsCache = undefined;
+		this.#fastTail = undefined;
+		this.#mathChangeHandler?.();
+		getImageRenderContext()?.requestRender();
+	};
+	#mathEnabled(): boolean {
+		return (
+			this.#mathAllowed &&
+			chatTranscriptDisplayPreferences.renderMath &&
+			chatTranscriptDisplayPreferences.showImages &&
+			!!getMathImageRenderer() &&
+			!!getImageRenderContext() &&
+			!!TERMINAL.imageProtocol
+		);
+	}
+	#presentMath(token: Token & { text: string }, display: boolean, width: number): ImagePresentation | undefined {
+		const tex = token.text;
+		if (
+			!this.#mathEnabled() ||
+			this.#mathMeasurement ||
+			this.#mathSpeculative ||
+			(!display && (TERMINAL.imageProtocol !== ImageProtocol.Kitty || !getKittyGraphics().unicodePlaceholders))
+		)
+			return undefined;
+		const cell = getCellDimensions();
+		const options = resolveImageOptions();
+		const request: MathImageRenderRequest = {
+			tex,
+			display,
+			inkHex: theme.getColorHex("text"),
+			cellWidthPx: cell.widthPx,
+			cellHeightPx: cell.heightPx,
+			pixelsPerEx: cell.heightPx / 2,
+			maxWidthPx: (options.maxWidthCells > 0 ? Math.min(width, options.maxWidthCells) : width) * cell.widthPx,
+		};
+		const height = Math.min(4096, (options.maxHeightCells ?? 256) * cell.heightPx);
+		const identity = this.#mathOccurrences.get(token);
+		if (!identity) return undefined;
+		const occurrence = `${identity}/presentation:${display ? "display" : "inline"}`;
+		const retained = this.#mathReplay.find(item => item.occurrence === occurrence);
+		if (
+			retained?.frame === this.#mathFrame &&
+			retained.height === height &&
+			retained.request.tex === request.tex &&
+			retained.request.display === display &&
+			retained.request.inkHex === request.inkHex &&
+			retained.request.cellWidthPx === request.cellWidthPx &&
+			retained.request.cellHeightPx === request.cellHeightPx &&
+			retained.request.maxWidthPx === request.maxWidthPx
+		)
+			return retained.presentation;
+		const ownerChanged = getMathImageOwnerChangeHandler();
+		const presentation = renderMathImage(request, height, this.#mathDocument, occurrence, () => {
+			this.#invalidateMathPresentation();
+			if (!this.#mathChangeHandler) ownerChanged?.();
+		});
+		const record = {
+			request,
+			height,
+			occurrence,
+			presentation,
+			frame: this.#mathFrame,
+			sourceStart: this.#mathTokenStart,
+			sourceEnd: this.#mathTokenStart + this.#mathTokenRawLength,
+		};
+		const previous = this.#mathReplay.findIndex(item => item.occurrence === occurrence);
+		if (previous < 0) this.#mathReplay.push(record);
+		else this.#mathReplay[previous] = record;
+		this.#mathPending ||= presentation.pending;
+		if (presentation.pending || presentation.graphic)
+			this.#mathBarrier = Math.min(this.#mathBarrier ?? Infinity, this.#mathTokenStart);
+		return presentation;
+	}
+	#renderDisplayMath(token: Token & { text: string }, width: number, context?: InlineStyleContext): RenderedLine[] {
+		const presentation = this.#presentMath(token, true, width);
+		if (presentation?.graphic) return presentation.lines.map(text => ({ text, mathGraphic: true }));
+		const apply = context?.applyText ?? ((text: string) => this.#applyDefaultStyle(text));
+		return latexToBlock(token.text).map(text => renderedLine(apply(text)));
+	}
 	setIgnoreTight(ignore: boolean): this {
 		this.#ignoreTight = ignore;
 		this.invalidate();
@@ -2582,6 +2752,10 @@ export class Markdown implements Component {
 			this.#appendOnlySinceLastScan = false;
 			this.#dropStreamPrefix();
 			this.#streamRewound = undefined;
+			this.#mathReplay = [];
+			this.#mathBarrier = undefined;
+			this.#mathPending = false;
+			this.#mathReset = true;
 		}
 		this.#text = text;
 		if (!text.trim()) {
@@ -2610,6 +2784,7 @@ export class Markdown implements Component {
 		this.#streamingHighlightCache = undefined;
 		this.#fastTail = undefined;
 		this.#lastTailCapture = undefined;
+		this.#mathReplay = [];
 	}
 
 	/**
@@ -2665,7 +2840,7 @@ export class Markdown implements Component {
 		const list = this.#streamListSettledText;
 		if (list !== undefined && list.length > text.length) text = list;
 		if (fence !== undefined && fence.length > text.length) text = fence;
-		return text;
+		return text.slice(0, this.#mathBarrier);
 	}
 
 	get transientRenderCache(): boolean {
@@ -3057,6 +3232,81 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		const hostContext = getImageRenderContext();
+		if (hostContext && !hasMathImageOwner())
+			return withMathImageOwner(
+				this,
+				() => {
+					this.invalidate();
+					hostContext.requestRender();
+				},
+				() => this.render(width),
+			);
+		this.#mathDocument = beginMathImageDocument();
+		if (this.#mathReset) {
+			releaseMathImageDocument(this.#mathDocument);
+			this.#mathReset = false;
+		}
+		this.#mathFrame++;
+		const mathSource = streamingMarkdownSource(this.#text);
+		const mathSignature = this.#mathEnabled()
+			? JSON.stringify([
+					getMathImageGeneration(),
+					theme?.getColorHex("text"),
+					getCellDimensions(),
+					width,
+					resolveImageOptions(),
+					getKittyGraphics().unicodePlaceholders,
+					TERMINAL.imageProtocol,
+					objectId(getImageRenderContext()!.budget),
+				])
+			: "off";
+		if (mathSignature !== this.#mathSignature) {
+			this.#mathSignature = mathSignature;
+			this.invalidate();
+			this.#streamPrefixLineCache = undefined;
+			this.#tailRowCache = undefined;
+			this.#listItemRowsCache = undefined;
+			this.#fastTail = undefined;
+		}
+		if (this.#mathReplay.length && this.#cachedText !== this.#text) {
+			this.#mathOccurrences = enumerateMathOccurrences(this.#lexTokens(mathSource));
+			const current = new Set(this.#mathOccurrences.values());
+			this.#mathReplay = this.#mathReplay.filter(item => {
+				if (current.has(item.occurrence.slice(0, item.occurrence.lastIndexOf("/presentation:")))) return true;
+				releaseMathImageOccurrence(this.#mathDocument, item.occurrence);
+				return false;
+			});
+			this.#mathBarrier = this.#mathReplay.reduce<number | undefined>(
+				(barrier, item) =>
+					item.presentation.pending || item.presentation.graphic
+						? Math.min(barrier ?? Infinity, item.sourceStart)
+						: barrier,
+				undefined,
+			);
+			this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
+		}
+		if (this.#mathEnabled() && this.#mathReplay.length) {
+			for (const item of this.#mathReplay) {
+				if (item.sourceEnd > mathSource.length) continue;
+				const ownerChanged = getMathImageOwnerChangeHandler();
+				const next = renderMathImage(item.request, item.height, this.#mathDocument, item.occurrence, () => {
+					this.#invalidateMathPresentation();
+					if (!this.#mathChangeHandler) ownerChanged?.();
+				});
+				item.frame = this.#mathFrame;
+				if (
+					next.graphic !== item.presentation.graphic ||
+					next.pending !== item.presentation.pending ||
+					next.lines.join("\n") !== item.presentation.lines.join("\n")
+				) {
+					item.presentation = next;
+					this.#invalidateMathPresentation();
+					break;
+				}
+			}
+			this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
+		}
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their
@@ -3257,7 +3507,7 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache) {
+		if (!this.transientRenderCache && !this.#mathEnabled()) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -3282,6 +3532,18 @@ export class Markdown implements Component {
 		const open = held ?? tail;
 		const speculated = this.transientRenderCache && open ? (speculateStreamingToken(open) ?? held) : undefined;
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
+		this.#mathOccurrences = enumerateMathOccurrences(tokens);
+		this.#mathSpeculatedToken = speculated;
+		this.#mathReplay = this.#mathReplay.filter(item => item.sourceEnd <= normalizedText.length);
+		this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);
+		this.#mathBarrier = this.#mathReplay.reduce<number | undefined>(
+			(barrier, item) =>
+				item.presentation.pending || item.presentation.graphic
+					? Math.min(barrier ?? Infinity, item.sourceStart)
+					: barrier,
+			undefined,
+		);
+		this.#mathWidth = contentWidth;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -3365,6 +3627,7 @@ export class Markdown implements Component {
 			bgColorProbe,
 			headingProbe,
 			symbolsProbe: this.#symbolsProbe,
+			math: this.#mathSignature,
 		};
 	}
 	// All-primitive signature — compare via the canonical render-cache encoding.
@@ -3373,7 +3636,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.extensionLinks}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks}\x00${signature.extensionLinks}\x00${signature.textSizing}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}\x00${signature.math}`;
 	}
 
 	#renderStreamingContentLines(
@@ -3532,6 +3795,7 @@ export class Markdown implements Component {
 	// token), or a following-token type change.
 	#tailSpliceEnd(cache: TailRowCache, start: number, signature: RenderSignature, tokens: Token[]): number {
 		if (cache.tokenStart !== start) return start;
+		if (!this.#signatureEquals(cache, signature)) return start;
 		if (cache.width !== signature.width) return start;
 		if (cache.paddingX !== signature.paddingX) return start;
 		if (cache.paddingY !== signature.paddingY) return start;
@@ -3571,6 +3835,8 @@ export class Markdown implements Component {
 		// Wrapped-row span per absolute token index. Call-local: stale values
 		// are never read across renders.
 		const tokenWrappedRowCounts: number[] = [];
+		let sourceOffset = 0;
+		for (let i = 0; i < start; i++) sourceOffset += tokens[i].raw.length;
 		for (let i = start; i < end; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
@@ -3579,12 +3845,21 @@ export class Markdown implements Component {
 			// identical links on neighbouring rows draw distinct markers that every render repeats.
 			this.#extensionLinkBlock = i;
 			this.#extensionLinkOrdinal = 0;
+			this.#mathTokenStart = sourceOffset;
+			this.#mathTokenRawLength = token.raw.length;
+			sourceOffset += token.raw.length;
+			this.#mathSpeculative = token === this.#mathSpeculatedToken;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
 				// continuation rows retain the correct hanging indent. Re-wrapping the
 				// flattened rows here would discard that structure.
-				if (token.type === "list" || TERMINAL.isImageLine(renderedRow.text) || isOsc66Line(renderedRow.text)) {
+				if (
+					token.type === "list" ||
+					renderedRow.mathGraphic ||
+					(!this.#mathEnabled() && TERMINAL.isImageLine(renderedRow.text)) ||
+					isOsc66Line(renderedRow.text)
+				) {
 					wrappedLines.push(renderedRow);
 				} else {
 					const wrappedRows = wrapTextWithAnsi(renderedRow.text, contentWidth);
@@ -3650,8 +3925,12 @@ export class Markdown implements Component {
 			}
 
 			// Image lines and OSC 66 sized headings must be output raw - no margins or background
-			if (TERMINAL.isImageLine(line) || isOsc66Line(line)) {
-				contentLines.push(line);
+			if (
+				(renderedLine.mathGraphic && line.startsWith("\x1b7")) ||
+				(!this.#mathEnabled() && TERMINAL.isImageLine(line)) ||
+				isOsc66Line(line)
+			) {
+				contentLines.push(renderedLine.mathGraphic ? prefixDirectMathLine(line, leftMargin) : line);
 				previousLineWasOsc66 = isOsc66Line(line);
 				continue;
 			}
@@ -4015,11 +4294,12 @@ export class Markdown implements Component {
 		styleContext?: InlineStyleContext,
 	): RenderedLine[] {
 		const lines: RenderedLine[] = [];
+		this.#mathWidth = width;
 
 		// Display math block (own-line `$$…$$` / `\[…\]`): stack `\frac` vertically
 		// and keep `\\` row breaks, so fractions and matrices span multiple lines.
 		if (isMathToken(token)) {
-			for (const mathLine of latexToBlock(token.text)) lines.push(renderedLine(this.#applyDefaultStyle(mathLine)));
+			lines.push(...this.#renderDisplayMath(token, width, styleContext));
 			if (nextTokenType && nextTokenType !== "space") lines.push(renderedLine(""));
 			return lines;
 		}
@@ -4030,7 +4310,12 @@ export class Markdown implements Component {
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
 				// A sized heading draws plain text, which would drop a clickable extension link's marker.
-				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
+				if (
+					headingLevel === 1 &&
+					TERMINAL.textSizing &&
+					!TERMINAL.isImageLine(headingText) &&
+					stripExtensionLinkMarkers(headingText) === headingText
+				) {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
@@ -4054,14 +4339,15 @@ export class Markdown implements Component {
 			case "paragraph": {
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
-					for (const mathLine of latexToBlock(displayMath.text))
-						lines.push(renderedLine(this.#applyDefaultStyle(mathLine)));
+					lines.push(...this.#renderDisplayMath(displayMath, width, styleContext));
 					if (nextTokenType && nextTokenType !== "list" && nextTokenType !== "space") lines.push(renderedLine(""));
 					break;
 				}
-				const paragraphText = this.#renderInlineTokens(token.tokens || [], styleContext);
-				for (const paragraphLine of hangWrapTreeGuideLines(paragraphText, width) ?? [paragraphText]) {
-					lines.push(renderedLine(paragraphLine));
+				for (const row of this.#renderParagraphMath(token.tokens || [], width, styleContext)) {
+					if (row.mathGraphic) lines.push(row);
+					else
+						for (const text of hangWrapTreeGuideLines(row.text, width) ?? [row.text])
+							lines.push(renderedLine(text));
 				}
 				// Don't add spacing if next token is space or list
 				if (nextTokenType && nextTokenType !== "list" && nextTokenType !== "space") {
@@ -4205,6 +4491,15 @@ export class Markdown implements Component {
 		const quoteContentWidth = Math.max(1, width - 2);
 		const lines: RenderedLine[] = [];
 		for (const quoteLine of renderedLines) {
+			if (quoteLine.mathGraphic) {
+				lines.push({
+					...quoteLine,
+					text: quoteLine.text.startsWith("\x1b7")
+						? prefixDirectMathLine(quoteLine.text, this.#theme.quoteBorder(`${this.#symbols.quoteBorder} `))
+						: this.#theme.quoteBorder(`${this.#symbols.quoteBorder} `) + quoteLine.text,
+				});
+				continue;
+			}
 			if (quoteLine.literalCode) {
 				const wrappedLiteralRows = wrapTextWithAnsi(quoteLine.text, quoteContentWidth);
 				if (wrappedLiteralRows.length === 0) {
@@ -4215,7 +4510,12 @@ export class Markdown implements Component {
 					}
 				}
 			} else {
-				const styledLine = applyQuoteStyle(quoteLine.text);
+				const styledLine = TERMINAL.isImageLine(quoteLine.text)
+					? this.#styleMathProse(quoteLine.text, text => this.#quoteStyle(text)).replace(
+							/\x1b\[0m/g,
+							`\x1b[0m${quoteStylePrefix}`,
+						)
+					: applyQuoteStyle(quoteLine.text);
 				for (const wrappedLine of wrapTextWithAnsi(styledLine, quoteContentWidth)) {
 					lines.push(renderedLine(this.#theme.quoteBorder(`${this.#symbols.quoteBorder} `) + wrappedLine));
 				}
@@ -4270,6 +4570,35 @@ export class Markdown implements Component {
 		return this.#applyQuoteBorder(innerLines, width);
 	}
 
+	#renderParagraphMath(tokens: Token[], width: number, context?: InlineStyleContext): RenderedLine[] {
+		const lines: RenderedLine[] = [];
+		let start = 0;
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i];
+			if (!isMathToken(token) || !token.display) continue;
+			const before = tokens
+				.slice(start, i)
+				.map(token => token.raw)
+				.join("");
+			const after = tokens[i + 1]?.raw ?? "";
+			if ((before && !/\n[ \t]*$/.test(before)) || (after && !/^[ \t]*\n/.test(after))) continue;
+			const presentation = this.#presentMath(token, true, width);
+			if (!presentation?.graphic) continue;
+			const prose = this.#renderInlineTokens(tokens.slice(start, i), context).trimEnd();
+			if (prose) lines.push(...prose.split("\n").map(text => renderedLine(text)));
+			lines.push(...presentation.lines.map(text => ({ text, mathGraphic: true as const })));
+			start = i + 1;
+		}
+		const tail = this.#renderInlineTokens(tokens.slice(start), context).replace(start > 0 ? /^[ \t]*\n/ : /$^/, "");
+		if (tail) lines.push(renderedLine(tail));
+		return lines;
+	}
+
+	#styleMathProse(text: string, style: (value: string) => string): string {
+		const prefix = this.#getStylePrefix(style);
+		return style(text).replace(/\x1b\[39;59m/g, `\x1b[39;59m${prefix}`);
+	}
+
 	#renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext): string {
 		let result = "";
 		const resolvedStyleContext = styleContext ?? this.#getDefaultInlineStyleContext();
@@ -4293,7 +4622,34 @@ export class Markdown implements Component {
 			trimLeadingWhitespace = false;
 			if (isMathToken(token)) {
 				markHtmlItemWhenContent(token.text);
-				result += applyTextWithNewlines(renderMathToken(token.text));
+				if (
+					this.#mathMeasurement &&
+					this.#mathEnabled() &&
+					TERMINAL.imageProtocol === ImageProtocol.Kitty &&
+					getKittyGraphics().unicodePlaceholders
+				) {
+					const cell = getCellDimensions();
+					const geometry = measureMathImage(
+						{
+							tex: token.text,
+							display: false,
+							inkHex: theme.getColorHex("text"),
+							cellWidthPx: cell.widthPx,
+							cellHeightPx: cell.heightPx,
+							pixelsPerEx: cell.heightPx / 2,
+							maxWidthPx: 4096,
+						},
+						this.#invalidateMathPresentation,
+					);
+					if (geometry) {
+						result += "x".repeat(geometry.columns);
+						continue;
+					}
+				}
+				const presentation = this.#presentMath(token, false, this.#mathWidth);
+				result += presentation?.graphic
+					? presentation.lines[0] + stylePrefix
+					: applyTextWithNewlines(renderMathToken(token.text));
 				continue;
 			}
 			switch (token.type) {
@@ -4324,7 +4680,7 @@ export class Markdown implements Component {
 						? this.#proseFgExemptContext(resolvedStyleContext)
 						: resolvedStyleContext;
 					const content = this.#renderInlineTokens(token.tokens || [], context);
-					result += (this.#theme.strong ? this.#theme.strong(content) : this.#theme.bold(content)) + stylePrefix;
+					result += this.#styleMathProse(content, this.#theme.strong ?? this.#theme.bold) + stylePrefix;
 					break;
 				}
 
@@ -4360,7 +4716,9 @@ export class Markdown implements Component {
 						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
 						break;
 					}
-					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
+					const styledLinkText = this.#styleMathProse(linkText, text =>
+						this.#theme.link(this.#theme.underline(text)),
+					);
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
@@ -4472,6 +4830,15 @@ export class Markdown implements Component {
 		const raws: string[] | undefined = signature === undefined ? undefined : [];
 		const rows: RenderedLine[][] | undefined = signature === undefined ? undefined : [];
 		const pushWrapped = (line: RenderedLine, firstPrefix: string, continuationPrefix: string): void => {
+			if (line.mathGraphic) {
+				lines.push({
+					...line,
+					text: line.text.startsWith("\x1b7")
+						? prefixDirectMathLine(line.text, firstPrefix)
+						: firstPrefix + line.text,
+				});
+				return;
+			}
 			if (line.literalCode) {
 				const wrappedLiteralRows = wrapTextWithAnsi(line.text, Math.max(1, width));
 				if (wrappedLiteralRows.length === 0) {
@@ -4584,8 +4951,10 @@ export class Markdown implements Component {
 		styleContext?: InlineStyleContext,
 	): RenderedListItemLine[] {
 		const lines: RenderedListItemLine[] = [];
+		this.#mathWidth = contentWidth;
 
 		for (let i = 0; i < tokens.length; i++) {
+			this.#mathWidth = contentWidth;
 			const token = tokens[i]!;
 			if (token.type === "list") {
 				// Nested list - render with one additional indent level
@@ -4598,25 +4967,23 @@ export class Markdown implements Component {
 				// Text content (may have inline tokens, or a sole display-math token)
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
-					const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
-					for (const mathLine of latexToBlock(displayMath.text))
-						lines.push({ text: apply(mathLine), nested: false });
+					for (const row of this.#renderDisplayMath(displayMath, contentWidth, styleContext))
+						lines.push({ ...row, nested: false });
 				} else {
-					const text =
-						token.tokens && token.tokens.length > 0
-							? this.#renderInlineTokens(token.tokens, styleContext)
-							: token.text || "";
-					lines.push({ text, nested: false });
+					if (token.tokens?.length)
+						for (const row of this.#renderParagraphMath(token.tokens, contentWidth, styleContext))
+							lines.push({ ...row, nested: false });
+					else lines.push({ text: token.text || "", nested: false });
 				}
 			} else if (token.type === "paragraph") {
 				// Paragraph in list item
-				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
-					for (const mathLine of latexToBlock(displayMath.text))
-						lines.push({ text: apply(mathLine), nested: false });
+					for (const row of this.#renderDisplayMath(displayMath, contentWidth, styleContext))
+						lines.push({ ...row, nested: false });
 				} else {
-					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
+					for (const row of this.#renderParagraphMath(token.tokens || [], contentWidth, styleContext))
+						lines.push({ ...row, nested: false });
 				}
 			} else if (token.type === "heading") {
 				// A heading in a list item (an ATX line, or a paragraph over a setext
@@ -4637,8 +5004,11 @@ export class Markdown implements Component {
 				}
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
-				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
-				for (const mathLine of latexToBlock(token.text)) lines.push({ text: apply(mathLine), nested: false });
+				for (const row of this.#renderDisplayMath(token, contentWidth, styleContext))
+					lines.push({ ...row, nested: false });
+			} else if (token.type === "blockquote") {
+				for (const row of this.#renderToken(token, contentWidth, tokens[i + 1]?.type, styleContext))
+					lines.push({ ...row, nested: false });
 			} else {
 				// Other token types - try to render as inline
 				const text = this.#renderInlineTokens([token], styleContext);
@@ -4653,9 +5023,14 @@ export class Markdown implements Component {
 
 	/** Rendered inline heading text styled for its level, as one (unsized) line. */
 	#styleHeading(depth: number, headingText: string): string {
-		if (depth === 1) return this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)), 1);
-		if (depth === 2) return this.#theme.heading(this.#theme.bold(headingText), 2);
-		return this.#theme.heading(this.#theme.bold(`${"#".repeat(depth)} ${headingText}`), depth);
+		if (depth === 1)
+			return this.#styleMathProse(headingText, text =>
+				this.#theme.heading(this.#theme.bold(this.#theme.underline(text)), 1),
+			);
+		if (depth === 2) return this.#styleMathProse(headingText, text => this.#theme.heading(this.#theme.bold(text), 2));
+		return this.#styleMathProse(`${"#".repeat(depth)} ${headingText}`, text =>
+			this.#theme.heading(this.#theme.bold(text), depth),
+		);
 	}
 
 	/**
@@ -4763,6 +5138,7 @@ export class Markdown implements Component {
 		// Calculate natural column widths (what each column needs without constraints)
 		const naturalWidths: number[] = [];
 		const minWordWidths: number[] = [];
+		this.#mathMeasurement = true;
 		for (let i = 0; i < numCols; i++) {
 			const headerText = this.#renderInlineTokens(token.header[i].tokens || [], styleContext);
 			const headerLineWidths = this.#terminalLineWidths(headerText);
@@ -4793,6 +5169,7 @@ export class Markdown implements Component {
 				);
 			}
 		}
+		this.#mathMeasurement = false;
 
 		let minColumnWidths = minWordWidths;
 		let minCellsWidth = minColumnWidths.reduce((a, b) => a + b, 0);
@@ -4882,6 +5259,7 @@ export class Markdown implements Component {
 		// Render header with wrapping
 		const headerStyleContext = this.#theme.tableHeader ? this.#proseFgExemptContext(styleContext) : styleContext;
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
+			this.#mathWidth = columnWidths[i];
 			const text = this.#renderInlineTokens(cell.tokens || [], headerStyleContext);
 			return this.#wrapCellText(text, columnWidths[i]);
 		});
@@ -4905,6 +5283,7 @@ export class Markdown implements Component {
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
 			const row = token.rows[rowIndex];
 			const rowCellLines: string[][] = row.map((cell, i) => {
+				this.#mathWidth = columnWidths[i];
 				const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
 				return this.#wrapCellText(text, columnWidths[i]);
 			});

@@ -980,13 +980,14 @@ export function encodeKittyPlacement(options: {
  * APC, optional `ESC 8` suffix. The parser unwraps tmux passthrough first.
  */
 const KITTY_DIRECT_PLACEMENT_LINE =
-	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?$/;
+	/^(?:\x1b7(?:\x1b\[(\d+)A)?(?:\x1b\[(\d+)G)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?(?:\r[^\n]*)?$/;
 
 export interface ParsedKittyPlacementLine {
 	imageId: number;
 	placementId: number | undefined;
 	columns: number;
 	rows: number;
+	column: number;
 }
 
 /**
@@ -1003,19 +1004,20 @@ export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacemen
 	}
 	const m = KITTY_DIRECT_PLACEMENT_LINE.exec(line);
 	if (!m) return null;
-	const columns = m[4] !== undefined ? Number(m[4]) : 0;
-	const rows = m[5] !== undefined ? Number(m[5]) : 0;
+	const columns = m[5] !== undefined ? Number(m[5]) : 0;
+	const rows = m[6] !== undefined ? Number(m[6]) : 0;
 	if (columns <= 0 || rows <= 0) return null;
 	return {
-		imageId: Number(m[2]),
-		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
+		imageId: Number(m[3]),
+		placementId: m[4] !== undefined ? Number(m[4]) : undefined,
+		column: m[2] === undefined ? 0 : Math.max(0, Number(m[2]) - 1),
 		columns,
 		rows,
 	};
 }
 
 /** `ESC 7` + `CUU(n)` lead-in of an {@link Image} direct-placement line. */
-const DIRECT_PLACEMENT_LIFT = /^\x1b7\x1b\[(\d+)A/;
+const DIRECT_PLACEMENT_LIFT = /^\x1b7(?:\x1b\[(\d+)A)?/;
 
 /**
  * Rows above its own line that an {@link Image} direct-placement line paints
@@ -1026,7 +1028,7 @@ const DIRECT_PLACEMENT_LIFT = /^\x1b7\x1b\[(\d+)A/;
  */
 export function directPlacementLift(line: string): number {
 	const m = DIRECT_PLACEMENT_LIFT.exec(line);
-	return m ? Number(m[1]) : 0;
+	return m?.[1] ? Number(m[1]) : 0;
 }
 
 /**
@@ -1037,6 +1039,14 @@ export function directPlacementLift(line: string): number {
  */
 export function withDirectPlacementLift(line: string, lift: number): string {
 	return line.replace(DIRECT_PLACEMENT_LIFT, lift > 0 ? `\x1b7\x1b[${lift}A` : "\x1b7");
+}
+
+/** Accumulate Markdown structural indentation without writing over the graphic's final row. */
+export function offsetDirectPlacementLine(line: string, columns: number): string {
+	return line.replace(
+		/^\x1b7((?:\x1b\[\d+A)?)(?:\x1b\[(\d+)G)?/,
+		(_match, up: string, column: string | undefined) => `\x1b7${up}\x1b[${(column ? Number(column) : 1) + columns}G`,
+	);
 }
 
 /**
@@ -1057,6 +1067,7 @@ export function encodeKittyPlacementLine(options: {
 	screenRow: number;
 	/** Source image height in pixels, for the clipped source rectangle. */
 	imageHeightPx: number;
+	column?: number;
 }): string {
 	// Without a source pixel height the slice cannot be expressed — emit the
 	// component's own full form (status quo) rather than squashing the whole
@@ -1072,7 +1083,7 @@ export function encodeKittyPlacementLine(options: {
 	}
 	const apc = wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 	const cuu = visibleRows - 1;
-	return cuu > 0 ? `\x1b7\x1b[${cuu}A${apc}\x1b8` : apc;
+	return `\x1b7${cuu > 0 ? `\x1b[${cuu}A` : ""}${options.column ? `\x1b[${options.column + 1}G` : ""}${apc}\x1b8`;
 }
 
 /**

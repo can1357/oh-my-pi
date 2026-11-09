@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
+import { Markdown, setMathImageRenderer } from "@oh-my-pi/pi-tui";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+import { withMathImageOwner, mathImageOwnerPending } from "@oh-my-pi/pi-tui/components/math-image";
+import { defaultMarkdownTheme } from "./test-themes";
+import { initThemeSync } from "@oh-my-pi/pi-tui/theme/theme";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
@@ -630,7 +635,7 @@ describe("Image budget integration", () => {
 		expect(last).toContain("r=4");
 	});
 
-	it("does not move the cursor around single-row direct Kitty placements", () => {
+	it("saves and restores the cursor around single-row direct Kitty placements", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");
 		const image = new Image(
@@ -646,11 +651,11 @@ describe("Image budget integration", () => {
 
 		const last = lines.at(-1) ?? "";
 		expect(lines).toHaveLength(1);
-		expect(last.startsWith("\x1b_Ga=p")).toBe(true);
+		expect(last.startsWith("\x1b7\x1b_Ga=p")).toBe(true);
 		expect(last).toContain("C=1");
 		expect(last).toContain(`i=${id}`);
 		expect(last).toContain("r=1");
-		expect(last.endsWith("\x1b\\")).toBe(true);
+		expect(last.endsWith("\x1b\\\x1b8")).toBe(true);
 		expect(last).not.toContain("\x1b[0A");
 		expect(last).not.toContain("\x1b[0B");
 		expect(last).not.toMatch(/\x1b\[\d+[AB]/);
@@ -1977,4 +1982,135 @@ describe("ImageBudget transmit tracking", () => {
 		// d=I freed the data, so the image must transmit again if it returns.
 		expect(budget.shouldTransmit(1)).toBe(true);
 	});
+});
+
+it("presentation cache hits still observe the shared image budget", () => {
+	const original = terminal.imageProtocol;
+	try {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const budget = new ImageBudget(1, () => {});
+		const first = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "presentation:first" },
+		);
+		const second = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "presentation:second" },
+		);
+		budget.beginPass();
+		first.renderPresentation(20);
+		second.renderPresentation(20);
+		expect(budget.endPass()).toBe(true);
+		budget.beginPass();
+		expect(first.renderPresentation(20).graphic).toBe(false);
+		expect(second.renderPresentation(20).graphic).toBe(true);
+		budget.endPass();
+		budget.beginPass();
+		expect(first.renderPresentation(20).graphic).toBe(false);
+		expect(second.renderPresentation(20).graphic).toBe(true);
+		expect(budget.endPass()).toBe(false);
+	} finally {
+		terminal.imageProtocol = original;
+	}
+});
+
+it("math residency ignores ordinary cap and evicts only off-screen math past 512", () => {
+	const budget = new ImageBudget(1);
+	const ids = Array.from({ length: 513 }, (_, index) => budget.acquireId(`math:resident:${index}`));
+	budget.beginPass();
+	for (const id of ids.slice(0, 512)) {
+		expect(budget.observe(id)).toBe(false);
+		budget.enqueueTransmit(id, "transmit");
+	}
+	expect(budget.endPass()).toBe(false);
+	budget.limitResidentImages();
+	budget.takeTransmits();
+	budget.beginPass();
+	budget.observe(ids[512]);
+	budget.enqueueTransmit(ids[512], "transmit");
+	budget.endPass();
+	budget.limitResidentImages();
+	expect(budget.takePurgeIds()).toEqual([ids[0]]);
+	expect(budget.shouldTransmit(ids[1])).toBe(false);
+	expect(budget.shouldTransmit(ids[512])).toBe(false);
+});
+
+it("bounds 600 math formulas in a tall headless TUI to the viewport-aware residency cap", async () => {
+	initThemeSync();
+	const original = terminal.imageProtocol;
+	const graphics = getKittyGraphics();
+	const term = new VirtualTerminal(40, 20);
+	const scheduler = new VirtualRenderScheduler();
+	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+	const markdown = new Markdown(
+		Array.from({ length: 600 }, (_, index) => `$x_{${index}}$`).join("\n\n"),
+		0,
+		0,
+		defaultMarkdownTheme,
+	);
+	let completion = Promise.withResolvers<void>();
+	const resident = new Set<number>();
+	const write = term.write.bind(term);
+	const spy = spyOn(term, "write").mockImplementation(data => {
+		for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
+			const fields = new Map(match[1].split(",").map(field => field.split("=") as [string, string]));
+			const id = Number(fields.get("i"));
+			if (fields.get("a") === "t") resident.add(id);
+			if (fields.get("a") === "d" && fields.get("d") === "I") resident.delete(id);
+		}
+		write(data);
+	});
+	try {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+		setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+		setMathImageRenderer({
+			id: "viewport",
+			render: () => ({
+				svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><path d="M0 0H10V10H0Z"/></svg>',
+				widthEx: 1,
+				heightEx: 1,
+			}),
+		});
+		tui.addChild({
+			render: width =>
+				withMathImageOwner(
+					markdown,
+					() => {
+						completion.resolve();
+						tui.requestRender();
+					},
+					() => markdown.render(width),
+				),
+			invalidate: () => markdown.invalidate(),
+		});
+		tui.start();
+		await scheduler.settle(term);
+		while (mathImageOwnerPending(markdown)) {
+			await completion.promise;
+			completion = Promise.withResolvers<void>();
+			await scheduler.settle(term);
+		}
+		await scheduler.settle(term);
+		expect(resident.size).toBeLessThanOrEqual(512);
+		expect(resident.size).toBeGreaterThan(0);
+	} finally {
+		tui.stop();
+		spy.mockRestore();
+		setMathImageRenderer(undefined);
+		setChatTranscriptDisplayPreferences({ renderMath: false });
+		terminal.imageProtocol = original;
+		setKittyGraphics(graphics);
+	}
+});
+
+it("reset clears math identity classification before reusing a logical key", () => {
+	const budget = new ImageBudget(1);
+	const old = budget.acquireId("math:reset");
+	budget.takeAllTransmittedIds();
+	expect(budget.acquireId("math:reset")).not.toBe(old);
 });

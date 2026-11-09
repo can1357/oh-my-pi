@@ -160,6 +160,8 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	// Distribution smoke intentionally exercises the lazy module boundary; normal CLI startup must not load MathJax.
+	const { smokeTestMathImageRenderer } = await import("./modes/math-image-renderer");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -189,6 +191,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
 	await smokeTestSubagentWorker();
+	await smokeTestMathImageRenderer();
 	process.stdout.write("smoke-test: ok\n");
 }
 

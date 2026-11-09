@@ -9,6 +9,12 @@ import {
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { Markdown } from "../src/components/markdown";
+import { ImageBudget, withImageRenderContext } from "../src/components/image";
+import { releaseMathImageOwner } from "../src/components/math-image";
+import { setMathImageRenderer } from "../src/math-image-renderer";
+import { setChatTranscriptDisplayPreferences } from "../src/chat/display-preferences";
+import { defaultMarkdownTheme } from "./test-themes";
 
 class Block implements Component {
 	#rows: string[];
@@ -1349,4 +1355,137 @@ describe("TranscriptContainer insertChildAt", () => {
 		expect(transcript.canRemoveBlock(insertedA)).toBe(true);
 		expect(transcript.canRemoveBlock(insertedB)).toBe(true);
 	});
+});
+
+it("holds finalized Markdown discovered during measurement until math settles", async () => {
+	const protocol = TERMINAL.imageProtocol;
+	const completion = Promise.withResolvers<void>();
+	const budget = new ImageBudget(8, () => {});
+	const markdown = new Markdown("$$x$$", 0, 0, defaultMarkdownTheme);
+	const component: Component & { isTranscriptBlockFinalized(): boolean } = {
+		render: width => markdown.render(width),
+		invalidate: () => markdown.invalidate(),
+		isTranscriptBlockFinalized: () => true,
+	};
+	const transcript = new TranscriptContainer();
+	transcript.addChild(component);
+	setTerminalImageProtocol(ImageProtocol.Kitty);
+	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMathImageRenderer({
+		id: "retirement",
+		render: () => ({
+			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><rect width="10" height="10" fill="white"/></svg>',
+			widthEx: 1,
+			heightEx: 1,
+		}),
+	});
+	const context = { budget, requestRender: () => completion.resolve() };
+	try {
+		expect(withImageRenderContext(context, () => transcript.peekFlushBatch(80))).toBeUndefined();
+		await completion.promise;
+		const batch = withImageRenderContext(context, () => transcript.peekFlushBatch(80));
+		expect(batch).toBeDefined();
+		expect(batch?.rows.join("\n")).toContain("\x1b_G");
+	} finally {
+		releaseMathImageOwner(component);
+		setMathImageRenderer(undefined);
+		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setTerminalImageProtocol(protocol);
+	}
+});
+
+it("keeps submitted user math mutable while assistant starts streaming", async () => {
+	const protocol = TERMINAL.imageProtocol;
+	let completion = Promise.withResolvers<void>();
+	const budget = new ImageBudget(8, () => {});
+	const user = new UserMessageComponent("submitted $x+y=1$\n\n$$x+y=1$$");
+	const transcript = new TranscriptContainer();
+	transcript.addChild(user);
+	setTerminalImageProtocol(ImageProtocol.Kitty);
+	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMathImageRenderer({
+		id: "user-retirement",
+		render: () => ({
+			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><rect width="10" height="10" fill="white"/></svg>',
+			widthEx: 1,
+			heightEx: 1,
+		}),
+	});
+	const context = { budget, requestRender: () => completion.resolve() };
+	try {
+		withImageRenderContext(context, () => transcript.render(80));
+		transcript.addChild(new Block(["assistant streaming"], false));
+		expect(withImageRenderContext(context, () => transcript.peekFinalizedBatch(80, 1))).toBeUndefined();
+		await completion.promise;
+		// Display and inline identities complete independently; wait for pending admission.
+		let batch = withImageRenderContext(context, () => transcript.peekFinalizedBatch(80, 1));
+		while (!batch) {
+			completion = Promise.withResolvers<void>();
+			await completion.promise;
+			batch = withImageRenderContext(context, () => transcript.peekFinalizedBatch(80, 1));
+		}
+		expect(batch).toBeDefined();
+		expect(batch?.rows.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		expect(transcript.blockStates()[0]).not.toBe("committed");
+	} finally {
+		releaseMathImageOwner(user);
+		setMathImageRenderer(undefined);
+		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setTerminalImageProtocol(protocol);
+	}
+});
+
+it("waits for newly discovered resized math before acknowledging committed-history replay", async () => {
+	const protocol = TERMINAL.imageProtocol;
+	let completion = Promise.withResolvers<void>();
+	const budget = new ImageBudget(8);
+	const markdown = new Markdown("$$x+y=1$$", 0, 0, defaultMarkdownTheme);
+	const transcript = new TranscriptContainer();
+	transcript.addChild(markdown);
+	const context = { budget, requestRender: () => completion.resolve() };
+	const scoped = <T>(run: () => T) => withImageRenderContext(context, run);
+	setTerminalImageProtocol(ImageProtocol.Kitty);
+	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMathImageRenderer({
+		id: "replay",
+		render: () => ({
+			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><path d="M0 0H10V10H0Z"/></svg>',
+			widthEx: 1,
+			heightEx: 1,
+		}),
+	});
+	try {
+		expect(scoped(() => transcript.peekFlushBatch(80))).toBeUndefined();
+		await completion.promise;
+		const initial = scoped(() => transcript.peekFlushBatch(80));
+		expect(initial).toBeDefined();
+		transcript.acknowledgeFinalizedBatch(initial!.id);
+		completion = Promise.withResolvers<void>();
+		transcript.beginReplay();
+		expect(scoped(() => transcript.peekReplayBatch(40))).toBeUndefined();
+		// While the resized range is pending, a second offer must not re-render the ledger.
+		const renderDuringPending = markdown.render;
+		let repeatedRenders = 0;
+		markdown.render = width => {
+			repeatedRenders++;
+			return renderDuringPending.call(markdown, width);
+		};
+		try {
+			expect(scoped(() => transcript.peekReplayBatch(40))).toBeUndefined();
+			expect(repeatedRenders).toBe(0);
+		} finally {
+			markdown.render = renderDuringPending;
+		}
+		await completion.promise;
+		const replay = scoped(() => transcript.peekReplayBatch(40));
+		expect(replay?.kind).toBe("replay");
+		expect(replay?.rows.join("\n")).toContain("\x1b_G");
+		transcript.acknowledgeFinalizedBatch(replay!.id);
+		expect(scoped(() => transcript.peekReplayBatch(40))).toBeUndefined();
+	} finally {
+		releaseMathImageOwner(markdown);
+		setMathImageRenderer(undefined);
+		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setTerminalImageProtocol(protocol);
+	}
 });

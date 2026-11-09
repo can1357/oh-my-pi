@@ -43,6 +43,32 @@ export interface ImageOptions {
 	requestRender?: () => void;
 }
 
+export interface ImageRenderContext {
+	budget: ImageBudget;
+	requestRender: () => void;
+}
+export interface ImagePresentation {
+	lines: readonly string[];
+	graphic: boolean;
+	pending: boolean;
+}
+let imageRenderContext: ImageRenderContext | undefined;
+export function withImageRenderContext<T>(context: ImageRenderContext, render: () => T): T {
+	const previous = imageRenderContext;
+	imageRenderContext = context;
+	try {
+		return render();
+	} finally {
+		imageRenderContext = previous;
+	}
+}
+export function getImageRenderContext(): ImageRenderContext | undefined {
+	return imageRenderContext;
+}
+export function isImageMeasureRender(): boolean {
+	return measureRenderDepth > 0;
+}
+
 interface SixelEncode {
 	widthPx: number;
 	heightPx: number;
@@ -243,6 +269,25 @@ export class ImageBudget {
 	#placementGeometry = new Map<number, ImageDimensions>();
 	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
 	#released = new Set<number>();
+	#mathIds = new Set<number>();
+	static readonly MATH_PLACEMENT_CAP = 512;
+	#visibleMathIds: Set<number> | undefined;
+	#mathRetireHandlers = new Map<number, () => void>();
+	setMathRetireHandler(key: string, handler: () => void): void {
+		const id = this.#keyToId.get(key);
+		if (id !== undefined) this.#mathRetireHandlers.set(id, handler);
+	}
+	setMathViewport(lines: readonly string[]): void {
+		const visible = new Set<number>();
+		for (const line of lines) {
+			for (const match of line.matchAll(/\x1b_Ga=p,[^\x1b]*?\bi=(\d+)/g)) visible.add(Number(match[1]));
+			if (line.includes("\u{10eeee}"))
+				for (const match of line.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g))
+					visible.add((Number(match[1]) << 16) | (Number(match[2]) << 8) | Number(match[3]));
+		}
+		this.#visibleMathIds = visible;
+		for (const [id, handler] of this.#mathRetireHandlers) if (!visible.has(id)) handler();
+	}
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
 		this.#cap = normalizeCap(cap);
@@ -286,6 +331,7 @@ export class ImageBudget {
 			this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
 			this.#keyToId.set(key, id);
 			this.#idToKey.set(id, key);
+			if (key.startsWith("math:")) this.#mathIds.add(id);
 			return id;
 		}
 		const id = this.#nextId;
@@ -371,6 +417,10 @@ export class ImageBudget {
 		if (measureRenderDepth > 0) measuredImageObservations++;
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
+		if (this.#mathIds.has(imageId)) {
+			if (measureRenderDepth === 0) this.#passSuppression.set(imageId, false);
+			return false;
+		}
 		if (this.#stablePass) {
 			const suppressed = this.#cap > 0 && this.#lastSlotBelow(imageId, this.#split.onTerminal);
 			this.#passSuppression.set(imageId, suppressed);
@@ -435,6 +485,13 @@ export class ImageBudget {
 			const id = this.#passIds[i];
 			if (this.#passShowsLive(id)) liveIds.add(id);
 		}
+		for (const id of this.#mathIds) {
+			if (this.#passShowsLive(id)) {
+				liveIds.add(id);
+				const resident = this.#transmitted[this.#surface];
+				if (resident.delete(id)) resident.add(id);
+			}
+		}
 		const transmitted = this.#transmitted[this.#surface];
 		for (const id of this.#released) {
 			// #retire refuses while this pass or the other surface still shows it.
@@ -443,10 +500,16 @@ export class ImageBudget {
 			this.#forgetKeyForId(id);
 			this.#released.delete(id);
 		}
-		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
+		let ordinary = 0;
+		let math = 0;
 		for (const id of transmitted) {
-			if (transmitted.size <= this.#cap) break;
-			this.#retire(id);
+			if (this.#mathIds.has(id)) math++;
+			else ordinary++;
+		}
+		for (const id of transmitted) {
+			if (this.#mathIds.has(id)) {
+				if (math > ImageBudget.MATH_PLACEMENT_CAP && this.#retire(id)) math--;
+			} else if (this.#cap > 0 && ordinary > this.#cap && this.#retire(id)) ordinary--;
 		}
 	}
 
@@ -462,6 +525,7 @@ export class ImageBudget {
 	 * the reconcile has since undercut counts as live.
 	 */
 	#passShowsLive(imageId: number): boolean {
+		if (this.#mathIds.has(imageId) && this.#visibleMathIds) return this.#visibleMathIds.has(imageId);
 		const suppressed = this.#passSuppression.get(imageId);
 		if (suppressed === undefined) return false;
 		if (!suppressed) return true;
@@ -532,7 +596,9 @@ export class ImageBudget {
 			this.#transmitted[surface].clear();
 			this.#pendingTransmits[surface].clear();
 		}
-		if (ids.size === 0) return EMPTY_IDS;
+		this.#mathIds.clear();
+		this.#mathRetireHandlers.clear();
+		this.#visibleMathIds = undefined;
 		this.#purgeIds = [];
 		this.#resetPurgeIds = [];
 		this.#keyToId.clear();
@@ -655,6 +721,8 @@ export class ImageBudget {
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
 		this.#idToKey.delete(id);
+		this.#mathIds.delete(id);
+		this.#mathRetireHandlers.delete(id);
 		if (this.#keyToId.get(key) === id) this.#keyToId.delete(key);
 	}
 
@@ -703,6 +771,7 @@ export class Image implements Component {
 	#cachedSixelBackground: number | undefined;
 	#cachedKittyUnicodePlaceholders = false;
 	#cachedLinked = false;
+	#graphic = false;
 	// Tallest graphic placement this image has rendered. The text fallback
 	// pads itself to this height so a budget demotion never shrinks the block
 	// (its rows may already be committed to native scrollback).
@@ -828,6 +897,10 @@ export class Image implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		return this.renderPresentation(width).lines;
+	}
+
+	renderPresentation(width: number): ImagePresentation {
 		const imageProtocol = TERMINAL.imageProtocol;
 		const hasProtocol = imageProtocol != null;
 		const cellDimensions = getCellDimensions();
@@ -862,13 +935,23 @@ export class Image implements Component {
 			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
 			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {
-			return this.#cachedLines;
+			return {
+				lines: this.#cachedLines,
+				graphic: this.#graphic,
+				pending:
+					hasProtocol &&
+					!suppressed &&
+					imageProtocol === ImageProtocol.Sixel &&
+					this.#sixel !== undefined &&
+					this.#sixel.sequence === undefined,
+			};
 		}
 
 		const cap = this.#options.maxWidthCells;
 		const maxWidth = cap != null && cap > 0 ? Math.min(imageMaxColumns(width), cap) : imageMaxColumns(width);
 
 		let lines: string[];
+		this.#graphic = false;
 
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
@@ -882,6 +965,10 @@ export class Image implements Component {
 				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
 
+			this.#graphic =
+				result !== null &&
+				result !== undefined &&
+				!(imageProtocol === ImageProtocol.Sixel && this.#sixel?.sequence === undefined);
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {
 				this.#budget.enqueueTransmit(this.#imageId, result.transmit);
 			}
@@ -912,7 +999,7 @@ export class Image implements Component {
 				const cursorRows = result.rows - 1;
 				const moveUp = cursorRows > 0 ? `\x1b[${cursorRows}A` : "";
 				const placement = moveUp + (result.sequence ?? "");
-				lines.push(cursorRows > 0 ? SAVE_CURSOR + placement + RESTORE_CURSOR : placement);
+				lines.push(SAVE_CURSOR + placement + RESTORE_CURSOR);
 			} else {
 				lines = this.#fallbackLines();
 			}
@@ -931,7 +1018,15 @@ export class Image implements Component {
 		this.#cachedKittyUnicodePlaceholders = kittyUnicodePlaceholders;
 		this.#cachedLinked = linked;
 
-		return lines;
+		return {
+			lines,
+			graphic: this.#graphic,
+			pending:
+				!suppressed &&
+				imageProtocol === ImageProtocol.Sixel &&
+				this.#sixel !== undefined &&
+				this.#sixel.sequence === undefined,
+		};
 	}
 
 	/**

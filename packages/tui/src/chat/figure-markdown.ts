@@ -1,6 +1,6 @@
 import type { Tokens } from "@oh-my-pi/pi-utils/marked";
 import type { ImageBudget } from "../components/image";
-import { type Markdown, streamingMarkdownSource } from "../components/markdown";
+import type { Markdown } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
@@ -81,12 +81,12 @@ export class FigureMarkdown extends Container {
 		const first = this.#parts[0];
 		if (first?.kind !== "markdown") return "";
 		if (this.#transient && this.#parts.length === 1) return first.md.getLastRenderStableText().trim();
-		return streamingMarkdownSource(first.text);
+		return first.md.getMathImageStableSource();
 	}
 
 	/** Whether a figure's final source still waits for its raster, or a chart for its pick or raster. */
 	get pending(): boolean {
-		return this.#parts.some(part => part.kind !== "markdown" && part.figure.pending);
+		return this.#parts.some(part => (part.kind === "markdown" ? part.md.mathImagesPending : part.figure.pending));
 	}
 
 	/** Rebuild the prose runs through the Markdown factory after its theme changed; figures keep their rasters. */

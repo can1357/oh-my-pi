@@ -15,6 +15,16 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 
+## Math images
+
+Enable **Render Math as Images** in `/settings` → Appearance → Display, or set `tui.renderMath: true` in your configuration. The default is `false`; `terminal.showImages` must also be enabled. Changing either setting redraws existing transcript math.
+
+Display formulas replace their Unicode blocks in place on Kitty, iTerm2, and Sixel terminals. Inline formulas use a single row only on terminals with proven Kitty Unicode-placeholder support. Scripted formulas and simple fractions may shrink uniformly down to 0.6× to fit that row; nested stacks that would need more shrinking and inline matrices remain Unicode. Unsupported, oversized, pending, or failed formulas use the existing Unicode rendering.
+
+Math images do not count toward `tui.maxInlineImages`. A separate internal cap retains 512 math placements per terminal surface, including scrollback. Beyond that cap, least-recently-used off-screen math can be deleted: its committed scrollback placeholders become blank until history replay regenerates them. On-screen math is not deleted to enforce the cap.
+
+This applies to shared ANSI Markdown, not thinking or scratchpad output. Original LaTeX remains unchanged in copied text, session data, exports, and native TSP Markdown. The bundled MathJax renderer and TeX font run offline; enabling math does not change prompts or the separate image-display preference.
+
 ## Bash visualization
 
 Embedded-shell calls default to Python-like **Pseudo**; switch to **Raw** for the original command. Syntax appears incrementally as the shell compiles it. Active commands retain their colors while inactive code fades; only failures get `×`. Values appear beside each variable's latest observed setter.

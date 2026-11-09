@@ -19,7 +19,13 @@ import { $flag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
-import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import {
+	DEFAULT_MAX_INLINE_IMAGES,
+	ImageBudget,
+	getImageRenderContext,
+	withImageRenderContext,
+} from "./components/image";
+import { withMathImageOwner, releaseMathImageOwner, getMathImageOwnerChangeHandler } from "./components/math-image";
 import { TuiDebugServer } from "./debug-server";
 import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
@@ -574,11 +580,13 @@ export class Container implements Component {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			releaseMathImageOwner(component);
 			this.#memoLines = undefined;
 		}
 	}
 
 	clear(): void {
+		for (const child of this.children) releaseMathImageOwner(child);
 		this.children = [];
 		this.#memoLines = undefined;
 		this.#memoChildLines = [];
@@ -615,6 +623,7 @@ export class Container implements Component {
 	 */
 	dispose(): void {
 		for (const child of this.children) {
+			releaseMathImageOwner(child);
 			child.dispose?.();
 		}
 	}
@@ -631,7 +640,18 @@ export class Container implements Component {
 			this.#memoChildLines = refs;
 		}
 		for (let i = 0; i < count; i++) {
-			const childLines = children[i]!.render(width);
+			const child = children[i]!;
+			const context = getImageRenderContext();
+			const childLines = getMathImageOwnerChangeHandler()
+				? child.render(width)
+				: withMathImageOwner(
+						child,
+						() => {
+							child.invalidate?.();
+							context?.requestRender();
+						},
+						() => child.render(width),
+					);
 			if (refs[i] !== childLines) {
 				unchanged = false;
 				refs[i] = childLines;
@@ -1332,7 +1352,11 @@ export class TUI extends Container {
 
 	/** Render the current root document at the live terminal width for debug inspection. */
 	getDebugDocument(): readonly string[] {
-		return this.render(Math.max(1, this.terminal.columns));
+		return this.#withImageContext(() => this.render(Math.max(1, this.terminal.columns)));
+	}
+
+	#withImageContext<T>(render: () => T): T {
+		return withImageRenderContext({ budget: this.#imageBudget, requestRender: () => this.requestRender() }, render);
 	}
 
 	/** Feed debug and test input through the same pipeline as terminal stdin. */
@@ -2415,9 +2439,11 @@ export class TUI extends Container {
 		let rendered: readonly string[];
 		do {
 			this.#imageBudget.beginPass(false, true);
-			rendered =
-				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
-				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
+			rendered = this.#withImageContext(
+				() =>
+					provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
+					(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width)),
+			);
 		} while (this.#imageBudget.endPass());
 		const viewport = rendered.length > height ? rendered.slice(rendered.length - height) : Array.from(rendered);
 		// The borrowed resize buffer is transient, not a streamable session paint.
@@ -2672,7 +2698,7 @@ export class TUI extends Container {
 			let viewport: string[];
 			do {
 				this.#imageBudget.beginPass();
-				plan = provider.renderFrame({ columns: width, rows: height });
+				plan = this.#withImageContext(() => provider.renderFrame({ columns: width, rows: height }));
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
 			} while (this.#imageBudget.endPass());
@@ -3347,7 +3373,16 @@ export class TUI extends Container {
 			// Get layout with height=0 first to determine width and maxHeight
 			// (width and maxHeight don't depend on overlay height).
 			const { width, maxHeight } = this.#resolveOverlayLayout(options, 0, termWidth, termHeight);
-			let overlayLines = component.render(width);
+			let overlayLines = this.#withImageContext(() =>
+				withMathImageOwner(
+					component,
+					() => {
+						component.invalidate?.();
+						this.requestRender();
+					},
+					() => component.render(width),
+				),
+			);
 			if (overlayLines.length > maxHeight) {
 				const anchor = options?.anchor ?? "center";
 				overlayLines =
@@ -3423,7 +3458,8 @@ export class TUI extends Container {
 				if (clipped === line) return "";
 				line = withDirectPlacementLift(clipped, lift);
 			}
-			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
+			const column = Number(/\x1b\[(\d+)G/.exec(line)?.[1] ?? 1);
+			return lift > 0 ? `\x1b[${lift}A${`\x1b[${column}G\x1b[K\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
 		const placementId = previous?.placementId ?? this.#nextImagePlacementId++;
@@ -3436,9 +3472,11 @@ export class TUI extends Container {
 				placementId,
 				columns: parsed.columns,
 				rows: parsed.rows,
+				column: parsed.column,
 				screenRow: frameRow,
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
-			})
+			}) +
+			(line.includes("\r") ? line.slice(line.indexOf("\r")) : "")
 		);
 	}
 
@@ -3527,7 +3565,7 @@ export class TUI extends Container {
 		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			plan = provider.renderFrame({ columns: width, rows: height });
+			plan = this.#withImageContext(() => provider.renderFrame({ columns: width, rows: height }));
 			viewport = Array.from(plan.viewport);
 			if (viewport.length > height) {
 				const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
@@ -3784,6 +3822,7 @@ export class TUI extends Container {
 		// endPass(): this is the last point before the purge and transmit bytes go
 		// out, and it runs once per emitted frame instead of once per retry.
 		let viewport = viewportRows;
+		this.#imageBudget.setMathViewport(viewport);
 		this.#imageBudget.limitResidentImages();
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
@@ -4210,7 +4249,7 @@ export class TUI extends Container {
 		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			const composed = this.render(width);
+			const composed = this.#withImageContext(() => this.render(width));
 			this.#debugNextWindowTop = Math.max(0, composed.length - height);
 			viewport = composed.length > height ? composed.slice(composed.length - height) : Array.from(composed);
 			viewport = this.#compositeVisibleOverlays(viewport, width, height);
@@ -4739,6 +4778,7 @@ export class TUI extends Container {
 	): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
 		// screen's own placements behind it are not treated as retired.
+		this.#imageBudget.setMathViewport(prepared.lines);
 		this.#imageBudget.limitResidentImages();
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this
