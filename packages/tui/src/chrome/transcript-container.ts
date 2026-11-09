@@ -1,3 +1,5 @@
+import { getThemeEpoch } from "../theme";
+import { getWidthConfigEpoch } from "../utils";
 import { type Component, Container, type HistoryBatch, ownDescription } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
@@ -59,6 +61,8 @@ export interface AppendOnlyTranscriptBlock {
 
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
+	/** Monotonic version for renders after finalization; changes invalidate cached document rows. */
+	getTranscriptBlockVersion?(): number;
 	/**
 	 * A finalized block whose rows still wait on async work (an SVG figure's
 	 * raster). Retirement holds until it lands: committed rows can never be
@@ -380,6 +384,8 @@ export class TranscriptContainer extends Container {
 	/** Block list handed to the native frame provider, reused while the children are unchanged. */
 	#nativeBlocks: readonly Component[] = [];
 	#nativeNode: NativeNode | undefined;
+	#documentRows = new WeakMap<Component, { width: number; version: number; rows: readonly string[] }>();
+	#documentEpoch = "";
 	/** `true` when history ends with a compact block whose separator was withheld; history rows never change. */
 	#historyEnd: RowsAbove;
 	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
@@ -438,6 +444,7 @@ export class TranscriptContainer extends Container {
 
 	override clear(): void {
 		super.clear();
+		this.releaseDocumentCaches();
 		this.#entries = [];
 		this.#frontier = 0;
 		this.#offered = undefined;
@@ -456,6 +463,11 @@ export class TranscriptContainer extends Container {
 			if (isToolActivityComponent(child)) child.setToolActivityVisible(visible);
 		}
 		this.invalidate();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.releaseDocumentCaches();
 	}
 
 	/**
@@ -1269,6 +1281,59 @@ export class TranscriptContainer extends Container {
 			rows.push(...block);
 			above = compact;
 		}
+		return rows;
+	}
+
+	/**
+	 * Full document render for surfaces that can scroll arbitrarily (fullscreen).
+	 * Finalized blocks exposing a version are rendered once per width/version and
+	 * their component render caches are released. Unversioned and image blocks
+	 * still render each frame. This preserves post-finalize mutations that bump the version.
+	 */
+	renderDocument(width: number, spans?: TranscriptViewportSpan[]): readonly string[] {
+		const epoch = `${getThemeEpoch()}:${getWidthConfigEpoch()}:${TERMINAL.imageProtocol}`;
+		if (epoch !== this.#documentEpoch) {
+			this.releaseDocumentCaches();
+			this.#documentEpoch = epoch;
+		}
+		this.#syncEntries();
+		this.#settleFinalized();
+		this.#childStartRows.clear();
+		const rows: string[] = [];
+		for (const entry of this.#entries) {
+			const block = this.#renderDocumentEntry(entry, width);
+			if (block.length === 0) continue;
+			if (rows.length > 0) rows.push("");
+			this.#childStartRows.set(entry.component, rows.length);
+			spans?.push({ component: entry.component, start: rows.length, end: rows.length + block.length });
+			rows.push(...block);
+		}
+		return rows;
+	}
+
+	/** Release fullscreen snapshots when the owning surface closes. */
+	releaseDocumentCaches(): void {
+		this.#documentRows = new WeakMap();
+	}
+
+	#renderDocumentEntry(entry: TranscriptEntry, width: number): readonly string[] {
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const version = (entry.component as Component & FinalizableBlock).getTranscriptBlockVersion?.();
+		if (version === undefined || !isFinalized(entry.component)) {
+			this.#documentRows.delete(entry.component);
+			return trimBlankEdges(entry.component.render(width));
+		}
+		const cached = this.#documentRows.get(entry.component);
+		if (cached?.width === width && cached.version === version) return cached.rows;
+		const measured = measureRender(() => trimBlankEdges(entry.component.render(width)));
+		// Images must register with the current image-budget pass, even when settled.
+		if (measured.images || measured.value.some(line => TERMINAL.isImageLine(line))) {
+			this.#documentRows.delete(entry.component);
+			return trimBlankEdges(entry.component.render(width));
+		}
+		const rows = measured.value.slice();
+		this.#releaseRenderCaches(entry);
+		this.#documentRows.set(entry.component, { width, version, rows });
 		return rows;
 	}
 

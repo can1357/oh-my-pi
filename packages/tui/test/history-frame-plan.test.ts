@@ -399,6 +399,45 @@ describe("terminal frame plans", () => {
 		expect(plainBuffer(terminal)).toContain("final two");
 	});
 
+	it("keeps a fullscreen base on the alternate screen beneath an ordinary dialog", async () => {
+		const terminal = new CountingTerminal(40, 8);
+		const provider = new Provider({ viewport: ["normal editor"] });
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		tui.showOverlay(new FullscreenOverlay(), { fullscreen: true, base: true, anchor: "top-left", margin: 0 });
+		await renderScheduler.settle(terminal);
+		terminal.writes.length = 0;
+		const dialog = tui.showOverlay({ render: () => ["ordinary dialog"] }, { row: 3, col: 0, margin: 0 });
+		await renderScheduler.settle(terminal);
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1049l");
+		expect(terminal.getViewport().join("\n")).toContain("ordinary dialog");
+		expect(terminal.getViewport().join("\n")).toContain("fullscreen overlay");
+		dialog.hide();
+		await renderScheduler.settle(terminal);
+		expect(terminal.writes.join("")).not.toContain("\x1b[?1049l");
+		expect(terminal.getViewport().join("\n")).not.toContain("ordinary dialog");
+		tui.stop();
+	});
+
+	it.each([true, false])("only skips shutdown history for a persistent fullscreen base (base=%s)", async base => {
+		const terminal = new CountingTerminal(40, 8);
+		const provider = new FlushProvider();
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		tui.showOverlay(new FullscreenOverlay(), { fullscreen: true, base });
+		await renderScheduler.settle(terminal);
+		tui.stop();
+		expect(provider.acknowledged).toEqual(base ? [] : [1, 2]);
+		expect(plainBuffer(terminal).includes("final one")).toBe(!base);
+		expect(plainBuffer(terminal).includes("final two")).toBe(!base);
+	});
+
 	it("keeps visible history above the anchored viewport while room remains", () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const provider = new Provider({ history: { id: 1, rows: ["block one"] }, viewport: ["editor"] });

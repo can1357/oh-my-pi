@@ -386,8 +386,8 @@ export class InputController {
 			this.#btwBranchListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!matchesKey(data, "b")) return undefined;
-				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				void this.ctx.handleBtwBranchKey();
 				return { consume: true };
@@ -518,7 +518,7 @@ export class InputController {
 			this.#inlineMouseListenerInstalled = true;
 			// Inline click-to-focus (`tui.mouse`): SGR reports only arrive while
 			// the setting has tracking enabled, so this stays inert otherwise.
-			// Defers to fullscreen overlays, which own mouse handling on the
+			// Defers to fullscreen surfaces, which own mouse handling on the
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
 		}
@@ -856,7 +856,7 @@ export class InputController {
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
-		if (this.ctx.ui.hasOverlay()) return undefined;
+		if (this.ctx.ui.hasOverlay() || this.ctx.ui.hasFullscreenBaseOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
 		if (event.motion) this.#updateHoverHighlight(event.row);
@@ -946,8 +946,20 @@ export class InputController {
 		this.#lastHoverClickId = undefined;
 	}
 
+	activateFullscreenClick(row: number, col: number): boolean {
+		if (!cfgTuiMouse.get(this.ctx.settings)) return false;
+		if (this.ctx.activateViewportLink(row, col)) return true;
+		const candidates = this.ctx.resolveViewportClickCandidates(row);
+		if (candidates.length === 0) return false;
+		this.#focusClickCandidates(candidates);
+		return true;
+	}
+
 	#focusClickedAgent(screenRow: number): void {
-		const candidates = this.#viewportCandidates(screenRow);
+		this.#focusClickCandidates(this.#viewportCandidates(screenRow));
+	}
+
+	#focusClickCandidates(candidates: string[]): void {
 		if (candidates.length === 0) return;
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));

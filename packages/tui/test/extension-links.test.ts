@@ -318,6 +318,30 @@ describe("extension link hints", () => {
 		}
 	});
 
+	it("counts, tags, and picks links in rows published from a fullscreen viewport", () => {
+		setExtensionLinks(["demo"]);
+		const composer = new Composer({
+			terminal: new VirtualTerminal(SIZE.columns, SIZE.rows),
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.start();
+		try {
+			const row = `before ${formatExtensionLink("details", "demo:open/7", "fullscreen")} after`;
+			composer.renderFullscreenViewport([row, "editor"], SIZE.columns);
+			expect(composer.viewportLinkCount()).toBe(1);
+
+			composer.startLinkHints(() => {});
+			const painted = composer.renderFullscreenViewport([row, "editor"], SIZE.columns);
+			// Tags now reuse the label's first letter (d for "details"), so the
+			// plain text is unchanged and the tag reads as inverse video on the cell.
+			expect(plain(painted[0]!)).toContain("details");
+			expect(painted[0]!).toContain("\x1b[1;7m");
+			expect(composer.typeLinkHint("d")).toEqual({ url: "demo:open/7", row: 0, start: 7 });
+		} finally {
+			composer.stop();
+		}
+	});
+
 	it("ends instead of keeping tags over labels a repaint moved", () => {
 		setExtensionLinks(["demo"]);
 		const block = new StaticBlock(render("Pick [first](demo:open/1) or [second](demo:open/2) now"));

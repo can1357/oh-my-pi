@@ -43,6 +43,14 @@
 
 ### Added
 
+- Added base overlays for persistent fullscreen surfaces that keep dialogs and their keyboard focus above the application layout. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Added pointer-to-caret positioning for editors and shared wheel scrolling and text-column helpers. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+
+### Fixed
+
+- Fixed dense or batched wheel input stalling fullscreen scrolling. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Fixed search and selection of text-sized headings, and preserved clipped fullscreen images with an original-image link for unsupported cropping protocols. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
+- Fixed unterminated text styling bleeding into ScrollView scrollbars. ([#17695](https://github.com/can1357/oh-my-pi/pull/17695) by [@Err0rCM](https://github.com/Err0rCM))
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
 

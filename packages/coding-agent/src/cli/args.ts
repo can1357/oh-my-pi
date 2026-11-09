@@ -103,6 +103,8 @@ export interface Args {
 	motion?: MotionMode;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
+	/** One-run terminal layout override. */
+	tuiMode?: "regular" | "fullscreen";
 	autoApprove?: boolean;
 	approvalMode?: ApprovalMode;
 	messages: string[];
@@ -331,6 +333,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				const consumed = consumeBuiltInStringValue(arg, args, i + 1);
 				i = consumed.index;
 				STRING_SETTERS[arg](result, consumed.value, parseDeps);
+			} else if (arg === "--tui-mode") {
+				throw new CliUsageError("--tui-mode requires regular or fullscreen");
 			}
 		} else if (OPTIONAL_VALUE_FLAGS.has(arg)) {
 			const config = OPTIONAL_FLAGS[arg];

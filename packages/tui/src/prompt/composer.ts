@@ -218,6 +218,57 @@ function rowTargetCandidates(target: Component): ((local: number) => string[]) |
 }
 
 /**
+ * Append one below-transcript root's rows to `after`, recording click spans
+ * for its row targets in `after` coordinates.
+ *
+ * Row targets usually nest one level down: chrome roots are plain
+ * containers (the HUD lives inside `subagentContainer`), and
+ * `Container.render` is a pure concatenation, so child spans tile the root
+ * span exactly. Render those children once and share the rows for
+ * composition and measurement — a second render per frame would duplicate
+ * render-time side effects (image placement registration). Roots with a
+ * custom render keep the composed output as the source of truth and measure
+ * up to the last target.
+ */
+export function renderClickTargetRoot(
+	root: Component,
+	width: number,
+	after: string[],
+	spans: ViewportClickSpan[],
+): void {
+	const start = after.length;
+	const plainContainer = root instanceof Container && root.render === Container.prototype.render;
+	const targets = root instanceof Container ? root.children : [root];
+	const resolves = targets.map(rowTargetCandidates);
+	const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
+	if (plainContainer) {
+		let offset = start;
+		for (let index = 0; index < targets.length; index++) {
+			const childLines = targets[index]!.render(width);
+			after.push(...childLines);
+			if (index > lastTarget) continue;
+			const resolve = resolves[index];
+			if (resolve !== undefined && childLines.length > 0) {
+				spans.push({ start: offset, end: offset + childLines.length, candidates: resolve });
+			}
+			offset += childLines.length;
+		}
+		return;
+	}
+	after.push(...root.render(width));
+	if (lastTarget === -1) return;
+	let offset = start;
+	for (let index = 0; index <= lastTarget; index++) {
+		const childLines = targets[index] === root ? after.length - start : targets[index]!.render(width).length;
+		const resolve = resolves[index];
+		if (resolve !== undefined && childLines > 0) {
+			spans.push({ start: offset, end: offset + childLines, candidates: resolve });
+		}
+		offset += childLines;
+	}
+}
+
+/**
  * Canonical interactive composer, usable before session/settings exist and updatable in place.
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
@@ -446,7 +497,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		let selfClearingRows = 0;
 		for (const root of afterRoots) {
 			const start = after.length;
-			this.#renderBelowRoot(root, width, after, afterSpans);
+			renderClickTargetRoot(root, width, after, afterSpans);
 			if (this.#selfClearingChrome.has(root)) selfClearingRows += after.length - start;
 			else if (this.#transientChrome.has(root)) transientRows += after.length - start;
 			ends.push({ root, end: after.length });
@@ -557,6 +608,24 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
+	 * Render rows already laid out for a fullscreen viewport through the same extension-link pipeline
+	 * as renderFrame, so link counts, picks, and tags reflect what the alternate screen displays.
+	 */
+	renderFullscreenViewport(
+		rows: readonly string[],
+		width: number,
+		spans: ViewportClickSpan[] = [],
+	): readonly string[] {
+		if (!this.#started || this.#stopped) return rows;
+		this.#lastClickSpans = spans;
+		this.#lastViewportRows = rows;
+		this.#lastViewportWidth = width;
+		this.#syncLinkHints(rows, width);
+		const painted = [...rows];
+		return this.#linkHints?.hints.paint(painted, width) ?? painted;
+	}
+
+	/**
 	 * Keep link-hint tags on what `rows` show. The first frame after `startLinkHints` tags its
 	 * labels; later frames keep the tags while the tagged labels are still drawn first, in the same
 	 * order and columns (rows may scroll, links may be added below), and otherwise end the mode, so a
@@ -615,52 +684,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#nativeSurface = { main: nextMain, dock: nextDock };
 		}
 		return this.#nativeSurface;
-	}
-
-	/**
-	 * Append one below-transcript root's rows to `after`, recording click spans
-	 * for its row targets in `after` coordinates.
-	 *
-	 * Row targets usually nest one level down: chrome roots are plain
-	 * containers (the HUD lives inside `subagentContainer`), and
-	 * `Container.render` is a pure concatenation, so child spans tile the root
-	 * span exactly. Render those children once and share the rows for
-	 * composition and measurement — a second render per frame would duplicate
-	 * render-time side effects (image placement registration). Roots with a
-	 * custom render keep the composed output as the source of truth and measure
-	 * up to the last target.
-	 */
-	#renderBelowRoot(root: Component, width: number, after: string[], spans: ViewportClickSpan[]): void {
-		const start = after.length;
-		const plainContainer = root instanceof Container && root.render === Container.prototype.render;
-		const targets = root instanceof Container ? root.children : [root];
-		const resolves = targets.map(rowTargetCandidates);
-		const lastTarget = resolves.findLastIndex(resolve => resolve !== undefined);
-		if (plainContainer) {
-			let offset = start;
-			for (let index = 0; index < targets.length; index++) {
-				const childLines = targets[index]!.render(width);
-				after.push(...childLines);
-				if (index > lastTarget) continue;
-				const resolve = resolves[index];
-				if (resolve !== undefined && childLines.length > 0) {
-					spans.push({ start: offset, end: offset + childLines.length, candidates: resolve });
-				}
-				offset += childLines.length;
-			}
-			return;
-		}
-		after.push(...root.render(width));
-		if (lastTarget === -1) return;
-		let offset = start;
-		for (let index = 0; index <= lastTarget; index++) {
-			const childLines = targets[index] === root ? after.length - start : targets[index]!.render(width).length;
-			const resolve = resolves[index];
-			if (resolve !== undefined && childLines > 0) {
-				spans.push({ start: offset, end: offset + childLines, candidates: resolve });
-			}
-			offset += childLines;
-		}
 	}
 
 	/**
@@ -1176,6 +1199,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#disposeStartupStatus(): void {
 		this.#startupStatus?.dispose();
 		this.#startupStatus = undefined;
+	}
+
+	/** Header and runtime roots, including the status host; read by fullscreen framing. */
+	get runtimeChildren(): readonly Component[] {
+		return [this.#header, ...this.#runtimeChildren, this.#statusHost];
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */

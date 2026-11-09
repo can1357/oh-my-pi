@@ -1621,6 +1621,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setToolActivityVisible(visible: boolean): void {
+		if (this.#toolActivityVisible !== visible) this.#blockVersion++;
 		this.#toolActivityVisible = visible;
 		this.#spotlight.setHidden(!visible);
 		this.#lateDiagnosticsBlock?.block.setToolActivityVisible(visible);
@@ -1628,6 +1629,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setShowImages(show: boolean): void {
+		if (this.#showImages !== show) this.#blockVersion++;
 		this.#showImages = show;
 		this.#updateDisplay();
 	}

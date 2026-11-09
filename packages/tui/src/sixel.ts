@@ -54,7 +54,7 @@ function appendBand(output: string[], band: SixelBand | undefined, shift: number
  * Crop integer pixel rows from a raw (not tmux-wrapped) SIXEL DCS image.
  * Runs are shifted between adjacent six-pixel bands, never decoded to pixels.
  * Palette selections, overdraw order, transparent gaps and DCS background mode
- * are retained. A nonpositive crop returns the original sequence unchanged.
+ * are retained. A zero top crop still applies a supplied height limit.
  *
  * The supported grammar is the native icy_sixel encoder's: one leading raster
  * declaration with positive dimensions and square pixels, prefix RGB/HLS palette
@@ -71,7 +71,7 @@ function appendBand(output: string[], band: SixelBand | undefined, shift: number
  * policy of dropping bottom pixels rather than overwriting the following row.
  */
 export function cropSixelTop(sequence: string, pixels: number, maxHeightPixels?: number): string {
-	if (pixels <= 0) return sequence;
+	if (pixels < 0 || (pixels === 0 && maxHeightPixels === undefined)) return sequence;
 	if (!Number.isSafeInteger(pixels)) throw new RangeError("SIXEL crop must be an integer pixel count");
 	if (maxHeightPixels !== undefined && (!Number.isFinite(maxHeightPixels) || maxHeightPixels < 0)) {
 		throw new RangeError("SIXEL height limit must be a nonnegative finite pixel count");

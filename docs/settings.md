@@ -867,6 +867,42 @@ task:
 
 ### Appearance and terminal
 
+Choose **Interface Mode** under `/settings` → **Appearance** → **Display**:
+
+- **Regular** (default) uses the terminal's native scrollback.
+- **Fullscreen** scrolls the transcript inside the app while keeping the input area at the bottom.
+
+Changing the mode applies immediately, preserves the conversation and input draft, and saves the
+choice to the global config. `omp --tui-mode regular|fullscreen` overrides the saved mode for one
+launch; a later mode choice in `/settings` replaces that launch override. Other configuration layers
+still follow the normal [settings precedence](#precedence).
+
+In fullscreen mode, use PageUp/PageDown, Ctrl+Home/Ctrl+End, or the mouse wheel to scroll.
+Ctrl+F searches the transcript, Enter moves to the next match, Shift+Enter to the previous match,
+and Esc closes search. Search accepts the same text editing and paste input as other single-line
+fields. Search and status rows reserve their own space rather than covering transcript lines.
+When a temporary prompt takes over the editor slot, search and selection end so the prompt
+receives input. Drag to select text; release copies it through the terminal's OSC 52 clipboard protocol. On terminals that support it, Shift+drag uses native selection. Clipboard delivery requires
+terminal support; tmux also needs `set-clipboard on`. A width change or replacement of selected
+text cancels an unfinished selection rather than copying different content.
+
+Search and copying include Kitty text-sized headings. A modal dialog temporarily pauses search;
+closing it returns focus to the same search field. Clicking blank space below the transcript does
+not select or copy the last message. Configuration warnings remain at the start of the scrollable
+document. With `tui.mouse` enabled, extension links, subagent cards, and the pinned-agent list
+keep their click actions in fullscreen mode.
+
+Fullscreen clips SIXEL and budgeted Kitty direct images to the visible transcript area. For
+partially visible iTerm2 images and Kitty images without a reusable image ID, it shows an
+`Image clipped` placeholder instead of a blank block or drawing over the input area. The placeholder
+links to the complete image when hyperlinks and the host image-blob writer are available; otherwise
+scroll until the full image fits, resize the terminal, or use the saved session/export. Image links
+refer to files on the OMP host, so opening them from a remote terminal depends on the client.
+
+Fullscreen uses the alternate terminal screen. Exiting restores the preceding terminal buffer;
+it does not print the full conversation into shell scrollback. Saved sessions and `/export`
+remain available for retaining the conversation.
+
 ```yaml
 theme:
    dark: titanium
@@ -886,6 +922,7 @@ images:
    autoResize: true
    blockImages: false
 tui:
+   mode: regular # regular, fullscreen
    hyperlinks: auto # off, auto, always
 ```
 
@@ -904,6 +941,7 @@ tui:
 | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `tui.mode` | enum | `regular` | `regular`, `fullscreen`. Conversation layout; can be switched live. |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `tui.motion`                  | enum    | `full`           | Animation preset: `full` leaves each animation at its own setting; `reduced` runs spinners at 250 ms with no shimmer or blink/fade; `none` makes spinners, the thinking pulse and the title static as well. Streaming text is unaffected (see `tui.maxFps`). A `tui.spinnerInterval` you set wins over the preset. Also `--motion` and `PI_MOTION`.                                                                                                                                                                                                                                                                  |
 | `tui.spinnerInterval`         | number  | unset            | Milliseconds between spinner frames, terminal title included; `0` shows static glyphs. Unset follows `tui.motion` (`80` under `full`). Each frame is a repaint the terminal (and every tmux control-mode client) must process. Also `--spinner-interval` and `PI_SPINNER_INTERVAL`.                                                                                                                                                                                                                                                                                                                                   |

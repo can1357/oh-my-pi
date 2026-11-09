@@ -980,9 +980,11 @@ export function encodeKittyPlacement(options: {
  * APC, optional `ESC 8` suffix. The parser unwraps tmux passthrough first.
  */
 const KITTY_DIRECT_PLACEMENT_LINE =
-	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?$/;
+	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?(?:,y=(\d+),h=(\d+))?\x1b\\(?:\x1b8)?$/;
 
 export interface ParsedKittyPlacementLine {
+	sourceY?: number;
+	sourceHeight?: number;
 	imageId: number;
 	placementId: number | undefined;
 	columns: number;
@@ -1011,6 +1013,7 @@ export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacemen
 		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
 		columns,
 		rows,
+		...(m[6] !== undefined ? { sourceY: Number(m[6]), sourceHeight: Number(m[7]) } : {}),
 	};
 }
 
@@ -1057,18 +1060,23 @@ export function encodeKittyPlacementLine(options: {
 	screenRow: number;
 	/** Source image height in pixels, for the clipped source rectangle. */
 	imageHeightPx: number;
+	/** Maximum visible rows when the viewport also clips the bottom. */
+	maxRows?: number;
+	/** Source offset retained when a previously clipped placement is repainted. */
+	sourceY?: number;
 }): string {
 	// Without a source pixel height the slice cannot be expressed — emit the
 	// component's own full form (status quo) rather than squashing the whole
 	// image into the reduced row count.
 	const clippable = options.imageHeightPx > 0;
 	const hiddenRows = clippable ? Math.max(0, options.rows - 1 - options.screenRow) : 0;
-	const visibleRows = options.rows - hiddenRows;
+	const visibleRows = Math.min(options.rows - hiddenRows, options.maxRows ?? options.rows);
 	const params: string[] = ["a=p", "q=2", "C=1", `i=${options.imageId}`, `p=${options.placementId}`];
 	params.push(`c=${options.columns}`, `r=${visibleRows}`);
-	if (hiddenRows > 0) {
+	if (hiddenRows > 0 || visibleRows < options.rows || options.sourceY !== undefined) {
 		const srcY = Math.floor((options.imageHeightPx * hiddenRows) / options.rows);
-		params.push(`y=${srcY}`, `h=${Math.max(1, options.imageHeightPx - srcY)}`);
+		const srcEnd = Math.floor((options.imageHeightPx * (hiddenRows + visibleRows)) / options.rows);
+		params.push(`y=${(options.sourceY ?? 0) + srcY}`, `h=${Math.max(1, srcEnd - srcY)}`);
 	}
 	const apc = wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 	const cuu = visibleRows - 1;
@@ -1140,6 +1148,13 @@ export function iterm2ImagePayload(line: string): string | undefined {
 	if (colon === -1) return undefined;
 	const end = line.indexOf("\x07", colon + 1);
 	return line.slice(colon + 1, end === -1 ? undefined : end);
+}
+
+/** PNG payload of a self-contained Kitty transmit-and-display command. */
+export function kittyImagePayload(line: string): string | undefined {
+	const chunks = [...line.matchAll(/\x1b_G([^;]*);([A-Za-z0-9+/=]+)\x1b/g)];
+	if (!chunks[0]?.[1]?.startsWith("a=T,f=100,")) return undefined;
+	return chunks.map(chunk => chunk[2]).join("");
 }
 
 export function calculateImageRows(

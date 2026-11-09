@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	encodeTextSized,
+	stripTerminalSequences,
+	colToCodeUnitIndex,
 	extractSegments,
 	sliceWithWidth,
 	truncateToWidth,
@@ -167,5 +169,16 @@ describe("text utils", () => {
 		const truncated = truncateToWidth(encoded, 40);
 		expect(truncated).not.toBe(encoded);
 		expect(visibleWidth(truncated)).toBeLessThanOrEqual(40);
+	});
+});
+
+describe("sized text extraction and hit testing", () => {
+	it("preserves OSC 66 text while dropping hyperlink and image payloads", () => {
+		const row = `prefix ${encodeTextSized("标题", { scale: 2, widthCells: 4 })}\x1b]8;;https://example.test\x07link\x1b]8;;\x07\x1b_Ga=p\x1b\\`;
+		expect(stripTerminalSequences(row)).toBe("prefix 标题link");
+		expect(colToCodeUnitIndex(row, 7)).toBe(7);
+		expect(colToCodeUnitIndex(row, 10)).toBe(7);
+		expect(colToCodeUnitIndex(row, 11)).toBe(8);
+		expect(colToCodeUnitIndex(row, 15)).toBe(9);
 	});
 });
