@@ -5,6 +5,8 @@
 ### Fixed
 
 - A late usage-limit error from a previous provider no longer blocks or cools down the selected provider; when the old provider has spent its retry budget, a replay-safe turn still tries the selected model without the old quota delay ([#17098](https://github.com/can1357/oh-my-pi/issues/17098), [#17571](https://github.com/can1357/oh-my-pi/pull/17571) by [@Bensonluo](https://github.com/Bensonluo))
+- Multi-question ask forms in Tern show Submit on every question tab, not only on the Review tab
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
