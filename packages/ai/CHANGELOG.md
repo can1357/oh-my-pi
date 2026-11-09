@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Providers paused by a `disabled` auth rule (currently Google Antigravity) are left out of every login list, refuse login, resolve no key from any source and refuse requests and image generation with the pause reason; stored logins are kept and work again once the rule is removed
+- Providers paused by a `disabled` auth rule (currently Google Antigravity) are left out of every login list (extension-registered ones too), refuse login, token refresh and usage probes, resolve no key from any source, and refuse requests and image generation with the pause reason; stored logins are kept and work again once the rule is removed ([#18622](https://github.com/can1357/oh-my-pi/pull/18622) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 

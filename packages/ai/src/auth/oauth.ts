@@ -79,6 +79,7 @@ export class OAuthAccounts implements OAuthApi {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
 		AIError.assertProviderEnabled(provider);
+		if (def.storeCredentialsAs) AIError.assertProviderEnabled(def.storeCredentialsAs);
 		const result = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,

@@ -7,6 +7,12 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import {
+	getOAuthProviders,
+	refreshOAuthToken,
+	registerOAuthProvider,
+	unregisterOAuthProviders,
+} from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const PROVIDER = "anthropic";
@@ -67,5 +73,37 @@ describe("a provider disabled in its auth rules", () => {
 		await expect(
 			auth.oauth.login(PROVIDER, { onAuth: () => {}, onPrompt: async () => "", onProgress: () => {} }),
 		).rejects.toBeInstanceOf(AIError.ProviderDisabledError);
+	});
+
+	test("never probes usage, even through a runtime usage provider with its own key", async () => {
+		disable();
+		const fetchUsage = vi.fn(async () => null);
+		auth.usage.setProvider(PROVIDER, { id: PROVIDER, fetchUsage }, "sk-ext");
+		await auth.usage.reports({ provider: PROVIDER });
+		expect(fetchUsage).not.toHaveBeenCalled();
+	});
+
+	test("never starts a token exchange for an old credential", async () => {
+		disable();
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		await expect(
+			refreshOAuthToken(PROVIDER, { access: "old", refresh: "old-refresh", expires: 0 }),
+		).rejects.toBeInstanceOf(AIError.ProviderDisabledError);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	test("an extension cannot put it back in the login list", () => {
+		disable();
+		registerOAuthProvider({
+			id: PROVIDER,
+			name: "Extension login",
+			sourceId: "provider-disabled-test",
+			login: async () => "",
+		});
+		try {
+			expect(getOAuthProviders().some(provider => provider.name === "Extension login")).toBe(false);
+		} finally {
+			unregisterOAuthProviders("provider-disabled-test");
+		}
 	});
 });

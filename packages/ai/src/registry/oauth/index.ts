@@ -77,6 +77,8 @@ export async function refreshOAuthToken(
 			provider,
 		});
 	}
+	// A paused provider never starts a token exchange, even for an SDK/extension holding an old credential.
+	AIError.assertProviderEnabled(provider);
 	const def = getProviderDefinition(provider);
 	if (!def?.login) {
 		throw new AIError.OAuthError(`Unknown OAuth provider: ${provider}`, {
@@ -160,12 +162,20 @@ export async function getOAuthApiKey(
  * Get list of OAuth providers.
  */
 export function getOAuthProviders(): OAuthProviderInfo[] {
-	const customProviders = Array.from(customOAuthProviders.values(), provider => ({
-		id: provider.id,
-		name: provider.name,
-		available: true,
-		storeCredentialsAs: provider.storeCredentialsAs,
-	}));
+	// Extensions cannot re-offer a provider its auth rules pause, under its id or as its credential store.
+	const customProviders = Array.from(customOAuthProviders.values())
+		.filter(
+			provider =>
+				providerDisabledReason(provider.id) === undefined &&
+				(provider.storeCredentialsAs === undefined ||
+					providerDisabledReason(provider.storeCredentialsAs) === undefined),
+		)
+		.map(provider => ({
+			id: provider.id,
+			name: provider.name,
+			available: true,
+			storeCredentialsAs: provider.storeCredentialsAs,
+		}));
 	return [...builtInOAuthProviders, ...customProviders];
 }
 
