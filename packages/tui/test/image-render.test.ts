@@ -356,14 +356,28 @@ describe("terminal image rendering", () => {
 		const imageLine = lines.at(-1) ?? "";
 
 		expect(lines).toHaveLength(1);
-		expect(imageLine.startsWith("\x1b7\x1b_Ga=T")).toBe(true);
+		expect(imageLine.startsWith("\x1b_Ga=T")).toBe(true);
 		expect(imageLine).toContain("C=1");
 		expect(imageLine).toContain("c=1");
 		expect(imageLine).toContain("r=1");
-		expect(imageLine.endsWith("\x1b\\\x1b8")).toBe(true);
+		expect(imageLine.endsWith("\x1b\\")).toBe(true);
 		expect(imageLine).not.toContain("\x1b[0A");
 		expect(imageLine).not.toContain("\x1b[0B");
 		expect(imageLine).not.toMatch(/\x1b\[\d+[AB]/);
+	});
+
+	it("preserves opted-in single-row direct Kitty output", () => {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const image = new Image(
+			BASE64_DUMMY,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 10, maxHeightCells: 1, preserveCursor: true },
+			SQUARE_DIMENSIONS,
+		);
+		const line = image.render(20)[0]!;
+		expect(line.startsWith("\x1b7\x1b_Ga=T")).toBe(true);
+		expect(line.endsWith("\x1b\\\x1b8")).toBe(true);
 	});
 });
 

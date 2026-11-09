@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in Markdown math images through a host-supplied renderer: in-place display graphics on Kitty, iTerm2, and Sixel, one-row inline graphics (scripts and simple fractions, fitted down to 0.6×) on proven Kitty-placeholder clients, and Unicode fallback. Math placements have separate 512-entry retention rather than consuming ordinary-image limits. Source and native TSP Markdown remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+- Added opt-in Markdown math images through a host-supplied renderer and `setMarkdownMathRendering`: in-place display graphics on Kitty, iTerm2, and Sixel, fitting one-row inline graphics on proven Kitty-placeholder clients, and Unicode fallback. Math alone opts into cursor preservation and separate 512-placement retention; ordinary-image defaults and math-free shared caching remain unchanged. Source and native TSP Markdown remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
 
 ## [18.18.3] - 2026-11-09
 

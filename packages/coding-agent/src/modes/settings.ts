@@ -867,7 +867,6 @@ effect(
 		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
-		renderMath: cfgTuiRenderMath,
 		cacheMissMarker: cfgDisplayCacheMissMarker,
 		showTokenUsage: cfgDisplayShowTokenUsage,
 		showTurnTime: cfgDisplayShowTurnTime,

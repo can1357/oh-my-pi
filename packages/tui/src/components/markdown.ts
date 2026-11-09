@@ -22,7 +22,6 @@ import {
 	mathStartIndex,
 } from "@oh-my-pi/pi-utils/math-delimiters";
 import { listMayContinueAt } from "@oh-my-pi/pi-utils/marked-list";
-import { chatTranscriptDisplayPreferences } from "../chat/display-preferences";
 import { getKittyGraphics } from "../kitty-graphics";
 import { getMathImageGeneration, getMathImageRenderer, type MathImageRenderRequest } from "../math-image-renderer";
 import { resolveImageOptions } from "../render/render-utils";
@@ -1302,6 +1301,13 @@ function renderedLine(text: string, literalCode?: boolean): RenderedLine {
 	return literalCode ? { text, literalCode: true } : { text };
 }
 
+let markdownMathRendering = false;
+
+/** Apply the host's effective math-image rendering policy. */
+export function setMarkdownMathRendering(enabled: boolean): void {
+	markdownMathRendering = enabled;
+}
+
 const renderCache = new LRUCache<string, readonly string[]>({
 	max: RENDER_CACHE_MAX,
 	maxSize: RENDER_CACHE_MAX_SIZE,
@@ -2570,6 +2576,8 @@ export class Markdown implements Component {
 	#mathReset = false;
 	#mathFrame = 0;
 	#mathOccurrences = new Map<Token, string>();
+	#mathOccurrenceSource?: string;
+	#mathHasOccurrences = false;
 	#mathReplay: {
 		request: MathImageRenderRequest;
 		height: number;
@@ -2606,8 +2614,7 @@ export class Markdown implements Component {
 	#mathEnabled(): boolean {
 		return (
 			this.#mathAllowed &&
-			chatTranscriptDisplayPreferences.renderMath &&
-			chatTranscriptDisplayPreferences.showImages &&
+			markdownMathRendering &&
 			!!getMathImageRenderer() &&
 			!!getImageRenderContext() &&
 			!!TERMINAL.imageProtocol
@@ -3524,7 +3531,18 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache && !this.#mathEnabled()) {
+		// Establish eligibility from the current normalized document, not a stale
+		// occurrence map. Reuse the lex below and retain the verdict across resizes.
+		const mathLexed =
+			!this.transientRenderCache && this.#mathEnabled() && this.#mathOccurrenceSource !== normalizedText
+				? this.#lexTokens(normalizedText)
+				: undefined;
+		if (mathLexed) {
+			this.#mathOccurrences = enumerateMathOccurrences(mathLexed);
+			this.#mathOccurrenceSource = normalizedText;
+			this.#mathHasOccurrences = this.#mathOccurrences.size !== 0;
+		}
+		if (!this.transientRenderCache && (!this.#mathEnabled() || !this.#mathHasOccurrences)) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -3543,13 +3561,17 @@ export class Markdown implements Component {
 
 		// Parse markdown to HTML-like tokens. While streaming, the block still
 		// being written renders its open link or math span as already closed.
-		const lexed = this.#lexTokens(normalizedText);
+		const lexed = mathLexed ?? this.#lexTokens(normalizedText);
 		const tail = lexed.at(-1);
 		const held = this.transientRenderCache && tail ? holdPendingBullet(tail) : undefined;
 		const open = held ?? tail;
 		const speculated = this.transientRenderCache && open ? (speculateStreamingToken(open) ?? held) : undefined;
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
-		this.#mathOccurrences = enumerateMathOccurrences(tokens);
+		if (!mathLexed) this.#mathOccurrences = enumerateMathOccurrences(tokens);
+		if (!this.transientRenderCache) {
+			this.#mathOccurrenceSource = normalizedText;
+			this.#mathHasOccurrences = this.#mathOccurrences.size !== 0;
+		}
 		this.#mathSpeculatedToken = speculated;
 		this.#mathReplay = this.#mathReplay.filter(item => item.sourceEnd <= normalizedText.length);
 		this.#mathPending = this.#mathReplay.some(item => item.presentation.pending);

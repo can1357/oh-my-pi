@@ -101,8 +101,21 @@ describe("kitty direct-placement wire format", () => {
 		);
 		// Only the last row visible: no cursor movement, bottom slice only.
 		expect(encodeKittyPlacementLine({ ...base, placementId: 3, screenRow: 0 })).toBe(
-			"\x1b7\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\\x1b8",
+			"\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\",
 		);
+	});
+	it("preserves opted-in unindented last-row-only placements", () => {
+		expect(
+			encodeKittyPlacementLine({
+				imageId: 7,
+				placementId: 3,
+				columns: 4,
+				rows: 6,
+				imageHeightPx: 60,
+				screenRow: 0,
+				preserveCursor: true,
+			}),
+		).toBe("\x1b7\x1b_Ga=p,q=2,C=1,i=7,p=3,c=4,r=1,y=50,h=10\x1b\\\x1b8");
 	});
 	it("retains the structural column when reanchoring a clipped graphic", () => {
 		const line = encodeKittyPlacementLine({

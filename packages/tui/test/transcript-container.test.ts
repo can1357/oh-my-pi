@@ -9,11 +9,10 @@ import {
 } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { Markdown } from "../src/components/markdown";
+import { Markdown, setMarkdownMathRendering } from "../src/components/markdown";
 import { ImageBudget, withImageRenderContext } from "../src/components/image";
 import { releaseMathImageOwner } from "../src/components/math-image";
 import { setMathImageRenderer } from "../src/math-image-renderer";
-import { setChatTranscriptDisplayPreferences } from "../src/chat/display-preferences";
 import { defaultMarkdownTheme } from "./test-themes";
 
 class Block implements Component {
@@ -1370,7 +1369,7 @@ it("holds finalized Markdown discovered during measurement until math settles", 
 	const transcript = new TranscriptContainer();
 	transcript.addChild(component);
 	setTerminalImageProtocol(ImageProtocol.Kitty);
-	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "retirement",
 		render: () => ({
@@ -1389,7 +1388,7 @@ it("holds finalized Markdown discovered during measurement until math settles", 
 	} finally {
 		releaseMathImageOwner(component);
 		setMathImageRenderer(undefined);
-		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setMarkdownMathRendering(false);
 		setTerminalImageProtocol(protocol);
 	}
 });
@@ -1402,7 +1401,7 @@ it("keeps submitted user math mutable while assistant starts streaming", async (
 	const transcript = new TranscriptContainer();
 	transcript.addChild(user);
 	setTerminalImageProtocol(ImageProtocol.Kitty);
-	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "user-retirement",
 		render: () => ({
@@ -1430,7 +1429,7 @@ it("keeps submitted user math mutable while assistant starts streaming", async (
 	} finally {
 		releaseMathImageOwner(user);
 		setMathImageRenderer(undefined);
-		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setMarkdownMathRendering(false);
 		setTerminalImageProtocol(protocol);
 	}
 });
@@ -1445,7 +1444,7 @@ it("waits for newly discovered resized math before acknowledging committed-histo
 	const context = { budget, requestRender: () => completion.resolve() };
 	const scoped = <T>(run: () => T) => withImageRenderContext(context, run);
 	setTerminalImageProtocol(ImageProtocol.Kitty);
-	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "replay",
 		render: () => ({
@@ -1485,7 +1484,7 @@ it("waits for newly discovered resized math before acknowledging committed-histo
 	} finally {
 		releaseMathImageOwner(markdown);
 		setMathImageRenderer(undefined);
-		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setMarkdownMathRendering(false);
 		setTerminalImageProtocol(protocol);
 	}
 });

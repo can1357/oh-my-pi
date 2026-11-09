@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { Container, TUI } from "@oh-my-pi/pi-tui";
-import { Markdown, setMathImageRenderer } from "@oh-my-pi/pi-tui";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+import { Markdown, setMarkdownMathRendering, setMathImageRenderer } from "@oh-my-pi/pi-tui";
 import { withMathImageOwner, mathImageOwnerPending } from "@oh-my-pi/pi-tui/components/math-image";
 import { defaultMarkdownTheme } from "./test-themes";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme/theme";
@@ -27,6 +26,7 @@ import {
 	setCellDimensions,
 	TERMINAL,
 	wrapTmuxPassthrough,
+	withDirectPlacementLift,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
@@ -635,7 +635,7 @@ describe("Image budget integration", () => {
 		expect(last).toContain("r=4");
 	});
 
-	it("saves and restores the cursor around single-row direct Kitty placements", () => {
+	it("leaves single-row ordinary direct Kitty placements bare", () => {
 		const budget = new ImageBudget(3, () => {});
 		const id = budget.acquireId("k");
 		const image = new Image(
@@ -651,11 +651,11 @@ describe("Image budget integration", () => {
 
 		const last = lines.at(-1) ?? "";
 		expect(lines).toHaveLength(1);
-		expect(last.startsWith("\x1b7\x1b_Ga=p")).toBe(true);
+		expect(last.startsWith("\x1b_Ga=p")).toBe(true);
 		expect(last).toContain("C=1");
 		expect(last).toContain(`i=${id}`);
 		expect(last).toContain("r=1");
-		expect(last.endsWith("\x1b\\\x1b8")).toBe(true);
+		expect(last.endsWith("\x1b\\")).toBe(true);
 		expect(last).not.toContain("\x1b[0A");
 		expect(last).not.toContain("\x1b[0B");
 		expect(last).not.toMatch(/\x1b\[\d+[AB]/);
@@ -2020,7 +2020,8 @@ it("presentation cache hits still observe the shared image budget", () => {
 
 it("math residency ignores ordinary cap and evicts only off-screen math past 512", () => {
 	const budget = new ImageBudget(1);
-	const ids = Array.from({ length: 513 }, (_, index) => budget.acquireId(`math:resident:${index}`));
+	const placementClass = { cap: 512 };
+	const ids = Array.from({ length: 513 }, (_, index) => budget.acquireId(`resident:${index}`, placementClass));
 	budget.beginPass();
 	for (const id of ids.slice(0, 512)) {
 		expect(budget.observe(id)).toBe(false);
@@ -2067,7 +2068,7 @@ it("bounds 600 math formulas in a tall headless TUI to the viewport-aware reside
 	try {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		setKittyGraphics({ unicodePlaceholders: true });
-		setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+		setMarkdownMathRendering(true);
 		setMathImageRenderer({
 			id: "viewport",
 			render: () => ({
@@ -2102,15 +2103,152 @@ it("bounds 600 math formulas in a tall headless TUI to the viewport-aware reside
 		tui.stop();
 		spy.mockRestore();
 		setMathImageRenderer(undefined);
-		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setMarkdownMathRendering(false);
 		terminal.imageProtocol = original;
 		setKittyGraphics(graphics);
 	}
 });
 
-it("reset clears math identity classification before reusing a logical key", () => {
+it("reset clears placement class membership before reusing a logical key", () => {
 	const budget = new ImageBudget(1);
-	const old = budget.acquireId("math:reset");
+	const old = budget.acquireId("reset", { cap: 512 });
 	budget.takeAllTransmittedIds();
-	expect(budget.acquireId("math:reset")).not.toBe(old);
+	expect(budget.acquireId("reset")).not.toBe(old);
+	// The old numeric id must now participate in the ordinary cap as well.
+	budget.beginPass();
+	budget.observe(old);
+	budget.observe(budget.acquireId("ordinary"));
+	expect(budget.endPass()).toBe(true);
+});
+
+it("treats keys as opaque and independently caps placement classes", () => {
+	const budget = new ImageBudget(1);
+	const a = { cap: 1 };
+	const b = { cap: 2 };
+	const ordinary = budget.acquireId("math:ordinary");
+	const secondOrdinary = budget.acquireId("ordinary");
+	budget.beginPass();
+	budget.observe(ordinary);
+	budget.observe(secondOrdinary);
+	expect(budget.endPass()).toBe(true);
+	const ids = [
+		budget.acquireId("a1", a),
+		budget.acquireId("a2", a),
+		budget.acquireId("b1", b),
+		budget.acquireId("b2", b),
+	];
+	budget.beginPass();
+	for (const id of ids) {
+		expect(budget.observe(id)).toBe(false);
+		budget.enqueueTransmit(id, "transmit");
+	}
+	budget.endPass();
+	budget.limitResidentImages();
+	budget.takeTransmits();
+	budget.beginPass();
+	budget.observe(ids[1]);
+	budget.observe(ids[2]);
+	budget.observe(ids[3]);
+	budget.endPass();
+	budget.limitResidentImages();
+	expect(budget.takePurgeIds()).toEqual([ids[0]]);
+});
+
+it("skips viewport iteration when no classed placements exist", () => {
+	const original = terminal.imageProtocol;
+	try {
+		terminal.imageProtocol = ImageProtocol.Kitty;
+		const budget = new ImageBudget(1);
+		budget.acquireId("math:ordinary");
+		const lines = new Proxy([] as string[], {
+			get: () => {
+				throw new Error("viewport scanned");
+			},
+		});
+		expect(() => budget.setPlacementViewport(lines)).not.toThrow();
+	} finally {
+		terminal.imageProtocol = original;
+	}
+});
+
+for (const reset of [true, false]) {
+	it(`retained classed images keep their independent cap after ${reset ? "reset" : "eviction"}`, () => {
+		const protocol = terminal.imageProtocol;
+		const graphics = getKittyGraphics();
+		try {
+			terminal.imageProtocol = ImageProtocol.Kitty;
+			setKittyGraphics({ unicodePlaceholders: false });
+			const budget = new ImageBudget(1);
+			const placementClass = { cap: 2 };
+			const images = Array.from(
+				{ length: 3 },
+				(_, index) =>
+					new Image(
+						BASE64_ONE_PIXEL_PNG,
+						"image/png",
+						{ fallbackColor: text => text },
+						{ budget, imageKey: `retained:${index}`, placementClass },
+					),
+			);
+			const ids = images.map((_, index) => budget.acquireId(`retained:${index}`));
+			const render = (visible: readonly Image[]) => {
+				budget.beginPass();
+				for (const image of visible) expect(image.render(20).join("")).toContain("\x1b_G");
+				expect(budget.endPass()).toBe(false);
+				budget.limitResidentImages();
+				budget.takeTransmits();
+			};
+			render(images);
+			if (reset) budget.takeAllTransmittedIds();
+			else {
+				render(images.slice(1));
+				expect(budget.takePurgeIds()).toEqual([ids[0]]);
+			}
+			render(images);
+			render(images.slice(1));
+			expect(budget.takePurgeIds()).toEqual([ids[0]]);
+			expect(budget.shouldTransmit(ids[1])).toBe(false);
+			expect(budget.shouldTransmit(ids[2])).toBe(false);
+		} finally {
+			terminal.imageProtocol = protocol;
+			setKittyGraphics(graphics);
+		}
+	});
+}
+
+it("applies a supplied placement class when acquiring an existing ordinary key", () => {
+	const budget = new ImageBudget(1);
+	const id = budget.acquireId("reclassified");
+	expect(budget.acquireId("reclassified", { cap: 2 })).toBe(id);
+	budget.beginPass();
+	budget.observe(id);
+	budget.observe(budget.acquireId("ordinary-a"));
+	expect(budget.endPass()).toBe(false);
+});
+
+it("keeps main's full-line erase bytes for lifted ordinary non-Kitty images", async () => {
+	const protocol = terminal.imageProtocol;
+	const term = new VirtualTerminal(40, 12);
+	const scheduler = new VirtualRenderScheduler();
+	const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+	const writes: string[] = [];
+	const write = term.write.bind(term);
+	const spy = spyOn(term, "write").mockImplementation(data => {
+		writes.push(data);
+		write(data);
+	});
+	const line = withDirectPlacementLift("\x1b7\x1b[2A\x1b]1337;File=inline=1:AA==\x07\x1b8", 2);
+	try {
+		terminal.imageProtocol = ImageProtocol.Iterm2;
+		tui.addChild({ render: () => ["", "", line], invalidate: () => {} });
+		tui.start();
+		await scheduler.settle(term);
+		// origin/main uses ERASE_LINE followed by cursor-down for each lifted row.
+		expect(writes.join("")).toContain(`\x1b[2A\x1b[2K\x1b[B\x1b[2K\x1b[B${line}`);
+		expect(writes.join("")).not.toContain("\x1b[1G\x1b[K");
+	} finally {
+		tui.stop();
+		spy.mockRestore();
+		terminal.imageProtocol = protocol;
+	}
 });

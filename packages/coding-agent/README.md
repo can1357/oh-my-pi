@@ -17,9 +17,11 @@ Package-specific references:
 
 ## Math images
 
-Enable **Render Math as Images** in `/settings` → Appearance → Display, or set `tui.renderMath: true` in your configuration. The default is `false`; `terminal.showImages` must also be enabled. Changing either setting redraws existing transcript math.
+Enable **Render Math as Images** in `/settings` → Appearance → Display, or set `tui.renderMath: true` in your configuration. The default is `false`; `terminal.showImages` must also be enabled. The agent applies both settings through `setMarkdownMathRendering(renderMath && showImages)` at startup and on live changes. Changing `tui.renderMath` rebuilds the transcript; changing `terminal.showImages` rebuilds it only when math is enabled. With math off, image visibility changes repaint existing components without rebuilding the transcript.
 
 Display formulas replace their Unicode blocks in place on Kitty, iTerm2, and Sixel terminals. Inline formulas use a single row only on terminals with proven Kitty Unicode-placeholder support. Scripted formulas and simple fractions may shrink uniformly down to 0.6× to fit that row; nested stacks that would need more shrinking and inline matrices remain Unicode. Unsupported, oversized, pending, or failed formulas use the existing Unicode rendering.
+
+Math images explicitly preserve the cursor, including single-row and clipped placements; ordinary-image transport defaults remain unchanged. Markdown without recognized math still uses the shared render cache when math is enabled, while math-containing documents retain their own placements and asynchronous rendering state.
 
 Math images do not count toward `tui.maxInlineImages`. A separate internal cap retains 512 math placements per terminal surface, including scrollback. Beyond that cap, least-recently-used off-screen math can be deleted: its committed scrollback placeholders become blank until history replay regenerates them. On-screen math is not deleted to enforce the cap.
 

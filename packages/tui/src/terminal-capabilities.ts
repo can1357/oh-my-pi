@@ -867,6 +867,8 @@ export interface ImageRenderOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	preserveAspectRatio?: boolean;
+	/** Keep the cursor fixed when supported by the selected transport. */
+	preserveCursor?: boolean;
 	/**
 	 * Stable Kitty image id (`i=`). When set, the image is displayed via a
 	 * transmit-once + placement scheme keyed off this id instead of re-sending the
@@ -1088,6 +1090,7 @@ export function encodeKittyPlacementLine(options: {
 	/** Source image height in pixels, for the clipped source rectangle. */
 	imageHeightPx: number;
 	column?: number;
+	preserveCursor?: boolean;
 }): string {
 	// Without a source pixel height the slice cannot be expressed — emit the
 	// component's own full form (status quo) rather than squashing the whole
@@ -1103,7 +1106,8 @@ export function encodeKittyPlacementLine(options: {
 	}
 	const apc = wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 	const cuu = visibleRows - 1;
-	return `\x1b7${cuu > 0 ? `\x1b[${cuu}A` : ""}${options.column ? `\x1b[${options.column + 1}G` : ""}${apc}\x1b8`;
+	const movement = `${cuu > 0 ? `\x1b[${cuu}A` : ""}${options.column ? `\x1b[${options.column + 1}G` : ""}`;
+	return movement || options.preserveCursor ? `\x1b7${movement}${apc}\x1b8` : apc;
 }
 
 /**
@@ -1146,11 +1150,7 @@ export function encodeITerm2(
 		doNotMoveCursor?: boolean;
 	} = {},
 ): string {
-	if (!base64Data) return "";
-	const params: string[] = [
-		`inline=${options.inline !== false ? 1 : 0}`,
-		`size=${Buffer.from(base64Data, "base64").length}`,
-	];
+	const params: string[] = [`inline=${options.inline !== false ? 1 : 0}`];
 
 	if (options.width !== undefined) params.push(`width=${options.width}`);
 	if (options.height !== undefined) params.push(`height=${options.height}`);
@@ -1455,7 +1455,7 @@ export function renderImage(
 			width: fit.columns,
 			height: fit.rows,
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
-			doNotMoveCursor: true,
+			doNotMoveCursor: options.preserveCursor,
 		});
 		return { sequence, rows: fit.rows };
 	}

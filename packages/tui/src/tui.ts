@@ -3459,7 +3459,7 @@ export class TUI extends Container {
 				if (clipped === line) return "";
 				line = withDirectPlacementLift(clipped, lift);
 			}
-			const column = Number(/\x1b\[(\d+)G/.exec(line)?.[1] ?? 1);
+			const column = /\x1b\[(\d+)G/.exec(line)?.[1];
 			let background =
 				line.slice(line.indexOf("\x1b8") + 2).match(/\x1b\[(?:48[;:]2[;:][^m]+|48[;:]5[;:]\d+)m/)?.[0] ?? "";
 			if (TERMINAL.imageProtocol === ImageProtocol.Sixel)
@@ -3469,7 +3469,8 @@ export class TUI extends Container {
 						`48;2;${[r, g, b].map(channel => Math.round((Math.round((Number(channel) * 100) / 255) * 255) / 100)).join(";")}`,
 				);
 			if (background) return directImageBackgroundPrelude(line, lift, background, this.terminal.columns) + line;
-			return lift > 0 ? `\x1b[${lift}A${`\x1b[${column}G\x1b[K\x1b[B`.repeat(lift)}${line}` : line;
+			const erase = column === undefined ? ERASE_LINE : `\x1b[${column}G\x1b[K`;
+			return lift > 0 ? `\x1b[${lift}A${`${erase}\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
 		const placementId = previous?.placementId ?? this.#nextImagePlacementId++;
@@ -3492,6 +3493,7 @@ export class TUI extends Container {
 				columns: parsed.columns,
 				rows: parsed.rows,
 				column: parsed.column,
+				preserveCursor: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.preserveCursor,
 				screenRow: frameRow,
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
 			}) +
@@ -3841,7 +3843,7 @@ export class TUI extends Container {
 		// endPass(): this is the last point before the purge and transmit bytes go
 		// out, and it runs once per emitted frame instead of once per retry.
 		let viewport = viewportRows;
-		this.#imageBudget.setMathViewport(viewport);
+		this.#imageBudget.setPlacementViewport(viewport);
 		this.#imageBudget.limitResidentImages();
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
@@ -4797,7 +4799,7 @@ export class TUI extends Container {
 	): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
 		// screen's own placements behind it are not treated as retired.
-		this.#imageBudget.setMathViewport(prepared.lines);
+		this.#imageBudget.setPlacementViewport(prepared.lines);
 		this.#imageBudget.limitResidentImages();
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this

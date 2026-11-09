@@ -21,6 +21,10 @@ export interface ImageTheme {
 	fallbackColor: (str: string) => string;
 }
 
+export interface ImagePlacementClass {
+	readonly cap: number;
+}
+
 export interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
@@ -37,6 +41,10 @@ export interface ImageOptions {
 	 * repaint replaces the placement instead of stacking a duplicate.
 	 */
 	imageKey?: string;
+	/** Separately capped residency; omitted images use the ordinary budget. */
+	placementClass?: ImagePlacementClass;
+	/** Preserve the cursor for direct graphics, including single-row placements. */
+	preserveCursor?: boolean;
 	/**
 	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
 	 * Defaults to the budget's repaint; a host without a budget must pass one,
@@ -268,21 +276,19 @@ export class ImageBudget {
 	 */
 	#liveIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
 	/** Source pixel dimensions for clipping direct placements at the viewport edge. */
-	#placementGeometry = new Map<number, ImageDimensions>();
+	#placementGeometry = new Map<number, ImageDimensions & { preserveCursor: boolean }>();
 	/** Ids whose owner replaced them for good ({@link release}); retired once no frame shows them. */
 	#released = new Set<number>();
-	#mathIds = new Set<number>();
-	static readonly MATH_PLACEMENT_CAP = 512;
-	#visibleMathIds: Set<number> | undefined;
-	#mathRetireHandlers = new Map<number, () => void>();
-	setMathRetireHandler(key: string, handler: () => void): void {
-		const id = this.#keyToId.get(key);
-		if (id !== undefined) this.#mathRetireHandlers.set(id, handler);
+	#placementClasses = new Map<number, ImagePlacementClass>();
+	#visiblePlacementIds: Set<number> | undefined;
+	#placementRetireHandlers = new Map<number, () => void>();
+	setPlacementRetireHandler(imageId: number, handler: () => void): void {
+		this.#placementRetireHandlers.set(imageId, handler);
 	}
-	setMathViewport(lines: readonly string[]): void {
+	setPlacementViewport(lines: readonly string[]): void {
 		// Only Kitty placements have terminal IDs that can be matched to viewport rows.
 		// Dropping a pending Sixel Image here restarts its encoder every frame.
-		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
+		if (this.#placementClasses.size === 0 || TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
 		const visible = new Set<number>();
 		for (const line of lines) {
 			for (const match of line.matchAll(/\x1b_Ga=p,[^\x1b]*?\bi=(\d+)/g)) visible.add(Number(match[1]));
@@ -290,8 +296,8 @@ export class ImageBudget {
 				for (const match of line.matchAll(/\x1b\[38;2;(\d+);(\d+);(\d+)m/g))
 					visible.add((Number(match[1]) << 16) | (Number(match[2]) << 8) | Number(match[3]));
 		}
-		this.#visibleMathIds = visible;
-		for (const [id, handler] of this.#mathRetireHandlers) if (!visible.has(id)) handler();
+		this.#visiblePlacementIds = visible;
+		for (const [id, handler] of this.#placementRetireHandlers) if (!visible.has(id)) handler();
 	}
 
 	constructor(cap: number = DEFAULT_MAX_INLINE_IMAGES, requestRender: () => void = () => {}) {
@@ -328,19 +334,23 @@ export class ImageBudget {
 	 * id across re-creations (so repaints replace the placement); a missing key
 	 * gets a fresh id every call.
 	 */
-	acquireId(key?: string): number {
+	acquireId(key?: string, placementClass?: ImagePlacementClass): number {
 		if (key) {
 			const existing = this.#keyToId.get(key);
-			if (existing !== undefined) return existing;
+			if (existing !== undefined) {
+				if (placementClass) this.#placementClasses.set(existing, placementClass);
+				return existing;
+			}
 			const id = this.#nextId;
 			this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
 			this.#keyToId.set(key, id);
 			this.#idToKey.set(id, key);
-			if (key.startsWith("math:")) this.#mathIds.add(id);
+			if (placementClass) this.#placementClasses.set(id, placementClass);
 			return id;
 		}
 		const id = this.#nextId;
 		this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
+		if (placementClass) this.#placementClasses.set(id, placementClass);
 		return id;
 	}
 
@@ -353,6 +363,11 @@ export class ImageBudget {
 	release(key: string): void {
 		const id = this.#keyToId.get(key);
 		if (id !== undefined) this.#released.add(id);
+	}
+
+	/** Release a retained placement even after its logical key has been forgotten. */
+	releaseId(imageId: number): void {
+		this.#released.add(imageId);
 	}
 
 	/**
@@ -418,11 +433,12 @@ export class ImageBudget {
 	 * which is what the display-order render that follows will decide once the
 	 * split has converged.
 	 */
-	observe(imageId: number): boolean {
+	observe(imageId: number, placementClass?: ImagePlacementClass): boolean {
+		if (placementClass) this.#placementClasses.set(imageId, placementClass);
 		if (measureRenderDepth > 0) measuredImageObservations++;
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
-		if (this.#mathIds.has(imageId)) {
+		if (this.#placementClasses.has(imageId)) {
 			if (measureRenderDepth === 0) this.#passSuppression.set(imageId, false);
 			return false;
 		}
@@ -490,7 +506,7 @@ export class ImageBudget {
 			const id = this.#passIds[i];
 			if (this.#passShowsLive(id)) liveIds.add(id);
 		}
-		for (const id of this.#mathIds) {
+		for (const id of this.#placementClasses.keys()) {
 			if (this.#passShowsLive(id)) {
 				liveIds.add(id);
 				const resident = this.#transmitted[this.#surface];
@@ -506,14 +522,17 @@ export class ImageBudget {
 			this.#released.delete(id);
 		}
 		let ordinary = 0;
-		let math = 0;
+		const classCounts = this.#placementClasses.size > 0 ? new Map<ImagePlacementClass, number>() : undefined;
 		for (const id of transmitted) {
-			if (this.#mathIds.has(id)) math++;
+			const placementClass = this.#placementClasses.get(id);
+			if (placementClass) classCounts!.set(placementClass, (classCounts!.get(placementClass) ?? 0) + 1);
 			else ordinary++;
 		}
 		for (const id of transmitted) {
-			if (this.#mathIds.has(id)) {
-				if (math > ImageBudget.MATH_PLACEMENT_CAP && this.#retire(id)) math--;
+			const placementClass = this.#placementClasses.get(id);
+			if (placementClass) {
+				const count = classCounts!.get(placementClass)!;
+				if (count > placementClass.cap && this.#retire(id)) classCounts!.set(placementClass, count - 1);
 			} else if (this.#cap > 0 && ordinary > this.#cap && this.#retire(id)) ordinary--;
 		}
 	}
@@ -530,7 +549,8 @@ export class ImageBudget {
 	 * the reconcile has since undercut counts as live.
 	 */
 	#passShowsLive(imageId: number): boolean {
-		if (this.#mathIds.has(imageId) && this.#visibleMathIds) return this.#visibleMathIds.has(imageId);
+		if (this.#placementClasses.has(imageId) && this.#visiblePlacementIds)
+			return this.#visiblePlacementIds.has(imageId);
 		const suppressed = this.#passSuppression.get(imageId);
 		if (suppressed === undefined) return false;
 		if (!suppressed) return true;
@@ -601,9 +621,9 @@ export class ImageBudget {
 			this.#transmitted[surface].clear();
 			this.#pendingTransmits[surface].clear();
 		}
-		this.#mathIds.clear();
-		this.#mathRetireHandlers.clear();
-		this.#visibleMathIds = undefined;
+		this.#placementClasses.clear();
+		this.#placementRetireHandlers.clear();
+		this.#visiblePlacementIds = undefined;
 		this.#purgeIds = [];
 		this.#resetPurgeIds = [];
 		this.#keyToId.clear();
@@ -624,18 +644,19 @@ export class ImageBudget {
 	 * can clip its placement to the visible slice at write time; cleared when
 	 * the image is purged from the terminal store.
 	 */
-	registerPlacementGeometry(imageId: number, widthPx: number, heightPx: number): void {
+	registerPlacementGeometry(imageId: number, widthPx: number, heightPx: number, preserveCursor = false): void {
 		const geometry = this.#placementGeometry.get(imageId);
 		if (geometry) {
 			geometry.widthPx = widthPx;
 			geometry.heightPx = heightPx;
+			geometry.preserveCursor = preserveCursor;
 		} else {
-			this.#placementGeometry.set(imageId, { widthPx, heightPx });
+			this.#placementGeometry.set(imageId, { widthPx, heightPx, preserveCursor });
 		}
 	}
 
 	/** Source dimensions used by the frame writer to clip a direct placement. */
-	getPlacementGeometry(imageId: number): ImageDimensions | undefined {
+	getPlacementGeometry(imageId: number): (ImageDimensions & { preserveCursor: boolean }) | undefined {
 		return this.#placementGeometry.get(imageId);
 	}
 
@@ -723,11 +744,11 @@ export class ImageBudget {
 	 */
 	#forgetKeyForId(id: number): void {
 		if (this.#isTransmitted(id)) return;
+		this.#placementClasses.delete(id);
+		this.#placementRetireHandlers.delete(id);
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
 		this.#idToKey.delete(id);
-		this.#mathIds.delete(id);
-		this.#mathRetireHandlers.delete(id);
 		if (this.#keyToId.get(key) === id) this.#keyToId.delete(key);
 	}
 
@@ -799,7 +820,12 @@ export class Image implements Component {
 		this.#options = options;
 		this.#dimensions = dimensions || getImageDimensions(base64Data, mimeType) || { widthPx: 800, heightPx: 600 };
 		this.#budget = options.budget;
-		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
+		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey, options.placementClass) : undefined;
+	}
+
+	/** Stable placement identity, retained across budget resets and eviction. */
+	get imageId(): number | undefined {
+		return this.#imageId;
 	}
 	/** Return source metadata without exposing the encoded image buffer. */
 	debugState(): Record<string, unknown> {
@@ -919,7 +945,10 @@ export class Image implements Component {
 		// its display-order slot in the budget. Only graphics-capable frames count
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
-		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		const suppressed =
+			hasProtocol && this.#budget !== undefined
+				? this.#budget.observe(this.#imageId ?? 0, this.#options.placementClass)
+				: false;
 		// Only Kitty images with a budget id transmit their data separately from
 		// the placement; a pending re-transmit (after a purge or history clear)
 		// must rebuild the lines. SIXEL and iTerm2 carry the image inside the line
@@ -971,6 +1000,7 @@ export class Image implements Component {
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
+				preserveCursor: this.#options.preserveCursor,
 				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx, sixelBackground!),
 			});
 
@@ -999,6 +1029,7 @@ export class Image implements Component {
 						this.#imageId,
 						this.#dimensions.widthPx,
 						this.#dimensions.heightPx,
+						this.#options.preserveCursor,
 					);
 				}
 				lines = [];
@@ -1008,7 +1039,9 @@ export class Image implements Component {
 				const cursorRows = result.rows - 1;
 				const moveUp = cursorRows > 0 ? `\x1b[${cursorRows}A` : "";
 				const placement = moveUp + (result.sequence ?? "");
-				lines.push(SAVE_CURSOR + placement + RESTORE_CURSOR);
+				lines.push(
+					cursorRows > 0 || this.#options.preserveCursor ? SAVE_CURSOR + placement + RESTORE_CURSOR : placement,
+				);
 			} else {
 				lines = this.#fallbackLines();
 			}

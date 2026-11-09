@@ -367,11 +367,13 @@ md.setText("Updated markdown");
 - Padding support
 - Render caching for performance
 
-**Opt-in math images:** Hosts register a `MathImageRenderer` with `setMathImageRenderer`, set the shared display preferences `renderMath` and `showImages` to `true` (`renderMath` defaults to `false`), and render inside `withImageRenderContext` with an `ImageBudget` and repaint callback. The coding-agent supplies its offline MathJax renderer at interactive startup; pi-tui has no MathJax dependency.
+**Opt-in math images:** Hosts register a `MathImageRenderer` with `setMathImageRenderer`, apply their effective policy with `setMarkdownMathRendering(renderMath && showImages)` (default off), and render inside `withImageRenderContext` with an `ImageBudget` and repaint callback. Reapply the setter whenever either host setting changes; Markdown does not read chat display preferences. The coding-agent supplies its offline MathJax renderer at interactive startup; pi-tui has no MathJax dependency.
 
 Display formulas replace Unicode in place on Kitty, iTerm2, and Sixel. Inline formulas require proven Kitty Unicode-placeholder support; scripted formulas and simple fractions may shrink uniformly down to 0.6× to fit one row, while nested stacks that would need more shrinking and inline matrices remain Unicode. Unsupported, oversized, pending, or failed formulas retain Unicode fallback. `setMathImagesAllowed(false)` excludes thinking and scratchpad surfaces. Native TSP `describe()`, copied text, and original Markdown source stay unchanged. Hosts changing policy live should release math placements with `releaseMathImages` and repaint retained surfaces.
 
-Math uses the host's image transport ledger but does not count against ordinary-image limits. It retains up to 512 math placements per terminal surface, including committed scrollback. Beyond that cap, least-recently-used math not currently on screen can be deleted; immutable scrollback placeholders for those evicted formulas become blank until history replay regenerates them. On-screen math is never deleted to satisfy the cap.
+Math-created images explicitly enable `ImageOptions.preserveCursor`, including single-row direct graphics and clipped placements; iTerm2 math requests `doNotMoveCursor=1`. Ordinary images keep their existing transport defaults. Math-free documents remain eligible for the shared Markdown render cache even when math rendering is enabled; documents containing recognized math keep document-owned rendering and asynchronous completion.
+
+Math uses the host's image transport ledger with a separately capped `ImageOptions.placementClass`, rather than key-prefix classification, and does not count against ordinary-image limits. It retains up to 512 math placements per terminal surface, including committed scrollback. Beyond that cap, least-recently-used math not currently on screen can be deleted; immutable scrollback placeholders for those evicted formulas become blank until history replay regenerates them. On-screen math is never deleted to satisfy the cap. When no separately capped placements exist, the budget skips their viewport scan.
 
 ### Loader
 

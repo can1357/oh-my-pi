@@ -9,8 +9,8 @@ import {
 	withMathImageOwner,
 	releaseMathImageOwner,
 	setMathImageRenderer,
+	setMarkdownMathRendering,
 } from "@oh-my-pi/pi-tui";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 import { getCellDimensions, setCellDimensions, TERMINAL, ImageProtocol } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setKittyGraphics, getKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme/theme";
@@ -186,7 +186,7 @@ it("renders list display, scripted and fraction inline math, and keeps stacked f
 		TERMINAL.imageProtocol = ImageProtocol.Kitty;
 		setKittyGraphics({ unicodePlaceholders: true });
 		setCellDimensions({ widthPx: 20, heightPx: 40 });
-		setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+		setMarkdownMathRendering(true);
 		registerCodingAgentMathImageRenderer();
 		paint();
 		while (markdown.mathImagesPending) {
@@ -202,7 +202,7 @@ it("renders list display, scripted and fraction inline math, and keeps stacked f
 	} finally {
 		releaseMathImageOwner(markdown);
 		setMathImageRenderer(undefined);
-		setChatTranscriptDisplayPreferences({ renderMath: false });
+		setMarkdownMathRendering(false);
 		TERMINAL.imageProtocol = protocol;
 		setCellDimensions(cell);
 		setKittyGraphics(graphics);

@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
-import { setChatTranscriptDisplayPreferences } from "../src/chat/display-preferences";
+import { setMarkdownMathRendering } from "../src/components/markdown";
 import { ImageBudget, withImageRenderContext } from "../src/components/image";
 import { releaseMathImageOwner, withMathImageOwner } from "../src/components/math-image";
 import { setMathImageRenderer } from "../src/math-image-renderer";
@@ -11,13 +11,13 @@ import { setTranscriptActionHandler } from "../src/chat/transcript-actions";
 const protocol = TERMINAL.imageProtocol;
 afterEach(() => {
 	setMathImageRenderer(undefined);
-	setChatTranscriptDisplayPreferences({ renderMath: false });
+	setMarkdownMathRendering(false);
 	TERMINAL.imageProtocol = protocol;
 });
 it("repaints completed assistant math without changing copied source", async () => {
 	initThemeSync();
 	TERMINAL.imageProtocol = ImageProtocol.Kitty;
-	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMarkdownMathRendering(true);
 	const source = "before\n\n$$x+y=1$$\n\nafter";
 	const message: AssistantMessage = {
 		role: "assistant",

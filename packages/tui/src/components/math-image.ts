@@ -9,9 +9,17 @@ import {
 	type MathImageSvg,
 } from "../math-image-renderer";
 import type { Component } from "../tui";
-import { Image, getImageRenderContext, isImageMeasureRender, type ImageBudget, type ImagePresentation } from "./image";
+import {
+	Image,
+	getImageRenderContext,
+	isImageMeasureRender,
+	type ImageBudget,
+	type ImagePlacementClass,
+	type ImagePresentation,
+} from "./image";
 
 const MiB = 1024 * 1024;
+const mathPlacementClass: ImagePlacementClass = { cap: 512 };
 const encoder = new TextEncoder();
 interface Raster {
 	base64: string;
@@ -181,6 +189,7 @@ interface Slot {
 	placement: string;
 	budget: ImageBudget;
 	image?: Image;
+	imageId?: number;
 	listener?: () => void;
 	pending: boolean;
 	change: () => void;
@@ -204,7 +213,7 @@ const activeOwners = new Set<WeakRef<Owner>>();
 let nextOwner = 0;
 let currentOwner: Owner | undefined;
 function release(slot: Slot): void {
-	slot.budget.release(slot.placement);
+	if (slot.imageId !== undefined) slot.budget.releaseId(slot.imageId);
 	if (slot.listener) pending.get(slot.key)?.listeners.delete(slot.listener);
 	slot.image = undefined;
 	slot.raster = undefined;
@@ -423,6 +432,8 @@ export function renderMathImage(
 			{
 				budget: context.budget,
 				imageKey: slot.placement,
+				placementClass: mathPlacementClass,
+				preserveCursor: true,
 				backgroundRgb: request.backgroundRgb,
 				requestRender: () => {
 					retained.pending = false;
@@ -435,11 +446,13 @@ export function renderMathImage(
 			raster,
 		);
 		const presentation = slot.image.renderPresentation(maxWidthPx / request.cellWidthPx + 2);
-		context.budget.setMathRetireHandler(slot.placement, () => {
-			retained.image = undefined;
-			retained.raster = undefined;
-			retained.settled = true;
-		});
+		slot.imageId = slot.image.imageId;
+		if (slot.imageId !== undefined)
+			context.budget.setPlacementRetireHandler(slot.imageId, () => {
+				retained.image = undefined;
+				retained.raster = undefined;
+				retained.settled = true;
+			});
 		slot.pending = presentation.pending;
 		owner.pending ||= presentation.pending;
 		return presentation;

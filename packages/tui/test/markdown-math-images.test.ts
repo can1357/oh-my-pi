@@ -2,11 +2,10 @@ import { afterEach, beforeEach, expect, it } from "bun:test";
 import { directImageBackgroundPrelude } from "../src/terminal-capabilities";
 import { stripVTControlCharacters } from "node:util";
 import { inflateSync } from "node:zlib";
-import { Markdown } from "../src/components/markdown";
+import { clearRenderCache, Markdown, setMarkdownMathRendering } from "../src/components/markdown";
 import { ImageBudget, withImageRenderContext } from "../src/components/image";
 import { releaseMathImageOwner, withMathImageOwner } from "../src/components/math-image";
 import { setMathImageRenderer } from "../src/math-image-renderer";
-import { setChatTranscriptDisplayPreferences } from "../src/chat/display-preferences";
 import { ImageProtocol, TERMINAL } from "../src/terminal-capabilities";
 import { initThemeSync } from "../src/theme/theme";
 import { defaultMarkdownTheme } from "./test-themes";
@@ -18,7 +17,6 @@ import { spyOn } from "bun:test";
 import { getMarkdownTheme } from "../src/theme/theme";
 import { setInlineImageMaxColumns } from "../src/render/render-utils";
 import { directPlacementLift, parseKittyDirectPlacementLine } from "../src/terminal-capabilities";
-import { encodeITerm2 } from "../src/terminal-capabilities";
 withoutTerminalMultiplexer();
 const graphics = getKittyGraphics();
 
@@ -50,7 +48,7 @@ beforeEach(() => {
 	completion = Promise.withResolvers<void>();
 	budget = new ImageBudget(16, () => {});
 	TERMINAL.imageProtocol = ImageProtocol.Kitty;
-	setChatTranscriptDisplayPreferences({ renderMath: true, showImages: true });
+	setMarkdownMathRendering(true);
 	setMathImageRenderer({ id: "markdown-contract", render: () => svg });
 	markdown = new Markdown("before\n\n$$x+y=1$$\n\nafter", 0, 0, defaultMarkdownTheme);
 });
@@ -58,10 +56,36 @@ beforeEach(() => setKittyGraphics({ unicodePlaceholders: true }));
 afterEach(() => {
 	releaseMathImageOwner(markdown);
 	setMathImageRenderer(undefined);
-	setChatTranscriptDisplayPreferences({ renderMath: false });
+	setMarkdownMathRendering(false);
 	TERMINAL.imageProtocol = protocol;
 });
 afterEach(() => setKittyGraphics(graphics));
+it("recreated math-free documents reuse shared rows with math enabled", () => {
+	clearRenderCache();
+	markdown.setText("ordinary **formatted** prose");
+	const rows = render();
+	releaseMathImageOwner(markdown);
+	markdown = new Markdown("ordinary **formatted** prose", 0, 0, defaultMarkdownTheme);
+	expect(render()).toBe(rows);
+});
+it("math edits bypass shared rows and returning to prose restores reuse", () => {
+	clearRenderCache();
+	markdown.setText("ordinary prose");
+	const prose = render();
+	markdown.setText("$$x+y=1$$");
+	const math = render();
+	expect(markdown.mathImagesPending).toBe(true);
+	const previous = markdown;
+	markdown = new Markdown("$$x+y=1$$", 0, 0, defaultMarkdownTheme);
+	try {
+		expect(render()).not.toBe(math);
+		expect(markdown.mathImagesPending).toBe(true);
+		markdown.setText("ordinary prose");
+		expect(render()).toBe(prose);
+	} finally {
+		releaseMathImageOwner(previous);
+	}
+});
 it("replaces display in place after pending fallback and preserves source", async () => {
 	expect(render().join("\n")).toContain("x+y=1");
 	expect(markdown.mathImagesPending).toBe(true);
@@ -149,11 +173,11 @@ for (const protocol of [ImageProtocol.Kitty, ImageProtocol.Iterm2]) {
 		expect(rows.join("\n")).toContain("after");
 	});
 }
-it("global image policy restores Unicode on a cache hit", async () => {
+it("host math policy restores Unicode on a cache hit", async () => {
 	render();
 	await completion.promise;
 	expect(render().join("\n")).not.toContain("x+y=1");
-	setChatTranscriptDisplayPreferences({ showImages: false });
+	setMarkdownMathRendering(false);
 	expect(render().join("\n")).toContain("x+y=1");
 });
 it("open speculative streaming math never schedules a raster", () => {
@@ -267,7 +291,7 @@ it("tall own-line display after list prose is requested as display", async () =>
 	expect(render().filter(row => TERMINAL.isImageLine(row)).length).toBeGreaterThan(0);
 });
 it("feature off preserves existing inline Unicode soft-break shape", () => {
-	setChatTranscriptDisplayPreferences({ renderMath: false });
+	setMarkdownMathRendering(false);
 	for (const source of [
 		"As shown:\n$$\\frac{a}{b}=c$$\nso it holds.",
 		"- As shown:\n  $$\\frac{a}{b}=c$$\n  so it holds.",
@@ -382,7 +406,7 @@ it("append grammar change removes old math observations and restores source", as
 	await completion.promise;
 	render();
 	const observe = spyOn(budget, "observe");
-	const release = spyOn(budget, "release");
+	const release = spyOn(budget, "releaseId");
 	try {
 		markdown.setText("before $x$123");
 		const rows = render();
@@ -433,7 +457,7 @@ it("append invalidation releases only the missing duplicate occurrence", async (
 	render();
 	await completion.promise;
 	render();
-	const release = spyOn(budget, "release");
+	const release = spyOn(budget, "releaseId");
 	const observe = spyOn(budget, "observe");
 	try {
 		markdown.setText("$x$ and $x$123");
@@ -502,7 +526,7 @@ for (const source of ["| $x$ |\n| --- |\n| first |", "- Before $x$:\n  $$y$$\n  
 		}
 		const images = render().filter(row => TERMINAL.isImageLine(row));
 		expect(images.length).toBeGreaterThan(0);
-		const release = spyOn(budget, "release");
+		const release = spyOn(budget, "releaseId");
 		try {
 			markdown.setText(source + (source.startsWith("|") ? "\n| other |" : " continued"));
 			const next = render();
@@ -538,20 +562,17 @@ it("Sixel pending encoder survives final viewport admission pass", async () => {
 	await completion.promise;
 	completion = Promise.withResolvers<void>();
 	render();
-	budget.setMathViewport([]);
+	budget.setPlacementViewport([]);
 	while (markdown.mathImagesPending) {
 		await completion.promise;
 		completion = Promise.withResolvers<void>();
 		render();
-		budget.setMathViewport([]);
+		budget.setPlacementViewport([]);
 	}
 	const rows = render();
-	budget.setMathViewport(rows);
+	budget.setPlacementViewport(rows);
 	expect(rows.some(row => row.includes("\x1bP"))).toBe(true);
 	expect(rows.join("\n")).not.toContain("x+y=1");
-});
-it("empty iTerm file data emits no OSC transfer", () => {
-	expect(encodeITerm2("")).toBe("");
 });
 for (const transport of [ImageProtocol.Iterm2, ImageProtocol.Sixel]) {
 	it(`panel erase stays right of image and opaque background is contextual ${JSON.stringify(transport)}`, async () => {

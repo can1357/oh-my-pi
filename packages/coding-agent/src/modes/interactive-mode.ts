@@ -29,6 +29,7 @@ import {
 	Markdown,
 	minFrameIntervalMs,
 	releaseMathImages,
+	setMarkdownMathRendering,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -2179,6 +2180,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
+		setMarkdownMathRendering(cfgTuiRenderMath.get(this.settings) && cfgTerminalShowImages.get(this.settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
@@ -4307,6 +4309,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Visibility changes must rebuild retired terminal history.
 			resetDisplay = true;
 		}
+		if (any("terminal.showImages", "tui.renderMath")) {
+			setMarkdownMathRendering(cfgTuiRenderMath.get(this.settings) && cfgTerminalShowImages.get(this.settings));
+		}
 		if (any("terminal.showImages")) {
 			const visible = cfgTerminalShowImages.get(this.settings);
 			for (const child of this.chatContainer.children) {
@@ -4320,8 +4325,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				releaseMathImages();
 				this.ui.clearInlineImages();
 			}
-			rebuildChat = true;
-			this.ui.invalidate();
+			if (cfgTuiRenderMath.get(this.settings)) {
+				rebuildChat = true;
+				this.ui.invalidate();
+			} else {
+				this.ui.requestRender(true);
+			}
 		}
 		if (any("tui.renderMath")) {
 			releaseMathImages();

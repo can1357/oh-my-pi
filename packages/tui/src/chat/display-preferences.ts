@@ -5,7 +5,6 @@ export interface ChatTranscriptDisplayPreferences {
 	shellVisualization: boolean;
 	readToolResultPreview: boolean;
 	showImages: boolean;
-	renderMath: boolean;
 	cacheMissMarker: boolean;
 	showTokenUsage: boolean;
 	showTurnTime: boolean;
@@ -19,7 +18,6 @@ export const chatTranscriptDisplayPreferences: ChatTranscriptDisplayPreferences 
 	shellVisualization: true,
 	readToolResultPreview: false,
 	showImages: true,
-	renderMath: false,
 	cacheMissMarker: false,
 	showTokenUsage: false,
 	showTurnTime: false,

@@ -8,6 +8,7 @@ import {
 	measureRender,
 	releaseMathImageOwner,
 	renderMathImage,
+	renderForScrollback,
 	setMathImageRenderer,
 	withImageRenderContext,
 	withMathImageOwner,
@@ -15,6 +16,7 @@ import {
 	type MathImageRenderRequest,
 } from "@oh-my-pi/pi-tui";
 import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 withoutTerminalMultiplexer();
 const protocol = TERMINAL.imageProtocol;
@@ -112,6 +114,92 @@ it("defers, coalesces exact requests and repaints a ready exact-cell image", asy
 	expect(render().lines).toEqual(ready.lines);
 	budget.endPass();
 });
+
+for (const lostMapping of ["reset", "eviction"] as const) {
+	for (const retirement of ["off-screen handler", "owner release"] as const) {
+		it(`retires retained math through ${retirement} after ${lostMapping}`, async () => {
+			const graphics = getKittyGraphics();
+			const otherOwner: Component = { render: () => [], invalidate: () => {} };
+			try {
+				setKittyGraphics({ unicodePlaceholders: false });
+				setMathImageRenderer({ id: "lifecycle", render: () => svg });
+				render();
+				await settled();
+				budget.beginPass();
+				const initial = render();
+				const id = Number(initial.lines.join("").match(/\bi=(\d+)/)![1]);
+				budget.endPass();
+				budget.takeTransmits();
+				budget.limitResidentImages();
+				if (lostMapping === "reset") {
+					expect(budget.takeAllTransmittedIds()).toContain(id);
+				} else {
+					budget.beginPass();
+					withImageRenderContext({ budget, requestRender: () => {} }, () =>
+						withMathImageOwner(
+							otherOwner,
+							() => {},
+							() => {
+								for (let i = 0; i < 512; i++)
+									renderMathImage(request, 200, beginMathImageDocument(), String(i));
+							},
+						),
+					);
+					budget.endPass();
+					budget.takeTransmits();
+					budget.limitResidentImages();
+					expect(budget.takePurgeIds()).toContain(id);
+				}
+				budget.beginPass();
+				const restored = render();
+				expect(restored.lines.join("")).toContain(`i=${id},`);
+				budget.endPass();
+				budget.takeTransmits();
+				budget.limitResidentImages();
+				if (retirement === "off-screen handler") {
+					budget.setPlacementViewport([]);
+					budget.beginPass();
+					expect(render().lines.join("")).not.toContain(`i=${id},`);
+					budget.endPass();
+				} else {
+					releaseMathImageOwner(owner);
+					budget.beginPass();
+					budget.endPass();
+					budget.limitResidentImages();
+					expect(budget.takePurgeIds()).toContain(id);
+				}
+			} finally {
+				releaseMathImageOwner(otherOwner);
+				setKittyGraphics(graphics);
+			}
+		});
+	}
+}
+
+for (const imageProtocol of [ImageProtocol.Kitty, ImageProtocol.Iterm2, ImageProtocol.Sixel]) {
+	it(`preserves single-row math cursors on ${JSON.stringify(imageProtocol)}`, async () => {
+		const graphics = getKittyGraphics();
+		try {
+			setKittyGraphics({ unicodePlaceholders: false });
+			terminal.imageProtocol = imageProtocol;
+			setMathImageRenderer({ id: "cursor", render: () => svg });
+			render();
+			await settled();
+			const ready = renderForScrollback(() => render());
+			expect(ready.graphic).toBe(true);
+			const line = ready.lines[0]!;
+			expect(line.startsWith("\x1b7")).toBe(true);
+			expect(line.endsWith("\x1b8")).toBe(true);
+			if (imageProtocol === ImageProtocol.Iterm2) {
+				expect(line).toContain("doNotMoveCursor=1");
+				expect(line).not.toContain("size=");
+			}
+		} finally {
+			setKittyGraphics(graphics);
+		}
+	});
+}
+
 it("retains failed identities without retries and permits changed context", async () => {
 	let calls = 0;
 	setMathImageRenderer({
