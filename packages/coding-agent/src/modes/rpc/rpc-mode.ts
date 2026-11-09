@@ -1219,7 +1219,10 @@ function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | un
 	let other: string | undefined;
 	for (const entry of entries) {
 		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry strings`);
-		const index = field.options.findIndex(option => !option.disabled && option.value === entry);
+		const index = field.options.findIndex(option => option.value === entry);
+		if (index >= 0 && field.options[index]!.disabled) {
+			throw new Error(`Form field ${label} carries disabled option ${JSON.stringify(entry)}`);
+		}
 		if (index >= 0 && !checked.has(index)) {
 			checked.add(index);
 		} else if (index < 0 && field.other && other === undefined) {

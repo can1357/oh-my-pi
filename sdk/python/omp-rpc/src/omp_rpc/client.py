@@ -954,11 +954,15 @@ class RpcClient(WireClient):
         )
 
     def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
-        """Answer a `form` request with the submitted values by control `name`."""
-        wire_data: JsonObject = {
-            name: value if isinstance(value, (str, int, float)) else list(value)
-            for name, value in data.items()
-        }
+        """Answer a `form` request with the submitted values by control `name`.
+
+        Raises `TypeError` for a `bool`: forms submit option values, never booleans.
+        """
+        wire_data: JsonObject = {}
+        for name, value in data.items():
+            if isinstance(value, bool):
+                raise TypeError(f"form field {name!r} must be a string, a number or a list of strings, not a bool")
+            wire_data[name] = value if isinstance(value, (str, int, float)) else list(value)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "data": wire_data}
         )

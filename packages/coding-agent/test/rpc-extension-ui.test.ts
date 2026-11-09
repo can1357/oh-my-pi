@@ -585,9 +585,11 @@ const DEPLOY_FORM = `<form>
   <p>Which target?</p>
   <label><input type="radio" name="target" value="prod" checked> Production</label>
   <label><input type="radio" name="target" value="canary"> Canary</label>
+  <label><input type="radio" name="target" value="legacy" disabled> Legacy</label>
   <p>Which checks?</p>
   <label><input type="checkbox" name="checks" value="lint"> Lint</label>
   <label><input type="checkbox" name="checks" value="smoke"> Smoke</label>
+  <label><input type="checkbox" name="checks" value="e2e" disabled> End-to-end</label>
   <label>Replicas <input type="number" name="replicas" value="2" min="1"></label>
   <input type="hidden" name="release" value="r7">
 </form>`;
@@ -624,6 +626,8 @@ describe("RPC form dialog", () => {
 		["an option checked twice", { data: { checks: ["lint", "lint"] } }],
 		["two free-text answers in one group", { data: { checks: ["Rollback", "Canary bake"] } }],
 		["a number below the input's min", { data: { replicas: 0 } }],
+		["a disabled radio option", { data: { target: "legacy" } }],
+		["a disabled checkbox option", { data: { checks: ["lint", "e2e"] } }],
 	])("rejects %s", async (_case, response) => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
