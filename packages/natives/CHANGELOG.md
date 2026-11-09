@@ -6,6 +6,7 @@
 
 - Fixed `&>file` and `>&file` replacing an existing file under `set -o noclobber`, and `>fifo` being refused there; `noclobber` now refuses only an existing regular file, judged on the file it opens, as in Bash ([#18091](https://github.com/can1357/oh-my-pi/pull/18091) by [@sjawhar](https://github.com/sjawhar))
 - Suspended shell images now use format version 31, so incompatible builds are rejected instead of reporting corruption ([#18091](https://github.com/can1357/oh-my-pi/pull/18091) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
