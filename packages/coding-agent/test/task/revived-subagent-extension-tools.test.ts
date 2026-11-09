@@ -18,6 +18,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -314,6 +315,44 @@ it("cold-revives with the tools and devices it was parked with", async () => {
 		// Tools the spawn mounted as `xd://` devices stay devices: a top-level copy changes the tool list.
 		expect(wake.tools).toEqual(run.parked.tools);
 		expect(wake.systemPrompt).toEqual(run.parked.systemPrompt);
+	} finally {
+		await revived?.dispose();
+		run.close();
+	}
+}, 30_000);
+
+it("restores withdrawn tool schemas from the persisted request controls on cold revival", async () => {
+	const run = await spawnAndPark();
+	let revived: AgentSession | undefined;
+	try {
+		const ref = AgentRegistry.global().get(AGENT_ID);
+		if (!ref?.sessionFile) throw new Error("Expected a parked session file");
+		const manager = await SessionManager.open(ref.sessionFile);
+		const last = manager
+			.getEntries()
+			.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
+		if (last?.type !== "message" || last.message.role !== "assistant") throw new Error("Expected an assistant reply");
+		const declared = run.parked.tools;
+		const active = declared.filter(name => name !== "late_tool");
+		manager.appendMessage({
+			...last.message,
+			content: [{ type: "text", text: "Retired late_tool after this request" }],
+			requestControls: {
+				messageIndex: manager.buildSessionContext().messages.length,
+				tools: { declared, deferred: ["late_tool"], active },
+			},
+		});
+		await manager.close();
+
+		revived = await run.coldRevive();
+		await revived.setActiveToolsByName(active);
+		const lastReply = revived.agent.state.messages.findLast(message => message.role === "assistant");
+		if (lastReply?.role !== "assistant") throw new Error("Expected a revived assistant reply");
+		const context = await revived.agent.buildSideRequestContext([lastReply]);
+		expect(context.tools?.map(tool => tool.name)).not.toContain("late_tool");
+		expect(context.tools?.map(tool => tool.name)).toContain("yield");
+		expect(context.inactiveTools?.map(tool => tool.name)).toEqual(["late_tool"]);
+		expect(context.inactiveTools?.[0]?.parameters).toBeDefined();
 	} finally {
 		await revived?.dispose();
 		run.close();

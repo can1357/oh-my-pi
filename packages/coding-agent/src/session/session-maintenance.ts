@@ -2831,7 +2831,7 @@ export class SessionMaintenance {
 		return !previousArchive || previousArchive.frames.length === 0 || previousArchive.text !== undefined;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<string | undefined> {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
@@ -2843,6 +2843,16 @@ export class SessionMaintenance {
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
+		}
+		// Neither the fixed request nor a previous ineffective rewrite can
+		// shrink by compacting history again. Reject before provider dispatch;
+		// recompute against the current model and settings on every prompt.
+		if (
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) >=
+				resolveThresholdTokens(contextWindow, compactionSettings) ||
+			this.#previousCompactionExceededThreshold(contextWindow, compactionSettings)
+		) {
+			return this.#compactionDeadEndWarning("clear large tool output");
 		}
 		if (pendingMidTurnDeadEnd !== undefined) {
 			const prep = prepareCompaction(
@@ -3585,6 +3595,11 @@ export class SessionMaintenance {
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		// A previous rewrite still exceeded the threshold; another automatic
+		// pass over the same history cannot create headroom.
+		if (shouldThresholdCompact && this.#previousCompactionExceededThreshold(contextWindow, compactionSettings)) {
+			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+		}
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -4353,6 +4368,12 @@ export class SessionMaintenance {
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) >
 			recoveryBand
 		);
+	}
+
+	#previousCompactionExceededThreshold(contextWindow: number, settings: CompactionSettings): boolean {
+		if (contextWindow <= 0) return false;
+		const tokensAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch())?.tokensAfter;
+		return tokensAfter !== undefined && tokensAfter >= resolveThresholdTokens(contextWindow, settings);
 	}
 
 	#compactionDeadEndWarning(remedies: string): string {

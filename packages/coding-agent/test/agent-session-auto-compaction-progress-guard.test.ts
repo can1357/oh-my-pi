@@ -84,7 +84,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	function createTestSession(manager: SessionManager): AgentSession {
+	function createTestSession(manager: SessionManager, systemPrompt: string[] = ["Test"]): AgentSession {
 		// The progress-guard tests exercise AgentSession's post-compaction state
 		// transitions, not extension discovery. Keep the production hook boundary
 		// while returning the same short-circuit result without compiling a
@@ -126,7 +126,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 		const agent = new Agent({
 			initialState: {
 				model,
-				systemPrompt: ["Test"],
+				systemPrompt,
 				tools: [],
 				messages: [],
 			},
@@ -167,6 +167,13 @@ describe("AgentSession auto-compaction progress guard", () => {
 	afterAll(() => {
 		authStorage?.close();
 	});
+
+	async function useFixedPromptSession(): Promise<void> {
+		await session.dispose();
+		sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		session = createTestSession(sessionManager, ["Fixed instructions ".repeat(100_000)]);
+	}
 
 	/** Build a threshold-tripping assistant turn (contextWindow 200k, ~80% threshold). */
 	function highUsageAssistant() {
@@ -321,6 +328,90 @@ describe("AgentSession auto-compaction progress guard", () => {
 		expect(todoReminders.length).toBe(0);
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(1);
+	});
+
+	it("rejects a newly oversized fixed request before its first provider call", async () => {
+		await useFixedPromptSession();
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const startCount = countCompactionStarts();
+
+		await expect(session.prompt("First wake assignment")).rejects.toThrow(
+			"The system prompt and always-sent tool schemas alone exceed the recovery band",
+		);
+		expect(startCount()).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+
+		// Clearing the revived fixed context must restore normal prompt dispatch.
+		await session.dispose();
+		sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		session = createTestSession(sessionManager);
+		const correctedPromptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		await session.prompt("Corrected assignment");
+		expect(correctedPromptSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects a second pass when the previous compaction remained above threshold", async () => {
+		const first = sessionManager.getBranch()[0];
+		if (!first) throw new Error("Expected a persisted user message");
+		sessionManager.appendCompaction("compacted", undefined, first.id, 215_000, { tokensAfter: 195_000 });
+		vi.spyOn(session, "getContextBreakdown").mockReturnValue({
+			contextWindow: 200_000,
+			anchored: true,
+			usedTokens: 195_000,
+			systemPromptTokens: 10,
+			systemToolsTokens: 0,
+			systemContextTokens: 0,
+			skillsTokens: 0,
+			messagesTokens: 194_990,
+		});
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const startCount = countCompactionStarts();
+
+		await expect(session.prompt("Wake after ineffective compaction")).rejects.toThrow(
+			"Compaction freed too little context to make progress",
+		);
+		expect(startCount()).toBe(0);
+		expect(promptSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not recompact irreducible fixed context on subsequent turns", async () => {
+		// The provider can report a large prompt after tool schemas are restored
+		// even when there is almost no conversation history to summarize.
+		await useFixedPromptSession();
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
+		const notices = collectNotices();
+		const startCount = countCompactionStarts();
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const first = highUsageAssistant();
+		session.agent.emitExternalEvent({ type: "message_end", message: first });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [first] });
+		await compactionDone;
+		await session.waitForIdle();
+		expect(startCount()).toBe(1);
+		expect(notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("system prompt"))).toHaveLength(1);
+		expect(
+			sessionManager
+				.getBranch()
+				.some(entry => entry.type === "compaction" && entry.warning?.includes("system prompt")),
+		).toBe(true);
+
+		for (let turn = 0; turn < 3; turn++) {
+			// A revived worker's next IRC assignment enters the real pre-prompt
+			// path. It must fail before sending another oversized provider call.
+			await expect(session.prompt(`Wake assignment ${turn}`)).rejects.toThrow(
+				"The system prompt and always-sent tool schemas alone exceed the recovery band",
+			);
+		}
+		expect(startCount()).toBe(1);
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
 	it("drains queued messages when no-headroom compaction pauses auto-continue", async () => {
