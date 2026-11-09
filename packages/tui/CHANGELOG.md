@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it
+- In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
 
 ## [18.18.6] - 2026-11-09
 
