@@ -1163,6 +1163,39 @@ describe("openai-completions compatibility", () => {
 		expect(result.content).toEqual([]);
 	});
 
+	it("maps Mistral finish_reason: model_length to stopReason: length", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "mistral",
+			baseUrl: "https://api.mistral.ai/v1",
+		} as ModelSpec<"openai-completions">);
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-mistral-model-length",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: { role: "assistant", content: "partially finished answer" },
+						finish_reason: "model_length",
+					},
+				],
+			},
+			"[DONE]",
+		]);
+
+		const stream = streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		});
+		const result = await stream.result();
+		expect(result.stopReason).toBe("length");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	it("injects compat.extraBody into OpenAI payload", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,

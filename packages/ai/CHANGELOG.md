@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Mistral sessions failing with an unhandled stop reason when reaching context or output token limits ([#18486](https://github.com/can1357/oh-my-pi/pull/18486) by [@its-benjamin](https://github.com/its-benjamin))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
