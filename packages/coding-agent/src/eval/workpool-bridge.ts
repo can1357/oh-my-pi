@@ -1,12 +1,15 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
-import { invalidModelSelectorReason, resolveEffectiveSubagentPolicy } from "../task/structured-subagent";
+import {
+	invalidModelSelectorReason,
+	normalizeModelSelector,
+	resolveEffectiveSubagentPolicy,
+} from "../task/structured-subagent";
 import { type WorkPoolPeekResult, type WorkPoolStatus, WorkPoolRegistry } from "../task/workpool";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
-import { normalizeModelSelector } from "./model-selector";
 
 /** Synthetic bridge name reserved for eval work pools. */
 export const EVAL_WORKPOOL_BRIDGE_NAME = "__workpool__";

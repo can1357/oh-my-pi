@@ -8,6 +8,7 @@ import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	buildStructuredSubagentRecoveryHint,
 	invalidModelSelectorReason,
+	normalizeModelSelector,
 	reserveStructuredSubagentId,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -20,7 +21,6 @@ import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
-import { normalizeModelSelector } from "./model-selector";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";

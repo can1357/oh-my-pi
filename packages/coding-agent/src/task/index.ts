@@ -75,6 +75,7 @@ import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/too
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
 import {
 	invalidModelSelectorReason,
+	normalizeModelSelector,
 	renderSubagentUserPrompt,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
@@ -379,10 +380,12 @@ function validateModel(
 }
 
 function spawnModelFields(params: TaskParams): Pick<StructuredSubagentRequest, "perCallModel" | "seanceModel"> {
-	if (params.model === undefined) return {};
-	if (params.agent === SEANCE_AGENT_NAME) return { seanceModel: params.model };
+	if (params.agent === SEANCE_AGENT_NAME) {
+		return params.model === undefined ? {} : { seanceModel: params.model };
+	}
+	const model = normalizeModelSelector(params.model);
 	// `validateModel` rejected anything but one string before dispatch.
-	return typeof params.model === "string" ? { perCallModel: params.model } : {};
+	return typeof model === "string" ? { perCallModel: model } : {};
 }
 
 /**
@@ -493,7 +496,11 @@ function spawnParamsFor(params: TaskParams, item: ResolvedTaskItem, defaultAgent
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
-	if ("model" in item) spawn.model = item.model;
+	if ("model" in item) {
+		// Bundled seance's `model` is a source override; only a per-call selector collapses a blank value.
+		const model = spawn.agent === SEANCE_AGENT_NAME ? item.model : normalizeModelSelector(item.model);
+		if (model !== undefined) spawn.model = model;
+	}
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
