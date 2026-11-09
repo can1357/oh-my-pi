@@ -1,5 +1,5 @@
-import { isRecord } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManagerApi } from "../async";
+import { isRecord, truncate } from "@oh-my-pi/pi-utils";
+import { type AsyncJob, type AsyncJobManagerApi, agentProgress } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -134,24 +134,47 @@ function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
 	return true;
 }
 
+/**
+ * Longest string an `agent` status event keeps. Eval renderers show these fields on one line
+ * (a native status row stops at 200 cells, an agent tree row at 48), while the eval result
+ * persists every kept event in its details.
+ */
+const AGENT_STATUS_STRING_MAX = 256;
+
+/**
+ * The scalar fields of a subagent progress snapshot, long strings cut. Its nested data (tool
+ * data, recent tools and output) stays with the job: no eval renderer reads it, and copying it
+ * into each snapshot stored the full assignment and every extracted record with the eval result.
+ * `assignment` and `task` are dropped too: the row shows `taskPreview` instead.
+ */
+function agentStatusFields(progress: Record<string, unknown>): Record<string, unknown> {
+	const fields: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(progress)) {
+		if (key === "assignment" || key === "task") continue;
+		if (typeof value === "string") fields[key] = truncate(value, AGENT_STATUS_STRING_MAX);
+		else if (typeof value === "number" || typeof value === "boolean") fields[key] = value;
+	}
+	return fields;
+}
+
 function emitProgress(
 	resolved: ResolvedHandle,
 	emitStatus: ((event: JsStatusEvent) => void) | undefined,
 	previousProgress: unknown,
 ): unknown {
 	if (!emitStatus || !("job" in resolved)) return previousProgress;
-	const progress = resolved.job.latestDetails?.progress;
-	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isRecord(first) || first === previousProgress) return previousProgress;
-	const task = typeof first.assignment === "string" ? first.assignment : first.task;
+	const id = resolved.job.agentId ?? resolved.job.id;
+	const progress = agentProgress(resolved.job.latestDetails, id);
+	if (!progress || progress === previousProgress) return previousProgress;
+	const task = typeof progress.assignment === "string" ? progress.assignment : progress.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
-		...first,
+		...agentStatusFields(progress),
 		op: "agent",
-		id: resolved.job.agentId ?? resolved.job.id,
+		id,
 		taskPreview: taskPreview || undefined,
 	});
-	return first;
+	return progress;
 }
 
 /** Largest setTimeout delay before 32-bit overflow (Node/Bun warn and fire in ~1ms past this). */

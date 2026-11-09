@@ -85,6 +85,35 @@ describe("security://", () => {
 		expect(resource.content).not.toContain("\u001b");
 	});
 
+	test("validated findings show their status in the list and status, time, and summary in the detail page", async () => {
+		const scanId = "secscan_sariffixture";
+		const bundle = await store.getBundle(scanId);
+		const finding = bundle?.findings[0];
+		if (!finding) throw new Error("expected a SARIF finding");
+		const router = InternalUrlRouter.instance();
+		const listUrl = `security://scans/${scanId}/findings`;
+		const detailUrl = `${listUrl}/${finding.id}`;
+		const initial = await router.resolve(detailUrl, { cwd: repositoryRoot });
+		expect(initial.content).toContain("- Disposition: **open**");
+		expect(initial.content).toContain("- Validation: **unvalidated**");
+
+		await store.updateValidation(scanId, finding.id, {
+			status: "validated",
+			evidenceIds: [],
+			summary: "Path traversal confirmed by source trace at HEAD.",
+			validatedAt: "2026-11-04T09:52:00.949Z",
+		});
+
+		const list = await router.resolve(listUrl, { cwd: repositoryRoot });
+		const detail = await router.resolve(detailUrl, { cwd: repositoryRoot });
+		const entry = list.content.split("\n").find(line => line.includes(`\`${finding.id}\``));
+		expect(entry).toContain("**validated**");
+		expect(detail.content).toContain("- Disposition: **open**");
+		expect(detail.content).toContain("- Validation: **validated** (2026-11-04T09:52:00.949Z)");
+		expect(detail.content).toContain("## Validation summary");
+		expect(detail.content).toContain("Path traversal confirmed by source trace at HEAD.");
+	});
+
 	test("write is rejected as read-only", async () => {
 		await expect(
 			InternalUrlRouter.instance().write("security://scans/secscan_codexfixture", "mutate", { cwd: repositoryRoot }),

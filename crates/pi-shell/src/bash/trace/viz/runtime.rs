@@ -354,7 +354,8 @@ impl<'a> Runtime<'a> {
 						AssignScope::Global | AssignScope::Subshell => {
 							vpid.map(|pid| Binding::Process(*scope, pid))
 						},
-						// Assign reports a category, not the dynamic-scope binding owner.
+						// Assign reports a category, not the dynamic-scope binding
+						// owner.
 						AssignScope::Local => {
 							Some(vpid.map_or(Binding::UnlocatedLocal, |pid| Binding::Process(*scope, pid)))
 						},

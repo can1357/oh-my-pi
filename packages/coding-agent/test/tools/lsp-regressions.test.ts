@@ -917,6 +917,83 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("lists and applies source actions the server only returns when asked for by kind", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-source-code-actions-");
+		try {
+			const serverConfig: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: [".ts"],
+				rootMarkers: [],
+				isLinter: true,
+			};
+			// Two distinct actions sharing kind and title (different `data`), as servers emit per target.
+			const refactors = [1, 2].map(target => ({
+				title: "Convert named imports to namespace import",
+				kind: "refactor.rewrite",
+				data: { target },
+			}));
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { codeActionProvider: true } } });
+				} else if (message.method === "textDocument/codeAction") {
+					const params = message.params as { textDocument: { uri: string }; context: { only?: string[] } };
+					const organize = {
+						title: "Organize Imports",
+						kind: "source.organizeImports",
+						edit: {
+							changes: {
+								[params.textDocument.uri]: [
+									{
+										range: { start: { line: 0, character: 0 }, end: { line: 1, character: 0 } },
+										newText: "organized\n",
+									},
+								],
+							},
+						},
+					};
+					// Like typescript-language-server: source actions only on an explicit `source` request.
+					// The refactors come back regardless of `only`, as from servers that ignore the filter.
+					const wantsSource = params.context.only?.some(kind => kind.startsWith("source")) ?? false;
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: wantsSource ? [...refactors, organize] : refactors,
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
+			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
+			const targetPath = await openDocument(client, "target.ts");
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+
+			const listed = await tool.execute("list-source-actions", {
+				action: "code_actions",
+				file: targetPath,
+				line: 1,
+			});
+			expect(listed.content[0]).toMatchObject({
+				type: "text",
+				text: "3 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [refactor.rewrite] Convert named imports to namespace import\n  2: [source.organizeImports] Organize Imports",
+			});
+
+			await tool.execute("apply-source-action", {
+				action: "code_actions",
+				file: targetPath,
+				line: 1,
+				query: "Organize Imports",
+				apply: true,
+			});
+			expect(await Bun.file(targetPath).text()).toBe("organized\n");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("returns an already-starting client without creating a second client", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-pending-client-");
 		const initialize = Promise.withResolvers<void>();
@@ -2754,6 +2831,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map([[targetUri, { diagnostics: [staleDiagnostic], version: null }]]),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 1,
 				openFiles: new Map([[targetUri, { version: 1, languageId: "typescript", lastUsedAt: Date.now() }]]),
 				pendingRequests: new Map(),
@@ -3377,6 +3456,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3485,6 +3566,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3567,6 +3650,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3639,6 +3724,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3699,6 +3786,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3759,6 +3848,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3828,6 +3919,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3912,6 +4005,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -3969,6 +4064,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -5082,6 +5179,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -5926,6 +6025,8 @@ describe("lsp regressions", () => {
 			proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
 			requestId: 0,
 			diagnostics: new Map(),
+			publishedDiagnostics: new Map(),
+			pulledDiagnostics: new Map(),
 			diagnosticsVersion: 0,
 			openFiles: new Map(),
 			pendingRequests: new Map(),
@@ -6558,6 +6659,277 @@ describe("lsp regressions", () => {
 			}
 		});
 
+		it("reports rustc pushes alongside pull diagnostics from dual-mode servers (#17657)", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-dual-mode-");
+			const sourcePath = path.join(tempDir.path(), "src", "main.rs");
+			const sourceUri = fileToUri(sourcePath);
+			await fsp.mkdir(path.dirname(sourcePath), { recursive: true });
+			await Bun.write(sourcePath, "fn main() {}\n");
+
+			const rustcDiagnostic: Diagnostic = {
+				range: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } },
+				message: "unused variable: `unused`",
+				severity: 2,
+				source: "rustc",
+			};
+
+			const raDiagnostic: Diagnostic = {
+				range: { start: { line: 0, character: 15 }, end: { line: 0, character: 20 } },
+				message: "syntax error",
+				severity: 1,
+				source: "rust-analyzer",
+			};
+
+			let currentPullDiagnostics: Diagnostic[] = [raDiagnostic];
+			let pullShouldFail = false;
+			let serverRef: FakeLspServer | undefined;
+			installFakeLsp((message, srv) => {
+				serverRef = srv;
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: {
+							capabilities: {
+								diagnosticProvider: { identifier: "rust-analyzer" },
+							},
+						},
+					});
+					srv.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "indexing", value: { kind: "begin" } },
+					});
+					srv.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "indexing", value: { kind: "end" } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					srv.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: {
+							uri: sourceUri,
+							diagnostics: [rustcDiagnostic],
+						},
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					if (pullShouldFail) {
+						srv.send({
+							jsonrpc: "2.0",
+							id: message.id,
+							error: { code: -32603, message: "Internal server error" },
+						});
+					} else {
+						srv.send({
+							jsonrpc: "2.0",
+							id: message.id,
+							result: {
+								kind: "full",
+								items: currentPullDiagnostics,
+							},
+						});
+					}
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: [".rs"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "fake-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["fake-lsp", config]]);
+
+			try {
+				const tool = new LspTool(makeLspSession(tempDir.path()));
+
+				// Stage 1 (Initial Open): Both pull diagnostic ("syntax error") and pushed rustc diagnostic ("unused variable") are reported
+				const initial = await tool.execute("diag-initial", { action: "diagnostics", file: sourcePath });
+				const initialText = textResult(initial);
+				expect(initialText).toContain("syntax error");
+				expect(initialText).toContain("unused variable: `unused`");
+
+				// Stage 2 (Edit where push is NEVER republished): Server sends NO publishDiagnostics on didChange.
+				// Pull returns clean, but the unversioned prior rustc push survives across the edit.
+				currentPullDiagnostics = [];
+				await Bun.write(sourcePath, "fn main() { let unused = 1; }\n");
+				const afterPullFix = await tool.execute("diag-pull-fixed", { action: "diagnostics", file: sourcePath });
+				const afterPullFixText = textResult(afterPullFix);
+				expect(afterPullFixText).not.toContain("syntax error");
+				expect(afterPullFixText).toContain("unused variable: `unused`");
+
+				// A second edit with no subsequent push publish at all: the push warning still persists
+				await Bun.write(sourcePath, "fn main() { let unused = 2; }\n");
+				const secondEdit = await tool.execute("diag-second-edit", { action: "diagnostics", file: sourcePath });
+				const secondEditText = textResult(secondEdit);
+				expect(secondEditText).toContain("unused variable: `unused`");
+
+				// Stage 3 (Later push updates push diagnostics without discarding pull cache):
+				// Server pushes a new clippy diagnostic; verify combined cache retains syntax state.
+				currentPullDiagnostics = [raDiagnostic];
+				await tool.execute("diag-re-pull", { action: "diagnostics", file: sourcePath });
+				serverRef!.send({
+					jsonrpc: "2.0",
+					method: "textDocument/publishDiagnostics",
+					params: {
+						uri: sourceUri,
+						diagnostics: [rustcDiagnostic],
+					},
+				});
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				const cachedDiags = client.diagnostics.get(sourceUri)?.diagnostics ?? [];
+				expect(cachedDiags.some(d => d.message === "syntax error")).toBe(true);
+				expect(cachedDiags.some(d => d.message === "unused variable: `unused`")).toBe(true);
+
+				// Stage 4 (Pull fails/times out, push serves as fallback):
+				pullShouldFail = true;
+				const fallbackDiags = await waitForDiagnostics(client, sourceUri, { timeoutMs: 50, settleMs: 0 });
+				expect(fallbackDiags?.some(d => d.message === "unused variable: `unused`")).toBe(true);
+				pullShouldFail = false;
+				currentPullDiagnostics = [];
+
+				// Stage 5 (Cargo check clean): Server pushes empty publishDiagnostics; output resolves to clean "OK"
+				serverRef!.send({
+					jsonrpc: "2.0",
+					method: "textDocument/publishDiagnostics",
+					params: {
+						uri: sourceUri,
+						diagnostics: [],
+					},
+				});
+				const afterAllFix = await tool.execute("diag-all-fixed", { action: "diagnostics", file: sourcePath });
+				const afterAllFixText = textResult(afterAllFix);
+				expect(afterAllFixText).toContain("OK");
+				expect(afterAllFixText).not.toContain("unused variable");
+				expect(afterAllFixText).not.toContain("syntax error");
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		}, 15_000);
+
+		it("does not let a push older than minVersion stand in for a failed dual-mode pull (#17657)", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-dual-mode-stale-push-");
+			const sourcePath = path.join(tempDir.path(), "main.rs");
+			const sourceUri = fileToUri(sourcePath);
+			await Bun.write(sourcePath, "fn main() {}\n");
+
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { diagnosticProvider: { identifier: "rust-analyzer" } } },
+					});
+				} else if (message.method === "textDocument/diagnostic") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						error: { code: -32603, message: "Internal server error" },
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "dual-lsp", fileTypes: [".rs"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "dual-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["dual-lsp", config]]);
+
+			try {
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				await lspClient.ensureFileOpen(client, sourcePath);
+
+				// A clean flycheck publish from before the edit must not turn a failed pull into "OK".
+				client.publishedDiagnostics.set(sourceUri, { diagnostics: [], version: null });
+				client.diagnosticsVersion += 1;
+				const minVersion = client.diagnosticsVersion;
+				await expect(
+					waitForDiagnostics(client, sourceUri, { timeoutMs: 50, minVersion, settleMs: 0 }),
+				).rejects.toThrow("Internal server error");
+
+				// A publish after minVersion still serves as the fallback.
+				const rustcDiagnostic: Diagnostic = {
+					range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } },
+					message: "unused variable: `x`",
+					severity: 2,
+					source: "rustc",
+				};
+				client.publishedDiagnostics.set(sourceUri, { diagnostics: [rustcDiagnostic], version: null });
+				client.diagnosticsVersion += 1;
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 50, minVersion, settleMs: 0 })).toEqual([
+					rustcDiagnostic,
+				]);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("resolves undefined on timeout for push-only servers without falling back to stale pushes (#17657)", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-push-timeout-");
+			const sourcePath = path.join(tempDir.path(), "test.ts");
+			const sourceUri = fileToUri(sourcePath);
+			await Bun.write(sourcePath, "export const x = 1;\n");
+
+			installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "push-lsp", fileTypes: [".ts"], rootMarkers: [] };
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "push-lsp": config },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["push-lsp", config]]);
+
+			try {
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				await lspClient.ensureFileOpen(client, sourcePath);
+
+				// Case A: Cold empty unversioned publish with expectedDocumentVersion: 1 -> isProvisionalColdPublish -> undefined
+				client.publishedDiagnostics.set(sourceUri, { diagnostics: [], version: null });
+				client.diagnostics.set(sourceUri, { diagnostics: [], version: null });
+				const coldResult = await waitForDiagnostics(client, sourceUri, {
+					timeoutMs: 50,
+					expectedDocumentVersion: 1,
+					settleMs: 0,
+				});
+				expect(coldResult).toBeUndefined();
+
+				// Case B: Stale push with minVersion not advanced -> undefined
+				client.diagnosticsVersion = 5;
+				const staleResult = await waitForDiagnostics(client, sourceUri, {
+					timeoutMs: 50,
+					minVersion: 5,
+					settleMs: 0,
+				});
+				expect(staleResult).toBeUndefined();
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
 		it("does not send rust-analyzer/reloadWorkspace to a non-rust server that crashes on it (#8571)", async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-reload-non-rust-");
 			try {
@@ -6767,6 +7139,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),
@@ -6818,6 +7192,8 @@ describe("lsp regressions", () => {
 				} as unknown as LspClient["proc"],
 				requestId: 0,
 				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
 				diagnosticsVersion: 0,
 				openFiles: new Map(),
 				pendingRequests: new Map(),

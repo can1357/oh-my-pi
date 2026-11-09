@@ -626,8 +626,9 @@ fn virtual_descriptor_path(fd: i32) -> PathBuf {
 }
 
 /// The native path for a POSIX-style alias the shell accepts on Windows: an
-/// MSYS drive path (`/c/x`, `/mnt/c/x`) becomes `C:\\x`, and the `/tmp` tree
-/// lands in the system temporary directory. Elsewhere every path is native.
+/// MSYS drive path (`/c/x`, `/mnt/c/x`) becomes `C:\\x`, the `/tmp` tree
+/// lands in the system temporary directory, and `/dev/null` is the null
+/// device `NUL`. Elsewhere every path is native.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub(crate) fn normalize_shell_path(path: &Path) -> std::borrow::Cow<'_, Path> {
 	#[cfg(windows)]
@@ -652,6 +653,9 @@ mod msys {
 	/// `temp_dir` supplies the directory `/tmp` stands for.
 	pub(super) fn native(path: &std::path::Path, temp_dir: &dyn Fn() -> PathBuf) -> Option<PathBuf> {
 		let text = path.to_str()?;
+		if text == "/dev/null" {
+			return Some(PathBuf::from("NUL"));
+		}
 		let rest = text.strip_prefix('/')?;
 		if let Some(native) = drive(rest) {
 			return Some(native);
@@ -724,6 +728,12 @@ mod msys {
 			assert_eq!(translate("/tmp/../tmp/f"), Some(PathBuf::from("T").join("f")));
 			assert_eq!(translate("/tmp/../etc"), None);
 			assert_eq!(translate("/var/tmp"), None);
+		}
+
+		#[test]
+		fn dev_null_is_the_null_device() {
+			assert_eq!(translate("/dev/null"), Some(PathBuf::from("NUL")));
+			assert_eq!(translate("/dev/nullx"), None);
 		}
 	}
 }
