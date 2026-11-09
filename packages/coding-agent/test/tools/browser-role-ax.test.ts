@@ -372,7 +372,9 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
 		try {
 			const page = await browser.newPage();
-			await page.setContent('<input type="image" alt="Send"><input aria-label="Address">');
+			await page.setContent(
+				'<input type="image" alt="Send"><input aria-label="Address"><span role="LINK">Home</span>',
+			);
 			await page.evaluate(() => {
 				// CDP's locale override changes Intl but not V8's default string casing.
 				const lower = String.prototype.toLocaleLowerCase;
@@ -389,9 +391,10 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 						kit.observe({ includeAll: true }).elements.map(entry => `${entry.role} ${entry.name ?? ""}`),
 						kit.count({ engine: "role", query: 'BUTTON[name="Send" exact]' }),
 						kit.count({ engine: "role", query: 'textbox[name="Address" exact]' }),
+						kit.count({ engine: "role", query: 'LINK[name="Home" exact]' }),
 					];
 				}),
-			).toEqual([expect.arrayContaining(["button Send", "textbox Address"]), 1, 1]);
+			).toEqual([expect.arrayContaining(["button Send", "textbox Address", "link Home"]), 1, 1, 1]);
 		} finally {
 			await browser.close();
 		}

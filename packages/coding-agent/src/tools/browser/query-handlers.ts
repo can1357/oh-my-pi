@@ -851,7 +851,11 @@ async function waitForRole(
 					} finally {
 						if (root !== element) await root.dispose();
 					}
-					const documentRoot = found && (visible || hidden) && (await found.evaluate(node => node.nodeType === 9));
+					const documentRoot =
+						found &&
+						query.role === "rootwebarea" &&
+						(visible || hidden) &&
+						(await found.evaluate(node => node.nodeType === 9));
 					if (found && !hidden && (!visible || documentRoot || (await found.isVisible()))) return found;
 					if (hidden && (!found || (!documentRoot && (await found.isHidden())))) {
 						await found?.dispose();

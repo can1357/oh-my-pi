@@ -28,7 +28,8 @@
 
 ### Fixed
 
-- Browser role selectors keep input roles and names in Tern under Turkish and Azeri locales, and visibility waits for Chrome's document root no longer fail on element-only layout APIs
+- In Tern, browser `role/` selectors keep input roles and names under Turkish and Azeri locales
+- Chrome `role/RootWebArea` waits with `visible` return the document instead of failing, and `hidden` waits keep waiting
 
 ## [18.18.6] - 2026-11-09
 
