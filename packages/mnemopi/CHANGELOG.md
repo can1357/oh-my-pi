@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
 ### Fixed
 
 - Fixed recall returning episodic summaries for working memories that had been invalidated.

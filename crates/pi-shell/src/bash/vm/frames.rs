@@ -694,9 +694,15 @@ impl Shell {
 		k.next_vpid = parse_misc(cx.store, MiscKey::NextVpid)?.unwrap_or(base + 1);
 		k.written_vpid = k.next_vpid;
 		k.next_job = parse_misc(cx.store, MiscKey::NextJob)?.unwrap_or(1);
-		k.rand = state::root_misc(cx.store, MiscKey::Random)?
-			.and_then(state::Random::decode)
-			.unwrap_or_default();
+		k.rand = if opts.reseed_random {
+			let rand = state::Random::new((cx.host.random() & 0xffff_ffff) as u32);
+			k.root.set_misc(cx.store, MiscKey::Random, rand.encode());
+			rand
+		} else {
+			state::root_misc(cx.store, MiscKey::Random)?
+				.and_then(state::Random::decode)
+				.unwrap_or_default()
+		};
 		k.start_ns = match parse_misc(cx.store, MiscKey::StartNs)? {
 			Some(ns) => ns,
 			None => cx.host.now_ns(),

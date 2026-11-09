@@ -28,8 +28,8 @@ The runner is the user's code in the user's idiom; it calls the app's real entry
 - Resume idempotent on (case, rep); hard per-case wall-clock ceiling; jittered backoff with retry counts recorded; strict scoring (pass-on-retry is a fail unless the user decides otherwise); bounded concurrency near the rate limit; fresh state per trial.
 - Ground truth reachable by the grader only: not in the app's prompt, tools, sandbox, or anything the model under test can read.
 
-# Phase 1 — Grill (one batched `ask`)
-Read the code first, then ask everything in one `ask` call with your recommendation first on each question:
+# Phase 1 — Grill (one `ask` form)
+Read the code first, then ask everything in one `ask` form with your recommendation preselected on each question:
 - Which flow and entry point; what one input carries (files, profile, conversation prefix).
 - Input source, best first: production transcripts (ask about retention/PII before pulling; if unkeepable, store ids and fetch at run time), bug reports/tickets, 5–10 user-written cases, then synthesis anchored on 3–5 real examples plus what makes a case hard.
 - Goal: raise the headline metric, cut cost or latency holding quality, or move to another model and recover quality.

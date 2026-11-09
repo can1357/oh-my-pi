@@ -66,5 +66,5 @@ $ cargo nextest run -p pi-builtins --no-default-features --features util.sed
 ## Licensing
 
 MIT throughout, but the ported utilities carry upstream notices — uutils
-coreutils, uutils findutils, uutils sed, jaq, and rust-utf8. See `LICENSE`, which
+coreutils, uutils findutils, uutils sed, jaq, sd, and rust-utf8. See `LICENSE`, which
 reproduces each in full and lists which commands it covers.

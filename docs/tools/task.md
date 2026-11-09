@@ -72,7 +72,7 @@ When per-call selection is enabled for a surface, the task/eval tool description
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
-An exact empty `model` string or empty array is treated as an omitted model and uses the agent's normal routing. Whitespace and nonempty selectors are not placeholders; per-call model policy still applies.
+For `task` tool calls, an exact empty `model` string or empty array is treated as an omitted model and uses the agent's normal routing. Whitespace and nonempty selectors are not placeholders; per-call model policy still applies.
 
 Batch calls reject a top-level `agent` rather than silently discarding a specialist selector and spawning the default agent. Put `agent` on each `tasks[]` item when selecting `reviewer`, `scout`, or a custom agent; the agent name is not inferred from the task text.
 
