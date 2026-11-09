@@ -770,7 +770,7 @@ describe("composer inline shrink (#11007)", () => {
 		}
 	});
 
-	it("does not bill a transient HUD already painted on the first frame into the floor", async () => {
+	it("holds a transient HUD's rows back during the run, bills the HUD once it outlives the idle settle window, and floats the editor when it clears", async () => {
 		const rows = 30;
 		const shell = Array.from({ length: 12 }, (_, i) => `shell${i}`);
 		const terminal = new VirtualTerminal(COLUMNS, rows);
@@ -793,6 +793,11 @@ describe("composer inline shrink (#11007)", () => {
 		});
 		composer.start({ playWelcomeIntro: false });
 		const h = { terminal, scheduler, composer, transcript, editor };
+		const visible = (): string[] =>
+			h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trim())
+				.filter(row => /^line\d+$/.test(row));
 		try {
 			await h.scheduler.settle(h.terminal);
 			composer.setRunActive(true);
@@ -800,14 +805,21 @@ describe("composer inline shrink (#11007)", () => {
 			for (const row of answer) transcript.addChild({ render: () => [row] });
 			composer.ui.requestRender();
 			await h.scheduler.settle(h.terminal);
+			// Mid-run the HUD is not billed; the rows it displaces are held back for it to clear.
 			composer.setRunActive(false);
 			await h.scheduler.advance(h.terminal, 300);
 
-			// The todo HUD auto-clears: rows it covered must come back, not leave a band.
+			// Past the settle window the HUD is still up, so it is billed and the held-back rows
+			// retire: every line is on screen or in scrollback while the HUD shows.
+			expect(visible()).toEqual(answer);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+
+			// The todo HUD auto-clears: the retired rows cannot come back out of scrollback, so the
+			// editor floats up by the HUD's height instead of a seam band opening above it.
 			todos.rows = 0;
 			composer.ui.requestRender();
 			await h.scheduler.advance(h.terminal, 300);
-			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1);
+			expect(h.terminal.getViewport().findIndex(row => row.includes("EDITOR"))).toBe(rows - 1 - 8);
 			expect(blankBand(h.terminal)).toBeLessThanOrEqual(2);
 			const history = h.terminal
 				.getScrollBuffer()
