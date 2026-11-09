@@ -301,7 +301,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 				signal ? AbortSignal.any([signal, bridge.exited.signal]) : bridge.exited.signal,
 				options,
 			),
-		take: (bus, agentId, from) => bus.take(agentId, from),
+		take: (bus, agentId, from, filter) => bus.take(agentId, from, filter),
 		unreadCount: (bus, agentId) => bus.unreadCount(agentId),
 		recordReply: (bus, from, to) => bus.recordReply(from, to),
 	};

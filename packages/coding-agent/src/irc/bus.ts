@@ -98,8 +98,11 @@ export interface IrcBusApi {
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean },
 	): Promise<IrcMessage | null>;
-	/** Consume the oldest pending message for `agentId` (optionally from `from`). */
-	take(agentId: string, from?: string): IrcMessage | undefined;
+	/**
+	 * Consume the oldest pending message for `agentId` (optionally from `from`
+	 * and accepted by `filter`), leaving the rest of the mailbox intact.
+	 */
+	take(agentId: string, from?: string, filter?: IrcWaitFilter): IrcMessage | undefined;
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number;
 	/** Count a settled job of agent `from` owned by `to` as `from`'s reply to `to`. */
@@ -474,13 +477,16 @@ export class IrcBus implements IrcBusApi {
 	}
 
 	/**
-	 * Consume the OLDEST pending message for `agentId` (optionally restricted
-	 * to `from`), leaving the rest of the mailbox intact. This is the exact
-	 * atomic step `wait` performs on entry, exposed for callers that must not
-	 * block without draining the entire backlog.
+	 * Consume the OLDEST pending message for `agentId` that `filter` accepts
+	 * (optionally restricted to `from`), leaving the rest of the mailbox intact.
+	 * This is the exact atomic step `wait` performs on entry, exposed for callers
+	 * that must not block without draining the entire backlog.
 	 */
-	take(agentId: string, from?: string): IrcMessage | undefined {
-		return this.#takeFromMailbox(agentId, msg => from === undefined || msg.from === from);
+	take(agentId: string, from?: string, filter?: IrcWaitFilter): IrcMessage | undefined {
+		return this.#takeFromMailbox(
+			agentId,
+			msg => (from === undefined || msg.from === from) && (filter === undefined || ircWaitAccepts(filter, msg)),
+		);
 	}
 
 	/** Unread count for the local Agent Hub overlay. */

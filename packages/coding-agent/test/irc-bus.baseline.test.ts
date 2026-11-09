@@ -216,6 +216,23 @@ describe("IrcBus baseline", () => {
 		expect((await waiting)?.body).toBe("codeword");
 	});
 
+	it("take refuses a team notice under a notice-refusing filter", async () => {
+		const sink = makeFakeSession();
+		registry.register({ id: "0-Mail", displayName: "mail", kind: "sub", session: sink.session });
+
+		sink.setError(new Error("down"));
+		await bus.send({ from: "0-Owner", to: "0-Mail", body: "Plan approved.", progress: true, teamNotice: true });
+		sink.setError(new Error("down"));
+		await bus.send({ from: "0-Owner", to: "0-Mail", body: "codeword" });
+		expect(bus.unreadCount("0-Mail")).toBe(2);
+
+		// The notice is skipped, not silently dropped: it stays for the caller to
+		// drain as ordinary mail once the work it waits on is done.
+		expect(bus.take("0-Mail", undefined, { teamNotices: false })?.body).toBe("codeword");
+		expect(bus.unreadCount("0-Mail")).toBe(1);
+		expect(bus.take("0-Mail")?.body).toBe("Plan approved.");
+	});
+
 	it("the mailbox cap bounds unread count and wait drains the survivors oldest-first", async () => {
 		const sink = makeFakeSession();
 		registry.register({ id: "0-Sink", displayName: "task", kind: "sub", session: sink.session });

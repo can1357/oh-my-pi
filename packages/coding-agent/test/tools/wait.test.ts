@@ -328,6 +328,32 @@ describe("wait", () => {
 			]);
 		});
 
+		test("a team notice queued before a job wait does not stand in for it", async () => {
+			const bridge = streamingMain();
+			// Queued during the model turn that produced the `wait` call: no waiter
+			// is parked yet, so it sits in the inbox when the wait drains on entry.
+			await IrcBus.global().send({
+				from: "Peer",
+				to: "Main",
+				body: "Plan approved.",
+				progress: true,
+				teamNotice: true,
+			});
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const build = Promise.withResolvers<string>();
+			const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+			const waiting = new WaitTool(session(manager)).execute("wait-queued-notice", {});
+			expect(await stillPending(waiting)).toBe(true);
+			build.resolve("built");
+			const result = await waiting;
+			expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "built" });
+			expect(result.details?.waited).toBeUndefined();
+			// Still queued for the caller, delivered after the job result.
+			expect(details(bridge.drainPending())).toMatchObject([
+				{ from: "Peer", message: "Plan approved.", teamNotice: true },
+			]);
+		});
+
 		test("a team notice leaves a wait on its own job blocking, and injects after it", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
