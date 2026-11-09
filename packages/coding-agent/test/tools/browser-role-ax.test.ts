@@ -270,8 +270,10 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 				<button><img alt="Gear" src="data:,"> Settings</button>
 				<input type="date" aria-label="When">
 				<a href="#docs"><x-label>Docs</x-label></a>
+				<x-save role="button"></x-save>
 				<script>
 					customElements.define("x-label", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<span><slot></slot></span>"; } });
+					customElements.define("x-save", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<span>Save</span>"; } });
 				</script>`);
 			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
 			const [observed, interactive, docsLinks] = await page.evaluate(() => {
@@ -297,7 +299,7 @@ describe.skipIf(!available)("Tern kit roles and names", () => {
 				]),
 			);
 			// Date fields are text boxes to fill; slotted text names its link.
-			expect(interactive).toEqual(expect.arrayContaining(["textbox When", "link Docs"]));
+			expect(interactive).toEqual(expect.arrayContaining(["textbox When", "link Docs", "button Save"]));
 			expect(docsLinks).toBe(1);
 			expect(await page.evaluate(unreselectable)).toEqual([]);
 		} finally {

@@ -288,7 +288,7 @@ export function roleRules(): RoleRules {
 	// included, as the accessibility tree does. `followRefs` is off inside a referenced subtree, so
 	// `aria-labelledby` chains are not followed (and cannot cycle).
 	const contentText = (
-		start: Pick<Element, "childNodes">,
+		start: Pick<Element, "childNodes"> & { shadowRoot?: Pick<Element, "childNodes"> | null },
 		skip: Element | null,
 		visibility: unknown,
 		followRefs = true,
@@ -365,7 +365,7 @@ export function roleRules(): RoleRules {
 				text += gap;
 			}
 		};
-		walk(start, visibility);
+		walk(start.shadowRoot ?? start, visibility);
 		return text;
 	};
 	/** The host-language name of an element its descendants do not name: an optgroup's label, a fieldset's legend, a table's caption. */
