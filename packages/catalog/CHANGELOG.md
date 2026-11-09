@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.5] - 2026-11-09
+
 ### Added
 
 - Added Claude Fable 5.2 and Claude Mythos 5.2 ($8/$40 per MTok, $0.20 cache reads, 1M context)
