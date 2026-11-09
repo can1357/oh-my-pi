@@ -36,6 +36,7 @@ import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
+import { TeamProtocolHandler } from "./team-protocol";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -113,6 +114,7 @@ export class InternalUrlRouter {
 		this.register(new MemoryProtocolHandler());
 		this.register(new OutProtocolHandler());
 		this.register(new AgentProtocolHandler());
+		this.register(new TeamProtocolHandler());
 		this.register(new HistoryProtocolHandler());
 		this.register(new ArtifactProtocolHandler());
 		this.register(new LocalProtocolHandler());

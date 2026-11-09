@@ -17,6 +17,10 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { type WriteRenderContext, writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { teamRuntime } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
+import { registerLocalSession } from "@oh-my-pi/pi-coding-agent/thread/session-directory";
 import {
 	dispatchXdevTool,
 	listXdevTools,
@@ -851,34 +855,33 @@ describe("coordination-only write", () => {
 	for (const xdev of [false, true]) {
 		it(`restricts normalized targets and rebuilds with xdev ${xdev}`, async () => {
 			const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "coordination-write-"));
-			const router = InternalUrlRouter.instance();
-			const previousTeamHandler = router.getHandler("team");
-			const messages: string[] = [];
-			// Temporary Task 1 handler: remove when Task 2 registers the real team protocol.
-			router.register({
-				scheme: "team",
-				spec: {
-					backing: "virtual",
-					selectors: "lines",
-					immutable: false,
-					singleSlashAlias: true,
-					write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "write" },
-				},
-				resolve: async () => ({ url: "team://ops", content: "", contentType: "text/plain" }),
-				write: async (_url, content) => {
-					messages.push(content);
-				},
-			});
+			const lead = { instanceKey: `team-test:${crypto.randomUUID()}` } as AgentSession;
+			registerLocalSession(lead);
+			const registry = AgentRegistry.global();
+			const id = `team-test-${crypto.randomUUID()}`;
+			const ref = registry.register({ id, displayName: id, kind: "main", session: lead });
+			const team = {
+				name: "ops",
+				description: "ops",
+				members: [],
+				body: "",
+				source: "project" as const,
+				filePath: "ops.md",
+			};
+			await teamRuntime.start(lead, team);
 			try {
 				const session = xdevSession(tempDir, {
 					settings: Settings.isolated({ "tools.xdev": xdev }),
 					coordinationOnlyWrite: true,
+					getSessionInstanceKey: () => lead.instanceKey,
 				});
 				let tools = await createTools(session, ["read"]);
 				let write = tools.find(tool => tool.name === "write");
 				expect(write).toBeDefined();
-				await write!.execute("team", { path: "[team:/ops:raw#ABCD]", content: "hello" });
-				expect(messages).toEqual(["hello"]);
+				await write!.execute("team", { path: "[team:/ops/tasks:raw#ABCD]", content: "hello" });
+				expect(await teamRuntime.readTasks(lead, teamRuntime.identity(lead, "ops")!)).toMatchObject([
+					{ title: "hello" },
+				]);
 				for (const target of [
 					path.join(tempDir, "blocked.txt"),
 					"local://blocked",
@@ -898,8 +901,8 @@ describe("coordination-only write", () => {
 				).rejects.toThrow("coordination-only");
 				expect(await Bun.file(path.join(tempDir, "blocked.txt")).exists()).toBe(false);
 			} finally {
-				if (previousTeamHandler) router.register(previousTeamHandler);
-				else router.unregister("team");
+				await teamRuntime.stop(lead, "ops");
+				registry.unregister(id, ref);
 				await removeWithRetries(tempDir);
 			}
 		});

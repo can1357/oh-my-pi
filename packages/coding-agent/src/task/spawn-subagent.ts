@@ -15,6 +15,7 @@ import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { AgentRegistry, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { acquireSessionSpawnPermit, releaseSessionSpawnPermit } from "./spawn-limiter";
+import type { TeamIdentity } from "./team-runtime";
 import {
 	type StructuredSubagentIdentity,
 	type StructuredSubagentRequest,
@@ -67,6 +68,7 @@ export interface TeamSpawnSubagentOptions extends SpawnSubagentOptions {
 	teamIrc?: boolean;
 	/** An ID reserved for this team before contexts were rendered. */
 	teamReservedId?: string;
+	teamIdentity?: TeamIdentity;
 }
 
 /**
@@ -117,6 +119,7 @@ export async function spawnSubagentViaExecutor(
 			context: options.context,
 			...(options.teamWorkspace !== undefined ? { teamWorkspace: options.teamWorkspace } : {}),
 			...(options.teamIrc === true ? { teamIrc: true } : {}),
+			...(options.teamIdentity !== undefined ? { teamIdentity: options.teamIdentity } : {}),
 			detached: true,
 			retainArtifacts: true,
 			keepAlive: true,

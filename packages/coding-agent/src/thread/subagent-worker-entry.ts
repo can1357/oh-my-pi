@@ -26,7 +26,7 @@ import { loadedModulesChangedSince } from "./code-skew";
 import { isThreadId, setCurrentThreadId } from "./identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
-import { THREAD_SERVICES } from "./services/index";
+import { getThreadServices } from "./services/index";
 import { warmUpSubagentWorker } from "./worker-warm-up";
 
 installGlobalProxyFetch();
@@ -78,9 +78,9 @@ function start(init: SubagentWorkerInit): void {
 		},
 		{ name: `${init.threadId}↔main`, sync: { port: init.replyPort, counter: new Int32Array(init.counter) } },
 	);
-	for (const service of THREAD_SERVICES) service.installWorker?.(link);
+	for (const service of getThreadServices()) service.installWorker?.(link);
 	link.handle("boot", async globals => {
-		for (const service of THREAD_SERVICES) await service.boot?.(globals[service.name], link);
+		for (const service of getThreadServices()) await service.boot?.(globals[service.name], link);
 	});
 	link.handle("ping", nonce => link.callSync("ping", nonce));
 	link.handle("warmUp", options => warmUpSubagentWorker(options));

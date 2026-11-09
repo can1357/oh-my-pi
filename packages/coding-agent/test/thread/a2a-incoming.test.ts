@@ -3,7 +3,7 @@ import { IncomingRequests } from "../../src/a2a/incoming-requests";
 import type { ThreadService } from "../../src/thread/services";
 import { a2aIncomingThreadService } from "../../src/thread/services/a2a-incoming";
 import { executorThreadService } from "../../src/thread/services/executor";
-import { THREAD_SERVICES } from "../../src/thread/services/index";
+import { getThreadServices } from "../../src/thread/services/index";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
 import type { IncomingProbe, IncomingProbeGlobals } from "../fixtures/a2a-incoming-worker";
 
@@ -32,9 +32,9 @@ async function startWorker(): Promise<IncomingProbe> {
 
 describe("incoming A2A registry across workers", () => {
 	it("installs the registry before the executor", () => {
-		const incoming = THREAD_SERVICES.indexOf(a2aIncomingThreadService);
+		const incoming = getThreadServices().indexOf(a2aIncomingThreadService);
 		expect(incoming).toBeGreaterThanOrEqual(0);
-		expect(THREAD_SERVICES.indexOf(executorThreadService)).toBeGreaterThan(incoming);
+		expect(getThreadServices().indexOf(executorThreadService)).toBeGreaterThan(incoming);
 	});
 
 	it("shares notes and atomic consumes between main and real workers", async () => {

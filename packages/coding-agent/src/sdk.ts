@@ -99,6 +99,7 @@ import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
+import type { TeamIdentity } from "./task/team-runtime";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	type CustomCommandsLoadResult,
@@ -851,6 +852,7 @@ export interface CreateAgentSessionOptions {
 	restrictToolNames?: boolean;
 	/** Restrict the built-in write tool to agent:// and team:// coordination. */
 	coordinationOnlyWrite?: boolean;
+	teamIdentity?: TeamIdentity;
 	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
@@ -2602,6 +2604,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			restrictToolNames,
 			coordinationOnlyWrite: options.coordinationOnlyWrite,
+			teamIdentity: options.teamIdentity,
+			getSessionInstanceKey: () => session?.instanceKey,
 			get seanceSourceArtifactsDir() {
 				return sessionManager.getSeanceSourceArtifactsDir() ?? undefined;
 			},

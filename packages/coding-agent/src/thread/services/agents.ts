@@ -31,6 +31,7 @@ import { RemoteAgentSession, SessionHostClient } from "../remote-agent-session";
 import { registerRpcError, type RpcServe } from "../rpc";
 import type { ThreadService, WorkerPeer } from "../services";
 import { holdRemoteSession, onLocalSessionRegistered, releaseRemoteSession } from "../session-directory";
+import { deleteTeamSessionBridge, setTeamSessionBridge } from "./team-bridge";
 import {
 	readSessionFields,
 	SessionBridgeClient,
@@ -85,6 +86,7 @@ export class MainSessionBridge {
 	readonly #open = new Map<string, OpenSession>();
 	readonly #subscriptions = new Set<() => void>();
 	readonly #revivers = new Set<{ lifecycle: AgentLifecycleManager; id: string; revive: AgentReviver }>();
+	onSessionClosed?: (session: object) => void;
 	/** Aborts IRC waits the worker parked on main. */
 	readonly exited = new AbortController();
 
@@ -123,6 +125,7 @@ export class MainSessionBridge {
 	closed(key: string, reason = "disposed"): void {
 		const open = this.#open.get(key);
 		if (!open) return;
+		this.onSessionClosed?.(open.session);
 		this.#open.delete(key);
 		releaseRemoteSession(key);
 		open.session.close(reason);
@@ -310,6 +313,7 @@ function installMain(peer: WorkerPeer): void {
 	registerSessionErrors();
 	const bridge = new MainSessionBridge(peer);
 	bridges.set(peer.threadId, bridge);
+	setTeamSessionBridge(peer, bridge);
 	const { link } = peer;
 	link.exportClass(
 		AGENT_SESSION_BRIDGE_KIND,
@@ -353,6 +357,7 @@ function onWorkerExit(peer: WorkerPeer, reason: string): void {
 	const bridge = bridges.get(peer.threadId);
 	bridges.delete(peer.threadId);
 	bridge?.exit(reason);
+	deleteTeamSessionBridge(peer);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

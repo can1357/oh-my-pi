@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Teams can coordinate atomic task claims through `team://`; workspace ledgers persist across restarts and generate a readable `TASKS.md` view.
 - Agent definitions support `team` and a relative `team-prompt` for team-specific role instructions.
 - Removed the fork's outbound-only telemetry surfaces: automated tool-issue reporting (the `xd://report_issue` device, its consent flow, the `dev.autoqa`/`dev.autoqaConsent`/`dev.autoqaPush.*` settings, the `PI_AUTO_QA*` env vars, the `omp grievances` command and its push to the QA backend) is deleted entirely, and `startup.checkUpdate` now defaults to `false` so a launch no longer phones the build service for a newer release (a check would recommend replacing this fork's binary with an upstream release; `omp update` and `update.auto` still work when enabled explicitly). Local observability is untouched: OTLP export via `OTEL_*` endpoints, `omp stats`, model-perf, session diagnostics and logging all stay
 

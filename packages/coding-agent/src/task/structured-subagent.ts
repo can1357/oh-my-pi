@@ -43,6 +43,7 @@ import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
+import type { TeamIdentity } from "./team-runtime";
 import { isReservedChildToolName, reservedChildToolMessage } from "./reserved-tools";
 import { type ExecutorOptions, runSubprocess, type SubagentToolResult } from "./executor";
 import {
@@ -171,6 +172,7 @@ export interface StructuredSubagentRequest {
 	teamWorkspace?: string;
 	/** Marks a team spawn for prompt selection and coordination capability. */
 	teamIrc?: boolean;
+	teamIdentity?: TeamIdentity;
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
@@ -845,6 +847,7 @@ function buildExecutorOptions(
 				?.list()
 				.map(agent => agent.name) ?? [],
 		team: request.teamIrc === true,
+		teamIdentity: request.teamIdentity,
 		coordinationOnlyWrite:
 			request.teamIrc === true &&
 			!policy.planMode &&

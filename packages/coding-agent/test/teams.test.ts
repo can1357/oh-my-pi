@@ -31,6 +31,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/teams";
 import * as teamsModule from "@oh-my-pi/pi-coding-agent/task/teams";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { teamRuntime as teamRuntimeState } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
+import { registerLocalSession } from "@oh-my-pi/pi-coding-agent/thread/session-directory";
 
 const TEAM_YAML = `---
 name: audit
@@ -75,6 +78,20 @@ describe("parseTeamFile", () => {
 		expect(team?.members[0]).toMatchObject({ agent: "scout", handle: "Scout", role: "Сбор логов и метаданных" });
 		expect(team?.context).toContain("Общее пространство");
 		expect(team?.body).toContain("аудит охватывает");
+	});
+
+	it("parses optional task titles in order and accepts an empty list", () => {
+		const withTasks = TEAM_YAML.replace("members:", 'tasks: ["First", "Second"]\nmembers:');
+		expect(parseTeamFile(withTasks, "/tmp/audit.md")?.tasks).toEqual(["First", "Second"]);
+		expect(parseTeamFile(TEAM_YAML.replace("members:", "tasks: []\nmembers:"), "/tmp/audit.md")?.tasks).toEqual([]);
+		expect(parseTeamFile(TEAM_YAML, "/tmp/audit.md")?.tasks).toBeUndefined();
+	});
+
+	it("rejects malformed task lists and entries", () => {
+		for (const value of ["null", "a title", "42", "[first, 42]", '[""]', '["   "]', "[null]"]) {
+			const contents = TEAM_YAML.replace("members:", `tasks: ${value}\nmembers:`);
+			expect(parseTeamFile(contents, "/tmp/audit.md")).toBeUndefined();
+		}
 	});
 
 	it("skips a file with no name with undefined (warning logged)", () => {
@@ -152,7 +169,7 @@ describe("resolveTeamMembers", () => {
 });
 
 describe("render helpers", () => {
-	it("context names the handle, role, workspace, peers, and TASKS convention", async () => {
+	it("context names the handle, role, workspace, peers, and task protocol", async () => {
 		// A real temp dir keeps the workspace path platform-native: on Windows a
 		// POSIX "/tmp/x" fixture resolves to a drive-lettered path, so the old
 		// hardcoded expectation failed. Derive the expectation from the same root.
@@ -164,15 +181,22 @@ describe("render helpers", () => {
 			expect(context).toContain("write agent://Scout");
 			expect(context).toContain("Your role: Сбор логов и метаданных");
 			expect(context).toContain(`Team workspace: ${path.join(root, "ws")}`);
-			expect(context).toContain("TASKS.md");
-			expect(context).toContain("owner: Scout");
-			expect(context).not.toContain("{member.handle}");
+			expect(context).toContain("read team://audit/tasks");
+			expect(context).toContain("team://audit/tasks/<id>/claim");
+			expect(context).toContain("team://audit/tasks/<id>/release");
+			expect(context).toContain("team://audit/tasks/<id>/done");
+			expect(context).not.toContain("owner: Scout");
 			expect(context).toContain("Teammates");
 			expect(context).toContain("Reviewer (reviewer - Проверка находок)");
 			expect(context).toContain("Общее пространство команды");
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("includes task protocol instructions without a workspace", () => {
+		const team = parseTeamFile(TEAM_YAML.replace("workspace: ./ws\n", ""), "/tmp/audit.md")!;
+		expect(renderTeamMemberContext(team, team.members[0]!)).toContain("read team://audit/tasks");
 	});
 
 	it("prompt is the team body plus the assignment when given", () => {
@@ -385,7 +409,11 @@ function teamRuntime(root: string): { runtime: unknown; outputs: string[] } {
 	const runtime = {
 		settings: Settings.isolated({ "team.enabled": true, "team.maxTeammates": 10 }),
 		cwd: root,
-		session: { effectiveExtensionRoots: undefined, toolSession: { getArtifactsDir: () => null } },
+		session: {
+			instanceKey: `team-test:${crypto.randomUUID()}`,
+			effectiveExtensionRoots: undefined,
+			toolSession: { getArtifactsDir: () => null },
+		},
 		sessionManager: { getCwd: () => root },
 		output: (text: string) => {
 			outputs.push(text);
@@ -393,8 +421,32 @@ function teamRuntime(root: string): { runtime: unknown; outputs: string[] } {
 		refreshCommands: () => {},
 		reloadPlugins: async () => {},
 	};
+	registerLocalSession(runtime.session as unknown as AgentSession);
+	AgentRegistry.global().register({
+		id: "TeamLead",
+		displayName: "TeamLead",
+		kind: "main",
+		session: runtime.session as unknown as AgentSession,
+	});
 	return { runtime, outputs };
 }
+
+describe("team startup lifecycle", () => {
+	it("stops an empty generation after all spawns fail", async () => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
+		try {
+			mockTeamDiscovery(team);
+			vi.spyOn(spawnSubagent, "spawnSubagentForSession").mockRejectedValue(new Error("spawn failed"));
+			const { runtime } = teamRuntime(root);
+			await TEAM_HANDLE({ args: "start audit" }, runtime);
+			await TEAM_HANDLE({ args: "stop audit" }, runtime);
+			const session = (runtime as { session: object }).session;
+			expect(teamRuntimeState.identity(session, "audit")).toBeUndefined();
+		} finally {
+			await cleanup();
+		}
+	});
+});
 
 describe("/team start and stop", () => {
 	for (const definition of [
@@ -631,7 +683,7 @@ describe("/team start and stop", () => {
 		expect(await reserveStructuredSubagentId(session(), { label: "Scout" })).not.toBe("Scout");
 	});
 
-	it("creates TASKS.md in the workspace and interpolates the owner handle", async () => {
+	it("creates the generated task view and preserves the ledger across starts", async () => {
 		const { team, root, cleanup } = await teamFixture({ workspace: true, handles: ["Scout"] });
 		try {
 			mockTeamDiscovery(team);
@@ -640,14 +692,13 @@ describe("/team start and stop", () => {
 			const tasksPath = path.join(team.workspace!, "TASKS.md");
 
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
-			expect(await fs.readFile(tasksPath, "utf8")).toContain("owner: <your-handle>");
-			expect(renderTeamMemberContext(team, team.members[0]!)).toContain("owner: Scout");
-
-			// Re-running start must not overwrite claims the team already made.
-			await fs.writeFile(tasksPath, "claimed by Scout");
+			expect(await fs.readFile(tasksPath, "utf8")).toContain("# Team Tasks");
+			expect(renderTeamMemberContext(team, team.members[0]!)).toContain("team://audit/tasks");
+			const ledgerPath = path.join(team.workspace!, "tasks.json");
+			expect(JSON.parse(await fs.readFile(ledgerPath, "utf8"))).toEqual([]);
 			resetTeamMembershipsForTests();
 			await TEAM_HANDLE({ args: "start audit" }, runtime);
-			expect(await fs.readFile(tasksPath, "utf8")).toBe("claimed by Scout");
+			expect(JSON.parse(await fs.readFile(ledgerPath, "utf8"))).toEqual([]);
 		} finally {
 			await cleanup();
 		}

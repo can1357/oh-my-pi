@@ -7,7 +7,7 @@ import { sendA2aMessage } from "../../src/a2a/rpc";
 import { type OutgoingRequest, OutgoingRequests } from "../../src/a2a/outgoing-requests";
 import type { ThreadService } from "../../src/thread/services";
 import { a2aOutgoingThreadService } from "../../src/thread/services/a2a-outgoing";
-import { THREAD_SERVICES } from "../../src/thread/services/index";
+import { getThreadServices } from "../../src/thread/services/index";
 import { executorThreadService } from "../../src/thread/services/executor";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
 import type { OutgoingProbe, OutgoingProbeGlobals } from "../fixtures/a2a-outgoing-worker";
@@ -70,7 +70,7 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 10_0
 
 describe("outgoing A2A registry across workers", () => {
 	it("is installed before the executor so a worker task can register a wait", () => {
-		const names = THREAD_SERVICES.map(service => service.name);
+		const names = getThreadServices().map(service => service.name);
 		const outgoing = names.indexOf(a2aOutgoingThreadService.name);
 		const executor = names.indexOf(executorThreadService.name);
 		expect(outgoing).toBeGreaterThanOrEqual(0);

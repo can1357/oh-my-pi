@@ -4,13 +4,13 @@
  * stable handles as registry ids; they see each other via `agent://<handle>`
  * and share the team workspace.
  */
-import { AgentRegistry, type AgentRef } from "../registry/agent-registry";
+import { randomUUID } from "node:crypto";
+import { AgentRegistry } from "../registry/agent-registry";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { discoverAgents } from "../task/discovery";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import {
 	discoverTeams,
-	ensureTeamTasksFile,
 	renderTeamMemberContext,
 	renderTeamMemberPrompt,
 	resolveTeamMembers,
@@ -18,6 +18,9 @@ import {
 	type TeamDefinition,
 } from "../task/teams";
 import { SpawnPendingError, spawnSubagentForSession } from "../task/spawn-subagent";
+import { teamRuntime } from "../task/team-runtime";
+import { getTeamClient } from "../thread/services/team-client";
+import type { TeamCommandMember, TeamMembersSnapshot } from "../thread/services/team-protocol";
 import { releaseStructuredSubagentId, reserveStructuredSubagentId } from "../task/structured-subagent";
 import { cfgTeamEnabled, cfgTeamMaxTeammates } from "../task/settings";
 import { commandConsumed, parseSubcommand, usage } from "./helpers/parse";
@@ -35,40 +38,50 @@ function teamRuntimeError(message: string): string {
 	return `team: ${message}`;
 }
 
-interface TeamMembership {
-	id: string;
-	ref?: AgentRef;
-	/** Why a pending spawn ended without registering. */
-	failure?: string;
-}
-
-let teamMemberships = new WeakMap<object, Map<string, Map<string, TeamMembership>>>();
-
 /** Test-only: clear recorded team membership between cases. */
 export function resetTeamMembershipsForTests(): void {
-	teamMemberships = new WeakMap();
-}
-
-function membershipsFor(session: object): Map<string, Map<string, TeamMembership>> {
-	let memberships = teamMemberships.get(session);
-	if (!memberships) {
-		memberships = new Map();
-		teamMemberships.set(session, memberships);
-	}
-	return memberships;
+	teamRuntime.resetForTests();
 }
 
 /** One `<team>:` block per selected team, filled from that team's members recorded in this session. */
 async function teamReport(
-	session: object,
+	key: string,
 	selected: readonly TeamDefinition[],
-	describe: (team: TeamDefinition, recorded: Map<string, TeamMembership> | undefined) => string[] | Promise<string[]>,
+	describe: (team: TeamDefinition, snapshot: TeamMembersSnapshot | undefined) => string[] | Promise<string[]>,
 ): Promise<string> {
 	const lines: string[] = [];
 	for (const team of selected) {
-		lines.push(`${team.name}:`, ...(await describe(team, membershipsFor(session).get(team.name))));
+		lines.push(`${team.name}:`, ...(await describe(team, await getTeamClient().members(key, team.name))));
 	}
 	return lines.join("\n");
+}
+
+/** Update only the original reservation, even if a registration callback arrives late. */
+async function updateMember(
+	key: string,
+	team: string,
+	generation: number,
+	handle: string,
+	original: TeamCommandMember,
+	update: (entry: TeamCommandMember) => TeamCommandMember | undefined,
+): Promise<boolean> {
+	const client = getTeamClient();
+	for (;;) {
+		const snapshot = await client.members(key, team);
+		if (snapshot?.generation !== generation) return false;
+		const current = snapshot.members.find(([name]) => name === handle)?.[1];
+		if (!current || current.reservation !== original.reservation || current.id !== original.id) return false;
+		const next = update(current);
+		if (
+			next?.ref &&
+			(next.ref.id !== next.id || (next.ref !== current.ref && AgentRegistry.global().get(next.id) !== next.ref))
+		)
+			return false;
+		const changed = next
+			? await client.putMember(key, team, generation, handle, current, next)
+			: await client.deleteMember(key, team, generation, handle, current);
+		if (changed) return true;
+	}
 }
 
 export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -163,15 +176,6 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const skipped = team.members.length - members.length;
 				const assignment = assignmentParts.length > 0 ? assignmentParts.join(" ") : undefined;
-				await ensureTeamTasksFile(team);
-				const lines: string[] = [];
-				let failures = 0;
-				const memberships = membershipsFor(runtime.session);
-				let recorded = memberships.get(team.name);
-				if (recorded === undefined) {
-					recorded = new Map();
-					memberships.set(team.name, recorded);
-				}
 				const toolSession = runtime.session.toolSession;
 				if (!toolSession) {
 					await runtime.output(
@@ -179,20 +183,44 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					);
 					return commandConsumed();
 				}
+				const key = runtime.session.instanceKey;
+				const client = getTeamClient();
+				let started: { generation: number; leadId: string };
+				try {
+					started = await client.start(key, team);
+				} catch (error) {
+					await runtime.output(teamRuntimeError(error instanceof Error ? error.message : String(error)));
+					return commandConsumed();
+				}
+				const lines: string[] = [];
+				let failures = 0;
+				const recorded = new Map<string, TeamCommandMember>();
 				const ids = new Map<(typeof members)[number], string>();
 				const newlyReserved = new Set<string>();
 				for (const member of members) {
 					const handle = sanitizeTeamHandle(member.handle);
-					let entry = recorded.get(handle);
-					// A member whose pending spawn failed is started again.
-					if (!entry || entry.failure !== undefined) {
-						// Registry-wide reservation: unique against live refs and every
-						// other session's pending ids.
-						entry = { id: await reserveStructuredSubagentId(toolSession, { label: handle }) };
-						recorded.set(handle, entry);
-						newlyReserved.add(handle);
+					for (;;) {
+						const snapshot = await client.members(key, team.name);
+						if (snapshot?.generation !== started.generation)
+							throw new Error("Team generation is no longer active");
+						const current = snapshot.members.find(([name]) => name === handle)?.[1];
+						if (current && current.failure === undefined) {
+							recorded.set(handle, current);
+							ids.set(member, current.id);
+							break;
+						}
+						const entry: TeamCommandMember = {
+							id: await reserveStructuredSubagentId(toolSession, { label: handle }),
+							reservation: randomUUID(),
+						};
+						if (await client.putMember(key, team.name, started.generation, handle, current ?? null, entry)) {
+							recorded.set(handle, entry);
+							ids.set(member, entry.id);
+							newlyReserved.add(handle);
+							break;
+						}
+						releaseStructuredSubagentId(toolSession, entry.id);
 					}
-					ids.set(member, entry.id);
 				}
 				for (const member of members) {
 					const handle = sanitizeTeamHandle(member.handle);
@@ -208,33 +236,70 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							context: renderTeamMemberContext({ ...team, members }, member, ids),
 							handle,
 							teamReservedId: entry.id,
+							teamIdentity: { team: team.name, generation: started.generation, memberId: entry.id },
 							teamIrc: true,
 							...(team.workspace !== undefined ? { teamWorkspace: team.workspace } : {}),
 						});
-						entry.id = ref.id;
-						entry.ref = ref;
+						await updateMember(key, team.name, started.generation, handle, entry, current => ({
+							...current,
+							id: ref.id,
+							ref,
+						}));
 						lines.push(`${handle} → spawned (${ref.id})`);
 					} catch (error) {
 						if (error instanceof SpawnPendingError) {
-							entry.id = error.agentId;
-							entry.ref = AgentRegistry.global().get(entry.id);
-							// The run keeps starting after the timeout: record whichever
-							// outcome it reaches so status and stop never report a dead
-							// member as still starting.
-							error.registration.then(
-								ref => {
-									if (recorded.get(handle) === entry) entry.ref = ref;
-								},
-								(failure: unknown) => {
-									if (recorded.get(handle) !== entry) return;
-									entry.failure = failure instanceof Error ? failure.message : String(failure);
-									releaseStructuredSubagentId(toolSession, entry.id);
-								},
-							);
+							if (error.agentId !== entry.id) {
+								const updated = await updateMember(
+									key,
+									team.name,
+									started.generation,
+									handle,
+									entry,
+									current => ({
+										...current,
+										id: error.agentId,
+									}),
+								);
+								if (updated) entry.id = error.agentId;
+							}
+							const pendingRef = AgentRegistry.global().get(error.agentId);
+							if (pendingRef) {
+								await updateMember(key, team.name, started.generation, handle, entry, current => ({
+									...current,
+									ref: pendingRef,
+								}));
+							}
+							// Registration can finish after the command returns.
+							void error.registration
+								.then(
+									async ref => {
+										await updateMember(key, team.name, started.generation, handle, entry, current => ({
+											...current,
+											ref,
+										}));
+									},
+									async (failure: unknown) => {
+										const changed = await updateMember(
+											key,
+											team.name,
+											started.generation,
+											handle,
+											entry,
+											current => ({
+												...current,
+												failure: failure instanceof Error ? failure.message : String(failure),
+											}),
+										);
+										if (changed) releaseStructuredSubagentId(toolSession, entry.id);
+									},
+								)
+								.catch(error =>
+									runtime.output(teamRuntimeError(error instanceof Error ? error.message : String(error))),
+								);
 							lines.push(`${handle} → pending (${error.agentId}); the run is still starting`);
 							continue;
 						}
-						recorded.delete(handle);
+						await updateMember(key, team.name, started.generation, handle, entry, () => undefined);
 						releaseStructuredSubagentId(toolSession, entry.id);
 						failures += 1;
 						lines.push(`${handle} → FAILED: ${error instanceof Error ? error.message : String(error)}`);
@@ -261,10 +326,10 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					return commandConsumed();
 				}
 				const registry = AgentRegistry.global();
-				const report = await teamReport(runtime.session, selected, (team, recorded) =>
+				const report = await teamReport(runtime.session.instanceKey, selected, (team, snapshot) =>
 					team.members.map(member => {
 						const handle = sanitizeTeamHandle(member.handle);
-						const entry = recorded?.get(handle);
+						const entry = snapshot?.members.find(([name]) => name === handle)?.[1];
 						const ref = entry?.ref && registry.get(entry.id) === entry.ref ? entry.ref : undefined;
 						const status = ref
 							? `${ref.status} (${ref.kind})`
@@ -291,15 +356,19 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				}
 				const registry = AgentRegistry.global();
 				const lifecycle = AgentLifecycleManager.global();
-				const report = await teamReport(runtime.session, selected, async (team, recorded) => {
-					if (recorded === undefined || recorded.size === 0) {
-						return ["  nothing to stop (team not started in this session)"];
+				const key = runtime.session.instanceKey;
+				const client = getTeamClient();
+				const report = await teamReport(key, selected, async (team, snapshot) => {
+					if (snapshot === undefined) return ["  nothing to stop (team not started in this session)"];
+					if (snapshot.members.length === 0) {
+						const stopped = await client.stop(key, team.name, snapshot.generation);
+						return [stopped ? "  team stopped (no active members)" : "  team changed; retry stop"];
 					}
 					const lines: string[] = [];
-					for (const [handle, entry] of recorded) {
+					for (const [handle, entry] of snapshot.members) {
 						if (entry.failure !== undefined) {
 							lines.push(`  ${handle} - failed before registering: ${entry.failure}`);
-							recorded.delete(handle);
+							await client.deleteMember(key, team.name, snapshot.generation, handle, entry);
 							continue;
 						}
 						const ref = entry.ref;
@@ -309,16 +378,16 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 						}
 						if (registry.get(entry.id) !== ref) {
 							lines.push(`  ${handle} - no longer a team member`);
-							recorded.delete(handle);
+							await client.deleteMember(key, team.name, snapshot.generation, handle, entry);
 							continue;
 						}
 						const released = await lifecycle.release(entry.id, ref, { tombstone: true });
 						lines.push(
 							`  ${handle} — ${released ? "released (transcripts kept; revive available)" : "release refused"}`,
 						);
-						if (released) recorded.delete(handle);
+						if (released) await client.deleteMember(key, team.name, snapshot.generation, handle, entry);
 					}
-					if (recorded.size === 0) membershipsFor(runtime.session).delete(team.name);
+					await client.stop(key, team.name, snapshot.generation);
 					return lines;
 				});
 				await runtime.output(report);

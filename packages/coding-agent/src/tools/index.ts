@@ -41,6 +41,7 @@ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import { HandbackTool } from "../task/handback";
 import type { AgentOutputManager } from "../task/output-manager";
+import type { TeamIdentity } from "../task/team-runtime";
 import { type AgentDefinition, canSpawnAtDepth } from "../task/types";
 import { type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -377,6 +378,10 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Trusted team membership assigned by the spawn host. */
+	teamIdentity?: TeamIdentity;
+	/** Identity of the concrete live agent session for main-thread verification. */
+	getSessionInstanceKey?: () => string | undefined;
 	/** Parent cache identity for sibling sharing; the child stores it independently of its initial model, and each request consumes it only when its own model opts in. */
 	getPromptCacheKey?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

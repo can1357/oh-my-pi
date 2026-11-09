@@ -1,9 +1,9 @@
 # Agent Teams
 
 > Declarative, in-session teams: `/team start` spawns subagents from one
-> markdown file and gives them handles for `agent://` messaging. An optional
-> workspace supplies a shared `TASKS.md` list. Enable with `team.enabled: true`
-> (off by default).
+> markdown file and gives them handles for `agent://` messaging. Tasks are
+> coordinated through `team://` and can persist in an optional shared workspace.
+> Enable with `team.enabled: true` (off by default).
 
 ## Status
 
@@ -18,8 +18,9 @@ unrelated ref that happens to share a handle.
 ## What it is
 
 - a **team file** `.omp/teams/<name>.md` or `~/.omp/agent/teams/<name>.md` (project scope wins by team name)
-  listing `name`, `description`, optional `workspace`, optional `context`, and
-  `members` (each an existing agent definition + `handle` + optional `role`);
+  listing `name`, `description`, optional `workspace`, optional `context`,
+  optional initial `tasks` titles, and `members` (each an existing agent
+  definition + `handle` + optional `role`);
 - **teammates**: one subagent per member, spawned with the normalized handle as
   its registry id. The handle is normalized by the same `sanitizeAgentId` the
   registry uses (48-character cap), so `agent://<handle>` always addresses the
@@ -40,13 +41,21 @@ unrelated ref that happens to share a handle.
   A team prompt replaces the normal role body for team spawns only. Writable
   definitions need no team prompt unless `team: false`;
   bundled scout and reviewer include team variants;
+- **task coordination**: `read team://<team>/tasks` lists task IDs, titles,
+  owners, statuses and notes. The lead adds a title with
+  `write team://<team>/tasks`. A member claims an open task with
+  `write team://<team>/tasks/<id>/claim`; its owner or the lead can release it
+  with `/release` or complete it with `/done` (the write body becomes the note).
+  Claims are atomic across teams sharing a workspace. A released task is open
+  again. The caller's session determines its identity, not the write body.
 - an optional **shared workspace**: `workspace:` is resolved relative to the
   team file and added to each child's additional directories, not substituted
-  for its working directory. `/team start` creates the directory and `TASKS.md`
-  if missing, without overwriting an existing list. Members are instructed to
-  claim a task by writing `owner: <normalized-handle>` under it and not to edit
-  another member's tasks. This is a convention, not an atomic claim or lock.
-  If `workspace` is omitted, no team `TASKS.md` is created automatically;
+  for its working directory. The workspace's `tasks.json` is the authoritative
+  ledger; `TASKS.md` is a generated view. Teams using the same canonical
+  workspace share one ledger. Without a workspace the ledger is in memory and
+  isolated to the team generation. Existing ledgers are never reseeded; if an
+  old `TASKS.md` exists without `tasks.json`, startup refuses to overwrite it
+  and requires migration.
 - **commands**: `/team list`, `/team start <name> [assignment]`,
   `/team status [name]`, `/team stop <name|all>`. A spawn whose registry ref
   does not appear in time is reported as *pending* (with its reserved id); a
@@ -77,6 +86,9 @@ unrelated ref that happens to share a handle.
 name: audit
 description: Log-audit crew
 workspace: ./ws
+tasks:
+  - Collect logs
+  - Verify findings
 members:
   - agent: scout
     handle: Scout
@@ -85,22 +97,24 @@ members:
     handle: Reviewer
     role: Verify findings
 context: |
-  Claim tasks in TASKS.md (owner: <handle>).
+  Coordinate task ownership through team://audit/tasks.
 ---
 Audit covers services X and Y; the lead collects the final report.
 ```
 
 3. `/team start audit run the audit` - members spawn with handles `Scout` and
-   `Reviewer`, `.omp/teams/ws/TASKS.md` is created, and they appear in the Agent
-   Hub. Message them with `write agent://Scout`; inspect with `/team status audit`;
-   release them with `/team stop audit`.
+   `Reviewer`, the workspace ledger and view are created, and they appear in the
+   Agent Hub. Read `team://audit/tasks` to inspect work. Message members with
+   `write agent://Scout`; inspect them with `/team status audit`; release them
+   with `/team stop audit`.
 
 ## Implementation
 
-`task/teams.ts` discovers and parses team files, normalizes handles, renders
-the per-member context/prompt, and creates `TASKS.md` in the workspace.
-`slash-commands/builtin-teams.ts` implements `/team` and records team
-membership. `task/spawn-subagent.ts` forwards team spawn metadata through
+`task/teams.ts` discovers and parses team files, normalizes handles, and renders
+the per-member context/prompt. The main-owned team runtime manages membership
+and the task ledger; the thread service routes worker operations to it.
+`slash-commands/builtin-teams.ts` implements `/team`.
+`task/spawn-subagent.ts` forwards team spawn metadata through
 `task/structured-subagent.ts` and the session/tool creation path, where a
 coordination-only write capability is enforced. Settings:
 `team.enabled` / `team.maxTeammates`. The design contract is

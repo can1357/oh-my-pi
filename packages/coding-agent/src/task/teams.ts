@@ -12,9 +12,9 @@ import type * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { getConfigDirs, findAllNearestProjectConfigDirs } from "../config";
-import { parseFrontmatter } from "@oh-my-pi/pi-utils";
+import teamTaskProtocolTemplate from "../prompts/system/team-task-protocol.md" with { type: "text" };
 import { sanitizeAgentId } from "./name-generator";
 
 /** One member entry from the team file's frontmatter. */
@@ -37,6 +37,8 @@ export interface TeamDefinition {
 	workspace?: string;
 	/** Members to spawn on `/team start`. */
 	members: TeamMember[];
+	/** Initial task titles, seeded only when a ledger is first created. */
+	tasks?: string[];
 	/** Shared context block rendered into every member's prompt. */
 	context?: string;
 	/** The file's body: the team's standing instruction. */
@@ -84,6 +86,17 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 		logger.warn(`team file ${filePath}: no valid members; skipped`);
 		return undefined;
 	}
+	let tasks: string[] | undefined;
+	if ("tasks" in frontmatter) {
+		if (
+			!Array.isArray(frontmatter.tasks) ||
+			frontmatter.tasks.some(task => typeof task !== "string" || task.trim().length === 0)
+		) {
+			logger.warn(`team file ${filePath}: frontmatter 'tasks' must be a list of non-empty strings; skipped`);
+			return undefined;
+		}
+		tasks = frontmatter.tasks.map((task: string) => task.trim());
+	}
 	const workspace =
 		typeof frontmatter.workspace === "string" && frontmatter.workspace.trim().length > 0
 			? path.resolve(path.dirname(filePath), frontmatter.workspace.trim())
@@ -93,6 +106,7 @@ export function parseTeamFile(contents: string, filePath: string): TeamDefinitio
 		description: frontmatter.description.trim(),
 		...(workspace !== undefined ? { workspace } : {}),
 		members,
+		...(tasks !== undefined ? { tasks } : {}),
 		...(typeof frontmatter.context === "string" && frontmatter.context.trim().length > 0
 			? { context: frontmatter.context }
 			: {}),
@@ -177,7 +191,7 @@ export function sanitizeTeamHandle(handle: string): string {
 	return sanitizeAgentId(handle) ?? "member";
 }
 
-/** Render the per-member context block: team identity, role, workspace, TASKS convention. */
+/** Render the per-member context block: team identity, role, workspace, and task protocol. */
 export function renderTeamMemberContext(
 	team: TeamDefinition,
 	member: TeamMember,
@@ -191,10 +205,8 @@ export function renderTeamMemberContext(
 	if (member.role !== undefined) lines.push(`Your role: ${member.role}`);
 	if (team.workspace !== undefined) {
 		lines.push(`Team workspace: ${team.workspace}`);
-		lines.push(
-			`Shared task list: TASKS.md in the team workspace - claim a task by writing \`owner: ${handle}\` under it; do not touch tasks owned by another handle.`,
-		);
 	}
+	lines.push(prompt.render(teamTaskProtocolTemplate, { teamName: team.name }).trim());
 	const peers = team.members.filter(other => other.handle !== member.handle);
 	if (peers.length > 0) {
 		lines.push(
@@ -221,26 +233,5 @@ export function renderTeamMemberPrompt(team: TeamDefinition, assignment: string 
 
 /** Filename of the shared task list a team's workspace keeps. */
 export const TEAM_TASKS_FILE = "TASKS.md";
-
-/** Header explaining the `owner: <handle>` claim convention, written only for a new list. */
-export const TEAM_TASKS_HEADER = `# Team tasks
-
-Claim a task by writing \`owner: <your-handle>\` on the line under it.
-Only edit tasks you own; message a peer with \`write agent://<handle>\`.
-`;
-
-/**
- * Create `TASKS.md` in a team workspace when it is missing. Never overwrite an
- * existing list, so re-running `/team start` keeps the team's claims.
- */
-export async function ensureTeamTasksFile(team: TeamDefinition): Promise<void> {
-	if (team.workspace === undefined) return;
-	await fs.mkdir(team.workspace, { recursive: true });
-	try {
-		await fs.writeFile(path.join(team.workspace, TEAM_TASKS_FILE), TEAM_TASKS_HEADER, { flag: "wx" });
-	} catch (error) {
-		if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
-	}
-}
 
 export const TEAMS_DIR_MARKER = path.join(os.homedir(), ".omp");

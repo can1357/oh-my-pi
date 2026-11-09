@@ -19,25 +19,31 @@ import { runtimeThreadService } from "./runtime";
 import { runtimeIdentityThreadService } from "./runtime-identity";
 import { settingsThreadService } from "./settings";
 import { telemetryThreadService } from "./telemetry";
+import { teamThreadService } from "./team";
 
-export const THREAD_SERVICES: readonly ThreadService[] = [
-	identityThreadService,
-	// Early, so a worker's `logger.flush()` waits for main from the first service boot on.
-	loggerThreadService,
-	runtimeIdentityThreadService,
-	settingsThreadService,
-	authService,
-	agentsThreadService,
-	lspThreadService,
-	telemetryThreadService,
-	memoryThreadService,
-	integrationsThreadService,
-	runtimeThreadService,
-	asyncJobsThreadService,
-	// Before executor: incoming requests are shared with worker sessions.
-	a2aIncomingThreadService,
-	// Before executor: a worker task run may register an outgoing A2A wait.
-	a2aOutgoingThreadService,
-	// Last: its entry points run subagents against every service above.
-	executorThreadService,
-];
+let services: readonly ThreadService[] | undefined;
+
+export function getThreadServices(): readonly ThreadService[] {
+	return (services ??= [
+		identityThreadService,
+		// Early, so a worker's `logger.flush()` waits for main from the first service boot on.
+		loggerThreadService,
+		runtimeIdentityThreadService,
+		settingsThreadService,
+		authService,
+		agentsThreadService,
+		teamThreadService,
+		lspThreadService,
+		telemetryThreadService,
+		memoryThreadService,
+		integrationsThreadService,
+		runtimeThreadService,
+		asyncJobsThreadService,
+		// Before executor: incoming requests are shared with worker sessions.
+		a2aIncomingThreadService,
+		// Before executor: a worker task run may register an outgoing A2A wait.
+		a2aOutgoingThreadService,
+		// Last: its entry points run subagents against every service above.
+		executorThreadService,
+	]);
+}

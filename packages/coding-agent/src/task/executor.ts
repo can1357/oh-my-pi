@@ -65,6 +65,7 @@ import { IrcBus } from "../irc/bus";
 import type { MCPManagerApi } from "../mcp/manager";
 import type { MnemopiSessionStateApi } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
+import type { TeamIdentity } from "./team-runtime";
 import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pending.md" with { type: "text" };
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
@@ -480,6 +481,7 @@ export interface ExecutorOptions {
 	/** Team prompt metadata and its separate, restricted write grant. */
 	team?: boolean;
 	coordinationOnlyWrite?: boolean;
+	teamIdentity?: TeamIdentity;
 	task: string;
 	assignment?: string;
 	preparedSession?: PreparedSeanceSession;
@@ -5148,6 +5150,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					cacheWarming: false,
 					toolNames,
 					coordinationOnlyWrite: options.coordinationOnlyWrite,
+					teamIdentity: options.teamIdentity,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
