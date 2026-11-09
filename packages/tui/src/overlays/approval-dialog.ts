@@ -4,14 +4,14 @@
  * optional grants (led by a toggle that keeps them across sessions), Approve,
  * an optional "approve for this session", and Deny — and an action
  * bar. The arrows move between the choices and Enter takes the highlighted
- * one; `app.approval.approve` (Ctrl+Enter by default) approves this call
- * outright and Esc denies. Enter and the approve chord only arm
- * {@link APPROVE_ARM_MS} after mount, so a key meant for the composer (Enter,
- * or the follow-up chord pressed mid-run) as the prompt appears never answers
- * it. With an {@link ApprovalDialogDraft}, every other key edits the composer
- * mounted beneath the dialog, so a message can deny the call and steer the
- * turn instead: while the composer holds a draft, the arrows and Enter edit and
- * send it, and the highlight sits on Deny, relabeled to say Enter sends.
+ * one; `app.approval.approve` (Ctrl+Enter by default) approves this call, and
+ * with a composer draft it approves and sends the note as a steer. Esc denies.
+ * Enter and the approve chord only arm {@link APPROVE_ARM_MS} after mount, so a
+ * key meant for the composer (Enter, or the follow-up chord pressed mid-run) as
+ * the prompt appears never answers it. With an {@link ApprovalDialogDraft}, keys
+ * go to the composer mounted beneath the dialog, and a message typed there denies
+ * the call and steers the turn. While a draft holds the keys, Enter sends it and
+ * the highlight sits on Deny, relabeled to say Enter sends.
  * The prompt stays a few rows so the composer keeps its room; Page Up/Down
  * scroll the details, and with a full prompt the expand key
  * (`app.tools.expand`) swaps it in, wrapped.
@@ -55,7 +55,8 @@ interface ApprovalChoice {
 }
 
 interface ApprovalDialogCallbacks {
-	onApprove(): void;
+	/** Return `true` to leave the prompt open. A dispatched command takes the next keys. */
+	onApprove(): void | Promise<boolean>;
 	onDeny(): void;
 }
 
@@ -67,10 +68,12 @@ export interface ApprovalDialogGrant {
 	readonly alwaysLabel: string;
 }
 
-/** The composer mounted beneath the dialog: it receives every key the dialog does not own. */
+/** The composer mounted beneath the dialog receives every key the dialog does not own. */
 export interface ApprovalDialogDraft {
-	/** True while the composer holds a draft — text, attachments, or a paste still landing: keys then edit and send it. */
+	/** True while the composer holds text, attachments, or a paste still landing. */
 	hasDraft(): boolean;
+	/** True while a paste is landing, so the approve chord waits for it. */
+	pasteInFlight(): boolean;
 	handleInput(keyData: string): void;
 }
 
@@ -122,8 +125,9 @@ export class ApprovalDialogComponent implements Component {
 	/** The remember toggle: grants are kept across sessions while it is on. */
 	#rememberAlways = false;
 	#closed = false;
+	#commandPending = false;
 	#native: NativeNode | undefined;
-	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
+	/** Whether a draft held the keys when {@link #native} was described. */
 	#nativeDrafting = false;
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
@@ -157,6 +161,11 @@ export class ApprovalDialogComponent implements Component {
 					this.#panel.title = `${title} (${seconds}s)`;
 				},
 				() => {
+					// A dispatched command owns the keys, so the countdown waits.
+					if (this.#commandPending) {
+						this.#restartCountdown();
+						return;
+					}
 					options.onTimeout?.();
 					this.#finish("deny");
 				},
@@ -198,6 +207,7 @@ export class ApprovalDialogComponent implements Component {
 
 	dispose(): void {
 		this.#closed = true;
+		this.#commandPending = false;
 		this.#countdown?.dispose();
 		this.#panel.dispose();
 	}
@@ -205,8 +215,29 @@ export class ApprovalDialogComponent implements Component {
 	handleInput(keyData: string): void {
 		if (this.#closed) return;
 		this.#restartCountdown();
+		if (this.#commandPending) {
+			if (matchesAppApprove(keyData)) return;
+			if (this.#full && matchesAppToolsExpand(keyData)) {
+				this.#toggleExpanded();
+				return;
+			}
+			const pendingDraft = this.options.draft;
+			// Ctrl+C still clears a composer draft before it would answer the pending prompt.
+			if (pendingDraft?.hasDraft() && getKeybindings().matches(keyData, "app.clear")) {
+				this.#editDraft(pendingDraft, keyData);
+				return;
+			}
+			if (matchesSelectCancel(keyData)) {
+				this.#finish("deny");
+				return;
+			}
+			if (pendingDraft) this.#editDraft(pendingDraft, keyData);
+			return;
+		}
 		if (matchesAppApprove(keyData)) {
-			if (performance.now() >= this.#armedAt) this.#finish("once");
+			// A paste still landing counts as empty, so the chord waits.
+			const draft = this.options.draft;
+			if (!draft?.pasteInFlight() && performance.now() >= this.#armedAt) this.#finish("once");
 			return;
 		}
 		if (this.#full && matchesAppToolsExpand(keyData)) {
@@ -305,7 +336,7 @@ export class ApprovalDialogComponent implements Component {
 		}
 		this.#body.setHeight(rows);
 		const drafting = this.options.draft?.hasDraft() ?? false;
-		// While a draft holds Enter the highlight sits on Deny (sending the draft denies), else on the arrows' choice.
+		// A draft sends through the composer, which denies.
 		const shown = drafting ? this.#choices.length - 1 : this.#choice;
 		this.#choiceRows.setLines(
 			this.#choices.map((choice, index) => {
@@ -422,10 +453,58 @@ export class ApprovalDialogComponent implements Component {
 
 	#finish(answer: ApprovalAnswer): void {
 		if (this.#closed) return;
+		// A second Approve while a dispatched command owns the keys is meaningless;
+		// Esc/grants/session still answer the pending prompt.
+		if (answer === "once" && this.#commandPending) return;
+		if (answer === "once") {
+			let result: void | Promise<boolean> | undefined;
+			try {
+				result = this.callbacks.onApprove();
+			} catch {
+				this.#closed = true;
+				this.#commandPending = false;
+				this.#countdown?.dispose();
+				this.callbacks.onDeny();
+				return;
+			}
+			if (!(result instanceof Promise)) {
+				// A synchronous callback has already answered; async callbacks keep the
+				// prompt live until their dispatch settles.
+				this.#closed = true;
+				this.#commandPending = false;
+				this.#countdown?.dispose();
+				return;
+			}
+			// A dispatched command keeps the approval pending, so the prompt stays live and
+			// only the answer keys are held while the dispatch owns them.
+			this.#commandPending = true;
+			void result.then(
+				keep => {
+					this.#commandPending = false;
+					if (this.#closed) return;
+					if (keep === true) {
+						this.#restartCountdown();
+						this.options.tui?.requestRender();
+						return;
+					}
+					this.#closed = true;
+					this.#countdown?.dispose();
+				},
+				() => {
+					// The callback threw without settling. Deny the call.
+					this.#commandPending = false;
+					if (this.#closed) return;
+					this.#closed = true;
+					this.#countdown?.dispose();
+					this.callbacks.onDeny();
+				},
+			);
+			return;
+		}
 		this.#closed = true;
+		this.#commandPending = false;
 		this.#countdown?.dispose();
-		if (answer === "once") this.callbacks.onApprove();
-		else if (answer === "session") this.options.session?.onApprove();
+		if (answer === "session") this.options.session?.onApprove();
 		else if (answer.startsWith("grant")) {
 			const grant = this.options.grants?.[Number(answer.slice("grant".length))];
 			if (grant) this.options.onGrant?.(grant, this.#rememberAlways);

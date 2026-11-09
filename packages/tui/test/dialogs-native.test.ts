@@ -6,6 +6,8 @@ import { md } from "@oh-my-pi/pi-tui/native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -383,30 +385,78 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
-	it("approval: while a draft holds Enter, the highlight sits on Deny, relabeled to say Enter sends, and returns once cleared", () => {
+	it("approval: a draft moves the highlight to Deny and relabels it", () => {
 		let draft = "";
 		const dialog = new ApprovalDialogComponent(
 			"Allow tool: bash\nCommand: ls",
 			{ onApprove: vi.fn(), onDeny: vi.fn() },
 			{
-				draft: { hasDraft: () => draft.length > 0, handleInput: key => (draft += key) },
+				draft: { hasDraft: () => draft.length > 0, pasteInFlight: () => false, handleInput: key => (draft += key) },
 			},
 		);
 		const highlighted = () =>
 			stripVTControlCharacters(dialog.render(80).join("\n"))
 				.split("\n")
 				.find(line => line.includes("❯"));
+		const selected = () => {
+			const choices = find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
+			return choices.node.p && "selected" in choices.node.p ? choices.node.p.selected : undefined;
+		};
 		expect(highlighted()).toContain("Approve");
+		expect(selected()).toBe("once");
 		dialog.handleInput("k");
 		expect(highlighted()).toContain("Deny and send message");
-		const choices = find(dialog.describe(), node => node.p?.role === "omp.approval.choices")!;
-		expect(choices.node.p && "selected" in choices.node.p ? choices.node.p.selected : undefined).toBe("deny");
+		expect(selected()).toBe("deny");
 		draft = "";
 		expect(highlighted()).toContain("Approve");
-		expect(highlighted()).not.toContain("Deny");
+		dialog.dispose();
 	});
 
-	it("approval: with a composer draft, typing edits it; once it holds text, the arrows and Enter edit and send it", () => {
+	it("approval: Enter with a draft sends through the composer, and Esc denies without sending", () => {
+		const routed: string[] = [];
+		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+		const dialog = new ApprovalDialogComponent("Allow tool: task\nSubagents: 2", callbacks, {
+			session: { label: "Approve task for this session", onApprove: vi.fn() },
+			draft: { hasDraft: () => true, pasteInFlight: () => false, handleInput: key => routed.push(key) },
+		});
+		dialog.handleInput(ENTER);
+		expect(routed).toEqual([ENTER]);
+		expect(callbacks.onApprove).not.toHaveBeenCalled();
+		expect(callbacks.onDeny).not.toHaveBeenCalled();
+		dialog.handleInput("\x1b");
+		expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+		expect(routed).toEqual([ENTER]);
+		dialog.dispose();
+	});
+
+	it("approval: arrows edit the draft while one holds keys and move the highlight without one", () => {
+		const routed: string[] = [];
+		const drafting = new ApprovalDialogComponent(
+			"Allow tool: bash\nCommand: ls",
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ draft: { hasDraft: () => true, pasteInFlight: () => false, handleInput: key => routed.push(key) } },
+		);
+		drafting.handleInput(DOWN);
+		drafting.handleInput(UP);
+		expect(routed).toEqual([DOWN, UP]);
+
+		const idle = new ApprovalDialogComponent(
+			"Allow tool: bash\nCommand: ls",
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ grants: [{ label: "Approve Folder", alwaysLabel: "Always Approve Folder" }], onGrant: vi.fn() },
+		);
+		const cursorRow = () =>
+			stripVTControlCharacters(idle.render(80).join("\n"))
+				.split("\n")
+				.find(line => line.includes("❯"));
+		expect(cursorRow()).toContain("Approve Once");
+		idle.handleInput(UP);
+		expect(cursorRow()).toContain("Approve Folder");
+		drafting.dispose();
+		idle.dispose();
+	});
+
+	it("approval: with a composer draft, typing, arrows, and Enter all belong to the composer", () => {
 		let draft = "";
 		const routed: string[] = [];
 		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
@@ -414,6 +464,7 @@ describe("dialogs under a native surface", () => {
 		const dialog = new ApprovalDialogComponent(`Allow tool: bash\n${details}`, callbacks, {
 			draft: {
 				hasDraft: () => draft.length > 0,
+				pasteInFlight: () => false,
 				handleInput: key => {
 					routed.push(key);
 					if (key.length === 1 && key >= " ") draft += key;
@@ -425,7 +476,6 @@ describe("dialogs under a native surface", () => {
 		dialog.handleInput("\x1b[6~");
 		expect(routed).toEqual([]);
 		expect(stripVTControlCharacters(dialog.render(60).join("\n"))).not.toContain("Line 0");
-		// Typing reaches the composer; once it holds text, arrows and Enter edit and send it.
 		dialog.handleInput("n");
 		dialog.handleInput("o");
 		dialog.handleInput(UP);
@@ -433,12 +483,176 @@ describe("dialogs under a native surface", () => {
 		// Ctrl+C is both a cancel key and the composer's clear key: with a draft it clears, never denies.
 		dialog.handleInput("\x03");
 		expect(routed).toEqual(["n", "o", UP, ENTER, "\x03"]);
+		expect(callbacks.onApprove).not.toHaveBeenCalled();
 		expect(callbacks.onDeny).not.toHaveBeenCalled();
 		// Esc stays the dialog's: it denies without touching the draft.
 		dialog.handleInput("\x1b");
 		expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
 		expect(routed).toHaveLength(5);
-		expect(callbacks.onApprove).not.toHaveBeenCalled();
+		dialog.dispose();
+	});
+
+	it("approval: the approve chord waits for the arm window, and a dispatch keeps the prompt live", async () => {
+		const base = Date.now();
+		let clock = base;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => clock);
+		try {
+			let draft = "";
+			const routed: string[] = [];
+			const callbacks = { onApprove: vi.fn(async () => true), onDeny: vi.fn() };
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				draft: {
+					hasDraft: () => draft.length > 0,
+					pasteInFlight: () => false,
+					handleInput: key => {
+						routed.push(key);
+						if (key.length === 1 && key >= " ") draft += key;
+					},
+				},
+			});
+			// Inside the arm window the chord answers nothing.
+			dialog.handleInput("n");
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).not.toHaveBeenCalled();
+			clock = base + APPROVE_ARM_MS + 1;
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+			await Promise.resolve();
+			// The command owns the keys, and Esc answers the still-open prompt.
+			dialog.handleInput("x");
+			expect(routed).toEqual(["n", "x"]);
+			dialog.handleInput("\x1b");
+			expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+			dialog.dispose();
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("approval: keys reach the composer while a dispatch is still in flight", async () => {
+		const base = Date.now();
+		let clock = base;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => clock);
+		try {
+			let draft = "";
+			const routed: string[] = [];
+			const gate = Promise.withResolvers<boolean>();
+			const callbacks = { onApprove: vi.fn(() => gate.promise), onDeny: vi.fn() };
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				draft: {
+					hasDraft: () => draft.length > 0,
+					pasteInFlight: () => false,
+					handleInput: key => {
+						routed.push(key);
+						if (key.length === 1 && key >= " ") draft += key;
+					},
+				},
+			});
+			clock = base + APPROVE_ARM_MS + 1;
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			// The dispatched command is still awaiting: typing belongs to the composer,
+			// and Esc answers the pending approval instead of dropping the keystrokes.
+			dialog.handleInput("x");
+			expect(routed).toEqual(["x"]);
+			dialog.handleInput("\x1b");
+			expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			gate.resolve(true);
+			await Promise.resolve();
+			await Promise.resolve();
+			dialog.handleInput("y");
+			expect(routed).toEqual(["x"]);
+
+			dialog.dispose();
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("approval: the deadline waits while a dispatched command owns the keys", async () => {
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<boolean>();
+			const callbacks = { onApprove: vi.fn(() => gate.promise), onDeny: vi.fn() };
+			const onTimeout = vi.fn();
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				timeout: 1_000,
+				onTimeout,
+			});
+			vi.advanceTimersByTime(APPROVE_ARM_MS + 1);
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+			// The command owns the keys, so the deadline waits.
+			vi.advanceTimersByTime(1_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+			gate.resolve(false);
+			await Promise.resolve();
+			await Promise.resolve();
+			vi.advanceTimersByTime(1_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			dialog.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("approval: disposing while a dispatch is pending does not restart the countdown", async () => {
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<boolean>();
+			const callbacks = { onApprove: vi.fn(() => gate.promise), onDeny: vi.fn() };
+			const onTimeout = vi.fn();
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				timeout: 1_000,
+				onTimeout,
+			});
+			vi.advanceTimersByTime(APPROVE_ARM_MS + 1);
+			dialog.handleInput("\x11");
+			expect(callbacks.onApprove).toHaveBeenCalledTimes(1);
+
+			// The approval is torn down while the chord's dispatch still awaits.
+			dialog.dispose();
+			gate.resolve(true);
+			await Promise.resolve();
+			await Promise.resolve();
+
+			vi.advanceTimersByTime(1_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			expect(callbacks.onDeny).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("approval: a rejected approve callback denies the call", async () => {
+		vi.useFakeTimers();
+		try {
+			const callbacks = {
+				onApprove: vi.fn(async () => {
+					throw new Error("dispatch failed");
+				}),
+				onDeny: vi.fn(),
+			};
+			const onTimeout = vi.fn();
+			const dialog = new ApprovalDialogComponent("Allow tool: bash", callbacks, {
+				timeout: 1_000,
+				onTimeout,
+			});
+			vi.advanceTimersByTime(APPROVE_ARM_MS + 1);
+			dialog.handleInput("\x11");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(callbacks.onDeny).toHaveBeenCalledTimes(1);
+			vi.advanceTimersByTime(1_000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			dialog.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("approval: any key restarts the timeout (reporting start and reset), so a scroll before the deadline keeps it open", () => {
@@ -517,7 +731,7 @@ describe("dialogs under a native surface", () => {
 			{ onApprove: vi.fn(), onDeny: vi.fn() },
 			{
 				fullPrompt: `Allow tool: bash\n${command}`,
-				draft: { hasDraft: () => true, handleInput: key => routed.push(key) },
+				draft: { hasDraft: () => true, pasteInFlight: () => false, handleInput: key => routed.push(key) },
 			},
 		);
 		const body = () => stripVTControlCharacters(dialog.render(60).join("\n")).replace(/[│\s]+/g, "");
@@ -656,5 +870,46 @@ describe("dialogs under a native surface", () => {
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "cancel", mods: [] });
 		await expect(cancelled).rejects.toThrow("Login cancelled");
 		expect(onComplete).toHaveBeenCalledWith(false, "Login cancelled");
+	});
+
+	it("approval chord is ignored while a raw paste from draft editing is landing", async () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const paste = Promise.withResolvers<void>();
+		editor.onPasteTextRaw = async () => {
+			await paste.promise;
+			editor.insertText("raw paste");
+		};
+		editor.setActionKeys("app.clipboard.pasteTextRaw", ["ctrl+v"]);
+
+		const onApprove = vi.fn();
+		const dialog = new ApprovalDialogComponent(
+			"Allow tool: bash\nCommand: ls",
+			{ onApprove, onDeny: vi.fn() },
+			{
+				draft: {
+					hasDraft: () => editor.getText().length > 0 || editor.composerChips().length > 0 || editor.pasteInFlight,
+					pasteInFlight: () => editor.pasteInFlight,
+					handleInput: key => editor.handleDraftEdit(key),
+				},
+			},
+		);
+		const now = vi.spyOn(performance, "now").mockReturnValue(Number.POSITIVE_INFINITY);
+		try {
+			dialog.handleInput("\x16");
+			expect(editor.pasteInFlight).toBe(true);
+			dialog.handleInput("\x11");
+			expect(onApprove).not.toHaveBeenCalled();
+
+			paste.resolve();
+			await paste.promise;
+			await Promise.resolve();
+
+			expect(editor.pasteInFlight).toBe(false);
+			expect(editor.getText()).toBe("raw paste");
+			dialog.handleInput("\x11");
+			expect(onApprove).toHaveBeenCalledTimes(1);
+		} finally {
+			now.mockRestore();
+		}
 	});
 });

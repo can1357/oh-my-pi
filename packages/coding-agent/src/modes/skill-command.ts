@@ -42,7 +42,7 @@ interface InvokeSkillCommandOptions {
 	 * does not leave the submission invisible (issue #8895).
 	 */
 	optimistic?: boolean;
-	/** With `queueOnly`: called with the messages the skill prompt pushed onto a queue (see `PromptOptions.onPromptQueued`). */
+	/** With `queueOnly`: called just before the messages the skill prompt pushes onto a queue (see `PromptOptions.onPromptQueued`). */
 	onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 }
 
@@ -98,9 +98,14 @@ export async function invokeSkillCommandFromText(
 	try {
 		const built = await buildSkillCommandPrompt(ctx, text, streamingBehavior, options?.images);
 		if (!built) return false;
-		const promptOptions = options?.queueOnly
-			? { ...built.options, queueOnly: true, onPromptQueued: options.onPromptQueued }
-			: built.options;
+		const promptOptions =
+			options?.queueOnly || options?.onPromptQueued
+				? {
+						...built.options,
+						onPromptQueued: options.onPromptQueued,
+						...(options?.queueOnly ? { queueOnly: true } : {}),
+					}
+				: built.options;
 		optimistic = options?.optimistic === true && !options?.queueOnly && !ctx.session.isStreaming;
 		if (optimistic) {
 			ctx.renderOptimisticSkillMessage(

@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
@@ -64,6 +65,8 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import approvalLineTemplate from "../../prompts/steering/approval-line.md" with { type: "text" };
+import { prompt as promptTemplates } from "@oh-my-pi/pi-utils";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -146,6 +149,8 @@ export class ExtensionUiController {
 	 * and does not answer it.
 	 */
 	#denyingSteering: readonly AgentMessage[] | undefined;
+	/** Messages queued by an approve chord or its dispatched skill; the deny-watch ignores them. */
+	#approvedApprovalSteers = new WeakSet<AgentMessage>();
 	/**
 	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
 	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
@@ -711,16 +716,14 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * The tool-approval prompt in the composer's place; a collab guest answers it as a select over
-	 * the full prompt with the same choices ({@link approvalChoiceLabels}): the prompt's grants when
-	 * it offers any, Approve, its "for this session" choice when it offers one, and Deny. Locally it
-	 * shows the compact prompt (the details summarized to a
-	 * row, so the composer beneath keeps its room) over that list, and the expand key
-	 * swaps in the full one, wrapped — even when the two match, since a row the summary kept whole
-	 * can still clip. The composer stays mounted beneath it and takes the typing: a user message
-	 * queued as steering while the call waits (sent here, from Tern, or by a collab guest) denies
-	 * the call, so the message tells the agent why instead of a bare denial. The watch starts with
-	 * the request, so approvals still queued behind another dialog are denied by the same message.
+	 * The tool-approval prompt in the composer's place. A collab guest answers it as a select over
+	 * the full prompt with the same choices from {@link approvalChoiceLabels}. Locally the compact
+	 * prompt rides over the choice list, and the composer stays mounted beneath it and takes the
+	 * typing. A message sent from the composer, from Tern, or by a collab guest denies the call and
+	 * steers, naming the denial in the steer. The approve chord records its queued note (or the
+	 * messages pushed by a dispatched `/skill:`) before enqueueing them, so those messages approve
+	 * the call instead of denying approvals queued behind it. A plain steer denies every approval of
+	 * the batch, including those queued behind the shown dialog.
 	 */
 	async showCollabAwareApproval(
 		prompt: ExtensionApprovalPrompt,
@@ -745,12 +748,19 @@ export class ExtensionUiController {
 			if (event.type !== "queue_update" || steered.signal.aborted) return;
 			const current = agent.peekSteeringQueue();
 			if (event.steering.length > steeringBaseline) {
-				const added = current.filter(message => !knownSteering.has(message));
-				this.#denyingSteering = added;
-				// One-at-a-time delivery takes the oldest steer at the batch boundary; the
-				// message that denied this call must be the one that lands after the denial.
-				agent.prioritizeSteering(added);
-				steered.abort();
+				const added = current.filter(
+					message => !knownSteering.has(message) && !this.#approvedApprovalSteers.has(message),
+				);
+				if (added.length > 0) {
+					this.#denyingSteering = added;
+					// One-at-a-time delivery takes the oldest steer at the batch boundary; the
+					// message that denied this call must be the one that lands after the denial.
+					agent.prioritizeSteering(added);
+					steered.abort();
+				} else {
+					steeringBaseline = event.steering.length;
+					knownSteering = new Set(current);
+				}
 			} else {
 				steeringBaseline = event.steering.length;
 				knownSteering = new Set(current);
@@ -761,9 +771,58 @@ export class ExtensionUiController {
 			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
 				this.#presentDialog(localSignal, settle => {
 					const editor = this.ctx.editor;
+					let settled = false;
+					const markSettled = (): void => {
+						settled = true;
+					};
+					localSignal?.addEventListener("abort", markSettled, { once: true });
+					if (localSignal?.aborted) settled = true;
+					const answerApproval = (value: string): void => {
+						settled = true;
+						settle(value);
+					};
+					/** Returns true when the approval stays pending, for a dispatched command or nothing sent. */
+					const sendDraft = async (): Promise<boolean> => {
+						// The chord bypasses the editor commit path, which closes the autocomplete menu.
+						editor.cancelAutocomplete();
+						// The chord bypasses editor.submit(), which expands registered atoms.
+						// A collapsed `/skill:` chip reads back as its label without this call.
+						const note = editor.getExpandedText().trim();
+						if (editor.getText().length > 0 || editor.composerChips().length > 0) {
+							// Consume the text before dispatch; attachments stay until the submit path
+							// queues them, and a failed dispatch restores the collapsed draft.
+							editor.setText("");
+							const approval = {
+								steer: async (text: string, images?: ImageContent[]) => {
+									if (settled) {
+										// The answer already landed while the hook was waiting. Queue the
+										// note without an approval line so the model gets the denial it
+										// actually received.
+										await this.ctx.session.steer(text, images, { attribution: "user" });
+										return;
+									}
+									await this.#steerApprovalNote(text, images, prompt);
+								},
+								onSkillQueued: (queued: readonly AgentMessage[]) => {
+									if (!settled) this.#markApprovedApprovalMessages(queued);
+								},
+							};
+							const outcome = await this.ctx.submitApprovalNote(note, approval);
+							return outcome !== "steered";
+						}
+						return false;
+					};
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
-						{ onApprove: () => settle(onceLabel), onDeny: () => settle("Deny") },
+						{
+							onApprove: async () => {
+								if (await sendDraft()) return true;
+								if (settled) return true;
+								answerApproval(onceLabel);
+								return false;
+							},
+							onDeny: () => answerApproval("Deny"),
+						},
 						{
 							tui: this.ctx.ui,
 							fullPrompt: prompt.full,
@@ -772,17 +831,18 @@ export class ExtensionUiController {
 							onTimeoutStart: dialogOptions?.onTimeoutStart,
 							onTimeoutReset: dialogOptions?.onTimeoutReset,
 							...(sessionLabel
-								? { session: { label: sessionLabel, onApprove: () => settle(sessionLabel) } }
+								? { session: { label: sessionLabel, onApprove: () => answerApproval(sessionLabel) } }
 								: {}),
 							...(prompt.grants?.length
 								? {
 										grants: prompt.grants,
-										onGrant: (grant, always) => settle(always ? grant.alwaysLabel : grant.label),
+										onGrant: (grant, always) => answerApproval(always ? grant.alwaysLabel : grant.label),
 									}
 								: {}),
 							draft: {
 								hasDraft: () =>
-									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
+									editor.getText().length > 0 || editor.composerChips().length > 0 || editor.pasteInFlight,
+								pasteInFlight: () => editor.pasteInFlight,
 								handleInput: keyData => editor.handleDraftEdit(keyData),
 							},
 						},
@@ -811,6 +871,26 @@ export class ExtensionUiController {
 		} finally {
 			unsubscribe();
 		}
+	}
+
+	async #steerApprovalNote(
+		note: string,
+		images: ImageContent[] | undefined,
+		prompt: ExtensionApprovalPrompt,
+	): Promise<void> {
+		await this.ctx.session.steer(note, images, {
+			attribution: "user",
+			approvalLine: this.#approvalLine(prompt.toolName),
+			onPromptQueued: queued => this.#markApprovedApprovalMessages(queued),
+		});
+	}
+
+	#markApprovedApprovalMessages(queued: readonly AgentMessage[]): void {
+		for (const message of queued) this.#approvedApprovalSteers.add(message);
+	}
+
+	#approvalLine(toolName: string | undefined): string {
+		return promptTemplates.render(approvalLineTemplate, { toolName });
 	}
 
 	async showAskDialog(

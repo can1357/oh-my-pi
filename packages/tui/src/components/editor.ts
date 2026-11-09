@@ -5309,6 +5309,11 @@ export class Editor implements Component, Focusable {
 		return this.#visibleAutocompleteList() !== undefined;
 	}
 
+	/** Dismisses an open autocomplete menu from a submit path that bypasses `submit()`. */
+	cancelAutocomplete(): void {
+		this.#cancelAutocomplete();
+	}
+
 	/** The open autocomplete list, unless it has no candidate to show. */
 	#visibleAutocompleteList(): SelectList | undefined {
 		if (this.#autocompleteState === null) return undefined;

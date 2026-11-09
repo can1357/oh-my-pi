@@ -1473,7 +1473,7 @@ export class CustomEditor extends Editor {
 	/** Called when a bracketed paste contains one or more image or video file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
-	onPasteTextRaw?: () => void;
+	onPasteTextRaw?: () => void | Promise<void>;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
@@ -1610,7 +1610,7 @@ export class CustomEditor extends Editor {
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
 	}
 
-	/** True while a clipboard-image or image-path paste is still landing; later keys queue behind it. */
+	/** True while a clipboard-image, image-path, or raw text paste is still landing; later keys queue behind it. */
 	get pasteInFlight(): boolean {
 		return this.#pasteInFlight > 0;
 	}
@@ -1733,9 +1733,10 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured raw text paste (fires and handles result)
+			// Intercept configured raw text paste; async clipboard reads serialize like image pastes.
 			if (this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
-				this.onPasteTextRaw();
+				const pasted = this.onPasteTextRaw();
+				if (pasted instanceof Promise) this.#trackAsyncPaste(pasted);
 				return;
 			}
 
@@ -1947,8 +1948,8 @@ export class CustomEditor extends Editor {
 	 * an Ask dialog opened over a non-empty prompt — so finishing or submitting
 	 * the draft cannot fire an editor-slot shortcut that clears
 	 * `editorContainer` and orphans the overlay. Only text editing, cursor
-	 * movement, submission, the clear action, and pastes (clipboard images and
-	 * image paths attach as on the composer) reach the buffer.
+	 * movement, submission, the clear action, and paste shortcuts (clipboard images,
+	 * image paths, and raw clipboard text) reach the buffer.
 	 */
 	handleDraftEdit(data: string): void {
 		// Same serialization as handleInput: keys typed behind an image paste wait for it.
@@ -1972,6 +1973,15 @@ export class CustomEditor extends Editor {
 		}
 		if (canonical !== undefined && this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 			this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+			return;
+		}
+		if (
+			canonical !== undefined &&
+			this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") &&
+			this.onPasteTextRaw
+		) {
+			const pasted = this.onPasteTextRaw();
+			if (pasted instanceof Promise) this.#trackAsyncPaste(pasted);
 			return;
 		}
 		this.#forwardInput(data);

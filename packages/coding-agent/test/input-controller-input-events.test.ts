@@ -114,7 +114,8 @@ async function createHarness(factory: ExtensionFactory) {
 	const onSubmit = editor.onSubmit;
 	let enterCompletion: Promise<void> | undefined;
 	editor.onSubmit = text => {
-		enterCompletion = Promise.resolve(onSubmit?.(text));
+		// The normal submit path ignores the command/handled flag.
+		enterCompletion = Promise.resolve(onSubmit?.(text)) as Promise<void>;
 		return enterCompletion;
 	};
 	const followUp = vi.spyOn(controller, "handleFollowUp");
@@ -394,6 +395,29 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.getExpandedText()).toContain("new draft [Image #1]");
 		expect(h.editor.pendingImages).toEqual([transformedImage, originalImage]);
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpeg", "local://original.png"]);
+	});
+
+	it("Enter whose skill dispatch throws shows the error and restores the draft without sending a message", async () => {
+		using temp = TempDir.createSync("@omp-native-input-skill-throw-");
+		const h = await createHarness(() => {});
+		const filePath = temp.join("SKILL.md");
+		await Bun.write(filePath, "---\nname: review\ndescription: Draft ownership probe\n---\nReview the request.\n");
+		h.ctx.skillCommands.set("skill:review", {
+			name: "review",
+			description: "",
+			filePath,
+			baseDir: temp.path(),
+			source: "test",
+		});
+		h.session.promptCustomMessage.mockRejectedValue(new Error("skill dispatch rejected"));
+		h.draftWithImage("/skill:review original [Image #1]");
+		await h.pressSubmit(ENTER);
+		expect(h.session.promptCustomMessage).toHaveBeenCalledTimes(1);
+		expect(h.session.followUp).not.toHaveBeenCalled();
+		expect(h.session.prompt).not.toHaveBeenCalled();
+		expect(h.ctx.showError).toHaveBeenCalledWith("skill dispatch rejected");
+		expect(h.editor.getExpandedText()).toBe("/skill:review original [Image #1]");
+		expect(h.editor.pendingImages).toEqual([originalImage]);
 	});
 
 	it("Ctrl+Enter skill dispatch preserves drafts typed during both interception and queue rejection", async () => {

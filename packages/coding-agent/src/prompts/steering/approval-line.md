@@ -1,0 +1,1 @@
+{{#if toolName}}The user approved the `{{toolName}}` call and sent this message while you were still working:{{else}}The user approved the pending tool call and sent this message while you were still working:{{/if}}

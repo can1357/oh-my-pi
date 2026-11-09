@@ -296,6 +296,8 @@ export interface ExtensionApprovalPrompt {
 	 * that does not render them still answers `once`/`session`/`deny`.
 	 */
 	grants?: readonly ExtensionApprovalGrant[];
+	/** The tool being approved. Absent when the prompt names none. */
+	toolName?: string;
 }
 
 /** One remembered-approval choice of an `always-ask-cached` prompt. */
