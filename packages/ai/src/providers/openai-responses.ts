@@ -876,13 +876,16 @@ const streamOpenAIResponsesOnce = (
 				return fallbackKey;
 			};
 			let rejectedReasoning = providerSessionState?.rejectedReasoning;
-			const omitRejectedReasoning = (requestParams: OpenAIResponsesSamplingParams) => {
-				if (rejectedReasoning?.size && Array.isArray(requestParams.input)) {
+			const omitRejectedReasoning = (
+				requestParams: OpenAIResponsesSamplingParams,
+				excluded: ReadonlySet<string> | undefined = rejectedReasoning,
+			) => {
+				if (excluded?.size && Array.isArray(requestParams.input)) {
 					requestParams.input = requestParams.input.filter(
 						item =>
 							item.type !== "reasoning" ||
 							typeof item.encrypted_content !== "string" ||
-							!rejectedReasoning?.has(item.encrypted_content),
+							!excluded.has(item.encrypted_content),
 					);
 				}
 				return requestParams;
@@ -1176,16 +1179,34 @@ const streamOpenAIResponsesOnce = (
 									item => item.type === "reasoning" && typeof item.encrypted_content === "string",
 								);
 								if (rejected.length > 0) {
-									rejectedReasoning ??= new Set<string>();
-									if (providerSessionState) providerSessionState.rejectedReasoning = rejectedReasoning;
 									encryptedReasoningRetryAvailable = false;
-									for (const item of rejected) {
-										if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
-											rejectedReasoning.add(item.encrypted_content);
+									const namedBlob = /The encrypted content (\S+) could not be verified/i.exec(
+										encryptedReasoningRejection.message,
+									)?.[1];
+									const identified = rejected.some(
+										item => item.type === "reasoning" && item.encrypted_content === namedBlob,
+									);
+									let retryOnly: Set<string> | undefined;
+									if (identified && namedBlob) {
+										rejectedReasoning ??= new Set<string>();
+										if (providerSessionState) providerSessionState.rejectedReasoning = rejectedReasoning;
+										rejectedReasoning.add(namedBlob);
+									} else {
+										// Without an exact match, only remove the request's blobs for this retry.
+										retryOnly = new Set<string>();
+										for (const item of rejected) {
+											if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
+												retryOnly.add(item.encrypted_content);
+											}
 										}
 									}
 									if (chainState) resetOpenAIResponsesChainState(chainState);
 									({ builtParams, chained } = await prepareRequest(forceDisableStrictTools));
+									if (retryOnly) {
+										omitRejectedReasoning(builtParams.params, retryOnly);
+										if (chained.params !== builtParams.params)
+											omitRejectedReasoning(chained.params, retryOnly);
+									}
 									activeParams = builtParams.params;
 									activeTrailingScaffoldingItems = builtParams.trailingScaffoldingItems;
 									activeStrictToolsApplied = builtParams.strictToolsApplied;

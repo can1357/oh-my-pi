@@ -505,16 +505,16 @@ describe("OpenRouter Responses request shape", () => {
 			encrypted_content: "EmMKYQ_foreign",
 			summary: [{ type: "summary_text", text: "Earlier reasoning" }],
 		};
-		const reasoningResponse = (item: typeof reasoning, text: string) =>
+		const reasoningResponse = (items: Array<typeof reasoning>, text: string) =>
 			new Response(
 				`${[
-					{ type: "response.output_item.done", output_index: 0, item },
+					...items.map((item, output_index) => ({ type: "response.output_item.done", output_index, item })),
 					{
 						type: "response.output_item.done",
-						output_index: 1,
+						output_index: items.length,
 						item: {
 							type: "message",
-							id: `msg_${item.id}`,
+							id: `msg_${text}`,
 							role: "assistant",
 							content: [{ type: "output_text", text }],
 						},
@@ -525,12 +525,14 @@ describe("OpenRouter Responses request shape", () => {
 					.join("\n\n")}\n\n`,
 				{ status: 200, headers: { "content-type": "text/event-stream" } },
 			);
-		const acceptedReasoning = { ...reasoning, id: "rs_new", encrypted_content: "gAAAAA_new" };
+		const acceptedReasoning = { ...reasoning, id: "rs_accepted", encrypted_content: "gAAAAA_accepted" };
+		const newReasoning = { ...reasoning, id: "rs_new", encrypted_content: "gAAAAA_new" };
 		const bodies: Record<string, unknown>[] = [];
 		const fetchMock: FetchImpl = async (_input, init) => {
 			const body = JSON.parse(String(init?.body));
 			bodies.push(body);
-			if (bodies.length === 1) return reasoningResponse(reasoning, "first");
+			if (bodies.length === 1) return reasoningResponse([reasoning], "first");
+			if (bodies.length === 2) return reasoningResponse([acceptedReasoning], "second");
 			if (JSON.stringify(body.input).includes(reasoning.encrypted_content)) {
 				return Response.json(
 					{
@@ -543,7 +545,7 @@ describe("OpenRouter Responses request shape", () => {
 					{ status: 400 },
 				);
 			}
-			return bodies.length === 3 ? reasoningResponse(acceptedReasoning, "recovered") : createSseResponse();
+			return bodies.length === 4 ? reasoningResponse([newReasoning], "recovered") : createSseResponse();
 		};
 		const model = buildOpenRouterResponsesModel({ id: "openrouter/auto-code", reasoning: true });
 		const providerSessionState = new Map<string, ProviderSessionState>();
@@ -555,24 +557,35 @@ describe("OpenRouter Responses request shape", () => {
 		const followup: Context = {
 			messages: [firstMessage, { role: "user", content: "continue", timestamp: 1 }],
 		};
-		const result = await streamOpenAIResponses(model, followup, {
+		const secondMessage = await streamOpenAIResponses(model, followup, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		const mixedHistory: Context = {
+			messages: [...followup.messages, secondMessage, { role: "user", content: "continue", timestamp: 2 }],
+		};
+		const result = await streamOpenAIResponses(model, mixedHistory, {
 			apiKey: "test-key",
 			fetch: fetchMock,
 			providerSessionState,
 		}).result();
 		expect(result.stopReason).toBe("stop");
-		expect(bodies).toHaveLength(3);
-		expect(JSON.stringify(bodies[1]?.input)).toContain(reasoning.encrypted_content);
-		expect(JSON.stringify(bodies[2]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(bodies).toHaveLength(4);
+		expect(JSON.stringify(bodies[2]?.input)).toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[2]?.input)).toContain(acceptedReasoning.encrypted_content);
+		expect(JSON.stringify(bodies[3]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[3]?.input)).toContain(acceptedReasoning.encrypted_content);
 		const next = await streamOpenAIResponses(
 			model,
-			{ messages: [...followup.messages, result, { role: "user", content: "again", timestamp: 2 }] },
+			{ messages: [...mixedHistory.messages, result, { role: "user", content: "again", timestamp: 3 }] },
 			{ apiKey: "test-key", fetch: fetchMock, providerSessionState },
 		).result();
 		expect(next.stopReason).toBe("stop");
-		expect(bodies).toHaveLength(4);
-		expect(JSON.stringify(bodies[3]?.input)).not.toContain(reasoning.encrypted_content);
-		expect(JSON.stringify(bodies[3]?.input)).toContain(acceptedReasoning.encrypted_content);
+		expect(bodies).toHaveLength(5);
+		expect(JSON.stringify(bodies[4]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[4]?.input)).toContain(acceptedReasoning.encrypted_content);
+		expect(JSON.stringify(bodies[4]?.input)).toContain(newReasoning.encrypted_content);
 	});
 
 	it("replays foreign tool-call history without a fabricated reasoning id", async () => {
