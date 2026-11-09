@@ -1,3 +1,5 @@
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "../../task/types";
+import type { EventBus } from "../../utils/event-bus";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentBusyError, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
@@ -367,6 +369,16 @@ type AcpCompactionNotification = {
 	params: Record<string, unknown>;
 };
 
+type AcpSubagentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+type AcpSubagent = {
+	id: string;
+	agent: string;
+	description: string | null;
+	status: AcpSubagentStatus;
+	async: boolean;
+	updatedAt: number;
+};
+
 type ManagedSessionRecord = {
 	/** Stable ACP handle, independent of the underlying durable session. */
 	readonly protocolSessionId: string;
@@ -397,6 +409,10 @@ type ManagedSessionRecord = {
 	// Capture at registration, independently of prompt turns. Delivery opens
 	// after the bootstrap guard or a client prompt proves the session is known.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	subagentEventBus: EventBus | undefined;
+	subagentUnsubscribe: (() => void) | undefined;
+	subagents: Map<string, AcpSubagent>;
+	subagentSeq: number;
 	commandMetadataUnsubscribe: (() => void) | undefined;
 	lifetimeUpdatesReady: boolean;
 	pendingCompactionNotifications: AcpCompactionNotification[] | undefined;
@@ -441,6 +457,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	subagentEventBus?: EventBus;
 };
 
 type CreateAcpSession = (
@@ -451,8 +468,15 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	subagentEventBus: EventBus | undefined;
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created
+		? {
+				session: created.session,
+				setToolUIContext: created.setToolUIContext,
+				subagentEventBus: created.subagentEventBus,
+			}
+		: { session: created, setToolUIContext: undefined, subagentEventBus: undefined };
 }
 
 type AcpSpeechOption = {
@@ -1029,6 +1053,7 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		const supportsSubagents = params.clientCapabilities?._meta?.["omp/subagents"] === true;
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1075,6 +1100,7 @@ export class AcpAgent implements Agent {
 			// agent-shell gate `_session/steering` on it.
 			_meta: {
 				steering: { supported: true },
+				...(supportsSubagents ? { "omp/subagents": true } : {}),
 			},
 		};
 	}
@@ -1817,7 +1843,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #createNewSessionRecord(cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1828,7 +1854,13 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(
+			session,
+			mcpServers,
+			setToolUIContext,
+			session.sessionId,
+			subagentEventBus,
+		);
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1883,7 +1915,7 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1901,7 +1933,13 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		return await this.#registerPreparedSession(
+			session,
+			params.mcpServers ?? [],
+			setToolUIContext,
+			session.sessionId,
+			subagentEventBus,
+		);
 	}
 
 	async #openStoredSession(
@@ -1910,7 +1948,7 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		protocolSessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, subagentEventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1924,7 +1962,13 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, protocolSessionId);
+		return await this.#registerPreparedSession(
+			session,
+			mcpServers,
+			setToolUIContext,
+			protocolSessionId,
+			subagentEventBus,
+		);
 	}
 
 	async #registerPreparedSession(
@@ -1932,8 +1976,9 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
 		protocolSessionId = session.sessionId,
+		subagentEventBus?: EventBus,
 	): Promise<ManagedSessionRecord> {
-		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
+		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId, subagentEventBus);
 		// Registered before extensions start: a `session_start` handler can already replace the durable session.
 		session.registerSessionChangeCallback(() => this.#rememberHandleSession(record));
 		session.setClientBridge({
@@ -1952,6 +1997,11 @@ export class AcpAgent implements Agent {
 				this.#handleLifetimeEvent(record, event);
 			});
 			record.lifetimeUnsubscribe = unsubscribeEvents;
+			if (subagentEventBus && this.#clientCapabilities?._meta?.["omp/subagents"] === true) {
+				record.subagentUnsubscribe = subagentEventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+					this.#handleSubagentLifecycle(record, data as SubagentLifecyclePayload);
+				});
+			}
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(record.protocolSessionId, record);
@@ -1966,6 +2016,7 @@ export class AcpAgent implements Agent {
 		session: AgentSession,
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined = undefined,
 		protocolSessionId = session.sessionId,
+		subagentEventBus?: EventBus,
 	): ManagedSessionRecord {
 		return {
 			protocolSessionId,
@@ -1985,10 +2036,48 @@ export class AcpAgent implements Agent {
 			pendingPromptDispatches: [],
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			subagentEventBus,
+			subagentUnsubscribe: undefined,
+			subagents: new Map(),
+			subagentSeq: 0,
 			commandMetadataUnsubscribe: undefined,
 			lifetimeUpdatesReady: false,
 			pendingCompactionNotifications: undefined,
 		};
+	}
+
+	#handleSubagentLifecycle(record: ManagedSessionRecord, event: SubagentLifecyclePayload): void {
+		if (
+			event.status !== "started" &&
+			event.status !== "completed" &&
+			event.status !== "failed" &&
+			event.status !== "aborted"
+		)
+			return;
+		const status: AcpSubagentStatus = event.status === "started" ? "running" : event.status;
+		const previous = record.subagents.get(event.id);
+		record.subagents.set(event.id, {
+			id: event.id,
+			agent: event.agent,
+			description: event.description ?? previous?.description ?? null,
+			status,
+			async: event.detached ?? previous?.async ?? false,
+			updatedAt: Date.now(),
+		});
+		if (record.lifetimeUpdatesReady) this.#emitSubagentSnapshot(record, event.parentToolCallId ?? null);
+	}
+
+	#emitSubagentSnapshot(record: ManagedSessionRecord, parentToolCallId: string | null): void {
+		const terminal = new Set(["completed", "failed", "aborted"]);
+		const children = Array.from(record.subagents.values());
+		const params = {
+			sessionId: record.protocolSessionId,
+			parentToolCallId,
+			seq: ++record.subagentSeq,
+			children,
+		};
+		this.#trackLifetimeDelivery(record, "_omp/subagents", this.#connection.extNotification("_omp/subagents", params));
+		for (const child of children) if (terminal.has(child.status)) record.subagents.delete(child.id);
 	}
 
 	#handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
@@ -2038,6 +2127,7 @@ export class AcpAgent implements Agent {
 	#activateLifetimeUpdates(record: ManagedSessionRecord): void {
 		if (record.lifetimeUpdatesReady) return;
 		record.lifetimeUpdatesReady = true;
+		if (record.subagents.size > 0) this.#emitSubagentSnapshot(record, null);
 		const pending = record.pendingCompactionNotifications;
 		record.pendingCompactionNotifications = undefined;
 		for (const notification of pending ?? []) this.#deliverCompactionNotification(record, notification);
@@ -3486,6 +3576,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.subagentUnsubscribe?.();
 		record.commandMetadataUnsubscribe?.();
 		record.pendingCompactionNotifications = undefined;
 		if (record.mcpManager) {

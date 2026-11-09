@@ -89,6 +89,23 @@ ACP sessions forward automatic maintenance as JSON-RPC extension notifications:
 
 Clients that do not implement them can ignore them.
 
+### Subagent lifecycle snapshots
+
+Clients can opt in by sending `clientCapabilities._meta["omp/subagents"]: true` during `initialize`; OMP then advertises the same key in `agentCapabilities._meta`. Opted-in clients receive `_omp/subagents` JSON-RPC extension notifications containing full snapshots:
+
+```json
+{
+  "sessionId": "…",
+  "parentToolCallId": "…",
+  "seq": 1,
+  "children": [
+    { "id": "0-task", "agent": "explore", "description": "…", "status": "running", "async": true, "updatedAt": 1794216140826 }
+  ]
+}
+```
+
+`seq` increases per session. Child statuses are `running`, `completed`, `failed`, or `aborted`; a terminal child appears in its final snapshot and is omitted from the next. Detached tasks can complete after the parent turn ends, so clients should keep listening while the session is open. Clients that omit the capability receive no `_omp/subagents` notifications.
+
 ### Compaction shape (visual)
 
 ```text
