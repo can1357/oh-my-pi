@@ -546,6 +546,9 @@ describe("RelayBridge child targets", () => {
 			const second = bridge.cdpConnected(secondCdp);
 			const secondSession = await attachPage(bridge, ext, secondCdp, second, 1);
 			await armAutoAttach(bridge, ext, second, secondSession);
+			if (leave === "disconnect") {
+				await armAutoAttach(bridge, ext, second, await attachPage(bridge, ext, secondCdp, second, 1));
+			}
 			emit(bridge, ext, ATTACH);
 			const thirdCdp = new FakeCdpSocket();
 			const third = bridge.cdpConnected(thirdCdp);
@@ -596,6 +599,7 @@ describe("RelayBridge child targets", () => {
 			]);
 			ack(bridge, ext, "send");
 			await flush();
+			expect(ext.pending("send")).toEqual([]);
 		},
 	);
 
@@ -628,6 +632,44 @@ describe("RelayBridge child targets", () => {
 				params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
 			}),
 		);
+		nack(bridge, ext, "send");
+		await flush();
+		expect(ext.pending("send").map(rpc => [rpc.method, rpc.params?.autoAttach])).toEqual([
+			["Target.setAutoAttach", false],
+		]);
+		ack(bridge, ext, "send");
+		await flush();
+	});
+
+	it.each(["disconnect", "release"])("retries a failed disable after its holder leaves by %s", async leave => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const session = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, session);
+		const registry = new FakeCdpSocket();
+		await attachPage(bridge, ext, registry, bridge.cdpConnected(registry), 1);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: session,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		if (leave === "disconnect") bridge.cdpClosed(conn);
+		else
+			bridge.cdpMessage(
+				conn,
+				JSON.stringify({
+					id: ++msgSeq,
+					method: "Target.detachFromTarget",
+					params: { sessionId: session },
+				}),
+			);
 		nack(bridge, ext, "send");
 		await flush();
 		expect(ext.pending("send").map(rpc => [rpc.method, rpc.params?.autoAttach])).toEqual([

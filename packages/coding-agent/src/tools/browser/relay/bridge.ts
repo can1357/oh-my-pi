@@ -907,10 +907,12 @@ export class RelayBridge {
 		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
 		const departed = [...conn.sessions.values()];
 		conn.sessions.clear();
+		const armedTabs = new Set<string>();
 		for (const ref of departed) {
 			this.#releaseSwitches(ref);
-			if (ref.autoAttach) this.#releaseAutoAttach(ref.tabKey);
+			if (ref.autoAttach) armedTabs.add(ref.tabKey);
 		}
+		for (const tabKey of armedTabs) this.#releaseAutoAttach(tabKey);
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
@@ -1005,9 +1007,11 @@ export class RelayBridge {
 						!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))
 					) {
 						ref.autoAttach = previous;
+						if (previous && conn.sessions.get(sessionId) !== ref) this.#releaseAutoAttach(ref.tabKey);
 						return;
 					}
-					if (!conn.childTargetSessionForTab(ref.tabKey)) this.#forgetConnectionChildren(conn, ref.tabKey);
+					const tab = this.#tabs.get(ref.tabKey);
+					if (tab && !conn.childTargetSessionForTab(ref.tabKey)) this.#forgetConnectionChildren(conn, tab);
 				});
 				return;
 			}
@@ -1978,15 +1982,8 @@ export class RelayBridge {
 	 * connection told of one its detach; nested children go first, while their parent is still known.
 	 */
 	#forgetChildren(tab: TabState): void {
-		for (const child of [...tab.realSessions.keys()].reverse()) {
-			this.#realSessionTabs.delete(child);
-			for (const conn of this.#conns.values()) {
-				const parent = conn.childParents.get(child);
-				if (parent === undefined) continue;
-				conn.childParents.delete(child);
-				this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, parent);
-			}
-		}
+		for (const conn of this.#conns.values()) this.#forgetConnectionChildren(conn, tab);
+		for (const child of tab.realSessions.keys()) this.#realSessionTabs.delete(child);
 		tab.realSessions.clear();
 	}
 
@@ -2005,9 +2002,7 @@ export class RelayBridge {
 		return false;
 	}
 
-	#forgetConnectionChildren(conn: CdpConnection, tabKey: string): void {
-		const tab = this.#tabs.get(tabKey);
-		if (!tab) return;
+	#forgetConnectionChildren(conn: CdpConnection, tab: TabState): void {
 		for (const child of [...tab.realSessions.keys()].reverse()) {
 			const parent = conn.childParents.get(child);
 			if (parent === undefined) continue;
