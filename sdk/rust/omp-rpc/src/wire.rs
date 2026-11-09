@@ -2792,6 +2792,8 @@ pub enum GoalOp {
 	Drop,
 	#[serde(rename = "budget")]
 	Budget,
+	#[serde(rename = "guided")]
+	Guided,
 }
 
 impl GoalOp {
@@ -2804,6 +2806,7 @@ impl GoalOp {
 			Self::Pause => "pause",
 			Self::Drop => "drop",
 			Self::Budget => "budget",
+			Self::Guided => "guided",
 		}
 	}
 }

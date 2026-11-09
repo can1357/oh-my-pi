@@ -46,7 +46,7 @@ describe("RPC goal command", () => {
 
 	async function start(options: {
 		continuation: boolean;
-		script?: "complete" | "idle" | "slow";
+		script?: "complete" | "idle" | "slow" | "guided";
 		plan?: boolean;
 		persist?: boolean;
 	}): Promise<RpcClient> {
@@ -101,6 +101,41 @@ describe("RPC goal command", () => {
 		expect((await rpc.getState()).messageCount).toBe(0);
 		await rpc.goal("pause");
 		expect(await rejectionOf(rpc.goal("budget", { tokenBudget: 100 }))).toMatchObject({ command: "goal" });
+	}, 30_000);
+
+	test("guided starts a hidden interview without creating a goal; abort restores the interview toolset", async () => {
+		const rpc = await start({ continuation: false, script: "idle" });
+		const before = (await rpc.getState()).dumpTools?.map(tool => tool.name);
+		const settled = Promise.withResolvers<void>();
+		const unsubscribe = rpc.onSessionSettled(() => settled.resolve());
+		try {
+			await rpc.goal("guided", { objective: "rough idea" });
+			await withTimeout(settled.promise, 15_000, "Guided interview never settled");
+		} finally {
+			unsubscribe();
+		}
+		expect((await rpc.goal("get")).goal).toBeNull();
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
+		expect(await rpc.getMessages()).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "guided-goal",
+				display: false,
+			}),
+		);
+		await rpc.abort();
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
+	}, 30_000);
+
+	test("guided slash interview lets the agent create a goal and drop restores tools", async () => {
+		const rpc = await start({ continuation: false, script: "guided" });
+		const before = (await rpc.getState()).dumpTools?.map(tool => tool.name);
+		await rpc.promptAndWait("/guided-goal ship a fix");
+		expect((await rpc.goal("get")).goal).toMatchObject({ objective: "interviewed objective", status: "active" });
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toContain("goal");
+		expect(await rejectionOf(rpc.goal("guided"))).toMatchObject({ command: "goal" });
+		await rpc.goal("drop");
+		expect((await rpc.getState()).dumpTools?.map(tool => tool.name)).toEqual(before);
 	}, 30_000);
 
 	test("plan mode refuses create and resume", async () => {

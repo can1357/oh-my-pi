@@ -2308,7 +2308,8 @@
 				"resume",
 				"pause",
 				"drop",
-				"budget"
+				"budget",
+				"guided"
 			],
 			"type": "string"
 		},

@@ -84,7 +84,21 @@ const turns: MockResponse[] =
 				{ content: [{ type: "toolCall", id: "t2", name: "goal", arguments: { op: "complete" } }] },
 				{ content: ["Goal complete."] },
 			]
-		: [];
+		: Bun.env.GOAL_RPC_SCRIPT === "guided"
+			? [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "g1",
+								name: "goal",
+								arguments: { op: "create", objective: "interviewed objective" },
+							},
+						],
+					},
+					{ content: ["Goal ready."] },
+				]
+			: [];
 let slowTurnPending = Bun.env.GOAL_RPC_SCRIPT === "slow";
 const mock = createMockModel({
 	handler: async (_context, options) => {

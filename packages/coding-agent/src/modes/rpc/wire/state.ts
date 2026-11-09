@@ -20,7 +20,7 @@ export const stateDefs = {
 		"`set_event_filter` projection: `delta` replaces the accumulated snapshots with the block a start/end event touches.",
 	),
 	TodoStatus: "'pending' | 'in_progress' | 'completed' | 'abandoned' | 'blocked'",
-	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop' | 'budget'",
+	GoalOp: "'get' | 'create' | 'resume' | 'pause' | 'drop' | 'budget' | 'guided'",
 	GoalStatus: "'active' | 'paused' | 'budget-limited' | 'complete' | 'dropped'",
 	SlashCommandSource: "'builtin' | 'skill' | 'extension' | 'custom' | 'mcp_prompt' | 'file'",
 	SubagentSubscriptionLevel: doc(

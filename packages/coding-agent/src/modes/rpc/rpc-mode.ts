@@ -1877,13 +1877,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 	const getAvailableCommands = async () => {
 		const commands = await buildAvailableSlashCommands(session);
-		for (const name of ["goal"]) {
+		for (const name of ["goal", "guided-goal"]) {
 			const builtin = lookupBuiltinSlashCommand(name)!;
 			const entry: InternalAvailableSlashCommand = {
 				name,
-				description: "Adjust the active goal's token budget",
-				input: { hint: "budget <N|off>" },
-				subcommands: builtin.subcommands?.filter(sub => sub.name === "budget"),
+				description: name === "goal" ? "Adjust the active goal's token budget" : builtin.description,
+				input: { hint: name === "goal" ? "budget <N|off>" : builtin.inlineHint! },
+				subcommands: name === "goal" ? builtin.subcommands?.filter(sub => sub.name === "budget") : undefined,
 				source: "builtin",
 			};
 			const index = commands.findIndex(command => command.name === name);
@@ -1969,6 +1969,25 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						text: raw.toLowerCase() === "off" ? "Goal budget cleared." : `Goal budget set to ${raw}.`,
 					});
 					return "local";
+				}
+				if (goalSlash?.name === "guided-goal") {
+					await watchAndReportPromptResult({
+						ticket,
+						startPrompt: onPromptAdmitted =>
+							goalController.promptGuided(goalSlash.args, content => {
+								if (!isCurrent()) return Promise.resolve(false);
+								return session.prompt(content, {
+									synthetic: true,
+									images,
+									streamingBehavior: "followUp",
+									onPromptAdmitted,
+								});
+							}),
+						results: promptResults,
+						onError: onPromptError(command.id, "prompt"),
+						extensionUserMessageTracker,
+					});
+					return "admitted";
 				}
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);

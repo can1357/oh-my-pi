@@ -148,7 +148,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
 - `{ id?, type: "set_slow_mode", enabled: boolean }`
-- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop" | "budget", objective?: string, token_budget?: number }`
+- `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop" | "budget" | "guided", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
@@ -605,7 +605,12 @@ including those made by the agent's `goal` tool.
   `token_budget`, or omit it to remove the limit (`/goal budget off`). Paused goals
   must be resumed first. Usage is preserved; increasing or clearing an exhausted
   budget makes the goal active again.
+- `guided` starts the `/guided-goal` chat interview with an optional rough
+  `objective`. It exposes the `goal` tool without creating a goal record; the agent
+  creates the goal after the interview. The hidden kickoff starts a turn even when
+  RPC continuation is disabled, or queues behind a running turn.
 - RPC `prompt` also accepts `/goal budget <N|off>`.
+- RPC `prompt` also accepts `/guided-goal [rough objective]`.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`
