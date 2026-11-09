@@ -72,7 +72,7 @@ function render(tasks: TeamTask[]): string {
 	for (const task of tasks) {
 		lines.push(`- [${task.status === "done" ? "x" : " "}] ${task.id}: ${task.title}`);
 		lines.push(`  - Owner: ${task.owner ?? "unassigned"}`);
-		if (task.note) lines.push(`  - Note: ${task.note}`);
+		if (task.note) lines.push(`  - Note: ${task.note.replace(/\r\n|\r|\n/g, "\n    ")}`);
 	}
 	return `${lines.join("\n")}\n`;
 }
@@ -137,12 +137,16 @@ export class TeamLedger {
 		if (file !== undefined) await replace(path.join(path.dirname(file), "TASKS.md"), render(tasks));
 	}
 
-	async #commit(file: string | undefined, tasks: TeamTask[]): Promise<void> {
+	async #commit(file: string | undefined, tasks: TeamTask[], action: string): Promise<void> {
 		if (file === undefined) {
 			this.#memory = copy(tasks);
 		} else {
 			await replace(file, `${JSON.stringify(tasks, null, 2)}\n`);
-			await this.#view(file, tasks);
+			try {
+				await this.#view(file, tasks);
+			} catch (error) {
+				throw new Error(`${action} committed; TASKS.md view update failed: ${String(error)}`, { cause: error });
+			}
 		}
 	}
 
@@ -172,7 +176,7 @@ export class TeamLedger {
 					status: "open",
 					note: "",
 				}));
-				await this.#commit(file, tasks);
+				await this.#commit(file, tasks, "Team ledger initialization");
 				return copy(tasks);
 			}
 			await this.#view(file, tasks);
@@ -191,6 +195,8 @@ export class TeamLedger {
 	async add(title: string, isLead: boolean, authorize?: () => void): Promise<TeamTask> {
 		if (!isLead) throw new Error("Only the team lead can add tasks");
 		requireText(title, "Task title");
+		if (/[\r\n]/.test(title)) throw new Error("Task title must not contain carriage returns or newlines");
+		title = title.trim();
 		return this.#withLedger(async file => {
 			const tasks = await this.#load(file);
 			const used = new Set(tasks.map(task => task.id));
@@ -198,7 +204,7 @@ export class TeamLedger {
 			while (used.has(String(id))) id++;
 			const task: TeamTask = { id: String(id), title, owner: null, status: "open", note: "" };
 			tasks.push(task);
-			await this.#commit(file, tasks);
+			await this.#commit(file, tasks, `Task ${task.id} add`);
 			return { ...task };
 		}, authorize);
 	}
@@ -214,7 +220,7 @@ export class TeamLedger {
 				return { kind: task.owner === caller ? "already-owned" : "conflict", owner: task.owner };
 			}
 			task.owner = caller;
-			await this.#commit(file, tasks);
+			await this.#commit(file, tasks, `Task ${id} claim`);
 			return { kind: "claimed", owner: caller };
 		}, authorize);
 	}
@@ -228,7 +234,7 @@ export class TeamLedger {
 			task.owner = null;
 			task.status = "open";
 			task.note = "";
-			await this.#commit(file, tasks);
+			await this.#commit(file, tasks, `Task ${id} release`);
 			return { ...task };
 		}, authorize);
 	}
@@ -242,7 +248,7 @@ export class TeamLedger {
 			this.#authorize(task, caller, isLead);
 			task.status = "done";
 			task.note = note;
-			await this.#commit(file, tasks);
+			await this.#commit(file, tasks, `Task ${id} done`);
 			return { ...task };
 		}, authorize);
 	}

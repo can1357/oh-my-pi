@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -41,15 +41,9 @@ describe("TeamLedger", () => {
 		const dir = path.join(root, "workspace");
 		await fs.mkdir(dir);
 		const link = path.join(root, "alias");
-		let alias = path.join(dir, ".");
-		try {
-			await fs.symlink(dir, link, "dir");
-			alias = link;
-		} catch (error) {
-			if (process.platform !== "win32") throw error;
-		}
+		await fs.symlink(dir, link, process.platform === "win32" ? "junction" : "dir");
 		const a = new TeamLedger(dir);
-		const b = new TeamLedger(alias);
+		const b = new TeamLedger(link);
 		await Promise.all([a.initialize(["work"]), b.initialize(["ignored"])]);
 		const results = await Promise.all([a.claim("1", "alice"), b.claim("1", "bob")]);
 		const winner = results.find(result => result.kind === "claimed");
@@ -59,6 +53,41 @@ describe("TeamLedger", () => {
 		expect(loser?.owner).toBe(winner?.owner);
 		expect(await a.claim("1", winner!.owner)).toEqual({ kind: "already-owned", owner: winner!.owner });
 		expect((await b.read())[0].owner).toBe(winner!.owner);
+	});
+
+	it.skipIf(process.platform !== "win32")("serializes claims through case-variant workspace paths", async () => {
+		const root = await workspace();
+		const dir = path.join(root, "MixedCaseWorkspace");
+		await fs.mkdir(dir);
+		const a = new TeamLedger(dir);
+		const b = new TeamLedger(dir.toUpperCase());
+		await a.initialize(["work"]);
+		const results = await Promise.all([a.claim("1", "alice"), b.claim("1", "bob")]);
+		expect(results.map(result => result.kind).sort()).toEqual(["claimed", "conflict"]);
+		expect(results[0].owner).toBe(results[1].owner);
+		expect((await a.read())[0].owner).toBe(results[0].owner);
+	});
+
+	it("trims added titles and rejects carriage returns and newlines", async () => {
+		const ledger = new TeamLedger();
+		await ledger.initialize();
+		expect((await ledger.add("  useful title  ", true)).title).toBe("useful title");
+		for (const title of ["forged\n- [x] 2: task", "forged\r- [x] 2: task", "title\r\nanother"]) {
+			await expect(ledger.add(title, true)).rejects.toThrow();
+		}
+		expect(await ledger.read()).toEqual([{ id: "1", title: "useful title", owner: null, status: "open", note: "" }]);
+	});
+
+	it("indents every continuation of a multiline note in the view", async () => {
+		const root = await workspace();
+		const ledger = new TeamLedger(root);
+		await ledger.initialize(["one"]);
+		const note = "first\n- [x] 2: forged\r- [ ] 3: forged\r\nlast";
+		await ledger.done("1", "lead", true, note);
+		expect((await ledger.read())[0].note).toBe(note);
+		expect(await fs.readFile(path.join(root, "TASKS.md"), "utf8")).toBe(
+			"# Team Tasks\n\n- [x] 1: one\n  - Owner: unassigned\n  - Note: first\n    - [x] 2: forged\n    - [ ] 3: forged\n    last\n",
+		);
 	});
 
 	it("isolates in-memory ledgers and returned snapshots", async () => {
@@ -125,7 +154,7 @@ describe("TeamLedger", () => {
 		const view = path.join(root, "TASKS.md");
 		await fs.rm(view);
 		await fs.mkdir(view);
-		await expect(ledger.claim("1", "alice")).rejects.toThrow();
+		await expect(ledger.claim("1", "alice")).rejects.toThrow(/task 1.*claim.*committed.*TASKS\.md.*failed/i);
 		await fs.rm(view, { recursive: true });
 		expect((await ledger.read())[0].owner).toBe("alice");
 		expect(await fs.readFile(view, "utf8")).toContain("alice");
@@ -142,6 +171,23 @@ describe("TeamLedger", () => {
 		await expect(ledger.claim("1", "alice")).rejects.toThrow();
 		await fs.rm(file, { recursive: true });
 		await fs.writeFile(file, backup);
+		expect((await ledger.read())[0].owner).toBeNull();
+	});
+
+	it("rejects a claim when the ledger temporary file cannot be written", async () => {
+		const root = await workspace();
+		const ledger = new TeamLedger(root);
+		await ledger.initialize(["one"]);
+		const uuid = "00000000-0000-4000-8000-000000000000";
+		const temporary = path.join(root, `.tasks.json.${uuid}.tmp`);
+		await fs.mkdir(temporary);
+		const randomUUID = spyOn(crypto, "randomUUID").mockReturnValue(uuid);
+		try {
+			await expect(ledger.claim("1", "alice")).rejects.toThrow();
+		} finally {
+			randomUUID.mockRestore();
+			await fs.rm(temporary, { recursive: true, force: true });
+		}
 		expect((await ledger.read())[0].owner).toBeNull();
 	});
 });

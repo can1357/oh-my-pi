@@ -145,14 +145,24 @@ export class TeamRuntime {
 		const state = this.#generations.get(identity.generation);
 		if (!state || state.name !== identity.team) throw new Error("Unknown or stale team generation");
 		const registry = AgentRegistry.global();
-		if (registry.get(state.leadId) !== state.leadRef || state.leadRef.session !== state.lead) {
+		const leadRef = registry.get(state.leadId);
+		if (
+			!leadRef ||
+			leadRef.id !== state.leadRef.id ||
+			leadRef.generation !== state.leadRef.generation ||
+			leadRef.session !== state.lead
+		) {
 			throw new Error("Team lead is no longer registered");
 		}
 		if (identity.memberId === state.leadId && session === state.lead) return { state, lead: true };
 		const entry = [...state.members.values()].find(member => member.id === identity.memberId);
 		if (!entry || entry.failure !== undefined) throw new Error("Caller is not a team member");
 		const ref = registry.get(entry.id);
-		if (!ref || ref.session !== session || (entry.ref !== undefined && entry.ref !== ref)) {
+		if (
+			!ref ||
+			ref.session !== session ||
+			(entry.ref !== undefined && (entry.ref.id !== ref.id || entry.ref.generation !== ref.generation))
+		) {
 			throw new Error("Team member session is not registered");
 		}
 		entry.ref ??= ref;

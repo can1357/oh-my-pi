@@ -1,4 +1,5 @@
 import { AgentRegistry } from "../../registry/agent-registry";
+import { isMainThread } from "node:worker_threads";
 import { teamRuntime, type TeamIdentity } from "../../task/team-runtime";
 import type { TeamDefinition } from "../../task/teams";
 import { findLocalSession } from "../session-directory";
@@ -50,14 +51,9 @@ export class TeamEndpoint implements TeamClient {
 		if (!members) return false;
 		const current = members.get(handle) as TeamCommandMember | undefined;
 		if (!sameMember(current, expected)) return false;
-		const sameRef =
-			entry.ref &&
-			current?.ref &&
-			entry.ref.id === current.ref.id &&
-			entry.ref.generation === current.ref.generation;
-		if (entry.ref && (entry.ref.id !== entry.id || (!sameRef && AgentRegistry.global().get(entry.id) !== entry.ref)))
-			return false;
-		members.set(handle, { ...entry, ...(sameRef ? { ref: current.ref } : {}) });
+		const ref = entry.ref && AgentRegistry.global().get(entry.id);
+		if (entry.ref && (!ref || entry.ref.id !== entry.id || ref.generation !== entry.ref.generation)) return false;
+		members.set(handle, { ...entry, ...(ref ? { ref } : {}) });
 		return true;
 	}
 	async deleteMember(key: string, team: string, generation: number, handle: string, expected: TeamCommandMember) {
@@ -95,8 +91,9 @@ export class TeamEndpoint implements TeamClient {
 	}
 }
 
-let client: TeamClient = new TeamEndpoint();
+let client: TeamClient | undefined = isMainThread ? new TeamEndpoint() : undefined;
 export function getTeamClient(): TeamClient {
+	if (!client) throw new Error("Team client has not been installed in this worker");
 	return client;
 }
 export function installTeamClient(remote: TeamClient): void {

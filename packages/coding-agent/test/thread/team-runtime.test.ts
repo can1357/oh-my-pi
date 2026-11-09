@@ -46,6 +46,20 @@ describe("team runtime authorization", () => {
 		).toEqual([{ id: "1", title: "Inspect", owner: null, status: "open", note: "" }]);
 	});
 
+	it("authorizes a copied member ref with the same generation", async () => {
+		const registry = AgentRegistry.global();
+		const lead = session();
+		const child = session();
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref: { ...ref } });
+		expect(
+			(await runtime.claim(child, { team: "audit", generation: started.generation, memberId: "worker" }, "1")).kind,
+		).toBe("claimed");
+	});
+
 	it("revokes teams when a local lead session is disposed", async () => {
 		const disposers: Array<() => void> = [];
 		const lead = { addDisposer: (dispose: () => void) => disposers.push(dispose) } as unknown as AgentSessionHandle;
@@ -196,6 +210,57 @@ describe("team runtime authorization", () => {
 			).toEqual([{ id: "1", title: "Inspect", owner: null, status: "open", note: "" }]);
 		} finally {
 			await worker.terminate("test end");
+		}
+	});
+	it("handles worker lead member refs through status, claim and stop", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-team-lead-"));
+		const teamsDir = path.join(directory, ".omp", "teams");
+		await fs.mkdir(teamsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(teamsDir, "audit.md"),
+			[
+				"---",
+				"name: audit",
+				"description: audit",
+				"members:",
+				"  - agent: scout",
+				"    handle: worker-member",
+				"---",
+				"Audit",
+			].join("\n"),
+		);
+		const ready = Promise.withResolvers<TeamProbe>();
+		const probeService: ThreadService = {
+			name: "team-probe",
+			globals: (): TeamProbeGlobals => ({ ready: ready.resolve }),
+		};
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/team-runtime-worker.ts", import.meta.url),
+			services: [identityThreadService, agentsThreadService, teamThreadService, probeService],
+			initTimeoutMs: 60_000,
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			expect(await probe.beforeInstall()).toContain("has not been installed");
+			const lead = await probe.open("worker-lead");
+			const member = await probe.open("worker-member");
+			const started = await probe.start(lead, team);
+			expect(await probe.putMember(lead, started.generation, "worker-member")).toBe(true);
+			expect(await probe.command(lead, directory, "status audit")).toContain("worker-member - running");
+			expect(
+				(
+					await probe.claim(
+						member,
+						{ team: "audit", generation: started.generation, memberId: "worker-member" },
+						"1",
+					)
+				).kind,
+			).toBe("claimed");
+			expect(await probe.command(lead, directory, "stop audit")).toContain("released");
+		} finally {
+			await worker.terminate("test end");
+			await fs.rm(directory, { recursive: true, force: true });
 		}
 	});
 });

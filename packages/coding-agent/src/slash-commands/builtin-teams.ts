@@ -66,22 +66,32 @@ async function updateMember(
 	update: (entry: TeamCommandMember) => TeamCommandMember | undefined,
 ): Promise<boolean> {
 	const client = getTeamClient();
-	for (;;) {
+	for (let attempt = 0; attempt < 16; attempt++) {
 		const snapshot = await client.members(key, team);
 		if (snapshot?.generation !== generation) return false;
 		const current = snapshot.members.find(([name]) => name === handle)?.[1];
 		if (!current || current.reservation !== original.reservation || current.id !== original.id) return false;
 		const next = update(current);
-		if (
-			next?.ref &&
-			(next.ref.id !== next.id || (next.ref !== current.ref && AgentRegistry.global().get(next.id) !== next.ref))
-		)
+		const registered = next?.ref && AgentRegistry.global().get(next.id);
+		if (next?.ref && (!registered || next.ref.id !== next.id || next.ref.generation !== registered.generation))
 			return false;
 		const changed = next
 			? await client.putMember(key, team, generation, handle, current, next)
 			: await client.deleteMember(key, team, generation, handle, current);
 		if (changed) return true;
+		const refreshed = await client.members(key, team);
+		const latest = refreshed?.members.find(([name]) => name === handle)?.[1];
+		if (
+			refreshed?.generation === snapshot.generation &&
+			latest?.id === current.id &&
+			latest?.reservation === current.reservation &&
+			latest?.failure === current.failure &&
+			latest?.ref?.id === current.ref?.id &&
+			latest?.ref?.generation === current.ref?.generation
+		)
+			return false;
 	}
+	return false;
 }
 
 export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -197,17 +207,40 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const recorded = new Map<string, TeamCommandMember>();
 				const ids = new Map<(typeof members)[number], string>();
 				const newlyReserved = new Set<string>();
+				const releaseReservations = async () => {
+					for (const reservedHandle of newlyReserved)
+						releaseStructuredSubagentId(toolSession, recorded.get(reservedHandle)!.id);
+					for (const reservedHandle of newlyReserved)
+						await client.deleteMember(
+							key,
+							team.name,
+							started.generation,
+							reservedHandle,
+							recorded.get(reservedHandle)!,
+						);
+				};
 				for (const member of members) {
 					const handle = sanitizeTeamHandle(member.handle);
+					let conflicts = 0;
 					for (;;) {
 						const snapshot = await client.members(key, team.name);
-						if (snapshot?.generation !== started.generation)
-							throw new Error("Team generation is no longer active");
+						if (snapshot?.generation !== started.generation) {
+							await releaseReservations();
+							await runtime.output(teamRuntimeError("Team generation is no longer active"));
+							return commandConsumed();
+						}
 						const current = snapshot.members.find(([name]) => name === handle)?.[1];
 						if (current && current.failure === undefined) {
 							recorded.set(handle, current);
 							ids.set(member, current.id);
 							break;
+						}
+						if (conflicts >= 10) {
+							await releaseReservations();
+							await runtime.output(
+								teamRuntimeError(`could not reserve member "${handle}" due to repeated conflicts`),
+							);
+							return commandConsumed();
 						}
 						const entry: TeamCommandMember = {
 							id: await reserveStructuredSubagentId(toolSession, { label: handle }),
@@ -220,6 +253,7 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							break;
 						}
 						releaseStructuredSubagentId(toolSession, entry.id);
+						conflicts += 1;
 					}
 				}
 				for (const member of members) {
@@ -330,7 +364,11 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					team.members.map(member => {
 						const handle = sanitizeTeamHandle(member.handle);
 						const entry = snapshot?.members.find(([name]) => name === handle)?.[1];
-						const ref = entry?.ref && registry.get(entry.id) === entry.ref ? entry.ref : undefined;
+						const registered = entry?.ref && registry.get(entry.id);
+						const ref =
+							registered && registered.id === entry?.ref?.id && registered.generation === entry.ref.generation
+								? registered
+								: undefined;
 						const status = ref
 							? `${ref.status} (${ref.kind})`
 							: entry?.failure !== undefined
@@ -371,12 +409,12 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 							await client.deleteMember(key, team.name, snapshot.generation, handle, entry);
 							continue;
 						}
-						const ref = entry.ref;
-						if (!ref) {
+						if (!entry.ref) {
 							lines.push(`  ${handle} - pending (${entry.id}); retry stop after registration`);
 							continue;
 						}
-						if (registry.get(entry.id) !== ref) {
+						const ref = registry.get(entry.id);
+						if (!ref || ref.id !== entry.ref.id || ref.generation !== entry.ref.generation) {
 							lines.push(`  ${handle} - no longer a team member`);
 							await client.deleteMember(key, team.name, snapshot.generation, handle, entry);
 							continue;

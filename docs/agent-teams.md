@@ -48,6 +48,10 @@ unrelated ref that happens to share a handle.
   with `/release` or complete it with `/done` (the write body becomes the note).
   Claims are atomic across teams sharing a workspace. A released task is open
   again. The caller's session determines its identity, not the write body.
+  Added titles are trimmed and must not contain line breaks. Multi-line completion
+  notes remain intact, with continuation lines indented in the generated view.
+  If a view update fails after the ledger commit, the error says the mutation
+  committed; the view is regenerated on the next operation.
 - an optional **shared workspace**: `workspace:` is resolved relative to the
   team file and added to each child's additional directories, not substituted
   for its working directory. The workspace's `tasks.json` is the authoritative

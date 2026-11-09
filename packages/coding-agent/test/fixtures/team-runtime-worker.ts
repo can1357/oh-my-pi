@@ -21,11 +21,15 @@ import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { teamThreadService } from "../../src/thread/services/team";
 import { getTeamClient } from "../../src/thread/services/team-client";
+import { BUILTIN_TEAMS_SLASH_COMMANDS } from "../../src/slash-commands/builtin-teams";
 
 export interface TeamProbe {
 	open(id: string): Promise<string>;
 	start(key: string, team: TeamDefinition): Promise<{ generation: number; leadId: string }>;
 	claim(key: string, identity: TeamIdentity, id: string): Promise<TeamClaimResult>;
+	putMember(key: string, generation: number, memberId: string): Promise<boolean>;
+	command(key: string, cwd: string, args: string): Promise<string>;
+	beforeInstall(): Promise<string>;
 }
 export interface TeamProbeGlobals {
 	ready(probe: TeamProbe): void;
@@ -34,7 +38,11 @@ export interface TeamProbeGlobals {
 const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 const sessions = new Map<string, AgentSession>();
+let beforeInstall = "";
 const probe: TeamProbe = {
+	async beforeInstall() {
+		return beforeInstall;
+	},
 	async open(id) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("bundled model missing");
@@ -59,6 +67,34 @@ const probe: TeamProbe = {
 	},
 	start: (key, team) => getTeamClient().start(key, team),
 	claim: (key, identity, id) => getTeamClient().claim(key, identity, id),
+	async putMember(key, generation, memberId) {
+		const ref = AgentRegistry.global().get(memberId);
+		if (!ref) throw new Error("member missing");
+		return getTeamClient().putMember(key, "audit", generation, memberId, null, {
+			id: memberId,
+			reservation: "worker-test",
+			ref: { ...ref },
+		});
+	},
+	async command(key, cwd, args) {
+		const session = [...sessions.values()].find(value => value.instanceKey === key);
+		if (!session) throw new Error("session missing");
+		const outputs: string[] = [];
+		const handle = BUILTIN_TEAMS_SLASH_COMMANDS[0]!.handle as unknown as (
+			command: { args: string },
+			runtime: unknown,
+		) => Promise<void>;
+		await handle(
+			{ args },
+			{
+				session,
+				settings: Settings.isolated({ "team.enabled": true }),
+				sessionManager: { getCwd: () => cwd },
+				output: (text: string) => outputs.push(text),
+			},
+		);
+		return outputs.join("\n");
+	},
 };
 const probeService: ThreadService = {
 	name: "team-probe",
@@ -83,6 +119,12 @@ port.on("message", (message: unknown) => {
 			return;
 		const init = message as SubagentWorkerInit;
 		setCurrentThreadId(init.threadId);
+		try {
+			getTeamClient();
+			beforeInstall = "unexpected client";
+		} catch (error) {
+			beforeInstall = error instanceof Error ? error.message : String(error);
+		}
 		const link: WorkerThreadLink = new RpcLink(
 			{
 				send: frame => port.postMessage(frame),

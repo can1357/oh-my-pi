@@ -33,6 +33,7 @@ import * as teamsModule from "@oh-my-pi/pi-coding-agent/task/teams";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { teamRuntime as teamRuntimeState } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
+import { getTeamClient } from "@oh-my-pi/pi-coding-agent/thread/services/team-client";
 import { registerLocalSession } from "@oh-my-pi/pi-coding-agent/thread/session-directory";
 
 const TEAM_YAML = `---
@@ -361,7 +362,7 @@ describe("team handle through the spawn seam", () => {
 });
 
 const TEAM_COMMAND = BUILTIN_TEAMS_SLASH_COMMANDS[0]!;
-const TEAM_HANDLE = TEAM_COMMAND.handle as unknown as (command: { args: string }, runtime: unknown) => Promise<void>;
+const TEAM_HANDLE = TEAM_COMMAND.handle as unknown as (command: { args: string }, runtime: unknown) => Promise<unknown>;
 
 interface TeamFixture {
 	team: TeamDefinition;
@@ -432,6 +433,68 @@ function teamRuntime(root: string): { runtime: unknown; outputs: string[] } {
 }
 
 describe("team startup lifecycle", () => {
+	it("releases all new reservations when the team generation changes during startup", async () => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout", "Reviewer", "Writer"] });
+		try {
+			mockTeamDiscovery(team);
+			const spawn = vi.spyOn(spawnSubagent, "spawnSubagentForSession");
+			const { runtime, outputs } = teamRuntime(root);
+			const session = (runtime as { session: { toolSession: ToolSession } }).session;
+			const client = getTeamClient();
+			const members = client.members.bind(client);
+			let reads = 0;
+			vi.spyOn(client, "members").mockImplementation(async (key, name) => {
+				if (++reads === 3) {
+					await teamRuntimeState.stop(session, team.name);
+					await teamRuntimeState.start(session, team);
+				}
+				return members(key, name);
+			});
+
+			expect(await TEAM_HANDLE({ args: "start audit" }, runtime)).toEqual({ consumed: true });
+			expect(outputs).toContain("team: Team generation is no longer active");
+			expect(spawn).not.toHaveBeenCalled();
+			const fresh = { getArtifactsDir: () => null } as unknown as ToolSession;
+			const scout = await reserveStructuredSubagentId(fresh, { label: "Scout" });
+			const reviewer = await reserveStructuredSubagentId(fresh, { label: "Reviewer" });
+			expect([scout, reviewer]).toEqual(["Scout", "Reviewer"]);
+			releaseStructuredSubagentId(fresh, scout);
+			releaseStructuredSubagentId(fresh, reviewer);
+		} finally {
+			await cleanup();
+		}
+	});
+	it("abandons startup and frees reservations when membership updates keep conflicting", async () => {
+		const { team, root, cleanup } = await teamFixture({ handles: ["Scout", "Reviewer"] });
+		try {
+			mockTeamDiscovery(team);
+			const spawn = vi.spyOn(spawnSubagent, "spawnSubagentForSession");
+			const { runtime, outputs } = teamRuntime(root);
+			const session = (runtime as { session: { toolSession: ToolSession } }).session;
+			const client = getTeamClient();
+			const putMember = client.putMember.bind(client);
+			const put = vi
+				.spyOn(client, "putMember")
+				.mockImplementation(async (...args) => (args[3] === "Reviewer" ? false : putMember(...args)));
+
+			expect(await TEAM_HANDLE({ args: "start audit" }, runtime)).toEqual({ consumed: true });
+			expect(outputs.join("\n")).toContain("team:");
+			expect(outputs.join("\n")).toContain("Reviewer");
+			expect(put.mock.calls.length).toBeGreaterThan(1);
+			expect(put.mock.calls.length).toBeLessThan(100);
+			expect(spawn).not.toHaveBeenCalled();
+			expect(teamRuntimeState.members(session, team.name)?.size).toBe(0);
+			const fresh = { getArtifactsDir: () => null } as unknown as ToolSession;
+			const scout = await reserveStructuredSubagentId(fresh, { label: "Scout" });
+			const reviewer = await reserveStructuredSubagentId(fresh, { label: "Reviewer" });
+			expect([scout, reviewer]).toEqual(["Scout", "Reviewer"]);
+			releaseStructuredSubagentId(fresh, scout);
+			releaseStructuredSubagentId(fresh, reviewer);
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("stops an empty generation after all spawns fail", async () => {
 		const { team, root, cleanup } = await teamFixture({ handles: ["Scout"] });
 		try {

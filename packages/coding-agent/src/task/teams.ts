@@ -231,7 +231,4 @@ export function renderTeamMemberPrompt(team: TeamDefinition, assignment: string 
 	return parts.join("\n").trim();
 }
 
-/** Filename of the shared task list a team's workspace keeps. */
-export const TEAM_TASKS_FILE = "TASKS.md";
-
 export const TEAMS_DIR_MARKER = path.join(os.homedir(), ".omp");
