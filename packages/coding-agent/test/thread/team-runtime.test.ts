@@ -3,9 +3,10 @@ import { Settings } from "../../src/config/settings";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AgentRegistry } from "../../src/registry/agent-registry";
-import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
+import { AgentRegistry, type AgentRef } from "../../src/registry/agent-registry";
+import type { AgentDefinition } from "../../src/task/types";
 import { IrcBus } from "../../src/irc/bus";
+import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { TeamRuntime } from "../../src/task/team-runtime";
 import type { TeamDefinition } from "../../src/task/teams";
@@ -102,6 +103,40 @@ describe("team idle notifications", () => {
 			await runtime.stop(lead, "audit");
 		},
 	);
+
+	it("falls back to the run's yielded summary when the final turn carries no excerpt", async () => {
+		// A final turn with neither text nor yield/handback arguments: the
+		// caller-provided run summary stands in, bounded to the excerpt shape.
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const delivered = Promise.withResolvers<void>();
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				delivered.resolve();
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "sub", session: lead, status: "idle" });
+		// A tool call that is neither yield nor handback: no excerpt source.
+		const child = {
+			messages: [{ role: "assistant", content: [{ type: "toolCall", id: "read-1", name: "read", arguments: {} }] }],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, team);
+		started.members.set("worker", { id: "worker", ref });
+		const longSummary = `${"s".repeat(600)}\nsecond line\nthird line\nfourth line`;
+		registry.markTurnSettled("worker", ref, longSummary);
+		await delivered.promise;
+		expect(notices[0]).toContain("worker is idle.");
+		// The fallback is bounded: three lines, 500 characters.
+		expect(notices[0]).not.toContain("fourth line");
+		expect(notices[0]!.length).toBeLessThan(550);
+		expect(notices[0]).toContain("s".repeat(500));
+		expect(notices[0]).toEndWith("agent://worker");
+		await runtime.stop(lead, "audit");
+	});
 
 	it("notifies the actual lead once per completed running turn and ignores replaced members", async () => {
 		IrcBus.resetGlobalForTests();
@@ -1743,6 +1778,54 @@ describe("team runtime authorization", () => {
 		} finally {
 			await worker.terminate("test end");
 			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("notifies the lead when a worker-hosted member's turn settles", async () => {
+		// The worker-hosted member's settle crosses worker→main RPC: the
+		// worker's registry proxy calls markTurnSettled via callSync, main's
+		// registry emits `final: true`, and main's team runtime sends the idle
+		// notice. Main-side `ref.session` is the remote mirror, not the
+		// worker's local session, so the excerpt must resolve there too.
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ready = Promise.withResolvers<TeamProbe>();
+		const probeService: ThreadService = {
+			name: "team-probe",
+			globals: (): TeamProbeGlobals => ({ ready: ready.resolve }),
+		};
+		const worker = new SubagentWorker({
+			entry: new URL("../fixtures/team-runtime-worker.ts", import.meta.url),
+			services: [identityThreadService, agentsThreadService, teamThreadService, probeService],
+			initTimeoutMs: 60_000,
+		});
+		try {
+			await worker.ready;
+			const probe = await ready.promise;
+			const started = await teamRuntime.start(lead, team);
+			// Open a real member session in the worker; its registration is
+			// forwarded to main's registry.
+			const key = await probe.open("worker-member");
+			expect(key).toBeTruthy();
+			const ref = registry.get("worker-member");
+			if (!ref) throw new Error("worker member did not register");
+			started.members.set("worker-member", { id: "worker-member", ref });
+			// The member's turn finishes in the worker: the settle call
+			// crosses the RPC bridge and produces main-side the notice.
+			expect(await probe.runTurn("worker-member")).toBe(true);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("worker-member is idle.");
+			expect(notices[0]).toEndWith("agent://worker-member");
+		} finally {
+			await worker.terminate("test end");
+			await teamRuntime.stop(lead, "audit");
 		}
 	});
 });

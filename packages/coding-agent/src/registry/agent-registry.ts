@@ -379,12 +379,15 @@ export class AgentRegistry implements AgentRegistryApi {
 	 *
 	 * A ref still `running` with nothing streaming is terminalized first, the
 	 * same missed-transition reconciliation {@link markResultAccepted} performs;
-	 * a genuinely streaming session (a wake turn started at the boundary)
-	 * keeps its settle pending and returns false — callers re-issue it once the
-	 * run-state mirror delivers the missing transition.
+	 * a genuinely streaming session (a wake turn started at the boundary) makes
+	 * the settle a no-op that returns false — the settle is dropped, not
+	 * queued: the turn's outcome already reached its waiters through the wake
+	 * relays, so only the notice is lost, and the ref's own idle transition
+	 * (published by the run-state mirror) never carries `final`.
 	 *
 	 * `summary` is the turn's yielded summary, used as the notice excerpt when
 	 * the final turn itself carries no text (an empty excerpt after a `yield`).
+	 * Like every excerpt it is bounded to three lines and 500 characters.
 	 * A ref that is no longer owned by `expected` settles nothing.
 	 */
 	markTurnSettled(id: string, expected?: AgentRefExpectation, summary?: string): boolean {
@@ -398,7 +401,9 @@ export class AgentRegistry implements AgentRegistryApi {
 			type: "status_changed",
 			ref,
 			previousStatus: "running",
-			summary: this.#idleExcerpt(ref) ?? summary,
+			summary:
+				this.#idleExcerpt(ref) ??
+				(summary?.trim() ? summary.split(/\r?\n/, 4).slice(0, 3).join("\n").slice(0, 500) : undefined),
 			final: true,
 		});
 		return true;

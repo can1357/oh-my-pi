@@ -5486,12 +5486,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Turn finally idle (#T-4): the run reached its terminal decision —
 			// an accepted yield/handback or reminders exhausted. Publish the
 			// settle the team runtime's idle notice keys on; the monitor's
-			// report-turn text is the final turn's own summary.
-			AgentRegistry.global().markTurnSettled(
-				id,
-				session,
-				monitor.lastReportTurnText()?.trim() || monitor.rawOutput().trim() || undefined,
-			);
+			// report-turn text is the final turn's own summary. An aborted run
+			// has no terminal decision to settle: its mirror may not have
+			// delivered `aborted` yet, and a notice must not fire for it.
+			if (!aborted) {
+				AgentRegistry.global().markTurnSettled(
+					id,
+					session,
+					monitor.lastReportTurnText()?.trim() || monitor.rawOutput().trim() || undefined,
+				);
+			}
 		} catch (err) {
 			exitCode = 1;
 			if (!abortSignal.aborted) {

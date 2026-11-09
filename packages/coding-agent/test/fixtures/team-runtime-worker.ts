@@ -1,4 +1,7 @@
 import { MessagePort, parentPort } from "node:worker_threads";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -9,8 +12,8 @@ import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
-import type { TeamIdentity, TeamStopResponse } from "../../src/task/team-runtime";
 import type { TeamClaimResult } from "../../src/task/team-ledger";
+import type { TeamIdentity, TeamStopResponse } from "../../src/task/team-runtime";
 import type { TeamDefinition } from "../../src/task/teams";
 import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
@@ -34,6 +37,8 @@ export interface TeamProbe {
 	memberIdentity(key: string, team: string, generation: number, handle: string): Promise<TeamIdentity>;
 	command(key: string, cwd: string, args: string): Promise<string>;
 	beforeInstall(): Promise<string>;
+	/** Settle a worker-hosted member's finished turn through the worker→main registry RPC. */
+	runTurn(id: string): Promise<boolean>;
 }
 export interface TeamProbeGlobals {
 	ready(probe: TeamProbe): void;
@@ -102,6 +107,17 @@ const probe: TeamProbe = {
 			},
 		);
 		return outputs.join("\n");
+	},
+	async runTurn(id) {
+		// Drive the settle from the worker through the real registry proxy:
+		// markTurnSettled's callSync crosses worker→main RPC, main's registry
+		// emits `final: true`, and main's team runtime sends the notice. The
+		// ref is flipped idle first, as a finished member turn leaves it.
+		const registry = AgentRegistry.global();
+		const ref = registry.get(id);
+		if (!ref) throw new Error("member missing");
+		registry.setStatus(id, "idle", ref);
+		return registry.markTurnSettled(id, ref);
 	},
 };
 const probeService: ThreadService = {

@@ -2039,6 +2039,44 @@ describe("persisted subagent revival", () => {
 			IrcBus.resetGlobalForTests();
 		});
 
+		it("settles the turn exactly once on the registry when a wake turn finishes", async () => {
+			// The wake-turn observer's finish publishes the turn's settle: one
+			// `final: true` status_changed carrying the turn's answer text as the
+			// summary. The harness's run-state mirror never delivers idle, so the
+			// settle's reconciliation must terminalize the ref itself.
+			const cwd = makeTempDir("@pi-revive-settle-");
+			const { ref, handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+			// The spy bypasses real registration: bind the revived session and
+			// mark the turn running, as the live createAgentSession + revive flow
+			// would, so the settle's ref-ownership check passes.
+			const registry = AgentRegistry.global();
+			expect(registry.attachSession(ref.id, handle.session as never, ref.sessionFile, registry.get(ref.id))).toBe(
+				true,
+			);
+			registry.setStatus(ref.id, "running", registry.get(ref.id));
+			const finals: Array<{ id: string; summary?: string }> = [];
+			const unsubscribe = registry.onChange(event => {
+				if (event.type === "status_changed" && event.final === true)
+					finals.push({ id: event.ref.id, summary: event.summary });
+			});
+			try {
+				const finish = observer?.([wakeRecord("Main")]);
+				handle.setLastAssistantText("Turn answer");
+				await finish?.();
+				await handle.trackedReplies[0];
+
+				expect(finals).toEqual([{ id: ref.id, summary: "Turn answer" }]);
+				expect(AgentRegistry.global().get(ref.id)?.status).toBe("idle");
+			} finally {
+				unsubscribe();
+				AgentLifecycleManager.resetGlobalForTests();
+				AgentRegistry.resetGlobalForTests();
+				IrcBus.resetGlobalForTests();
+			}
+		});
+
 		it("relays the attributed provider error when the wake turn fails", async () => {
 			// A failed wake turn (provider error / exhausted fallback chain) must not
 			// look like a healthy peer that chose not to answer: the waiter needs the
