@@ -1600,6 +1600,16 @@ export interface CursorExecHandlers {
 	 */
 	mcpApprovalPreflight?: (call: CursorMcpCall) => Promise<boolean>;
 	/**
+	 * How a locally executed MCP call is ordered against the run's other exec
+	 * frames: `"exclusive"` waits for every unfinished earlier frame and holds
+	 * later frames until it finishes, mirroring the agent loop's scheduling of
+	 * the same tool. Resolve it from the tool the call will actually run — the
+	 * frame's name may be an alias the host rewrites onto another tool.
+	 * Without it every MCP call is `"shared"`. Approval probes execute
+	 * nothing, so they are never classified.
+	 */
+	mcpConcurrency?: (call: CursorMcpCall) => "shared" | "exclusive";
+	/**
 	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51). They are a
 	 * distinct frame family from the legacy `readArgs`/`shellArgs`/... set, not
 	 * an alias: different args, different result oneofs, and no `tool_call_id`.

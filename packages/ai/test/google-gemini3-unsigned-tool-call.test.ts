@@ -142,4 +142,14 @@ describe("Gemini 3 unsigned tool-call signatures (#9638, #10602)", () => {
 		expect(model.identity.class).toBe("gemini");
 		expect(toolCallParts(model, unsigned)[0]?.thoughtSignature).toBe(SENTINEL);
 	});
+
+	it("base64-encodes the sentinel when compat.base64SkipThoughtSignature is set", () => {
+		const base = buildGeminiModel("google-generative-ai", "gateway", "gemini-3.8-flash");
+		const model = buildModel({ ...base, compat: { base64SkipThoughtSignature: true } });
+		const sentinel = Buffer.from(SENTINEL).toString("base64");
+		const calls = toolCallParts(model, parallelToolCalls("google-generative-ai", "gateway", "gemini-3.8-flash"));
+
+		expect(calls[0]?.thoughtSignature).toBe(VALID_SIGNATURE);
+		expect(calls[1]?.thoughtSignature).toBe(sentinel);
+	});
 });

@@ -615,7 +615,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		input.prompt = "";
 		input.mask = field.type === "password";
 		input.placeholder = field.placeholder || undefined;
-		input.setValue(field.value);
+		input.setValue(field.value, { cursor: "start" });
 		input.onSubmit = () => this.#moveField(1);
 		this.#inputs.set(field, input);
 	}
