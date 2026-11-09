@@ -148,13 +148,18 @@ function sanitize(text: string): string {
 	return replaceTabs(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
 }
 
+/** Display text confined to one panel row. */
+function oneLine(text: string): string {
+	return sanitize(text).replace(/\s+/g, " ").trim();
+}
+
 /** A single select draws as a one-row dropdown; multi-selects keep option rows. */
 function isDropdown(field: ChoiceField): boolean {
 	return field.select && !field.multi;
 }
 
 function optionText(option: ChoiceOption): string {
-	return sanitize(spansText(option.label)).replace(/\s+/g, " ").trim();
+	return oneLine(spansText(option.label));
 }
 
 /** Split spans at hard breaks into display lines. */
@@ -206,6 +211,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #fieldIndex = new Map<FormField, number>();
 	readonly #checked = new Map<ChoiceField, Set<number>>();
 	readonly #inputs = new Map<TextField, Input>();
+	readonly #placeholders = new Map<TextField, string>();
 	/** The Other answer's text of each group that offers one. */
 	readonly #others = new Map<ChoiceField, Input>();
 	/** Each radio group's Other text as last seen, to notice typing from keys or the terminal. */
@@ -599,13 +605,15 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#initText(field: TextField): void {
+		const placeholder = oneLine(field.placeholder);
+		this.#placeholders.set(field, placeholder);
 		if (field.multiline) {
 			const editor = new Editor(getEditorTheme());
 			editor.setBorderVisible(false);
 			editor.setMaxHeight(this.#textareaRows(field));
 			// Enter leaves the field (handled before the editor); Shift+Enter inserts newlines.
 			editor.disableSubmit = true;
-			editor.placeholder = () => field.placeholder || undefined;
+			editor.placeholder = () => placeholder || undefined;
 			// Prefilled drafts (a commit message) open at their first line, not scrolled to the end.
 			editor.setText(field.value, { cursor: "start" });
 			this.#editors.set(field, editor);
@@ -614,7 +622,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const input = new Input();
 		input.prompt = "";
 		input.mask = field.type === "password";
-		input.placeholder = field.placeholder || undefined;
+		input.placeholder = placeholder || undefined;
 		input.setValue(field.value);
 		input.onSubmit = () => this.#moveField(1);
 		this.#inputs.set(field, input);
@@ -1237,6 +1245,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const prefix = `${padding(FIELD_INDENT - 2)}${bar} `;
 		const inner = Math.max(1, width - FIELD_INDENT);
 		const value = this.#textValue(field);
+		const placeholder = this.#placeholders.get(field)!;
 		let rows: string[];
 		if (field.multiline) {
 			const height = this.#textareaRows(field);
@@ -1246,7 +1255,7 @@ export class HtmlFormDialog implements Component, Focusable {
 					? sanitize(value)
 							.split("\n")
 							.map(line => theme.fg("toolOutput", truncateToWidth(line, inner, Ellipsis.Unicode)))
-					: [theme.fg("dim", truncateToWidth(sanitize(field.placeholder), inner, Ellipsis.Unicode))];
+					: [theme.fg("dim", truncateToWidth(placeholder, inner, Ellipsis.Unicode))];
 			if (rows.length > height) {
 				rows = rows.slice(0, height);
 				if (!focused) rows[height - 1] = theme.fg("dim", truncateToWidth("…", inner));
@@ -1255,15 +1264,15 @@ export class HtmlFormDialog implements Component, Focusable {
 		} else if (focused) {
 			const input = this.#inputs.get(field)!;
 			input.cursorOverride =
-				value === "" && field.placeholder
-					? `\x1b[7m \x1b[27m${theme.fg("dim", truncateToWidth(sanitize(field.placeholder), Math.max(1, inner - 1)))}`
+				value === "" && placeholder
+					? `\x1b[7m \x1b[27m${theme.fg("dim", truncateToWidth(placeholder, Math.max(1, inner - 1)))}`
 					: undefined;
 			rows = [...input.render(inner)];
 		} else if (value) {
 			const shown = field.type === "password" ? "•".repeat(value.length) : sanitize(value);
 			rows = [theme.fg("toolOutput", truncateToWidth(shown, inner, Ellipsis.Unicode))];
 		} else {
-			rows = [theme.fg("dim", truncateToWidth(sanitize(field.placeholder), inner, Ellipsis.Unicode))];
+			rows = [theme.fg("dim", truncateToWidth(placeholder, inner, Ellipsis.Unicode))];
 		}
 		return [...label, ...rows.map(row => `${prefix}${row}`)];
 	}
