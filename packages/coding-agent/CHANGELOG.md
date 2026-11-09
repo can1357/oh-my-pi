@@ -15,6 +15,7 @@
 ### Changed
 
 - Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+- RPC mode now prewarms the active model's API connection on `model_changed` events and when typing triggers `predict_word`, matching interactive mode ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
 
 ## [18.18.7] - 2026-11-10
 

@@ -12,6 +12,12 @@ provider "google-antigravity" {
 	// No size rejection up to a 64 MB body; 60 images at the 500 KiB resize
 	// target stay near 41 MB. Gemini counts images only against its context.
 	image-count-budget 60
+	// Sandbox Cloud Code Assist failover host (see google-gemini-cli.ts).
+	endpoint-hosts "daily-cloudcode-pa.sandbox.googleapis.com"
+	// Google Front End decodes gzip request bodies and rejects zstd/br with a 415
+	// ("Unsupported Content-Encoding; only identity/gzip are supported.").
+	request-encodings "gzip"
+	request-encoding-rejection "Unsupported Content-Encoding"
 
 	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
 		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {

@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Changed
+
+- Prewarm Google (`google`, `google-gemini-cli`) API connections before the first turn, compress opted-in Google request payloads with `gzip` at or above 1 KiB (`1,024` bytes, with automatic plaintext fallback on `"Unsupported Content-Encoding"` rejections), and memoize normalized Gemini/Claude Code Assist tool schemas ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+
 ## [18.18.7] - 2026-11-10
 
 ### Added

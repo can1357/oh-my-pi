@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `prewarm-base-url` catalog axis (`prewarmBaseUrl`) and opted `google` and `google-gemini-cli` into pre-first-turn connection prewarming and `gzip` request body compression (`google-antigravity` also opts into `gzip` compression and declares its sandbox endpoint host) ([#17102](https://github.com/can1357/oh-my-pi/pull/17102) by [@GTanger](https://github.com/GTanger))
+
 ## [18.18.7] - 2026-11-10
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
