@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `task`/`agent()`/`workpool()` calls with `tools` from a Python eval cell hanging on Windows until the kernel was killed; Python kernel-defined tool requests made while a Python cell is running now fail immediately with an explanation ([#18644](https://github.com/can1357/oh-my-pi/issues/18644))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

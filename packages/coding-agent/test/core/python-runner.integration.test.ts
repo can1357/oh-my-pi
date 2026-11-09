@@ -782,6 +782,36 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("fails a Windows tool request behind a running cell instead of deadlocking (#18644)", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-busy-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		if (!platform) throw new Error("process.platform descriptor is unavailable");
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				["@tool", "def echo(text: str) -> str:", '    """Echo."""', "    return text"].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// The Windows runner reads tool requests only between cells; this cell
+			// stands in for one blocked on `await tool.task({... tools ...})`.
+			Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+			const cell = kernel.execute("import asyncio\nawait asyncio.sleep(0.5)");
+			const busy = await kernel.invokeTool({ op: "describe", names: ["echo"] }, { timeoutMs: 200 });
+			expect(busy.timedOut).toBe(false);
+			expect(busy.status).toBe("error");
+			expect(busy.error?.name).toBe("PythonKernelBusyError");
+
+			expect((await cell).status).toBe("ok");
+			const idle = await kernel.invokeTool({ op: "call", name: "echo", args: { text: "pong" } });
+			expect(idle.reply).toEqual({ ok: true, value: "pong" });
+		} finally {
+			Object.defineProperty(process, "platform", platform);
+			await kernel.shutdown();
+		}
+	});
+
 	it("coordinates concurrent async tool calls through a kernel-global asyncio lock", async () => {
 		using tempDir = TempDir.createSync("@python-runner-tool-lock-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

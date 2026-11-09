@@ -135,6 +135,8 @@ export interface Frame {
 interface PendingExecution {
 	resolve: (result: KernelExecuteResult) => void;
 	options?: KernelExecuteOptions;
+	/** True for a code cell ({@link BaseKernel.execute}); false for a raw {@link BaseKernel.submitRequest}. */
+	cell: boolean;
 	status: "ok" | "error";
 	executionCount?: number;
 	error?: { name: string; value: string; traceback: string[] };
@@ -292,6 +294,14 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		this.#died.resolve();
 	}
 
+	/** Whether a code cell submitted via {@link execute} has not settled yet. */
+	hasRunningCell(): boolean {
+		for (const pending of this.#pending.values()) {
+			if (pending.cell) return true;
+		}
+		return false;
+	}
+
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
 		const msgId = options?.id ?? Snowflake.next();
 		return await this.#submit(msgId, this.#options.buildPayload(code, msgId, options), options, "interrupt");
@@ -324,6 +334,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		const pending: PendingExecution = {
 			resolve,
 			options,
+			cell: cancel === "interrupt",
 			status: "ok",
 			cancelled: false,
 			timedOut: false,
