@@ -775,3 +775,145 @@ fn nesting_is_a_syntax_error_past_the_limit_and_fits_a_default_stack_at_it() {
 		.join()
 		.unwrap();
 }
+
+#[cfg(unix)]
+/// Text, indentation and role of every statement or literal row: what a
+/// phase change must not move.
+fn chain_rows(p: &Value) -> Vec<(String, u64, String)> {
+	rows(p)
+		.into_iter()
+		.filter(|(_, row)| row["role"] == "stmt" || row["role"] == "raw")
+		.map(|(text, row)| {
+			(text, row["depth"].as_u64().unwrap(), row["role"].as_str().unwrap().to_owned())
+		})
+		.collect()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_and_chain_keeps_pseudo_connectors_while_running_and_after() {
+	// Regression for #18408: the minimizer runs each `&&` operand as its own
+	// unit, and the operators between (and before) them were drawn as raw
+	// ` && ` rows instead of Pseudo `and` connectors.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = root.path().join("wait.sh");
+	std::fs::write(&wait, format!("while [ ! -e \"{}\" ]; do sleep 0.01; done\n", gate.display()))
+		.unwrap();
+	let command = format!("echo start && /bin/sh {} && echo middle && echo end", wait.display());
+	let pending = chain_rows(&present(&RunTrace::new(command.as_str()), &Options::default()));
+	assert_eq!(pending.len(), 4, "{pending:?}");
+	assert_eq!(pending[0], ("print(\"start\")".into(), 0, "stmt".into()));
+	assert!(
+		pending[1..]
+			.iter()
+			.all(|(text, depth, role)| text.starts_with("and ") && *depth == 1 && role == "stmt"),
+		"{pending:?}"
+	);
+
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let shell = Shell::new(Some(crate::ShellOptions {
+		minimizer: Some(crate::minimizer::MinimizerOptions {
+			enabled: Some(true),
+			..Default::default()
+		}),
+		..Default::default()
+	}));
+	let run = shell.run(
+		ShellRunOptions {
+			command: command.clone(),
+			trace: Some(Arc::clone(&trace)),
+			..Default::default()
+		},
+		None,
+		().into(),
+	);
+	let probe = async {
+		// The gate segment is the second announced unit; the tail is unrun.
+		while trace
+			.snapshot()
+			.units
+			.iter()
+			.filter(|unit| unit.at.is_some())
+			.count()
+			< 2
+		{
+			tokio::task::yield_now().await;
+		}
+		let running = chain_rows(&present(&trace, &Options::default()));
+		std::fs::write(&gate, []).unwrap();
+		running
+	};
+	let (result, running) =
+		tokio::time::timeout(std::time::Duration::from_secs(10), async { tokio::join!(run, probe) })
+			.await
+			.unwrap();
+	assert_eq!(result.unwrap().exit_code, Some(0));
+	assert_eq!(running, pending, "running");
+	assert_eq!(chain_rows(&present(&trace, &Options::default())), pending, "finished");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn running_command_keeps_the_script_it_runs_active() {
+	// What a command runs is part of the command: while it runs, its heredoc
+	// and its untraced `sh -c` script must not dim like inactive rows.
+	let root = tempfile::tempdir().unwrap();
+	let gate = root.path().join("gate");
+	let wait = format!("while [ ! -e \"{}\" ]; do sleep 0.01; done", gate.display());
+	for command in [
+		format!("/bin/sh <<'EOF'\n{wait}\necho done\nEOF\necho after"),
+		format!("/bin/sh -c '{wait}\necho done'\necho after"),
+	] {
+		let _ = std::fs::remove_file(&gate);
+		let trace = Arc::new(RunTrace::new(command.as_str()));
+		let shell = Shell::new(None);
+		let run = shell.run(
+			ShellRunOptions {
+				command: command.clone(),
+				trace: Some(Arc::clone(&trace)),
+				..Default::default()
+			},
+			None,
+			().into(),
+		);
+		let probe = async {
+			loop {
+				let p = present(&trace, &Options::default());
+				if p["running"] == true {
+					let raw = present(&trace, &Options { view: View::Raw, ..Options::default() });
+					std::fs::write(&gate, []).unwrap();
+					return (p, raw);
+				}
+				tokio::task::yield_now().await;
+			}
+		};
+		let (result, (running, raw)) =
+			tokio::time::timeout(std::time::Duration::from_secs(10), async {
+				tokio::join!(run, probe)
+			})
+			.await
+			.unwrap();
+		assert_eq!(result.unwrap().exit_code, Some(0));
+		let shown = rows(&running);
+		let script: Vec<&(String, &Value)> = shown
+			.iter()
+			.filter(|(_, row)| row["depth"].as_u64() > Some(0))
+			.collect();
+		assert!(script.len() >= 3, "{command:?}: {running}");
+		assert!(script.iter().all(|(_, row)| row["active"] == true), "{command:?}: {running}");
+		let (_, after) = shown.last().unwrap();
+		assert_ne!(after["active"], true, "{command:?}: {running}");
+		// Raw: every source line of the command, through a heredoc's
+		// delimiter, runs; the next command does not.
+		let lines = rows(&raw);
+		let (after, command_lines) = lines.split_last().unwrap();
+		assert!(command_lines.iter().all(|(_, row)| row["active"] == true), "{command:?}: {raw}");
+		assert_ne!(after.1["active"], true, "{command:?}: {raw}");
+		let finished = present(&trace, &Options::default());
+		assert!(
+			rows(&finished).iter().all(|(_, row)| row["active"] != true),
+			"{command:?}: {finished}"
+		);
+	}
+}

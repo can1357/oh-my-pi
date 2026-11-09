@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -248,6 +248,9 @@ struct ProcImage {
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
+	/// This vproc's EXIT trap has already been started (a forked subshell
+	/// has no `Run` to keep the flag on).
+	exit_trap_run: bool,
 	procsubs:      Vec<(u32, i32)>,
 	coprocs:       Vec<super::proc::Coproc>,
 	restore_opts:  Vec<BString>,
@@ -605,6 +608,7 @@ impl Shell {
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
+				exit_trap_run: p.exit_trap_run,
 				procsubs: p.procsubs.clone(),
 				coprocs: p.coprocs.clone(),
 				restore_opts: p.restore_opts.clone(),
@@ -690,9 +694,15 @@ impl Shell {
 		k.next_vpid = parse_misc(cx.store, MiscKey::NextVpid)?.unwrap_or(base + 1);
 		k.written_vpid = k.next_vpid;
 		k.next_job = parse_misc(cx.store, MiscKey::NextJob)?.unwrap_or(1);
-		k.rand = state::root_misc(cx.store, MiscKey::Random)?
-			.and_then(state::Random::decode)
-			.unwrap_or_default();
+		k.rand = if opts.reseed_random {
+			let rand = state::Random::new((cx.host.random() & 0xffff_ffff) as u32);
+			k.root.set_misc(cx.store, MiscKey::Random, rand.encode());
+			rand
+		} else {
+			state::root_misc(cx.store, MiscKey::Random)?
+				.and_then(state::Random::decode)
+				.unwrap_or_default()
+		};
 		k.start_ns = match parse_misc(cx.store, MiscKey::StartNs)? {
 			Some(ns) => ns,
 			None => cx.host.now_ns(),
@@ -830,6 +840,7 @@ impl Shell {
 			vp.out = p.out.into();
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
+			vp.exit_trap_run = p.exit_trap_run;
 			vp.procsubs = p.procsubs;
 			vp.coprocs = p.coprocs;
 			vp.restore_opts = p.restore_opts;

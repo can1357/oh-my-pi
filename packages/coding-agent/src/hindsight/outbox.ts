@@ -47,7 +47,7 @@ export interface RetainCall {
 }
 
 export interface DrainResult {
-	/** Another holder is draining this destination; nothing was sent. */
+	/** Another holder is draining this destination, or an enqueue is mid-batch; nothing was sent. */
 	busy: boolean;
 	delivered: number;
 	/** Events refused by the server, malformed, or past their TTL, across all destinations. */
@@ -81,9 +81,11 @@ type SendOutcome = "accepted" | "rejected" | { error: string };
  * means server acceptance, not completed extraction.
  *
  * Concurrency: a per-destination queue lock serializes capacity checks and
- * publication; a per-destination drain lease, released by the OS when its process
- * exits, lets exactly one holder send and delete events. Event files are never
- * rewritten, so writers and the drainer never contend for one file.
+ * publication, and the drainer takes it for the instant it lists and reads
+ * events, so a snapshot never lands inside a batch that may still roll back; a
+ * per-destination drain lease, released by the OS when its process exits, lets
+ * exactly one holder send and delete events. Event files are never rewritten,
+ * so writers and the drainer never contend for one file.
  */
 export class HindsightOutbox {
 	readonly #root: string;
@@ -188,14 +190,28 @@ export class HindsightOutbox {
 	}
 
 	async #deliver(result: DrainResult): Promise<void> {
-		const now = Date.now();
+		// The snapshot must land between batches, never inside one: an enqueue that
+		// fails midway rolls its files back, and what a drain already sent cannot be
+		// unsent. The queue lock enqueue holds across publication and rollback keeps
+		// this snapshot out of that window; when it is taken, defer like drain-lease
+		// contention, since delivery always retries.
+		const lease = tryAcquireFileLock(path.join(this.#dir, "queue"));
+		if (!lease) {
+			result.busy = true;
+			return;
+		}
 		const invalid: string[] = [];
 		const pending: Pending[] = [];
-		for (const name of await eventFiles(this.#dir)) {
-			const file = path.join(this.#dir, name);
-			const entry = await readEvent(file, now);
-			if (entry) pending.push(entry);
-			else invalid.push(file);
+		try {
+			const now = Date.now();
+			for (const name of await eventFiles(this.#dir)) {
+				const file = path.join(this.#dir, name);
+				const entry = await readEvent(file, now);
+				if (entry) pending.push(entry);
+				else invalid.push(file);
+			}
+		} finally {
+			lease.release();
 		}
 		// Hindsight unions a request's item tags onto its document(s): one request per tag set, so
 		// untagged global memories never share a request with project-tagged ones.

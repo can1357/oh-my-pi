@@ -180,19 +180,54 @@ fn assignments_redirections_and_exec_keep_the_os_pid() {
 }
 
 // Failure mode: a compound job, a builtin, a function running its external
-// as one command of its own, a pipeline or a subshell group reports the
-// pid of one of the programs it runs.
+// as one command of its own, or a subshell group reports the pid of one of
+// the programs it runs.
 #[test]
 fn compound_and_builtin_jobs_keep_virtual_pids() {
 	let world = World::new();
 	let (out, _) = run(
 		world.host(),
-		"{ :; /x/true; } & a=$!; : & b=$!; f() { /x/true; }; f & c=$!; /x/true | /x/true & d=$!; ( \
-		 /x/true ) & e=$!; { /x/true; } & g=$!; wait; echo $a $b $c $d $e $g",
+		"{ :; /x/true; } & a=$!; : & b=$!; f() { /x/true; }; f & c=$!; ( /x/true ) & e=$!; { \
+		 /x/true; } & g=$!; wait; echo $a $b $c $e $g",
 	);
 	let pids: Vec<&str> = out.split_whitespace().collect();
-	assert_eq!(pids.len(), 6, "{out}");
+	assert_eq!(pids.len(), 5, "{out}");
 	assert!(pids.iter().all(|p| is_virtual(p)), "{out}");
+}
+
+// Failure mode: a background pipeline's `$!` is the shell's virtual pid,
+// which `kill` cannot reach as a program, instead of its last program's
+// (bash: `kill $!` signals that program), also under `!` and `time`.
+#[test]
+fn a_background_pipeline_is_known_by_its_last_program() {
+	for prefix in ["", "! ", "time "] {
+		let world = World::new();
+		let (out, _) =
+			run(world.host(), &format!("{prefix}/x/true | /x/trap42 & p=$!; kill $p; wait; echo $p"));
+		let last = world
+			.redirs
+			.lock()
+			.iter()
+			.position(|(argv0, _)| argv0.as_slice() == b"/x/trap42")
+			.expect("the last stage ran");
+		let pid = FIRST + last as u32;
+		assert_eq!(out, format!("{pid}\n"), "{prefix:?}");
+		assert_eq!(world.got(pid), [Signal::Term], "{prefix:?}");
+	}
+}
+
+// Failure mode: once a pipeline's last program ended, `kill` of its pid
+// (`$!`) still reaches the job its other stages keep running (bash: no
+// such process, status 1).
+#[test]
+fn an_ended_last_stage_is_no_longer_signalled() {
+	let world = World::new();
+	let (out, _) = run(
+		world.host(),
+		&format!("/x/sleeper | /x/true & p=$!; {BUSY}; kill -0 $p; echo $?; kill %1; wait"),
+	);
+	assert_eq!(out, "1\n");
+	assert_eq!(world.got(FIRST), [Signal::Term], "only `kill %1` reached the first stage");
 }
 
 // Failure mode: `wait -n -p` names the virtual pid while `$!` showed the OS

@@ -163,6 +163,36 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("write", path=str(p), chars=len(content))
         return p
 
+    class ShellError(RuntimeError):
+        """An ``sh(...)`` command that exited non-zero (``exit_code``) or timed out (``exit_code`` None)."""
+
+        def __init__(self, message: str, output: str, exit_code: int | None):
+            super().__init__(message)
+            self.output = output
+            self.exit_code = exit_code
+
+    def sh(command: str, cwd: str | Path | None = None, timeout: float | None = None) -> str:
+        """Run ``command`` on the embedded bash engine and return its output.
+
+        The host side lives in ``eval/shell-bridge.ts``. Raises ShellError on a
+        non-zero exit or timeout.
+        """
+        if not isinstance(command, str):
+            raise TypeError(f"sh() expects a command string (got {type(command).__name__})")
+        args = {"command": command}
+        if cwd is not None:
+            args["cwd"] = str(cwd)
+        if timeout is not None:
+            args["timeout"] = timeout
+        result = _bridge_call("__shell__", args)
+        output = result.get("output", "")
+        exit_code = result.get("exitCode")
+        if exit_code == 0:
+            return output
+        status = f"timed out after {timeout}s" if result.get("timedOut") else f"exited with code {exit_code}"
+        detail = f"\n{output.rstrip()}" if output else ""
+        raise ShellError(f"$ {command}: {status}{detail}", output, exit_code)
+
     def output(
         *ids: str,
         format: str = "raw",

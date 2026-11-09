@@ -19,6 +19,11 @@
 
 - Session traces no longer follow symlinks out of the sessions directory ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
 - Unexpected dashboard errors return a generic `500` without internal details ([#18334](https://github.com/can1357/oh-my-pi/pull/18334) by [@eggpeat](https://github.com/eggpeat))
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
 
 ## [18.17.0] - 2026-11-06
 
