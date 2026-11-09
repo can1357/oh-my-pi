@@ -476,6 +476,7 @@ import {
 	resolvePromptCacheTier,
 } from "./cache-warmer";
 import { type ObservedPromptCacheEntry, promptCacheStatus } from "./prompt-cache-status";
+import { PromptFollowUps } from "./prompt-follow-ups";
 import type { PromptCacheStatus } from "@oh-my-pi/pi-tui/status-line/host";
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { anonymizeSessionTranscripts } from "./session-anonymizer";
@@ -8703,7 +8704,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// count.
 		const claimEpoch = this.#inFlightEpoch;
 		this.#clientPromptInFlightCount++;
+		const followUps = this.#createPromptFollowUps(options?.followUps);
 		try {
+			this.#rejectQueuedExtensionCommands(options?.followUps);
 			// Idle compaction rewrites history without owning a prompt. Manual `/compact`
 			// reconnects the agent after preserving queues; `/handoff` commits a new
 			// history. Prompt setup waits for all three, and a prompt parked by a manual
@@ -8711,12 +8714,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
 			try {
-				return await this.#dispatchPrompt(text, options, submittedAt, outcome);
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
+		} catch (error) {
+			// Setup threw before the prompt went live: its follow-ups go back with it.
+			if (followUps?.held) this.#reportDroppedPrompt(text, options, followUps);
+			throw error;
 		} finally {
 			if (claimEpoch === this.#inFlightEpoch) {
 				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - 1);
@@ -8737,16 +8744,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options: PromptOptions | undefined,
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
+		followUps: PromptFollowUps | undefined,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
+		// A prompt that lands on a queue reaches the agent there: its follow-ups queue right behind it.
+		const onPromptQueuedAdmitted = followUps
+			? () => {
+					followUps.release();
+					options?.onPromptAdmitted?.();
+				}
+			: options?.onPromptAdmitted;
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			if (options?.runCommands !== false) {
-				const handled = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
-				if (handled) {
+				const command = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
+				if (command) {
+					// Queued only now, so whatever the command sent runs before them. A failed
+					// command hands them back with itself instead of letting them run without it.
+					if (command === "ran") followUps?.release();
+					else if (followUps) this.#reportDroppedPrompt(typedText, options, followUps);
 					return false;
 				}
 
@@ -8754,6 +8773,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const customResult = await this.#tryExecuteCustomCommand(text);
 				if (customResult !== null) {
 					if (customResult === "") {
+						followUps?.release();
 						return false;
 					}
 					text = customResult;
@@ -8808,13 +8828,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				prependMessages: prependNotices,
 				rawText: typedText,
 				onPromptQueued: options?.onPromptQueued,
-				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptAdmitted: onPromptQueuedAdmitted,
 				promptGeneration: queueGeneration,
 			});
 			outcome.sessionClaimed = queued;
-			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
-			}
+			if (!queued) this.#reportDroppedPrompt(typedText, options, followUps);
 			if (!queued && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
@@ -8859,9 +8877,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// generation-race checks further down.
 		if (this.#promptGeneration !== preflightGeneration) {
 			outcome.sessionClaimed = false;
-			if (!options?.synthetic) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
-			}
+			this.#reportDroppedPrompt(typedText, options, followUps);
 			if (options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
@@ -8889,10 +8905,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
 				},
-				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
 			outcome.sessionClaimed = queued;
+			if (!queued) this.#reportDroppedPrompt(typedText, options, followUps);
 			if (!queued && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		}
@@ -8942,6 +8959,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
+				followUpBatch: followUps,
 				images: normalizedImages,
 				prependMessages:
 					preludeMessages.length > 0 ||
@@ -8958,11 +8976,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			});
 		} catch (error) {
 			turnError = error;
-			if (
-				(error instanceof AgentStartPolicyChangedError || error instanceof PromptPreflightError) &&
-				message.role === "user"
-			) {
-				this.#promptDropped?.({ text: typedText, images: options?.images });
+			if (error instanceof AgentStartPolicyChangedError || error instanceof PromptPreflightError) {
+				this.#reportDroppedPrompt(typedText, options, followUps);
 			}
 			throw error;
 		} finally {
@@ -8975,12 +8990,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		outcome.sessionClaimed = dispatched;
 		const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
-		if (!dispatched && message.role === "user") {
+		if (!dispatched) {
 			// An abort (Esc), preflight denial or the cost cap raced turn setup: the
 			// prompt never reached the agent or the session file. Hand it back to the
 			// host so the user can edit/resubmit instead of losing it (tree/branch
 			// can't offer a message that was never persisted).
-			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
+			this.#reportDroppedPrompt(typedText, options, followUps, refusal?.message);
 		}
 		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError(refusal?.message);
 		return true;
@@ -8995,7 +9010,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9006,36 +9021,73 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	async #promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
-		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
-		// prompts and the CLI initial message must not start during idle/manual
-		// compaction or before a handoff commits its history.
-		const release = await this.#maintenance.waitForMaintenanceCleanup();
-		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-		if (!release) return this.#dispatchCustomPrompt(message, options, outcome);
+		const followUps = this.#createPromptFollowUps(options?.followUps);
 		try {
-			return await this.#dispatchCustomPrompt(message, options, outcome);
-		} finally {
-			release(outcome.sessionClaimed);
+			this.#rejectQueuedExtensionCommands(options?.followUps);
+			// Same barrier/claim protocol as prompt(): skill invocations, collab peer
+			// prompts and the CLI initial message must not start during idle/manual
+			// compaction or before a handoff commits its history.
+			const release = await this.#maintenance.waitForMaintenanceCleanup();
+			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
+			if (!release) return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
+			try {
+				return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
+			} finally {
+				release(outcome.sessionClaimed);
+			}
+		} catch (error) {
+			// Setup threw before the prompt went live: its follow-ups go back with it.
+			this.#reportDroppedCustomPrompt(message, options, followUps);
+			throw error;
 		}
+	}
+
+	/**
+	 * Hand a custom prompt that never reached the agent back with its unsent follow-ups.
+	 * Without follow-ups a dropped custom prompt is not reported.
+	 */
+	#reportDroppedCustomPrompt(
+		message: Pick<CustomMessage, "content">,
+		options: { queueChipText?: string } | undefined,
+		followUps: PromptFollowUps | undefined,
+	): void {
+		if (!followUps?.held) return;
+		const images =
+			typeof message.content === "string"
+				? []
+				: message.content.filter((part): part is ImageContent => part.type === "image");
+		this.#reportDroppedPrompt(
+			options?.queueChipText ?? this.#getCustomMessageTextContent(message),
+			{ images: images.length > 0 ? images : undefined },
+			followUps,
+		);
 	}
 
 	async #dispatchCustomPrompt<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options:
-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
+			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
 					queueChipText?: string;
 					queueOnly?: boolean;
 					onPromptQueued?: PromptOptions["onPromptQueued"];
 			  })
 			| undefined,
 		outcome: PromptDispatchOutcome,
+		followUps: PromptFollowUps | undefined,
 	): Promise<boolean> {
+		// A prompt that lands on a queue reaches the agent there: its follow-ups queue right behind it.
+		const onPromptQueuedAdmitted = followUps
+			? () => {
+					followUps.release();
+					options?.onPromptAdmitted?.();
+				}
+			: options?.onPromptAdmitted;
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -9073,9 +9125,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				prependMessages: queuedNotices,
-				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
+			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
+			this.#reportDroppedCustomPrompt(message, options, followUps);
 			outcome.sessionClaimed = true;
 			return true;
 		}
@@ -9102,6 +9156,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// description must not publish the skill or start a turn afterwards.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
 			outcome.sessionClaimed = false;
+			this.#reportDroppedCustomPrompt(message, options, followUps);
 			return true;
 		}
 
@@ -9120,19 +9175,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
-				onPromptAdmitted: options?.onPromptAdmitted,
+				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
+			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
+			this.#reportDroppedCustomPrompt(message, options, followUps);
 			outcome.sessionClaimed = true;
 			return true;
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
+			followUpBatch: followUps,
 			prependMessages:
 				keywordNotices.length > 0 || descriptionNotice
 					? [...keywordNotices, ...(descriptionNotice ? [descriptionNotice] : [])]
 					: undefined,
 		});
+		if (!outcome.sessionClaimed) this.#reportDroppedCustomPrompt(message, options, followUps);
 		return outcome.sessionClaimed;
 	}
 
@@ -9351,6 +9410,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
+			/** Follow-ups held until this run goes live; queued behind it then. */
+			followUpBatch?: PromptFollowUps;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -9613,6 +9674,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// waits behind an autonomous run) — wake steers parked on
 					// the dispatch so they admit into the run they targeted.
 					this.#wakeDispatchLiveWaiters();
+					options?.followUpBatch?.release();
 				});
 				await run;
 			} finally {
@@ -9635,11 +9697,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Try to execute an extension command. Returns true if command was found and executed.
+	 * Try to execute an extension command: undefined when no command matches, else whether its handler ran or threw.
 	 * `onRouted` fires once the command is found, before its handler runs.
 	 */
-	async #tryExecuteExtensionCommand(text: string, onRouted?: () => void): Promise<boolean> {
-		if (!this.#extensionRunner) return false;
+	async #tryExecuteExtensionCommand(text: string, onRouted?: () => void): Promise<"ran" | "failed" | undefined> {
+		if (!this.#extensionRunner) return undefined;
 
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
@@ -9647,7 +9709,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
 		const command = this.#extensionRunner.getCommand(commandName);
-		if (!command) return false;
+		if (!command) return undefined;
 		onRouted?.();
 
 		// Get command context from extension runner (includes session control methods)
@@ -9655,7 +9717,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		try {
 			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
-			return true;
+			return "ran";
 		} catch (err) {
 			// Emit error via extension runner
 			this.#extensionRunner.emitError({
@@ -9663,7 +9725,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				event: "command",
 				error: err instanceof Error ? err.message : String(err),
 			});
-			return true;
+			return "failed";
 		}
 	}
 
@@ -10115,56 +10177,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resumeStrandedIrcAsides();
 			return true;
 		}
-		this.#allowQueuedMessageDrainRetry();
-		// Publish the complete group without yielding: removal owns contiguous companions.
 		// The session-agent notice rides via prependMessages (from prompt()),
 		// so it arrives alongside the user message in the same turn (#14093).
-		let userMessage: AgentMessage;
-		if (mode === "followUp") {
-			for (const notice of prependMessages) this.agent.followUp(notice);
-			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
-			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			userMessage = {
-				role: "user",
-				content,
-				attribution,
-				timestamp: timestamp ?? Date.now(),
-			};
-			this.#queuedMessageRawText.set(userMessage, rawText);
-			this.agent.followUp(userMessage);
-		} else {
-			for (const notice of prependMessages) this.agent.steer(notice);
-			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
-			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			userMessage = {
-				role: "user",
-				content,
-				steering: true,
-				attribution,
-				timestamp: timestamp ?? Date.now(),
-			};
-			this.#queuedMessageRawText.set(userMessage, rawText);
-			this.agent.steer(userMessage);
-			// Wake any listener parked on steering arrival (the ACP permission
-			// gate): the message is on the queue now, so its wait ends even
-			// though the streaming boundary poll has not run yet. The whole
-			// admitted group rides along so the gate promotes exactly these
-			// messages — never an agent-authored steer that happened to be
-			// enqueued in the same window without firing the signal.
-			this.#fireSteeringArrival([
-				...prependMessages,
-				...attachmentSourceNotices,
-				...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-				userMessage,
-			]);
-		}
-		// The optional call skips building the group when no caller asked for it.
-		options?.onPromptQueued?.([
-			...prependMessages,
-			...attachmentSourceNotices,
-			...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-			userMessage,
-		]);
+		const queued = this.#pushQueuedUserMessage(
+			mode,
+			[...prependMessages, ...attachmentSourceNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])],
+			content,
+			attribution,
+			timestamp ?? Date.now(),
+			rawText,
+		);
+		options?.onPromptQueued?.(queued);
 		options?.onPromptAdmitted?.();
 		// joinActiveTurn admission must never start an autonomous turn: the
 		// live run owns delivery, and an idle queue stays put until the host
@@ -10173,6 +10196,83 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#scheduleIdleQueueDrain();
 		}
 		return true;
+	}
+
+	/**
+	 * Publish a user message after its hidden companions on the steering or follow-up queue,
+	 * without yielding: removal owns contiguous companions. Returns the published group.
+	 */
+	#pushQueuedUserMessage(
+		mode: "steer" | "followUp",
+		companions: readonly AgentMessage[],
+		content: (TextContent | ImageContent)[],
+		attribution: MessageAttribution,
+		timestamp: number,
+		rawText: string,
+	): AgentMessage[] {
+		this.#allowQueuedMessageDrainRetry();
+		const userMessage: AgentMessage =
+			mode === "followUp"
+				? { role: "user", content, attribution, timestamp }
+				: { role: "user", content, steering: true, attribution, timestamp };
+		this.#queuedMessageRawText.set(userMessage, rawText);
+		const group = [...companions, userMessage];
+		if (mode === "followUp") {
+			for (const message of group) this.agent.followUp(message);
+			return group;
+		}
+		for (const message of group) this.agent.steer(message);
+		// Wake any listener parked on steering arrival (the ACP permission
+		// gate): the message is on the queue now, so its wait ends even
+		// though the streaming boundary poll has not run yet. The whole
+		// admitted group rides along so the gate promotes exactly these
+		// messages — never an agent-authored steer that happened to be
+		// enqueued in the same window without firing the signal.
+		this.#fireSteeringArrival(group);
+		return group;
+	}
+
+	/** Queue text follow-ups without yielding, as {@link followUp} queues them without images. */
+	#queueFollowUpTexts(texts: readonly string[]): void {
+		this.#advisors.autoResumeSuppressed = false;
+		for (const text of texts) {
+			const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+			this.#pushQueuedUserMessage("followUp", [], [{ type: "text", text: expandedText }], "user", Date.now(), text);
+		}
+		this.#scheduleIdleQueueDrain();
+	}
+
+	/** The {@link PromptOptions.followUps} batch for one prompt, or undefined without follow-ups. */
+	#createPromptFollowUps(texts: readonly string[] | undefined): PromptFollowUps | undefined {
+		if (!texts?.length) return undefined;
+		return new PromptFollowUps(texts, released => this.#queueFollowUpTexts(released));
+	}
+
+	/** The follow-up queue cannot hold extension commands: refuse the batch before any of it is sent. */
+	#rejectQueuedExtensionCommands(texts: readonly string[] | undefined): void {
+		for (const text of texts ?? []) {
+			if (text.startsWith("/")) this.#throwIfExtensionCommand(text);
+		}
+	}
+
+	/**
+	 * Hand a prompt that never reached the agent back to the host, with the follow-ups
+	 * that rode on it. Synthetic prompts only release their follow-ups.
+	 */
+	#reportDroppedPrompt(
+		text: string,
+		options: Pick<PromptOptions, "images" | "synthetic"> | undefined,
+		followUps: PromptFollowUps | undefined,
+		reason?: string,
+	): void {
+		const unsent = followUps?.handBack() ?? [];
+		if (options?.synthetic) return;
+		this.#promptDropped?.({
+			text,
+			images: options?.images,
+			reason,
+			followUps: unsent.length > 0 ? unsent : undefined,
+		});
 	}
 
 	/**
@@ -11577,11 +11677,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const signal = this.#titleGenerationAbortController.signal;
 		const started = performance.now();
 		const icons = this.#cardIcons();
+		// The fork is billed to the branch it branches from, even after the main
+		// turn moves the leaf while this request streams.
+		const usageOwner = { sessionId, parentId: this.sessionManager.getLeafId() };
 		this.runEphemeralTurn({
 			promptText: prompt.render(titleForkPrompt, {
 				card: icons !== "boring",
 				nerdFonts: icons === "nf+emoji",
 			}),
+			// Journaled where the billed message exists, so a fork that ends in a
+			// provider error still records its spend before rejecting.
+			onUsage: message => this.#reportTitleUsage(usageOwner, message),
 			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
 		})
 			.then(
@@ -11760,11 +11866,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const parentSessionId = this.sessionId;
 		const sessionGeneration = this.#sessionGeneration;
 		const sessionId = this.#resolveTitleProviderSessionId(parentSessionId);
+		// Journal ownership follows the session manager, not the provider-side id
+		// titles request under (`sessionId` above is an isolated side identity).
+		const usageOwner = { sessionId: this.sessionManager.getSessionId(), parentId: this.sessionManager.getLeafId() };
+		// The tiny model is called directly, outside the session's metered stream, so its spend
+		// is charged here, to the gate of the session that started the request.
+		const costGate = this.#costGate;
 		const titleSignal = signal
 			? AbortSignal.any([signal, this.#titleGenerationAbortController.signal])
 			: this.#titleGenerationAbortController.signal;
 		// A capped session sends no further model requests, titles included.
-		if (titleSignal.aborted || this.#costGate.check()) return null;
+		if (titleSignal.aborted || costGate.check()) return null;
 		// The title request carries user text, so it follows this session's own credential
 		// redaction policy like its conversation requests (see `settingsAwareStreamFn`).
 		const title = await withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
@@ -11778,10 +11890,42 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
+				message => {
+					costGate.record(message.usage.cost.total);
+					this.#reportTitleUsage(usageOwner, message);
+				},
 			),
 		);
 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
 		return !titleSignal.aborted && this.sessionId === parentSessionId ? title : null;
+	}
+
+	/**
+	 * Journal a title request's billed usage as a `model_usage` entry on the
+	 * branch it ran from, so `/usage`, `getUsageStatistics()`, and `omp stats`
+	 * count title spend. Titles are cosmetic: a stale session owner or a failed
+	 * journal write is logged and dropped rather than failing the title.
+	 */
+	#reportTitleUsage(owner: { sessionId: string; parentId: string | null }, message: AssistantMessage): void {
+		try {
+			this.sessionManager.appendModelUsage(
+				{
+					purpose: "title",
+					api: message.api,
+					provider: message.provider,
+					model: message.model,
+					usage: message.usage,
+					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
+				},
+				owner,
+			);
+		} catch (err) {
+			logger.debug("title-generator: usage accounting failed", {
+				sessionId: owner.sessionId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 
 	/** Capture before generation to detect interruption or disposal of a title request. */
@@ -13587,6 +13731,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
+		// Reported where the provider settles the request, before any later step can throw it away.
+		const reportUsage = (message: AssistantMessage) => {
+			try {
+				args.onUsage?.(message);
+			} catch (error) {
+				logger.debug("ephemeral-turn: usage reporter failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		};
 		assertEphemeralTurnReady();
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);
@@ -13615,9 +13769,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					assistantMessage = this.#obfuscator?.hasSecrets()
 						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
 						: { ...event.message, content: rawContent };
+					reportUsage(assistantMessage);
 					break;
 				}
 				if (event.type === "error") {
+					reportUsage(event.error);
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
 			}
