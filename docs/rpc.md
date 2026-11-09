@@ -613,10 +613,9 @@ including those made by the agent's `goal` tool.
   is cancelled before admission, the request fails and restores the interview's
   tool set. In RPC, a host `abort` ends an interview that has no goal record and
   restores the tools; in the TUI, Esc leaves the interview armed.
-- RPC `prompt` also accepts `/goal budget <N|off>`.
-- RPC `prompt` also accepts `/guided-goal [rough objective]`.
-  User file, custom, extension, and skill commands with these names keep precedence
-  over the RPC-only builtins.
+- RPC `prompt` also accepts `/goal budget <N|off>` and `/guided-goal [rough objective]`.
+- User file, custom, extension, and skill commands named `goal` or `guided-goal` keep
+  precedence over the RPC-only builtins.
 - Failures are ordinary `success: false` responses.
 
 Goals do not continue on their own over RPC unless `goal.continuationModes`
