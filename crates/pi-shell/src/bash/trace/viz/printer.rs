@@ -564,15 +564,23 @@ impl<S: VizSource> Printer<'_, S> {
 	/// does not parse and everything after it stay literal, as does a unit
 	/// the engine announced without syntax (its parse may have used aliases
 	/// or features this one lacks) and everything after that. A leading
-	/// `&&`/`||` continues the chain of the unit before it.
+	/// `&&`/`||` continues the chain of the unit before it; a leading `;` is
+	/// the separator of the unit before and draws no row of its own.
 	fn ahead(&mut self, lo: usize, hi: usize) {
 		if lo >= hi {
 			return;
 		}
 		let source = self.source;
 		let script: &[u8] = source.script().as_ref();
-		let (mut lead, from) =
-			chain_operator(&script[lo..hi]).map_or((None, lo), |(op, len)| (Some(op), lo + len));
+		let (mut lead, from) = match chain_operator(&script[lo..hi]) {
+			Some((op, len)) => (Some(op), lo + len),
+			None => match separator(&script[lo..hi]) {
+				// A `;` with nothing after it separates nothing to draw.
+				Some(len) if lo + len >= hi => return,
+				Some(len) => (None, lo + len),
+				None => (None, lo),
+			},
+		};
 		let stop = (0..source.unit_count())
 			.filter_map(|index| source.unit(index)?.at)
 			.map(|at| at as usize)
@@ -2523,6 +2531,20 @@ fn chain_operator(bytes: &[u8]) -> Option<(AndOrOp, usize)> {
 			.take_while(|byte| byte.is_ascii_whitespace())
 			.count(),
 	))
+}
+/// The `;` opening `bytes` after blanks, with the byte length through it and
+/// the whitespace following it.
+fn separator(bytes: &[u8]) -> Option<usize> {
+	let at = bytes
+		.iter()
+		.position(|byte| !matches!(byte, b' ' | b'\t'))?;
+	(bytes.get(at) == Some(&b';')).then(|| {
+		let end = at + 1;
+		end + bytes[end..]
+			.iter()
+			.take_while(|byte| byte.is_ascii_whitespace())
+			.count()
+	})
 }
 fn single(a: AndOr<'_>) -> Option<Command<'_>> {
 	let first = a.first();
