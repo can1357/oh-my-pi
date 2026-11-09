@@ -1,7 +1,7 @@
 # Changelog
 
 ## [Unreleased]
-- `omp://` documentation links in the transcript open the doc in every install, not only a source checkout: the embedded doc is materialized into a read-only cache copy and linked, while the label still shows the `omp://` URL ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `omp://` documentation links in the transcript open the doc in every install, not only a source checkout: the embedded doc is materialized into a read-only cache copy and linked, while the label still shows the `omp://` URL ([#18647](https://github.com/can1357/oh-my-pi/pull/18647) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.8] - 2026-11-11
 
