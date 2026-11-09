@@ -304,6 +304,10 @@
 - `lsp.formatOnWrite` no longer re-indents 2/4-space files at 1 space per level when they contain JSDoc/block comments or one-off odd indents, and no longer converts tab-indented files that open with a JSDoc block to spaces ([#18544](https://github.com/can1357/oh-my-pi/issues/18544))
 - Isolated task sandboxes now finish cleanup after a SIGHUP or other signal even when releasing them takes longer than the agent shutdown grace period ([#18519](https://github.com/can1357/oh-my-pi/issues/18519)).
 
+### Added
+
+- `/cd` is an alias of `/move`, so relocating the session to another directory reads like the shell command it mirrors.
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
