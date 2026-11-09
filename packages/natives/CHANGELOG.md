@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.18.6] - 2026-11-09
+
 ### Fixed
 
 - Fixed GTK4 apps such as Files (Nautilus) on X11: element clicks and `computer.elementAt()` now find their elements where they are on screen, and `ax()` no longer marks their enabled controls `(disabled)` ([#18643](https://github.com/can1357/oh-my-pi/pull/18643) by [@will-bogusz](https://github.com/will-bogusz))

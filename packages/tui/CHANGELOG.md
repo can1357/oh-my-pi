@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
+## [18.18.6] - 2026-11-09
+
 ### Added
 
 - The `wait` result's `JobSnapshot` now carries `settledAtMs` (epoch ms when the run settled, absent while it is still running), so a snapshot can tell a result that finished during the call from one recovered from an earlier, never-delivered completion ([#18635](https://github.com/can1357/oh-my-pi/pull/18635) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added a `thinking.set` composer action so Tern's phone effort menu can pick a thinking level in one tap
+- Added All, Running, Done and Parked status scopes with counts to the agent hub's roster, so Tern's phone can filter agents by status
+- A prompt and a turn's answer list their actions for a phone's long press (`actions.hold`): Copy, Edit & resend (a prompt's), Retry turn, Rewind to here… and Fork from here; the desktop keeps its hover toolbars
+- A click or tap on a turn on the native rewind page picks it, and the rewind selector can open on a given turn (`startAt`)
+- A status notice can carry a button on its native toast (`StatusNoticeAction`), such as the Undo after a rewind
 
 ### Fixed
 
@@ -39,11 +46,6 @@
 - Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 - Added `HtmlFormDialog`, which renders an HTML form as an interactive terminal form, splits long forms into pages, and returns the answers as JSON. Single `<select>`s are one-row dropdowns, radio and checkbox groups get a free-text "Other" answer, `<img>` (URL, `data:` URI or local file) and inline `<svg>` pictures load in the background, an optional inactivity timeout submits the current values, and Tern terminals get the form natively.
 - Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
-- Added a `thinking.set` composer action so Tern's phone effort menu can pick a thinking level in one tap
-- Added All, Running, Done and Parked status scopes with counts to the agent hub's roster, so Tern's phone can filter agents by status
-- A prompt and a turn's answer list their actions for a phone's long press (`actions.hold`): Copy, Edit & resend (a prompt's), Retry turn, Rewind to here… and Fork from here; the desktop keeps its hover toolbars
-- A click or tap on a turn on the native rewind page picks it, and the rewind selector can open on a given turn (`startAt`)
-- A status notice can carry a button on its native toast (`StatusNoticeAction`), such as the Undo after a rewind
 
 ### Changed
 
