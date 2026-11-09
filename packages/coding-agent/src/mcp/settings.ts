@@ -6,6 +6,23 @@ import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
 import { effect, register } from "../config/registry";
 
 // MCP
+/**
+ * Trust grants are read only from the owning settings instance's user config,
+ * not its effective project, --config, runtime, or overlay layers.
+ * Config-file-only: the settings panel cannot express that authority boundary.
+ */
+export const cfgMcpWorkspaceRoots = register({
+	id: "mcp.workspaceRoots",
+	type: "array",
+	default: [] as string[],
+	validate: value => {
+		if (value === undefined) return;
+		if (!Array.isArray(value) || !value.every(root => typeof root === "string")) {
+			throw new Error("mcp.workspaceRoots must be an array of strings");
+		}
+	},
+});
+
 export const cfgMcpEnableProjectConfig = register({
 	id: "mcp.enableProjectConfig",
 	type: "boolean",

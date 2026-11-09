@@ -2854,6 +2854,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				configuredLevel: settings.extensionsSourceLevel(),
 			}));
 		const mcpDiscoverOptions = {
+			settings,
 			onStatus: onMCPStatus,
 			startupTimeoutMs: cfgMcpStartupTimeoutMs.get(settings),
 			enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
@@ -2866,7 +2867,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (enableMCP && !mcpManager && isMainThread()) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				const deferredMCPManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				const deferredMCPManager = new MCPManager(
+					cwd,
+					cacheStorage ? new MCPToolCache(cacheStorage) : null,
+					undefined,
+					undefined,
+					settings,
+				);
 				ownedMcpManager = deferredMCPManager;
 				mcpManager = deferredMCPManager;
 				deferredMCPManager.setAuthStorage(authStorage);

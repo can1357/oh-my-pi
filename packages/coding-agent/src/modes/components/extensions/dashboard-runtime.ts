@@ -3,7 +3,7 @@ import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { EffectiveExtensionRoots } from "../../../capability/types";
 import type { Settings } from "../../../config/settings";
-import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
+import { getAllProvidersInfo, isForeignUserProvider, isProviderEnabled, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
@@ -34,10 +34,11 @@ export function createExtensionDashboardRuntime(options: {
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
 				...provider,
-				userSourceEnabled: isUserSourceEnabled(provider.id),
+				enabled: isProviderEnabled(provider.id, settings),
+				userSourceEnabled: isUserSourceEnabled(provider.id, { settings }),
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
-		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.()),
+		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.(), settings),
 		toggleProvider,
 		toggleUserSource,
 		async persistMcpToggle(name, enabled, sourcePath) {
@@ -57,6 +58,7 @@ export function createExtensionDashboardRuntime(options: {
 				manager: mcpManager,
 				session: onMcpToolsChanged ? { refreshMCPTools: onMcpToolsChanged } : undefined,
 				discovery: {
+					settings,
 					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 					filterExa: true,
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,

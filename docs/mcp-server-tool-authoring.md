@@ -80,7 +80,7 @@ drops project entries before deduplication.
 
 ### `.mcp.json` and related files
 
-The dedicated fallback provider in `src/discovery/mcp-json.ts` reads project-root `mcp.json` and `.mcp.json` (low priority).
+The dedicated fallback provider in `src/discovery/mcp-json.ts` reads launch-directory `mcp.json` and `.mcp.json` (low priority). Within a user-granted `mcp.workspaceRoots` boundary, it and the native provider accumulate configs from the canonical launch directory through the most-specific root, closest-first, crossing Git roots. Same-named definitions replace whole entries within each provider; provider priorities and stdio working-directory defaults do not change. See [trusted multi-repository workspaces](./mcp-config.md#trusted-multi-repository-workspaces).
 
 In practice MCP servers also come from higher-priority providers (for example native `.omp/...` and tool-specific config dirs). Authoring guidance:
 

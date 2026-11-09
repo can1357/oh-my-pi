@@ -8,8 +8,10 @@ import * as path from "node:path";
 import * as url from "node:url";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { boundSettings } from "../capability";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import type { Settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
@@ -450,6 +452,7 @@ export class MCPManager implements MCPManagerApi {
 		private toolCache: MCPToolCache | null = null,
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
 		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
+		private readonly settings: Settings | null = boundSettings() ?? null,
 	) {}
 
 	/**
@@ -758,6 +761,7 @@ export class MCPManager implements MCPManagerApi {
 		let loadedConfigs: LoadMCPConfigsResult;
 		try {
 			loadedConfigs = await this.loadConfigs(this.cwd, {
+				settings: this.settings,
 				enableProjectConfig: options?.enableProjectConfig,
 				filterExa: options?.filterExa,
 				filterBrowser: options?.filterBrowser,
@@ -805,6 +809,7 @@ export class MCPManager implements MCPManagerApi {
 		if (!options || (options.enableProjectConfig ?? true) === enabled) return;
 		this.#discoverOptions = { ...options, enableProjectConfig: enabled };
 		const loaded = await this.loadConfigs(this.cwd, {
+			settings: this.settings,
 			enableProjectConfig: enabled,
 			filterExa: options.filterExa,
 			filterBrowser: options.filterBrowser,
@@ -839,6 +844,7 @@ export class MCPManager implements MCPManagerApi {
 	async #applyBrowserFilter(enabled: boolean): Promise<void> {
 		const options = this.#discoverOptions;
 		const loaded = await this.loadConfigs(this.cwd, {
+			settings: this.settings,
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: false,
@@ -2360,12 +2366,12 @@ export class MCPManager implements MCPManagerApi {
  */
 export async function createMCPManager(
 	cwd: string,
-	options?: MCPDiscoverOptions,
+	options?: MCPDiscoverOptions & { settings?: Settings | null },
 ): Promise<{
 	manager: MCPManager;
 	result: MCPLoadResult;
 }> {
-	const manager = new MCPManager(cwd);
+	const manager = new MCPManager(cwd, null, loadAllMCPConfigs, undefined, options?.settings);
 	const result = await manager.discoverAndConnect(options);
 	return { manager, result };
 }

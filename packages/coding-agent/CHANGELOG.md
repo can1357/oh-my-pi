@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `mcp.workspaceRoots` in user settings to inherit MCP servers across multi-repository workspaces, with closest whole-definition overrides and canonical, bounded discovery.
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

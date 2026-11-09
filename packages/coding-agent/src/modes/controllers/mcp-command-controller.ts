@@ -1801,6 +1801,7 @@ export class MCPCommandController {
 		}
 
 		const { configs, sources } = await loadAllMCPConfigs(getProjectDir(), {
+			settings: this.ctx.session.settings,
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		const config = configs[name];

@@ -15,6 +15,7 @@ import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
 import type { CustomTool } from "../../../capability/tool";
 import type { EffectiveExtensionRoots, SourceMeta } from "../../../capability/types";
+import type { Settings } from "../../../config/settings";
 import {
 	disableProvider,
 	disableUserSource,
@@ -54,14 +55,15 @@ function resolveState(
 	source: SourceMeta,
 	isDisabled: boolean,
 	isShadowed: boolean | undefined,
+	settings?: Settings,
 ): { state: ExtensionState; disabledReason?: DisabledReason } {
 	if (isDisabled) return { state: "disabled", disabledReason: "item-disabled" };
 	if (isShadowed) return { state: "shadowed", disabledReason: "shadowed" };
-	if (!isProviderEnabled(source.provider)) return { state: "disabled", disabledReason: "provider-disabled" };
+	if (!isProviderEnabled(source.provider, settings)) return { state: "disabled", disabledReason: "provider-disabled" };
 	if (source.provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") {
 		return { state: "active" };
 	}
-	if (source.level === "user" && !isUserSourceEnabled(source.provider)) {
+	if (source.level === "user" && !isUserSourceEnabled(source.provider, { settings })) {
 		return { state: "disabled", disabledReason: "user-opt-in" };
 	}
 	return { state: "active" };
@@ -127,6 +129,7 @@ export async function loadAllExtensions(
 	cwd?: string,
 	disabledIds?: string[],
 	extensionRoots?: EffectiveExtensionRoots,
+	settings?: Settings,
 ): Promise<Extension[]> {
 	const extensions: Extension[] = [];
 	const effectiveDisabledIds = disabledIds ?? [];
@@ -150,7 +153,7 @@ export async function loadAllExtensions(
 			const { state, disabledReason }: { state: ExtensionState; disabledReason?: DisabledReason } =
 				opts?.itemGateOnly && !isDisabled
 					? { state: "active" }
-					: resolveState(item._source, isDisabled, (item as { _shadowed?: boolean })._shadowed);
+					: resolveState(item._source, isDisabled, (item as { _shadowed?: boolean })._shadowed, settings);
 
 			extensions.push({
 				id,
@@ -171,9 +174,10 @@ export async function loadAllExtensions(
 
 	const loadOpts = {
 		cwd,
+		settings,
 		includeDisabled: true,
 		disabledExtensions: effectiveDisabledIds,
-		isSourceDisabled: (source: SourceMeta) => resolveState(source, false, undefined).state === "disabled",
+		isSourceDisabled: (source: SourceMeta) => resolveState(source, false, undefined, settings).state === "disabled",
 	};
 
 	// Load skills
@@ -234,7 +238,11 @@ export async function loadAllExtensions(
 	// user-level `enabledServers` allowlist overrides a non-writable source's
 	// `enabled: false` (e.g. opencode.json) but never the denylist.
 	try {
-		const userMcpPath = cwd ? getMCPConfigPath("user", cwd) : undefined;
+		const userMcpPath = settings
+			? path.join(settings.getAgentDir(), "mcp.json")
+			: cwd
+				? getMCPConfigPath("user", cwd)
+				: undefined;
 		const [mcpDisabledNames, mcpForcedEnabled] = await Promise.all([
 			userMcpPath
 				? readDisabledServers(userMcpPath)
@@ -257,6 +265,7 @@ export async function loadAllExtensions(
 				server._source,
 				isDisabled,
 				(server as { _shadowed?: boolean })._shadowed,
+				settings,
 			);
 
 			extensions.push({
@@ -313,6 +322,7 @@ export async function loadAllExtensions(
 				hook._source,
 				disabledExtensions.has(id),
 				(hook as { _shadowed?: boolean })._shadowed,
+				settings,
 			);
 
 			extensions.push({
@@ -344,6 +354,7 @@ export async function loadAllExtensions(
 				file._source,
 				disabledExtensions.has(id),
 				(file as { _shadowed?: boolean })._shadowed,
+				settings,
 			);
 
 			extensions.push({

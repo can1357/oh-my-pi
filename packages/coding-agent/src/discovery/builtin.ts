@@ -38,6 +38,7 @@ import {
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
+import { getMCPProjectConfigPaths } from "./mcp-workspace";
 
 const PROVIDER_ID = "native";
 const DISPLAY_NAME = "OMP";
@@ -233,17 +234,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	// User scope tracks the active profile via getAgentDir() (not ctx.home), so it
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
-	const userAgentDir = getAgentDir();
+	const userAgentDir = ctx.agentDir ?? getAgentDir();
+	const projectPaths = await getMCPProjectConfigPaths(ctx, PATHS.projectDir);
 	const paths = [
-		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
-		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },
-		{ path: path.join(userAgentDir, "mcp.json"), level: "user" as const },
-		{ path: path.join(userAgentDir, ".mcp.json"), level: "user" as const },
+		...projectPaths.map(p => ({ ...p, level: "project" as const })),
+		...["mcp.json", ".mcp.json"].map(filename => {
+			const file = path.join(userAgentDir, filename);
+			return { path: file, readPath: file, level: "user" as const };
+		}),
 	];
 
 	const contents = await Promise.allSettled(
 		paths.map(async p => {
-			const content = await readFile(p.path);
+			const content = await readFile(p.readPath);
 			if (content) {
 				return { path: p.path, content, level: p.level };
 			}

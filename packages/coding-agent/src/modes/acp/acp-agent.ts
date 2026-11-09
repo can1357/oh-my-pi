@@ -1691,12 +1691,17 @@ export class AcpAgent implements Agent {
 				const cwd = typeof params.cwd === "string" ? (params.cwd as string) : undefined;
 				const sm = cwd ? await Settings.loadReadOnly({ cwd }) : await Settings.init();
 				const disabledIds = cfgDisabledExtensions.get(sm);
-				const extensions = await loadAllExtensions(cwd, disabledIds, {
-					explicit: [],
-					mode: "merge",
-					configured: cfgExtensions.get(sm),
-					configuredLevel: sm.extensionsSourceLevel(),
-				});
+				const extensions = await loadAllExtensions(
+					cwd,
+					disabledIds,
+					{
+						explicit: [],
+						mode: "merge",
+						configured: cfgExtensions.get(sm),
+						configuredLevel: sm.extensionsSourceLevel(),
+					},
+					sm,
+				);
 				return { extensions: extensions as unknown as Array<{ [key: string]: unknown }> };
 			}
 			case "_omp/extensions/toggle": {

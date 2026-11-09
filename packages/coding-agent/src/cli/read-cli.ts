@@ -81,6 +81,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		MCPManager.setDeferredInstance(async () => {
 			authStorage ??= await discoverAuthStorage(undefined, { settings });
 			const result = await discoverAndLoadMCPTools(cwd, {
+				settings,
 				enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 				filterExa: true,
 				// `omp read` has no Eval prelude, so browser MCP remains available.

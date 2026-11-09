@@ -395,6 +395,16 @@ These are optional for normal single-agent embedding.
 
 Process-wide state that follows one settings instance — setting effects (theme, request limits, the fallback credential-redaction switch) and discovery provider toggles — is held by every top-level session on its own `settings` until it is disposed. With several live sessions the newest holder drives it, and disposing a session hands it back to the previous holder. Sessions with `parentTaskPrefix`/`taskDepth` or `bindProcessState: false` never take it. Independently of the holder, each session's own provider requests redact credential-shaped tokens per that session's `secrets.enabled`.
 
+MCP discovery is session-owned: managers created by `createAgentSession` retain
+the supplied settings for startup, reconciliation, and reload, including when
+`bindProcessState: false`. Another session's process binding cannot grant or
+revoke workspace inheritance. Lower-level `loadAllMCPConfigs` and
+`loadCapability` calls can pass `settings` explicitly; omission uses the current
+discovery holder, while `settings: null` disables workspace trust. Only the
+owning settings instance's user layer grants `mcp.workspaceRoots`; project,
+CLI, runtime, and child-overlay layers cannot broaden it. A borrowed manager
+keeps its original owner's settings and connections.
+
 ## `createAgentSession()` return value
 
 ```ts

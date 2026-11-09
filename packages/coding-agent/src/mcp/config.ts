@@ -4,9 +4,12 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
+import * as path from "node:path";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
+import { boundSettings } from "../capability";
 import { mcpCapability } from "../capability/mcp";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
+import type { Settings } from "../config/settings";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import { readMCPConfigFile } from "./config-writer";
@@ -22,6 +25,8 @@ export interface LoadMCPConfigsOptions {
 	filterBrowser?: boolean;
 	/** Session-local extension roots for post-startup rediscovery (explicit + mode + configured). */
 	extensionRoots?: EffectiveExtensionRoots;
+	/** Owning session settings; omitted uses the bound holder, null disables workspace trust. */
+	settings?: Settings | null;
 }
 
 /** Result of loading MCP configs */
@@ -104,6 +109,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
+	const settings = options?.settings === undefined ? (boundSettings() ?? null) : options.settings;
 
 	// Load user-level disable/force-enable lists. The denylist always wins; the
 	// allowlist overrides a non-writable source config's `enabled: false`.
@@ -111,7 +117,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	// stack (docs/mcp-config.md: the file simply contributes no entries): its
 	// servers are already skipped by the mcp-json provider with a warning, so
 	// the lists degrade to empty here instead of rejecting every source.
-	const userPath = getMCPConfigPath("user", cwd);
+	const userPath = settings ? path.join(settings.getAgentDir(), "mcp.json") : getMCPConfigPath("user", cwd);
 	let userConfig: MCPConfigFile;
 	try {
 		const config: unknown = await readMCPConfigFile(userPath);
@@ -146,6 +152,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
 		cwd,
+		settings,
 		extensionRoots: options?.extensionRoots,
 		filter: includeServer,
 		suppress: suppressServer,

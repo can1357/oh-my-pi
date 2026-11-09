@@ -5,6 +5,7 @@
  * `.claude`, `.codex`, `.gemini`, they simply ask for `load("mcps")` and get back
  * a unified array of MCP servers.
  */
+import type { Settings } from "../config/settings";
 
 /** Extension sub-discovery mode; `explicit-only` suppresses ambient sources. */
 export type ExtensionRootMode = "merge" | "explicit-only";
@@ -42,6 +43,8 @@ export interface LoadContext {
 	 * so user-level rules and tools come from that dir.
 	 */
 	agentDir?: string;
+	/** Owning settings for this load; null means no user trust. */
+	settings?: Settings | null;
 	/**
 	 * Session-local extension roots for sub-discovery. When set, extension
 	 * discovery uses these lanes instead of the invocation-scoped snapshot or
@@ -112,6 +115,8 @@ export interface LoadOptions<T = unknown> {
 	cwd?: string;
 	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */
 	agentDir?: string;
+	/** Owning settings; omitted uses the bound holder, null disables user trust. */
+	settings?: Settings | null;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
 	/** Include item-disabled and opted-out sources for inspection. Default: false. */
