@@ -142,6 +142,7 @@ export function retainThoughtSignature(existing: string | undefined, incoming: s
 const base64SignaturePattern = /^[A-Za-z0-9+/]+={0,2}$/;
 
 export const SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+const SKIP_THOUGHT_SIGNATURE_BASE64 = Buffer.from(SKIP_THOUGHT_SIGNATURE).toString("base64");
 
 function isValidThoughtSignature(signature: string | undefined): boolean {
 	if (!signature) return false;
@@ -306,7 +307,10 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					const requiresFallback =
 						model.compat.requiresSkipThoughtSignature ||
 						(isFirstToolCall && model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall);
-					const effectiveSignature = thoughtSignature || (requiresFallback ? SKIP_THOUGHT_SIGNATURE : undefined);
+					const skipSignature = model.compat.base64SkipThoughtSignature
+						? SKIP_THOUGHT_SIGNATURE_BASE64
+						: SKIP_THOUGHT_SIGNATURE;
+					const effectiveSignature = thoughtSignature || (requiresFallback ? skipSignature : undefined);
 					isFirstToolCall = false;
 
 					const part: Part = {
@@ -798,7 +802,6 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
-	let finishErrorId: number | undefined;
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
@@ -851,9 +854,6 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				output.stopReason = mapped;
 				if (mapped === "error") {
 					output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
-					// A backend fault, not a verdict on the request: the same request can succeed.
-					finishErrorId =
-						candidate.finishReason === "MALFORMED_RESPONSE" ? AIError.create(AIError.Flag.Transient) : undefined;
 				}
 			}
 		}
@@ -878,11 +878,10 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	}
 
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
-		const error = new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
 			provider: model.provider,
 			kind: "output",
 		});
-		throw finishErrorId === undefined ? error : AIError.attach(error, finishErrorId);
 	}
 }
 

@@ -813,6 +813,7 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 		entry: OpenAICompatibleModelRecord,
 		defaults: ModelSpec<TApi>,
 		reference: ModelSpec<TApi> | undefined,
+		references: Map<string, ModelSpec<TApi>>,
 	) => ModelSpec<TApi> | null;
 };
 
@@ -842,7 +843,8 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 						...(filterModel && {
 							filterModel: (entry, model) => filterModel(entry, model, references),
 						}),
-						mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
+						mapModel: (entry, defaults) =>
+							options.mapModel(entry, defaults, references.get(defaults.id), references),
 						fetch: options.config?.fetch,
 					}),
 					options.providerId,
@@ -3223,6 +3225,27 @@ export interface MistralModelManagerConfig {
 }
 
 /**
+ * Mistral's `/v1/models` lists each alias as its own row, with the canonical
+ * id in `name` and the other ids in `aliases`; `mistral-vibe-cli-latest`, the
+ * Vibe CLI's default, is a row named `mistral-medium-latest`. An id with no
+ * bundled row of its own reuses the bundled row of the model it aliases, so it
+ * keeps that model's reasoning, image input, limits, and prices. Such an id is
+ * listed only for keys whose `/v1/models` returns it.
+ */
+function mistralAliasReference(
+	entry: OpenAICompatibleModelRecord,
+	references: Map<string, ModelSpec<"openai-completions">>,
+): ModelSpec<"openai-completions"> | undefined {
+	const aliases = Array.isArray(entry.aliases) ? entry.aliases : [];
+	for (const candidate of [entry.name, ...aliases]) {
+		if (typeof candidate !== "string") continue;
+		const reference = references.get(candidate);
+		if (reference) return reference;
+	}
+	return undefined;
+}
+
+/**
  * Mistral's `/v1/models` lists every SKU the key can call, including
  * embedding, OCR, moderation, transcription, and speech models, and flags chat
  * support per row in `capabilities.completion_chat`. Rows without it reject
@@ -3238,10 +3261,11 @@ function mapMistralModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<"openai-completions">,
 	reference: ModelSpec<"openai-completions"> | undefined,
+	references: Map<string, ModelSpec<"openai-completions">>,
 ): ModelSpec<"openai-completions"> | null {
 	const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined;
 	if (capabilities && capabilities.completion_chat !== true) return null;
-	const model = mapWithBundledReference(entry, defaults, reference);
+	const model = mapWithBundledReference(entry, defaults, reference ?? mistralAliasReference(entry, references));
 	const input: ModelSpec<"openai-completions">["input"] =
 		capabilities?.vision === true && !model.input.includes("image") ? [...model.input, "image"] : model.input;
 	return {
@@ -8275,4 +8299,72 @@ export function scalewayModelManagerOptions(
 		filterModel: (_entry, model) => !isExcludedModel("scaleway", model.id),
 		mapModel: mapWithBundledReference,
 	});
+}
+
+// ---------------------------------------------------------------------------
+// Otari
+// ---------------------------------------------------------------------------
+
+/**
+ * Otari discovery configuration: the workspace API key plus optional base-URL
+ * (a self-hosted API root such as `https://host.example.com/api/v1`) and fetch
+ * overrides. Consumed by {@link otariModelManagerOptions}.
+ */
+export interface OtariModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Otari model manager: the workspace's live `/models` roster is the whole
+ * catalog, so nothing is bundled and every field comes from the row. Rows are
+ * OpenRouter-style (`supported_parameters`, `architecture` modalities,
+ * per-million USD `pricing`); rows the gateway has no metadata for omit them
+ * and stay text-only and non-reasoning. Rows that write no text are not chat
+ * models; metadata-less non-chat rows fall to `exclude-models provider="otari"`.
+ */
+export function otariModelManagerOptions(config?: OtariModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("otari")!;
+	return {
+		providerId: "otari",
+		cacheProviderId: resolveModelCacheProviderId("otari", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		dynamicCostAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "otari",
+					baseUrl,
+					apiKey,
+					filterModel: (entry, model) => {
+						const output = isRecord(entry.architecture) ? entry.architecture.output_modalities : undefined;
+						if (Array.isArray(output) && output.length > 0 && !output.includes("text")) return false;
+						return !isExcludedModel("otari", model.id);
+					},
+					mapModel: (entry, defaults) => {
+						const pricing = isRecord(entry.pricing) ? entry.pricing : {};
+						return {
+							...defaults,
+							reasoning:
+								Array.isArray(entry.supported_parameters) && entry.supported_parameters.includes("reasoning"),
+							input: toInputCapabilities(
+								isRecord(entry.architecture) ? entry.architecture.input_modalities : undefined,
+							),
+							cost: {
+								input: toNumber(pricing.input_price_per_million) ?? 0,
+								output: toNumber(pricing.output_price_per_million) ?? 0,
+								cacheRead: toNumber(pricing.cache_read_price_per_million) ?? 0,
+								cacheWrite: toNumber(pricing.cache_write_price_per_million) ?? 0,
+							},
+							contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
+							maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }

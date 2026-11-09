@@ -11,6 +11,7 @@ exports_files(["Cargo.toml"])
 cargo_build_script(
     name = "build_script",
     srcs = ["build.rs"],
+    build_script_env = {"OMP_BAZEL_BUILD": "1"},
     data = glob(["src/minimizer/defs/*.toml"]),
     edition = "2024",
     deps = all_crate_deps(build = True),
@@ -26,6 +27,8 @@ rust_library(
     compile_data = glob([
         "src/minimizer/filters/fixtures/**",
         "src/process/*.txt",
+        # The Windows console's terminfo entry (`terminfo_db.rs` `include_bytes!`).
+        "src/bash/vm/zsh/terminfo/*",
     ]),
     crate_name = "pi_shell",
     edition = "2024",
@@ -57,6 +60,12 @@ rust_binary(
     crate_root = "src/bin/obash/main.rs",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
+    # Match build.rs's Cargo-only, binary-specific linker directives.
+    rustc_flags = select({
+        "@platforms//os:linux": ["-Clink-arg=-no-pie"],
+        "@platforms//os:macos": ["-Clink-arg=-Wl,-dead_strip_dylibs"],
+        "//conditions:default": [],
+    }),
     version = "18.15.0",
     deps = all_crate_deps(normal = True) + [":pi-shell"],
 )

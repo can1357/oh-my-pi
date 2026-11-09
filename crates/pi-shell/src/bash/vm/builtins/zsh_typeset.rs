@@ -737,7 +737,7 @@ fn typeset_single(
 	// module special's `PM_HIDE` off until its feature goes.
 	let computed = |s: Special| {
 		!s.is_plain()
-			&& s.tie_partner().is_none()
+			&& !matches!(s, Special::TiedScalar(_) | Special::TiedArray(_))
 			&& (pmf & PM_READONLY != 0 || s.flags().contains(PmFlags::HIDE))
 	};
 	if newspecial && let Some(p) = pm.as_ref().filter(|p| p.special.is_some_and(computed)) {
@@ -763,10 +763,11 @@ fn typeset_single(
 	if newspecial
 		&& let Some(i) = locallevel
 		&& let Some(p) = pm.as_ref()
-		&& let Some(sp) = p
-			.special
-			.filter(|s| !s.is_plain() && s.tie_partner().is_none() && pmf & PM_READONLY == 0)
-	{
+		&& let Some(sp) = p.special.filter(|s| {
+			!s.is_plain()
+				&& !matches!(s, Special::TiedScalar(_) | Special::TiedArray(_))
+				&& pmf & PM_READONLY == 0
+		}) {
 		let flags = PmFlags::from_bits((pm_type(pmf) | on) & !(off | PM_LOCAL));
 		let width = p.width;
 		let base = if on & (PM_INTEGER | PM_EFLOAT | PM_FFLOAT) != 0 {
@@ -991,13 +992,12 @@ fn typeset_single(
 	// A local tied special (`local path`): zsh keeps it special at the new
 	// level, starting empty; here the scalar it is computed from (`PATH`)
 	// becomes local, keeping its export.
-	let tied_local = pm
-		.as_ref()
-		.and_then(|p| p.special)
-		.filter(|s| newspecial && matches!(s, Special::TiedArray(_)))
-		.and_then(Special::tie_partner);
+	let tied_local = pm.as_ref().and_then(|p| p.special).and_then(|s| match s {
+		Special::TiedArray(t) if newspecial => Some(t.scalar()),
+		_ => None,
+	});
 	let r = px(ctx, |ex| {
-		if let Some((partner, _)) = tied_local {
+		if let Some(partner) = tied_local {
 			let partner = partner.as_bytes();
 			let cur = params::getparam(ex, partner)?;
 			// Already local here (`typeset MANPATH` then `typeset -T
@@ -1006,8 +1006,10 @@ fn typeset_single(
 				.as_ref()
 				.is_none_or(|p| !matches!(scope, Where::Scope(s) if s == p.scope))
 			{
-				let exported = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED);
-				create_in(ex, partner, PmFlags::from_bits(exported), (0, 0), scope);
+				// `local -U path`: its uniqueness lives on the scalar's record
+				// ([`params::set_flags`]), local with it.
+				let kept = cur.map_or(0, |p| p.flags.bits() & PM_EXPORTED) | (flags & PM_UNIQUE);
+				create_in(ex, partner, PmFlags::from_bits(kept), (0, 0), scope);
 			}
 		} else {
 			// zsh `createparam` without `PM_LOCAL` over a private

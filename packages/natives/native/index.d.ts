@@ -99,7 +99,13 @@ export declare class DesktopSession {
   captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Drags along `path`. A macOS background left drag across the text of one
+   * native text element is made as that element's selection through
+   * accessibility, with no mouse event, and resolves to the selection read
+   * back; a drag posted as input resolves to where a takeover left focus.
+   */
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
   scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
@@ -595,7 +601,7 @@ export declare class RunTrace {
    * instead of an invented primary producer. Decoding ends at capture EOF.
    * Segmented minimizer submissions share one epoch and final status;
    * their history carries `segment`, with `logicalEnd`/`logicalStatus`
-   * finalizing the last actual root RunEnd after output draining.
+   * finalizing the last actual root `RunEnd` after output draining.
    * Serialization borrows the locked model rather than cloning its history.
    */
   snapshot(): string
@@ -614,6 +620,14 @@ export declare class Shell {
    * The options set session-scoped environment variables and a snapshot path.
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * A new shell with this one's options whose session starts from this
+   * session's state (variables, functions, aliases, options, working
+   * directory) as of its last command boundary: while a command runs, the
+   * state that command started from. What the fork sets stays in the
+   * fork. Never waits for the running command.
+   */
+  fork(): Shell
   /**
    * Run a shell command using the provided options.
    *
@@ -705,9 +719,13 @@ export declare class TextPredictor {
 /**
  * Dedicated writer thread for one terminal fd.
  *
- * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
- * pump's fd alive if the original is closed or replaced; file-status flags
- * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
+ * Duplicated (close-on-exec) at construction and closed on drop. The
+ * duplicate keeps the pump's fd alive if the original is closed or replaced;
+ * file-status flags such as `O_NONBLOCK` are shared and handled by polling for
+ * `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
+ * spawns without explicit fd handling (`std::process::Command`, gitoxide
+ * filter drivers), which could otherwise read the user's keystrokes and
+ * terminal replies through it.
  */
 export declare class TtyWriter {
   /**
@@ -1592,6 +1610,21 @@ export interface DesktopDisplay {
   pixelWidth: number
   pixelHeight: number
   isPrimary: boolean
+}
+
+/** What a drag call did: made a text selection, or posted input. */
+export interface DesktopDragResult {
+  /**
+   * The selection a macOS background left drag across the text of one
+   * native text element made through accessibility, read back; absent when
+   * the drag was posted as input.
+   */
+  selection?: AxTextSelection
+  /**
+   * Where focus ended when the drag ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /**
@@ -3412,7 +3445,9 @@ export declare function renderSnapcompactPng(text: string, options: SnapcompactR
 
 /**
  * Run the pi-shell engine as a process shell in this process (`omp zsh`,
- * `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+ * `omp bash`, `omp sh`).
+ *
+ * `argv` is the shell's whole command line,
  * `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
  * shell gets it. Synchronous: blocks the calling thread until the shell
  * exits and returns the status the process should exit with (0–255; 101

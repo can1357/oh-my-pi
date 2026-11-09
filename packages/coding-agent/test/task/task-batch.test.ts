@@ -392,6 +392,72 @@ describe("task.batch validation", () => {
 		expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(false);
 	});
 
+	it.each([
+		{ batch: false, structured: true, isolation: false, seance: false, model: "" },
+		{ batch: true, structured: false, isolation: true, seance: true, model: [] },
+	])(
+		"routes empty model placeholders through the agent loop: $batch $structured $isolation $seance",
+		async options => {
+			const configuredAgent = { ...taskAgent, model: ["default/route"] };
+			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
+			mockDiscovery(options.seance ? [configuredAgent, bundledSeance] : configuredAgent);
+			const seen: Array<{ model: unknown; grants: unknown }> = [];
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async spawn => {
+				seen.push({ model: spawn.modelOverride, grants: spawn.perCallModelGrants });
+				return makeResult(spawn.id ?? "?");
+			});
+			const tool = await TaskTool.create(
+				createSession({
+					settings: {
+						"async.enabled": false,
+						"task.batch": options.batch,
+						"task.structured": options.structured,
+						"task.isolation.enabled": options.isolation,
+						"task.perCallModel": "off",
+					},
+				}),
+			);
+			const item = { agent: "task", task: "Do A.", solutionSpace: "bounded", model: options.model };
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								id: "empty-model",
+								name: "task",
+								arguments: options.batch ? { context: "ctx", tasks: [item] } : item,
+							},
+						],
+					},
+					{ content: ["done"] },
+				],
+			});
+			const agent = new Agent({
+				initialState: {
+					model: mock.model,
+					systemPrompt: ["Test"],
+					tools: [tool as unknown as AgentTool],
+					messages: [],
+				},
+				streamFn: mock.stream,
+			});
+			await agent.prompt("go");
+			const result = agent.state.messages.find(message => message.role === "toolResult");
+			expect(result?.role === "toolResult" && result.isError).toBe(false);
+			const omitted = { agent: "task", task: "Do B.", solutionSpace: "bounded" };
+			const baseline = await tool.execute(
+				"omitted-model",
+				options.batch ? { context: "ctx", tasks: [omitted] } : omitted,
+			);
+			expect(baseline.isError).not.toBe(true);
+			expect(seen).toEqual([
+				{ model: ["default/route"], grants: undefined },
+				{ model: ["default/route"], grants: undefined },
+			]);
+		},
+	);
+
 	// The agent loop validates arguments against the wire schema before execute(),
 	// and that schema deletes undeclared keys. With per-call model off, `model` and
 	// `sourceSession` on an ordinary agent must still be refused by every call form
@@ -922,6 +988,27 @@ describe("task.batch spawning", () => {
 
 describe("batch model placement", () => {
 	afterEach(() => vi.restoreAllMocks());
+	it.each([{ model: "" }, { model: [] as string[] }])(
+		"ignores an empty batch-root model without mutating submitted items (%p)",
+		async ({ model }) => {
+			mockDiscovery();
+			const run = vi
+				.spyOn(executorModule, "runSubprocess")
+				.mockImplementation(async options => makeResult(options.id ?? "?"));
+			const tool = await TaskTool.create(
+				createSession({ settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "off" } }),
+			);
+			const item = { task: "work", solutionSpace: "bounded", model: [] as string[] };
+			const params = { context: "ctx", model, tasks: [item] };
+			const snapshot = structuredClone(params);
+			const result = await tool.execute("batch-root-placeholder", params);
+			expect(result.isError).not.toBe(true);
+			expect(run).toHaveBeenCalledTimes(1);
+			expect(params).toEqual(snapshot);
+			expect(params.tasks[0]).toBe(item);
+		},
+	);
+
 	it("rejects a top-level model before dispatch even when wire validation is bypassed", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
@@ -1324,11 +1411,46 @@ describe("batch model placement", () => {
 		expect(options.outputSchema).toEqual(schema);
 	});
 
-	// Regression: lenient argument repair deletes keys an item's schema does not declare, at any depth, so an
-	// item that needs repair (`name: 5`) loses a real `model` unless the item schema keeps declaring it. The
-	// gate would then never see the selector: the task spawns on the agent's configured model while the
-	// approval prompt still names the requested one.
-	it("keeps a repaired batch item's real model, so the disabled gate still refuses it", async () => {
+	// An item's `model` must reach the per-call gate, so a call naming a model the settings forbid is
+	// refused rather than quietly run on the agent's own. Since upstream gated the field on
+	// `task.perCallModel`, the item schema declares no `model` while the gate is off, and
+	// `keepGatedItemKeys` in ./types is what carries an undeclared one through validation. This pins
+	// that it does.
+	it("keeps an undeclared batch item's real model, so the disabled gate still refuses it", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(
+			createSession({ settings: { "task.batch": true, "async.enabled": false, "task.perCallModel": "off" } }),
+		);
+		const args = validateAgentToolArguments(tool as unknown as AgentTool, {
+			type: "toolCall",
+			id: "task-undeclared-model",
+			name: tool.name,
+			arguments: {
+				context: "Shared context",
+				tasks: [{ task: "Do work", solutionSpace: "c", agent: "task", name: "Worker", model: "openai/gpt-5.4" }],
+			},
+		});
+		expect((args as TaskParams).tasks?.[0]?.model).toBe("openai/gpt-5.4");
+		const result = await tool.execute("task-undeclared-model", args as TaskParams);
+		expect(getFirstText(result)).toMatch(/per-call model is disabled/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	// Skipped because the guarantee is missing, not because the case stopped mattering. A call whose
+	// arguments need repair (`name: 5` here) loses the key before `keepGatedItemKeys` can carry it:
+	// `validateToolArguments` repairs against the advertised schema, `coerceArgsFromIssues` deletes the
+	// value at an unrecognized key's path at any depth, and only keys dropped at the ROOT are put back.
+	// The child then runs on the agent's own model and preflight never refuses it. A call the repair
+	// cannot mend keeps the key, because the lenient fallback hands the tool its raw arguments; only
+	// the repairable middle loses it.
+	//
+	// It is upstream's, not this member's. The same probe at pristine upstream main
+	// 7027a619a41c1eccdae6a5f07de91c43e2a487e3, with no fork code present, returns the same arguments
+	// without `model`. Tracked, with the probe and both measurements, in dispatch://INFRA-2381.
+	// Un-skip this test with the fix; do not re-aim it at the guarantee that happens to hold.
+	it.skip("keeps a repaired batch item's real model, so the disabled gate still refuses it", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
 		const tool = await TaskTool.create(

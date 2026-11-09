@@ -1092,6 +1092,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			file: cfgTaskFile.get(this.session.settings),
+			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 			defaultAgent: this.#defaultAgent(),
 			seanceFields: this.#seanceSchemaFields(),
 		});

@@ -15,7 +15,8 @@
 let
   rootCargoToml = builtins.readFile (source + "/Cargo.toml");
   lockText = builtins.readFile (source + "/Cargo.lock");
-  workspaceVersion = (builtins.fromTOML rootCargoToml).workspace.package.version;
+  rootManifest = builtins.fromTOML rootCargoToml;
+  workspaceVersion = rootManifest.workspace.package.version;
   platform =
     {
       aarch64-darwin = {
@@ -161,11 +162,15 @@ let
       (map (versionEntry placeholderVersion) workspaceCrates)
       lockText
   );
-  # Crane writes a workspace root as its cleaned Cargo.toml, so only the
-  # version differs from what mkDummySrc would produce.
+  # Crane writes a workspace root as its cleaned Cargo.toml. Its filter drops
+  # `workspace.lints`, but the real vendored crates still inherit them, so
+  # restore those alongside the placeholder version.
   dependencyCargoToml = craneLib.writeTOML "Cargo.toml" (
     lib.recursiveUpdate (craneLib.cleanCargoToml { cargoTomlContents = rootCargoToml; }) {
-      workspace.package.version = placeholderVersion;
+      workspace = {
+        package.version = placeholderVersion;
+        inherit (rootManifest.workspace) lints;
+      };
     }
   );
   dependencySource = craneLib.mkDummySrc {

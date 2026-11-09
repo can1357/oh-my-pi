@@ -11,7 +11,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 // (batch: `{ context, tasks[] }` of the same items). `agent` defaults to the
 // schema's spawn-policy default, and unknown keys sent by stale callers (`role`,
 // `description`) are stripped by the schema's `+: "delete"` — never rejected. `model`
-// is always declared, so a disabled per-call model reaches preflight and is rejected.
+// is declared only while a caller may send it; an undeclared one on a batch item is
+// kept so preflight refuses it instead of the child silently running on its own model.
 
 describe("oneLineLabel", () => {
 	it("collapses control and zero-width characters that \\s alone misses", () => {
@@ -80,20 +81,19 @@ describe("task wire schema", () => {
 		}
 	});
 
-	it("keeps a per-call model on the flat shape so preflight decides it", () => {
-		const parsed = taskSchema({ agent: "task", task: "x", solutionSpace: "c", model: "openai/gpt-5.4:high" });
-		expect(parsed instanceof type.errors).toBe(false);
-		expect(parsed).toHaveProperty("model", "openai/gpt-5.4:high");
-	});
-
-	// `model` is declared `string | string[]` on every variant now, seance advertised or not. While
-	// the list form was seance-only, the narrow schema rewrote an array to its JSON text, so a
-	// `model: []` a caller filled with nothing reached dispatch as the string `"[]"` — a selector the
-	// caller never wrote — and the speculative launcher, which plans from the raw arguments, saw the
-	// array instead. The schema accepts the shape; `invalidModelSelectorReason` is what refuses a
+	// Wherever `model` is declared it takes both forms, seance advertised or not. While the list
+	// form was seance-only, the narrow schema rewrote an array to its JSON text, so a `model: []` a
+	// caller filled with nothing reached dispatch as the string `"[]"` — a selector the caller never
+	// wrote — and the speculative launcher, which plans from the raw arguments, saw the array
+	// instead. The schema accepts the shape; `invalidModelSelectorReason` is what refuses a
 	// populated one, with the exact selector form to send instead.
 	it("accepts a model array outside the seance fields, leaving the refusal to preflight", () => {
-		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, effortEnabled: true });
+		const schema = getTaskSchema({
+			isolationEnabled: false,
+			batchEnabled: false,
+			effortEnabled: true,
+			perCallModel: true,
+		});
 		const populated = schema({ task: "x", solutionSpace: "c", model: ["openai/gpt-5.4"] });
 		expect(populated instanceof type.errors).toBe(false);
 		expect((populated as { model?: unknown }).model).toEqual(["openai/gpt-5.4"]);

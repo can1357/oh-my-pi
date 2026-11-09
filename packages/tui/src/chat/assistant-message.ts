@@ -21,7 +21,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
@@ -1136,7 +1136,17 @@ export class AssistantMessageComponent extends Container {
 				node("row", { role: "omp.turn.usage", gap: "xs", align: "center", title: usage.title }, line, "turn-usage"),
 			);
 		}
-		return col(children, { role: this.#rewound ? "omp.assistant.rewound" : "omp.assistant" });
+		// A phone's long press on a turn's answer lists its actions (a desktop keeps the usage line's Copy).
+		const at = this.#answerMessage?.timestamp;
+		const hold =
+			this.#turnUsage && answered && at !== undefined && !this.#rewound && hasTranscriptActions()
+				? {
+						actions: {
+							hold: turnHoldEntries("assistant", { id: "copy-answer", label: "Copy reply", icon: "copy" }),
+						},
+					}
+				: {};
+		return col(children, { role: this.#rewound ? "omp.assistant.rewound" : "omp.assistant", ...hold });
 	}
 
 	/**
@@ -1230,7 +1240,7 @@ export class AssistantMessageComponent extends Container {
 		else if (act === "copy-answer") {
 			const text = this.#answerText();
 			if (text) runTranscriptAction({ act: "copy", text });
-		}
+		} else if (this.#answerMessage) runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp });
 	}
 
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */

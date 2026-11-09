@@ -42,7 +42,7 @@ function createSession(
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
+// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
@@ -55,7 +55,13 @@ describe("task schema (single-spawn)", () => {
 	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
 		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
 		for (const file of [true, false]) {
-			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
+			const schema = getTaskSchema({
+				batchEnabled,
+				isolationEnabled: false,
+				structured: false,
+				file,
+				perCallModel: true,
+			});
 			const item = {
 				taskFile: "local://assignment.md",
 				model: "mock/file-worker",
@@ -169,24 +175,32 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	// What seance advertisement controls is `sourceSession`, not the shape of `model`. `model` is
-	// declared `string | string[]` on every variant now: while the list form was seance-only, the
+	// Two separate gates. Seance advertisement controls `sourceSession`; `task.perCallModel`
+	// controls whether `model` is declared at all. Neither controls the *shape* of `model`: wherever
+	// it is declared it is `string | string[]`, because while the list form was seance-only the
 	// narrow schema rewrote an array to its JSON text, so a `model: []` a caller filled with nothing
 	// reached dispatch as the string `"[]"` and the speculative launcher — which plans from the raw
 	// arguments — saw the array, so the two disagreed wherever seance was hidden.
-	it("omits seance fields when they are not enabled, while `model` keeps both forms", () => {
+	it("omits seance fields when they are not enabled, while a declared `model` keeps both forms", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
-				expect(JSON.stringify(schema.toJsonSchema())).not.toContain('"sourceSession"');
+				const wireSchema = JSON.stringify(schema.toJsonSchema());
+				expect(wireSchema).not.toContain('"sourceSession"');
+				expect(wireSchema).not.toContain('"model"');
+				// Per-call model alone advertises the selector, never the seance selector list — and it
+				// advertises both of its forms.
+				const perCallSchema = getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true });
+				const perCall = JSON.stringify(perCallSchema.toJsonSchema());
+				expect(perCall).not.toContain('"sourceSession"');
+				expect(perCall).toContain('"model"');
 				// Assert the value the schema *kept*, not merely that validation passed: with `"+": "delete"`
 				// a schema that does not declare `model` at all accepts every one of these and silently
-				// drops the key, so an acceptance-only assertion passes against the field this PR exists
-				// to keep declared.
+				// drops the key, so an acceptance-only assertion passes against the field this pins.
 				const kept = (model: unknown): unknown => {
 					const out = batchEnabled
-						? schema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
-						: schema({ task: "x", solutionSpace: "c", model });
+						? perCallSchema({ context: "c", tasks: [{ task: "x", solutionSpace: "c", model }] })
+						: perCallSchema({ task: "x", solutionSpace: "c", model });
 					expect(out instanceof type.errors).toBe(false);
 					const item = batchEnabled ? (out as { tasks: Array<{ model?: unknown }> }).tasks[0] : out;
 					return (item as { model?: unknown }).model;
@@ -196,6 +210,16 @@ describe("task schema seance fields", () => {
 				expect(kept([])).toEqual([]);
 			}
 		}
+	});
+
+	it.each([
+		["off", false],
+		["eval", false],
+		["on", true],
+	] as const)("advertises model only when task.perCallModel allows task calls (%s)", async (mode, advertised) => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }));
+		expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"')).toBe(advertised);
 	});
 
 	it("advertises fields only when bundled seance is spawnable", async () => {
@@ -242,9 +266,9 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		// `model` stays declared in plan mode. What plan mode hides is `sourceSession` and every mention
-		// of seance; the shape of `model` is no longer what advertisement controls.
-		expect(planSchema).toContain('"model"');
+		// Plan mode hides `sourceSession` and every mention of seance. `model` is absent for its own
+		// reason: this session leaves `task.perCallModel` off, so no per-call selector is declared.
+		expect(planSchema).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 

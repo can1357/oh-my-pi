@@ -17,6 +17,8 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
+use bstr::BString;
+
 use crate::bash::syntax::zsh::wordcode::Eprog;
 
 /// The version a dump names (zsh `ZSH_VERSION`); readers reject others.
@@ -235,6 +237,26 @@ impl DumpHeader {
 			strs:  strs.to_vec(),
 			npats: f.npats,
 		})
+	}
+
+	/// The base names (metafied) of the functions [`Self::func_prog`]
+	/// loads from `data`: the first entry of each name, whole in `data`.
+	pub fn loadable(&self, data: &[u8]) -> std::collections::HashSet<BString> {
+		let mut seen = std::collections::HashSet::new();
+		let mut out = std::collections::HashSet::new();
+		for f in self.funcs() {
+			let Some(name) = f.name.get(f.tail..) else {
+				continue;
+			};
+			if !seen.insert(name) {
+				continue;
+			}
+			let base = self.off + f.start * 4;
+			if f.strs <= f.len && data.get(base..base + f.len).is_some() {
+				out.insert(BString::from(name));
+			}
+		}
+		out
 	}
 
 	/// Word `i` of the header (0 past its end).

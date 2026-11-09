@@ -125,6 +125,19 @@ function isRawMultilineBurst(text: string): boolean {
 	return false;
 }
 
+/**
+ * Whether a classified raw burst ends with an Enter typed after the pasted
+ * text: a final CR when every earlier break is LF. An unmarked paste encodes
+ * its breaks one way (terminals send CR, automation writes LF), so a lone CR
+ * after LF-delimited text is the submit key a stall batched into the same
+ * read (#17820). It rides along with the paste like a bracketed paste's
+ * trailing Enter.
+ */
+function endsWithTypedEnter(text: string): boolean {
+	const last = text.length - 1;
+	return text.charCodeAt(last) === 0x0d && text.lastIndexOf("\r", last - 1) === -1;
+}
+
 // `resolveEscapeEnd` result for an abandoned string sequence; see there.
 const STRING_ABORTED = -3;
 const OSC5522_PREFIX = "\x1b]5522;";
@@ -855,7 +868,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 		const content = this.#takeRawPasteCandidate();
 		this.#pendingKittyPrintableCodepoint = undefined;
-		this.emit("paste", content);
+		if (endsWithTypedEnter(content)) this.emit("paste", content.slice(0, -1), "\r");
+		else this.emit("paste", content);
 	}
 
 	/** Replay an ambiguous raw candidate as the original per-key data events. */

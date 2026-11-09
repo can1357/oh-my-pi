@@ -1,8 +1,10 @@
-use atspi::{CoordType, ObjectRefOwned, Role, State, proxy::accessible::ObjectRefExt};
+use atspi::{
+	CoordType, ObjectRefOwned, Role, State, proxy::accessible::ObjectRefExt, zbus::names::UniqueName,
+};
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi},
+	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -415,6 +417,108 @@ fn atspi_window_id(frame: &ObjectRefOwned) -> String {
 	format!("atspi:{name}:{}", frame.path())
 }
 
+/// Replaces an element's text and reads it back: Gecko (Firefox, Thunderbird)
+/// accepts the write and keeps the old text. A field that hides its text reads
+/// back one mask character per character, whatever its role (a GTK4 entry
+/// with visibility off is a plain `Text`), so there the length is the check.
+/// Where the old text already showed that mask, a write the field ignored
+/// reads back the same, so the field must first read back empty after a
+/// clear. A hidden field's text never enters an error.
+async fn write_text(
+	connection: &atspi::zbus::Connection,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+	value: &str,
+) -> CoreResult<()> {
+	let editable = atspi::proxy::editable_text::EditableTextProxy::builder(connection)
+		.destination(name.clone())
+		.and_then(|b| b.path(object.path().clone()))
+		.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+		.build()
+		.await
+		.map_err(|err| DesktopError::ax_failed(format!("AT-SPI editable text: {err}")))?;
+	let read = async || text_contents(connection, name, object).await.ok();
+	let replace = async |text: &str| {
+		if !editable
+			.set_text_contents(text)
+			.await
+			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
+		{
+			return Err(DesktopError::ax_failed("AT-SPI text value was rejected"));
+		}
+		CoreResult::Ok(read().await)
+	};
+	let old = read().await;
+	let actual = replace(value).await?;
+	if actual.as_deref() == Some(value) {
+		return Ok(());
+	}
+	if actual.as_deref().is_some_and(|actual| masks(actual, value)) {
+		if !old.as_deref().is_none_or(|old| masks(old, value)) {
+			return Ok(());
+		}
+		if replace("").await?.as_deref() != Some("") {
+			return text_readback(value, value, None, true);
+		}
+		let emptied = |mut error: DesktopError| {
+			error
+				.message
+				.push_str(". setValue emptied the field before this write, so it may now be empty");
+			error
+		};
+		let rewritten = replace(value).await.map_err(emptied)?;
+		if rewritten
+			.as_deref()
+			.is_some_and(|actual| masks(actual, value))
+		{
+			return Ok(());
+		}
+		return text_readback(value, value, None, true).map_err(emptied);
+	}
+	// A role that cannot be read counts as a password field's, so no password
+	// enters an error.
+	let secure = actual.as_deref().is_some_and(masked)
+		|| accessible
+			.get_role()
+			.await
+			.ok()
+			.is_none_or(|role| role == Role::PasswordText);
+	text_readback(value, value, actual.as_deref(), secure)
+}
+
+/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
+/// toolkits fall back on.
+fn masked(actual: &str) -> bool {
+	let mut chars = actual.chars();
+	chars.next().is_some_and(|first| {
+		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
+	})
+}
+
+/// Whether `actual` masks `value`: one mask character per character, or per
+/// UTF-16 unit as Qt masks.
+fn masks(actual: &str, value: &str) -> bool {
+	let shown = actual.chars().count();
+	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
+}
+
+/// The whole text of an element with the `Text` interface.
+async fn text_contents(
+	connection: &atspi::zbus::Connection,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+) -> atspi::zbus::Result<String> {
+	let text = atspi::proxy::text::TextProxy::builder(connection)
+		.destination(name.clone())?
+		.path(object.path().clone())?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+		.build()
+		.await?;
+	let count = text.character_count().await?;
+	text.get_text(0, count).await
+}
+
 fn native_window_for_frame(windows: &[DesktopWindow], pid: u32, title: &str) -> CoreResult<String> {
 	let mut matches = windows.iter().filter(|window| {
 		!window.id.starts_with("atspi:") && window.pid == Some(pid) && window.title == title
@@ -658,6 +762,8 @@ impl AxBackend for AtSpiAx {
 				child_count,
 				identity: None,
 				partial: false,
+				selected: false,
+				role_name: None,
 			})
 		})
 	}
@@ -733,21 +839,8 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI interfaces: {err}")))?;
 			if interfaces.contains(atspi::Interface::EditableText) {
-				let editable = atspi::proxy::editable_text::EditableTextProxy::builder(
-					self.connection.connection(),
-				)
-				.destination(name.clone())
-				.and_then(|b| b.path(object.path().clone()))
-				.map_err(|err| DesktopError::ax_failed(err.to_string()))?
-				.build()
-				.await;
-				let editable = editable
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI editable text: {err}")))?;
-				return editable
-					.set_text_contents(value)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
-					.ok_or_else(|| DesktopError::ax_failed("AT-SPI text value was rejected"));
+				return write_text(self.connection.connection(), &accessible, &name, &object, value)
+					.await;
 			}
 			if !interfaces.contains(atspi::Interface::Value) {
 				return Err(DesktopError::ax_failed("AT-SPI element has no writable value interface"));
@@ -984,6 +1077,210 @@ mod tests {
 	}
 
 	#[test]
+	fn a_text_write_the_app_ignores_fails() {
+		use std::sync::{Arc, Mutex};
+
+		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
+
+		/// Which writes a field applies: all (GTK, Qt, `LibreOffice`), none while
+		/// answering true (Gecko), or the first two and then it refuses.
+		#[derive(Clone, Copy)]
+		enum Writes {
+			All,
+			Ignored,
+			TwoThenRefused,
+		}
+
+		/// `org.a11y.atspi.EditableText`, counting the writes it gets.
+		struct Editable {
+			text:   Arc<Mutex<String>>,
+			writes: Writes,
+			count:  Arc<Mutex<usize>>,
+		}
+
+		#[interface(name = "org.a11y.atspi.EditableText")]
+		impl Editable {
+			fn set_text_contents(&self, new_contents: String) -> bool {
+				let mut count = self.count.lock().unwrap();
+				*count += 1;
+				let applies = match self.writes {
+					Writes::All => true,
+					Writes::Ignored => false,
+					Writes::TwoThenRefused if *count > 2 => return false,
+					Writes::TwoThenRefused => true,
+				};
+				if applies {
+					*self.text.lock().unwrap() = new_contents;
+				}
+				true
+			}
+		}
+
+		/// How a field shows its text: as is, or one `●` per character (GTK,
+		/// Gecko) or per UTF-16 unit (Qt).
+		#[derive(Clone, Copy)]
+		enum Shown {
+			Plain,
+			PerChar,
+			PerUtf16,
+		}
+
+		fn shown(text: &str, shown: Shown) -> String {
+			match shown {
+				Shown::Plain => text.to_owned(),
+				Shown::PerChar => "●".repeat(text.chars().count()),
+				Shown::PerUtf16 => "●".repeat(text.encode_utf16().count()),
+			}
+		}
+
+		/// `org.a11y.atspi.Text`, reading what the field shows.
+		struct Text {
+			text:  Arc<Mutex<String>>,
+			shown: Shown,
+		}
+
+		#[interface(name = "org.a11y.atspi.Text")]
+		impl Text {
+			#[zbus(property)]
+			fn character_count(&self) -> i32 {
+				shown(&self.text.lock().unwrap(), self.shown)
+					.chars()
+					.count() as i32
+			}
+
+			fn get_text(&self, start_offset: i32, end_offset: i32) -> String {
+				shown(&self.text.lock().unwrap(), self.shown)
+					.chars()
+					.skip(start_offset as usize)
+					.take((end_offset - start_offset) as usize)
+					.collect()
+			}
+		}
+
+		struct Accessible(Role);
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Accessible {
+			fn get_role(&self) -> u32 {
+				self.0 as u32
+			}
+		}
+
+		/// An error naming what the field reads, one that names no text, or one
+		/// saying the field was emptied.
+		enum Verdict {
+			Ok,
+			Reads(&'static str),
+			Hidden,
+			Emptied,
+		}
+
+		const PEER: &str = ":1.7";
+		// Path, which writes the field applies, role (`None`: unreadable), how it
+		// shows its text (`None`: no `Text`), its old text, the verdict, and how
+		// many writes it gets.
+		type Case = (&'static str, Writes, Option<Role>, Option<Shown>, &'static str, Verdict, usize);
+		let password = Some(Role::PasswordText);
+		let masked = Some(Shown::PerChar);
+		// As many characters as "new ä€😀", so it shows the same mask.
+		let same_length = "abcdefg";
+		let cases: [Case; 12] = [
+			("/gtk", Writes::All, Some(Role::Entry), Some(Shown::Plain), "old", Verdict::Ok, 1),
+			(
+				"/gecko",
+				Writes::Ignored,
+				Some(Role::Entry),
+				Some(Shown::Plain),
+				"old",
+				Verdict::Reads(r#"the field now reads "old""#),
+				1,
+			),
+			// The mask changed length, so one write is proof.
+			("/gtk_password", Writes::All, password, masked, "old", Verdict::Ok, 1),
+			("/gecko_password", Writes::Ignored, password, masked, "old", Verdict::Hidden, 1),
+			// The old text shows the same mask: the field must clear first.
+			("/gtk_password_same_length", Writes::All, password, masked, same_length, Verdict::Ok, 3),
+			(
+				"/gecko_password_same_length",
+				Writes::Ignored,
+				password,
+				masked,
+				same_length,
+				Verdict::Hidden,
+				2,
+			),
+			(
+				"/refused_after_clear",
+				Writes::TwoThenRefused,
+				password,
+				masked,
+				same_length,
+				Verdict::Emptied,
+				3,
+			),
+			("/qt_password", Writes::All, password, Some(Shown::PerUtf16), "old", Verdict::Ok, 1),
+			// A GTK4 entry with visibility off and no password purpose.
+			("/gtk4_hidden", Writes::All, Some(Role::Text), masked, "old", Verdict::Ok, 1),
+			(
+				"/gtk4_hidden_ignored",
+				Writes::Ignored,
+				Some(Role::Text),
+				masked,
+				"old",
+				Verdict::Hidden,
+				1,
+			),
+			("/no_role", Writes::Ignored, None, Some(Shown::Plain), "old", Verdict::Hidden, 1),
+			("/no_text", Writes::All, password, None, "old", Verdict::Hidden, 1),
+		];
+		let counts: Vec<_> = cases.iter().map(|_| Arc::new(Mutex::new(0))).collect();
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let results = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let mut builder = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for (&(path, writes, role, shown, old, ..), count) in cases.iter().zip(&counts) {
+				let text = Arc::new(Mutex::new(old.to_owned()));
+				let count = count.clone();
+				builder = builder
+					.serve_at(path, Editable { text: text.clone(), writes, count })
+					.unwrap();
+				if let Some(shown) = shown {
+					builder = builder.serve_at(path, Text { text, shown }).unwrap();
+				}
+				if let Some(role) = role {
+					builder = builder.serve_at(path, Accessible(role)).unwrap();
+				}
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
+			let mut results = Vec::new();
+			for &(path, ..) in &cases {
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
+				let name = object.name().unwrap().clone();
+				let accessible = object.as_accessible_proxy(&client).await.unwrap();
+				results.push(write_text(&client, &accessible, &name, &object, "new ä€😀").await);
+			}
+			drop(server);
+			results
+		});
+		for (((path, .., verdict, writes), result), count) in cases.iter().zip(results).zip(&counts) {
+			assert_eq!(*count.lock().unwrap(), *writes, "{path}: writes");
+			match (verdict, result) {
+				(Verdict::Ok, Ok(())) => {},
+				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
+				(Verdict::Hidden, Err(err))
+					if err.message.contains("secure") && !err.message.contains("new") => {},
+				(Verdict::Emptied, Err(err))
+					if err.message.contains("emptied") && !err.message.contains("new") => {},
+				(_, result) => panic!("{path}: {result:?}"),
+			}
+		}
+	}
+
+	#[test]
 	fn frame_ownership_requires_unique_process_and_title() {
 		let window = |id: &str, pid: u32| DesktopWindow {
 			id:      id.to_owned(),
@@ -1177,7 +1474,8 @@ mod tests {
 			let (client, server) = tokio::net::UnixStream::pair().unwrap();
 			let root = Node {
 				state:    vec![0, 0],
-				// Chromium frames report children that are all the AT-SPI null object.
+				// Chromium frames report children that are all the AT-SPI null
+				// object.
 				children: vec![
 					(PEER.to_owned(), path("/org/a11y/atspi/null")),
 					(PEER.to_owned(), path("/focus")),

@@ -79,6 +79,14 @@ const SLICE: u32 = 1024;
 /// bash version this engine implements (`$BASH_VERSION`).
 pub const BASH_VERSION: &str = "5.3.0(1)-release";
 
+/// Largest buffer a kernel keeps for reuse (the spare syntax tree, the unit
+/// blob encoder): every ordinary command fits, and a huge one's buffers are
+/// freed instead of held for the shell's lifetime.
+const SPARE_BUFFER_BYTES: usize = 1 << 20;
+
+/// Unit ids [`Kernel::written`] remembers before it starts over.
+const WRITTEN_MAX: usize = 1 << 16;
+
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
 	const fn send<T: Send>() {}
@@ -143,6 +151,11 @@ pub struct ShellInit {
 	/// its startup files: `ZSH_EXECUTION_STRING` (the `-c` string) and
 	/// `ZSH_SCRIPT` (the script file).
 	pub zsh_params:  Vec<(BString, BString)>,
+	/// The system zsh's function directories, which a zsh shell's `fpath`
+	/// starts with when the environment sets no `FPATH` (zsh's compiled-in
+	/// `FPATH_DIR` and its subdirectories). `None`: zsh 5.9's default
+	/// layout.
+	pub zsh_fpath:   Option<Vec<BString>>,
 	/// Whose shell it is: a user's, or a program's ([`Profile::Tool`]).
 	pub profile:     Profile,
 }
@@ -194,6 +207,7 @@ impl Default for ShellInit {
 			shell_pid:   0,
 			startup:     Vec::new(),
 			zsh_params:  Vec::new(),
+			zsh_fpath:   None,
 			profile:     Profile::User,
 		}
 	}
@@ -412,9 +426,12 @@ pub struct Kernel {
 	/// Origin of each currently executing source-context unit in its actual
 	/// vproc.
 	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
-	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
-	/// `externalize`).
-	pub written:            HashSet<UnitId>,
+	/// Unit blobs known to be in the store ([`Kernel::note_written`]); at
+	/// most [`WRITTEN_MAX`] ids.
+	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
+	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
+	/// imaged.
+	blob_buf:               Vec<u8>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
 	pub written_vpid:       u32,
@@ -446,9 +463,21 @@ pub struct Kernel {
 	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
 	pub nofork_units:       exec::NoforkUnits,
+	/// The functions each zsh word code digest (`.zwc`) holds, by path,
+	/// with the modification time and size they were read at
+	/// ([`Kernel::dump_funcs`]): an `$fpath` search asks of the same digests
+	/// for every function it resolves. Per shell, as its host's files are
+	/// (shells sharing an engine may see other files at a path); not imaged.
+	zsh_dumps:              parking_lot::Mutex<HashMap<BString, DumpFuncs>>,
+	/// Syntax-tree buffers of the last command run, lent to the next parse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
+	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
+	pub spare_tree:         crate::bash::syntax::Tree,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
 	pub arith_recent:       arith::Recent,
+	/// [`arith_recent`](Self::arith_recent) for zsh's evaluator.
+	pub zsh_arith_recent:   zsh::math::Recent,
 	/// The last event clock reading while it is still current
 	/// ([`Kernel::stamp`]): set by a reading that ends a duration or starts a
 	/// command, cleared by [`Kernel::clock_stale`] before anything that can
@@ -486,6 +515,16 @@ pub struct Kernel {
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
 	pub settled:            Vec<(Vpid, u32)>,
+	/// `(OS pid, vproc, job)`: a job's `$!` names a program a vproc other
+	/// than the job's own runs (a background pipeline's last stage), so
+	/// `kill` of that pid signals that vproc, and finds no process once it
+	/// ended though the job runs on. Dropped when the job ends; not imaged
+	/// (a restored shell signals the job's vproc).
+	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
+	/// The math options ([`zsh::arith::math_options`]) last read for a vproc
+	/// without an overlay, with the [`state::Root::opts_gen`] and mode they
+	/// were read under: every `(( ))` asks.
+	pub math_opts:          Option<(u64, ModeId, zsh::math::Options)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
 	pub deferrals:          Vec<proc::Deferral>,
@@ -513,7 +552,39 @@ impl ProcState {
 	}
 }
 
+/// A digest's function names, with the modification time (ns) and size
+/// of the file they were read from.
+type DumpFuncs = ((i64, u64), Arc<std::collections::HashSet<BString>>);
+
 impl Kernel {
+	/// The functions (metafied names) of the digest `path` as this shell
+	/// last read it, while its modification time and size are `stamp`.
+	pub(crate) fn dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+	) -> Option<Arc<std::collections::HashSet<BString>>> {
+		self
+			.zsh_dumps
+			.lock()
+			.get(path)
+			.filter(|(s, _)| *s == stamp)
+			.map(|(_, f)| Arc::clone(f))
+	}
+
+	/// Remember the functions `funcs` of the digest `path` at `stamp`.
+	pub(crate) fn cache_dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+		funcs: Arc<std::collections::HashSet<BString>>,
+	) {
+		self
+			.zsh_dumps
+			.lock()
+			.insert(BString::from(path), (stamp, funcs));
+	}
+
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
 		Self {
@@ -534,7 +605,8 @@ impl Kernel {
 			announced: HashSet::new(),
 			trace_sources: HashMap::new(),
 			trace_unit_origins: HashMap::new(),
-			written: HashSet::new(),
+			written: HashSet::default(),
+			blob_buf: Vec::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
 			argv0,
@@ -546,7 +618,10 @@ impl Kernel {
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			zsh_dumps: parking_lot::Mutex::new(HashMap::new()),
+			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
+			zsh_arith_recent: zsh::math::Recent::default(),
 			clock: None,
 			null_input: None,
 			callout_labels: Vec::new(),
@@ -555,6 +630,8 @@ impl Kernel {
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
+			pid_owners: Vec::new(),
+			math_opts: None,
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
@@ -588,8 +665,11 @@ impl Kernel {
 		let bang = self.bangs.swap_remove(i);
 		if let Some(pid) = os {
 			self.settled.push((bang.job, pid));
+			if bang.vproc != bang.job {
+				self.pid_owners.push((pid, bang.vproc, bang.job));
+			}
 		}
-		jobctl::bang_settled(self, bang.job, os);
+		jobctl::bang_settled(self, bang.vproc, os);
 		self.ctl.notify();
 	}
 
@@ -626,17 +706,43 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if self.written.contains(&unit.id) {
+		if !self.note_written(unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let mut buf = core::mem::take(&mut self.blob_buf);
+		buf.clear();
+		let written = postcard::to_extend(unit, buf)
 			.map_err(StoreError::Encode)
-			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
-		match written {
-			Ok(()) => {
-				self.written.insert(unit.id);
-			},
-			Err(err) => self.fail(err),
+			.and_then(|buf| {
+				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
+				if buf.capacity() <= SPARE_BUFFER_BYTES {
+					self.blob_buf = buf;
+				}
+				put
+			});
+		if let Err(err) = written {
+			self.written.remove(&unit.id);
+			self.fail(err);
+		}
+	}
+
+	/// Note that `id`'s blob is in the store; `false` when it already was
+	/// known. Past [`WRITTEN_MAX`] ids the set starts over: forgetting one
+	/// only costs writing its blob again, while a long-lived shell compiles
+	/// new units without end.
+	pub(crate) fn note_written(&mut self, id: UnitId) -> bool {
+		if self.written.len() >= WRITTEN_MAX && !self.written.contains(&id) {
+			self.written.clear();
+		}
+		self.written.insert(id)
+	}
+
+	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),
+	/// unless they outgrew [`SPARE_BUFFER_BYTES`]: one huge command's tree
+	/// is freed rather than held for the shell's lifetime.
+	pub(crate) fn keep_spare_tree(&mut self, tree: crate::bash::syntax::Tree) {
+		if tree.heap_bytes() <= SPARE_BUFFER_BYTES {
+			self.spare_tree = tree;
 		}
 	}
 
@@ -663,6 +769,16 @@ impl Kernel {
 		id
 	}
 
+	/// The vproc that runs (or ran) the program OS pid `pid` names when
+	/// that is not its job's own vproc ([`Self::pid_owners`]).
+	pub fn pid_owner(&self, pid: u32) -> Option<Vpid> {
+		self
+			.pid_owners
+			.iter()
+			.find(|&&(p, ..)| p == pid)
+			.map(|&(_, owner, _)| owner)
+	}
+
 	/// Child vproc `vpid` of `parent` ended with `status`; the record stays
 	/// until the status is collected ([`Self::proc_collect`]).
 	pub fn proc_exited(
@@ -672,6 +788,7 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		self.pid_owners.retain(|&(.., job)| job != vpid);
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
@@ -1090,14 +1207,12 @@ fn host_stdio(host: &mut dyn Host, cache: &mut [Option<FdRef>; 3]) -> FdTable {
 fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(), StoreError> {
 	let ppid = cx.host.ppid();
 	let need_shell = state::global(cx.store, b"SHELL")?.is_none();
-	let deferred_shell = if need_shell && init.mode.dialect() != crate::bash::ids::Dialect::Zsh {
-		match cx.host.login_shell_initializer() {
+	let deferred_shell = need_shell
+		&& init.mode.dialect() != crate::bash::ids::Dialect::Zsh
+		&& match cx.host.login_shell_initializer() {
 			Some(initializer) => cx.store.defer_scalar(b"SHELL", Attrs::NONE, initializer)?,
 			None => false,
-		}
-	} else {
-		false
-	};
+		};
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx, k.engine.config().platform)
 	} else {
@@ -1137,6 +1252,15 @@ fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(),
 				}
 			}
 		}
+	}
+	if init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& let Some(dirs) = &init.zsh_fpath
+		&& !init.env.iter().any(|(n, _)| n == "FPATH")
+	{
+		let sep = crate::bash::vm::probe::path_separator(k.engine.config().platform);
+		let joined = bstr::join([sep], dirs);
+		k.root
+			.set_var(cx.store, b"FPATH", Some(Var::scalar(BString::from(joined), Attrs::NONE)));
 	}
 	for (name, value) in &init.zsh_params {
 		k.root
@@ -1180,10 +1304,23 @@ pub fn zsh_startup_values(
 		(b"PSVAR", b""),
 		(b"FIGNORE", b""),
 	];
-	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`).
+	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`). The directory
+	// lists take the platform's separator, as their ties split them.
+	let sep = crate::bash::vm::probe::path_separator(platform);
 	let mut out: Vec<(&'static [u8], Var, bool)> = defaults
 		.into_iter()
-		.map(|(name, value)| (name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH"))
+		.map(|(name, value)| {
+			let value: BString = if matches!(name, b"PATH" | b"FPATH") {
+				value
+					.iter()
+					.map(|&c| if c == b':' { sep } else { c })
+					.collect::<Vec<u8>>()
+					.into()
+			} else {
+				value.into()
+			};
+			(name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH")
+		})
 		.collect();
 	// `setiparam`: integers.
 	let integers: [(&'static [u8], &[u8]); 3] =
@@ -1193,7 +1330,12 @@ pub fn zsh_startup_values(
 	}
 	// zsh exports `HOME` and `LOGNAME` (`addenv` when not imported).
 	if !user.home.is_empty() {
-		out.push((&b"HOME"[..], Var::scalar(user.home.clone(), Attrs::EXPORT), false));
+		let home = if platform == crate::bash::ids::Platform::Windows {
+			builtins::zsh_dir::windows_spelling(&user.home, &user.home)
+		} else {
+			user.home.clone()
+		};
+		out.push((&b"HOME"[..], Var::scalar(home, Attrs::EXPORT), false));
 	}
 	out.push((&b"LOGNAME"[..], Var::scalar(user.name, Attrs::EXPORT), false));
 	let (_, release, machine) = cx.host.uname().unwrap_or_default();
@@ -1223,6 +1365,9 @@ pub fn zsh_startup_values(
 			o.extend_from_slice(b".0");
 		}
 		o
+	} else if platform == crate::bash::ids::Platform::Windows {
+		// MSYS2's zsh, the zsh Windows users and plugins know.
+		BString::from("msys")
 	} else {
 		BString::from("linux-gnu")
 	};
@@ -1401,6 +1546,15 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::StartNs, k.start_ns.to_string());
 		k.startup.clone_from(&init.startup);
 		let mut foreign: Vec<BString> = Vec::new();
+		// zsh on Windows keeps directories spelled with `/` (`cd` does), so
+		// `$PWD`, `$HOME` and `~` agree from the start.
+		let zsh_on_windows = init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+			&& engine.config().platform == crate::bash::ids::Platform::Windows;
+		let cwd = if zsh_on_windows {
+			builtins::zsh_dir::windows_spelling(&init.cwd, &init.cwd)
+		} else {
+			init.cwd.clone()
+		};
 		for (name, value) in &init.env {
 			if let Some(func) = name
 				.strip_prefix(b"BASH_FUNC_")
@@ -1408,8 +1562,13 @@ impl Shell {
 			{
 				import_function(&mut k, cx.store, func, value);
 			} else if is_ident(name) {
+				let value = if zsh_on_windows && name == "HOME" {
+					builtins::zsh_dir::windows_spelling(value, value)
+				} else {
+					value.clone()
+				};
 				k.root
-					.set_var(cx.store, name, Some(Var::scalar(value.clone(), Attrs::EXPORT)));
+					.set_var(cx.store, name, Some(Var::scalar(value, Attrs::EXPORT)));
 			} else {
 				let mut entry = name.clone();
 				entry.push(b'=');
@@ -1425,7 +1584,7 @@ impl Shell {
 			);
 		}
 		k.root
-			.set_var(cx.store, b"PWD", Some(Var::scalar(init.cwd.clone(), Attrs::EXPORT)));
+			.set_var(cx.store, b"PWD", Some(Var::scalar(cwd.clone(), Attrs::EXPORT)));
 		let zsh = init.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 		let shlvl = state::global(cx.store, b"SHLVL")?
 			.and_then(|v| v.as_scalar())
@@ -1467,7 +1626,7 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::Argv0, init.argv0.clone());
 		k.root
 			.set_misc(cx.store, MiscKey::ShellPid, shell_pid.to_string());
-		k.root.set_misc(cx.store, MiscKey::Cwd, init.cwd.clone());
+		k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
 		k.root.set_misc(cx.store, MiscKey::Status, "0");
 		k.root
 			.set_misc(cx.store, MiscKey::Mode, <&'static str>::from(init.mode));
@@ -1510,7 +1669,7 @@ impl Shell {
 				fds.set(fd, Some(FdRef::open(file, FdOrigin::Host)));
 			}
 		}
-		let mut root = Vproc::new(vpid, None, fds, init.cwd, None, false);
+		let mut root = Vproc::new(vpid, None, fds, cwd, None, false);
 		root.mode = init.mode;
 		if zsh {
 			let start = mode::ZshStart {
@@ -2638,6 +2797,7 @@ impl Vproc {
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
+			exit_trap_run: false,
 			jobs: proc::JobTable::default(),
 			last_bg: proc::LastBg::default(),
 			getopts: proc::GetoptsState { optind: None, next: None, at: None },
