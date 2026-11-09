@@ -15,7 +15,7 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use bstr::{BStr, BString, ByteSlice};
 
@@ -58,11 +58,23 @@ fn opt(ex: &mut Expander<'_, '_>, o: ZshOpt) -> X<bool> {
 
 /// The options the evaluator reads (zsh `isset(OCTALZEROES)`, …), read
 /// once per top-level evaluation; also the options `convbase` takes.
+/// Remembered while no root option changes ([`state::Root::opts_gen`]):
+/// every `(( ))` asks. A subshell's own options (its overlay) are read
+/// each time.
 ///
 /// # Errors
 /// [`Stop::Store`] when an option cannot be read.
 pub fn math_options(ex: &mut Expander<'_, '_>) -> X<Options> {
-	Ok(Options {
+	let cacheable = ex.vp.overlay.is_none();
+	let now = ex.k.root.opts_gen();
+	if cacheable
+		&& let Some((g, mode, o)) = ex.k.math_opts
+		&& g == now
+		&& mode == ex.vp.mode
+	{
+		return Ok(o);
+	}
+	let o = Options {
 		octal_zeroes:      opt(ex, ZshOpt::Octalzeroes)?,
 		c_bases:           opt(ex, ZshOpt::Cbases)?,
 		c_precedences:     opt(ex, ZshOpt::Cprecedences)?,
@@ -71,7 +83,13 @@ pub fn math_options(ex: &mut Expander<'_, '_>) -> X<Options> {
 		multibyte:         opt(ex, ZshOpt::Multibyte)?,
 		posix_identifiers: opt(ex, ZshOpt::Posixidentifiers)?,
 		sh_emulation:      ex.vp.mode == ModeId::ZshSh,
-	})
+	};
+	// Reading an option may have filled the root's facts: key by the
+	// generation they were read at.
+	if cacheable && ex.k.root.opts_gen() == now {
+		ex.k.math_opts = Some((now, ex.vp.mode, o));
+	}
+	Ok(o)
 }
 
 /// The evaluator's view of the shell during one top-level evaluation.
@@ -176,8 +194,9 @@ impl<'x, 'e, 'c> ShellEnv<'x, 'e, 'c> {
 impl Env for ShellEnv<'_, '_, '_> {
 	type Error = Stop;
 	/// What a subscripted operand resolved to (a plain name is found by
-	/// name again: the same parameter).
-	type Slot = Option<params::Value>;
+	/// name again: the same parameter). Boxed: every value-stack entry
+	/// holds one, and most are `None`.
+	type Slot = Option<Box<params::Value>>;
 
 	fn options(&self) -> Options {
 		self.opts
@@ -187,13 +206,20 @@ impl Env for ShellEnv<'_, '_, '_> {
 		&CACHE
 	}
 
+	fn compiled(&mut self, text: &[u8], flags: u8) -> Arc<math::Expr> {
+		self.ex.k.zsh_arith_recent.get(text, flags, &CACHE)
+	}
+
 	fn state(&mut self) -> &mut MathState {
 		&mut self.state
 	}
 
 	fn get(&mut self, lval: &[u8]) -> Result<Option<(Param, Self::Slot)>, Stop> {
 		let subscripted = lval.contains(&b'[');
-		Ok(params::getmathparam(self.ex, lval)?.map(|(p, v)| (p, subscripted.then_some(v))))
+		if !subscripted && let Some(p) = params::direct_math_value(self.ex, lval)? {
+			return Ok(Some((p, None)));
+		}
+		Ok(params::getmathparam(self.ex, lval)?.map(|(p, v)| (p, subscripted.then(|| Box::new(v)))))
 	}
 
 	fn set_slot(&mut self, slot: &Self::Slot, value: Number) -> Result<bool, Stop> {
@@ -206,9 +232,12 @@ impl Env for ShellEnv<'_, '_, '_> {
 	}
 
 	fn assign(&mut self, lval: &[u8], value: Number) -> Result<Option<Assigned>, Stop> {
+		self.assigned = true;
+		if let Some(assigned) = params::setnparam_number(self.ex, lval, value)? {
+			return Ok(Some(assigned));
+		}
 		let text = math::format_number(value, &self.state, self.opts);
 		let radix = self.state.output_radix;
-		self.assigned = true;
 		params::setnparam(self.ex, lval, value, text.as_bytes(), radix).map(Some)
 	}
 

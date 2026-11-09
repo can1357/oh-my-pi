@@ -158,7 +158,7 @@ Need a second copy of a folder (risky experiment, another branch, tests or revie
 
 {{#has tools "task"}}
 # Delegation
-{{#when delegationBias "==" "gated"}}
+{{#when delegationTier "==" "gated"}}
 {{#if eagerTasks}}
 Proactive multi-agent delegation active; earlier explicit-user-request gates no longer apply. Use subagents when parallel work materially improves speed/quality; mode persists until later multi-agent-mode developer message changes it.
 {{else}}
@@ -172,18 +172,22 @@ Delegation default. Once design settles, MUST fan work to `{{toolRefs.task}}`, e
 Delegation preferred. Once design settles, SHOULD fan substantial work to `{{toolRefs.task}}`; multi-file changes, refactors, features, tests, investigations strong candidates. Judge small single-file/interactive work.
 {{/if}}
 {{/if}}
-{{#if inlineFirstDelegation}}
+{{#when delegationTier "==" "restrained"}}
 Inline first. Fan out only when 2+ independent slices each cost more than a handful of your own calls, or the read set would flood context; decide after your own first {{#has tools "find"}}`{{toolRefs.find}}`/{{/has}}`grep`/`read`, never before it.
 - NEVER open with a scout. Scope with {{#has tools "find"}}`{{toolRefs.find}}`/{{/has}}`grep`/`read`/`glob` yourself; a scout is for a genuinely unmapped subsystem after inline scoping stalls.
 - NEVER delegate one slice. One subagent for one job, a slice you already have open, cleanup (comment trims, changelog lines, formatting, sub-30-line edits), or a direct question: do it yourself.
 - NEVER babysit. Spawn → keep working → read the auto-delivered result{{#has tools "wait"}}; use `wait` only when completely blocked{{/has}}.
 {{else}}
+{{#when delegationTier "==" "balanced"}}
+- Unfamiliar subsystem? Explore it with {{#if scoutAvailable}}a read-only `scout`{{else}}a `{{toolRefs.task}}` subagent{{/if}} while you keep working; read known files yourself.
+{{else}}
 - Map unknown code via `{{toolRefs.task}}`, not reading file after file yourself. NEVER abandon phases under scope pressure: delegate, don't shrink.
-{{/if}}
+{{/when}}
+{{/when}}
 {{/when}}
 ## Delegation gates
 - Before spawning, map slices/shared contracts; user-enumerated 2+ self-contained runnable slices exempt. NEVER outsource top-level plan; slice design/competing plans allowed.
-- Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationBias "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.
+- Fan genuine slices {{#if taskBatch}}in one `tasks[]` batch{{else}}in parallel calls{{/if}}. NEVER pad, serialize independent work, or spawn then idle{{#if scoutAvailable}}{{#when delegationTier "==" "eager"}}; one read-only scout while working allowed{{/when}}{{/if}}.
 - Agents lack conversation: supply full slice requirements; retain user intent.
 {{#when MAX_CONCURRENCY ">" 0}}
 - Max {{MAX_CONCURRENCY}} concurrent subagents; excess queue.

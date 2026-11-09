@@ -75,7 +75,17 @@ import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { OTHER_OPTION } from "../../tools/ask";
+import {
+	choiceValue,
+	defaultFormData,
+	fieldQuestions,
+	type HtmlFormData,
+	type HtmlFormValue,
+	isArrayChoice,
+	OTHER_LABEL,
+	textValue,
+} from "@oh-my-pi/pi-tui/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, spansText } from "@oh-my-pi/pi-tui/html-form/parse";
 import { resolvePlanFilePath } from "../../plan-mode/plan-files";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
@@ -104,6 +114,8 @@ const ACP_PLAN_MODE_ID = "plan";
 const DEFAULT_PLAN_FILE_URL = "local://PLAN.md";
 const APPROVE_OPTION = "Approve and execute";
 const REFINE_OPTION = "Refine plan";
+/** Title of the free-text property each `askDialog` question gets beside its options. */
+const OTHER_OPTION = "Other (type your own)";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
@@ -618,6 +630,162 @@ async function elicitFromAcpClient(
 	return content?.value;
 }
 
+/**
+ * The elicitation message for an HTML form: its section titles and context
+ * blocks (paragraphs, lists, preformatted text, tables) as plain text, the
+ * fields themselves being schema properties.
+ */
+function formElicitationMessage(form: HtmlForm): string {
+	const parts: string[] = [];
+	for (const section of form.sections) {
+		const title = spansText(section.title).trim();
+		if (title) parts.push(title);
+		for (const block of section.blocks) {
+			if (block.kind === "text") parts.push(spansText(block.spans));
+			else if (block.kind === "pre") parts.push(block.text);
+			else if (block.kind === "list") {
+				parts.push(
+					block.items
+						.map((item, index) => `${block.ordered ? `${index + 1}.` : "-"} ${spansText(item)}`)
+						.join("\n"),
+				);
+			} else if (block.kind === "table") {
+				parts.push(block.rows.map(cells => cells.map(cell => spansText(cell)).join(" | ")).join("\n"));
+			}
+		}
+	}
+	return parts.filter(part => part.trim()).join("\n\n") || "Fill in the form";
+}
+
+/**
+ * Property holding each "Other" choice field's free-text answer:
+ * `<name>_other`, with more underscores while another control already uses it.
+ */
+function otherProperties(form: HtmlForm): Map<ChoiceField, string> {
+	const taken = new Set([...form.fields.map(field => field.name), ...form.hidden.map(([name]) => name)]);
+	const properties = new Map<ChoiceField, string>();
+	for (const field of form.fields) {
+		if (field.kind !== "choice" || !field.other || !field.name) continue;
+		let property = `${field.name}_other`;
+		while (taken.has(property)) property += "_";
+		taken.add(property);
+		properties.set(field, property);
+	}
+	return properties;
+}
+
+/**
+ * An elicitation schema with one property per named field: radios and single
+ * selects as a string enum, a lone checkbox as a boolean, checkbox groups and
+ * multi-selects as an array, number inputs as numbers, other text as strings.
+ * Radio and checkbox groups get an extra optional string for their free-text
+ * "Other" answer ({@link otherProperties}). Preselected options and prefilled
+ * text are the properties' defaults.
+ */
+function formElicitationSchema(form: HtmlForm): {
+	properties: Record<string, ElicitationPropertySchema>;
+	required: string[];
+} {
+	const questions = fieldQuestions(form);
+	const others = otherProperties(form);
+	const properties: Record<string, ElicitationPropertySchema> = {};
+	const required: string[] = [];
+	for (const field of form.fields) {
+		if (!field.name) continue;
+		const title = questions.get(field) ?? field.name;
+		if (field.required) required.push(field.name);
+		if (field.kind === "choice") {
+			const options = field.options.filter(option => !option.disabled);
+			const entries = options.map(option => ({
+				const: option.value,
+				title: spansText(option.label) || option.value,
+			}));
+			const checked = options.filter(option => option.checked).map(option => option.value);
+			if (isArrayChoice(field)) {
+				properties[field.name] = { type: "array", title, items: { anyOf: entries }, default: checked };
+			} else if (field.multi) {
+				// A lone checkbox renders as one box: its own label says what checking it means.
+				const boxLabel = entries[0]?.title;
+				properties[field.name] = {
+					type: "boolean",
+					title: boxLabel ?? title,
+					...(boxLabel !== undefined && title !== field.name && title !== boxLabel ? { description: title } : {}),
+					default: checked.length > 0,
+				};
+			} else {
+				properties[field.name] = {
+					type: "string",
+					title,
+					oneOf: entries,
+					...(checked[0] !== undefined ? { default: checked[0] } : {}),
+				};
+			}
+			const other = others.get(field);
+			if (other !== undefined) {
+				properties[other] = {
+					type: "string",
+					title: `${title} — ${OTHER_LABEL}`,
+					description: field.multi ? "Another answer, added to those checked" : "Your own answer instead",
+				};
+			}
+			continue;
+		}
+		const description = field.placeholder.trim() ? { description: field.placeholder } : {};
+		if (field.type === "number" || field.type === "range") {
+			const value = textValue(field, field.value);
+			properties[field.name] = {
+				type: "number",
+				title,
+				...description,
+				...(field.min !== undefined ? { minimum: field.min } : {}),
+				...(field.max !== undefined ? { maximum: field.max } : {}),
+				...(typeof value === "number" ? { default: value } : {}),
+			};
+			continue;
+		}
+		properties[field.name] = {
+			type: "string",
+			title,
+			...description,
+			...(field.minLength !== undefined ? { minLength: field.minLength } : {}),
+			...(field.maxLength !== undefined ? { maxLength: field.maxLength } : {}),
+			...(field.value ? { default: field.value } : {}),
+		};
+	}
+	return { properties, required };
+}
+
+/** Form data from an accepted elicitation of {@link formElicitationSchema}, keeping only values the form offers. */
+function formDataFromElicitation(form: HtmlForm, content: Record<string, ElicitationContentValue>): HtmlFormData {
+	const others = otherProperties(form);
+	const data: HtmlFormData = {};
+	for (const [name, value] of form.hidden) data[name] = value;
+	for (const field of form.fields) {
+		if (!field.name) continue;
+		const value = content[field.name];
+		let formValue: HtmlFormValue | undefined;
+		if (field.kind === "choice") {
+			const picked = new Set(
+				field.options.flatMap((option, index) => {
+					const chosen = Array.isArray(value)
+						? value.includes(option.value)
+						: typeof value === "boolean"
+							? value
+							: value === option.value;
+					return chosen ? [index] : [];
+				}),
+			);
+			const other = others.get(field);
+			const typed = other === undefined ? undefined : content[other];
+			formValue = choiceValue(field, picked, typeof typed === "string" ? typed : undefined);
+		} else {
+			formValue = textValue(field, value === undefined || Array.isArray(value) ? "" : String(value));
+		}
+		if (formValue !== undefined) data[field.name] = formValue;
+	}
+	return data;
+}
+
 /** Narrows a `CreateElicitationResponse` to the accepted-with-content branch; the SDK's `action: string` catch-all arm otherwise defeats literal narrowing on `action !== "accept"`. */
 function isAcceptedElicitation(
 	response: CreateElicitationResponse | undefined,
@@ -767,6 +935,30 @@ export function createAcpExtensionUiContext(
 					};
 				}),
 			};
+		},
+		formDialog: async (html, dialogOptions) => {
+			if (!supportsForm) return undefined;
+			const form = parseHtmlForm(html);
+			const { properties, required } = formElicitationSchema(form);
+			let timedOut = false;
+			const content = await elicitFormFromAcpClient(
+				connection,
+				getSessionId(),
+				"formDialog",
+				formElicitationMessage(form),
+				properties,
+				required.length > 0 ? required : undefined,
+				{
+					...dialogOptions,
+					onTimeout: () => {
+						timedOut = true;
+						dialogOptions?.onTimeout?.();
+					},
+				},
+			);
+			if (timedOut) return { data: defaultFormData(form), timedOut: true };
+			if (!content) return undefined;
+			return { data: formDataFromElicitation(form, content) };
 		},
 		notify: (message, type) => {
 			logger.debug("ACP extension notification", { message, type });

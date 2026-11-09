@@ -15,7 +15,7 @@ fn an_unannounced_malformed_tail_is_not_parsed_or_transformed() {
 fn immutable_analysis_invalidates_when_same_count_syntax_changes() {
 	let mut fixture = Fixture::new("echo first");
 	assert!(text(&fixture.present(&[], &Options::default()).rows).contains("first"));
-	let Fixture { script, units, cache: _ } = Fixture::new("echo later");
+	let Fixture { script, units, .. } = Fixture::new("echo later");
 	fixture.script = script;
 	fixture.units = units;
 	let after = fixture.present(&[], &Options { split: true, ..Options::default() });
@@ -171,7 +171,7 @@ fn actual_local_units_preserve_pending_tail_and_raw_literal_leaf_projection() {
 	let span = word.span();
 	let parent = SourceParent { unit: 0, node: word.id().0, lo: span.lo, hi: span.hi };
 	let child = Fixture::new("echo inner\nread x");
-	let Fixture { script: _, mut units, cache: _ } = child;
+	let Fixture { mut units, .. } = child;
 	let mut first = units.remove(0);
 	first.syntax.parent = Some(parent);
 	let active = NodeKey::engine(1, match first.syntax.tree.view() {

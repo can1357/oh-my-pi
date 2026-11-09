@@ -132,6 +132,7 @@ fn restore_rejects_corrupt_and_foreign_frames_and_can_drop_them() {
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.unwrap();
 	assert_eq!(report.abandoned, [id], "the header still names the abandoned run");
@@ -162,6 +163,7 @@ fn restore_drop_frames_abandons_the_running_script_with_255() {
 	let (mut shell, report) =
 		Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, RestoreOpts {
 			drop_frames: true,
+			..RestoreOpts::default()
 		})
 		.unwrap();
 	assert_eq!(report.abandoned, [id]);

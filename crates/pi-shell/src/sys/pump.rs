@@ -72,7 +72,6 @@ impl End {
 	/// `Unsupported`). `Pending` counts as capable (a full or empty pipe).
 	/// The child must get a pipe in that direction rather than a socket:
 	/// Linux cannot reopen a socket through `/dev/fd/N` (`cat <(…)`, ENXIO).
-	#[cfg(unix)]
 	pub fn direction(&mut self) -> (bool, bool) {
 		let mut cx = Context::from_waker(Waker::noop());
 		let readable = !matches!(self.poll_read(&mut cx, &mut []), Poll::Ready(Err(_)));
@@ -246,8 +245,22 @@ impl Task {
 	fn poll(&mut self, cx: &mut Context<'_>, cancelled: bool) -> Poll<()> {
 		match self {
 			Self::In { .. } if cancelled => Poll::Ready(()),
-			Self::In { dst, src, chunk } => chunk.poll_copy(cx, src, dst),
-			Self::Out { src, dst, chunk, .. } => chunk.poll_copy(cx, src, dst),
+			Self::In { dst, src, chunk } => {
+				// A `<(…)` bridge listens for the child's opens before the
+				// producer has written anything.
+				dst.poll_listening(cx);
+				chunk.poll_copy(cx, src, dst)
+			},
+			Self::Out { src, dst, chunk, .. } => {
+				// A child gone without opening its named pipe (a `>(…)` it
+				// never wrote to) gives no end of file: nothing more comes. A
+				// client that connected is read first: it may have written and
+				// left.
+				if cancelled && src.poll_unopened(cx) {
+					return Poll::Ready(());
+				}
+				chunk.poll_copy(cx, src, dst)
+			},
 			#[cfg(unix)]
 			Self::Duplex(d) => d.poll(cx, cancelled),
 		}

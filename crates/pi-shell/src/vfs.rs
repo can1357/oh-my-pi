@@ -578,19 +578,6 @@ fn time_ns(secs: i64, nsec: Option<i64>) -> i64 {
 		.saturating_add(nsec.unwrap_or(0))
 }
 
-/// The effective uid and gid of this process.
-#[cfg(unix)]
-fn owner() -> (u32, u32) {
-	// SAFETY: `geteuid` and `getegid` always succeed and touch no memory.
-	unsafe { (libc::geteuid(), libc::getegid()) }
-}
-
-/// No owner ids off Unix.
-#[cfg(not(unix))]
-const fn owner() -> (u32, u32) {
-	(0, 0)
-}
-
 /// [`Stat`] of provider metadata for `path` (see the module docs for the
 /// fields a provider may leave out).
 fn stat_of(meta: &pi_vfs::Metadata, path: &Path) -> Stat {
@@ -600,7 +587,7 @@ fn stat_of(meta: &pi_vfs::Metadata, path: &Path) -> Stat {
 		path.hash(&mut hasher);
 		(SYNTHETIC_DEV, hasher.finish())
 	});
-	let (euid, egid) = owner();
+	let (euid, egid) = crate::sys::user::owner();
 	let mtime_ns = meta
 		.mtime()
 		.map_or(0, |secs| time_ns(secs, meta.mtime_nsec()));

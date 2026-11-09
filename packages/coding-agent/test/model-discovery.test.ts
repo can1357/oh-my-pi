@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -68,6 +69,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		resetSettingsForTest();
 		if (originalOllamaBaseUrl === undefined) {
 			delete Bun.env.OLLAMA_BASE_URL;
@@ -689,6 +691,8 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
+		// Antigravity is paused in its auth rules; its discovery stays for when it is turned back on.
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
 		// authoritative, so reading only one account's roster would prune Claude
 		// 5.5 for both whenever A is the account discovery happens to pick.
@@ -748,6 +752,7 @@ describe("ModelRegistry runtime discovery", () => {
 	});
 
 	test("Antigravity routing still works for an account whose login stored no email", async () => {
+		vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined);
 		// Google's userinfo lookup is optional at login; such a credential keeps
 		// only its project id, which must still tag and select the account.
 		await authStorage.credentials.set("google-antigravity", [
