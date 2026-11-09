@@ -2141,13 +2141,19 @@ async fn abort_state_signals_cancel_token() {
 	assert!(matches!(reason, AbortReason::Signal));
 }
 
+/// A reader's sink for `sender`, recording into a loss slot of its own.
+#[cfg(unix)]
+fn test_sink<T: Send>(sender: Option<flume::Sender<T>>) -> ChunkSink<T> {
+	ChunkSink::new(sender, "output", Arc::default())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn read_output_stops_when_cancelled_before_pipe_eof() {
 	let (reader, _writer) = pipe_to_files("test").expect("test pipe should be created");
 	let cancel = CancellationToken::new();
 	let (activity_tx, _activity_rx) = flume::bounded(1);
-	let handle = tokio::spawn(read_output(reader, None, cancel.clone(), activity_tx));
+	let handle = tokio::spawn(read_output(reader, test_sink(None), cancel.clone(), activity_tx));
 
 	time::sleep(Duration::from_millis(10)).await;
 	cancel.cancel();
@@ -2155,7 +2161,410 @@ async fn read_output_stops_when_cancelled_before_pipe_eof() {
 	time::timeout(Duration::from_millis(100), handle)
 		.await
 		.expect("reader task should stop after cancellation")
-		.expect("reader task should not panic");
+		.expect("reader task should not panic")
+		.expect("reader should read its pipe");
+}
+
+/// A pipe holding `bytes` whose writer stays open, as when a background job
+/// keeps the run's output pipe after the command exits.
+#[cfg(unix)]
+fn pipe_holding(bytes: &[u8]) -> (fs::File, fs::File) {
+	use std::io::Write as _;
+	let (reader, mut writer) = pipe_to_files("queued").expect("test pipe should be created");
+	writer.write_all(bytes).expect("bytes fit in the pipe");
+	(reader, writer)
+}
+
+/// Each output reader, cancelled before it first runs (as when the scheduler
+/// starves it past the post-exit wait), still delivers the bytes its pipe
+/// holds, then stops though their writer is still open. Before, the first
+/// poll saw the cancellation and no readiness yet, so the reader ended with
+/// the bytes unread and the run returned without them.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
+	// Under the smallest default pipe buffer (16 KiB on macOS).
+	let expected: String = ('a'..='z').cycle().take(8000).collect();
+	let cancelled = || {
+		let cancel = CancellationToken::new();
+		cancel.cancel();
+		cancel
+	};
+	let bound = Duration::from_secs(5);
+
+	let (reader, _writer) = pipe_holding(expected.as_bytes());
+	let (tx, rx) = flume::unbounded::<String>();
+	let (activity_tx, _activity_rx) = flume::bounded(1);
+	time::timeout(bound, read_output(reader, test_sink(Some(tx)), cancelled(), activity_tx))
+		.await
+		.expect("streaming reader should stop")
+		.expect("streaming reader should read its pipe");
+	assert_eq!(rx.drain().collect::<String>(), expected, "streaming reader");
+
+	let (reader, _writer) = pipe_holding(expected.as_bytes());
+	let (tx, rx) = flume::unbounded::<String>();
+	let (activity_tx, _activity_rx) = flume::bounded(1);
+	let buffered = time::timeout(
+		bound,
+		read_output_buffered(reader, test_sink(Some(tx)), cancelled(), activity_tx, usize::MAX),
+	)
+	.await
+	.expect("buffered reader should stop")
+	.expect("buffered reader should read its pipe");
+	assert_eq!(rx.drain().collect::<String>(), expected, "buffered reader's stream");
+	assert_eq!(buffered.text, expected, "buffered reader's capture");
+	assert_eq!(buffered.input_bytes, expected.len());
+
+	let (reader, _writer) = pipe_holding(expected.as_bytes());
+	let (tx, rx) = flume::unbounded::<Bytes>();
+	let (activity_tx, _activity_rx) = flume::bounded(1);
+	time::timeout(bound, read_output_bytes(reader, test_sink(Some(tx)), cancelled(), activity_tx))
+		.await
+		.expect("byte reader should stop")
+		.expect("byte reader should read its pipe");
+	let bytes: Vec<u8> = rx.drain().flat_map(|chunk| chunk.to_vec()).collect();
+	assert_eq!(bytes, expected.as_bytes(), "byte reader");
+}
+
+/// The drain after cancellation covers only what the pipe held when it
+/// fired, so a writer that never stops cannot keep a cancelled reader
+/// reading.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_reader_stops_while_its_writer_keeps_writing() {
+	use std::io::Write as _;
+	let (reader, mut writer) = pipe_to_files("flood").expect("test pipe should be created");
+	// Ends at EPIPE once the reader closes its end.
+	let flood = std::thread::spawn(move || while writer.write_all(&[b'y'; 4096]).is_ok() {});
+	let cancel = CancellationToken::new();
+	let (tx, rx) = flume::unbounded::<String>();
+	let (activity_tx, _activity_rx) = flume::bounded(1);
+	let reader = tokio::spawn(read_output(reader, test_sink(Some(tx)), cancel.clone(), activity_tx));
+	rx.recv_async().await.expect("the flood reaches the reader");
+	cancel.cancel();
+	time::timeout(Duration::from_secs(10), reader)
+		.await
+		.expect("cancelled reader should stop")
+		.expect("reader task should not panic")
+		.expect("reader should read its pipe");
+	flood.join().expect("flood thread");
+}
+
+/// A consumer slower than the post-exit wait. Its channel holds one chunk, so
+/// after the command exits the reader waits on the channel with `z` in hand
+/// and `w` still in the pipe, and no output arrives for longer than the idle
+/// window. The run then aborted the reader, and `z` and `w` were lost though
+/// the exit status was 0. The run must wait for the consumer.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_waits_for_a_slow_consumer_to_take_every_byte() {
+	let _guard = shell_test_lock().lock().await;
+	let (tx, rx) = flume::bounded::<String>(1);
+	let consumer = tokio::spawn(async move {
+		let mut output = rx.recv_async().await.expect("first chunk");
+		time::sleep(Duration::from_millis(1500)).await;
+		while let Ok(chunk) = rx.recv_async().await {
+			output.push_str(&chunk);
+		}
+		output
+	});
+	let result = Shell::new(None)
+		.run(
+			ShellRunOptions {
+				command: "printf x; sleep 0.1; printf y; sleep 0.1; printf z; sleep 0.1; printf w"
+					.into(),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("run");
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(consumer.await.expect("consumer task"), "xyzw");
+}
+
+/// `x`, then `y` once the file `one` exists, then `z` once `two` exists: the
+/// consumer tests open the gates, so each write is its own chunk.
+#[cfg(unix)]
+const GATED_WRITES: &str = "printf x; until [ -e one ]; do sleep 0.02; done; printf y; until [ -e \
+                            two ]; do sleep 0.02; done; printf z";
+
+/// Waits until a one-chunk channel holds its chunk.
+#[cfg(unix)]
+async fn until_full<T: Send>(rx: &flume::Receiver<T>) {
+	time::timeout(Duration::from_secs(20), async {
+		while !rx.is_full() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the reader queues the next chunk");
+}
+
+/// A consumer that takes `x` and then neither reads nor drops its receiver:
+/// `y` waits in its one-chunk channel and the reader holds `z`. The run
+/// aborted the reader and reported success without `z`. It must fail, and in
+/// bounded time (the stall limit is 3 s under test).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_reports_a_consumer_that_stops_taking_output() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("gate directory");
+	let gates = root.path().to_owned();
+	let (tx, rx) = flume::bounded::<String>(1);
+	let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+	let consumer = tokio::spawn(async move {
+		let first = rx.recv_async().await.expect("first chunk");
+		fs::write(gates.join("one"), "").expect("open gate one");
+		until_full(&rx).await;
+		fs::write(gates.join("two"), "").expect("open gate two");
+		let _ = release_rx.await;
+		first
+	});
+	let shell = Shell::new(None);
+	let run = shell.run(
+		ShellRunOptions {
+			command: GATED_WRITES.into(),
+			cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+			..Default::default()
+		},
+		Some(tx),
+		CancelToken::default(),
+	);
+	let result = time::timeout(Duration::from_secs(23), run)
+		.await
+		.expect("a run must not wait forever on a consumer that stopped");
+	let _ = release_tx.send(());
+	assert_eq!(consumer.await.expect("consumer task"), "x");
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+}
+
+/// A consumer that drops its receiver after `x`: the reader still drains the
+/// pipe, so the command ends, and the run fails rather than report success
+/// without `y`. The failure is the consumer's, not the shell's: the session
+/// keeps its variables for the next run.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_reports_a_consumer_that_drops_its_receiver() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("gate directory");
+	let gates = root.path().to_owned();
+	let shell = Shell::new(None);
+	shell
+		.run(
+			ShellRunOptions { command: "kept=yes".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("set a variable");
+	let (tx, rx) = flume::bounded::<String>(1);
+	let consumer = tokio::spawn(async move {
+		let first = rx.recv_async().await.expect("first chunk");
+		drop(rx);
+		fs::write(gates.join("one"), "").expect("open gate one");
+		fs::write(gates.join("two"), "").expect("open gate two");
+		first
+	});
+	let run = shell.run(
+		ShellRunOptions {
+			command: GATED_WRITES.into(),
+			cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+			..Default::default()
+		},
+		Some(tx),
+		CancelToken::default(),
+	);
+	let result = time::timeout(Duration::from_secs(20), run)
+		.await
+		.expect("the run ends");
+	assert_eq!(consumer.await.expect("consumer task"), "x");
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+
+	let (tx, rx) = flume::unbounded::<String>();
+	shell
+		.run(
+			ShellRunOptions { command: "printf %s \"$kept\"".into(), ..Default::default() },
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("the next run");
+	assert_eq!(rx.drain().collect::<String>(), "yes", "the session survives the consumer");
+}
+
+/// A consumer gone before the first chunk, under the minimizer, which runs
+/// `printf x; printf done > marker` one segment at a time. The first
+/// segment's lost output stopped the chain, so `marker` was never written;
+/// the same command without the minimizer writes it. The chain must run to
+/// its end and the run fail after.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_chain_runs_to_its_end_after_its_consumer_is_gone() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("scratch directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		execute_shell(
+			ShellExecuteOptions {
+				command: "printf x; printf done > marker".into(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				minimizer: Some(minimizer),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("the run ends");
+	assert_eq!(
+		fs::read_to_string(root.path().join("marker"))
+			.ok()
+			.as_deref(),
+		Some("done"),
+		"the segment after the lost output ran"
+	);
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+}
+
+/// A segmented chain whose consumer is gone runs to its end and then fails
+/// for the output it lost. Its trace must still be finished with the real
+/// final status: the early return skipped `finish_segments`, so the
+/// presentation of a command that had ended still said it was executing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_segmented_chain_that_lost_output_still_finishes_its_trace() {
+	use crate::bash::trace::{RunTrace, history::HistoryData};
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("scratch directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let command = "printf x; printf done > marker; false";
+	let trace = Arc::new(RunTrace::new(command));
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() })).run(
+			ShellRunOptions {
+				command: command.to_owned(),
+				cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+				trace: Some(trace.clone()),
+				..Default::default()
+			},
+			Some(tx),
+			CancelToken::default(),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+	let snapshot = trace.snapshot();
+	assert_eq!(snapshot.status, Some(1), "the chain's real final status ends the trace");
+	let last_root_end = snapshot
+		.history
+		.iter()
+		.filter(|entry| {
+			matches!(entry.data, HistoryData::RunEnd { .. }) && entry.vpid == snapshot.root_vpid
+		})
+		.next_back()
+		.expect("the chain submitted at least one segment");
+	assert!(last_root_end.logical_end, "the finished chain is not left executing");
+	assert_eq!(last_root_end.logical_status, Some(1));
+}
+
+/// A consumer gone before the first chunk, then the run's timeout: the
+/// output was already lost, and the run reported only `timed_out`. It must
+/// fail.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_run_still_reports_output_its_consumer_lost() {
+	let _guard = shell_test_lock().lock().await;
+	let (tx, rx) = flume::bounded::<String>(1);
+	drop(rx);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		Shell::new(None).run(
+			ShellRunOptions { command: "printf x; sleep 5".into(), ..Default::default() },
+			Some(tx),
+			CancelToken::new(Some(300)),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("output lost before the timeout must fail the run");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
+}
+
+/// Raw streams: stdout's consumer is gone before the run starts, while
+/// stderr's takes nothing, so its reader waits on its channel. The timeout
+/// then ends the run before that reader does, and the run reported only
+/// `timed_out`, though stdout's output was already lost. It must fail.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_run_reports_a_lost_stream_while_another_still_waits() {
+	let _guard = shell_test_lock().lock().await;
+	let (stdout_tx, stdout_rx) = flume::bounded::<Bytes>(1);
+	drop(stdout_rx);
+	let (stderr_tx, _stderr_rx) = flume::bounded::<Bytes>(1);
+	let result = time::timeout(
+		Duration::from_secs(20),
+		execute_shell_streams(
+			ShellExecuteOptions {
+				command: "printf LOST; head -c 500000 /dev/zero >&2; sleep 20".into(),
+				..Default::default()
+			},
+			StreamSinks { stdout: Some(stdout_tx), stderr: Some(stderr_tx) },
+			CancelToken::new(Some(300)),
+		),
+	)
+	.await
+	.expect("the run ends");
+	let err = result.expect_err("output lost before the timeout must fail the run");
+	assert!(err.to_string().contains("stdout was not all delivered"), "{err}");
+}
+
+/// The raw-bytes path with a bounded sink whose consumer stops after `x`. Its
+/// send blocked a runtime thread, so the run never returned.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn execute_shell_streams_reports_a_consumer_that_stops_taking_output() {
+	let root = tempfile::tempdir().expect("gate directory");
+	let gates = root.path().to_owned();
+	let (stdout_tx, stdout_rx) = flume::bounded::<Bytes>(1);
+	let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+	let consumer = tokio::spawn(async move {
+		let first = stdout_rx.recv_async().await.expect("first chunk");
+		fs::write(gates.join("one"), "").expect("open gate one");
+		until_full(&stdout_rx).await;
+		fs::write(gates.join("two"), "").expect("open gate two");
+		let _ = release_rx.await;
+		first
+	});
+	let run = execute_shell_streams(
+		ShellExecuteOptions {
+			command: GATED_WRITES.into(),
+			cwd: Some(root.path().to_str().expect("utf8 cwd").to_owned()),
+			..Default::default()
+		},
+		StreamSinks { stdout: Some(stdout_tx), stderr: None },
+		CancelToken::default(),
+	);
+	let result = time::timeout(Duration::from_secs(23), run)
+		.await
+		.expect("a run must not wait forever on a consumer that stopped");
+	let _ = release_tx.send(());
+	assert_eq!(&consumer.await.expect("consumer task")[..], b"x");
+	let err = result.expect_err("a run whose output was not all delivered must fail");
+	assert!(err.to_string().contains("not all delivered"), "{err}");
 }
 
 #[cfg(unix)]
