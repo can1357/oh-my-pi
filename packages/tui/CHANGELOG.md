@@ -4,14 +4,14 @@
 
 ### Changed
 
-- `ask` HTML forms in Tern set a question's leading prose (paragraphs, lists, preformatted text) as a Markdown context card that scrolls on its own, and its legend as the question heading, instead of one monospace column
-- Text fields of `ask` HTML forms in Tern are rounded boxes whether or not they have the keyboard, with an accent ring while focused and a red one while refused; the radio group's Other answer is the same box, and a field that gains the keyboard scrolls into view
-- In `ask` HTML forms in Tern, ↑/↓ on a radio group pick the option like a browser, ↑/↓ past a tab's first or last control scroll the tab instead of jumping to the next one, and ←/→ (also on an empty Other answer) turn tabs
+- `ask` HTML forms in Tern set a question's leading prose (paragraphs, lists, preformatted text) as a Markdown context card that scrolls on its own, and its legend as the question heading, instead of one monospace column ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Text fields of `ask` HTML forms in Tern are rounded boxes whether or not they have the keyboard, with an accent ring while focused and a red one while refused; the radio group's Other answer is the same box, and a field that gains the keyboard scrolls into view ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- In `ask` HTML forms in Tern, ↑/↓ on a radio group pick the option like a browser, ↑/↓ past a tab's first or last control scroll the tab instead of jumping to the next one, and ←/→ (also on an empty Other answer) turn tabs ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 
 ### Fixed
 
-- Fixed the `ask` HTML form tab strip in Tern running off the card with long or many questions: tabs are numbered and their labels clipped to fit, fall back to numbers alone, and past that show a window around the current tab with arrows to the rest
-- Fixed `ask` HTML form Review rows in Tern stacking long questions in a narrow column: each row is keyed by the field's label, else its question clipped like a tab label
+- Fixed the `ask` HTML form tab strip in Tern running off the card with long or many questions: tabs are numbered and their labels clipped to fit, fall back to numbers alone, and past that show a window around the current tab with arrows to the rest ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Fixed `ask` HTML form Review rows in Tern stacking long questions in a narrow column: each row is keyed by the field's label, else its question clipped like a tab label ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 
 ## [18.18.4] - 2026-11-09
 
