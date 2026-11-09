@@ -21,6 +21,7 @@
 
 - Added `HtmlFormDialog`, which renders an HTML form as an interactive terminal form, splits long forms into pages, and returns the answers as JSON. Single `<select>`s are one-row dropdowns, radio and checkbox groups get a free-text "Other" answer, `<img>` (URL, `data:` URI or local file) and inline `<svg>` pictures load in the background, an optional inactivity timeout submits the current values, and Tern terminals get the form natively.
 - Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
+- Enabled macOS spelling assistance (typo undercurls, Tab completions, on-space autocorrect) in the hook and ask answer editor (`HookEditorComponent`), following the `spelling.*` settings ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102))
 
 ## [18.18.2] - 2026-11-08
 

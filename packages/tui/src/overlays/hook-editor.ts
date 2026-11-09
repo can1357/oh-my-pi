@@ -9,7 +9,9 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
-import { extractImagePastePathsFromText } from "../prompt/custom-editor";
+import { extractImagePastePathsFromText, type SpellingFeatures } from "../prompt/custom-editor";
+import { MacOSSpellingProvider } from "../prompt/macos-spelling";
+import { WordCompletionProvider } from "../prompt/word-completion";
 import {
 	Editor,
 	Ellipsis,
@@ -99,12 +101,16 @@ export interface HookEditorOptions {
 	 * hint out of view.
 	 */
 	maxHeight?: number;
+	/** Optional spelling assistance flags. Omitted: typo detection and auto completion on, autocorrect off. */
+	spellingFeatures?: Partial<SpellingFeatures>;
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
 export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
+	#spelling = new MacOSSpellingProvider();
+	#wordCompletion = new WordCompletionProvider();
 	#onSubmitCallback: (value: string, images?: ImageContent[]) => void;
 	#onCancelCallback: (draft: string, images?: ImageContent[]) => void;
 	#tui: TUI;
@@ -152,6 +158,32 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
+		this.#spelling.onUpdate = () => {
+			this.#editor.invalidate();
+			this.#tui.requestRender();
+		};
+		this.#editor.onTextAssistApplied = () => {
+			this.#editor.invalidate();
+			this.#tui.requestRender();
+		};
+		this.#wordCompletion.onUpdate = () => {
+			this.#editor.invalidate();
+			this.#tui.requestRender();
+		};
+		this.#editor.setTextAssistProvider({
+			getWordCompletion: (lines, cursorLine, cursorCol) =>
+				this.#wordCompletion.getWordCompletion(lines, cursorLine, cursorCol),
+			wordCompletionFeedback: (lines, cursorLine, cursorCol, suggestion, accepted) =>
+				this.#wordCompletion.wordCompletionFeedback(lines, cursorLine, cursorCol, suggestion, accepted),
+			tryAutocorrect: (lines, cursorLine, cursorCol) => this.#spelling.tryAutocorrect(lines, cursorLine, cursorCol),
+			getWordReplacements: (lines, cursorLine, cursorCol) =>
+				this.#spelling.getWordReplacements(lines, cursorLine, cursorCol),
+		});
+		this.setSpellingFeatures({
+			typoDetection: options?.spellingFeatures?.typoDetection ?? true,
+			autocomplete: options?.spellingFeatures?.autocomplete ?? "auto",
+			autocorrect: options?.spellingFeatures?.autocorrect ?? false,
+		});
 		if (this.#promptStyle) {
 			this.#editor.setBorderVisible(false);
 			this.#editor.setPromptGutter("> ");
@@ -281,6 +313,12 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		if (event.act === "submit") this.#submitCurrentText();
 		else if (event.act === "cancel") this.#cancel();
 		else if (event.act === "external") void this.#openExternalEditor();
+	}
+
+	/** Configure spelling features for the inner editor. */
+	setSpellingFeatures(features: SpellingFeatures): void {
+		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
+		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */
