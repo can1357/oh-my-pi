@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	IndexedSessionStorage,
@@ -413,6 +414,67 @@ describe("deferred writer callbacks belong to their session state", () => {
 		} finally {
 			manager.onEntryAppended = undefined;
 			await manager.close();
+		}
+	});
+	it("records an atomic batch's rename under the sibling its publish moved to", async () => {
+		const manager = SessionManager.create(dir.path(), path.join(dir.path(), "sessions"));
+		manager.appendMessage(user("first"));
+		manager.appendMessage(assistant("first reply"));
+		await manager.setSessionName("Original title", "user");
+		const originalId = manager.getSessionId();
+		const originalFile = manager.getSessionFile()!;
+		const notifications: string[] = [];
+		manager.onSessionNameChanged(() => notifications.push(manager.getSessionId()));
+		let rename: Promise<boolean> | undefined;
+		try {
+			await manager.appendEntriesAtomically(() => {
+				// Another session replaces the file before the batch publishes, so the batch moves to a sibling.
+				fs.writeFileSync(
+					originalFile,
+					`${JSON.stringify({ type: "session", version: 3, id: "replacement", cwd: dir.path(), timestamp: "2026-01-01T00:00:00.000Z" })}\n`,
+				);
+				rename = manager.setSessionName("Batch title", "user");
+			});
+			await rename;
+			const siblingId = manager.getSessionId();
+			expect(siblingId).not.toBe(originalId);
+			expect(lookupSessionTitle(siblingId)).toBe("Batch title");
+			expect(lookupSessionTitle(originalId)).toBe("Original title");
+			expect(notifications).toEqual([siblingId]);
+		} finally {
+			await rename?.catch(() => {});
+			await manager.close();
+		}
+	});
+	it("leaves the leaf of the session an entry observer switches to during model usage", async () => {
+		const manager = SessionManager.inMemory();
+		const other = SessionManager.inMemory();
+		const parentId = manager.appendMessage({ role: "user", content: "request", timestamp: 1 });
+		manager.appendMessage({ role: "user", content: "later", timestamp: 2 });
+		const otherLeaf = other.appendMessage({ role: "user", content: "other session", timestamp: 3 });
+		const otherState = other.captureState();
+		manager.onEntryAppended = entry => {
+			if (entry.type === "model_usage") manager.restoreState(otherState);
+		};
+		try {
+			manager.appendModelUsage(
+				{
+					purpose: "auto-thinking",
+					role: "smol",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-haiku-4-5",
+					stopReason: "stop",
+					usage: makeAssistantMessage().usage,
+				},
+				{ sessionId: manager.getSessionId(), parentId },
+			);
+			expect(manager.getSessionId()).toBe(other.getSessionId());
+			expect(manager.getLeafId()).toBe(otherLeaf);
+		} finally {
+			manager.onEntryAppended = undefined;
+			await manager.close();
+			await other.close();
 		}
 	});
 });

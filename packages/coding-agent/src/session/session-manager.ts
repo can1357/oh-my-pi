@@ -870,6 +870,8 @@ interface AtomicEntryBatch {
 	collecting: boolean;
 	entryIds: Set<string>;
 	deferredNotifications: SessionEntry[];
+	/** Recorders waiting to learn which session their entry was written to, told when the batch publishes. */
+	written: Array<{ entryId: string; onWritten: (sessionId: string | undefined) => void }>;
 	preBatchLeafId: string | null;
 	externalLeafChanged: boolean;
 	externalLeafId: string | null;
@@ -2678,14 +2680,15 @@ export class SessionManager {
 	}
 
 	/**
-	 * Record `entry` and return the id of the session it was written to, read before append observers run:
-	 * persistence can move this manager to a sibling session, and an observer can switch it to another one.
-	 * `undefined` when the entry is dropped after release.
+	 * Record `entry`. `onWritten` learns the id of the session it was written to before append observers run, as
+	 * persistence can move this manager to a sibling session and an observer can switch it to another one: at
+	 * once, or when an atomic batch publishes. It gets `undefined` when the entry is dropped or rolled back.
 	 */
-	#recordEntry(entry: SessionEntry): string | undefined {
+	#recordEntry(entry: SessionEntry, onWritten?: (sessionId: string | undefined) => void): void {
 		if (this.#released) {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
-			return undefined;
+			onWritten?.(undefined);
+			return;
 		}
 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
 			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
@@ -2700,10 +2703,20 @@ export class SessionManager {
 			batch.externalLeafId = sessionEntryLeafId(entry);
 		}
 		this.#appendToSessionFile(entry);
-		const sessionId = this.#sessionId;
-		if (batch) batch.deferredNotifications.push(entry);
-		else this.#notifyEntryAppended(entry);
-		return sessionId;
+		if (batch) {
+			if (onWritten) batch.written.push({ entryId: entry.id, onWritten });
+			batch.deferredNotifications.push(entry);
+		} else {
+			onWritten?.(this.#sessionId);
+			this.#notifyEntryAppended(entry);
+		}
+	}
+
+	/** Tell a batch's recorders where their entries were written, before the batch's append observers run. */
+	#settleBatchWritten(batch: AtomicEntryBatch, sessionIdOf: (entryId: string) => string | undefined): void {
+		const written = batch.written;
+		batch.written = [];
+		for (const { entryId, onWritten } of written) onWritten(sessionIdOf(entryId));
 	}
 
 	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
@@ -3460,6 +3473,7 @@ export class SessionManager {
 			collecting: true,
 			entryIds: new Set(),
 			deferredNotifications: [],
+			written: [],
 			preBatchLeafId: this.#index.leafId(),
 			externalLeafChanged: false,
 			externalLeafId: null,
@@ -3477,6 +3491,7 @@ export class SessionManager {
 				throw new Error("Atomic session batch was superseded before commit.");
 			}
 			this.#atomicEntryBatch = undefined;
+			this.#settleBatchWritten(batch, () => this.#sessionId);
 			this.#notifyDurableEntries(batch.deferredNotifications);
 			return result;
 		} catch (error) {
@@ -3489,6 +3504,7 @@ export class SessionManager {
 				const retainedNotifications = batch.deferredNotifications.filter(entry => !batch.entryIds.has(entry.id));
 				this.#pendingDurabilityNotifications.push(...retainedNotifications);
 				this.#atomicEntryBatch = undefined;
+				this.#settleBatchWritten(batch, () => undefined);
 				this.#fileIsCurrent = false;
 				this.#rewriteRequired = true;
 				if (repairError instanceof SessionPersistenceIndeterminateError) throw repairError;
@@ -3496,6 +3512,7 @@ export class SessionManager {
 			}
 			const retainedNotifications = batch.deferredNotifications.filter(entry => !batch.entryIds.has(entry.id));
 			this.#atomicEntryBatch = undefined;
+			this.#settleBatchWritten(batch, entryId => (batch.entryIds.has(entryId) ? undefined : this.#sessionId));
 			this.#notifyDurableEntries(retainedNotifications);
 			throw error;
 		}
@@ -4193,10 +4210,12 @@ export class SessionManager {
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
 		// Journal titles in the same physical order as every other entry. The title belongs to the session the
-		// entry was written to (a sibling, when another process owns the file); a switch after that is not this
-		// rename's.
-		const sessionId = this.#recordEntry(entry);
+		// entry was written to (a sibling, when another process owns the file, known once an atomic batch
+		// publishes); a switch after that is not this rename's.
+		const written = Promise.withResolvers<string | undefined>();
+		this.#recordEntry(entry, written.resolve);
 		await this.flush();
+		const sessionId = await written.promise;
 		// Keep the recent-sessions title index current so welcome-screen lookups
 		// never have to content-scan this session's file. A line the full volume
 		// held back is indexed where it lands (#indexDurableTitle).
@@ -4365,9 +4384,16 @@ export class SessionManager {
 			...usage,
 			...(activeLeafId !== owner.parentId ? { activeLeafId } : {}),
 		};
-		this.#recordEntry(entry);
-		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the usage entry, on rollback.
-		if (activeLeafId !== owner.parentId) this.#setLeaf(activeLeafId);
+		const written: { known: boolean; sessionId?: string } = { known: false };
+		this.#recordEntry(entry, sessionId => {
+			written.known = true;
+			written.sessionId = sessionId;
+		});
+		// Through #setLeaf so an in-flight atomic batch restores this leaf, not the usage entry, on rollback. An
+		// append observer can switch this manager to another session; the leaf belongs to the one written to.
+		if (activeLeafId !== owner.parentId && (!written.known || written.sessionId === this.#sessionId)) {
+			this.#setLeaf(activeLeafId);
+		}
 		return entry.id;
 	}
 
