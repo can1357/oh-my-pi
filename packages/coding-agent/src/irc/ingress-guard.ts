@@ -159,7 +159,8 @@ export class IrcIngressGuard {
 		// ever regain broadcast, charge its legs again.
 		// Bridge deliveries are external client requests, not agent-loop traffic:
 		// they have no shared sender budget to spend.
-		// Team control is runtime-authored fan-out, not agent-loop traffic.
+		// Team control is runtime-authored team traffic (control and notices on
+		// behalf of members), not agent-loop traffic.
 		if (message.broadcast || message.wakeRelay || message.external || message.teamControl) return undefined;
 		const window = this.#rates.get(message.from);
 		if (window) {

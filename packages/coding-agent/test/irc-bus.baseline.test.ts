@@ -182,9 +182,7 @@ describe("IrcBus baseline", () => {
 
 		// A notice is informational: the question is still open, with no promise
 		// of a later answer, and the wake relay has nothing to skip the agent for.
-		expect(bus.unansweredSends("0-Ask", t0)).toEqual([
-			{ to: "0-Rep", sentAt: expect.any(Number), promised: false },
-		]);
+		expect(bus.unansweredSends("0-Ask", t0)).toEqual([{ to: "0-Rep", sentAt: expect.any(Number), promised: false }]);
 		expect(bus.sentSince("0-Rep", "0-Ask", t0)).toBe(false);
 
 		// An ordinary message back does answer it.

@@ -263,12 +263,15 @@ remain live. After all its teams retire, normal idle-TTL parking resumes.
 Genuine session termination still retires its generations without changing
 member teardown ownership; Main shutdown leaves cleanup to the lifecycle manager.
 
-Runtime-authored stop requests and approval/rejection notices bypass **only
-sender rate charging**. Stop requests still undergo dedup/hop/delivery checks;
-approval/rejection notices are progress deliveries, which already skip dedup.
-Idle and decline/timeout notices, and agent-authored plan submissions, remain
-rate-limited like ordinary progress messages. All retain hop, membership/ref
-and ordinary delivery/queue checks; this is not an unrestricted messaging bypass.
+Runtime-authored team traffic — stop requests, plan approval/rejection notices,
+and idle, decline, timeout and failed-registration notices sent on behalf of a
+member — bypasses **only sender rate charging**. Stop requests still undergo
+dedup/hop/delivery checks; the notices are progress deliveries, which already
+skip dedup. Agent-authored plan submissions remain rate-limited like ordinary
+progress messages. All traffic retains hop, membership/ref and ordinary
+delivery/queue checks; this is not an unrestricted messaging bypass, and the
+`teamControl` flag is set only by runtime code — an agent cannot claim the
+exemption through any tool.
 
 ## Plan submission and approval
 

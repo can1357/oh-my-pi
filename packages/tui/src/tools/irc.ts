@@ -48,9 +48,11 @@ export interface IrcMessage {
 	 */
 	external?: boolean;
 	/**
-	 * Runtime stop requests and approval/rejection notices bypass sender rate
-	 * charging only; agent-authored plan submissions do not. This flag implies
-	 * no request or relay semantics; `teamNotice` marks non-request notices.
+	 * Runtime-authored team traffic — stop requests and notices sent on behalf
+	 * of a member (idle, decline/timeout, plan approval/rejection) — bypasses
+	 * sender rate charging only; agent-authored plan submissions do not. This
+	 * flag implies no request or relay semantics; `teamNotice` marks
+	 * non-request notices.
 	 */
 	teamControl?: boolean;
 	/** Original A2A message id for an external request, distinct from the IRC bus id. */

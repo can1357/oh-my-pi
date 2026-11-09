@@ -178,6 +178,105 @@ describe("team idle notifications", () => {
 	});
 });
 
+describe("team notice rate budget", () => {
+	// Cost model of the ingress guard: a message costs max(1, ceil(body length
+	// / 4)) tokens, and an empty window always admits one message however
+	// expensive it is. With "irc.rateLimitTokens": 3, a runtime notice (11
+	// tokens) that was wrongly charged would leave the member's window spent,
+	// refusing the next agent-authored send (14 tokens) that must still fit.
+	function guardBus(): void {
+		IrcBus.installGlobal(
+			new IrcBus(AgentRegistry.global(), undefined, {
+				settings: Settings.isolated({ "irc.ingressGuard": true, "irc.rateLimitTokens": 3 }),
+			}),
+		);
+	}
+
+	it("an idle notice does not spend the member's rate budget", async () => {
+		guardBus();
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const child = {
+			messages: [{ role: "assistant", content: [{ type: "text", text: "12 characters" }] }],
+		} as unknown as AgentSessionHandle;
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, { ...team, planApproval: true });
+		started.members.set("worker", { id: "worker", ref });
+		registry.setStatus("worker", "running", ref);
+		registry.setStatus("worker", "idle", ref);
+		// `setStatus` emits synchronously, but `send` is async: await a microtask
+		// tick so the notice is delivered before the budget is asserted.
+		await Promise.resolve();
+		// The idle notice reached the lead; its body costs 11 tokens, over
+		// three times the budget, without the runtime-authored exemption.
+		expect(notices).toHaveLength(1);
+		const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+		// Plan submission is the budget probe: an already-charged window (11 > 3)
+		// refuses the plan (14 tokens); an exempt notice leaves room for it.
+		let failure: unknown;
+		try {
+			await runtime.submitPlan(child, identity, "12 characters");
+		} catch (caught) {
+			failure = caught;
+		}
+		expect(failure).toBeUndefined();
+		expect(notices).toHaveLength(2);
+		expect(notices[1]).toContain("12 characters");
+		expect(notices[1]).toContain("team audit");
+		await runtime.stop(lead, "audit");
+	});
+
+	it("a stop timeout notice does not spend the member's rate budget", async () => {
+		guardBus();
+		const registry = AgentRegistry.global();
+		const notices: string[] = [];
+		const lead = {
+			deliverIrcMessage: async (message: { body: string }) => {
+				notices.push(message.body);
+				return "injected";
+			},
+		} as unknown as AgentSessionHandle;
+		const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+		const runtime = new TeamRuntime();
+		const started = await runtime.start(lead, { ...team, planApproval: true });
+		const entry = { id: "worker", reservation: "reservation", ref };
+		started.members.set("worker", entry);
+		vi.useFakeTimers();
+		try {
+			await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, 1000);
+			vi.advanceTimersByTime(1000);
+			// The timeout callback fires synchronously; the notice `send` is async,
+			// so drain microtasks before asserting the notice was delivered.
+			// The timeout notice reached the lead (21 tokens, over budget)...
+			expect(notices.some(body => body.includes("timed out"))).toBe(true);
+			const identity = { team: "audit", generation: started.generation, memberId: "worker" };
+			// ...and the member's budget stayed intact: a charged window (21 > 3)
+			// would refuse the plan (14 tokens); the exemption leaves room for it.
+			let failure: unknown;
+			try {
+				await runtime.submitPlan(child, identity, "12 characters");
+			} catch (caught) {
+				failure = caught;
+			}
+			expect(failure).toBeUndefined();
+			expect(notices.some(body => body.includes("Plan from worker"))).toBe(true);
+		} finally {
+			vi.useRealTimers();
+			await runtime.stop(lead, "audit");
+		}
+	});
+});
+
 describe("team cooperative stop", () => {
 	it("accepts only the targeted member's acknowledgement and tombstones that member once", async () => {
 		IrcBus.resetGlobalForTests();

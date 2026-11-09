@@ -14,8 +14,9 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcBusApi } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { IrcIngressGuard } from "@oh-my-pi/pi-coding-agent/irc/ingress-guard";
-import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -127,6 +128,46 @@ describe("IrcBus ingress guard", () => {
 		expect(
 			sink.delivered.slice(1).every(message => !message.progress && !message.wakeRelay && !message.broadcast),
 		).toBe(true);
+	});
+
+	it("an agent-authored send cannot claim teamControl", async () => {
+		// The public messaging path (`write agent://<id>`) builds its messages
+		// from explicit fields. An agent must not be able to smuggle the
+		// runtime-only exemptions (teamControl/teamNotice) into its own send
+		// through extra params — a future `...params` spread in executeSend
+		// would reopen that hole, and this test would catch it. executeSend uses
+		// the process-global bus, so the guarded policy must be installed there.
+		IrcBus.installGlobal(
+			new IrcBus(registry, undefined, {
+				settings: Settings.isolated({ "compaction.enabled": false, "irc.rateLimitTokens": 3 }),
+			}),
+		);
+		registerPeers();
+		const sink = makeFakeSession();
+		registry.register({ id: "0-Target", displayName: "target", kind: "sub", session: sink.session });
+
+		// Extra fields an agent cannot normally pass through the typed params;
+		// executeSend must drop them.
+		await executeSend(
+			{ registry, senderId: "0-Sender" },
+			{
+				to: "0-Target",
+				message: "12 characters",
+				...({ teamControl: true, teamNotice: true } as Record<string, unknown>),
+			},
+		);
+		// The delivered message carries no runtime-only flags.
+		expect(sink.delivered[0]?.teamControl).not.toBe(true);
+		expect(sink.delivered[0]?.teamNotice).not.toBe(true);
+
+		// The send was charged like ordinary traffic: a distinct second send in
+		// the same window exceeds the 3-token budget (each body costs 4 tokens).
+		const second = await executeSend(
+			{ registry, senderId: "0-Sender" },
+			{ to: "0-Target", message: "13 characters" },
+		);
+		expect(second.isError).toBe(true);
+		expect(second.details?.receipts?.[0]?.error).toStartWith("rate limited");
 	});
 
 	it("refuses a sender's flood past 30 tokens per 500 ms, and lets it through after the window", async () => {

@@ -132,6 +132,7 @@ export class TeamRuntime {
 							.filter(Boolean)
 							.join("\n"),
 						progress: true,
+						teamControl: true,
 						teamNotice: true,
 					})
 					.then(receipt => {
@@ -308,6 +309,7 @@ export class TeamRuntime {
 				to: state.leadId,
 				body: `${body} (request ${intent.requestId})`,
 				progress: true,
+				teamControl: true,
 				teamNotice: true,
 			})
 			.catch(error => logger.warn("Team stop notification failed", { error: String(error) }));
