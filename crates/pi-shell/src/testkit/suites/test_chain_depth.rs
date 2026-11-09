@@ -12,7 +12,7 @@
 //! runner's larger stack.
 
 use crate::{
-	bash::{ModeId, Script, ShellInit},
+	bash::{ModeId, Script, ShellInit, syntax::MAX_NESTING},
 	testkit::{FakeHost, Fault, Rig, fault::skeleton_init, run_script},
 };
 
@@ -21,7 +21,7 @@ use crate::{
 const TERMS: usize = 100_000;
 
 /// The parenthesis depth the builtins accept, `MAX_NESTING`.
-const LIMIT: usize = 400;
+const LIMIT: usize = MAX_NESTING as usize;
 
 /// The stack the shells run on by default.
 const STACK: usize = 2 << 20;
@@ -201,5 +201,70 @@ fn test_parenthesis_nesting_is_reported_past_the_limit_in_both_dialects() {
 				assert!(err.contains("maximum nesting level exceeded"), "{dialect} at {depth}: {err}");
 			}
 		}
+	});
+}
+
+/// Build a `[` expression from an explicit argument list.
+fn bracket(args: &[&str]) -> String {
+	format!("[ {} ]\n", args.join(" "))
+}
+
+/// zsh short-circuits `-a` (stops at the first non-zero status) and `-o`
+/// (stops at the first status that is not 1 or 3).  bash evaluates every
+/// term.  An error in a later term (`1 -eq abc`) is the oracle: if
+/// short-circuit is correct, the error is never reached and the status
+/// comes from the short-circuiting term alone.
+///
+/// These three rows, plus a long-chain variant, are the exactness guard
+/// for the `break` in `evalcond`'s `And`/`Or` arms.
+#[test]
+fn test_zsh_short_circuit_skips_errors_and_bash_does_not() {
+	on_a_shell_stack(|| {
+		// Row 1: `[ '' -a 1 -eq abc ]`
+		// zsh: `''` is false (status 1), -a stops → rc=1, no stderr.
+		// bash: evaluates `1 -eq abc` → rc=2, stderr.
+		let src = bracket(&["''", "-a", "1", "-eq", "abc"]);
+		let (_, err, rc) = zsh(&src);
+		assert_eq!((rc, err.as_str()), (1, ""), "zsh: '' -a 1 -eq abc");
+		let (_, err, rc) = bash(&src);
+		assert_eq!(rc, 2, "bash: '' -a 1 -eq abc");
+		assert!(err.contains("integer"), "bash stderr: {err}");
+
+		// Row 2: `[ x -o 1 -eq abc ]`
+		// zsh: `x` is true (status 0), -o stops → rc=0, no stderr.
+		// bash: evaluates `1 -eq abc` → rc=2, stderr.
+		let src = bracket(&["x", "-o", "1", "-eq", "abc"]);
+		let (_, err, rc) = zsh(&src);
+		assert_eq!((rc, err.as_str()), (0, ""), "zsh: x -o 1 -eq abc");
+		let (_, err, rc) = bash(&src);
+		assert_eq!(rc, 2, "bash: x -o 1 -eq abc");
+		assert!(err.contains("integer"), "bash stderr: {err}");
+
+		// Row 3: `[ x -a 1 -eq abc ]`
+		// Both: `x` is true, -a continues, `1 -eq abc` errors → rc=2.
+		let src = bracket(&["x", "-a", "1", "-eq", "abc"]);
+		let (_, err, rc) = zsh(&src);
+		assert_eq!(rc, 2, "zsh: x -a 1 -eq abc");
+		assert!(err.contains("integer"), "zsh stderr: {err}");
+		let (_, err, rc) = bash(&src);
+		assert_eq!(rc, 2, "bash: x -a 1 -eq abc");
+		assert!(err.contains("integer"), "bash stderr: {err}");
+
+		// Long-chain variant: 100,000 terms of '' then -a 1 -eq abc.
+		// zsh: first '' short-circuits the whole chain → rc=1, no stderr.
+		let mut args: Vec<&str> = Vec::with_capacity(TERMS * 2 + 3);
+		args.push("''");
+		for _ in 1..TERMS {
+			args.push("-a");
+			args.push("''");
+		}
+		args.push("-a");
+		args.push("1");
+		args.push("-eq");
+		args.push("abc");
+		// Trailing `]` is added by bracket().
+		let src = bracket(&args);
+		let (_, err, rc) = zsh(&src);
+		assert_eq!((rc, err.as_str()), (1, ""), "zsh: 100k '' -a ... 1 -eq abc");
 	});
 }
