@@ -93,8 +93,11 @@ async function expectRetryable(error: unknown): Promise<void> {
 }
 
 describe("cowork transport connection lost before a response", () => {
-	it("says the body was still uploading when the connection drops mid-body", async () => {
-		const port = await droppingServer(() => 256 * 1024);
+	it.each([
+		["256 KiB", () => 256 * 1024],
+		["halfway", (contentLength: number) => Math.floor(contentLength / 2)],
+	])("says the body was still uploading when the connection drops %s into it", async (_, cutoff) => {
+		const port = await droppingServer(cutoff);
 		const error = await sendThrough(port);
 
 		await expectRetryable(error);
@@ -103,13 +106,13 @@ describe("cowork transport connection lost before a response", () => {
 		expect(message).toContain("while uploading the 32.0MB request body; no response received");
 	});
 
-	it("says the body was sent when the connection drops before any response", async () => {
+	it("says the body was written to the socket when the connection drops before any response", async () => {
 		const port = await droppingServer(contentLength => contentLength);
 		const error = await sendThrough(port);
 
 		await expectRetryable(error);
 		const { message } = error as Error;
 		expect(message).toStartWith("Connection error: connection lost after ");
-		expect(message).toContain("after the 32.0MB request body was sent and before any response");
+		expect(message).toContain("after the 32.0MB request body was written to the socket, before any response");
 	});
 });
