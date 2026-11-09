@@ -8,6 +8,7 @@ import {
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
 	joinAdditionalContext,
+	resolveToolConcurrency,
 	TOOL_RESULT_ADDITIONAL_CONTEXT,
 	type ToolResultWithAdditionalContext,
 	validateAgentToolArguments,
@@ -579,21 +580,6 @@ function resolveMcpTool(
 		? options.getEditReplaceTool?.()
 		: (options.getExecutableTool?.(toolName) ?? options.tools.get(toolName));
 	return { tool, preferReplace };
-}
-
-/**
- * A tool's batch concurrency for one call, mirroring the agent loop: an
- * unset mode is shared, and a throwing per-call resolver is exclusive — the
- * ordering that cannot race — rather than failing the batch.
- */
-function resolveToolConcurrency(tool: CursorBridgeTool, args: Record<string, unknown>): "shared" | "exclusive" {
-	const concurrency = tool.concurrency;
-	if (typeof concurrency !== "function") return concurrency ?? "shared";
-	try {
-		return concurrency(args);
-	} catch {
-		return "exclusive";
-	}
 }
 
 function formatMcpToolErrorMessage(toolName: string, availableTools: string[]): string {
