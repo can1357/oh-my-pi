@@ -172,7 +172,7 @@ export function collectOnlineTinyCandidates(
  * configured primary, else the configured `default` chain, which roles that are
  * not model kinds inherit as in `collectOnlineTinyCandidates`. Only configured
  * chains apply: a role's built-in priority list never adds fallbacks, so a
- * request cannot reach a model the user did not select. Model-keyed and
+ * retry cannot move to a model the user did not select. Model-keyed and
  * wildcard chains retain their precedence.
  * Without a role hint, consult only the configured model-keyed / wildcard /
  * matching-role keys that `resolveRetryFallbackChainKey` already selects.

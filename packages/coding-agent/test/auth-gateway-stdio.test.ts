@@ -23,7 +23,7 @@ describe("auth-gateway stdio model selectors", () => {
 		expect(selectorCandidates("@smol", settings, registry)).toEqual([fast, vertex]);
 	});
 
-	// The gateway must never reach a model the user did not select: a role's
+	// A retry must never move to a model the user did not select: a role's
 	// built-in priority list would retry on any logged-in provider.
 	it("never falls back to a role's built-in priority models", () => {
 		const settings = Settings.isolated({});
