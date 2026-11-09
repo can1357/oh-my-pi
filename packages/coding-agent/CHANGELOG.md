@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Multi-question ask forms in Tern show Submit on every question tab, not only on the Review tab
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

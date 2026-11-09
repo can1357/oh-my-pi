@@ -458,6 +458,15 @@ describe("html form", () => {
 			expect(findPath(form.describe(CX), node => node.k === "section")).toBeUndefined();
 		});
 
+		it("natively: Submit sits on every question tab and sends the answers without visiting Review", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			const root = form.describe(CX);
+			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // still on the first question tab
+			expect(findPath(root, node => node.key === "submit")).toBeDefined();
+			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+			expect(onSubmit).toHaveBeenCalledWith({ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" });
+		});
+
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
 			const { form } = dialog(DB_FORM);
 			const checked = () => {
