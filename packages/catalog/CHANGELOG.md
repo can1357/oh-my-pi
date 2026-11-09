@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- LiteLLM lists only the models the configured key can call (its authenticated `/v1/models`), keeping the proxy's metadata for them; a proxy whose `/v1/models` fails now lists no models instead of every model it serves ([#18601](https://github.com/can1357/oh-my-pi/issues/18601))
+
+## [18.18.5] - 2026-11-09
+
+### Added
+
+- Added Claude Fable 5.2 and Claude Mythos 5.2 ($8/$40 per MTok, $0.20 cache reads, 1M context)
+
+### Fixed
+
+- Fixed newly discovered Anthropic Fable/Mythos models showing as text-only, non-reasoning, and mispriced before models.dev catalogs them
+- Fixed Claude Mythos 5.1 not using thinking prefix-binding controls, which it needs on every account
+
+## [18.18.4] - 2026-11-09
+
 ### Added
 
 - Added Otari gateway provider: `/login otari` with `OTARI_API_KEY`, models discovered live per workspace ([#17841](https://github.com/can1357/oh-my-pi/pull/17841) by [@tbille](https://github.com/tbille))

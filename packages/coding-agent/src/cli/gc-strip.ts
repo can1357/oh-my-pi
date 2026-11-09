@@ -11,9 +11,11 @@
  * stays resumable on any model.
  *
  * Kept on purpose:
- * - The latest surviving assistant turn, verbatim: a resumed turn that
- *   continues its tool loop must replay the most recent response's reasoning
- *   unmodified.
+ * - The latest replay turn, verbatim: the run of assistant responses that ends
+ *   the latest surviving assistant turn, joined by tool results or adjacency as
+ *   a provider's message list joins them. Providers validate that run as one
+ *   assistant message, so a resumed turn that continues its tool loop must
+ *   replay each response's reasoning unmodified.
  * - Replay state that carries context found nowhere else: reasoning source
  *   markers ({@link isReasoningSourceSignature}), text signatures (OpenAI
  *   message phase), Anthropic message controls and native compaction blocks,
@@ -28,26 +30,35 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
-import type { AssistantMessage, ProviderPayload } from "@oh-my-pi/pi-ai";
-import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ProviderPayload } from "@oh-my-pi/pi-ai";
+import { isReplayTurnBoundary, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { isReasoningSourceSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
-import { isRecord, readLines } from "@oh-my-pi/pi-utils";
+import { isRecord, readLines, tryParseJson } from "@oh-my-pi/pi-utils";
+import { convertMessagesForContextView } from "../session/messages";
+import { buildSessionContext } from "../session/session-context";
+import type { FileEntry, RawFileEntry, SessionEntry } from "../session/session-entries";
+import { migrateToCurrentVersion } from "../session/session-migrations";
 import { type FileSessionStorage, sessionStagingPath } from "../session/session-storage";
 
 const GZIP_SUFFIX = ".gz";
-/** Keys only replay data uses: a line without one has nothing to strip and is never parsed. */
+/** Keys only replay data uses: a line without one has nothing to strip. */
 const REPLAY_KEY_RE =
 	/"(?:providerPayload|requestControls|inputTransformations|thinkingSignature|itemId|redactedThinking|thoughtSignature|partialArgs|streamIndex|providerFile)"/;
-const ASSISTANT_RE = /"role":"assistant"/;
 const NEWLINE = new Uint8Array([0x0a]);
 const WRITE_CHUNK_BYTES = 1 << 20;
+const FILE_PERMISSION_MASK = 0o7777n;
+/** Carries a message entry's physical JSONL line index through context rebuilding. */
+const LINE_INDEX = Symbol("lineIndex");
+
+type TaggedMessage = AgentMessage & { [LINE_INDEX]?: number };
 
 /** What stripping one transcript removes, planned against the file as it was at `stat`. */
 export interface StripPlan {
 	file: string;
 	stat: BigIntStats;
-	/** Line index of the latest surviving assistant turn, which stays verbatim; -1 when there is none. */
-	keep: number;
+	/** Line indices whose replay data is removed. */
+	strip: ReadonlySet<number>;
 	/** Records that lose replay data. */
 	records: number;
 	/** JSONL bytes removed; uncompressed for an archived `.jsonl.gz`. */
@@ -83,6 +94,13 @@ function drop(target: Record<string, unknown>, keys: readonly string[]): boolean
 	return dropped;
 }
 
+function hasImageSource(block: Record<string, unknown>): boolean {
+	return (
+		(typeof block.data === "string" && block.data.length > 0) ||
+		(typeof block.url === "string" && block.url.length > 0)
+	);
+}
+
 function stripBlock(block: Record<string, unknown>): boolean {
 	switch (block.type) {
 		case "thinking": {
@@ -94,7 +112,7 @@ function stripBlock(block: Record<string, unknown>): boolean {
 			// `partialArgs`/`streamIndex`: streaming state an interrupted openai-completions stream left behind.
 			return drop(block, ["thoughtSignature", "partialArgs", "streamIndex"]);
 		case "image":
-			return drop(block, ["providerFile"]);
+			return hasImageSource(block) && drop(block, ["providerFile"]);
 		default:
 			return false;
 	}
@@ -134,17 +152,65 @@ function parseRecord(text: string): unknown {
 	}
 }
 
-/** Whether `record` is an assistant turn a provider would replay as its most recent response. */
-function isSurvivingAssistantRecord(record: unknown): boolean {
-	if (!isRecord(record) || record.type !== "message") return false;
-	const message = record.message;
-	return isAssistantMessage(message) && isSurvivingAssistant(message);
+/**
+ * Parse a JSONL line into a {@link FileEntry} tagged with its physical line
+ * index for {@link buildSessionContext}.
+ */
+function parseFileEntry(text: string, index: number): FileEntry | undefined {
+	const entry = tryParseJson<RawFileEntry>(text);
+	if (!isRecord(entry) || typeof entry.type !== "string" || entry.type === "title") return undefined;
+	if (entry.type === "message") {
+		const message: unknown = entry.message;
+		if (!isRecord(message) || typeof message.role !== "string") return undefined;
+		if (message.role === "assistant" && !Array.isArray(message.content)) return undefined;
+		if (message.role === "toolResult" && typeof message.toolName !== "string") message.toolName = "";
+		(entry.message as TaggedMessage)[LINE_INDEX] = index;
+	}
+	return entry;
 }
 
-function isAssistantMessage(value: unknown): value is AssistantMessage {
-	return (
-		isRecord(value) && value.role === "assistant" && Array.isArray(value.content) && value.content.every(isRecord)
+/**
+ * Line indices belonging to the latest replay turn on the active branch, as
+ * {@link buildSessionContext} and {@link convertMessagesForContextView} rebuild
+ * it on resume: the run of surviving assistant responses joined only by tool
+ * results that ends at the last surviving assistant response. Undefined when a
+ * message in that run lost its physical line index, so the caller fails closed.
+ */
+function protectedTurnLines(entries: SessionEntry[]): Set<number> | undefined {
+	const keep = new Set<number>();
+	if (entries.length === 0) return keep;
+	const context = buildSessionContext(entries, undefined, undefined, {
+		maxFrameDataBytes: 0,
+	});
+	const converted = convertMessagesForContextView(context.messages);
+	const lastAssistant = converted.findLastIndex(
+		({ message }) => message.role === "assistant" && isSurvivingAssistant(message),
 	);
+	if (lastAssistant < 0) return keep;
+	let firstAssistant = lastAssistant;
+	for (let i = lastAssistant - 1; i >= 0; i--) {
+		const { message } = converted[i]!;
+		if (message.role === "assistant") {
+			if (isSurvivingAssistant(message)) firstAssistant = i;
+		} else if (message.role === "toolResult") {
+			continue;
+		} else if (isReplayTurnBoundary(message)) {
+			break;
+		}
+	}
+	let turnEnd = lastAssistant;
+	while (turnEnd + 1 < converted.length && converted[turnEnd + 1]!.message.role === "toolResult") {
+		turnEnd += 1;
+	}
+	for (let i = firstAssistant; i <= turnEnd; i++) {
+		const { message, sourceIndex } = converted[i]!;
+		if (message.role !== "assistant" && message.role !== "toolResult") continue;
+		if (message.role === "assistant" && !isSurvivingAssistant(message)) continue;
+		const lineIndex = (context.messages[sourceIndex] as TaggedMessage | undefined)?.[LINE_INDEX];
+		if (lineIndex === undefined) return undefined;
+		keep.add(lineIndex);
+	}
+	return keep;
 }
 
 /** Decoded lines of a transcript, gunzipped for an archived `.jsonl.gz`. */
@@ -158,36 +224,38 @@ async function* transcriptLines(file: string): AsyncGenerator<{ bytes: Uint8Arra
 /**
  * Plan stripping `file`. Undefined when it was modified after `idleBeforeMs`,
  * is not a regular file with a single link (a rename would split the links),
- * or carries no replay data outside its latest surviving assistant turn.
+ * or carries no replay data outside its latest replay turn.
  */
 export async function planStrip(file: string, idleBeforeMs: number): Promise<StripPlan | undefined> {
 	const stat = await fs.lstat(file, { bigint: true });
 	if (!stat.isFile() || stat.nlink !== 1n || Number(stat.mtimeMs) > idleBeforeMs) return undefined;
-	const plan: StripPlan = { file, stat, keep: -1, records: 0, bytes: 0 };
-	// Removable bytes of the kept turn: they count once a later turn supersedes it.
-	let keptBytes: number | undefined;
+	const fileEntries: FileEntry[] = [];
+	const candidates: Array<{ index: number; byteLength: number; record: Record<string, unknown> }> = [];
 	let index = -1;
+
 	for await (const { bytes, text } of transcriptLines(file)) {
 		index += 1;
-		const replay = REPLAY_KEY_RE.test(text);
-		if (!replay && !ASSISTANT_RE.test(text)) continue;
-		const record = parseRecord(text);
-		if (isSurvivingAssistantRecord(record)) {
-			if (keptBytes !== undefined) {
-				plan.records += 1;
-				plan.bytes += keptBytes;
-			}
-			keptBytes = undefined;
-			plan.keep = index;
+		const entry = parseFileEntry(text, index);
+		if (!entry) continue;
+		fileEntries.push(entry);
+		if (entry.type === "message" && REPLAY_KEY_RE.test(text)) {
+			const record = parseRecord(text);
+			if (isRecord(record)) candidates.push({ index, byteLength: bytes.length, record });
 		}
-		if (!replay || !stripRecord(record)) continue;
-		const removed = bytes.length - Buffer.byteLength(JSON.stringify(record));
-		if (index === plan.keep) {
-			keptBytes = removed;
-		} else {
-			plan.records += 1;
-			plan.bytes += removed;
-		}
+	}
+	if (candidates.length === 0) return undefined;
+	migrateToCurrentVersion(fileEntries);
+	const entries = fileEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
+	const keep = protectedTurnLines(entries);
+	if (!keep) return undefined;
+
+	const strip = new Set<number>();
+	const plan: StripPlan = { file, stat, strip, records: 0, bytes: 0 };
+	for (const { index: lineIndex, byteLength, record } of candidates) {
+		if (keep.has(lineIndex) || !stripRecord(record)) continue;
+		strip.add(lineIndex);
+		plan.records += 1;
+		plan.bytes += byteLength - Buffer.byteLength(JSON.stringify(record));
 	}
 	return plan.records > 0 ? plan : undefined;
 }
@@ -199,7 +267,7 @@ async function* strippedChunks(plan: StripPlan): AsyncGenerator<Buffer> {
 	let index = -1;
 	for await (const { bytes, text } of transcriptLines(plan.file)) {
 		index += 1;
-		const record = index !== plan.keep && REPLAY_KEY_RE.test(text) ? parseRecord(text) : undefined;
+		const record = plan.strip.has(index) ? parseRecord(text) : undefined;
 		const line = stripRecord(record) ? Buffer.from(JSON.stringify(record)) : bytes;
 		parts.push(line, NEWLINE);
 		size += line.length + 1;
@@ -218,7 +286,8 @@ function unchangedSincePlan(plan: StripPlan): boolean {
 		current.ino === plan.stat.ino &&
 		current.nlink === 1n &&
 		current.size === plan.stat.size &&
-		current.mtimeNs === plan.stat.mtimeNs
+		current.mtimeNs === plan.stat.mtimeNs &&
+		current.mode === plan.stat.mode
 	);
 }
 
@@ -237,8 +306,16 @@ function utimeSeconds(ns: bigint): number {
  */
 export async function applyStrip(plan: StripPlan, storage: FileSessionStorage): Promise<boolean> {
 	const staged = sessionStagingPath(plan.file);
+	const mode = Number(plan.stat.mode & FILE_PERMISSION_MASK);
 	try {
-		const sink = (await fs.open(staged, "wx")).createWriteStream();
+		const handle = await fs.open(staged, "wx", mode);
+		try {
+			await handle.chmod(mode);
+		} catch (error) {
+			await handle.close();
+			throw error;
+		}
+		const sink = handle.createWriteStream();
 		if (plan.file.endsWith(GZIP_SUFFIX)) await pipeline(strippedChunks(plan), createGzip({ level: 9 }), sink);
 		else await pipeline(strippedChunks(plan), sink);
 		await fs.utimes(staged, utimeSeconds(plan.stat.atimeNs), utimeSeconds(plan.stat.mtimeNs));
