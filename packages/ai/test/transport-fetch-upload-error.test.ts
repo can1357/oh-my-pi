@@ -133,24 +133,58 @@ describe("transportFetch connection lost before a response", () => {
 		);
 	});
 
-	it("follows a redirect by resending the whole body", async () => {
+	it("follows a 307 by uploading the body to the new location, still naming how far it got", async () => {
+		const dropping = await droppingServer(() => 256 * 1024);
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 307, headers: { location: `${dropping}/v1/responses` } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) });
+
+		const error = await postThroughTransport(`http://127.0.0.1:${server.port}`, BODY);
+
+		expect(requests).toEqual([`POST ${BODY.length}`]);
+		expect(error).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		expect((error as Error).message).toEndWith(
+			" while uploading the 32.0MB request body; no response received (ECONNRESET).",
+		);
+	});
+
+	it("follows a cross-origin 303 as a GET without the body or credentials", async () => {
+		const requests: string[] = [];
+		const target = Bun.serve({
+			hostname: "localhost",
+			port: 0,
+			async fetch(request) {
+				const received = (await request.arrayBuffer()).byteLength;
+				requests.push(`${request.method} ${received} ${request.headers.get("authorization")}`);
+				return new Response("done");
+			},
+		});
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
 			port: 0,
 			async fetch(request) {
 				const received = (await request.arrayBuffer()).byteLength;
-				if (new URL(request.url).pathname === "/moved") {
-					return new Response(null, { status: 307, headers: { location: "/v1/responses" } });
-				}
-				return new Response(String(received));
+				requests.push(`${request.method} ${received} ${request.headers.get("authorization")}`);
+				return new Response(null, { status: 303, headers: { location: `http://localhost:${target.port}/done` } });
 			},
 		});
-		servers.push({ close: () => server.stop(true) });
+		servers.push({ close: () => server.stop(true) }, { close: () => target.stop(true) });
 		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
 
-		const response = await fetch(`http://127.0.0.1:${server.port}/moved`, { method: "POST", body: BODY });
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, {
+			method: "POST",
+			body: BODY,
+			headers: { authorization: "Bearer sk-test" },
+		});
 
-		expect(response.status).toBe(200);
-		expect(await response.text()).toBe(String(BODY.length));
+		expect(await response.text()).toBe("done");
+		expect(requests).toEqual([`POST ${BODY.length} Bearer sk-test`, "GET 0 null"]);
 	});
 });
