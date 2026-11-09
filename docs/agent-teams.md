@@ -238,7 +238,9 @@ These are alternatives for the same request, not sequential replies:
   leaves the member live.
 - No reply by `team.stopAckTimeoutMs` (default **120000 ms**, two minutes) closes
   the request and notifies the lead once. Timeout never forces release. Values
-  below 1000 ms and non-finite values clamp to 1000 ms.
+  outside 1000..2147483647 ms clamp into that range: Node/Bun `setTimeout`
+  overflows past 2^31-1 ms and would otherwise fire the timeout almost
+  immediately.
 - Late, duplicate, wrong-member and old-generation replies cannot release a
   member. After decline/timeout, issue another stop or explicitly use `--force`.
 
@@ -340,7 +342,7 @@ All `/team` commands require `team.enabled: true`.
 |---|---|---|
 | `team.enabled` | `false` | Enables the experimental `/team` commands. |
 | `team.maxTeammates` | `4` | Caps members selected per start; skipped members are reported. |
-| `team.stopAckTimeoutMs` | `120000` | Cooperative-stop acknowledgement deadline in milliseconds; minimum 1000, with no forced release on timeout. |
+| `team.stopAckTimeoutMs` | `120000` | Cooperative-stop acknowledgement deadline in milliseconds; clamped to 1000..2147483647, with no forced release on timeout. |
 
 ## Source
 

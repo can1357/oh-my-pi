@@ -683,6 +683,56 @@ describe("team cooperative stop", () => {
 		}
 	});
 
+	it.each([2 ** 31, Number.MAX_SAFE_INTEGER])(
+		"clamps an overflowing stop timeout (%s) to the signed 32-bit timer range",
+		async timeout => {
+			const registry = AgentRegistry.global();
+			const notices: string[] = [];
+			const lead = {
+				deliverIrcMessage: async (message: { body: string }) => {
+					notices.push(message.body);
+					return "injected";
+				},
+			} as unknown as AgentSessionHandle;
+			const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
+			registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
+			const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
+			const runtime = new TeamRuntime();
+			const started = await runtime.start(lead, team);
+			const entry = { id: "worker", reservation: "registered", ref };
+			started.members.set("worker", entry);
+			// Bun/Node setTimeout clamps delays over 2^31-1 to 1 ms, so the raw value
+			// would fire the timeout almost immediately. Capture the delay actually
+			// handed to the timer: with fake timers active, the spy wraps and
+			// forwards to the fake implementation, so this is the stored intent
+			// value #dispatchStop schedules.
+			vi.useFakeTimers();
+			const fakeSetTimeout = globalThis.setTimeout;
+			const scheduled = vi
+				.spyOn(globalThis, "setTimeout")
+				.mockImplementation(((handler: (...args: unknown[]) => void, ms?: number, ...rest: unknown[]) =>
+					fakeSetTimeout(handler, ms, ...rest)) as typeof setTimeout);
+			try {
+				await runtime.requestStop(lead, "audit", started.generation, "worker", entry, false, timeout);
+				expect(scheduled.mock.calls.map(call => call[1])).toEqual([2_147_483_647]);
+				vi.advanceTimersByTime(1);
+				await Promise.resolve();
+				expect(notices).toEqual([]);
+				vi.advanceTimersByTime(999);
+				await Promise.resolve();
+				expect(notices).toEqual([]);
+				vi.advanceTimersByTime(2_147_483_647 - 1_000);
+				await Promise.resolve();
+				expect(notices).toHaveLength(1);
+				expect(notices[0]).toContain("timed out");
+			} finally {
+				scheduled.mockRestore();
+				vi.useRealTimers();
+				await runtime.stop(lead, "audit");
+			}
+		},
+	);
+
 	it.each(["ack", "decline", "release", "replacement", "restart", "teardown", "registration failure"] as const)(
 		"cleans the stop timer on %s and rejects the old response",
 		async action => {

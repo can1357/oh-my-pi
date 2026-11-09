@@ -22,6 +22,9 @@ export interface TeamStopResponse {
 	requestId: string;
 	outcome: "acknowledged" | "declined";
 }
+/** Bun/Node `setTimeout` overflows past 2^31-1 ms (firing in 1 ms), so clamp stop deadlines into the timer range. */
+const STOP_ACK_TIMEOUT_MAX_MS = 2_147_483_647;
+const STOP_ACK_TIMEOUT_MIN_MS = 1000;
 
 export interface TeamMembership {
 	id: string;
@@ -436,7 +439,10 @@ export class TeamRuntime {
 			id: expected.id,
 			force,
 			wholeTeam: wholeTeam || priorWholeTeam,
-			timeoutMs: Number.isFinite(timeoutMs) ? Math.max(1000, timeoutMs) : 1000,
+			timeoutMs: Math.min(
+				STOP_ACK_TIMEOUT_MAX_MS,
+				Math.max(STOP_ACK_TIMEOUT_MIN_MS, Number.isFinite(timeoutMs) ? timeoutMs : STOP_ACK_TIMEOUT_MIN_MS),
+			),
 			requestId: randomUUID(),
 		};
 		state.stops.set(handle, intent);
