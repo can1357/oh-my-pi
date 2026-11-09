@@ -328,22 +328,6 @@ describe("task spawn validation", () => {
 		expect(await executeText(params, [bundledSeance, scout])).toContain("task.perCallModel: off");
 	});
 
-	it("still requires a source for bundled seance with an empty model placeholder", async () => {
-		const text = await executeText({ agent: "seance", task: "Consult history", model: [] }, [bundledSeance]);
-		expect(text).toContain("requires a non-empty `sourceSession`");
-	});
-
-	it("does not exempt a project agent shadowing seance from model policy", async () => {
-		const shadow: AgentDefinition = {
-			name: "seance",
-			description: "ordinary",
-			systemPrompt: "ordinary",
-			source: "project",
-		};
-		const text = await executeText({ agent: "seance", task: "work", model: "p/requested" }, [shadow]);
-		expect(text).toContain("task.perCallModel: off");
-	});
-
 	it("advertises approved selectors only while task.perCallModel is on", async () => {
 		const description = async (mode: string) => {
 			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });

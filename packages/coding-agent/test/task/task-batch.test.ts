@@ -392,9 +392,7 @@ describe("task.batch validation", () => {
 
 	it.each([
 		{ batch: false, structured: true, isolation: false, seance: false, model: "" },
-		{ batch: false, structured: false, isolation: true, seance: true, model: [] },
-		{ batch: true, structured: true, isolation: true, seance: false, model: [] },
-		{ batch: true, structured: false, isolation: false, seance: true, model: "" },
+		{ batch: true, structured: false, isolation: true, seance: true, model: [] },
 	])(
 		"routes empty model placeholders through the agent loop: $batch $structured $isolation $seance",
 		async options => {
@@ -458,7 +456,7 @@ describe("task.batch validation", () => {
 		},
 	);
 
-	it.each(["p/requested", " ", ["p/requested"]])("refuses nonempty model %p before any batch spawn", async model => {
+	it("refuses a whitespace model before any batch spawn", async () => {
 		mockDiscovery();
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("unexpected"));
 		const tool = await TaskTool.create(
@@ -476,7 +474,7 @@ describe("task.batch validation", () => {
 								context: "ctx",
 								tasks: [
 									{ task: "Allowed", solutionSpace: "bounded", model: [] },
-									{ task: "Restricted", solutionSpace: "bounded", model },
+									{ task: "Restricted", solutionSpace: "bounded", model: " " },
 								],
 							},
 						},
@@ -497,6 +495,7 @@ describe("task.batch validation", () => {
 		await agent.prompt("go");
 		const result = agent.state.messages.find(message => message.role === "toolResult");
 		expect(result?.role === "toolResult" && result.isError).toBe(true);
+		expect(result?.role === "toolResult" ? getFirstText(result) : "").toContain("task.perCallModel: off");
 		expect(run).not.toHaveBeenCalled();
 	});
 

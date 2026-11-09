@@ -510,9 +510,6 @@ interface SpawnPlan {
 }
 
 function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
-	if (!isRecord(params)) return params;
-	const prototype = Object.getPrototypeOf(params);
-	if (prototype !== Object.prototype && prototype !== null) return params;
 	const originalTasks = params.tasks;
 	let normalizedTasks: TaskItem[] | undefined;
 	if (Array.isArray(originalTasks)) {
@@ -521,8 +518,6 @@ function normalizeTaskModelPlaceholders(params: TaskParams): TaskParams {
 			if (!isRecord(item)) continue;
 			const model = item.model;
 			if (model !== "" && !(Array.isArray(model) && model.length === 0)) continue;
-			const itemPrototype = Object.getPrototypeOf(item);
-			if (itemPrototype !== Object.prototype && itemPrototype !== null) continue;
 			normalizedTasks ??= originalTasks.slice();
 			const copy = { ...item };
 			delete copy.model;
