@@ -1,3 +1,4 @@
+import { heapStats } from "bun:jsc";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { generateRoomKey, importRoomKey, open, seal } from "../../src/collab/crypto";
 import { type CollabFrame, packEnvelope, unpackEnvelope } from "../../src/collab/protocol";
@@ -918,7 +919,6 @@ describe("CollabSocket send backpressure", () => {
 			});
 			// Past its share the peer is shed, and every later frame for it is refused.
 			for (let i = 0; i < PEER_SHARE; i++) socket.send({ t: "error", message: `reply ${i}` }, 2);
-			const { heapStats } = await import("bun:jsc");
 			Bun.gc(true);
 			const before = heapStats().objectTypeCounts.Promise ?? 0;
 			let refused = 0;
