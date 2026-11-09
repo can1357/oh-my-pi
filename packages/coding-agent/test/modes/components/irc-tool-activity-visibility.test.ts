@@ -57,6 +57,32 @@ function expectCoordination(text: string, visible: boolean): void {
 }
 
 describe("IRC tool activity visibility", () => {
+	it("shows a received team approval as a no-reply notice in the transcript card", async () => {
+		const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
+		const helpers = new UiHelpers(ctx);
+		ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
+		const controller = new EventController(ctx);
+		try {
+			await controller.handleEvent({
+				type: "irc_message",
+				message: {
+					role: "custom",
+					customType: "irc:incoming",
+					content: "Plan approved.",
+					details: { from: "Lead", message: "Plan approved.", teamNotice: true },
+					display: true,
+					timestamp: Date.now(),
+				},
+			});
+			const rendered = Bun.stripANSI(ctx.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("Plan approved.");
+			expect(rendered).toContain("(team notice; no reply needed)");
+		} finally {
+			controller.dispose();
+			ctx.chatContainer.dispose();
+		}
+	});
+
 	it("hides live cards, including arrivals while hidden, without hiding conversation", async () => {
 		const ctx = createInteractiveModeContext({ settings: Settings.isolated() });
 		const helpers = new UiHelpers(ctx);

@@ -707,6 +707,7 @@ export function createIrcMessageCard(
 		to?: string;
 		body?: string;
 		replyTo?: string;
+		teamNotice?: boolean;
 		timestamp?: number;
 		pool?: string;
 		mode?: string;
@@ -728,6 +729,7 @@ export function createIrcMessageCard(
 	if (card.kind === "autoreply") meta.push("auto");
 	if (card.kind === "workpool" && card.mode) meta.push(card.mode);
 	if (card.replyTo) meta.push("reply");
+	if (card.teamNotice) meta.push("(team notice; no reply needed)");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);
 	const component = createCachedComponent(getExpanded, (width, expanded) => {
@@ -846,7 +848,11 @@ function describeMessage(msg: IrcMessage, single: boolean): NativeNode[] {
 	const age = msg.ts
 		? [text([span("received", "dim")]), elapsed(Date.now() - msg.ts), text([span("ago", "dim")])]
 		: [];
-	const head = [...sender, ...age];
+	const head = [
+		...sender,
+		...(msg.teamNotice ? [text([span("(team notice; no reply needed)", "muted")])] : []),
+		...age,
+	];
 	return compact([head.length > 0 ? row(head, { gap: "xs" }) : undefined, msg.body.trim() ? md(msg.body) : undefined]);
 }
 
@@ -924,7 +930,11 @@ export const waitToolRenderer = {
 							{
 								iconOverride: ircGlyph(uiTheme),
 								title: `IRC ${uiTheme.nav.back} ${replaceTabs(msg.from)}`,
-								meta: [messageAge(msg.ts), ...(msg.replyTo ? ["reply"] : [])],
+								meta: [
+									messageAge(msg.ts),
+									...(msg.replyTo ? ["reply"] : []),
+									...(msg.teamNotice ? ["(team notice; no reply needed)"] : []),
+								],
 							},
 							uiTheme,
 						),

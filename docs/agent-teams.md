@@ -188,15 +188,20 @@ On each real `running → idle` transition, the runtime sends the current member
 actual lead one non-request notice containing the member ID and an
 `agent://<actual-id>` link. When the registered session exposes the completed
 assistant turn, the notice includes its first three lines, capped at 500
-characters; otherwise the summary is empty. Repeated idle events do not duplicate
-a notice; a later completed running turn produces a new one. Delayed events from
-replaced refs or old team generations do not notify for replacements. Delivery
-can fail under the ordinary IRC guard or recipient availability constraints.
+characters. If that turn has no text, the excerpt comes from its final
+`yield`/`handback` call arguments; without either, the summary line is omitted.
+Repeated idle events do not duplicate a notice; a later completed running turn
+produces a new one. A text stop followed by a yield-reminder turn can therefore
+produce two notices. Delayed events from replaced refs or old team generations
+do not notify for replacements. Delivery can fail under the ordinary IRC guard
+or recipient availability constraints.
 
-Idle notices, plan submissions, approval notices and rejections use IRC progress
-notifications: they impose no automatic reply obligation or wake-relay loop.
-Progress delivery can wake an idle lead/member, but does not interrupt a busy
-recipient's wait. This is different from ordinary request wake-relay, which
+Idle notices, plan submissions, approval/rejection notices and stop
+decline/timeout notices are displayed as **team notices, no reply needed**.
+They impose no automatic reply obligation or wake-relay loop. An addressed team
+notice can end a pending `wait`, including a member waiting for plan approval.
+Ordinary progress messages retain their “reply follows later” presentation and
+do not end waits. This is different from ordinary request wake-relay, which
 returns a woken subagent's turn output to the requester and is not an idle
 notification. Direct peer messages keep the existing IRC ingress guard.
 
@@ -248,10 +253,18 @@ A handle-only stop preserves the generation, even if it removes the last member.
 A subsequent whole-team start after retirement gets a fresh generation; a
 workspace ledger survives, whereas the old in-memory ledger does not.
 
-Runtime-authored stop requests bypass **only the IRC ingress rate limit** so
-fan-out reaches all members. Duplicate and hop checks, membership/ref validation
-and ordinary delivery/queue checks still apply; this is not an unrestricted
-messaging bypass.
+A session leading a current team generation is not idle-TTL parked: its timer
+is re-armed so the team, active members and the lead's `/team stop` authority
+remain live. After all its teams retire, normal idle-TTL parking resumes.
+Genuine session termination still retires its generations without changing
+member teardown ownership; Main shutdown leaves cleanup to the lifecycle manager.
+
+Runtime-authored stop requests and approval/rejection notices bypass **only
+sender rate charging**. Stop requests still undergo dedup/hop/delivery checks;
+approval/rejection notices are progress deliveries, which already skip dedup.
+Idle and decline/timeout notices, and agent-authored plan submissions, remain
+rate-limited like ordinary progress messages. All retain hop, membership/ref
+and ordinary delivery/queue checks; this is not an unrestricted messaging bypass.
 
 ## Plan submission and approval
 
@@ -274,9 +287,11 @@ plan approval required: send it via write team://audit/plan
 This is not session plan mode: IRC wake turns remain enabled. Every team dispatch
 consults the main runtime, including worker calls and extension-rewritten final
 arguments, even if local identity says approval is not required. Service failure
-or invalid live membership fails closed. Only teammates originally started
-without an approval requirement may continue after team/lead authority ends,
-including on cold revival; approval itself is never persisted as a grant.
+or invalid live membership fails closed, except `yield`/`handback` remain
+available because they do not mutate team state. Only teammates originally
+started without an approval requirement may otherwise continue after team/lead
+authority ends, including on cold revival; approval itself is never persisted
+as a grant.
 
 1. The member submits non-empty plan text as the content of
    `write team://audit/plan`. Its trusted session identifies the author; the

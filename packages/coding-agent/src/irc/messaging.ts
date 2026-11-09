@@ -22,8 +22,12 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 
 export function formatIncoming(msg: IrcMessage): string {
 	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	const progressTag = msg.progress ? " (progress; reply follows)" : "";
-	return `[${msg.id}] ${msg.from}${replyTag}${progressTag}: ${msg.body}`;
+	const noticeTag = msg.teamNotice
+		? " (team notice; no reply needed)"
+		: msg.progress
+			? " (progress; reply follows)"
+			: "";
+	return `[${msg.id}] ${msg.from}${replyTag}${noticeTag}: ${msg.body}`;
 }
 
 /** Takes every message buffered in `senderId`'s session inbox before automatic injection; with `ifAny`, none unless one satisfies it. */

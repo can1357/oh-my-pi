@@ -97,7 +97,7 @@ describe("team plan commands", () => {
 		expect(approvals).toHaveLength(1);
 		expect(approvals[0]).toMatchObject({ from: "lead", to: "worker", progress: true, teamControl: true });
 		expect(approvals[0]!.body).toContain("mutation tools are available");
-		expect(ircWaitAccepts({ directOnly: true }, approvals[0]!)).toBe(false);
+		expect(ircWaitAccepts({ directOnly: true }, approvals[0]!)).toBe(true);
 		expect(IrcBus.global().unansweredSends("lead", 0)).toEqual([]);
 		expect(IrcBus.global().unansweredSends("worker", 0)).toEqual([]);
 	});

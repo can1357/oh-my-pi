@@ -34,6 +34,12 @@ export interface IrcMessage {
 	 */
 	progress?: boolean;
 	/**
+	 * Non-request team notification: no reply or automatic wake-turn relay is
+	 * owed. A notice addressed to the recipient can end its wait, even when
+	 * `progress` is set. Independent of the `teamControl` rate exemption.
+	 */
+	teamNotice?: boolean;
+	/**
 	 * A delivery from outside the agent tree — the A2A bridge. Each such message
 	 * is one authenticated client request identified by its A2A `messageId`, so
 	 * the agent-loop ingress policy does not apply: identical text is a new
@@ -42,9 +48,9 @@ export interface IrcMessage {
 	 */
 	external?: boolean;
 	/**
-	 * Runtime-authored team control request. Exempt from sender rate charging
-	 * so a whole-team stop reaches every member; still a normal wakeable request.
-	 * Set only by TeamRuntime, never by agent-authored messaging.
+	 * Runtime stop requests and approval/rejection notices bypass sender rate
+	 * charging only; agent-authored plan submissions do not. This flag implies
+	 * no request or relay semantics; `teamNotice` marks non-request notices.
 	 */
 	teamControl?: boolean;
 	/** Original A2A message id for an external request, distinct from the IRC bus id. */

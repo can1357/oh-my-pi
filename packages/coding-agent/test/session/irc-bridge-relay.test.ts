@@ -105,6 +105,42 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.content).not.toContain("sent to the sender automatically");
 	});
 
+	it.each([true, false])("renders a plan approval as a no-reply team notice with progress=%s", async progress => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "plan-approved",
+			from: "Lead",
+			to: "Builder",
+			body: "Plan approved. Mutation tools are available.",
+			ts: Date.now(),
+			progress,
+			teamNotice: true,
+		});
+		const record = woken[0][0] as CustomMessage;
+		const rendered = JSON.stringify(convertToLlm([record]));
+		expect(rendered).toContain("Plan approved. Mutation tools are available.");
+		expect(rendered).toContain("(team notice; no reply needed)");
+		expect(rendered).not.toContain("reply follows");
+		expect(rendered).not.toContain("If response expected");
+		expect(rendered).not.toContain("is delivered to");
+		expect(record.details).toMatchObject({ teamNotice: true });
+	});
+
+	it("keeps ordinary progress wording distinct from team notices", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({
+			id: "ordinary-progress",
+			from: "Peer",
+			to: "Builder",
+			body: "Reviewing the plan.",
+			ts: Date.now(),
+			progress: true,
+		});
+		const rendered = JSON.stringify(convertToLlm(woken[0]));
+		expect(rendered).toContain("(progress; its reply follows later)");
+		expect(rendered).not.toContain("team notice");
+	});
+
 	it("routes a bridge request's reply through an a2a: spawn, not the pseudo-sender", async () => {
 		const { bridge, woken } = makeBridge();
 		// An A2A request arrives from the bridge's `a2a` pseudo-sender, which no
@@ -256,6 +292,24 @@ describe("IrcBridge broadcast legs reaching a streaming recipient", () => {
 		expect(steered.map(message => bridge.isParentSteer(message))).toEqual([true]);
 		expect(bridge.drainPending().map(record => (record as CustomMessage).details)).toMatchObject([
 			{ id: "b1", broadcast: true },
+		]);
+	});
+
+	it("keeps a parent's team notice rendered and drainable instead of turning it into a request steer", async () => {
+		const { bridge, steered } = makeStreamingChild();
+		await bridge.deliver({
+			id: "parent-approval",
+			from: "Main",
+			to: "Child",
+			body: "Plan approved.",
+			ts: 3,
+			progress: true,
+			teamNotice: true,
+		});
+		expect(steered).toEqual([]);
+		expect(bridge.hasInterrupts()).toBe(true);
+		expect(bridge.drainInboxMessages("Child")).toMatchObject([
+			{ id: "parent-approval", body: "Plan approved.", teamNotice: true },
 		]);
 	});
 

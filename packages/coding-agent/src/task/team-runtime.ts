@@ -128,8 +128,11 @@ export class TeamRuntime {
 					.send({
 						from: event.ref.id,
 						to: state.leadId,
-						body: `${event.ref.id} is idle.\n${event.summary ?? ""}\nagent://${event.ref.id}`,
+						body: [`${event.ref.id} is idle.`, event.summary, `agent://${event.ref.id}`]
+							.filter(Boolean)
+							.join("\n"),
 						progress: true,
+						teamNotice: true,
 					})
 					.then(receipt => {
 						if (receipt.outcome === "failed")
@@ -300,7 +303,13 @@ export class TeamRuntime {
 	#notifyLead(state: RuntimeTeam, intent: StopIntent, body: string): void {
 		if (!this.isCurrentLead(state.lead, state.name, state.generation)) return;
 		void IrcBus.global()
-			.send({ from: intent.id, to: state.leadId, body: `${body} (request ${intent.requestId})`, progress: true })
+			.send({
+				from: intent.id,
+				to: state.leadId,
+				body: `${body} (request ${intent.requestId})`,
+				progress: true,
+				teamNotice: true,
+			})
 			.catch(error => logger.warn("Team stop notification failed", { error: String(error) }));
 	}
 
@@ -528,6 +537,16 @@ export class TeamRuntime {
 		await state.ledger.barrier();
 	}
 
+	/** A current lead must stay live so its team generation and stop authority survive idle TTL. */
+	hasLiveTeam(session: object): boolean {
+		const teams = this.#sessions.get(session);
+		if (!teams) return false;
+		for (const state of teams.values()) {
+			if (this.isCurrentLead(session, state.name, state.generation)) return true;
+		}
+		return false;
+	}
+
 	/** Invalidate lead-owned teams when their session closes. */
 	sessionClosed(session: object): void {
 		this.#closedSessions.add(session);
@@ -618,7 +637,7 @@ export class TeamRuntime {
 			to: state.leadId,
 			body: `Plan from ${handle} (${member.id}) for team ${state.name}:\n${text}`,
 			progress: true,
-			teamControl: true,
+			teamNotice: true,
 		});
 		this.#authorize(session, identity);
 		const current = state.members.get(handle);
@@ -657,6 +676,7 @@ export class TeamRuntime {
 			body: `Plan approved for team ${state.name}; mutation tools are available within your existing permissions.`,
 			progress: true,
 			teamControl: true,
+			teamNotice: true,
 		});
 		if (receipt.outcome === "failed") throw new Error(`Plan approved, but notification failed: ${receipt.error}`);
 	}
@@ -673,6 +693,7 @@ export class TeamRuntime {
 			body: `Plan rejected for team ${state.name}: ${reason}\nResubmit via write team://${state.name}/plan`,
 			progress: true,
 			teamControl: true,
+			teamNotice: true,
 		});
 		if (receipt.outcome === "failed") throw new Error(`Plan rejected, but notification failed: ${receipt.error}`);
 	}

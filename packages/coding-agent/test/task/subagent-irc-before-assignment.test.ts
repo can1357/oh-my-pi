@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -16,9 +17,14 @@ import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/e
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { TeamProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/team-protocol";
+import { teamRuntime } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -50,6 +56,7 @@ beforeEach(async () => {
 	restoreEnvValue("HOME", home);
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
+	teamRuntime.resetForTests();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
 	AgentLifecycleManager.resetGlobalForTests();
@@ -58,6 +65,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	await AgentLifecycleManager.global().dispose();
+	teamRuntime.resetForTests();
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	IrcBus.resetGlobalForTests();
@@ -175,22 +183,8 @@ for (const xdev of [false, true]) {
 		await fs.mkdir(artifactsDir, { recursive: true });
 		const router = InternalUrlRouter.instance();
 		const prior = router.getHandler("team");
-		const teamMessages: string[] = [];
-		// Temporary Task 1 handler: remove when Task 2 registers the real team protocol.
-		router.register({
-			scheme: "team",
-			spec: {
-				backing: "virtual",
-				selectors: "lines",
-				immutable: false,
-				singleSlashAlias: true,
-				write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "write" },
-			},
-			resolve: async () => ({ url: "team://ops", content: "", contentType: "text/plain" }),
-			write: async (_url, content) => {
-				teamMessages.push(content);
-			},
-		});
+		router.register(new TeamProtocolHandler());
+		const teamMessages: IrcMessage[] = [];
 		const peerMessages: IrcMessage[] = [];
 		AgentRegistry.global().register({
 			id: "SiblingScout",
@@ -230,6 +224,36 @@ for (const xdev of [false, true]) {
 			"advisor.enabled": false,
 			modelRoles: { default: "mock/mock-model" },
 		});
+		const lead = new AgentSession({
+			agent: new Agent({
+				initialState: { model: mock.model, systemPrompt: ["test"], tools: [], messages: [] },
+				convertToLlm,
+			}),
+			settings,
+			sessionManager: SessionManager.inMemory(cwd),
+			modelRegistry,
+		});
+		vi.spyOn(lead, "deliverIrcMessage").mockImplementation(async message => {
+			teamMessages.push(message);
+			return "injected";
+		});
+		AgentRegistry.global().register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: lead,
+		});
+		const team = await teamRuntime.start(lead, {
+			name: "ops",
+			description: "Inspect",
+			members: [{ agent: "scout", handle: AGENT_ID }],
+			body: "",
+			source: "project",
+			filePath: path.join(cwd, "ops.md"),
+			planApproval: true,
+		});
+		team.members.set(AGENT_ID, { id: AGENT_ID, reservation: "scout-reservation" });
+		const teamIdentity = teamRuntime.memberIdentity(lead, "ops", team.generation, AGENT_ID);
 		const running = runSubprocess({
 			cwd,
 			artifactsDir,
@@ -239,6 +263,7 @@ for (const xdev of [false, true]) {
 			id: AGENT_ID,
 			team: true,
 			coordinationOnlyWrite: true,
+			teamIdentity,
 			modelOverride: "mock/mock-model",
 			parentAgentId: MAIN_AGENT_ID,
 			authStorage,
@@ -253,6 +278,8 @@ for (const xdev of [false, true]) {
 		});
 		try {
 			await entered.promise;
+			const ref = AgentRegistry.global().get(AGENT_ID)!;
+			team.members.set(AGENT_ID, { id: ref.id, ref, reservation: "scout-reservation" });
 			const child = localSession(AgentRegistry.global().get(AGENT_ID)?.session);
 			let write = child.agent.state.tools.find(tool => tool.name === "write");
 			expect(write).toBeDefined();
@@ -265,13 +292,30 @@ for (const xdev of [false, true]) {
 			);
 			await write!.execute(
 				"team",
-				{ path: "[team:/ops:raw#ABCD]", content: "hello team" },
+				{ path: "team://ops/plan", content: "hello team" },
 				undefined,
 				undefined as never,
 				undefined as never,
 			);
 			expect(peerMessages.map(message => message.body)).toEqual(["hello peer"]);
-			expect(teamMessages).toEqual(["hello team"]);
+			expect(teamMessages).toHaveLength(1);
+			expect(teamMessages[0]).toMatchObject({
+				from: AGENT_ID,
+				to: MAIN_AGENT_ID,
+				progress: true,
+				teamNotice: true,
+			});
+			expect(teamMessages[0]!.teamControl).not.toBe(true);
+			expect(teamMessages[0]!.body).toContain("hello team");
+			await expect(
+				write!.execute(
+					"malformed-team",
+					{ path: "team://ops", content: "invalid" },
+					undefined,
+					undefined as never,
+					undefined as never,
+				),
+			).rejects.toThrow("Invalid team task URL");
 			for (const target of [path.join(cwd, "blocked"), "local://blocked", "xd://anything", "proc://anything/kill"]) {
 				await expect(
 					write!.execute(
@@ -286,6 +330,23 @@ for (const xdev of [false, true]) {
 			await child.setActiveToolsByName(["read", "write"]);
 			write = child.agent.state.tools.find(tool => tool.name === "write");
 			expect(write).toBeDefined();
+			for (const target of ["team:/ops/plan", "[team:/ops/plan:raw#ABCD]"]) {
+				const now = Date.now();
+				vi.spyOn(Date, "now").mockReturnValue(now + 500);
+				await write!.execute(
+					"rebuilt-team",
+					{ path: target, content: "rebuilt plan" },
+					undefined,
+					undefined as never,
+					undefined as never,
+				);
+			}
+			expect(teamMessages).toHaveLength(3);
+			for (const message of teamMessages.slice(1)) {
+				expect(message).toMatchObject({ from: AGENT_ID, to: MAIN_AGENT_ID, teamNotice: true });
+				expect(message.teamControl).not.toBe(true);
+				expect(message.body).toContain("rebuilt plan");
+			}
 			await expect(
 				write!.execute(
 					"rebuilt",
@@ -304,6 +365,8 @@ for (const xdev of [false, true]) {
 			startup.resolve();
 			await running;
 			authStorage.close();
+			await teamRuntime.stop(lead, "ops");
+			await lead.dispose();
 			if (prior) router.register(prior);
 			else router.unregister("team");
 		}

@@ -318,17 +318,20 @@ export class AgentRegistry implements AgentRegistryApi {
 			previousStatus === "running" && status === "idle"
 				? ref.session?.messages?.findLast(message => message.role === "assistant")
 				: undefined;
-		const summary =
-			assistant?.role === "assistant"
-				? assistant.content
-						.filter(part => part.type === "text")
-						.map(part => part.text)
-						.join("\n")
-						.split(/\r?\n/, 4)
-						.slice(0, 3)
-						.join("\n")
-						.slice(0, 500)
-				: undefined;
+		let excerpt: string | undefined;
+		if (assistant?.role === "assistant") {
+			excerpt = assistant.content
+				.filter(part => part.type === "text")
+				.map(part => part.text)
+				.join("\n");
+			if (!excerpt.trim()) {
+				const terminal = assistant.content.findLast(
+					part => part.type === "toolCall" && (part.name === "yield" || part.name === "handback"),
+				);
+				if (terminal?.type === "toolCall") excerpt = JSON.stringify(terminal.arguments);
+			}
+		}
+		const summary = excerpt?.trim() ? excerpt.split(/\r?\n/, 4).slice(0, 3).join("\n").slice(0, 500) : undefined;
 		const leftRunning = previousStatus === "running";
 		ref.status = status;
 		// Activity describes current work; it is meaningless once the agent

@@ -56,9 +56,9 @@ interface WaitMessaging {
  * Every message queued for the caller, oldest first: its bus mailbox and its
  * session inbox, plus `woke`, the message that ended the wait, if any. A wait
  * not already ending takes the inbox only when it holds a message that ends a
- * wait: broadcast legs and progress notes alone stay queued and inject as
- * asides once the wait returns. Mailbox mail (a failed live hand-off) reaches
- * the caller only through here, so it is always taken.
+ * wait: broadcasts and ordinary progress alone stay queued and inject as
+ * asides once the wait returns; direct team notices can end it. Mailbox mail
+ * (a failed live hand-off) reaches the caller only here, so it is always taken.
  */
 function takeQueuedMessages(messaging: WaitMessaging, woke?: IrcMessage): IrcMessage[] {
 	const { registry, senderId } = messaging;
@@ -135,12 +135,12 @@ export function hasWaitTool(session: ToolSession): boolean {
  * still answer soon: each one finished its turn, is blocked on the caller
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits. A direct message arriving
- * mid-wait ends any wait, returning every message queued by then. Broadcast
- * legs and progress notes ask the caller nothing, so they never end a wait
- * and inject as asides once it returns; the exception is a broadcast from an
- * agent a reply wait asked, which answers it (see `IrcBus.unansweredSends`).
- * A progress note leaves its sender's reply owed, so the reply wait goes on.
+ * that climbs across back-to-back idle waits. A direct message or team notice
+ * arriving mid-wait ends any wait, returning every message queued by then.
+ * Broadcasts and ordinary progress ask the caller nothing, so they never end a
+ * wait and inject as asides once it returns; the exception is a broadcast from
+ * an agent a reply wait asked (see `IrcBus.unansweredSends`). Ordinary progress
+ * leaves its sender's reply owed; a team notice can settle it without a reply.
  */
 export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetails> {
 	readonly name = "wait";
@@ -220,7 +220,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}
 
 	/**
-	 * Block until an owned job settles, an owned service finishes, a direct message arrives, the ladder window elapses, or the call aborts.
+	 * Block until an owned job settles, an owned service finishes, a direct message or team notice arrives, the ladder window elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {

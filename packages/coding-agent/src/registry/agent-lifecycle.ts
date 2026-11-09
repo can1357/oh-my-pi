@@ -26,6 +26,7 @@ import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { OutgoingRequests } from "../a2a/outgoing-requests";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import { teamRuntime } from "../task/team-runtime";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -384,7 +385,8 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 
 	/**
 	 * Dispose the live session, detach it from the registry, and mark the
-	 * agent `parked`. No-op unless the id is adopted and live.
+	 * agent `parked`. No-op unless adopted and live; current team leads stay live
+	 * until their team generations retire.
 	 *
 	 * The session is detached (and status flipped to `parked`) *before*
 	 * `session.dispose()` so concurrent {@link ensureLive}/peer sends never
@@ -401,7 +403,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (!ref || adopted.ref !== ref) return;
 		const session = ref.session;
 		if (!session) return;
-		if (OutgoingRequests.global().hasOwner(id)) {
+		if (OutgoingRequests.global().hasOwner(id) || teamRuntime.hasLiveTeam(session)) {
 			this.#armTimer(id, adopted);
 			return;
 		}
@@ -438,7 +440,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				const live = this.#registry.get(id);
 				if (live !== ref || !live.session || live.session !== session) return;
 				if (this.#adopted.get(id)?.ref !== ref) return;
-				if (OutgoingRequests.global().hasOwner(id)) {
+				if (OutgoingRequests.global().hasOwner(id) || teamRuntime.hasLiveTeam(session)) {
 					this.#armTimer(id, adopted);
 					return;
 				}

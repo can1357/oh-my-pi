@@ -39,8 +39,8 @@ export class IrcBridge {
 	/** A subagent's records from anyone but its parent: answered in their own turn, never by
 	 *  extending a finished one (whose text is the subagent's result). */
 	readonly #peerMessages = new WeakSet<AgentMessage>();
-	/** Queued broadcast legs and progress notes: they ask nothing of the recipient, so they
-	 *  inject at the next step boundary like any record but never cut a `wait` short. */
+	/** Queued broadcasts and ordinary progress: they inject at the next step
+	 *  boundary but never cut a wait short. Direct team notices can interrupt. */
 	readonly #quietRecords = new WeakSet<AgentMessage>();
 
 	readonly #host: IrcBridgeHost;
@@ -68,7 +68,7 @@ export class IrcBridge {
 		return this.#peerMessages.has(record);
 	}
 
-	/** Whether an incoming message can interrupt a wait: anything queued but a broadcast or progress note. */
+	/** Whether an incoming message can interrupt a wait: direct messages and team notices. */
 	hasInterrupts(): boolean {
 		return this.#interrupts.some(record => !this.#quietRecords.has(record));
 	}
@@ -225,6 +225,7 @@ export class IrcBridge {
 				const replyTo = Reflect.get(details, "replyTo");
 				const broadcast = Reflect.get(details, "broadcast") === true;
 				const progress = Reflect.get(details, "progress") === true;
+				const teamNotice = Reflect.get(details, "teamNotice") === true;
 				const hops = Reflect.get(details, "hops");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
@@ -239,6 +240,7 @@ export class IrcBridge {
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 					...(broadcast ? { broadcast: true } : {}),
 					...(progress ? { progress: true } : {}),
+					...(teamNotice ? { teamNotice: true } : {}),
 					...(Array.isArray(hops) && hops.every(hop => typeof hop === "string") ? { hops } : {}),
 				});
 			}
@@ -281,17 +283,18 @@ export class IrcBridge {
 		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
 		// An idle subagent runs a monitored wake turn whose output is relayed
 		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.
+		// agent, mid-turn asides, relays, broadcasts, progress and team notices have no such relay.
 		const relayOnStop =
 			!streaming &&
 			!planModeIdle &&
 			msg.to !== MAIN_AGENT_ID &&
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
-			msg.progress !== true;
-		// A broadcast leg or progress note asks nothing of the recipient, so a
-		// busy one reads it at its next step boundary without being interrupted.
-		const quiet = msg.broadcast === true || msg.progress === true;
+			msg.progress !== true &&
+			msg.teamNotice !== true;
+		// Ordinary progress and broadcasts stay quiet; a direct team notice can
+		// settle a blocked wait even though it asks for no reply.
+		const quiet = msg.broadcast === true || (msg.progress === true && msg.teamNotice !== true);
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -305,6 +308,7 @@ export class IrcBridge {
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
 				progress: msg.progress === true,
+				teamNotice: msg.teamNotice === true,
 				interrupting: streaming && !quiet,
 				relayOnStop,
 				a2aAutoReply: msg.to === MAIN_AGENT_ID || this.#host.hasWakeRelay?.() === true,
@@ -323,6 +327,7 @@ export class IrcBridge {
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
 				...(msg.broadcast ? { broadcast: true } : {}),
 				...(msg.progress ? { progress: true } : {}),
+				...(msg.teamNotice ? { teamNotice: true } : {}),
 				...(msg.hops?.length ? { hops: msg.hops } : {}),
 				...(fromParent ? { fromParent: true } : {}),
 				// Read by the LLM converter: a peer terminal's text speaks as a user,
@@ -337,7 +342,7 @@ export class IrcBridge {
 		if (peerMessage) this.#peerMessages.add(record);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			if (fromParent && !peerMessage) {
+			if (fromParent && !peerMessage && !msg.teamNotice) {
 				const steer: AgentMessage = {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),

@@ -195,6 +195,7 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			message?: string;
 			body?: string;
 			replyTo?: string;
+			teamNotice?: boolean;
 			pool?: string;
 			mode?: string;
 		}>
@@ -215,6 +216,7 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 				to: details?.to,
 				body: kind === "incoming" ? details?.message : details?.body,
 				replyTo: details?.replyTo,
+				teamNotice: details?.teamNotice,
 				timestamp: message.timestamp,
 				pool: details?.pool,
 				mode: details?.mode,

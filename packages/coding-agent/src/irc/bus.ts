@@ -30,8 +30,8 @@ export interface IrcWaitFilter {
 	/** Only messages from this agent. */
 	from?: string;
 	/**
-	 * Skip broadcast legs and progress notes, which ask the waiter nothing: they
-	 * reach it through ordinary delivery, a non-interrupting aside when it is busy.
+	 * Skip broadcast legs and ordinary progress notes: they reach the waiter
+	 * through ordinary delivery. Direct team notices can end the wait.
 	 */
 	directOnly?: boolean;
 	/**
@@ -44,7 +44,7 @@ export interface IrcWaitFilter {
 /** Whether a bus wait under `filter` consumes `msg`. */
 export function ircWaitAccepts(filter: IrcWaitFilter, msg: IrcMessage): boolean {
 	if (filter.from !== undefined && msg.from !== filter.from) return false;
-	if (!filter.directOnly || (!msg.broadcast && !msg.progress)) return true;
+	if (!filter.directOnly || (!msg.broadcast && (msg.teamNotice || !msg.progress))) return true;
 	return !msg.progress && (filter.repliesFrom?.includes(msg.from) ?? false);
 }
 
@@ -138,11 +138,11 @@ export class IrcBus implements IrcBusApi {
 	#limits: { settings: Settings; revision: number; limits: IrcIngressLimits | undefined } | undefined;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
-	/** The latest successful non-progress send per `from` → `to`; see {@link sentSince}. */
+	/** The latest successful message other than ordinary progress per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, SendMark>>();
-	/** The latest direct (non-broadcast, non-progress) send per `from` → `to`; see {@link unansweredSends}. */
+	/** The latest direct request (not a broadcast, progress or team notice); see {@link unansweredSends}. */
 	readonly #lastDirect = new Map<string, Map<string, SendMark>>();
-	/** The latest progress message per `from` → `to`: a promise that a reply will follow. */
+	/** The latest ordinary progress per `from` → `to`: a promise that a reply will follow. */
 	readonly #lastProgress = new Map<string, Map<string, SendMark>>();
 	/** The latest job-carried reply per agent → owner; see {@link IrcBus.recordReply}. */
 	readonly #lastJobReply = new Map<string, Map<string, SendMark>>();
@@ -202,11 +202,11 @@ export class IrcBus implements IrcBusApi {
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliver(message);
 		if (receipt.outcome !== "failed") {
-			if (message.progress) {
+			if (message.progress && !message.teamNotice) {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
 			} else {
 				this.#record(this.#lastSent, message.from, message.to, mark);
-				if (!message.broadcast && !message.wakeRelay)
+				if (!message.broadcast && !message.wakeRelay && !message.teamNotice)
 					this.#record(this.#lastDirect, message.from, message.to, mark);
 			}
 		}
@@ -280,10 +280,11 @@ export class IrcBus implements IrcBusApi {
 	 * Agents `from` messaged directly at or after `sinceTs` that have not
 	 * answered since, with when the latest of those messages went out: the
 	 * replies a `wait` can block for. A message back answers, and so does a
-	 * settled job of the agent `from` owns, which delivers its result. Progress
-	 * answers nothing; it marks the request `promised`, and from then on only
-	 * an explicit message answers it (a job settling the turn that sent the
-	 * progress must not). "Since" is by send order, not timestamp, so an answer
+	 * settled job of the agent `from` owns, which delivers its result. An
+	 * addressed team notice also answers; ordinary progress only marks the
+	 * request `promised`, after which only an explicit message answers it (a
+	 * job settling the turn that sent the progress must not). "Since" is by send
+	 * order, not timestamp, so an answer
 	 * to an earlier question never settles a later one sent within the same
 	 * millisecond.
 	 */
@@ -538,7 +539,12 @@ export class IrcBus implements IrcBusApi {
 			customType: "irc:relay",
 			content: `[IRC \`${message.from}\` → \`${message.to}\`]\n\n${message.body}`,
 			display: true,
-			details: { from: message.from, to: message.to, body: message.body },
+			details: {
+				from: message.from,
+				to: message.to,
+				body: message.body,
+				...(message.teamNotice ? { teamNotice: true } : {}),
+			},
 			attribution: "agent",
 			timestamp: message.ts,
 		};

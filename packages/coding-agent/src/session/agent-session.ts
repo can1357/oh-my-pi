@@ -5743,11 +5743,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Team approval is main-runtime authority, not a tool-list or plan-mode
 	 * setting. Keep it here so replacing/rebuilding tools cannot remove it.
-	 * A missing/stale caller or unavailable service denies even read-only calls.
+	 * A missing/stale caller or unavailable service denies even read-only calls,
+	 * but must never prevent yielding or handing back the current turn.
 	 */
 	async #teamPlanGate(name: string, args: unknown): Promise<BeforeToolCallResult | undefined> {
 		const identity = this.#evalToolSession?.teamIdentity;
 		if (!identity) return undefined;
+		if (name === "yield" || name === "handback") return undefined;
 		const blocked: BeforeToolCallResult = {
 			block: true,
 			reason: `plan approval required: send it via write team://${identity.team}/plan`,
@@ -5762,8 +5764,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				case "glob":
 				case "web_search":
 				case "wait":
-				case "yield":
-				case "handback":
 					return undefined;
 				case "lsp":
 					if (isRecord(args) && typeof args.action === "string" && LSP_READONLY_ACTIONS.has(args.action))

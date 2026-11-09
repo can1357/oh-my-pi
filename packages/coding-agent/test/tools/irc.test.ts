@@ -676,6 +676,15 @@ describe("IRC", () => {
 			await peer.settled();
 			expect(sender.delivered).toEqual([]);
 		});
+
+		it("does not relay a turn woken by a team notice even without a progress flag", async () => {
+			const sender = makeFakeSession();
+			registry.register({ id: "0-C", displayName: "task", kind: "sub", status: "idle", session: sender.session });
+			const peer = registerIdleSubagent("0-A");
+			await bus.send({ from: "0-C", to: "0-A", body: "Plan approved.", teamNotice: true });
+			await peer.settled();
+			expect(sender.delivered).toEqual([]);
+		});
 	});
 
 	describe("AgentSession.deliverIrcMessage", () => {

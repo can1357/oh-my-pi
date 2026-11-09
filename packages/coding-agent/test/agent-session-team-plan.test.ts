@@ -399,6 +399,8 @@ describe("AgentSession authoritative team plan gate", () => {
 
 	it("uses runtime approval on every call: reject, resubmit, approve then actually write", async () => {
 		const { session, lead, leadMessages, memberMessages } = await fixture();
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
 		const args = { path: "result.txt", content: "approved output" };
 		expect(await dispatchWrite(session, args)).toMatchObject({ block: true, reason: required });
 		await dispatchWrite(session, { path: "[team:/audit/plan#ABCD]", content: "First plan" });
@@ -406,6 +408,7 @@ describe("AgentSession authoritative team plan gate", () => {
 		expect(await teamCommand(lead, "reject Scout Include verification")).toContain("rejected");
 		expect(memberMessages.some(message => message.body.includes("Include verification"))).toBe(true);
 		expect(await dispatchWrite(session, args)).toMatchObject({ block: true, reason: required });
+		now += 500; // Revised plans are ordinary rate-charged progress, so begin a fresh window.
 		await dispatchWrite(session, { path: "team://audit/plan", content: "Revised plan with verification" });
 		expect(await teamCommand(lead, "approve Scout")).toContain("approved");
 		const approvals = memberMessages.filter(message => message.body.includes("Plan approved"));
@@ -479,6 +482,27 @@ describe("AgentSession authoritative team plan gate", () => {
 				block: true,
 				reason: required,
 			});
+		});
+	}
+
+	for (const authority of ["stale", "unreachable", "mismatched"] as const) {
+		it(`allows yield and handback with ${authority} team authority while other tools fail closed`, async () => {
+			const { session, client, toolSession } = await fixture({ requireYieldTool: true });
+			if (authority === "stale") {
+				toolSession.teamIdentity = { ...toolSession.teamIdentity!, generation: -1 };
+			} else if (authority === "unreachable") {
+				vi.spyOn(client, "planPending").mockRejectedValue(new Error("thread service unavailable"));
+			} else {
+				toolSession.teamIdentity = { ...toolSession.teamIdentity!, memberId: "outsider" };
+			}
+			for (const name of ["yield", "handback"]) {
+				expect(await before(session, name)).toBeUndefined();
+			}
+			for (const name of ["read", "grep", "glob", "lsp", "web_search", "wait", "bash", "edit", "task", "write"]) {
+				expect(
+					await before(session, name, { action: "hover", path: "team://audit/plan", content: "plan" }),
+				).toMatchObject({ block: true, reason: required });
+			}
 		});
 	}
 

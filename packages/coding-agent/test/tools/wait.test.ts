@@ -328,6 +328,23 @@ describe("wait", () => {
 			]);
 		});
 
+		test("a queued team notice ends a wait without becoming an ordinary progress note", async () => {
+			const bridge = streamingMain();
+			await IrcBus.global().send({
+				from: "Peer",
+				to: "Main",
+				body: "Plan approved.",
+				progress: true,
+				teamNotice: true,
+			});
+			const result = await new WaitTool(session()).execute("queued-approval", {});
+			expect(result.details?.waited).toMatchObject([{ from: "Peer", body: "Plan approved.", teamNotice: true }]);
+			expect(result.content[0]).toMatchObject({
+				text: expect.stringContaining("(team notice; no reply needed)"),
+			});
+			expect(bridge.drainPending()).toEqual([]);
+		});
+
 		test("a direct message still ends the wait, returning the chatter queued before it, oldest first", async () => {
 			const bridge = streamingMain();
 			const manager = new AsyncJobManager({ onJobComplete: () => {} });
@@ -723,6 +740,39 @@ describe("wait", () => {
 			await handleWait;
 		});
 
+		test.each(["Plan approved.", "Plan rejected: add rollback steps."])(
+			"a team notice ends an already blocked approval wait: %s",
+			async body => {
+				vi.useFakeTimers();
+				registerParentAndChild();
+				await IrcBus.global().send({ from: "Child", to: "Main", body: "Please approve my submitted plan." });
+				const controller = new AbortController();
+				let settled = false;
+				const waiting = new WaitTool(session(undefined, "Child"))
+					.execute("approval-wait", {}, controller.signal)
+					.finally(() => {
+						settled = true;
+					});
+				try {
+					await flushMicrotasks();
+					expect(settled).toBe(false);
+					await IrcBus.global().send({ from: "Main", to: "Child", body, progress: true, teamNotice: true });
+					await flushMicrotasks();
+					expect(settled).toBe(true);
+					const result = await waiting;
+					expect(result.details?.waited).toMatchObject([{ from: "Main", body, teamNotice: true }]);
+					expect(result.content[0]).toMatchObject({
+						text: expect.stringContaining("(team notice; no reply needed)"),
+					});
+					expect(JSON.stringify(result.content)).not.toContain("reply follows");
+					expect(IrcBus.global().unansweredSends("Child", 0)).toEqual([]);
+					expect(IrcBus.global().unansweredSends("Main", 0)).toEqual([]);
+				} finally {
+					controller.abort();
+					await waiting.catch(() => {});
+				}
+			},
+		);
 		test("a progress note from the agent asked keeps the wait blocking for its answer", async () => {
 			registerParentAndChild();
 			await ask();
