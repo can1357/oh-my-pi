@@ -670,6 +670,38 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { constructor: "", target: "prod" } });
 	});
 
+	it("accepts a value whose enabled option follows a disabled duplicate", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label><input type="radio" name="tier" value="basic" disabled> Basic (sold out)</label>
+  <label><input type="radio" name="tier" value="basic"> Basic</label>
+  <label><input type="radio" name="tier" value="pro"> Pro</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { tier: "basic" } });
+
+		expect(await result).toEqual({ data: { tier: "basic" } });
+	});
+
+	it("keeps a control named __proto__ as an ordinary key of the data", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <label>Proto <input type="text" name="__proto__"></label>
+  <label>Target <input type="text" name="target"></label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, {
+			data: JSON.parse('{"__proto__":"x","target":"prod"}'),
+		});
+
+		// The model reads the data as JSON, so the key must survive serialization.
+		expect(JSON.stringify((await result)?.data)).toBe('{"__proto__":"x","target":"prod"}');
+	});
+
 	it.each([
 		["omp's timer fires", 5, undefined],
 		["the host reports its own timeout", undefined, { cancelled: true, timedOut: true }],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import math
 import os
 import queue
 import signal
@@ -956,12 +957,15 @@ class RpcClient(WireClient):
     def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
         """Answer a `form` request with the submitted values by control `name`.
 
-        Raises `TypeError` for a `bool`: forms submit option values, never booleans.
+        Raises `TypeError` for a `bool` (forms submit option values, never booleans)
+        and `ValueError` for a non-finite float, which JSON cannot carry.
         """
         wire_data: JsonObject = {}
         for name, value in data.items():
             if isinstance(value, bool):
                 raise TypeError(f"form field {name!r} must be a string, a number or a list of strings, not a bool")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError(f"form field {name!r} must be a finite number, not {value!r}")
             wire_data[name] = value if isinstance(value, (str, int, float)) else list(value)
         self._send_notification(
             {"type": "extension_ui_response", "id": request_id, "data": wire_data}

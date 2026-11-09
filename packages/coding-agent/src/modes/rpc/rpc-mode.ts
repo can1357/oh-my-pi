@@ -1219,7 +1219,9 @@ function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | un
 	let other: string | undefined;
 	for (const entry of entries) {
 		if (typeof entry !== "string") throw new Error(`Form field ${label} must carry strings`);
-		const index = field.options.findIndex(option => option.value === entry);
+		// Prefer an enabled option, so a disabled duplicate of the same value earlier in the group cannot shadow it.
+		const enabled = field.options.findIndex(option => !option.disabled && option.value === entry);
+		const index = enabled >= 0 ? enabled : field.options.findIndex(option => option.value === entry);
 		if (index >= 0 && field.options[index]!.disabled) {
 			throw new Error(`Form field ${label} carries disabled option ${JSON.stringify(entry)}`);
 		}
@@ -1265,7 +1267,8 @@ function parseFormDialogResponse(
 	}
 
 	// Check the value against every field of its name, enforcing the same rules the form dialogs apply on submit.
-	const data: HtmlFormData = Object.fromEntries(form.hidden);
+	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
+	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
 	for (const field of named) {
 		const entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
 		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
