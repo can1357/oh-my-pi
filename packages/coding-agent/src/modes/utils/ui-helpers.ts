@@ -271,7 +271,7 @@ export class UiHelpers {
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
-		const notice = { styleFn, toast: options?.toast };
+		const notice = { styleFn, toast: options?.toast, action: options?.action };
 
 		if (last && last === this.ctx.lastStatus) {
 			if (this.ctx.lastStatus.message !== message) {
