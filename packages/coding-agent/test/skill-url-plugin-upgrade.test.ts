@@ -362,7 +362,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 
 		installPluginVersion("2.0.0");
 
-		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		const built = await session.buildUserSkillPrompt([skill], { args: "" });
 		expect(built.message).toContain("Body of version 2.0.0.");
 		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
 	});
@@ -375,7 +375,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		writePluginVersionWithoutSkill("2.0.0");
 		writeRegistry(userRegistryPath(), "2.0.0", "user");
 
-		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+		await expect(session.buildUserSkillPrompt([skill], { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
 		expect(await readText(session, `skill://${SKILL}`)).toContain(`Unknown skill: ${SKILL}`);
 	});
 
@@ -391,7 +391,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		writePluginVersionWithoutSkill("2.0.0");
 		writeRegistryWithCollidingPlugin("2.0.0");
 
-		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+		await expect(session.buildUserSkillPrompt([skill], { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
 		// That rediscovery gave the other plugin's skill the bare name; the copy's lookup still refuses it.
 		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
 		await expect(new SkillProtocolHandler().resolve(parseInternalUrl(`skill://${SKILL}`), context)).rejects.toThrow(
@@ -413,7 +413,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(text).not.toContain("Body of the other plugin.");
 		expect(text).toContain(`Unknown skill: ${SKILL}`);
 		// The rediscovery that refused the read gave the other plugin's skill the bare name.
-		await expect(session.buildUserSkillPrompt(skill, { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
+		await expect(session.buildUserSkillPrompt([skill], { args: "" })).rejects.toThrow(`Unknown skill: ${SKILL}`);
 	});
 
 	it("an upgrade that leaves another plugin's same-named skill the bare name still serves the new version", async () => {
@@ -436,7 +436,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		}
 		// The rediscovery gave the other plugin's skill the bare name; the upgraded one is namespaced.
 		expect(session.skills.find(entry => entry.name === SKILL)?.filePath.startsWith(otherPluginDir())).toBe(true);
-		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		const built = await session.buildUserSkillPrompt([skill], { args: "" });
 		expect(built.message).toContain("Body of version 2.0.0.");
 		// A fixed list re-points the entry under the name it already lists, so later reads by that name keep working.
 		for (let attempt = 0; attempt < 2; attempt++) {
@@ -463,7 +463,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		writeRegistry(userRegistryPath(), "2.0.0", "user");
 		removeSyncWithRetries(pluginDir("1.0.0"));
 
-		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		const built = await session.buildUserSkillPrompt([skill], { args: "" });
 		expect(built.message).toContain("Body of the moved skill.");
 	});
 
@@ -637,7 +637,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		expect(await readText(session, `skill://${SKILL}`)).toContain("Body of version 2.0.0.");
 		installPluginVersion("3.0.0", "2.0.0");
 
-		const built = await session.buildUserSkillPrompt(original, { args: "" });
+		const built = await session.buildUserSkillPrompt([original], { args: "" });
 		expect(built.message).toContain("Body of version 3.0.0.");
 		expect(built.details.path.startsWith(pluginDir("3.0.0"))).toBe(true);
 	});
@@ -648,7 +648,7 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 
 		installPluginVersion("2.0.0", "1.0.0");
 
-		const built = await session.buildUserSkillPrompt(skill, { args: "" });
+		const built = await session.buildUserSkillPrompt([skill], { args: "" });
 		expect(built.message).toContain("Body of version 2.0.0.");
 		expect(built.details.path.startsWith(pluginDir("2.0.0"))).toBe(true);
 	});

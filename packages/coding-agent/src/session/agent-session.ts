@@ -170,7 +170,8 @@ import type { CustomCommandContext } from "../extensibility/custom-commands/type
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
 	type BuiltSkillPromptMessage,
-	loadSkillPrompt,
+	type LoadedSkillPrompt,
+	loadSkillPrompts,
 	renderSkillPromptMessage,
 	type Skill,
 	type SkillPromptInput,
@@ -11298,24 +11299,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Load a user-invoked skill and authorize model tags in its arguments. A stale skill (its plugin
+	 * Load user-invoked skills and authorize model tags in their arguments. A stale skill (its plugin
 	 * install was replaced or deleted) is read from this session's rediscovered same-named skill.
 	 */
 	async buildUserSkillPrompt(
-		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+		skills: readonly Pick<Skill, "name" | "filePath" | "baseDir">[],
 		input: SkillPromptInput,
 	): Promise<BuiltSkillPromptMessage> {
-		const loaded = await loadSkillPrompt(skill, this);
-		return this.renderUserSkillPrompt(loaded.skill, input, loaded.body);
+		return this.renderUserSkillPrompt(await loadSkillPrompts(skills, this), input);
 	}
 
-	/** Render an already-loaded skill only after the invoking submission is still current. */
-	renderUserSkillPrompt(
-		skill: Pick<Skill, "name" | "filePath" | "baseDir">,
-		input: SkillPromptInput,
-		body: string,
-	): BuiltSkillPromptMessage {
-		return renderSkillPromptMessage(skill, input, body, "user", {
+	/** Render already-loaded skills only after the invoking submission is still current. */
+	renderUserSkillPrompt(loaded: readonly LoadedSkillPrompt[], input: SkillPromptInput): BuiltSkillPromptMessage {
+		return renderSkillPromptMessage(loaded, input, "user", {
 			expandUserArgs: args => this.#modelMentions.expandMentions(args),
 		});
 	}

@@ -1509,15 +1509,15 @@ export class AcpAgent implements Agent {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
-		const parsed = parseSkillInvocation(text);
+		const parsed = parseSkillInvocation(text, name => record.session.skills.some(s => s.name === name));
 		if (!parsed) {
 			return false;
 		}
-		const skill = record.session.skills.find(candidate => candidate.name === parsed.name);
-		if (!skill) {
+		const skills = parsed.names.flatMap(name => record.session.skills.find(s => s.name === name) ?? []);
+		if (skills.length === 0) {
 			return false;
 		}
-		const built = await record.session.buildUserSkillPrompt(skill, parsed);
+		const built = await record.session.buildUserSkillPrompt(skills, parsed);
 		await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
