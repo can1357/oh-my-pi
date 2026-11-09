@@ -60,12 +60,51 @@ async fn run(script: &str, cwd: &str) -> (String, Option<i32>) {
 	(rx.drain().collect(), result.exit_code)
 }
 
+/// A scratch directory this run alone owns.
+///
+/// `create_dir` fails when the name already exists, so a directory, a file or
+/// a SYMLINK left at the name by anything else is never adopted: the rows
+/// write their helper scripts into a directory that was empty a moment ago,
+/// and the recursive cleanup below can only remove what this run made. The
+/// process id alone is not ownership — a pid is reused, and the name is
+/// guessable by anything that shares `TMPDIR`.
+fn fresh_scratch_dir(base: &std::path::Path) -> std::path::PathBuf {
+	for n in 0..1024u32 {
+		let candidate = base.join(format!("fatal-site-matrix-{}-{n}", std::process::id()));
+		match std::fs::create_dir(&candidate) {
+			Ok(()) => return candidate,
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+			Err(err) => panic!("scratch directory {}: {err}", candidate.display()),
+		}
+	}
+	panic!("no free scratch directory name under {}", base.display())
+}
+
+/// The allocation never takes a name something else already holds, whatever
+/// kind of thing holds it.
+#[test]
+fn the_scratch_directory_is_fresh_and_owned() {
+	let base = fresh_scratch_dir(&std::env::temp_dir());
+	let first = fresh_scratch_dir(&base);
+	let second = fresh_scratch_dir(&base);
+	assert_ne!(first, second, "two allocations took the same directory");
+	// A symlink at the next name must be stepped over, not followed.
+	let outside = base.join("outside");
+	std::fs::write(&outside, b"not the matrix's").expect("canary");
+	let taken = base.join(format!("fatal-site-matrix-{}-2", std::process::id()));
+	std::os::unix::fs::symlink(&outside, &taken).expect("symlink");
+	let third = fresh_scratch_dir(&base);
+	assert_ne!(third, taken, "the allocation adopted a pre-existing symlink");
+	assert!(third.is_dir() && !third.is_symlink(), "{third:?} is not a fresh directory");
+	assert_eq!(std::fs::read(&outside).expect("canary"), b"not the matrix's");
+	std::fs::remove_dir_all(&base).expect("cleanup");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_site_of_the_jump_model_answers_as_the_measured_baseline_does() {
 	let fixture: Fixture = serde_json::from_str(FIXTURE).expect("fixture");
 	assert!(!fixture.rows.is_empty(), "the fixture has no rows");
-	let dir = std::env::temp_dir().join(format!("fatal-site-matrix-{}", std::process::id()));
-	std::fs::create_dir_all(&dir).expect("scratch directory");
+	let dir = fresh_scratch_dir(&std::env::temp_dir());
 	let cwd = dir.to_string_lossy().into_owned();
 	let (mut regressions, mut stale, mut drift) = (Vec::new(), Vec::new(), Vec::new());
 	for row in &fixture.rows {
