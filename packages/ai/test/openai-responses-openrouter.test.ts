@@ -9,6 +9,7 @@ import type {
 	Model,
 	ModelSpec,
 	OpenAICompat,
+	ProviderSessionState,
 	StreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -495,6 +496,83 @@ describe("OpenRouter Responses request shape", () => {
 		}
 
 		expect(bodies[1]?.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "continue" }] }]);
+	});
+
+	it("recovers when an auto-routed upstream rejects another upstream's encrypted reasoning", async () => {
+		const reasoning = {
+			type: "reasoning",
+			id: "rs_foreign",
+			encrypted_content: "EmMKYQ_foreign",
+			summary: [{ type: "summary_text", text: "Earlier reasoning" }],
+		};
+		const reasoningResponse = (item: typeof reasoning, text: string) =>
+			new Response(
+				`${[
+					{ type: "response.output_item.done", output_index: 0, item },
+					{
+						type: "response.output_item.done",
+						output_index: 1,
+						item: {
+							type: "message",
+							id: `msg_${item.id}`,
+							role: "assistant",
+							content: [{ type: "output_text", text }],
+						},
+					},
+					{ type: "response.completed", response: { status: "completed" } },
+				]
+					.map(event => `data: ${JSON.stringify(event)}`)
+					.join("\n\n")}\n\n`,
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		const acceptedReasoning = { ...reasoning, id: "rs_new", encrypted_content: "gAAAAA_new" };
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			const body = JSON.parse(String(init?.body));
+			bodies.push(body);
+			if (bodies.length === 1) return reasoningResponse(reasoning, "first");
+			if (JSON.stringify(body.input).includes(reasoning.encrypted_content)) {
+				return Response.json(
+					{
+						error: {
+							message: `The encrypted content ${reasoning.encrypted_content} could not be verified. Reason: Encrypted content could not be decrypted or parsed.`,
+							type: "invalid_request_error",
+							code: "invalid_encrypted_content",
+						},
+					},
+					{ status: 400 },
+				);
+			}
+			return bodies.length === 3 ? reasoningResponse(acceptedReasoning, "recovered") : createSseResponse();
+		};
+		const model = buildOpenRouterResponsesModel({ id: "openrouter/auto-code", reasoning: true });
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstMessage = await streamOpenAIResponses(model, context, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		const followup: Context = {
+			messages: [firstMessage, { role: "user", content: "continue", timestamp: 1 }],
+		};
+		const result = await streamOpenAIResponses(model, followup, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			providerSessionState,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(3);
+		expect(JSON.stringify(bodies[1]?.input)).toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[2]?.input)).not.toContain(reasoning.encrypted_content);
+		const next = await streamOpenAIResponses(
+			model,
+			{ messages: [...followup.messages, result, { role: "user", content: "again", timestamp: 2 }] },
+			{ apiKey: "test-key", fetch: fetchMock, providerSessionState },
+		).result();
+		expect(next.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(4);
+		expect(JSON.stringify(bodies[3]?.input)).not.toContain(reasoning.encrypted_content);
+		expect(JSON.stringify(bodies[3]?.input)).toContain(acceptedReasoning.encrypted_content);
 	});
 
 	it("replays foreign tool-call history without a fabricated reasoning id", async () => {

@@ -450,6 +450,8 @@ export interface OpenAIResponsesProviderSessionState
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
 	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
 	transports?: OpenAIResponsesTransportSessions;
+	/** Opaque reasoning rejected by a serving upstream; never replay those blobs again in this session. */
+	rejectedReasoning?: Set<string>;
 }
 
 /** Wire efforts a `configuration_update` can carry: every real tier, never `none`/null. */
@@ -521,6 +523,7 @@ function createOpenAIResponsesProviderSessionState(
 			state.chains.clear();
 			state.effortControls.clear();
 			state.transports?.close();
+			state.rejectedReasoning = undefined;
 			state.transports = undefined;
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
@@ -872,10 +875,23 @@ const streamOpenAIResponsesOnce = (
 				}
 				return fallbackKey;
 			};
+			let rejectedReasoning = providerSessionState?.rejectedReasoning;
+			const omitRejectedReasoning = (requestParams: OpenAIResponsesSamplingParams) => {
+				if (rejectedReasoning?.size && Array.isArray(requestParams.input)) {
+					requestParams.input = requestParams.input.filter(
+						item =>
+							item.type !== "reasoning" ||
+							typeof item.encrypted_content !== "string" ||
+							!rejectedReasoning?.has(item.encrypted_content),
+					);
+				}
+				return requestParams;
+			};
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				omitRejectedReasoning(payload);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -895,6 +911,7 @@ const streamOpenAIResponsesOnce = (
 				const { params, trailingScaffoldingItems } = builtParams;
 				wireToolNames = builtParams.toolNamesByWire;
 				if (chainState && !chainState.disabled) params.store = true;
+				omitRejectedReasoning(params);
 				applyReasoningEffortFallbackForRequest(params);
 				const chained: OpenAIResponsesChainedParams =
 					chainState && !chainState.disabled
@@ -1062,6 +1079,7 @@ const streamOpenAIResponsesOnce = (
 				});
 			};
 			let strictRetryAvailable = true;
+			let encryptedReasoningRetryAvailable = true;
 			let activeStrictToolsApplied = builtParams.strictToolsApplied;
 			let forceDisableStrictTools = false;
 			const openResponsesStreamWithFallbacks = async (): Promise<AsyncIterable<ResponseStreamEvent>> => {
@@ -1137,6 +1155,43 @@ const streamOpenAIResponsesOnce = (
 								activeParams = fallback.builtParams.params;
 								activeTrailingScaffoldingItems = fallback.builtParams.trailingScaffoldingItems;
 								continue;
+							}
+							const encryptedReasoningRejection =
+								(error instanceof OpenAIHttpError && (error.status === 400 || error.status === 422)) ||
+								(error instanceof OpenAIResponsesRequestRejection &&
+									(error.status === undefined || error.status === 400 || error.status === 422))
+									? error
+									: undefined;
+							if (
+								encryptedReasoningRetryAvailable &&
+								!requestSignal.aborted &&
+								encryptedReasoningRejection &&
+								(encryptedReasoningRejection.code === "invalid_encrypted_content" ||
+									/reasoning.*encrypted_content.*was not issued to this caller/i.test(
+										encryptedReasoningRejection.message,
+									)) &&
+								Array.isArray(chained.params.input)
+							) {
+								const rejected = chained.params.input.filter(
+									item => item.type === "reasoning" && typeof item.encrypted_content === "string",
+								);
+								if (rejected.length > 0) {
+									rejectedReasoning ??= new Set<string>();
+									if (providerSessionState) providerSessionState.rejectedReasoning = rejectedReasoning;
+									encryptedReasoningRetryAvailable = false;
+									for (const item of rejected) {
+										if (item.type === "reasoning" && typeof item.encrypted_content === "string") {
+											rejectedReasoning.add(item.encrypted_content);
+										}
+									}
+									if (chainState) resetOpenAIResponsesChainState(chainState);
+									({ builtParams, chained } = await prepareRequest(forceDisableStrictTools));
+									activeParams = builtParams.params;
+									activeTrailingScaffoldingItems = builtParams.trailingScaffoldingItems;
+									activeStrictToolsApplied = builtParams.strictToolsApplied;
+									activeRawRequestDump.body = chained.params;
+									continue;
+								}
 							}
 							if (!chainState || !sentPreviousResponseId || requestSignal.aborted) {
 								throw error;

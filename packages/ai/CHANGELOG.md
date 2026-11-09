@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- OpenRouter auto-router sessions recover when an upstream rejects earlier encrypted reasoning, without losing the rest of the conversation ([#18626](https://github.com/can1357/oh-my-pi/issues/18626)).
 - Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.18.2] - 2026-11-08
