@@ -332,8 +332,11 @@ describe("extension link hints", () => {
 
 			composer.startLinkHints(() => {});
 			const painted = composer.renderFullscreenViewport([row, "editor"], SIZE.columns);
-			expect(plain(painted[0]!)).toContain("aetails");
-			expect(composer.typeLinkHint("a")).toEqual({ url: "demo:open/7", row: 0, start: 7 });
+			// Tags now reuse the label's first letter (d for "details"), so the
+			// plain text is unchanged and the tag reads as inverse video on the cell.
+			expect(plain(painted[0]!)).toContain("details");
+			expect(painted[0]!).toContain("\x1b[1;7m");
+			expect(composer.typeLinkHint("d")).toEqual({ url: "demo:open/7", row: 0, start: 7 });
 		} finally {
 			composer.stop();
 		}
