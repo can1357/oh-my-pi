@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { type SettingsCallbacks, SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { cfgStatusLineLeftSegments, cfgStatusLinePreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
@@ -52,7 +52,7 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 	};
 }
 
-function createSelector(): SettingsSelectorComponent {
+function createSelector(callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
 	return new SettingsSelectorComponent(
 		{
 			availableThinkingLevels: [],
@@ -65,6 +65,7 @@ function createSelector(): SettingsSelectorComponent {
 		{
 			onChange: () => {},
 			onCancel: () => {},
+			...callbacks,
 		},
 	);
 }
@@ -122,14 +123,14 @@ function nativeErrorText(node: TspNode): string {
 }
 
 describe("custom status-line segment editors", () => {
-	function openAppearance(): SettingsSelectorComponent {
-		const component = createSelector();
+	function openAppearance(callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
+		const component = createSelector(callbacks);
 		component.handleNativeEvent({ type: "action", key: "", act: "page", value: "appearance", mods: [] });
 		return component;
 	}
 
-	function openSegmentList(path: string): SettingsSelectorComponent {
-		const component = openAppearance();
+	function openSegmentList(path: string, callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
+		const component = openAppearance(callbacks);
 		component.handleNativeEvent({ type: "activate", key: "", item: path });
 		return component;
 	}
@@ -152,6 +153,33 @@ describe("custom status-line segment editors", () => {
 		expect(cfgStatusLineLeftSegments.get(settings)).not.toContain("model");
 		component.handleInput(" ");
 		expect(cfgStatusLineLeftSegments.get(settings)).toContain("model");
+	});
+
+	it("shows the live status line in the editor and refreshes it as segments toggle", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments", {
+			getStatusLinePreview: () => `bar: ${cfgStatusLineLeftSegments.get(settings).join(",")}`,
+			onStatusLinePreview: () => {},
+		});
+		const before = Bun.stripANSI(component.render(120).join("\n"));
+		expect(before).toContain("Preview:");
+		expect(before).toContain("bar: vim,model,mode,path,git,pr");
+
+		component.handleInput(" ");
+		const after = Bun.stripANSI(component.render(120).join("\n"));
+		expect(after).toContain("bar: vim,mode,path,git,pr");
+		expect(after).not.toContain("bar: vim,model,mode,path,git,pr");
+	});
+
+	it("previews the saved custom lists, not the preset's baseline defaults", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		cfgStatusLineLeftSegments.set(settings, ["vim", "model"]);
+		const seen: unknown[] = [];
+		const component = openAppearance({ onStatusLinePreview: value => seen.push(value) });
+		component.handleNativeEvent({ type: "activate", key: "", item: "statusLine.preset" });
+		component.handleNativeEvent({ type: "select", key: "", item: "statusLine.preset=custom" });
+		expect(seen.length).toBeGreaterThan(0);
+		for (const value of seen) expect(value).not.toHaveProperty("leftSegments");
 	});
 });
 
