@@ -6,6 +6,7 @@
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 
 /** Per-request abort deadline for each OAuth discovery metadata fetch. */
@@ -403,7 +404,7 @@ export async function fetchResourceMetadataScopes(
 	resourceMetadataUrl: string,
 	opts?: { fetch?: FetchImpl; signal?: AbortSignal },
 ): Promise<string | undefined> {
-	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	const fetchImpl: FetchImpl = opts?.fetch ?? wrapFetchForExtraCa(fetch);
 	try {
 		const resp = await fetchImpl(resourceMetadataUrl, {
 			method: "GET",
@@ -474,7 +475,7 @@ export async function discoverOAuthEndpoints(
 	resourceMetadataUrl?: string,
 	opts?: { fetch?: FetchImpl; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
-	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	const fetchImpl: FetchImpl = opts?.fetch ?? wrapFetchForExtraCa(fetch);
 	// Authorization servers are not protected resources: probing
 	// `oauth-protected-resource` here would follow another resource's
 	// `authorization_servers` (typically the origin root's) and bypass the
