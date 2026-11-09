@@ -457,13 +457,14 @@ export class CollabHost {
 		const reqId = ++this.#uiReqSeq;
 		const fullRequest: CollabUiRequest = { ...request, reqId };
 		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
+		const recipients = new Set<number>();
 		let settled = false;
 		const settle = (result: CollabGuestUiResult): void => {
 			if (settled) return;
 			settled = true;
 			signal?.removeEventListener("abort", onAbort);
 			this.#pendingUi.delete(reqId);
-			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+			this.#endUiRequest(reqId, recipients);
 			resolve(result);
 		};
 		const onAbort = (): void => settle({ kind: "unavailable" });
@@ -472,7 +473,7 @@ export class CollabHost {
 		// who actually holds the dialog. With no writer connected yet, the ask waits for
 		// the first one to join; writers that all refused it can never answer.
 		const hadWritable = [...this.#peers.values()].some(peer => peer.canWrite);
-		const recipients = new Set(this.#sendWritablePeers({ t: "ui-request", request: fullRequest }));
+		for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: fullRequest })) recipients.add(peerId);
 		this.#pendingUi.set(reqId, {
 			request: fullRequest,
 			promise,
@@ -484,15 +485,34 @@ export class CollabHost {
 		return promise;
 	}
 
-	/** @returns the writable peers the frame was admitted for. */
-	#sendWritablePeers(frame: CollabFrame): number[] {
+	/** @returns the writable peers outside {@link skip} the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame, skip?: ReadonlySet<number>): number[] {
 		const socket = this.#socket;
 		if (!socket || this.#sendSuppressed(frame)) return [];
 		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite && socket.send(frame, peerId)) admitted.push(peerId);
+			if (!peer.canWrite || skip?.has(peerId)) continue;
+			if (socket.send(frame, peerId)) admitted.push(peerId);
 		}
 		return admitted;
+	}
+
+	/**
+	 * Dismiss a settled ask on every writer. A holder the queue refused for capacity
+	 * alone would keep the dialog open with nothing left to close it, so the end falls
+	 * back to a broadcast, which replica-bearing admission delivers or ends the room
+	 * over. Guests ignore an end for a request they never held. A holder that left or
+	 * was shed needs none: its rejoin clears every presentation.
+	 */
+	#endUiRequest(reqId: number, recipients: ReadonlySet<number>): void {
+		const frame: CollabFrame = { t: "ui-request-end", reqId };
+		const socket = this.#socket;
+		const admitted = new Set(this.#sendWritablePeers(frame));
+		for (const peerId of recipients) {
+			if (admitted.has(peerId) || !this.#peers.get(peerId)?.canWrite || !socket?.isAdmitting(peerId)) continue;
+			this.#broadcast(frame);
+			return;
+		}
 	}
 
 	/**
@@ -1203,8 +1223,18 @@ export class CollabHost {
 				this.#ctx.session.isSessionTransitioning
 			);
 			if (this.#pendingUi.get(reqId) !== pending || !this.#guestTrafficAllowed()) return;
-			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) pending.settle({ kind: "answered", value });
-			else this.#sendWritablePeers({ t: "ui-request", request: pending.request });
+			if (peer?.canWrite && this.#peers.get(fromPeer) === peer) {
+				pending.settle({ kind: "answered", value });
+				return;
+			}
+			// Re-pose only to writers not already holding it, and record who took it: an
+			// answer from a peer outside `recipients` is ignored.
+			const hadWritable = [...this.#peers.values()].some(candidate => candidate.canWrite);
+			const holders = new Set(pending.recipients);
+			for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: pending.request }, holders)) {
+				pending.recipients.add(peerId);
+			}
+			if (hadWritable && pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
 		} catch (error) {
 			logger.warn("Collab UI response could not await session transition", { error: String(error) });
 			pending.settle({ kind: "unavailable" });
@@ -1326,6 +1356,8 @@ export class CollabHost {
 		// guest-only callers still settle rather than wait without a recipient.
 		// Explicit stop and session replacement continue to settle every request.
 		for (const pending of this.#pendingUi.values()) {
+			// Old-room ids may be reissued; only a writer that says hello again holds it.
+			pending.recipients.clear();
 			if (!pending.retainOnReconnect) pending.settle({ kind: "unavailable" });
 		}
 		this.#updateStatusSegment();

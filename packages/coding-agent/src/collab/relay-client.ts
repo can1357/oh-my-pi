@@ -143,8 +143,12 @@ export class CollabSocket {
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
-	/** Resolves once regular frames queued before flush() have been sealed. */
-	#sendChain: Promise<void> = Promise.resolve();
+	/**
+	 * Admitted regular sends not yet sealed or discarded; {@link flush} awaits a
+	 * snapshot of it. A set, not a chain: refused and discarded sends leave no
+	 * trace, so a backed-up head cannot accumulate history behind it.
+	 */
+	#preparing = new Set<Promise<void>>();
 	/** Serializes open() so frames are delivered in arrival order. */
 	#recvChain: Promise<void> = Promise.resolve();
 	#pendingSends: PendingSend[] = [];
@@ -186,6 +190,15 @@ export class CollabSocket {
 	 */
 	isServing(peerId: number): boolean {
 		return !this.#retiredPeers.has(peerId);
+	}
+
+	/**
+	 * False while targeted work for the peer is refused outright: it left, or it was
+	 * shed and its overload report is pending. A targeted send refused while this
+	 * holds was refused for capacity alone.
+	 */
+	isAdmitting(peerId: number): boolean {
+		return !this.#retiredPeers.has(peerId) && !this.#shedPeers.has(peerId);
 	}
 
 	/**
@@ -248,8 +261,13 @@ export class CollabSocket {
 			return false;
 		}
 		const prepared = Promise.withResolvers<void>();
-		this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
-		return this.#enqueueSend({
+		let done = false;
+		const onPrepared = (): void => {
+			done = true;
+			this.#preparing.delete(prepared.promise);
+			prepared.resolve();
+		};
+		const admitted = this.#enqueueSend({
 			frames: [serialized].values(),
 			targetPeer,
 			bytes: Buffer.byteLength(serialized),
@@ -257,9 +275,11 @@ export class CollabSocket {
 			advisory,
 			cancelled: false,
 			eager: true,
-			onPrepared: prepared.resolve,
+			onPrepared,
 			key,
 		});
+		if (admitted && !done) this.#preparing.add(prepared.promise);
+		return admitted;
 	}
 
 	/**
@@ -582,7 +602,8 @@ export class CollabSocket {
 	 * either written to the transport or retained as a prepared envelope.
 	 */
 	flush(): Promise<void> {
-		return this.#sendChain;
+		if (this.#preparing.size === 0) return Promise.resolve();
+		return Promise.all(this.#preparing).then(() => {});
 	}
 
 	/** Revoke unsent frames, including sealing work, before admitting a final frame. */
@@ -595,7 +616,7 @@ export class CollabSocket {
 		}
 		this.#pendingSends.length = 0;
 		this.#sending = false;
-		this.#sendChain = Promise.resolve();
+		this.#preparing.clear();
 		this.#clearBackpressureDrain();
 		this.#wakeSender?.();
 	}

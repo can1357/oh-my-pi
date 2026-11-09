@@ -259,13 +259,14 @@ export class CollabGuestLink {
 	#pendingSnapshot: PendingSnapshot | null = null;
 	/**
 	 * Fires `firstWelcome.reject` from a stalled welcome/snapshot during the
-	 * initial join. Set in {@link join}, cleared on resolve/reject; arming a
-	 * timer after that point is a no-op so reconnect-time stalls fall through
-	 * to the normal socket close handling instead of aborting the live session.
+	 * initial join. Set in {@link join}, cleared on resolve/reject; a stall after
+	 * that point rejoins instead.
 	 */
 	#joinReject: ((err: Error) => void) | null = null;
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
+	/** Set in {@link join}: fails the first join, or rejoins once joined. */
+	#onSnapshotTimeout: (() => void) | null = null;
 	/** base64url write token from a full link; absent when joined via a view link. */
 	#writeToken: string | undefined;
 	/** True when the host marked this peer read-only (view link). */
@@ -397,6 +398,11 @@ export class CollabGuestLink {
 			// The host no longer counts us as a recipient of its open dialogs.
 			this.#clearUiRequests();
 			introduce();
+		};
+		this.#onSnapshotTimeout = () => {
+			const message = "timed out waiting for the host's session snapshot";
+			if (joined) rejoin(message);
+			else firstWelcome.reject(new Error(message));
 		};
 		const onWelcomeTimeout = (): void => {
 			const message = "timed out waiting for the host's welcome";
@@ -661,11 +667,12 @@ export class CollabGuestLink {
 	}
 
 	#armSnapshotProgressTimer(): void {
-		if (this.#joinReject === null) return;
+		const onTimeout = this.#onSnapshotTimeout;
+		if (this.#left || onTimeout === null) return;
 		this.#clearSnapshotProgressTimer();
 		this.#snapshotProgressTimer = setTimeout(() => {
 			this.#snapshotProgressTimer = null;
-			this.#joinReject?.(new Error("timed out waiting for the host's session snapshot"));
+			onTimeout();
 		}, SNAPSHOT_PROGRESS_TIMEOUT_MS);
 	}
 

@@ -960,6 +960,45 @@ describe("collab TUI guest resync", () => {
 		expect(hellos).toBe(MAX_AUTO_REJOINS);
 	});
 
+	it("says hello again when a rejoin's snapshot stops arriving", async () => {
+		const h = await openHarness();
+		let hellos = 0;
+		h.hostSocket.onFrame = frame => {
+			if (frame.t !== "hello") return;
+			hellos++;
+			// A welcome that promises entries, then nothing: the batch was cut off.
+			h.hostSocket.send({
+				t: "welcome",
+				proto: COLLAB_PROTO,
+				header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
+				state: makeState(),
+				agents: [],
+				entryCount: 2,
+			});
+		};
+		const timeouts: (() => void)[] = [];
+		const realSetTimeout = globalThis.setTimeout;
+		const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+			fn: () => void,
+			ms?: number,
+			...args: unknown[]
+		) => {
+			if (ms === 30_000) timeouts.push(fn);
+			return realSetTimeout(fn, ms, ...args);
+		}) as typeof setTimeout);
+		try {
+			h.hostSocket.send({ t: "error", message: "rejoin to resync", resync: true });
+			await waitFor(() => hellos === 1, "guest never re-sent hello for the resync");
+			await h.barrier();
+			// The welcome timer, then the snapshot-progress timer the welcome armed.
+			expect(timeouts).toHaveLength(2);
+			timeouts[1]!();
+			await waitFor(() => hellos === 2, "guest stayed frozen on a snapshot that never finished");
+		} finally {
+			timerSpy.mockRestore();
+		}
+	});
+
 	it("says hello again when a rejoin's welcome never arrives", async () => {
 		const h = await openHarness();
 		let hellos = 0;

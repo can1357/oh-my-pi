@@ -1075,4 +1075,42 @@ describe("CollabSocket send backpressure", () => {
 			socket.close();
 		}
 	});
+
+	it("keeps no flush bookkeeping for sends it refused behind a blocked head", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/flush-set", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// A snapshot stalled at the head keeps the broadcast behind it unprepared,
+			// so flush() stays pending for the whole flood.
+			socket.sendBatch(welcomeBatch("stalled snapshot"), GREEDY, 0);
+			expect(socket.send({ t: "error", message: "broadcast behind the snapshot" })).toBe(true);
+			const flushed = socket.flush();
+			let settled = false;
+			void flushed.then(() => {
+				settled = true;
+			});
+			// Past its share the peer is shed, and every later frame for it is refused.
+			for (let i = 0; i < PEER_SHARE; i++) socket.send({ t: "error", message: `reply ${i}` }, 2);
+			const { heapStats } = await import("bun:jsc");
+			Bun.gc(true);
+			const before = heapStats().objectTypeCounts.Promise ?? 0;
+			let refused = 0;
+			for (let i = 0; i < 20_000; i++) {
+				if (!socket.send({ t: "error", message: `refused ${i}` }, 2)) refused++;
+			}
+			Bun.gc(true);
+			const after = heapStats().objectTypeCounts.Promise ?? 0;
+			expect(refused).toBe(20_000);
+			expect(after - before).toBeLessThan(1_000);
+			expect(settled).toBe(false);
+		} finally {
+			socket.close();
+		}
+	});
 });
