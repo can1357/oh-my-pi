@@ -384,6 +384,56 @@ describe("html form", () => {
 			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" });
 		});
 
+		it("natively: the tab strip fits the card, clipping labels, then numbers, then a window with arrows", () => {
+			const legend = (index: number) => `Question ${index} about the rollout window and who signs off on it?`;
+			const form = (count: number) =>
+				`<form>${Array.from(
+					{ length: count },
+					(_, index) =>
+						`<fieldset><legend>${legend(index)}</legend><label><input type="radio" name="q${index}" value="a" checked> A</label></fieldset>`,
+				).join("")}</form>`;
+			const tabItems = (dialogForm: HtmlFormDialog) => {
+				const root = dialogForm.describe(CX);
+				const path = findPath(root, node => node.k === "tabs")!;
+				let tabs: NativeNode = root;
+				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
+				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
+				return items.flatMap(entry =>
+					"id" in entry
+						? [
+								{
+									id: entry.id,
+									text:
+										typeof entry.label === "string" ? entry.label : entry.label.map(part => part.t).join(""),
+								},
+							]
+						: [],
+				);
+			};
+			// Two questions: numbered labels, clipped.
+			const two = tabItems(dialog(form(2)).form);
+			expect(two.map(entry => entry.text)).toEqual([
+				expect.stringMatching(/^1 Question 0 .*…$/),
+				expect.stringMatching(/^2 /),
+				"Review",
+			]);
+			// Twelve: numbers alone.
+			expect(tabItems(dialog(form(12)).form).map(entry => entry.text)).toEqual([
+				...Array.from({ length: 12 }, (_, index) => `${index + 1}`),
+				"Review",
+			]);
+			// Forty: a window around the shown tab, with arrows that page to the rest.
+			const { form: forty } = dialog(form(40));
+			const strip = findPath(forty.describe(CX), node => node.k === "tabs")!;
+			forty.handleNativeEvent({ type: "select", key: strip, item: "t20" });
+			const windowed = tabItems(forty);
+			expect(windowed[0]).toMatchObject({ id: "prev" });
+			expect(windowed.at(-2)).toMatchObject({ id: "next" });
+			expect(windowed.some(entry => entry.id === "t20")).toBe(true);
+			forty.handleNativeEvent({ type: "select", key: strip, item: "next" });
+			expect(tabItems(forty).some(entry => entry.id === "t20")).toBe(false);
+		});
+
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
 			const { form } = dialog(DB_FORM);
 			const checked = () => {

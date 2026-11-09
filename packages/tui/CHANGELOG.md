@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `ask` HTML form tab strip in Tern running off the card with long or many questions: tabs are numbered and their labels clipped to fit, fall back to numbers alone, and past that show a window around the current tab with arrows to the rest
+- Fixed `ask` HTML form Review rows in Tern stacking long questions in a narrow column: each row is keyed by the field's label, else its question clipped like a tab label
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

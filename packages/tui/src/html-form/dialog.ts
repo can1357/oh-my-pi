@@ -130,11 +130,25 @@ const EDIT_ACT = "edit:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
 const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
-/** Widest a question tab's label grows before it is clipped. */
+/** Widest a question tab's label or a Review key grows before it is clipped. */
 const TAB_LABEL_WIDTH = 28;
+/** Below this a tab shows its number alone; a clipped label any shorter reads as noise. */
+const TAB_LABEL_MIN = 8;
+/**
+ * Terminal cells the native tab strip may fill: the ask card is at most 736px wide, about 92
+ * cells of the 13px mono face, less its padding.
+ */
+const TAB_STRIP_COLS = 86;
+/** Cells a tab's padding and gap take beside its label (10px each side plus a 2px gap). */
+const TAB_CHROME = 3;
+/** Width of Tern's 12.5px sans tab labels against a mono cell, measured on its tab strip. */
+const TAB_SANS = 0.85;
 const REVIEW_TAB = "Review";
 /** Tab id of the Review tab (question tabs are `t<index>`). */
 const REVIEW_ID = "review";
+/** Tab ids of the arrows that page a windowed tab strip. */
+const TABS_PREV = "prev";
+const TABS_NEXT = "next";
 
 /** A picture block's state: still loading, failed (with why), or drawn by `rows` and described by `native`. */
 type MediaSlot =
@@ -239,11 +253,7 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
 		const label = title || sanitize(questions.get(fields[0]!) ?? "") || `Question ${tabs.length + 1}`;
-		tabs.push({
-			label: truncateToWidth(label, TAB_LABEL_WIDTH, Ellipsis.Unicode),
-			sections: [...lead, index],
-			fields,
-		});
+		tabs.push({ label, sections: [...lead, index], fields });
 		lead = [];
 	});
 	if (lead.length > 0) {
@@ -307,6 +317,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #leftTabs = new Set<number>();
 	/** Collapsed to one row (`app.ask.hide` / Hide) while the form stays pending. */
 	#hidden = false;
+	/** Question tabs the native strip shows when it is too narrow for all of them. */
+	#tabWindow = { start: 0, end: 0 };
 
 	constructor(form: HtmlForm, options: HtmlFormDialogOptions) {
 		this.#form = form;
@@ -508,7 +520,14 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (this.#hidden || (event.type !== "select" && event.type !== "activate")) return;
 		const leaf = leafKey(event.key);
 		if (leaf === "tabs") {
-			const index = event.item === REVIEW_ID ? this.#tabs.length : itemIndex(event.item, "t");
+			const index =
+				event.item === REVIEW_ID
+					? this.#tabs.length
+					: event.item === TABS_PREV
+						? this.#tabWindow.start - 1
+						: event.item === TABS_NEXT
+							? this.#tabWindow.end
+							: itemIndex(event.item, "t");
 			if (this.#tabbed() && index >= 0) this.#showTab(index);
 			return;
 		}
@@ -560,14 +579,14 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * lists `select` to focus/pick (a checkbox `select` toggles); the focused text
 	 * field is its live `Input`/`Editor`. Hidden, it is one summary row.
 	 */
-	describe(_cx: DescribeContext): NativeNode {
+	describe(cx: DescribeContext): NativeNode {
 		const blocked = this.#guardBlocks();
 		this.#options.inputGuard?.syncPresentation?.(blocked);
 		// Other answers are typed into the terminal's own inputs, which don't pass through handleInput.
 		const others = [...this.#others.values()].map(input => input.getValue()).join("\0");
-		const key = `${this.#version}\0${blocked}\0${others}`;
+		const key = `${this.#version}\0${blocked}\0${cx.cols}\0${others}`;
 		if (this.#native?.key === key) return this.#native.node;
-		const described = this.#hidden ? this.#describeHidden() : this.#describeForm(blocked);
+		const described = this.#hidden ? this.#describeHidden() : this.#describeForm(blocked, cx.cols);
 		this.#native = { key, node: described };
 		return described;
 	}
@@ -1468,11 +1487,11 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * `omp.ask.answers`. A tab's content therefore sits in one such list (a `col` capped by `max`
 	 * only clips), so it scrolls inside the card and the action bar below stays in view.
 	 */
-	#describeForm(blocked: boolean): NativeNode {
+	#describeForm(blocked: boolean, cols: number): NativeNode {
 		const tabbed = this.#tabbed();
 		const review = tabbed && this.#tab === this.#tabs.length;
 		const children: NativeChild[] = [];
-		if (tabbed) children.push(this.#describeTabs());
+		if (tabbed) children.push(this.#describeTabs(cols));
 		if (review) {
 			children.push(...this.#describeReview());
 		} else {
@@ -1488,19 +1507,55 @@ export class HtmlFormDialog implements Component, Focusable {
 		return col(children, { role: "omp.editor.ask", gap: "md" });
 	}
 
-	/** One tab per question, checked once the user has left it with no field failing validation, then Review. */
-	#describeTabs(): NativeNode {
-		const items = this.#tabs.map((tab, index) => ({
-			id: `t${index}`,
-			label:
+	/**
+	 * Numbered tabs that fit the card: question labels clipped to share the strip, numbers alone
+	 * when even short labels overflow, and past that a window of numbers around the shown tab
+	 * with arrows paging to the hidden ones. A tab is checked once the user has left it with no
+	 * field failing validation.
+	 */
+	#describeTabs(cols: number): NativeNode {
+		const count = this.#tabs.length;
+		const done = this.#tabs.map(
+			(tab, index) =>
 				this.#leftTabs.has(index) &&
 				tab.fields.length > 0 &&
-				tab.fields.every(field => fieldError(field, this.#value(field)) === undefined)
-					? [span("✓ ", "success"), span(tab.label)]
-					: [span(tab.label)],
-		}));
+				tab.fields.every(field => fieldError(field, this.#value(field)) === undefined),
+		);
+		const room = Math.min(cols - TAB_CHROME, TAB_STRIP_COLS) - REVIEW_TAB.length * TAB_SANS - TAB_CHROME;
+		const width = (label: string, index: number) =>
+			(visibleWidth(label) + (done[index] ? 2 : 0)) * TAB_SANS + TAB_CHROME;
+		const numbers = this.#tabs.map((_, index) => `${index + 1}`);
+		let labels: string[] | undefined;
+		for (let clip = TAB_LABEL_WIDTH; clip >= TAB_LABEL_MIN && !labels; clip--) {
+			const clipped = this.#tabs.map((tab, index) =>
+				tab.label ? `${numbers[index]} ${truncateToWidth(tab.label, clip, Ellipsis.Unicode)}` : numbers[index]!,
+			);
+			if (clipped.reduce((sum, label, index) => sum + width(label, index), 0) <= room) labels = clipped;
+		}
+		let start = 0;
+		let end = count;
+		if (!labels && numbers.reduce((sum, label, index) => sum + width(label, index), 0) > room) {
+			// Room for the two paging arrows (`‹ 12`, `12 ›`) and as many numbered tabs as fit.
+			const slot = 3 * TAB_SANS + TAB_CHROME;
+			const fit = Math.max(1, Math.floor((room - 2 * (5 * TAB_SANS + TAB_CHROME)) / slot));
+			const active = Math.min(this.#tab, count - 1);
+			start = Math.max(0, Math.min(count - fit, active - Math.floor(fit / 2)));
+			end = Math.min(count, start + fit);
+		}
+		this.#tabWindow = { start, end };
+		const shown = labels ?? numbers;
+		const items: { id: string; label: TspSpan[] }[] = [];
+		if (start > 0) items.push({ id: TABS_PREV, label: [span(`‹ ${start}`, "muted")] });
+		for (let index = start; index < end; index++) {
+			const label = shown[index]!;
+			const gap = label.indexOf(" ");
+			const spans = [span(gap === -1 ? label : label.slice(0, gap), "muted")];
+			if (gap !== -1) spans.push(span(label.slice(gap)));
+			items.push({ id: `t${index}`, label: done[index] ? [span("✓ ", "success"), ...spans] : spans });
+		}
+		if (end < count) items.push({ id: TABS_NEXT, label: [span(`${count - end} ›`, "muted")] });
 		items.push({ id: REVIEW_ID, label: [span(REVIEW_TAB)] });
-		const active = this.#tab === this.#tabs.length ? REVIEW_ID : `t${this.#tab}`;
+		const active = this.#tab === count ? REVIEW_ID : `t${this.#tab}`;
 		const tabs = node(
 			"tabs",
 			{
@@ -1527,9 +1582,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * Review tab: whether anything still needs fixing, then every answer under its question. The
-	 * answers sit straight in the card as `omp.ask.answers`, the list Tern's stylesheet lets shrink
-	 * and scroll inside the card.
+	 * Review tab: whether anything still needs fixing, then every answer. The answers sit straight
+	 * in the card as `omp.ask.answers`, the kv Tern's stylesheet lets shrink and scroll inside the
+	 * card. Its keys never wrap, so each is the field's own label, else its tab's question, clipped
+	 * like a tab label; the whole question is on its tab.
 	 */
 	#describeReview(): NativeChild[] {
 		const problems = this.#form.fields.filter(field => fieldError(field, this.#value(field)) !== undefined).length;
@@ -1547,7 +1603,12 @@ export class HtmlFormDialog implements Component, Focusable {
 				field.kind === "text" && field.type === "password"
 					? "•".repeat(answer.answer.length)
 					: sanitize(answer.answer).replace(/\s+/g, " ");
-			return { k: sanitize(answer.question), v: shown ? [span(shown)] : [span("—", "dim")] };
+			const own = sanitize(spansText(field.label)).replace(/\s+/g, " ").trim();
+			const key = own || this.#tabs[this.#fieldTab.get(field) ?? -1]?.label || sanitize(answer.question);
+			return {
+				k: truncateToWidth(key, TAB_LABEL_WIDTH, Ellipsis.Unicode),
+				v: shown ? [span(shown)] : [span("—", "dim")],
+			};
 		});
 		return [
 			text(notice, { wrap: "word", role: "omp.ask.notice" }),
