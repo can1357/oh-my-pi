@@ -26,6 +26,7 @@ import {
 	cfgComputerBackgroundFallback,
 	cfgComputerDisplay,
 	cfgComputerEnabled,
+	cfgComputerInlineDocs,
 	cfgComputerMaxHeight,
 	cfgComputerMaxWidth,
 	cfgToolsMaxTimeout,
@@ -152,7 +153,7 @@ export function createComputerPrelude(
 	return {
 		name: "computer",
 		documentation: computerPreludeAssets.documentation,
-		inlineDocumentation: true,
+		inlineDocumentation: cfgComputerInlineDocs.get(session.settings),
 		javascript: computerPreludeAssets.javascript,
 		python: computerPreludeAssets.python,
 		exports: ["computer"],

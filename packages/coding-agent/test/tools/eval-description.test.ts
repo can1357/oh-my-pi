@@ -8,6 +8,7 @@ import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
 import { EvalTool, getEvalDocTopics, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -36,6 +37,27 @@ function makeSession(opts: {
 		...(opts.preludes ? { getEvalPreludes: opts.preludes } : {}),
 		settings,
 	} as unknown as ToolSession;
+}
+
+/** Eval tool whose only prelude is the real computer prelude, built under the given settings. */
+function makeComputerTool(settings: Record<string, unknown>): EvalTool {
+	const preludes: EvalPreludeDefinition[] = [];
+	const session = makeSession({
+		settings: { "computer.enabled": true, ...settings },
+		preludes: () => preludes,
+	});
+	preludes.push(
+		createComputerPrelude(session, () => ({
+			async run() {
+				return { displays: [], returnValue: undefined, screenshots: [] };
+			},
+			async capabilities() {
+				return undefined;
+			},
+			async close() {},
+		})),
+	);
+	return new EvalTool(session);
 }
 
 /** Pull the model-facing cell-schema fields (sorted `language` enum + descriptions) from the flat wire schema. */
@@ -228,6 +250,21 @@ describe("eval tool description", () => {
 		expect(withoutRead.description.split("INLINE PRELUDE DOCUMENTATION")).toHaveLength(2);
 		expect(withoutRead.description).not.toContain("<fixture>");
 		expect(withoutRead.description).not.toContain("xd://eval/fixture");
+	});
+
+	it("inlines the computer prelude's documentation by default", () => {
+		const tool = makeComputerTool({});
+		expect(tool.description).toContain("Control the host desktop");
+		expect(tool.description).toContain("<computer>");
+		expect(tool.description).not.toContain("xd://eval/computer");
+	});
+
+	it("serves the computer prelude as an xd://eval/computer topic when computer.inlineDocs is off", () => {
+		const tool = makeComputerTool({ "computer.inlineDocs": false });
+		expect(tool.description).toContain("`computer`: Control the host desktop");
+		expect(tool.description).toContain("xd://eval/computer");
+		expect(tool.description).not.toContain("<computer>");
+		expect(tool.docTopics().computer).toContain("computer.window");
 	});
 });
 

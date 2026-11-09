@@ -634,6 +634,19 @@ export const cfgComputerEnabled = register({
 	},
 });
 
+export const cfgComputerInlineDocs = register({
+	id: "computer.inlineDocs",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Available Tools",
+		label: "Computer Docs Inline",
+		description:
+			"Inline the computer prelude's documentation in the eval tool description; off links it as an xd://eval/computer topic and saves ~19k characters per request at the cost of one read before the first computer call",
+	},
+});
+
 export const cfgRatchetEnabled = register({
 	id: "ratchet.enabled",
 	type: "boolean",
