@@ -3057,9 +3057,11 @@ pub enum FpFound {
 }
 
 /// zsh `getfpfunc`: the first regular file `name` in `dirs` (relative to
-/// `cwd`), answered through `ask`. The search's `stat`s are asked in
-/// stretches ([`Probe::StatAll`], each up to the first file it finds), not
-/// one probe per path, each of which would restart the asking builtin.
+/// `cwd`), answered through `ask`; its text when `read` (zsh's
+/// `test_only` when not: `autoload -r` needs only where it is). The
+/// search's `stat`s are asked in stretches ([`Probe::StatAll`], each up to
+/// the first file it finds), not one probe per path, each of which would
+/// restart the asking builtin.
 ///
 /// # Errors
 /// What `ask` fails with (a probe in flight).
@@ -3068,62 +3070,98 @@ pub fn getfpfunc<E>(
 	cwd: &[u8],
 	name: &[u8],
 	dirs: &[BString],
+	read: bool,
 ) -> Result<FpFound, E> {
-	use super::builtins::zsh_zcompile::fpath_stat_paths;
-	let paths: Vec<BString> = dirs
+	use super::builtins::zsh_zcompile::{fpath_dump, fpath_stat_paths};
+	// Each directory's paths: `dir/name`, then the word code files.
+	let mut paths: Vec<BString> = Vec::with_capacity(dirs.len() * 3);
+	let mut spans = Vec::with_capacity(dirs.len());
+	for d in dirs {
+		let start = paths.len();
+		paths.extend(fpath_stat_paths(cwd, d, name));
+		spans.push(start..paths.len());
+	}
+	// A definition file ends the search; a word code file it passes does
+	// not (its directory may hold the function after all).
+	let ends: Vec<u32> = spans
 		.iter()
-		.flat_map(|d| fpath_stat_paths(cwd, d, name))
+		.filter_map(|s| u32::try_from(s.start).ok())
 		.collect();
-	let mut known: std::collections::HashMap<BString, Option<crate::bash::fs::Stat>> =
-		std::collections::HashMap::new();
-	// `paths[..asked]` are in `known`.
-	let mut asked = 0;
-	// A `stat` of the search is answered from the stretches; one past them
-	// asks for the next stretch. Reads go to `ask`.
-	let mut ask = |p: Probe| {
-		let Probe::Stat { path, follow: true } = &p else {
-			return ask(p);
-		};
-		if !known.contains_key(path)
-			&& paths[asked..].contains(path)
-			&& let ProbeResult::Stats(stats) = ask(Probe::StatAll { paths: paths[asked..].to_vec() })?
-		{
-			for (q, st) in paths[asked..].iter().zip(&stats) {
-				known.insert(q.clone(), *st);
-			}
-			asked += stats.len().max(1);
-		}
-		match known.get(path) {
-			Some(st) => Ok(ProbeResult::Stat(*st)),
-			None => ask(p),
-		}
-	};
-	for dir in dirs {
-		let mut rel = BString::from(dir.as_slice());
-		if !rel.is_empty() {
-			rel.push(b'/');
-		}
-		rel.extend_from_slice(name);
-		let path = absolute(cwd, &rel);
+	let mut search =
+		StatSearch { paths: &paths, ends: &ends, known: hashbrown::HashMap::new(), asked: 0 };
+	for (dir, span) in dirs.iter().zip(spans) {
+		let path = &paths[span.start];
 		let regular = matches!(
-			ask(Probe::Stat { path: path.clone(), follow: true })?,
+			search.stat(ask, Probe::Stat { path: path.clone(), follow: true })?,
 			ProbeResult::Stat(Some(st)) if st.kind != StatKind::Dir
 		);
 		if !regular {
 			// zsh loads a definition from word code alone (`DIR.zwc`,
-			// `DIR/NAME.zwc`, a digest in `$fpath`).
-			if let Some(dump) =
-				super::builtins::zsh_zcompile::fpath_dump::<E>(&mut ask, cwd, dir, name)?
+			// `DIR/NAME.zwc`, a digest in `$fpath`): none when the search
+			// found no such file here.
+			if paths[span.start + 1..span.end]
+				.iter()
+				.all(|p| matches!(search.known.get(p), Some(None)))
 			{
+				continue;
+			}
+			let mut ask = |p: Probe| search.stat(ask, p);
+			if let Some(dump) = fpath_dump::<E>(&mut ask, cwd, dir, name)? {
 				return Ok(FpFound::Dump(dump));
 			}
 			continue;
 		}
-		if let ProbeResult::Bytes(Ok(text)) = ask(Probe::Read { path })? {
+		if !read {
+			return Ok(FpFound::File { dir: dir.clone(), text: BString::default() });
+		}
+		if let ProbeResult::Bytes(Ok(text)) = ask(Probe::Read { path: path.clone() })? {
 			return Ok(FpFound::File { dir: dir.clone(), text });
 		}
 	}
 	Ok(FpFound::None)
+}
+
+/// The `stat`s of a [`getfpfunc`] search, asked in stretches.
+struct StatSearch<'p> {
+	paths: &'p [BString],
+	/// Indices of the paths a file at ends a stretch, ascending.
+	ends:  &'p [u32],
+	known: hashbrown::HashMap<BString, Option<crate::bash::fs::Stat>>,
+	/// `paths[..asked]` are in `known`.
+	asked: usize,
+}
+
+impl StatSearch<'_> {
+	/// `p` answered: a `stat` of the search from the stretches (one past
+	/// them asks for the next stretch), anything else by `ask`.
+	fn stat<E>(
+		&mut self,
+		ask: &mut super::builtins::zsh_zcompile::Ask<'_, E>,
+		p: Probe,
+	) -> Result<ProbeResult, E> {
+		let Probe::Stat { path, follow: true } = &p else {
+			return ask(p);
+		};
+		if !self.known.contains_key(path)
+			&& self.paths[self.asked..].contains(path)
+			&& let ProbeResult::Stats(stats) = ask(Probe::StatAll {
+				paths: self.paths[self.asked..].to_vec(),
+				ends:  self
+					.ends
+					.iter()
+					.filter_map(|&e| e.checked_sub(u32::try_from(self.asked).unwrap_or(u32::MAX)))
+					.collect(),
+			})? {
+			for (q, st) in self.paths[self.asked..].iter().zip(&stats) {
+				self.known.insert(q.clone(), *st);
+			}
+			self.asked += stats.len().max(1);
+		}
+		match self.known.get(path) {
+			Some(st) => Ok(ProbeResult::Stat(*st)),
+			None => ask(p),
+		}
+	}
 }
 
 /// zsh `loadautofn`'s search for the definition of stub `name` with
@@ -3143,13 +3181,13 @@ pub fn find_autoload<E>(
 	current_fpath: bool,
 ) -> Result<FpFound, E> {
 	if dir.first() == Some(&b'/') {
-		let found = getfpfunc(ask, cwd, name, &[BString::from(dir)])?;
+		let found = getfpfunc(ask, cwd, name, &[BString::from(dir)], true)?;
 		if !matches!(found, FpFound::None) || !(current_fpath || attrs.contains(Attrs::ZSH_CUR_FPATH))
 		{
 			return Ok(found);
 		}
 	}
-	getfpfunc(ask, cwd, name, fpath)
+	getfpfunc(ask, cwd, name, fpath, true)
 }
 
 /// zsh `dircache_set`'s directory: `dir` if absolute, else the working

@@ -41,6 +41,8 @@ The params object **is** a single op — the discriminator and its fields live a
 | `items`  | `string[]`                                                                                    | For `append`; or as a flat `init` payload                                                         | Tasks to append, or the full task list for a flat `init`. Op-specific validation requires at least one item; a stray empty array on an unrelated op is schema-valid and ignored. |
 | `reason` | `string`                                                                                      | No                                                                                                | Optional blocker note for `block`; normalized to a single trimmed line.                                                                                                          |
 
+For `init`, an absent or empty phase name becomes `Tasks`; duplicate phase names are rejected after this default applies.
+
 ## Outputs
 
 The tool returns a single-shot `AgentToolResult`:
