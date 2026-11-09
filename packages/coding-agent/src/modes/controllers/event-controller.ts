@@ -58,7 +58,9 @@ import {
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
-import { recoverAskQuestions } from "../../tools/ask";
+import { recoverAskHtml } from "../../tools/ask";
+import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -2132,8 +2134,14 @@ export class EventController {
 	 */
 	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
 		if (toolName === "ask") {
-			const questions = recoverAskQuestions(args)?.map(question => question.question);
-			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
+			const html = recoverAskHtml(args);
+			const form = html === undefined ? undefined : parseHtmlForm(html);
+			const question = form?.fields.find(field => field.name);
+			return {
+				state: "blocked",
+				kind: "question",
+				msg: form && question ? fieldQuestions(form).get(question) : undefined,
+			};
 		}
 		const session = this.ctx.viewSession;
 		const tool = session.getToolByName(toolName);

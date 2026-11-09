@@ -74,16 +74,18 @@ const NEW: PgroupSpec = PgroupSpec::New(JobId(1));
 
 /// `argv` as a fresh job's only stage.
 fn spawn(s: &NativeSpawner, argv: &[BString], lineage: Lineage) -> Box<dyn ExtProc> {
-	spawn_with(s, argv, lineage, NEW, &[])
+	spawn_with(s, argv, lineage, NEW, &[], SigSet::EMPTY)
 }
 
-/// [`spawn`] into `pgroup`, with variables added to its environment.
+/// [`spawn`] into `pgroup`, with variables added to its environment and
+/// the signals `ignored` on entry.
 fn spawn_with(
 	s: &NativeSpawner,
 	argv: &[BString],
 	lineage: Lineage,
 	pgroup: PgroupSpec,
 	vars: &[(&str, &str)],
+	ignored: SigSet,
 ) -> Box<dyn ExtProc> {
 	let root = system_root();
 	let mut pairs = vec![
@@ -107,7 +109,7 @@ fn spawn_with(
 		tag: CmdTag { run: RunId(1), vpid: Vpid(Vpid::BASE), seq: 1 },
 		vpid: Vpid(Vpid::BASE),
 		umask: 0,
-		sigmask_ign: SigSet::EMPTY,
+		sigmask_ign: ignored,
 		rlimits: &[],
 		lineage,
 		redirs: None,
@@ -253,6 +255,7 @@ fn a_stage_joining_an_emptied_owned_job_gets_a_console() {
 		Lineage::default(),
 		PgroupSpec::Join(first.pid()),
 		&[],
+		SigSet::EMPTY,
 	);
 	assert_eq!(wait(&mut next), ExitStatus::Exited(7), "the joining stage has no usable console");
 }
@@ -262,6 +265,9 @@ const PROBE: &str = "sys::spawn::windows::tests::console_probe";
 /// path with `.child` appended.
 const PROBE_OUT: &str = "PI_CONSOLE_PROBE_OUT";
 const PROBE_CHILD: &str = "PI_CONSOLE_PROBE_CHILD";
+/// Makes the probe sleep for [`LONG`] with the default console control
+/// handler (which ends it on `CTRL_BREAK`), recording nothing.
+const PROBE_SLEEP: &str = "PI_CONSOLE_PROBE_SLEEP";
 
 /// This test binary running only [`console_probe`].
 fn probe_argv() -> Vec<BString> {
@@ -335,6 +341,10 @@ impl Seen {
 #[test]
 #[ignore = "entry point of the probes the console tests spawn"]
 fn console_probe() {
+	if std::env::var_os(PROBE_SLEEP).is_some() {
+		thread::sleep(LONG);
+		return;
+	}
 	let out = std::env::var(PROBE_OUT).expect("spawned by a console test");
 	if std::env::var_os(PROBE_CHILD).is_none() {
 		let mut argv = probe_argv().into_iter().map(|a| a.to_string());
@@ -359,7 +369,7 @@ fn detach_externals_and_their_children_share_a_usable_windowless_console() {
 	for (n, lineage) in [Lineage::default(), RELEASED].into_iter().enumerate() {
 		let out = dir.path().join(n.to_string()).to_str().unwrap().to_owned();
 		let s = spawner(Sessions::Detach, LONG);
-		let mut p = spawn_with(&s, &probe_argv(), lineage, NEW, &[(PROBE_OUT, &out)]);
+		let mut p = spawn_with(&s, &probe_argv(), lineage, NEW, &[(PROBE_OUT, &out)], SigSet::EMPTY);
 		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "detached={}", lineage.detached);
 		let (probe, child) = (Seen::read(&out), Seen::read(&format!("{out}.child")));
 		for seen in [&probe, &child] {
@@ -392,6 +402,109 @@ fn int_reaches_an_owned_external_unless_it_inherited_an_ignored_ctrl_c() {
 			wait(&mut p);
 		}
 	}
+}
+
+/// On a standalone shell's (shared) console a command that ignores INT
+/// (an asynchronous one without job control) leads a console process group
+/// of its own, out of the keyboard's Ctrl-C, which INT reaches as
+/// `CTRL_BREAK`. A foreground one stays in the shell's group, where the
+/// keyboard's Ctrl-C reaches it but no event can be aimed at it alone:
+/// INT kills it instead.
+#[test]
+fn shared_console_groups_follow_the_int_disposition() {
+	let s = spawner(Sessions::Inherit, LONG);
+	let sleep = [(PROBE_SLEEP, "1")];
+	let int = SigSet::EMPTY.with(Signal::Int);
+	let mut background = spawn_with(&s, &probe_argv(), Lineage::default(), NEW, &sleep, int);
+	assert_running(&mut background);
+	background.signal(Signal::Int).unwrap();
+	assert_eq!(wait(&mut background), ExitStatus::Signaled(Signal::Int));
+	let mut foreground =
+		spawn_with(&s, &probe_argv(), Lineage::default(), NEW, &sleep, SigSet::EMPTY);
+	assert_running(&mut foreground);
+	foreground.signal(Signal::Int).unwrap();
+	assert_eq!(wait(&mut foreground), ExitStatus::Signaled(Signal::Kill));
+}
+
+/// A process substitution's `/dev/fd/N` is found whole, inside an
+/// argument too (`--file=/dev/fd/6`), never as the start of a longer
+/// number: `/dev/fd/63` is not fd 6's.
+#[test]
+fn fd_paths_are_matched_whole() {
+	use super::fd_path_at;
+	assert_eq!(fd_path_at(b"/dev/fd/6", b"/dev/fd/6"), Some(0));
+	assert_eq!(fd_path_at(b"--file=/dev/fd/6", b"/dev/fd/6"), Some(7));
+	assert_eq!(fd_path_at(b"/dev/fd/63", b"/dev/fd/6"), None);
+	assert_eq!(fd_path_at(b"/dev/fd/63:/dev/fd/6x", b"/dev/fd/6"), Some(11));
+}
+
+/// A process substitution's pipe, opened by path, survives the probing
+/// open many programs make first (`cmd`'s `type` and redirections open
+/// the path once to look at it), which a single-instance pipe answered
+/// with `All pipe instances are busy`. Its reader finds the pipe open and
+/// gets the data after a slow producer, and a writer that exits before the
+/// pump looks again loses nothing.
+#[test]
+fn a_path_opened_pipe_survives_a_probing_open() {
+	use crate::sys::pump::os::named_pipe;
+	let cx = Context::from_waker(Waker::noop());
+	let deadline = Instant::now() + Duration::from_secs(10);
+	let run = |script: String| {
+		std::process::Command::new(system32("cmd.exe").to_string())
+			.args(["/c", &script])
+			.stdout(std::process::Stdio::piped())
+			.stderr(std::process::Stdio::piped())
+			.spawn()
+			.unwrap()
+	};
+	// The child reads; the producer has nothing for 300 ms, while the pump
+	// keeps the pipe listening.
+	let (mut ours, name) = named_pipe(true).unwrap();
+	let child = run(format!("type {name}"));
+	let slow = Instant::now() + Duration::from_millis(300);
+	while Instant::now() < slow {
+		ours.poll_listening(&cx);
+		thread::sleep(Duration::from_millis(10));
+	}
+	let mut sent = false;
+	while !sent {
+		assert!(Instant::now() < deadline, "no reader took the pipe");
+		match ours.poll_write(&cx, b"hello\n") {
+			Poll::Ready(r) => sent = r.is_ok(),
+			Poll::Pending => thread::sleep(Duration::from_millis(10)),
+		}
+	}
+	while ours.poll_flush(&cx).is_pending() {
+		thread::sleep(Duration::from_millis(10));
+	}
+	drop(ours);
+	let out = child.wait_with_output().unwrap();
+	assert_eq!(
+		String::from_utf8_lossy(&out.stdout),
+		"hello\n",
+		"{}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	// The child writes and exits between two polls of the pump (which polls
+	// from the spawn on): its bytes are read, not taken for a pipe nobody
+	// opened.
+	let (mut ours, name) = named_pipe(false).unwrap();
+	let mut got = Vec::new();
+	let mut buf = [0u8; 64];
+	assert!(ours.poll_read(&cx, &mut buf).is_pending());
+	let out = run(format!("echo hi>{name}")).wait_with_output().unwrap();
+	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+	assert!(!ours.poll_unopened(&cx), "a client wrote: the pipe was opened");
+	loop {
+		assert!(Instant::now() < deadline, "the writer's bytes never came");
+		match ours.poll_read(&cx, &mut buf) {
+			Poll::Ready(Ok(0)) => break,
+			Poll::Ready(Ok(n)) => got.extend_from_slice(&buf[..n]),
+			Poll::Ready(Err(e)) => panic!("{e}"),
+			Poll::Pending => thread::sleep(Duration::from_millis(10)),
+		}
+	}
+	assert_eq!(String::from_utf8_lossy(&got), "hi\r\n");
 }
 
 /// An agent host's external writing to `CONOUT$` (xperf's progress bar)

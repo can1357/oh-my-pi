@@ -59,6 +59,7 @@ pub fn store_conformance<S: StateStore>(
 	set_elem_keeps_indices_sorted_and_assoc_keys_in_order(&mut make());
 	append_changes_keep_attributes_and_order(&mut make());
 	del_elem_removes_one_element(&mut make());
+	insert_elem_places_a_new_key(&mut make());
 	fine_grained_changes_reject_the_wrong_shape(&mut make());
 	deleting_a_scope_drops_its_locals(&mut make());
 	scan_visits_each_table_alone(&mut make());
@@ -527,6 +528,38 @@ fn del_elem_removes_one_element(store: &mut dyn StateStore) {
 	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)), "key a removed");
 }
 
+/// `InsertElem` puts a new key at the position given (zsh's hash order),
+/// later lookups find every key at its new place, and a present key takes
+/// the value where it is.
+fn insert_elem_places_a_new_key(store: &mut dyn StateStore) {
+	let m = VarValue::Assoc(vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"2"))].into());
+	apply(store, Change::Put(var(b"m"), var_rec(Attrs::ASSOC, m)));
+	apply(store, Change::InsertElem(var(b"m"), 1, BStr::new("q"), BStr::new("9")));
+	apply(store, Change::InsertElem(var(b"m"), 0, BStr::new("a"), BStr::new("3")));
+	apply(store, Change::InsertElem(var(b"m"), 99, BStr::new("e"), BStr::new("5")));
+	let want = VarValue::Assoc(
+		vec![
+			(bytes(b"z"), bytes(b"1")),
+			(bytes(b"q"), bytes(b"9")),
+			(bytes(b"a"), bytes(b"3")),
+			(bytes(b"e"), bytes(b"5")),
+		]
+		.into(),
+	);
+	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)));
+	apply(store, Change::DelElem(var(b"m"), Elem::Key(BStr::new("q"))));
+	apply(store, Change::AppendElem(var(b"m"), Elem::Key(BStr::new("a")), BStr::new("+")));
+	let want = VarValue::Assoc(
+		vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"3+")), (bytes(b"e"), bytes(b"5"))]
+			.into(),
+	);
+	assert_eq!(
+		read(store, var(b"m")),
+		Some(var_rec(Attrs::ASSOC, want)),
+		"the index followed the insert"
+	);
+}
+
 /// Set, append and delete deltas on an absent record, a non-variable, a
 /// value of the other kind or an element of the other kind fail with
 /// [`StoreError::Shape`] of the key's table and change nothing.
@@ -574,6 +607,7 @@ fn fine_grained_changes_reject_the_wrong_shape(store: &mut dyn StateStore) {
 			| Change::AppendScalar(key, _)
 			| Change::SetElem(key, ..)
 			| Change::AppendElem(key, ..)
+			| Change::InsertElem(key, ..)
 			| Change::DelElem(key, _) => key.table(),
 		};
 		let res = store.apply(change);
