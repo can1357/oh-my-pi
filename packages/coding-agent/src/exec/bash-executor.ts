@@ -15,7 +15,7 @@ import {
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
@@ -27,6 +27,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
+import { isThenable } from "../utils/ipc";
 import { quotePosixArgv } from "../utils/shell-quote";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -298,6 +299,10 @@ const QUARANTINE_CLEANUP_TIMEOUT_MS = 30_000;
 // intact and the next call must still see them. This is the line between "the
 // run failed" and "the session is unusable".
 const OUTPUT_DELIVERY_FAILURE = "Command output was not all delivered";
+// Matches pi-natives' FORWARD_STALL_TIMEOUT (crates/pi-natives/src/shell.rs).
+// Check elapsed time as well as promises: JS timers cannot run while a
+// synchronous callback blocks, but the native pump's deadline still can.
+const OUTPUT_CALLBACK_STALL_MS = 30_000;
 // How long a run whose consumer has ALREADY failed may still settle before the
 // executor reports its interruption. The engine fails such a run as soon as it
 // unwinds, so this only bounds a wedged one; a run with no observed loss is
@@ -311,15 +316,15 @@ function isOutputDeliveryFailure(err: unknown): boolean {
 }
 
 /**
- * The engine's delivery failure for a run whose output callback has already
- * thrown and which a cancel or a timeout then interrupted, waiting at most
+ * The engine's delivery failure for a run whose output delivery has already
+ * failed or stalled and which a cancel or a timeout then interrupted, waiting at most
  * {@link OUTPUT_LOSS_SETTLE_MS} for the engine to raise it. One owner decides
  * a run's outcome: output the consumer lost outranks a cancel that arrived
  * after it. When the engine is too slow to say so, the consumer's own failure
  * is the evidence and this reports it in the same terms. The rejection keeps a
  * handler here; its real consumer is the quarantine record.
  */
-async function lostOutputAfterInterrupt(runPromise: Promise<ShellRunResult>, consumerFailure: unknown): Promise<Error> {
+async function lostOutputAfterInterrupt(runPromise: Promise<ShellRunResult>, consumerFailure: Error): Promise<Error> {
 	const { promise: deadline, resolve } = Promise.withResolvers<void>();
 	const timer = setTimeout(resolve, OUTPUT_LOSS_SETTLE_MS);
 	timer.unref?.();
@@ -332,8 +337,7 @@ async function lostOutputAfterInterrupt(runPromise: Promise<ShellRunResult>, con
 			deadline.then(() => undefined),
 		]);
 		if (fromEngine) return fromEngine;
-		const reason = consumerFailure instanceof Error ? consumerFailure.message : String(consumerFailure);
-		return new Error(`${OUTPUT_DELIVERY_FAILURE}: the output callback failed: ${reason}`);
+		return consumerFailure;
 	} finally {
 		clearTimeout(timer);
 	}
@@ -708,12 +712,52 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const graphics = new TerminalGraphicsDecoder();
 	const onChunk = usePty ? undefined : options?.onChunk;
 	const onPreview = usePty ? undefined : options?.onPreview;
+	// A recorded failure is independent of the value a consumer throws or
+	// rejects with. The same evidence owns synchronous, asynchronous and stalled
+	// deliveries, including a stall native observed while JS could not run.
+	let consumerFailure: Error | undefined;
+	let pendingDeliveries: Map<Promise<void>, number> | undefined;
+	let deliveryObservation: AbortController | undefined;
+	const recordConsumerFailure = (cause: unknown): Error =>
+		(consumerFailure ??= new Error(`${OUTPUT_DELIVERY_FAILURE}: the output callback failed`, { cause }));
+	const stalledDelivery = `${OUTPUT_DELIVERY_FAILURE}: the output callback did not return for ${OUTPUT_CALLBACK_STALL_MS / 1000} s`;
+	const observeElapsed = (startedAt: number) => {
+		if (performance.now() - startedAt >= OUTPUT_CALLBACK_STALL_MS) {
+			recordConsumerFailure(new Error(stalledDelivery));
+		}
+	};
+	const observeDelivery = (callback: (text: string) => void, text: string): void => {
+		const startedAt = performance.now();
+		try {
+			const result = callback(text);
+			if (isThenable(result)) {
+				const pending = withTimeout(
+					Promise.resolve(result),
+					Math.max(0, OUTPUT_CALLBACK_STALL_MS - (performance.now() - startedAt)),
+					stalledDelivery,
+					(deliveryObservation ??= new AbortController()).signal,
+				)
+					.then(
+						() => observeElapsed(startedAt),
+						(err: unknown) => {
+							if (!deliveryObservation?.signal.aborted) recordConsumerFailure(err);
+						},
+					)
+					.finally(() => pendingDeliveries?.delete(pending));
+				(pendingDeliveries ??= new Map()).set(pending, startedAt);
+			}
+		} catch (err) {
+			throw recordConsumerFailure(err);
+		} finally {
+			observeElapsed(startedAt);
+		}
+	};
 	const sink: OutputSink = new OutputSink({
 		onChunk:
 			onChunk || onPreview
 				? chunk => {
-						onChunk?.(chunk);
-						onPreview?.(sink.preview());
+						if (onChunk) observeDelivery(onChunk, chunk);
+						if (onPreview) observeDelivery(onPreview, sink.preview());
 					}
 				: undefined,
 		artifactPath: options?.artifactPath,
@@ -724,24 +768,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		chunkThrottleMs: onChunk || onPreview ? (options?.chunkThrottleMs ?? 50) : 0,
 	});
 
-	// sink.push() is synchronous — buffer management, counters, and onChunk
-	// all run inline. File writes (artifact path) are handled asynchronously
-	// inside the sink. No promise chain needed.
 	let acceptingChunks = true;
 	let graphicsFinished = false;
 	let decodedImages: ImageContent[] = [];
-	// The consumer's own failure, kept because it is this side's evidence that
-	// the run's output was lost: the engine fails such a run, and an
-	// interruption that lands afterwards must not report it as a cancellation.
-	let consumerFailure: unknown;
 	const enqueueChunk = (chunk: string) => {
 		if (!acceptingChunks) return;
+		if (consumerFailure) throw consumerFailure;
 		try {
 			const clean = graphics.push(chunk);
 			if (clean) sink.push(clean);
 		} catch (err) {
-			consumerFailure ??= err;
-			throw err;
+			throw recordConsumerFailure(err);
 		}
 	};
 	const dump = async (notice?: string): Promise<OutputSummary & { images?: ImageContent[] }> => {
@@ -751,8 +788,15 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			if (tail) sink.push(tail);
 			decodedImages = await graphics.images();
 		}
+		const summary = await sink.dump(notice);
+		// Successful completion includes asynchronous consumers. Interrupted runs
+		// with no observed loss never wait for delivery or native cleanup.
+		if (notice === undefined) {
+			if (pendingDeliveries?.size) await Promise.all(pendingDeliveries.keys());
+			if (consumerFailure) throw consumerFailure;
+		}
 		return {
-			...(await sink.dump(notice)),
+			...summary,
 			...(decodedImages.length > 0 ? { images: decodedImages } : {}),
 		};
 	};
@@ -915,7 +959,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			// interruption instead would hide it. A run with no lost output is
 			// not waited for, so a stalled native cleanup still returns at once.
 			// The shell was torn down here either way, so the session stays reset.
-			if (consumerFailure !== undefined) {
+			if (pendingDeliveries) {
+				for (const startedAt of pendingDeliveries.values()) observeElapsed(startedAt);
+			}
+			if (consumerFailure) {
 				resetSession = true;
 				throw await lostOutputAfterInterrupt(runPromise, consumerFailure);
 			}
@@ -1025,6 +1072,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		throw err;
 	} finally {
 		settleTrace();
+		deliveryObservation?.abort();
 		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);

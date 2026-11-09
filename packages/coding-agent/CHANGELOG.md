@@ -6,6 +6,7 @@
 
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.
+- Bash commands report failed or stalled output delivery instead of hiding it behind a later cancellation, and keep session state after a delivery failure ([#17858](https://github.com/can1357/oh-my-pi/pull/17858)).
 
 ## [18.17.0] - 2026-11-06
 
