@@ -217,6 +217,9 @@ export interface RequestUploadProgress {
  * naming how far the request body got. While part of the body is still queued
  * in the process, it is "uploading"; once the socket has taken all of it, it was
  * "written to the socket", which does not say the server received it.
+ * The message is the complete user-facing sentence, so providers that surface
+ * a transport error's own text and the Anthropic client's `Connection error.`
+ * render it the same way.
  */
 export class ConnectionLostBeforeResponseError extends Error {
 	constructor(cause: unknown, { bodyBytes, bodySent, elapsedMs }: RequestUploadProgress) {
@@ -231,7 +234,7 @@ export class ConnectionLostBeforeResponseError extends Error {
 				: bodySent
 					? `${after}, after the ${formatBytes(bodyBytes)} request body was written to the socket, before any response${code}`
 					: `${after} while uploading the ${formatBytes(bodyBytes)} request body; no response received${code}`;
-		super(progress, { cause });
+		super(`Connection error: ${progress}.`, { cause });
 		this.name = "ConnectionLostBeforeResponseError";
 	}
 }
@@ -241,7 +244,7 @@ export class AnthropicConnectionError extends Error {
 	constructor(cause: unknown, requestUrl?: string) {
 		super(
 			cause instanceof ConnectionLostBeforeResponseError
-				? `Connection error: ${cause.message}.`
+				? cause.message
 				: (networkFailureMessage(cause, requestUrl) ?? "Connection error."),
 			{ cause },
 		);
