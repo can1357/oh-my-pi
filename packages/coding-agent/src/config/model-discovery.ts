@@ -7,6 +7,7 @@
  */
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
+import { buildPiNativeAttributionHeaders, piNativeEndpoint } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -16,6 +17,8 @@ import {
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
+import { getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
@@ -25,12 +28,14 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
+	apiServesKind,
 	type KindApiKind,
+	MODEL_KINDS,
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
-	type ThinkingConfig,
 	runnerApiKind,
+	type ThinkingConfig,
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
@@ -186,6 +191,19 @@ export function discoveryDefaultMaxTokens(api: Api | undefined): number {
 	return api === "anthropic-messages" ? DISCOVERY_DEFAULT_MAX_TOKENS_ANTHROPIC : DISCOVERY_DEFAULT_MAX_TOKENS;
 }
 
+/**
+ * Internal discovery type for a provider configured with `transport: pi-native`
+ * and no `discovery` block: the roster is the gateway's own
+ * `GET {baseUrl}/v1/models`. The models.yml schema does not accept it; the
+ * registry derives it from the transport.
+ */
+export interface PiNativeGatewayDiscovery {
+	type: "pi-native-gateway";
+	timeoutMs?: undefined;
+	injectV1?: undefined;
+	advertisedReasoning?: undefined;
+}
+
 export interface DiscoveryProviderConfig {
 	provider: string;
 	api: Api;
@@ -193,7 +211,7 @@ export interface DiscoveryProviderConfig {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
-	discovery: ProviderDiscovery;
+	discovery: ProviderDiscovery | PiNativeGatewayDiscovery;
 	optional?: boolean;
 	/**
 	 * Extra roots probed in order when `baseUrl` yields no reachable server.
@@ -465,6 +483,8 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "pi-native-gateway":
+			return discoverPiNativeGatewayModels(providerConfig, ctx);
 		case "apple-foundation-models":
 			return discoverAppleFoundationModels(providerConfig);
 	}
@@ -1355,6 +1375,139 @@ export async function discoverOpenAIModelsList(
 	return providerConfig.discovery.type === "litellm"
 		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
 		: specs.map(spec => buildModel(spec));
+}
+
+/** Whether `headers` already carry an `Authorization` header, whatever its case. */
+export function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+	return headers !== undefined && Object.keys(headers).some(name => name.toLowerCase() === "authorization");
+}
+
+/**
+ * Discover the roster of a provider configured with `transport: pi-native` from
+ * the gateway it streams through: `GET {baseUrl}/v1/models`, authenticated like
+ * `POST /v1/pi/stream` (provider `headers`, the attribution headers, and
+ * `Authorization: Bearer <apiKey>` unless the headers set `Authorization`).
+ *
+ * Rows are provider-qualified (`<provider>/<id>`; the stream sends the same
+ * form back as `modelId`), so only this provider's rows count and the prefix is
+ * stripped for the local id. A row's `kind` (absent = chat), `api`,
+ * `display_name`, `context_length`, `max_output_tokens`, `input_modalities` and
+ * `supports_tools` carry over; whatever the row omits comes from the bundled
+ * model of the same provider and id, when there is one. Rows hold neither
+ * pricing nor reasoning metadata, so those come from the bundled model or the
+ * catalog rules.
+ *
+ * A reply that is not a model list throws, so the caller keeps its last usable
+ * snapshot instead of treating the roster as emptied.
+ */
+export async function discoverPiNativeGatewayModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const baseUrl = providerConfig.baseUrl;
+	if (!baseUrl) {
+		throw new Error(`pi-native provider ${providerConfig.provider} has no baseUrl to discover models from`);
+	}
+	const modelsUrl = piNativeEndpoint(baseUrl, "/v1/models");
+	const headers: Record<string, string> = {
+		Accept: "application/json",
+		...buildPiNativeAttributionHeaders(),
+		...providerConfig.headers,
+	};
+	const timeoutMs = REMOTE_DISCOVERY_TIMEOUT_MS;
+	const attempt = (requestHeaders: Record<string, string>) =>
+		withTimeoutSignal(timeoutMs, async signal => {
+			const res = await ctx.fetch(modelsUrl, { headers: requestHeaders, signal });
+			if (!res.ok) throw new DiscoveryHttpError(res.status, modelsUrl);
+			return (await res.json()) as unknown;
+		});
+	const apiKey = hasAuthorizationHeader(headers)
+		? undefined
+		: await ctx.getBearerApiKeyResolver(providerConfig.provider);
+	const payload = apiKey
+		? await withAuth(apiKey, key => attempt({ ...headers, Authorization: `Bearer ${key}` }))
+		: await attempt(headers);
+	const rows = isRecord(payload) ? payload.data : undefined;
+	if (!Array.isArray(rows)) {
+		throw new Error(`${modelsUrl} did not return a model list`);
+	}
+
+	const prefix = `${providerConfig.provider}/`;
+	const references = getBundledModelReferenceIndex();
+	const seen = new Set<string>();
+	const models: Model<Api>[] = [];
+	for (const row of rows) {
+		if (!isRecord(row) || typeof row.id !== "string" || !row.id.startsWith(prefix)) continue;
+		const id = row.id.slice(prefix.length);
+		if (!id || seen.has(id)) continue;
+		let kind: ModelKind = "chat";
+		if (row.kind !== undefined) {
+			// A kind this build does not know cannot be mapped to a runner: skip the row.
+			if (!(MODEL_KINDS as readonly unknown[]).includes(row.kind)) continue;
+			kind = row.kind as ModelKind;
+		}
+		const exact = isGeneratedProvider(providerConfig.provider)
+			? (getBundledModel(providerConfig.provider, id) as Model<Api> | undefined)
+			: undefined;
+		const api: Api = typeof row.api === "string" && row.api.length > 0 ? row.api : (exact?.api ?? providerConfig.api);
+		if (!apiServesKind(api, kind)) continue;
+		seen.add(id);
+
+		const reference = exact ?? resolveModelReference(id, references);
+		const name = typeof row.display_name === "string" ? row.display_name.trim() : "";
+		const input = extractOpenAIModelsListInputCapabilities(row) ?? reference?.input ?? ["text"];
+		const reportedContextWindow = toPositiveNumberOrUndefined(row.context_length);
+		const reportedMaxTokens = toTokenLimitOrUndefined(row.max_output_tokens);
+		const chatLike = kind === "chat" || kind === "tiny";
+		// The bundled row of this provider and id describes the same upstream
+		// model; it stays the base only while it speaks the api the gateway
+		// reports, otherwise its api-specific thinking and compat would mislead.
+		const bundled = exact !== undefined && exact.api === api ? exact : undefined;
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const base: ModelSpec<Api> = bundled
+			? { ...toModelSpec(bundled), headers: undefined, resolveHeaders: undefined }
+			: ({
+					id,
+					name: name || reference?.name || id,
+					api,
+					provider: providerConfig.provider,
+					// Dedicated runners answer no chat: no reasoning, tools or pricing.
+					reasoning: chatLike && reference?.reasoning === true,
+					thinking: chatLike ? inheritReferenceThinking(undefined, reference, providerConfig.provider) : undefined,
+					input,
+					...(chatLike ? {} : { supportsTools: false }),
+					cost: zeroCost,
+				} as ModelSpec<Api>);
+		// Embeddings and judges cap their input by context; image jobs carry no
+		// token window and no runner produces output tokens.
+		const contextWindow = chatLike
+			? (reportedContextWindow ??
+				bundled?.contextWindow ??
+				reference?.contextWindow ??
+				DISCOVERY_DEFAULT_CONTEXT_WINDOW)
+			: (reportedContextWindow ?? bundled?.contextWindow ?? null);
+		const maxTokens = chatLike
+			? Math.min(
+					reportedMaxTokens ?? bundled?.maxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+					contextWindow ?? Number.POSITIVE_INFINITY,
+				)
+			: (bundled?.maxTokens ?? null);
+		const supportsTools = row.supports_tools === false ? false : base.supportsTools;
+		models.push(
+			buildModel({
+				...base,
+				name: name || base.name,
+				// An absent kind is chat: the gateway's row, not the bundled one, decides.
+				kind: kind === "chat" ? undefined : kind,
+				baseUrl,
+				input,
+				contextWindow,
+				maxTokens,
+				...(supportsTools !== undefined ? { supportsTools } : {}),
+			} as ModelSpec<Api>),
+		);
+	}
+	return models;
 }
 
 export async function discoverLiteLLMModels(

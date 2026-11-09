@@ -82,6 +82,7 @@ import {
 	ensureLlamaCppV1BaseUrl,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
+	hasAuthorizationHeader,
 	isDiscoveryAuthRejection,
 	LLAMA_CPP_DEFAULT_BASE_URLS,
 	normalizeBareDiscoveryBaseUrl,
@@ -205,6 +206,8 @@ interface CustomModelsResult {
 interface ConfiguredModelDiscoveryResult {
 	models: Model<Api>[];
 	replaceRuntimeModels: boolean;
+	/** The roster is the provider's whole chat roster: bundled chat rows it does not list are dropped. */
+	authoritative?: boolean;
 }
 
 /**
@@ -1475,7 +1478,7 @@ export class ModelRegistry {
 			this.#loadBuiltInModels(this.#providerOverrides, providerFilter),
 		);
 		if (this.#cachedAuthoritativeProviders.size > 0) {
-			builtInModels = dropProviderModels(builtInModels, this.#cachedAuthoritativeProviders, { kind: "chat" });
+			builtInModels = this.#dropSupersededModels(builtInModels, this.#cachedAuthoritativeProviders);
 		}
 		return this.#mergeResolvedModels(
 			this.#mergeResolvedModels(builtInModels, cachedStandardModels),
@@ -1483,11 +1486,31 @@ export class ModelRegistry {
 		);
 	}
 
+	/**
+	 * Drop what an authoritative discovery supersedes. A provider's endpoint
+	 * roster replaces its bundled chat rows; a pi-native gateway's roster is
+	 * the provider's whole catalog (it lists its image, speech and other
+	 * rows too), so bundled rows of every kind go.
+	 */
+	#dropSupersededModels(models: Model<Api>[], authoritative: ReadonlySet<string>): Model<Api>[] {
+		if (authoritative.size === 0) return models;
+		const gatewayRosters = new Set<string>();
+		for (const { provider, discovery } of this.#discoverableProviders) {
+			if (discovery.type === "pi-native-gateway" && authoritative.has(provider)) gatewayRosters.add(provider);
+		}
+		if (gatewayRosters.size === 0) return dropProviderModels(models, authoritative, { kind: "chat" });
+		const chatRosters = new Set([...authoritative].filter(provider => !gatewayRosters.has(provider)));
+		const withoutGatewayRosters = dropProviderModels(models, gatewayRosters);
+		return chatRosters.size === 0
+			? withoutGatewayRosters
+			: dropProviderModels(withoutGatewayRosters, chatRosters, { kind: "chat" });
+	}
+
 	/** The `#baseModels` stage: cached base models plus runtime discoveries. */
 	#composeBaseModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
 		let resolvedDefaults = this.#composeCachedBaseModels(providerFilter);
 		if (this.#runtimeAuthoritativeProviders.size > 0) {
-			resolvedDefaults = dropProviderModels(resolvedDefaults, this.#runtimeAuthoritativeProviders, { kind: "chat" });
+			resolvedDefaults = this.#dropSupersededModels(resolvedDefaults, this.#runtimeAuthoritativeProviders);
 		}
 		return this.#mergeResolvedModels(
 			resolvedDefaults,
@@ -1870,6 +1893,11 @@ export class ModelRegistry {
 				),
 			);
 			cachedModels.push(...models);
+			// A cached gateway snapshot already replaces the bundled chat roster at
+			// startup, so a stale bundled id never shows before the refresh lands.
+			if (providerConfig.discovery.type === "pi-native-gateway" && models.length > 0) {
+				this.#cachedAuthoritativeProviders.add(providerConfig.provider);
+			}
 			this.#providerDiscoveryStates.set(providerConfig.provider, {
 				provider: providerConfig.provider,
 				status: "cached",
@@ -2147,6 +2175,22 @@ export class ModelRegistry {
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
+			} else if (providerConfig.transport === "pi-native" && providerConfig.baseUrl) {
+				// Every model of a pi-native provider streams through the gateway at
+				// `baseUrl`, so that gateway's `/v1/models` is the roster. An explicit
+				// `discovery` block keeps its own protocol (and its own host policy);
+				// the gateway roster applies only when there is none.
+				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
+				discoverableProviders.push({
+					provider: providerName,
+					api: (providerConfig.api ?? getBundledModels(providerName)[0]?.api ?? "openai-completions") as Api,
+					baseUrl: providerConfig.baseUrl,
+					headers: providerConfig.headers,
+					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					remoteCompaction: providerConfig.remoteCompaction,
+					discovery: { type: "pi-native-gateway" },
+					optional: false,
+				});
 			}
 
 			// Store API key for fallback resolver AND register as config override
@@ -2253,6 +2297,9 @@ export class ModelRegistry {
 		for (const provider of builtInDiscovery.authoritativeProviders) {
 			authoritativeProviders.add(provider);
 		}
+		for (const result of currentConfiguredDiscoveryResults) {
+			if (result.authoritative) authoritativeProviders.add(result.provider.provider);
+		}
 
 		const replacedProviderSet = new Set(replacedConfiguredProviders);
 		for (const provider of builtInDiscovery.replaceRuntimeProviders) {
@@ -2289,7 +2336,7 @@ export class ModelRegistry {
 			);
 		}
 		if (authoritativeProviders.size > 0) {
-			baseModels = dropProviderModels(baseModels, authoritativeProviders, { kind: "chat" });
+			baseModels = this.#dropSupersededModels(baseModels, authoritativeProviders);
 		}
 		this.#baseModels = this.#mergeResolvedModels(baseModels, discoveredModels);
 		this.#unprojectedModels = this.#projectBaseModels(this.#baseModels);
@@ -2384,6 +2431,11 @@ export class ModelRegistry {
 			// `offline` strategy nothing else would refetch the other mode's rows.
 			return `${providerConfig.provider}:proxy-v2-${this.advertisedReasoningCacheSuffix(providerConfig)}`;
 		}
+		if (providerConfig.discovery.type === "pi-native-gateway") {
+			// A gateway's roster belongs to that gateway: a snapshot read from one
+			// `baseUrl` must never answer for another, even when the provider id stays.
+			return `${providerConfig.provider}:pi-native-gateway-v1-${Bun.hash(providerConfig.baseUrl ?? "").toString(36)}`;
+		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
 			// pagination. rich-v6 moved decisions-mode groups to the Decisions
@@ -2412,7 +2464,12 @@ export class ModelRegistry {
 			strategy === "online-if-uncached" && (cacheOlderThanConfig || bypassFreshCache) ? "online" : strategy;
 		const willFetch =
 			effectiveStrategy === "online" || (effectiveStrategy === "online-if-uncached" && cached === null);
-		const requiresAuth = !this.#keylessProviders.has(providerConfig.provider);
+		// A pi-native gateway can authenticate through a provider `Authorization`
+		// header alone, exactly as its stream request does.
+		const piNativeGateway = providerConfig.discovery.type === "pi-native-gateway";
+		const requiresAuth =
+			!this.#keylessProviders.has(providerConfig.provider) &&
+			!(piNativeGateway && hasAuthorizationHeader(providerConfig.headers));
 		if (requiresAuth && willFetch) {
 			const apiKey = await this.#peekApiKeyForProvider(providerConfig.provider);
 			if (!isAuthenticated(apiKey)) {
@@ -2425,9 +2482,11 @@ export class ModelRegistry {
 					models: cached?.models.map(model => model.id) ?? [],
 				});
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				const cachedModels = cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [];
 				return {
-					models: cached ? this.#normalizeDiscoverableModels(providerConfig, cached.models) : [],
+					models: cachedModels,
 					replaceRuntimeModels: false,
+					authoritative: piNativeGateway && cachedModels.length > 0,
 				};
 			}
 		}
@@ -2507,6 +2566,11 @@ export class ModelRegistry {
 				),
 			),
 			replaceRuntimeModels: result.source === "provider",
+			// A gateway snapshot, fresh or the last usable one after a failed
+			// refresh, is the whole chat roster; with nothing to show (no cache and
+			// no answer, or a gateway that lists none of this provider) the bundled
+			// roster stays rather than leaving the provider empty.
+			authoritative: piNativeGateway && result.models.length > 0,
 		};
 	}
 

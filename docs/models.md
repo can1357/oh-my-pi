@@ -311,7 +311,7 @@ Loading models.yml checks a `modelOverrides` `kind` only against an api the file
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, `proxy`, `litellm`, or `apple-foundation-models`. Apple's transport is registered implicitly on supported Macs; `apple-foundation-models` is not an allowed `api` value in this YAML schema.
 - `discovery.injectV1`: optional boolean, default `true`, for `openai-models-list`. Set `false` to fetch the model list from `{baseUrl}/models` without injecting `/v1` — for gateways that root their OpenAI-compatible surface at a versioned path (e.g. `https://api.opper.ai/v3/compat`) where the forced `/v1/models` returns a different, smaller model list. Query strings in `baseUrl` are ignored, matching the default mode.
 - `discovery.advertisedReasoning`: optional boolean, default `true`, for `openai-models-list`, `lm-studio`, and `proxy`. Discovery reads what a `/v1/models` row states about its own reasoning surface (`supported_reasoning_levels` / `default_reasoning_level` / `reasoning`, top-level or under `metadata`) and lets it outrank the bundled-reference guess, so a gateway that dispatches with its own catalog offers exactly the tiers its route accepts. A row that lists `none` gets `reasoningDisableMode: none-effort`, so a thinking-off request sends the off-switch instead of being clamped to the lowest tier. An advertised ladder also pins `defaultLevel` inside itself, so catalog policy cannot inject a tier the row omits. A row reporting `reasoning: false` overrides a reasoning-enabled reference for that id. Set the flag to `false` when an endpoint advertises levels its route rejects: discovery then builds each model's thinking surface from the bundled reference alone. A row that says nothing about reasoning is unaffected either way. Explicit `modelOverrides.<id>.thinking` and `compat.supportsReasoningEffort` still win over both. `litellm` does not accept the flag: its authoritative reasoning metadata comes from `/model_group/info`, so the setting would only apply to its `/v1/models` fallback.
-- `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
+- `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer, and the provider's `headers` are sent too. Without a `discovery` block, the provider's model roster comes from that gateway too; see [pi-native gateway discovery](#pi-native-gateway-discovery).
 - `imageInputDecoder`: `stb` only. Set this on a custom model or `modelOverrides` entry when the serving backend uses an STB-compatible image decoder that cannot accept WebP; OMP converts attached and historical WebP images before provider dispatch.
 - `imageCountBudget`: positive integer. Set this on a custom model or `modelOverrides` entry to state how many images one request to its host may carry. It replaces the catalog budget, which is 5 for a provider no catalog rule names. A gateway in front of a vendor with a higher limit needs it: once a session holds more images than the budget, OMP drops the oldest ones, which changes the cached prompt prefix.
 - `tokenizer`: opt into a specific embedded local tokenizer when a proxy's model id is ambiguous or noncanonical. Allowed values: `claude-v3`, `claude-v47`, `claude-v5`, `claude-v5-sonnet`, `qwen3`, `deepseek-v3`, `kimi-k2`, `glm5`, `cl100k` (OpenAI GPT-3.5 and GPT-4) and `o200k` (OpenAI GPT-5 and later). Omit it to use catalog identity policy; models without one count in o200k.
@@ -675,6 +675,26 @@ providers:
       discovery:
          type: proxy
 ```
+
+### pi-native gateway discovery
+
+A provider with `transport: pi-native` and no `discovery` block takes its roster from the gateway it streams through. The client does not use the provider's own discovery, which for an OAuth provider such as `openai-codex` needs a provider login the client no longer holds and otherwise falls back to a bundled roster that can name models the gateway does not serve.
+
+```yaml
+providers:
+   openai-codex:
+      transport: pi-native
+      baseUrl: https://gateway.example
+      apiKey: "!cat ~/.config/omp-gateway/token"
+```
+
+- Discovery calls `GET {baseUrl}/v1/models` (10 s timeout) with the same authentication as the stream: `Authorization: Bearer <apiKey>` unless the provider `headers` set `Authorization`, the provider `headers` (`!command` values resolve as usual), and the `x-omp-*` attribution headers.
+- Gateway ids are provider-qualified (`openai-codex/gpt-6.1-terra`). Only rows whose id starts with `<provider>/` count, and the prefix is stripped for the local id, because the stream sends `<provider>/<id>` back as `modelId`. Rows of other providers and unqualified ids are ignored.
+- A row's `kind` (`judge`, `image`, `tts`, `stt`, `embedding`, `rerank`, `video`; absent means chat), `api`, `display_name`, `context_length`, `max_output_tokens`, `input_modalities` and `supports_tools` carry over. What a row omits comes from the bundled model of the same provider and id when there is one, and from catalog rules otherwise; rows carry no pricing or reasoning metadata.
+- The result is authoritative for the provider: bundled rows of every kind that the gateway does not list disappear, so an id the gateway answers `Unknown model` for is no longer offered. Explicit `models` entries and `modelOverrides` from `models.yml` still merge on top.
+- Snapshots are cached with the other configured-discovery caches (24 h TTL, in `models.db`, keyed by provider and a hash of `baseUrl`), and a snapshot read at startup already replaces the bundled roster. When the gateway is unreachable, answers an error, or answers something that is not a model list, OMP keeps the last usable snapshot and marks the provider `cached`. Without a snapshot, or when the gateway lists none of the provider's models, the bundled roster stays.
+- A provider with an explicit `discovery` block keeps that block: it runs against `baseUrl` with its own protocol and does not strip the `<provider>/` prefix, so `discovery.type: openai-models-list` against an `omp auth-gateway` yields `<provider>/<provider>/<id>` ids the gateway rejects. Omit `discovery` for a gateway.
+- Providers without `transport: pi-native` are unchanged.
 
 ### Extension provider registration
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a `transport: pi-native` provider listing models its gateway does not serve (and missing ones it does): without a `discovery` block, its roster now comes from the gateway's `GET /v1/models` (provider-qualified ids, `kind` and capability fields carried over), replaces the bundled roster, and keeps the last snapshot when the gateway is unreachable
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

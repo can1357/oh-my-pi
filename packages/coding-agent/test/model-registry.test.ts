@@ -652,12 +652,16 @@ describe("ModelRegistry", () => {
 			const fetchMock: FetchImpl = async input => {
 				const url = input instanceof Request ? input.url : String(input);
 				requestedUrls.push(url);
-				if (url === "http://localhost:4000/models") {
+				if (url === "http://localhost:4000/v1/models") {
 					return new Response(
 						JSON.stringify({
 							data: [
-								{ id: "openai/gpt-5.4", name: "GPT-5.4", supported_parameters: ["tools"] },
-								{ id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6", supported_parameters: ["tools"] },
+								{ id: "openrouter/openai/gpt-5.4", display_name: "GPT-5.4", api: "openai-completions" },
+								{
+									id: "openrouter/anthropic/claude-opus-4.6",
+									display_name: "Claude Opus 4.6",
+									api: "openai-completions",
+								},
 							],
 						}),
 						{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -675,7 +679,7 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toContain("http://localhost:4000/models");
+			expect(requestedUrls).toContain("http://localhost:4000/v1/models");
 
 			// Post-refresh: every openrouter model — bundled or freshly
 			// discovered — must still route through the pi-native transport.
