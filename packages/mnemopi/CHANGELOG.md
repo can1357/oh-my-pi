@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed local embedding rebuilds repeatedly timing out on large memory backlogs by splitting local requests into smaller batches ([#18559](https://github.com/can1357/oh-my-pi/issues/18559)).
+
 ## [18.18.2] - 2026-11-08
 
 ### Fixed
