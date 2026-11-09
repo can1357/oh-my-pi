@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { type SettingsCallbacks, SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { cfgStatusLineLeftSegments, cfgStatusLinePreset } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
@@ -51,7 +52,7 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 	};
 }
 
-function createSelector(): SettingsSelectorComponent {
+function createSelector(callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
 	return new SettingsSelectorComponent(
 		{
 			availableThinkingLevels: [],
@@ -64,6 +65,7 @@ function createSelector(): SettingsSelectorComponent {
 		{
 			onChange: () => {},
 			onCancel: () => {},
+			...callbacks,
 		},
 	);
 }
@@ -119,6 +121,93 @@ function nativeErrorText(node: TspNode): string {
 	for (const child of node.c ?? []) text.push(nativeErrorText(child));
 	return text.join("\n");
 }
+
+/** Every span in the native tree, whatever its style. */
+function nativeText(node: TspNode): string {
+	const text = node.k === "text" ? (node.p?.spans ?? []).map(span => span.t) : [];
+	for (const child of node.c ?? []) text.push(nativeText(child));
+	return text.join("\n");
+}
+
+/** Describe the selector for a TSP terminal that draws the settings page natively. */
+function nativeSnapshot(component: SettingsSelectorComponent): TspNode {
+	const document = new TspDocument("settings");
+	const ops = new Reconciler("settings").reconcile(
+		{ main: [], dock: [], layer: [component] },
+		{ cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => true },
+	);
+	document.applyFrame({ sf: "settings", s: 1, ops });
+	return document.snapshot();
+}
+
+describe("custom status-line segment editors", () => {
+	function openAppearance(callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
+		const component = createSelector(callbacks);
+		component.handleNativeEvent({ type: "action", key: "", act: "page", value: "appearance", mods: [] });
+		return component;
+	}
+
+	function openSegmentList(path: string, callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
+		const component = openAppearance(callbacks);
+		component.handleNativeEvent({ type: "activate", key: "", item: path });
+		return component;
+	}
+
+	it("offers both segment lists as ordered lists once the Custom preset is active", () => {
+		expect(Bun.stripANSI(openAppearance().render(120).join("\n"))).not.toContain("Status Line Left Segments");
+
+		cfgStatusLinePreset.set(settings, "custom");
+		const rendered = Bun.stripANSI(openAppearance().render(120).join("\n"));
+		expect(rendered).toContain("Status Line Left Segments");
+		expect(rendered).toContain("Status Line Right Segments");
+		// Ordered lists render positions, so the current order is visible on the row itself.
+		expect(rendered).toContain("Vim mode → Model → Mode");
+	});
+
+	it("toggles a segment out of the Custom preset's left list", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments");
+		component.handleInput(" ");
+		expect(cfgStatusLineLeftSegments.get(settings)).not.toContain("model");
+		component.handleInput(" ");
+		expect(cfgStatusLineLeftSegments.get(settings)).toContain("model");
+	});
+
+	it("shows the live status line in the editor and refreshes it as segments toggle", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments", {
+			getStatusLinePreview: () => `bar: ${cfgStatusLineLeftSegments.get(settings).join(",")}`,
+			onStatusLinePreview: () => {},
+		});
+		const before = Bun.stripANSI(component.render(120).join("\n"));
+		expect(before).toContain("Preview:");
+		expect(before).toContain("bar: vim,model,mode,path,git,pr");
+
+		component.handleInput(" ");
+		const after = Bun.stripANSI(component.render(120).join("\n"));
+		expect(after).toContain("bar: vim,mode,path,git,pr");
+		expect(after).not.toContain("bar: vim,model,mode,path,git,pr");
+	});
+
+	it("keeps the page-level status preview on a native page while the segment editor is open", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments", { getStatusLinePreview: () => "LIVEBAR" });
+		// A TSP terminal edits the list as the row's chips, so the bar it shows is
+		// the page-level preview — which must survive the editor being open.
+		expect(nativeText(nativeSnapshot(component))).toContain("LIVEBAR");
+	});
+
+	it("previews the saved custom lists, not the preset's baseline defaults", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		cfgStatusLineLeftSegments.set(settings, ["vim", "model"]);
+		const seen: unknown[] = [];
+		const component = openAppearance({ onStatusLinePreview: value => seen.push(value) });
+		component.handleNativeEvent({ type: "activate", key: "", item: "statusLine.preset" });
+		component.handleNativeEvent({ type: "select", key: "", item: "statusLine.preset=custom" });
+		expect(seen.length).toBeGreaterThan(0);
+		for (const value of seen) expect(value).not.toHaveProperty("leftSegments");
+	});
+});
 
 describe("extra context filenames editor", () => {
 	it("saves multiple filenames as an array and lets users disable extras", async () => {

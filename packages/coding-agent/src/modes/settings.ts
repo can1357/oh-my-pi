@@ -9,6 +9,7 @@ import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
 	STATUS_LINE_PRESET_VALUES,
+	STATUS_LINE_SEGMENT_CHOICES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
 } from "@oh-my-pi/pi-tui/status-line/schema";
@@ -284,6 +285,16 @@ export const cfgStatusLineLeftSegments = register({
 	type: "array",
 	default: CUSTOM_STATUS_LINE_DEFAULTS.left,
 	items: { values: STATUS_LINE_SEGMENT_IDS, label: "status line segment" },
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Status Line Left Segments",
+		description:
+			"Segments drawn on the left of the Custom status line, in order; hidden segments reappear on their own when they have something to show",
+		options: STATUS_LINE_SEGMENT_CHOICES,
+		ordered: true,
+		condition: "statusLineCustomPreset",
+	},
 });
 
 export const cfgStatusLineRightSegments = register({
@@ -291,6 +302,16 @@ export const cfgStatusLineRightSegments = register({
 	type: "array",
 	default: CUSTOM_STATUS_LINE_DEFAULTS.right,
 	items: { values: STATUS_LINE_SEGMENT_IDS, label: "status line segment" },
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Status Line Right Segments",
+		description:
+			"Segments drawn on the right of the Custom status line, in order; hidden segments reappear on their own when they have something to show",
+		options: STATUS_LINE_SEGMENT_CHOICES,
+		ordered: true,
+		condition: "statusLineCustomPreset",
+	},
 });
 
 export const cfgStatusLineSegmentOptions = register({

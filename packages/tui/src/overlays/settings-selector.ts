@@ -225,9 +225,31 @@ function createSettingsSelectField(
 }
 
 /**
+ * Renders the real status line as it looks right now, so toggling a segment
+ * shows the result instead of a label describing it. The source is the live
+ * status-line component, which the settings runtime updates on every change.
+ * Only the ANSI frame draws the editor: a TSP terminal edits the list as the
+ * row's chips and keeps the page-level preview, which carries the bar natively.
+ */
+class StatusLineSegmentPreview implements Component {
+	readonly #getPreview: () => string;
+
+	constructor(getPreview: () => string) {
+		this.#getPreview = getPreview;
+	}
+
+	/** A fresh read every frame: the selection changes while this editor is open. */
+	render(): readonly string[] {
+		return this.#getPreview().split("\n");
+	}
+}
+
+/**
  * Submenu for array-of-enum settings: every option is a toggle row. Enter or
  * Space flips membership; ordered lists render 1-based positions and reorder
  * the highlighted member with ←/→. Changes apply live; Esc goes back.
+ * The optional preview sits above the list (FormField's `preview` slot), as it
+ * does for the single-choice fields.
  */
 class MultiSelectSubmenu extends Container {
 	#selectList!: SelectList;
@@ -242,6 +264,7 @@ class MultiSelectSubmenu extends Container {
 	readonly #ordered: boolean;
 	readonly #onApply: (value: string[]) => void;
 	readonly #onClose: () => void;
+	readonly #preview: Component | undefined;
 
 	constructor(
 		title: string,
@@ -251,6 +274,7 @@ class MultiSelectSubmenu extends Container {
 		ordered: boolean,
 		onApply: (value: string[]) => void,
 		onClose: () => void,
+		preview?: Component,
 	) {
 		super();
 		this.#title = title;
@@ -259,9 +283,15 @@ class MultiSelectSubmenu extends Container {
 		this.#ordered = ordered;
 		this.#onApply = onApply;
 		this.#onClose = onClose;
+		this.#preview = preview;
 		// Drop stale ids (renamed/removed providers) so positions stay contiguous.
 		this.#value = initial.filter(id => options.some(option => option.value === id));
 		this.#rebuild();
+	}
+
+	/** True when this editor renders the status line inline (so the page needn't). */
+	get hasPreview(): boolean {
+		return this.#preview !== undefined;
 	}
 
 	#rebuild(): void {
@@ -292,6 +322,7 @@ class MultiSelectSubmenu extends Container {
 			theme: formTheme,
 			label: this.#title,
 			description: this.#description || undefined,
+			...(this.#preview ? { previewLabel: "Preview:", preview: this.#preview } : {}),
 			hint,
 		});
 		this.addChild(this.#field);
@@ -746,7 +777,11 @@ export class SettingsSelectorComponent implements Component {
 
 		const tabLines = this.#tabBar.render(innerWidth);
 		const searching = this.#searchList !== null;
-		const showPreview = !searching && this.#currentTabId === "appearance";
+		// The segment editors carry their own live preview; don't paint a second
+		// copy of the same bar at the bottom of the page.
+		const open = (this.#searchList ?? this.#currentList)?.openSubmenu;
+		const editorHasPreview = open?.component instanceof MultiSelectSubmenu && open.component.hasPreview;
+		const showPreview = !searching && this.#currentTabId === "appearance" && !editorHasPreview;
 		const previewLines = showPreview ? ["", theme.fg("muted", "Preview:"), this.#getStatusPreviewString()] : [];
 
 		// Fixed chrome: top border, tabs, divider, [search row], divider, hint, bottom border.
@@ -1599,26 +1634,23 @@ export class SettingsSelectorComponent implements Component {
 				this.#callbacks.onThemePreview?.(activeThemeBeforePreview);
 			};
 		} else if (def.path === "statusLine.preset") {
-			onPreview = value => {
-				const presetDef = getPreset(
-					value as "default" | "minimal" | "compact" | "full" | "nerd" | "ascii" | "custom",
-				);
-				this.#callbacks.onStatusLinePreview?.({
-					preset: value as StatusLinePreset,
-					leftSegments: presetDef.leftSegments,
-					rightSegments: presetDef.rightSegments,
-					separator: presetDef.separator,
-				});
+			// "custom" doesn't own a segment set: its lists live in the user's
+			// settings. Passing getPreset("custom")'s defaults here would preview
+			// a different bar than the custom preset actually renders.
+			const previewPreset = (value: string): StatusLinePreviewSettings => {
+				const settings: StatusLinePreviewSettings = { preset: value as StatusLinePreset };
+				if (value !== "custom") {
+					const presetDef = getPreset(value as StatusLinePreset);
+					settings.leftSegments = presetDef.leftSegments;
+					settings.rightSegments = presetDef.rightSegments;
+					settings.separator = presetDef.separator;
+				}
+				return settings;
 			};
+			onPreview = value => this.#callbacks.onStatusLinePreview?.(previewPreset(value));
 			onPreviewCancel = () => {
 				const currentPreset = this.#context.settings.get("statusLine.preset") as StatusLinePreset;
-				const presetDef = getPreset(currentPreset);
-				this.#callbacks.onStatusLinePreview?.({
-					preset: currentPreset,
-					leftSegments: presetDef.leftSegments,
-					rightSegments: presetDef.rightSegments,
-					separator: presetDef.separator,
-				});
+				this.#callbacks.onStatusLinePreview?.(previewPreset(currentPreset));
 			};
 		} else if (def.path === "statusLine.separator") {
 			onPreview = value => {
@@ -1735,6 +1767,13 @@ export class SettingsSelectorComponent implements Component {
 		const initial = Array.isArray(current)
 			? current.filter((entry): entry is string => typeof entry === "string")
 			: [];
+		// The two Custom segment lists are the status line itself: show the real
+		// bar while toggling, so changing one is WYSIWYG instead of guesswork.
+		const getPreview = this.#callbacks.getStatusLinePreview;
+		const preview =
+			(def.path === "statusLine.leftSegments" || def.path === "statusLine.rightSegments") && getPreview
+				? new StatusLineSegmentPreview(getPreview)
+				: undefined;
 		return new MultiSelectSubmenu(
 			def.label,
 			def.description,
@@ -1744,8 +1783,12 @@ export class SettingsSelectorComponent implements Component {
 			value => {
 				this.#context.settings.set(def.path, value);
 				this.#callbacks.onChange(def.path, value);
+				// The live bar updates via the settings bus; refresh it now so the
+				// preview in this editor can't lag a frame behind the toggle.
+				if (preview) this.#triggerStatusLinePreview();
 			},
 			() => done(this.#formatMultiSelectValue(def, this.#context.settings.get(def.path))),
+			preview,
 		);
 	}
 
