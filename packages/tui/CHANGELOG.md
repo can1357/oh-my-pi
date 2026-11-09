@@ -15,6 +15,7 @@
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- The dot between two extension statuses in the status bar now uses the status line separator color instead of the statuses' accent color, matching the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#18616](https://github.com/can1357/oh-my-pi/pull/18616) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -259,9 +260,6 @@
 - Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
 - Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
 - Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
-
-- The dot between two extension statuses in the status bar now uses the status line separator color instead of the statuses' accent color, matching the other status bar separators ([#15740](https://github.com/can1357/oh-my-pi/issues/15740), [#16351](https://github.com/can1357/oh-my-pi/pull/16351) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ## [18.18.3] - 2026-11-09
 
