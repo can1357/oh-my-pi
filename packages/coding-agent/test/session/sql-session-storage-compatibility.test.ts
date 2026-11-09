@@ -128,34 +128,83 @@ describe("SqlSessionStorage optional title authority compatibility", () => {
 			}
 		});
 
-		it(`resumes a session under a newer metadata-only title in external ${columns}-column schemas`, async () => {
-			const client = new SQL("sqlite::memory:");
-			let session: SessionManager | undefined;
-			try {
-				await client.unsafe(
-					`CREATE TABLE omp_session_files (${SIX_COLUMNS}${columns === 7 ? ", title_indexed_size INTEGER" : ""})`,
-				);
-				const storage = await SqlSessionStorage.create({ client, createTable: false });
-				const file = "/sessions/p/resume-direct.jsonl";
-				await storage.writeText(
-					file,
-					serializeTitleSlot({ title: "Slot", updatedAt: "slot" }) +
-						'{"type":"session","id":"resume-direct","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo"}\n' +
-						'{"type":"title_change","id":"older","parentId":null,"title":"Older journal","source":"auto","timestamp":"2099-01-01"}\n',
-				);
-				await storage.updateSessionTitle(file, DIRECT_TITLE);
-				const reopened = await SqlSessionStorage.create({ client, createTable: false });
-				session = await SessionManager.open(file, undefined, reopened, { suppressBreadcrumb: true });
-				expect({ title: session.getSessionName(), source: session.titleSource }).toEqual({
-					title: DIRECT_TITLE.title,
-					source: DIRECT_TITLE.source,
+		for (const body of ["journal-titled", "slotless"] as const)
+			for (const authority of [DIRECT_TITLE, { title: undefined, source: "user" as const, updatedAt: "clear" }]) {
+				it(`resumes a ${body} session under its metadata title (${authority.title ?? "cleared"}) across a rewrite in external ${columns}-column schemas`, async () => {
+					const client = new SQL("sqlite::memory:");
+					let session: SessionManager | undefined;
+					try {
+						await client.unsafe(
+							`CREATE TABLE omp_session_files (${SIX_COLUMNS}${columns === 7 ? ", title_indexed_size INTEGER" : ""})`,
+						);
+						const storage = await SqlSessionStorage.create({ client, createTable: false });
+						const file = `/sessions/p/resume-${body}.jsonl`;
+						const header =
+							'{"type":"session","id":"resume-direct","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo","title":"Header title","titleSource":"auto"}\n';
+						await storage.writeText(
+							file,
+							body === "slotless"
+								? header
+								: serializeTitleSlot({ title: "Slot", updatedAt: "slot" }) +
+										header +
+										'{"type":"title_change","id":"older","parentId":null,"title":"Older journal","source":"auto","timestamp":"2099-01-01"}\n',
+						);
+						await storage.updateSessionTitle(file, authority);
+						const reopen = async () =>
+							SessionManager.open(
+								file,
+								undefined,
+								await SqlSessionStorage.create({ client, createTable: false }),
+								{
+									suppressBreadcrumb: true,
+								},
+							);
+						const expected = { title: authority.title, source: authority.source };
+						session = await reopen();
+						expect({ title: session.getSessionName(), source: session.titleSource }).toEqual(expected);
+						// A whole-body rewrite publishes the title the session resumed with, not the older one in the body.
+						await session.setTaskPromptCacheKey("rewrite");
+						await session.close();
+						session = await reopen();
+						expect({ title: session.getSessionName(), source: session.titleSource }).toEqual(expected);
+					} finally {
+						await session?.close();
+						await client.end();
+					}
 				});
-			} finally {
-				await session?.close();
-				await client.end();
 			}
-		});
 	}
+
+	it("reopens a branched copy under a metadata title that has no source", async () => {
+		const client = new SQL("sqlite::memory:");
+		let session: SessionManager | undefined;
+		let branch: SessionManager | undefined;
+		try {
+			const storage = await SqlSessionStorage.create({ client });
+			const file = "/sessions/p/source-less.jsonl";
+			await storage.writeText(
+				file,
+				serializeTitleSlot({ title: "Slot", updatedAt: "slot" }) +
+					'{"type":"session","id":"source-less","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/repo"}\n' +
+					'{"type":"title_change","id":"older","parentId":null,"title":"Older journal","source":"auto","timestamp":"2099-01-01"}\n' +
+					'{"type":"message","id":"branch-point","parentId":"older","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"branch here","timestamp":1}}\n',
+			);
+			await storage.updateSessionTitle(file, { title: "Source-less metadata", updatedAt: "1900-01-01" });
+			session = await SessionManager.open(file, undefined, storage, { suppressBreadcrumb: true });
+			const branched = session.createBranchedSession("branch-point");
+			if (!branched) throw new Error("Expected a branched session file");
+			await session.close();
+			branch = await SessionManager.open(branched, undefined, storage, { suppressBreadcrumb: true });
+			expect({ title: branch.getSessionName(), source: branch.titleSource }).toEqual({
+				title: "Source-less metadata",
+				source: undefined,
+			});
+		} finally {
+			await branch?.close();
+			await session?.close();
+			await client.end();
+		}
+	});
 
 	it("persists drained direct title authority on the default SQLite schema without body reads", async () => {
 		const client = new SQL("sqlite::memory:");

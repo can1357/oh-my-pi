@@ -1867,6 +1867,7 @@ export class SessionManager {
 		const body = this.#serializeBody();
 		const options = {
 			expectedSize: this.#expectedDiskSize,
+			slotTitleIsCurrent: true,
 			commitGuard: () => this.#isCurrentWriterState(writerStateGen, target) && (commitGuard?.() ?? true),
 		};
 		try {
@@ -2150,7 +2151,7 @@ export class SessionManager {
 			this.#closeWriterEventually();
 			for (let recoveries = 0; ; recoveries++) {
 				try {
-					const options = { expectedSize: this.#expectedDiskSize };
+					const options = { expectedSize: this.#expectedDiskSize, slotTitleIsCurrent: true };
 					if (this.#storage.writeLinesSync) this.#storage.writeLinesSync(targetPath, body.lines, options);
 					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
 					break;
@@ -2300,6 +2301,7 @@ export class SessionManager {
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
+					slotTitleIsCurrent: true,
 					commitGuard: () =>
 						!this.#released &&
 						this.#diskEpoch === epoch &&
@@ -4868,7 +4870,9 @@ export class SessionManager {
 
 		const keptEntries = [...entriesToKeep, ...labels];
 		// The title is session-wide, but the kept path can end before a later rename. Journal the title the
-		// header carries after it, so the newest title change a reload folds over the header is that one.
+		// header carries after it, so the newest title change a reload folds over the header is that one. A
+		// title without a source, or a cleared one, only comes from an indexed backend's metadata: there the
+		// body's slot is indexed as current when written, and resume applies that authority over the journal.
 		const keptTitle = entriesToKeep.findLast(entry => entry.type === TITLE_CHANGE_ENTRY_TYPE);
 		if (
 			keptTitle?.type === TITLE_CHANGE_ENTRY_TYPE &&

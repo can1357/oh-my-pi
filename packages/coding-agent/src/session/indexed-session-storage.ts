@@ -133,6 +133,16 @@ function titleUpdateForIndex(entry: IndexEntry): SessionTitleUpdate | undefined 
 	return { title: entry.title, source: entry.titleSource, updatedAt: entry.titleUpdatedAt };
 }
 
+/**
+ * The title a full body carries: its newest journal title over the slot, unless the writer marks the slot
+ * current. A current slot with no title is a cleared title, indexed without one rather than as "".
+ */
+function bodyTitle(content: string, options?: SessionStorageWriteOptions): SessionTitleUpdate | undefined {
+	const slot = titleUpdateFromSlot(parseTitleSlotFromContent(content));
+	if (options?.slotTitleIsCurrent && slot) return { ...slot, title: slot.title || undefined };
+	return latestTitleChangeFromContent(content) ?? slot;
+}
+
 export class IndexedSessionStorage implements SessionStorage {
 	/**
 	 * Sync writes only update {@link #index} and queue the remote publish, so a
@@ -268,7 +278,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const title = latestTitleChangeFromContent(content) ?? titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		const title = bodyTitle(content, options);
 		const size = byteLength(content);
 		this.#setIndex(path, size, mtimeMs, title ?? null, size);
 		this.#pushFrame(path, { mtimeMs, previous });
@@ -445,7 +455,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		this.#assertExpectedSize(path, options?.expectedSize);
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		const title = latestTitleChangeFromContent(content) ?? titleUpdateFromSlot(parseTitleSlotFromContent(content));
+		const title = bodyTitle(content, options);
 		const size = byteLength(content);
 		this.#setIndex(path, size, mtimeMs, title ?? null, size);
 		this.#pushFrame(path, { mtimeMs, previous });
