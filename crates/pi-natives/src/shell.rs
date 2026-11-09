@@ -1,4 +1,4 @@
-//! Brush-based shell execution exported via N-API.
+//! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
 pub mod vfs;
 
@@ -21,11 +21,108 @@ use pi_shell::{
 	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
+	bash::trace::viz::{self, model},
 	execute_shell as core_execute_shell, minimizer,
 };
 
 use self::vfs::ShellFilesystem;
 use crate::task;
+
+/// Native non-executing visualization transformations.
+#[napi(object)]
+pub struct ShellVizLayers {
+	pub color:   bool,
+	pub inline:  bool,
+	pub idioms:  bool,
+	pub effects: bool,
+	pub unwrap:  bool,
+}
+
+/// Native presentation controls. Node identities are opaque engine keys.
+#[napi(object)]
+pub struct ShellVizOptions {
+	#[napi(ts_type = "'raw' | 'pseudo'")]
+	pub view:           String,
+	pub layers:         ShellVizLayers,
+	pub split:          bool,
+	pub cursor:         Option<u32>,
+	pub cursor_seq:     Option<f64>,
+	pub playing:        bool,
+	pub speed:          f64,
+	pub selected_node:  Option<String>,
+	pub expanded_nodes: Vec<String>,
+}
+
+impl TryFrom<ShellVizOptions> for model::Options {
+	type Error = Error;
+
+	fn try_from(value: ShellVizOptions) -> Result<Self> {
+		let view = match value.view.as_str() {
+			"raw" => model::View::Raw,
+			"pseudo" => model::View::Pseudo,
+			_ => return Err(Error::from_reason("view must be raw or pseudo")),
+		};
+		let node = |value: String| value.parse::<model::NodeKey>().map_err(Error::from_reason);
+		let cursor_seq = value
+			.cursor_seq
+			.map(|seq| {
+				if seq.is_finite() && seq >= 0.0 && seq.fract() == 0.0 && seq <= 9_007_199_254_740_991.0
+				{
+					Ok(seq as u64)
+				} else {
+					Err(Error::from_reason("cursorSeq must be a nonnegative safe integer"))
+				}
+			})
+			.transpose()?;
+		Ok(Self {
+			view,
+			layers: model::Layers {
+				color:   value.layers.color,
+				inline:  value.layers.inline,
+				idioms:  value.layers.idioms,
+				effects: value.layers.effects,
+				unwrap:  value.layers.unwrap,
+			},
+			split: value.split,
+			cursor: value.cursor.map(|cursor| cursor as usize),
+			cursor_seq,
+			playing: value.playing,
+			speed: value.speed,
+			selected_node: value.selected_node.map(node).transpose()?,
+			expanded_nodes: value
+				.expanded_nodes
+				.into_iter()
+				.map(node)
+				.collect::<Result<_>>()?,
+		})
+	}
+}
+
+/// Persisted native visualization, restored once rather than reparsed on each
+/// frame.
+#[napi]
+pub struct ShellVisualization {
+	inner: viz::StoredVisualization,
+}
+
+#[napi]
+impl ShellVisualization {
+	#[napi(constructor)]
+	pub fn new(snapshot: String) -> Result<Self> {
+		Ok(Self {
+			inner: viz::StoredVisualization::from_snapshot_json(&snapshot)
+				.map_err(|error| Error::from_reason(error.to_string()))?,
+		})
+	}
+
+	#[napi]
+	pub fn present(&self, options: ShellVizOptions) -> Result<String> {
+		self
+			.inner
+			.presentation_json(&options.try_into()?)
+			.map_err(|error| Error::from_reason(error.to_string()))
+	}
+}
 
 /// Expand Windows 8.3 components without resolving symlinks or junctions.
 #[napi]
@@ -147,6 +244,63 @@ pub struct ShellRunOptions<'env> {
 	pub filesystem: Option<ShellFilesystem>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
+	/// Folds the run's engine events into a live model of the command.
+	pub trace:      Option<ClassInstance<'env, RunTrace>>,
+}
+
+/// Actual command state, source units and bounded history for one shell run,
+/// including observed assignments and producer-attributed output.
+///
+/// Create one over the command text and
+/// pass it as [`ShellRunOptions::trace`]; poll [`RunTrace::version`] while the
+/// run is in flight and take [`RunTrace::snapshot`] when it changed.
+#[napi]
+pub struct RunTrace {
+	inner: Arc<pi_shell::bash::trace::RunTrace>,
+}
+
+#[napi]
+impl RunTrace {
+	/// A trace of `script`, the exact command text about to run.
+	#[napi(constructor)]
+	pub fn new(script: String) -> Self {
+		Self { inner: Arc::new(pi_shell::bash::trace::RunTrace::new(script)) }
+	}
+
+	/// Revision of semantic events, assignments and visible output; unchanged
+	/// means `snapshot()` is unchanged, even when adjacent output coalesces.
+	#[napi]
+	pub fn version(&self) -> f64 {
+		self.inner.version() as f64
+	}
+
+	/// The `ShellTrace` JSON with byte-offset layout, current node states and
+	/// ordered replay `history`. The newest 20,000 records retain at most
+	/// 2 MiB visible output and 8 MiB payload; `historyTruncated` explicitly
+	/// reports eviction. History timestamps are measured ns since `RunStart`;
+	/// output identifies its real producer (`u`, `n`, `command`) when known.
+	/// Semantic entries carry their actual `vpid`; `rootVpid` distinguishes
+	/// root lifecycle from owned tool children even after journal trimming.
+	/// A UTF-8 scalar spanning producers has exact byte `contributors`
+	/// instead of an invented primary producer. Decoding ends at capture EOF.
+	/// Segmented minimizer submissions share one epoch and final status;
+	/// their history carries `segment`, with `logicalEnd`/`logicalStatus`
+	/// finalizing the last actual root `RunEnd` after output draining.
+	/// Serialization borrows the locked model rather than cloning its history.
+	#[napi]
+	pub fn snapshot(&self) -> String {
+		self.inner.snapshot_json()
+	}
+
+	/// Render directly over the borrowed native state; no snapshot or syntax
+	/// roundtrip.
+	#[napi]
+	pub fn present(&self, options: ShellVizOptions) -> Result<String> {
+		self
+			.inner
+			.presentation_json(&options.try_into()?)
+			.map_err(|error| Error::from_reason(error.to_string()))
+	}
 }
 
 /// The bytes crossing one shell run's pipeline pipes, during and after the run.
@@ -230,7 +384,8 @@ impl PipeStreams {
 	}
 }
 
-/// Options for executing a shell command via brush-core.
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -320,7 +475,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	}
 }
 
-/// Persistent brush-core shell session.
+/// Persistent embedded bash engine (pi-shell) shell session.
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
@@ -334,6 +489,16 @@ impl Shell {
 	#[napi(constructor)]
 	pub fn new(options: Option<ShellOptions>) -> Self {
 		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
+	}
+
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork. Never waits for the running command.
+	#[napi]
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(self.inner.fork()) }
 	}
 
 	/// Run a shell command using the provided options.
@@ -358,6 +523,7 @@ impl Shell {
 			timeout_ms: options.timeout_ms,
 			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
+			trace:      options.trace.map(|trace| Arc::clone(&trace.inner)),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -401,7 +567,25 @@ impl Shell {
 	}
 }
 
-/// Execute a brush shell command.
+/// Run the pi-shell engine as a process shell in this process (`omp zsh`,
+/// `omp bash`, `omp sh`).
+///
+/// `argv` is the shell's whole command line,
+/// `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
+/// shell gets it. Synchronous: blocks the calling thread until the shell
+/// exits and returns the status the process should exit with (0–255; 101
+/// after a panic). The shell uses the process's own stdin, stdout, stderr,
+/// terminal and inherited descriptors (duplicated, never taken over); the
+/// job-control and termination signals the runtime handles are reset to
+/// their defaults for the run and restored after it.
+#[napi]
+pub fn run_shell_main(argv: Vec<String>) -> i32 {
+	let opts = pi_shell::process::ProcessOptions { embedded: true };
+	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pi_shell::process::main(argv, opts)))
+		.unwrap_or(101)
+}
+
+/// Execute a command in the embedded bash engine (pi-shell).
 ///
 /// Creates a fresh session for each call. The `on_chunk` callback receives
 /// streamed stdout/stderr output. Returns the exit code when the command
@@ -865,6 +1049,7 @@ mod tests {
 						timeout_ms: None,
 						filesystem: None,
 						pipe_taps:  None,
+						trace:      None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -914,6 +1099,7 @@ mod tests {
 						timeout_ms: None,
 						filesystem: None,
 						pipe_taps:  None,
+						trace:      None,
 					},
 					None,
 					cancel,
@@ -954,6 +1140,7 @@ mod tests {
 						timeout_ms: None,
 						filesystem: None,
 						pipe_taps:  None,
+						trace:      None,
 					},
 					Some(tx),
 					cancel,

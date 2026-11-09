@@ -406,6 +406,11 @@ export interface OpenFile {
 	 * reconcile treats the document as dirty and resyncs from disk.
 	 */
 	syncedHash?: number | bigint;
+	/**
+	 * The disk text a reconcile last read: its stat stamp and text hash. While the stamp is
+	 * unchanged and `hash` equals `syncedHash`, the server already holds the disk text.
+	 */
+	disk?: { stamp: string; hash: number | bigint };
 	/** When an OMP operation last used this document; long-unused documents close before the next open. */
 	lastUsedAt: number;
 	/** When OMP last reopened this document (an idle close, or a diagnostics reopen); absent for a first open. */
@@ -444,6 +449,10 @@ export interface LspClient {
 	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/publishDiagnostics` notifications. */
+	publishedDiagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/diagnostic` pull requests. */
+	pulledDiagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
 	publishesDocumentVersions?: boolean;
@@ -465,6 +474,8 @@ export interface LspClient {
 	idleClosedFiles?: Map<string, number>;
 	pendingRequests: Map<number | string, PendingRequest>;
 	isReading: boolean;
+	/** rust-analyzer only: the crate manifests present at initialize ({@link listCargoManifests}). */
+	cargoManifests?: Promise<string | undefined>;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */
 	status: "connecting" | "ready" | "error";
 	serverCapabilities?: LspServerCapabilities;

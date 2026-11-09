@@ -13,7 +13,10 @@ async function runPostmortemProbe(
 	const root = await mkdtemp(join(tmpdir(), "omp-postmortem-probe-"));
 	const probePath = join(root, "probe.ts");
 	try {
-		await Bun.write(probePath, source);
+		await Bun.write(
+			probePath,
+			`import { postmortem as installedPostmortem } from "${postmortemModuleUrl}"; installedPostmortem.installProcessHandlers();\n${source}`,
+		);
 		const proc = Bun.spawn([process.execPath, probePath], {
 			cwd: process.cwd(),
 			stdout: "pipe",
@@ -217,6 +220,56 @@ describe("postmortem expected cleanup errors", () => {
 			expect(result.exitCode).toBe(143);
 			expect(result.stderr).toContain("[Stopped by SIGTERM]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
 			expect(result.stderr.split("[Recovery]")).toHaveLength(2);
+		},
+	);
+
+	it.skipIf(process.platform === "win32")("prints recovery commands when SIGHUP stops the process", async () => {
+		const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			let saved = false;
+			const cancelHint = postmortem.registerFatalRecoveryHint(() =>
+				saved ? { label: "Main", command: "omp --resume 019cafe0-dead-beef" } : undefined,
+			);
+			postmortem.register("session", async () => {
+				// Teardown saves the session and unregisters its hint, so the report has to
+				// come from the provider snapshot taken before cleanup.
+				saved = true;
+				cancelHint();
+			});
+			// Keep-alive only: a real child process must stay open until its SIGHUP handler
+			// exits it, and a fake clock cannot hold the event loop open.
+			setInterval(() => {}, 60_000);
+			process.kill(process.pid, "SIGHUP");
+		`);
+
+		expect(result.exitCode).toBe(129);
+		expect(result.stderr).toContain("[Stopped by SIGHUP]\n[Recovery]\n  Main: omp --resume 019cafe0-dead-beef");
+		expect(result.stderr.split("[Recovery]")).toHaveLength(2);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"skips the recovery hints when the terminal is already declared dead",
+		async () => {
+			const result = await runPostmortemProbe(`
+			import { postmortem } from "${postmortemModuleUrl}";
+
+			postmortem.registerFatalRecoveryHint(() => ({
+				label: "Main",
+				command: "omp --resume 019cafe0-dead-beef",
+			}));
+			// What the TUI does before raising its own SIGHUP: stdout stalled, so fd 2 is a
+			// full, blocking pty and a report write would hang instead of exiting.
+			postmortem.declareTerminalDead();
+			// Keep-alive only: a real child process must stay open until its SIGHUP handler
+			// exits it, and a fake clock cannot hold the event loop open.
+			setInterval(() => {}, 60_000);
+			process.kill(process.pid, "SIGHUP");
+		`);
+
+			expect(result.exitCode).toBe(129);
+			expect(result.stderr).not.toContain("[Stopped by SIGHUP]");
+			expect(result.stderr).not.toContain("[Recovery]");
 		},
 	);
 

@@ -31,6 +31,9 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { parseMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
+import { parseMotionMode } from "../config/motion-presets";
+import { parseSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -186,6 +189,27 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.serviceTier = value;
+	},
+	"--spinner-interval": (result, value) => {
+		try {
+			result.spinnerInterval = parseSpinnerInterval(value);
+		} catch (error) {
+			throw new CliUsageError(`--spinner-interval: ${(error as Error).message}`);
+		}
+	},
+	"--max-fps": (result, value) => {
+		try {
+			result.maxFps = parseMaxFps(value);
+		} catch (error) {
+			throw new CliUsageError(`--max-fps: ${(error as Error).message}`);
+		}
+	},
+	"--motion": (result, value) => {
+		try {
+			result.motion = parseMotionMode(value);
+		} catch (error) {
+			throw new CliUsageError(`--motion: ${(error as Error).message}`);
+		}
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
@@ -415,11 +439,11 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
 
 /**
  * Rewrite the launch argv for a relaunch of this session (`/restart`, and
- * `/fork pane|window` with `resumeSessionSource` undefined).
+ * `/fork pane|window` with `restoreSessionSource` undefined).
  *
  * Keeps every configuration flag as launched, but drops:
  * - one-shot selectors ({@link ONE_SHOT_LAUNCH_FLAGS}, including inline
- *   `--resume=<source>` forms) - the relaunch resumes `resumeSessionSource` instead;
+ *   `--resume=<source>` forms) - the relaunch restores `restoreSessionSource` instead;
  * - flags in `drop`, which the caller re-supplies with current values;
  * - positionals (prompt messages, `@file` args, subcommand tokens) — their
  *   effect is already in the resumed transcript, so replaying them would
@@ -427,12 +451,14 @@ const ONE_SHOT_LAUNCH_FLAGS: Readonly<Record<string, true>> = {
  *
  * Value consumption mirrors {@link flagConsumesValue}, so a dropped flag takes
  * its value token with it and an unknown extension flag keeps its value.
- * `resumeSessionSource` is a session ID or file path, omitted for a session that
+ * `restoreSessionSource` is a session ID or file path, omitted for a session that
  * never materialized on disk; the relaunch then starts fresh with the same configuration.
+ * The session is reopened with `--restore`, so the subagent turns the relaunch cut
+ * off go on (see `task/restore.ts`).
  */
 export function restartArgv(
 	argv: string[],
-	resumeSessionSource: string | undefined,
+	restoreSessionSource: string | undefined,
 	drop?: Readonly<Record<string, true>>,
 ): string[] {
 	const kept: string[] = [];
@@ -449,6 +475,6 @@ export function restartArgv(
 		kept.push(arg);
 		if (consumesNext) kept.push(argv[++i]);
 	}
-	if (resumeSessionSource !== undefined) kept.push("--resume", resumeSessionSource);
+	if (restoreSessionSource !== undefined) kept.push("--restore", restoreSessionSource);
 	return kept;
 }

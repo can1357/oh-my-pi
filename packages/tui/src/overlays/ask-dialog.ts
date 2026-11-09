@@ -40,6 +40,11 @@ export interface AskDialogPromptValue {
 	images?: ImageContent[];
 }
 
+/** A prompt left without submitting: what it still held, offered again when the custom answer reopens. */
+export interface AskDialogPromptDraft {
+	draft: AskDialogPromptValue;
+}
+
 /** Submitted answer to one dialog question. */
 export interface ExtensionAskDialogResultItem {
 	id: string;
@@ -139,12 +144,13 @@ export interface AskDialogPrompt {
 interface AskDialogCallbacks {
 	onSubmit(result: ExtensionAskDialogSubmitResult): void;
 	onCancel(): void;
-	onPrompt(prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined>;
-	/** Prompt that accepts pasted images; without it, prompts use `onPrompt`. */
+	/** Resolves the submitted text; on cancel, the editor's draft, or `undefined` when none is kept. */
+	onPrompt(prompt: AskDialogPrompt, prefill?: string): Promise<string | AskDialogPromptDraft | undefined>;
+	/** Prompt that accepts pasted images; without it, prompts use `onPrompt`. Resolves like `onPrompt`. */
 	onImagePrompt?(
 		prompt: AskDialogPrompt,
 		prefill: AskDialogPromptValue | undefined,
-	): Promise<AskDialogPromptValue | undefined>;
+	): Promise<AskDialogPromptValue | AskDialogPromptDraft | undefined>;
 }
 
 /**
@@ -153,7 +159,7 @@ interface AskDialogCallbacks {
  * keys are the explicit hand-off: they release the guard for the rest of the
  * dialog's life and the draft stays parked (intact) beneath it.
  */
-interface AskDialogInputGuard {
+export interface AskDialogInputGuard {
 	isBlocked(): boolean;
 	handleInput(keyData: string): void;
 	/** Shown after the release keys while the guard holds input. */
@@ -175,6 +181,8 @@ interface QuestionState {
 	selectedOptions: Set<string>;
 	customInput: string | undefined;
 	customInputImages: ImageContent[] | undefined;
+	/** Unsubmitted custom answer left by a cancelled prompt; prefills the next one over `customInput`. */
+	customDraft: AskDialogPromptValue | undefined;
 	note: string | undefined;
 	noteImages: ImageContent[] | undefined;
 	noteRowKey: string | undefined;
@@ -437,10 +445,17 @@ function describeRowDetail(
 	return spans.length > 0 ? spans : undefined;
 }
 
+/** A prompt's outcome: the submitted value, or after a cancel the draft the host kept, if any. */
+type PromptOutcome =
+	| { submitted: true; text: string; images: ImageContent[] | undefined }
+	| { submitted: false; draft: AskDialogPromptValue | undefined };
+
 /** Normalize the result of either prompt callback. */
-function splitPromptInput(input: string | AskDialogPromptValue): { text: string; images: ImageContent[] | undefined } {
-	if (typeof input === "string") return { text: input, images: undefined };
-	return { text: input.text, images: input.images?.length ? input.images : undefined };
+function promptOutcome(result: string | AskDialogPromptValue | AskDialogPromptDraft | undefined): PromptOutcome {
+	if (result === undefined) return { submitted: false, draft: undefined };
+	if (typeof result === "string") return { submitted: true, text: result, images: undefined };
+	if ("draft" in result) return { submitted: false, draft: result.draft };
+	return { submitted: true, text: result.text, images: result.images?.length ? result.images : undefined };
 }
 
 function clearNote(state: QuestionState): void {
@@ -600,12 +615,6 @@ export class AskDialogComponent implements Component {
 	#countdownDeadline = 0;
 	/** Once-a-second re-describe while the native countdown ring is shown. */
 	#ringTick: NodeJS.Timeout | undefined;
-	/**
-	 * The answer whose pick just moved the dialog on to the next question. Note annotates it, not the
-	 * next question's highlighted row, until that question is answered or any other input arrives:
-	 * a Tern click commits a single-choice row, so picking then pressing Note is the mouse flow.
-	 */
-	#justAnswered: { questionIndex: number; rowKey: string } | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #headerRegion: PanelRows;
 	readonly #bodyRegion: PanelRows;
@@ -625,6 +634,7 @@ export class AskDialogComponent implements Component {
 				selectedOptions: new Set<string>(),
 				customInput: undefined,
 				customInputImages: undefined,
+				customDraft: undefined,
 				note: undefined,
 				noteImages: undefined,
 				noteRowKey: undefined,
@@ -703,7 +713,6 @@ export class AskDialogComponent implements Component {
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
 		this.#native = undefined;
-		if (keyData !== "n" && keyData !== "N") this.#justAnswered = undefined;
 		if (matchesSelectCancel(keyData)) {
 			this.#finishCancel();
 			return;
@@ -945,6 +954,8 @@ export class AskDialogComponent implements Component {
 					...(detail ? { detail } : {}),
 					...(recommended ? { value: [span("Recommended")] } : {}),
 					...(checked ? { tone: "accent" as const, ...(question.multi ? { icon: "check" } : {}) } : {}),
+					// Notes this row without picking it, wherever the cursor is.
+					actions: { menu: ["note"] },
 				},
 				undefined,
 				rowItem.key,
@@ -1035,7 +1046,7 @@ export class AskDialogComponent implements Component {
 		});
 		const note = actionButton("Note", "note", {
 			keys: "n",
-			title: "Add a note to the highlighted answer, or to the one just picked  n",
+			title: "Add a note to the highlighted answer  n",
 		});
 		return actionBar([...lead, null, note, skip, submit]);
 	}
@@ -1044,12 +1055,11 @@ export class AskDialogComponent implements Component {
 	 * Pointer actions: a tab click switches to it; a click on an answer row is
 	 * Enter on it (Space for a multi-select option, so it toggles; its
 	 * double-click `activate` is Enter); the action bar's Submit, Note and Skip
-	 * run what Enter (see {@link #pressEnter} for Other), `n` and Esc run on the highlighted row; Hide/Show
-	 * collapse and restore the dialog.
+	 * run what Enter (see {@link #pressEnter} for Other), `n` and Esc run on the highlighted row, and a
+	 * row's menu Note highlights that row and notes it; Hide/Show collapse and restore the dialog.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#closed || this.#promptActive) return;
-		if (event.type !== "action" || event.act !== "note") this.#justAnswered = undefined;
 		if (event.type === "action") {
 			if (event.act === "cancel") {
 				this.#finishCancel();
@@ -1063,7 +1073,7 @@ export class AskDialogComponent implements Component {
 			// A pointer action on the dialog is an explicit hand-off from the draft.
 			this.#releaseGuardForPointer();
 			if (event.act === "submit") this.#pressEnter();
-			else if (event.act === "note") this.#pressNote();
+			else if (event.act === "note") this.#noteFromPointer(event.key);
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
@@ -1113,37 +1123,38 @@ export class AskDialogComponent implements Component {
 		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
 		if (!active || !rowItem) return;
 		if (rowItem.kind === "other" && this.#hasSubmitTab()) {
-			this.#advanceAfterQuestion(active.state.customInput === undefined ? undefined : rowItem.key);
+			this.#advanceAfterQuestion();
 			return;
 		}
 		this.#commitRow(active.question, active.state, rowItem, true);
 		this.#requestRender();
 	}
 
-	/** `n`: a note on the {@link #noteTarget} row (questions only). */
+	/** `n`: a note on the highlighted row of the question shown (questions only). */
 	#pressNote(): void {
 		if (this.#isSubmitTab()) return;
 		this.#countdown?.reset();
-		const target = this.#noteTarget();
-		if (target) void this.#promptForNote(target.question, target.state, target.rowItem);
+		const active = this.#activeQuestionState();
+		const rowItem = active ? this.#questionRows(active.question)[active.state.cursorIndex] : undefined;
+		if (active && rowItem) void this.#promptForNote(active.question, active.state, rowItem);
 	}
 
 	/**
-	 * The row a note goes to: the answer just picked while the question it moved on to is still
-	 * unanswered, else the highlighted row.
+	 * Note from the action bar (keypath `…/note`: the highlighted row) or from a row's menu (keypath
+	 * `…/q<i>/<row>`: that row, highlighted first). A menu on a list the dialog has moved past does nothing.
 	 */
-	#noteTarget(): { question: ExtensionAskDialogQuestion; state: QuestionState; rowItem: QuestionRow } | undefined {
-		const active = this.#activeQuestionState();
-		if (!active) return undefined;
-		const last = this.#justAnswered;
-		if (last && last.questionIndex !== this.#currentQuestionIndex() && !isAnswered(active.state)) {
-			const question = this.#questions[last.questionIndex];
-			const state = this.#states[last.questionIndex];
-			const rowItem = question ? this.#questionRows(question).find(row => row.key === last.rowKey) : undefined;
-			if (question && state && rowItem) return { question, state, rowItem };
+	#noteFromPointer(keypath: string): void {
+		const [listKey, rowKey] = keypath.split("/").slice(-2);
+		if (listKey && /^q\d+$/.test(listKey)) {
+			const active = this.#activeQuestionState();
+			if (!active || this.#isSubmitTab() || listKey !== `q${this.#currentQuestionIndex()}`) return;
+			const index = this.#questionRows(active.question).findIndex(row => row.key === rowKey);
+			if (index < 0) return;
+			active.state.cursorIndex = index;
+			active.state.manualScroll = false;
+			this.#requestRender();
 		}
-		const rowItem = this.#questionRows(active.question)[active.state.cursorIndex];
-		return rowItem ? { question: active.question, state: active.state, rowItem } : undefined;
+		this.#pressNote();
 	}
 
 	/** Re-describe once a second while a countdown ring is shown (the ring's value is data, not a terminal clock). */
@@ -1445,7 +1456,7 @@ export class AskDialogComponent implements Component {
 				// focused option; Space toggles. Advances to the next question
 				// (submitting only for a single-question dialog), matching
 				// single-select Enter (#8252).
-				this.#advanceAfterQuestion(state.selectedOptions.has(option.label) ? rowItem.key : undefined);
+				this.#advanceAfterQuestion();
 				return;
 			}
 			if (state.selectedOptions.has(option.label)) {
@@ -1461,7 +1472,7 @@ export class AskDialogComponent implements Component {
 		state.customInput = undefined;
 		state.customInputImages = undefined;
 		clearNoteUnlessRow(state, rowItem.key);
-		this.#advanceAfterQuestion(rowItem.key);
+		this.#advanceAfterQuestion();
 	}
 
 	#handleSubmitTabInput(keyData: string): void {
@@ -1486,13 +1497,9 @@ export class AskDialogComponent implements Component {
 		this.#submitScrollOffset = 0;
 	}
 
-	/** Move past the current question; `answeredRowKey` is the row whose pick did it, for {@link #noteTarget}. */
-	#advanceAfterQuestion(answeredRowKey?: string): void {
+	/** Move past the current question (submits a single-question dialog). */
+	#advanceAfterQuestion(): void {
 		const current = this.#currentQuestionIndex();
-		this.#justAnswered =
-			answeredRowKey !== undefined && this.#questions.length > 1
-				? { questionIndex: current, rowKey: answeredRowKey }
-				: undefined;
 		if (this.#questions.length === 1) {
 			this.#finishSubmit();
 			return;
@@ -1509,7 +1516,7 @@ export class AskDialogComponent implements Component {
 	#openPrompt(
 		prompt: AskDialogPrompt,
 		prefill: AskDialogPromptValue | undefined,
-	): Promise<string | AskDialogPromptValue | undefined> {
+	): Promise<string | AskDialogPromptValue | AskDialogPromptDraft | undefined> {
 		return this.callbacks.onImagePrompt
 			? this.callbacks.onImagePrompt(prompt, prefill)
 			: this.callbacks.onPrompt(prompt, prefill?.text);
@@ -1522,11 +1529,21 @@ export class AskDialogComponent implements Component {
 	): Promise<void> {
 		this.#promptActive = true;
 		try {
+			// A cancelled edit's draft wins over the submitted answer it was revising.
 			const prefill =
-				state.customInput === undefined ? undefined : { text: state.customInput, images: state.customInputImages };
+				state.customDraft ??
+				(state.customInput === undefined
+					? undefined
+					: { text: state.customInput, images: state.customInputImages });
 			const result = await this.#openPrompt({ title: "Custom answer", question: question.question }, prefill);
-			if (result === undefined || this.#closed) return;
-			const input = splitPromptInput(result);
+			if (this.#closed) return;
+			const input = promptOutcome(result);
+			if (!input.submitted) {
+				const draft = input.draft;
+				state.customDraft = draft && (draft.text.trim() !== "" || draft.images?.length) ? draft : undefined;
+				return;
+			}
+			state.customDraft = undefined;
 			if (input.text.trim() === "") {
 				// Submitting an empty value unselects the custom answer.
 				state.customInput = undefined;
@@ -1544,7 +1561,7 @@ export class AskDialogComponent implements Component {
 				this.#activeTabIndex = this.#submitTabIndex();
 				this.#submitScrollOffset = 0;
 			} else {
-				this.#advanceAfterQuestion(rowItem.key);
+				this.#advanceAfterQuestion();
 			}
 		} finally {
 			this.#promptActive = false;
@@ -1567,8 +1584,9 @@ export class AskDialogComponent implements Component {
 				{ title: `Note for ${rowItem.label}`, question: question.question },
 				prefill,
 			);
-			if (result === undefined || this.#closed) return;
-			const note = splitPromptInput(result);
+			if (this.#closed) return;
+			const note = promptOutcome(result);
+			if (!note.submitted) return;
 			state.note = note.text;
 			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;

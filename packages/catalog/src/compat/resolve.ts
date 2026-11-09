@@ -604,7 +604,6 @@ function detectOpenAICompat(
 		zaiReasoningEffortDialect: false,
 		clampOutputToModelMax: d.isLocalOpenAICompatBackend,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		supportsPromptCacheKey: false,
@@ -762,7 +761,6 @@ function resolveOpenAIResponsesPolicy(
 		supportsSteering: false,
 		requiresReasoningOffJuiceInstruction: false,
 		stripImageInput: false,
-		thinkingLoopGuard: undefined,
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
 		supportsSamplingParams: true,
@@ -872,6 +870,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
+		toolNamePrefix: compat.toolNamePrefix,
 		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
@@ -905,6 +904,7 @@ function resolveAnthropicPolicy(
 		signingEndpoint,
 		supportsContextManagement: true,
 		supportsServerCompaction: false,
+		supportsMessageThreads: false,
 		firstPartyProvider: false,
 		honorsClaudeCodeBetaKillSwitch: false,
 		supportsOutputEffort: true,
@@ -936,10 +936,10 @@ function resolveAnthropicPolicy(
 		// user-authored `compat` block to override them.
 		maxImageDimension: undefined,
 		maxImagePayloadBytes: undefined,
-		thinkingLoopGuard: undefined,
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
+		disabledThinking: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};
 	applyWireAxes(compat, axes.wire, "anthropic-messages");
@@ -1340,8 +1340,10 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
  * {@link resolveModelPolicy} without resolving the compat and thinking
  * policies, which dominate its cost on catalog-wide scans.
  */
-export function resolveCatalogAxes(spec: CatalogPolicyInputs): Record<string, unknown> {
-	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
+export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
+	const target = buildResolveTarget(spec, resolveIdentity(spec));
+	target.upstream = route?.upstream;
+	return resolveCascade(target).catalog;
 }
 
 /**

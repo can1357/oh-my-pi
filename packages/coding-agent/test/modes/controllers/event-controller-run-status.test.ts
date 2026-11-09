@@ -63,7 +63,9 @@ function toolEnd(toolCallId: string, toolName: string): AgentSessionEvent {
 }
 
 function askArgs(question: string): Record<string, unknown> {
-	return { questions: [{ id: "q", question, options: [{ label: "Yes" }, { label: "No" }] }] };
+	return {
+		html: `<form><p>${question}</p><label><input type="radio" name="q" value="yes"> Yes</label><label><input type="radio" name="q" value="no"> No</label></form>`,
+	};
 }
 
 describe("EventController run status at turn end", () => {
@@ -166,5 +168,30 @@ describe("EventController run status while prompts wait on the user", () => {
 		await controller.handleEvent(toolStart("bash-1", "bash", { command: "rm -rf build" }));
 
 		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+	});
+
+	it("judges a focused subagent's tool call by the subagent's own settings and session approvals", async () => {
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		const bash = { name: "bash", label: "Bash" } as unknown as AgentTool;
+		let approved = false;
+		const controller = new EventController(
+			createInteractiveModeContext({
+				viewSession: {
+					getToolByName: () => bash,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+					hasSessionApproval: (key: string) => approved && key === "bash\0exec",
+				},
+			}),
+		);
+
+		// The root session runs yolo; the focused subagent asks before exec-tier calls.
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(toolStart("bash-1", "bash", { command: "make" }));
+		expect(report).toHaveBeenLastCalledWith(expect.objectContaining({ state: "blocked", kind: "permission" }));
+
+		approved = true;
+		report.mockClear();
+		await controller.handleEvent(toolStart("bash-2", "bash", { command: "make" }));
+		expect(report).not.toHaveBeenCalledWith(expect.objectContaining({ state: "blocked" }));
 	});
 });

@@ -329,8 +329,13 @@ export interface CredentialDisabledEvent {
 	orgName?: string;
 }
 
-/** Why a delegated OAuth refresh was requested. */
-export type OAuthRefreshReason = "auth-recovery";
+/**
+ * Why an OAuth refresh was requested.
+ * - `auth-recovery`: a provider rejected the bearer with a 401.
+ * - `usage-probe`: a background usage poll; advisory, so a definitive refresh
+ *   failure never disables the credential (an interactive request decides).
+ */
+export type OAuthRefreshReason = "auth-recovery" | "usage-probe";
 
 /** Configuration supplied when constructing credential storage. */
 export type AuthStorageOptions = {
@@ -480,7 +485,10 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
-	/** {@link oauthAccountKey}s of accounts known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
+	/**
+	 * {@link oauthAccountKey}s known to serve `modelId` from discovery.
+	 * Unblocked matches win, then other unblocked plan-eligible accounts, before blocked fallbacks.
+	 */
 	accountIds?: readonly string[];
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
@@ -882,6 +890,8 @@ export interface CredentialsApi {
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean;
+	/** Check whether stored credentials use a subscription (OAuth or an opted-in login API key). */
+	hasSubscription(provider: string): boolean;
 	/**
 	 * Get OAuth credentials for a provider.
 	 */
@@ -1064,9 +1074,10 @@ export interface OAuthRefreshByIdOptions {
 	 */
 	reuseRecentMint?: boolean;
 	/**
-	 * Provider-401 recovery intent. Forwarded to a delegated refresh (an auth
-	 * broker), which may then return a token it minted in the last five minutes.
-	 * Local reuse still requires {@link reuseRecentMint}.
+	 * Why the refresh was requested. `auth-recovery` is forwarded to a delegated
+	 * refresh (an auth broker), which may then return a token it minted in the
+	 * last five minutes; local reuse still requires {@link reuseRecentMint}.
+	 * `usage-probe` never disables the row on a definitive refresh failure.
 	 */
 	reason?: OAuthRefreshReason;
 	/** The access token a provider 401 rejected; see {@link AuthApiKeyOptions.rejectedAccessToken}. */

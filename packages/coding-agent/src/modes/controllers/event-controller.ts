@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -23,7 +24,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
-import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { isNativeRendering, nativePacing } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import {
 	asyncJobState,
@@ -35,6 +36,7 @@ import {
 	toolRenderName,
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
+import { eventBlockId, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -56,8 +58,9 @@ import {
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
-import { getApprovalGrants } from "../../tools/approval-cache";
-import { recoverAskQuestions } from "../../tools/ask";
+import { recoverAskHtml } from "../../tools/ask";
+import { fieldQuestions } from "@oh-my-pi/pi-tui/html-form/data";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { writeDeviceDispatch } from "../../tools/resolve";
@@ -111,11 +114,17 @@ const MAX_LIVE_IRC_CARDS = 4;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
-function hasNestedTodo(details: unknown): boolean {
+function hasCommittedTodo(events: unknown): boolean {
 	return (
-		isRecord(details) &&
-		Array.isArray(details.statusEvents) &&
-		details.statusEvents.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+		Array.isArray(events) && events.some(event => isRecord(event) && event.op === "todo" && event.committed === true)
+	);
+}
+
+/** Eval status events live on each cell. */
+function hasNestedTodo(details: unknown): boolean {
+	if (!isRecord(details)) return false;
+	return (
+		Array.isArray(details.cells) && details.cells.some(cell => isRecord(cell) && hasCommittedTodo(cell.statusEvents))
 	);
 }
 
@@ -307,7 +316,7 @@ export class EventController {
 	#displaceableTodoComponent: ToolExecutionComponent | undefined = undefined;
 	// Most recent TTSR notification block. A new ttsr_triggered event merges its
 	// rules into this block while it is still the (live-region) transcript tail.
-	#lastTtsrNotification: TtsrNotificationComponent | undefined = undefined;
+	#lastTtsrNotification: PresentedBlock<TtsrNotificationComponent> | undefined = undefined;
 	#streamingReveal: StreamingRevealController;
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
@@ -343,6 +352,9 @@ export class EventController {
 	// feeds it. Speech stays intact: `#vocalizeDelta` runs at ARRIVAL for every
 	// delta before the snapshot is coalesced away.
 	#pendingMessageUpdate: Extract<AgentSessionEvent, { type: "message_update" }> | undefined = undefined;
+	// Provider replay resets are not cumulative: retain the boundary even when
+	// the empty restart snapshot is replaced by a later delta before painting.
+	#pendingMessageRestart = false;
 	#messageUpdateTimer: NodeJS.Timeout | undefined = undefined;
 	/** Tail of the serialized dispatch chain; see #runSerialized. */
 	#dispatchTail: Promise<void> = Promise.resolve();
@@ -376,9 +388,11 @@ export class EventController {
 		);
 		this.#streamingReveal = new StreamingRevealController({
 			// Extension text renderers get the full text so far on each drawn update (deltas within one
-			// frame are coalesced), never a partly revealed prefix from the typing reveal.
+			// frame are coalesced), never a partly revealed prefix from the typing reveal. A terminal that
+			// paces streamed `md` itself (Tern) gets the text as it arrives: pacing it here too is wasted work.
 			getSmoothStreaming: () =>
 				cfgDisplaySmoothStreaming.get(this.ctx.settings) &&
+				!nativePacing() &&
 				!this.ctx.viewSession.extensionRunner?.getAssistantTextRenderers?.().length,
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
@@ -415,8 +429,15 @@ export class EventController {
 			manual_compaction_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
-			cache_warming_start: async () => {},
-			cache_warming_end: async () => {},
+			// The cache details show a refresh in flight; its hit moves the entry's expiry, a miss turns it cold.
+			cache_warming_start: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
+			cache_warming_end: async () => {
+				this.ctx.statusLine.invalidate();
+				this.ctx.ui.requestRender();
+			},
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
@@ -492,6 +513,7 @@ export class EventController {
 			this.#messageUpdateTimer = undefined;
 		}
 		this.#pendingMessageUpdate = undefined;
+		this.#pendingMessageRestart = false;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
@@ -666,13 +688,15 @@ export class EventController {
 	}
 
 	#retractToolCardEntry(toolCallId: string, component: ToolExecutionHandle): void {
-		component.seal();
 		let removeComponent = true;
 		if (component instanceof ReadToolGroupComponent) {
 			removeComponent = component.removeEntry(toolCallId);
 			if (component === this.#lastReadGroup) this.#resetReadGroup();
 		}
-		if (removeComponent) this.ctx.chatContainer.removeChild(component);
+		if (removeComponent) {
+			component.seal();
+			this.ctx.chatContainer.removeChild(component);
+		}
 		this.ctx.pendingTools.delete(toolCallId);
 		this.#toolTimelineComponents.delete(toolCallId);
 		this.#clearReadToolCall(toolCallId);
@@ -682,9 +706,9 @@ export class EventController {
 	 * Re-key a live streamed tool card whose id changed mid-stream (see
 	 * {@link #streamedToolCallIdByIndex}). Moves every id-keyed tracker from the
 	 * old id to the new one so the next cumulative `message_update` reuses the
-	 * existing card instead of creating a duplicate (#6879). The card component
-	 * itself is id-agnostic (routing is via `pendingTools`), so only the maps and
-	 * the shared read group's entry need re-keying.
+	 * existing card instead of creating a duplicate (#6879). Routing is via
+	 * `pendingTools`; the card (or the shared read group's entry) takes the new
+	 * id too, which is what transcript presenters see and refresh by.
 	 */
 	#migrateStreamedToolCallId(oldId: string, newId: string): void {
 		// `oldId` may be "" (the block streamed before its id): that empty key still
@@ -727,6 +751,10 @@ export class EventController {
 		// A collapsed read renders into a shared group keyed by id; rename its
 		// entry so the row isn't duplicated under the new id.
 		if (pending instanceof ReadToolGroupComponent) pending.renameEntry(oldId, newId);
+		// A card now owning `newId` hands presenters (and refreshTranscript) that id.
+		else if (pending instanceof ToolExecutionComponent && this.ctx.pendingTools.get(newId) === pending) {
+			pending.renameToolCallId(newId);
+		}
 		// A fast completion can land under `newId` while the card is still keyed
 		// by `oldId`. Consume it now that the card owns the final id; the normal
 		// creation path is skipped on a re-key (Codex review on #6881).
@@ -956,6 +984,7 @@ export class EventController {
 		this.#vocalizeDelta(event);
 		this.#vocalizedMessageUpdates.add(event);
 		this.#pendingMessageUpdate = event;
+		this.#pendingMessageRestart ||= event.assistantMessageEvent.type === "start";
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
 			this.#messageUpdateTimer = undefined;
@@ -988,6 +1017,11 @@ export class EventController {
 		const event = this.#pendingMessageUpdate;
 		if (!event) return;
 		this.#pendingMessageUpdate = undefined;
+		const restarted = this.#pendingMessageRestart;
+		this.#pendingMessageRestart = false;
+		if (restarted && event.assistantMessageEvent.type !== "start") {
+			await this.#restartAssistantStream(event.message);
+		}
 		await this.handleEvent(event);
 	}
 
@@ -1019,6 +1053,7 @@ export class EventController {
 			this.#messageUpdateTimer = undefined;
 		}
 		this.#pendingMessageUpdate = undefined;
+		this.#pendingMessageRestart = false;
 		this.#resetReadGroup();
 		this.#lastVisibleBlockCount = 0;
 		this.#renderedCustomMessages.clear();
@@ -1365,6 +1400,7 @@ export class EventController {
 	}
 
 	async #handleIrcMessage(event: Extract<AgentSessionEvent, { type: "irc_message" }>): Promise<void> {
+		if (!event.message.display) return;
 		const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 		if (this.#renderedCustomMessages.has(signature)) {
 			return;
@@ -1568,18 +1604,50 @@ export class EventController {
 		if (text) vocalizer.speak(text);
 	}
 
+	async #restartAssistantStream(message: AgentMessage): Promise<void> {
+		this.#retractStreamedToolPreviews();
+		await this.handleEvent({ type: "message_start", message });
+	}
+
+	#retractStreamedToolPreviews(): void {
+		// A provider replay can abandon previews without ever executing them.
+		// No result will settle those cards; leaving one pins all later history.
+		for (const toolCallId of this.#streamedToolCallIdByIndex.values()) {
+			if (this.#executionStartedCallIds.has(toolCallId) || this.#backgroundCallIds.has(toolCallId)) continue;
+			this.#toolArgsReveal.finish(toolCallId);
+			this.#pendingStreamPreviews.delete(toolCallId);
+			const component = this.ctx.pendingTools.get(toolCallId);
+			if (component) this.#retractToolCardEntry(toolCallId, component);
+			const segment = this.#postToolAssistantComponents.get(toolCallId);
+			if (segment) {
+				this.ctx.chatContainer.removeChild(segment);
+				segment.markTranscriptBlockFinalized();
+				this.#postToolAssistantComponents.delete(toolCallId);
+			}
+		}
+		this.#resetReadGroup();
+	}
+
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (!this.#vocalizedMessageUpdates.delete(event)) {
 			this.#vocalizeDelta(event);
 		}
-		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
+		if (event.assistantMessageEvent?.type === "start") {
+			await this.#restartAssistantStream(event.message);
+		}
+		if (event.message.role === "assistant") await this.syncAssistantMessage(event.message);
+	}
+
+	/** Resync a cumulative snapshot without replay cleanup or speech side effects. */
+	async syncAssistantMessage(message: AssistantMessage): Promise<void> {
+		if (this.ctx.streamingComponent) {
+			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
 				this.#streamingReveal.resyncVisibility();
 			}
-			this.ctx.streamingMessage = event.message;
+			this.ctx.streamingMessage = message;
 			const timeline = splitAssistantMessageToolTimeline(this.ctx.streamingMessage);
 			this.#streamingReveal.setTarget(timeline.beforeTools, timeline.hasToolCalls);
 
@@ -1675,9 +1743,10 @@ export class EventController {
 				}
 				if (isNew) {
 					// A write's streamed path may still grow into a reply URL (`ou…` → `out://`), which
-					// draws as prose rather than a card; the block waits until the path tells. An unbound
-					// reveal never advances, so drop it: the next update's fresh entry shows all received.
-					if (partialJson && isReplyWrite(renderToolName, renderArgs) === undefined) {
+					// draws as prose rather than a card; the block waits until the path tells. Empty partial
+					// JSON (`toolcall_start`) is still streaming, not final empty args. An unbound reveal
+					// never advances, so drop it: the next update's fresh entry shows all received.
+					if (partialJson !== undefined && isReplyWrite(renderToolName, renderArgs) === undefined) {
 						this.#toolArgsReveal.finish(content.id);
 						continue;
 					}
@@ -2057,36 +2126,42 @@ export class EventController {
 	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
 	 * an approval-mode / per-tool `prompt` policy is user-blocking — the run
 	 * reads `blocked`, not `working`. Mirrors the wrapper's `resolveApproval`
-	 * inputs (approvalMode + tools.approval) and prompt text; uses
-	 * `resolveApproval` rather than `requiresApproval` so a `deny` policy does not
-	 * throw in the render path.
+	 * inputs (approvalMode + tools.approval, grants, restrictions) and prompt
+	 * text, all read from the viewed session — a focused subagent runs under its
+	 * own settings, conversation, and session approvals; uses `resolveApproval`
+	 * rather than `requiresApproval` so a `deny` policy does not throw in the
+	 * render path.
 	 */
 	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
 		if (toolName === "ask") {
-			const questions = recoverAskQuestions(args)?.map(question => question.question);
-			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
+			const html = recoverAskHtml(args);
+			const form = html === undefined ? undefined : parseHtmlForm(html);
+			const question = form?.fields.find(field => field.name);
+			return {
+				state: "blocked",
+				kind: "question",
+				msg: form && question ? fieldQuestions(form).get(question) : undefined,
+			};
 		}
 		const session = this.ctx.viewSession;
 		const tool = session.getToolByName(toolName);
 		if (!tool) return undefined;
-		const mode = cfgToolsApprovalMode.get(settings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
-		const grants =
-			mode === "always-ask-cached"
-				? getApprovalGrants(settings.getAgentDir(), this.ctx.sessionManager.getSessionId())
-				: undefined;
+		const sessionSettings = session.settings;
+		const mode = cfgToolsApprovalMode.get(sessionSettings);
+		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(sessionSettings);
+		const grants = mode === "always-ask-cached" ? session.getApprovalGrants() : undefined;
 		const approval = resolveApproval(
 			tool,
 			args,
 			mode,
 			userPolicies,
 			grants,
-			approvalRestrictions(settings, this.ctx.sessionManager.getCwd()),
+			approvalRestrictions(sessionSettings, session.sessionManager.getCwd()),
 		);
 		if (approval.policy !== "prompt") return undefined;
 		// Approved for this session: the wrapper runs it without asking.
 		const scope = sessionApprovalScope(approval, tool.name);
-		if (scope && session.extensionRunner?.hasSessionApproval(scope.key)) return undefined;
+		if (scope && session.hasSessionApproval(scope.key)) return undefined;
 		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
@@ -2913,18 +2988,34 @@ export class EventController {
 			this.ctx.chatContainer.children.at(-1) === previous &&
 			this.ctx.chatContainer.canRemoveBlock(previous)
 		) {
-			previous.addRules(event.rules);
+			previous.inner.addRules(event.rules);
+			previous.setBlock({
+				type: "event",
+				id: previous.block.id,
+				event: { type: "ttsr_triggered", rules: previous.inner.rules },
+			});
 			this.ctx.ui.requestRender();
 			return;
 		}
-		const component = new TtsrNotificationComponent(event.rules);
+		const notification = new TtsrNotificationComponent(event.rules);
+		const component = new PresentedBlock(notification, {
+			type: "event",
+			id: eventBlockId("ttsr"),
+			event: { type: "ttsr_triggered", rules: notification.rules },
+		});
 		component.setExpanded(this.ctx.toolOutputExpanded);
 		this.ctx.present(component);
 		this.#lastTtsrNotification = component;
 	}
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
-		const component = new TodoReminderComponent(event.todos, event.attempt, event.maxAttempts);
+		const { todos, attempt, maxAttempts } = event;
+		const component = new PresentedBlock(new TodoReminderComponent(todos, attempt, maxAttempts), {
+			type: "event",
+			id: eventBlockId("todo-reminder"),
+			event: { type: "todo_reminder", todos, attempt, maxAttempts },
+		});
+		component.setExpanded(this.ctx.toolOutputExpanded);
 		this.ctx.present(component);
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {

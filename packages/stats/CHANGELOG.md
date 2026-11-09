@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+
+## [18.16.0] - 2026-11-02
+
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `setStatsCloseHandler`: while a host sets one, the dashboard shows a Close button in its top bar and closes on Esc or Ctrl+C (with no text selected), for hosts that show it in place of their terminal
+
+### Fixed
+
+- Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed ([#17463](https://github.com/can1357/oh-my-pi/pull/17463) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.14.0] - 2026-10-29
 
 ### Changed

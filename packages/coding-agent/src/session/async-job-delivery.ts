@@ -110,6 +110,17 @@ export function taskAgentHandles(
 	return job.status === "completed" && job.agentOutputPublished !== false ? "agent" : "history";
 }
 
+/** Longest command a completion header quotes before eliding its middle. */
+const COMMAND_IDENTITY_MAX_CHARS = 400;
+
+/** A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct. */
+function commandIdentity(command: string): string {
+	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
+	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
+	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;
+	return `${oneLine.slice(0, keep)}…${oneLine.slice(-keep)}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -127,7 +138,11 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// Job output (a command's output, or a task's `<task-result>` around a
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
-		// into or open a forged harness block.
+		// into or open a forged harness block. Neither may the label naming it.
+		// A bash job is named by its whole command: its label truncates the tail, so parallel jobs
+		// that share a prefix would otherwise read the same in the notice that delivers them.
+		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
+		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
 		return {
 			jobId: entry.jobId,
 			agentUrlId,
@@ -138,6 +153,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
 			label: entry.job?.label,
+			headerLabel: headerLabel ? escapeHarnessTags(headerLabel) : undefined,
+			namedByCommand: command !== undefined,
 			durationMs: entry.durationMs,
 			meta: entry.job?.latestDetails?.meta,
 			structured,

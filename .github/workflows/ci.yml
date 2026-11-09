@@ -176,11 +176,21 @@ jobs:
                 *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
               esac
               name="cargo-deny-$ver-$arch-unknown-linux-musl"
-              curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"
-              echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
-              tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
-              mkdir -p "$HOME/.cargo/bin"
-              install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+              # vmon's omp-ci template keeps the binary a previous run of this
+              # step installed. GitHub release assets go through outages;
+              # crates.io keeps the job independent of them at the cost of a
+              # source build.
+              if [ "$(cargo-deny --version 2>/dev/null)" = "cargo-deny $ver" ]; then
+                echo "cargo-deny $ver already installed"
+              elif curl -fsSL --retry 5 --retry-max-time 60 -o "$RUNNER_TEMP/$name.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz"; then
+                echo "$sha  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+                tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+                mkdir -p "$HOME/.cargo/bin"
+                install -m 0755 "$RUNNER_TEMP/$name/cargo-deny" "$HOME/.cargo/bin/cargo-deny"
+              else
+                echo "::warning::cargo-deny release download failed; building $ver from crates.io"
+                cargo install --locked --force cargo-deny --version "$ver"
+              fi
               # `--offline` needs every workspace crate already in the registry
               # cache. PR runs use a fresh GitHub-hosted runner (see runs-on
               # above) with no prior cargo work, so nothing populates the index
@@ -245,18 +255,17 @@ jobs:
               bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test //crates/...
          # Clippy scope mirrors `cargo clippy --workspace` (libraries only, no
          # test targets) plus the strict/default split: crates with
-         # `[lints] workspace = true` get the workspace policy, except
-         # brush-core (a vendored fork excluded from the Cargo task too).
+         # `[lints] workspace = true` get the workspace policy.
          # pi-builtins allows every clippy group in its own manifest (ported
-         # brush/uutils/jaq code) but is still held to zero rustc warnings;
+         # uutils/jaq code) but is still held to zero rustc warnings;
          # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
          - name: Clippy (workspace lint policy on opted-in crates)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library|rust_binary', //crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
          - name: Clippy (default lints elsewhere)
            run: |
-              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/... - //crates/vendor/brush-core/...)" \
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-diff/... + //crates/pi-edit/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/...)" \
                 | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
          - name: Clippy (manifest allows on ported pi-builtins)
            run: |
@@ -590,7 +599,7 @@ jobs:
               # Not `test:scripts`: scripts/install.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts
+              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)

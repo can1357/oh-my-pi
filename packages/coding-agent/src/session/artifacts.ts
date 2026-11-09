@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
 
 /**
@@ -56,10 +57,35 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
 		await replaceFileAtomically(tempPath, path);
 	} catch (error) {
-		await fs.rm(tempPath, { force: true });
+		// Best-effort cleanup: the write or publication error is the one to report.
+		await fs.rm(tempPath, { force: true }).catch(cleanupError => {
+			logger.warn("Failed to remove staged artifact", { tempPath, error: toError(cleanupError).message });
+		});
 		throw error;
 	}
 	return expectedBytes;
+}
+
+/**
+ * Artifact surface shared by a session and the subagents that adopt its
+ * manager. {@link ArtifactManager} implements it on the owning thread; a
+ * subagent worker holds a remote implementation whose ids come from the owner
+ * (`thread/services/runtime-remote.ts`), so ids stay unique across the tree.
+ */
+export interface ArtifactManagerApi {
+	/** Artifact directory path; may not exist until the first artifact is saved. */
+	readonly dir: string;
+	/** Allocate the next artifact id. */
+	allocateId(): number;
+	/** Allocate a new artifact path and id without writing content. */
+	allocatePath(toolType: string): Promise<{ id: string; path: string }>;
+	/** Save `content` as a new artifact; returns its id. */
+	save(content: string, toolType: string): Promise<string>;
+	exists(id: string): Promise<boolean>;
+	/** Every artifact file name in the directory; empty when it does not exist. */
+	listFiles(): Promise<string[]>;
+	/** Full path of an artifact file, or null when it does not exist. */
+	getPath(id: string): Promise<string | null>;
 }
 
 /**
@@ -72,7 +98,7 @@ export async function writeArtifact(path: string, content: string): Promise<numb
  * adopted via `SessionManager.adoptArtifactManager`, so the whole parent +
  * subagent tree shares one ID space and one directory.
  */
-export class ArtifactManager {
+export class ArtifactManager implements ArtifactManagerApi {
 	#nextId = 0;
 	readonly #dir: string;
 	#dirCreated = false;

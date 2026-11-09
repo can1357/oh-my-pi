@@ -343,6 +343,9 @@ struct Gen<'a> {
 	sib: &'a flume::Receiver<Vec<Sibling>>,
 	/// Pipe input already read (upstream `iobuf.in` of the generator).
 	inbox: VecDeque<Sibling>,
+	/// Pipe input the receiver delivered while the generator awaited a file list
+	/// without an output pass (see `await_list`); unread until the next refill.
+	delivered: VecDeque<Sibling>,
 	/// File-list segments the generator has read (upstream: lists it received).
 	seen_segments: usize,
 	/// The generator read NDX_FLIST_EOF (upstream `flist_eof`).
@@ -531,6 +534,7 @@ impl<'a> Gen<'a> {
 			out: out.clone(),
 			sib: &sib.rx,
 			inbox: VecDeque::new(),
+			delivered: VecDeque::new(),
 			seen_segments: sib.segments,
 			seen_eof: sib.eof,
 			ndx_out,
@@ -795,6 +799,7 @@ impl<'a> Gen<'a> {
 
 	/// Moves every batch the receiver has delivered into the inbox (no waiting).
 	fn pull_input(&mut self) {
+		self.inbox.append(&mut self.delivered);
 		while let Ok(batch) = self.sib.try_recv() {
 			self.inbox.extend(batch);
 		}
@@ -862,7 +867,7 @@ impl<'a> Gen<'a> {
 	/// was already waiting, the data stays buffered. Then every waiting batch is read,
 	/// blocking (with keepalives) until one arrives.
 	fn refill(&mut self) -> Result<(), RsyncError> {
-		let ready = !self.sib.is_empty();
+		let ready = !self.delivered.is_empty() || !self.sib.is_empty();
 		self.out.output_pass(ready).map_err(RsyncError::from_stream)?;
 		self.pull_input();
 		// Output keeps going out while later passes wait for input; what is still
@@ -876,6 +881,55 @@ impl<'a> Gen<'a> {
 					self.inbox.extend(batch);
 					self.pull_input();
 				},
+				Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
+				Err(flume::RecvTimeoutError::Timeout) => {
+					if last_idle.elapsed() >= Duration::from_millis(500) {
+						last_idle = Instant::now();
+						self.out.idle(MSK_ALLOW_FLUSH).map_err(|e| self.log.io_error(&e, RERR_STREAMIO, 0))?;
+					}
+				},
+			}
+		}
+		Ok(())
+	}
+
+	/// wait_for_receiver while the generator needs the next file list.
+	fn wait_for_list(&mut self) -> Result<(), RsyncError> {
+		self.await_list()?;
+		self.wait_for_receiver()
+	}
+
+	/// Whether the sender sends the next file list (or the end of the lists) without
+	/// waiting for anything from this side: before it reads its first request, its
+	/// send_extra_file_list queues incremental lists until MIN_FILECNT_LOOKAHEAD
+	/// entries beyond the initial list are out, and frees none before this side
+	/// reports a list done.
+	fn next_list_unconditional(&self) -> bool {
+		let queued: usize = (1..self.seen_segments).filter_map(|seg| self.flists.segment_len(seg)).sum();
+		self.inc() && !self.seen_eof && queued < MIN_FILECNT_LOOKAHEAD as usize
+	}
+
+	/// Before a refill for a list the sender sends unconditionally, when that refill's
+	/// output pass depends on input already waiting (messages sent since the last pass,
+	/// data buffered), waits — without the pass — until the receiver has delivered
+	/// something. Upstream's sender has those lists on the socket before the generator
+	/// starts, and its receiver forwards them while the generator works through the
+	/// list before; the refill then finds them waiting and keeps the data back after
+	/// the messages, however this process's threads are scheduled. A pass that writes
+	/// regardless is not delayed.
+	fn await_list(&mut self) -> Result<(), RsyncError> {
+		if !self.inbox.is_empty()
+			|| !self.delivered.is_empty()
+			|| !self.out.pass_depends_on_input()
+			|| !self.next_list_unconditional()
+		{
+			return Ok(());
+		}
+		let mut last_idle = Instant::now();
+		while self.delivered.is_empty() {
+			self.check_cancel()?;
+			match self.sib.recv_timeout(Duration::from_millis(100)) {
+				Ok(batch) => self.delivered.extend(batch),
 				Err(flume::RecvTimeoutError::Disconnected) => return Ok(()),
 				Err(flume::RecvTimeoutError::Timeout) => {
 					if last_idle.elapsed() >= Duration::from_millis(500) {
@@ -1116,7 +1170,7 @@ impl<'a> Gen<'a> {
 			}
 			if self.hard_links() && self.inc() {
 				while !self.seen_eof && (self.view_file_total() as i32) < MIN_FILECNT_LOOKAHEAD / 2 {
-					self.wait_for_receiver()?;
+					self.wait_for_list()?;
 				}
 			}
 			let start = self.flists.segment_start(self.cur_seg).unwrap_or(0);
@@ -1163,7 +1217,7 @@ impl<'a> Gen<'a> {
 				if self.seen_segments > self.cur_seg + 1 || self.seen_eof {
 					break;
 				}
-				self.wait_for_receiver()?;
+				self.wait_for_list()?;
 			}
 			if self.seen_segments <= self.cur_seg + 1 {
 				// Upstream's cur_flist becomes NULL here, so check_for_finished_files

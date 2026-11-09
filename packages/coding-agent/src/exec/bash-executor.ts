@@ -1,21 +1,27 @@
 /**
  * Bash command execution with streaming support and cancellation.
  *
- * Uses brush-core via native bindings for shell execution.
+ * Uses the embedded bash engine (pi-shell) through native bindings for shell
+ * execution.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
 	type PipeStreams,
 	PtySession,
+	RunTrace,
 	Shell,
 	type ShellFilesystem,
 	type ShellRunResult,
 } from "@oh-my-pi/pi-natives";
+import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
+import { logger } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { attachShellTrace } from "@oh-my-pi/pi-tui/tools/shell-viz";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -52,7 +58,7 @@ export interface BashExecutorOptions {
 	sessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
-	/** Run through the configured user shell instead of brush parsing directly. */
+	/** Run through the configured user shell instead of the embedded shell parsing directly. */
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
 	pty?: BashPtyOptions;
@@ -61,6 +67,8 @@ export interface BashExecutorOptions {
 	 * enforced by the embedded shell's `git` builtin.
 	 */
 	gitGuard?: boolean;
+	/** ovnfs command for the git guard's separate-checkout guidance. */
+	ovnfs?: string;
 	/**
 	 * Filesystem for `scheme://` paths in this run of the embedded shell (a URL
 	 * `cwd` included). External shells and processes never see it.
@@ -72,6 +80,12 @@ export interface BashExecutorOptions {
 	 */
 	streams?: PipeStreams;
 	/**
+	 * Receives the embedded shell's live trace of the command (pi-shell's
+	 * `RunTrace` snapshot) every {@link TRACE_POLL_MS} while it changed, and
+	 * once more after the run settles. The PTY path never calls it.
+	 */
+	onTrace?: (trace: ShellTrace) => void;
+	/**
 	 * Invoked once the embedded shell starts the command, with a probe of the
 	 * live pids it spawned (empty once the run ends). Not called on the
 	 * user-shell paths.
@@ -79,8 +93,9 @@ export interface BashExecutorOptions {
 	onStart?: (pids: () => readonly number[]) => void;
 	/**
 	 * Invoked before the run when the session's persistent shell is busy with
-	 * another command, so this one runs in a one-shot shell instead: it sees
-	 * none of the session's shell state, and the state it sets is discarded.
+	 * another command, so this one runs in a fork of it instead: it sees the
+	 * session's shell state as of before that command, and the state it sets
+	 * is discarded.
 	 */
 	onSessionShellBusy?: () => void;
 	/**
@@ -89,6 +104,11 @@ export interface BashExecutorOptions {
 	 * so the persistent shell it used is dropped instead of kept for a next call.
 	 */
 	isSessionCurrent?: () => boolean;
+	/**
+	 * `false` skips the shell output minimizer (`shellMinimizer.*`) for this run: the session's Spotlight
+	 * experiment shapes the output instead. Default: the setting decides.
+	 */
+	minimize?: boolean;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -118,21 +138,16 @@ export interface BashPtyOptions {
 	onStdin?: (write: (data: string) => void) => void;
 }
 
-export interface BashResult {
-	output: string;
+/** A command's captured output (the sink's summary, column-cap and middle-elision fields included) and how it ended. */
+export interface BashResult extends OutputSummary {
 	exitCode: number | undefined;
 	cancelled: boolean;
 	/** True when the command was killed by its timeout deadline (not a user abort). */
 	timedOut?: boolean;
-	truncated: boolean;
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	artifactId?: string;
-	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
-	artifactElidedBytes?: number;
-	artifactError?: OutputArtifactError;
+	/** The final trace snapshot of an embedded-shell run started with `onTrace`. */
+	trace?: ShellTrace;
+	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
+	minimized?: MinimizedMeta;
 	workingDir?: string;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
@@ -145,6 +160,45 @@ const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** A `scheme://` working directory: it exists only in the embedded shell's injected filesystem. */
 const URL_CWD_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/** Cadence of the `onTrace` poll while an embedded run is in flight. */
+const TRACE_POLL_MS = 80;
+
+/**
+ * Polls `trace` every {@link TRACE_POLL_MS} while the run is in flight and
+ * forwards each changed snapshot; `stop()` takes the final one.
+ *
+ * An invalid snapshot is logged once and skipped: the poll runs from a timer,
+ * where a throw would escape as an uncaught exception and end the session,
+ * and the trace is only a visualization of the run.
+ */
+function pollRunTrace(trace: RunTrace, onTrace: (trace: ShellTrace) => void): { stop: () => ShellTrace | undefined } {
+	let last = -1;
+	let latest: ShellTrace | undefined;
+	let warned = false;
+	const poll = () => {
+		const version = trace.version();
+		if (version === last) return;
+		last = version;
+		const snapshot: unknown = JSON.parse(trace.snapshot());
+		if (!isShellTrace(snapshot)) {
+			if (!warned) logger.warn("Native shell returned an invalid execution trace", { version });
+			warned = true;
+			return;
+		}
+		latest = snapshot;
+		attachShellTrace(latest, trace);
+		onTrace(latest);
+	};
+	const timer = setInterval(poll, TRACE_POLL_MS);
+	return {
+		stop: () => {
+			clearInterval(timer);
+			poll();
+			return latest;
+		},
+	};
+}
 
 export interface DirenvPreflightOptions {
 	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
@@ -319,7 +373,7 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
-	// Preserve the caller's logical cwd string. Brush uses this value to update `PWD` and its
+	// Preserve the caller's logical cwd string. The embedded shell uses this value to update `PWD` and its
 	// internal working directory, so realpathing here collapses symlinks before the shell sees them.
 	return cwd;
 }
@@ -571,7 +625,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		supportsAutoUserShell(shell) &&
 		$env.PI_NO_PTY !== "1" &&
 		!isPersistentShellCdCommand(command);
-	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const minimizer = options?.minimize === false ? undefined : buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
@@ -596,10 +650,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			commandPrefix: prefix,
 		}),
 	]);
-	const commandEnv = buildNonInteractiveEnv(preflight.env);
+	const commandEnv = buildNonInteractiveEnv(preflight.env, { inheritLocale: options?.useUserShell === true });
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
-	// paths, and the embedded brush shell runs the POSIX line better directly.
+	// paths, and the embedded shell runs the POSIX line better directly.
 	const finalCommand =
 		options?.useUserShell === true && !bashShell && !isCmdShell(shell) && !runCdInPersistentShell
 			? buildUserShellCommand(shell, args, preflight.command)
@@ -680,7 +734,9 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const sessionEnv = options?.gitGuard ? { ...shellEnv, PI_GIT_GUARD: "1" } : shellEnv;
+	const sessionEnv = options?.gitGuard
+		? { ...shellEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
+		: shellEnv;
 	const shellOptions = {
 		sessionEnv,
 		snapshotPath: snapshotPath ?? undefined,
@@ -695,15 +751,17 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// A persistent Shell runs one command at a time (the native session is a
 	// mutex-guarded queue and `abort()` kills every in-flight run on it). When
 	// parallel bash calls overlap on the same key, the first one owns the
-	// persistent session; the rest degrade to isolated one-shot shells — the
-	// same path quarantined sessions take.
+	// persistent session; the rest run in one-shot forks of it, which start
+	// from the session's state before the owner's command. A quarantined
+	// session gets a fresh one-shot shell.
 	const sessionBusy = shellSessionsInUse.has(sessionKey);
 	let shellSession = persistentSessionBroken || sessionBusy ? undefined : shellSessions.get(sessionKey);
 	if (!shellSession && !persistentSessionBroken && !sessionBusy) {
 		shellSession = new Shell(shellOptions);
 		shellSessions.set(sessionKey, shellSession);
 	}
-	const executionShell = shellSession ?? new Shell(shellOptions);
+	const busyShell = sessionBusy ? shellSessions.get(sessionKey) : undefined;
+	const executionShell = shellSession ?? busyShell?.fork() ?? new Shell(shellOptions);
 	const ownsPersistentSession = shellSession !== undefined;
 	if (ownsPersistentSession) {
 		shellSessionsInUse.add(sessionKey);
@@ -753,6 +811,16 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	}
 
 	let resetSession = false;
+	const runTrace = options?.onTrace ? new RunTrace(finalCommand) : undefined;
+	const tracePoll = runTrace && options?.onTrace ? pollRunTrace(runTrace, options.onTrace) : undefined;
+	// The last snapshot once the run settled (any outcome); `stop()` is idempotent past the first call.
+	let finalTrace: ShellTrace | undefined;
+	const settleTrace = (): { trace: ShellTrace } | Record<string, never> => {
+		if (tracePoll) {
+			finalTrace ??= tracePoll.stop();
+		}
+		return finalTrace ? { trace: finalTrace } : {};
+	};
 
 	try {
 		const runPromise = executionShell.run(
@@ -764,6 +832,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
 				streams: options?.streams,
+				trace: runTrace,
 			},
 			(err, chunk) => {
 				if (!err) {
@@ -805,6 +874,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
+				...settleTrace(),
 				...(await dump(notice)),
 			};
 		}
@@ -826,6 +896,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				timedOut: true,
+				...settleTrace(),
 				...(await dump(annotation)),
 			};
 		}
@@ -839,6 +910,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
+				...settleTrace(),
 				...(await dump("Command cancelled")),
 			};
 		}
@@ -851,15 +923,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		// (or an unavailable allocator) must keep the raw stream rather than
 		// silently dropping the diagnostics the summary elided.
 		const minimized = winner.result.minimized;
+		let minimizedMeta: MinimizedMeta | undefined;
 		if (minimized && minimized.text !== minimized.originalText) {
+			const info = {
+				filter: minimized.filter,
+				inputBytes: minimized.inputBytes,
+				outputBytes: minimized.outputBytes,
+			};
 			const artifactId = options?.onMinimizedSave
-				? await options.onMinimizedSave(minimized.originalText, {
-						filter: minimized.filter,
-						inputBytes: minimized.inputBytes,
-						outputBytes: minimized.outputBytes,
-					})
+				? await options.onMinimizedSave(minimized.originalText, info)
 				: undefined;
 			if (artifactId) {
+				minimizedMeta = { ...info, artifactId };
 				// The decoder above already owns image extraction from the streamed
 				// lossless output. Scrub any graphics frames repeated by the native
 				// minimizer without feeding them back into that decoder.
@@ -876,12 +951,15 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
+			...settleTrace(),
 			...(await dump()),
 		};
 	} catch (err) {
 		resetSession = true;
 		throw err;
 	} finally {
+		settleTrace();
 		await sink.dispose();
 		if (timeoutTimer) {
 			clearTimeout(timeoutTimer);

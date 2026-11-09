@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.18.3] - 2026-11-09
+
+### Changed
+
+- `ask` tool cards show the HTML form's fieldset legends and field count while pending, and each question with its submitted answer (or "(no answer)") once answered, flagging submissions made by the timeout
+
+## [18.15.0] - 2026-11-01
+
+### Changed
+
+- `job` tool results name each background job by the purpose the model gave for it, falling back to its command ([#17649](https://github.com/can1357/oh-my-pi/pull/17649) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

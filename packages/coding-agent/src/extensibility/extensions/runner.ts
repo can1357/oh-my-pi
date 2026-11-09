@@ -25,7 +25,9 @@ import {
 	markPerCallContextMessage,
 	setContextHistoryIndex,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { addKeyAliases, canonicalKeyId, type KeyId, type Keybinding } from "@oh-my-pi/pi-tui";
+import { KEYBINDINGS, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appApproveKeys, appFollowUpKeys } from "@oh-my-pi/pi-tui/keybinding-matchers";
 import { logger } from "@oh-my-pi/pi-utils";
 import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
@@ -45,6 +47,10 @@ import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
+import {
+	notifyTranscriptPresentersChanged,
+	readTranscriptPresentation,
+} from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -97,18 +103,24 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ShortcutConflict,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
 	ToolResultEvent,
 	ToolResultEventResult,
+	TranscriptPresenter,
 	UserBashEvent,
 	UserBashEventResult,
 	UserPythonEvent,
 	UserPythonEventResult,
 } from "./types";
 
-import { cfgExtensionAssistantTextRenderers, cfgExtensionHandlersToolCallTimeoutMs } from "../settings";
+import {
+	cfgExtensionAssistantTextRenderers,
+	cfgExtensionHandlersToolCallTimeoutMs,
+	cfgExtensionTranscriptPresenters,
+} from "../settings";
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -201,6 +213,7 @@ function createHandlerUIContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
+	const formDialog = ui.formDialog;
 	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
@@ -220,6 +233,10 @@ function createHandlerUIContext(
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
+			: undefined,
+		formDialog: formDialog
+			? (html, dialogOptions) =>
+					runDialog(() => formDialog.call(ui, html, attachHandlerSignal(dialogOptions, handlerSignal)))
 			: undefined,
 		approve: approve
 			? (prompt, dialogOptions) =>
@@ -250,7 +267,10 @@ function createHandlerUIContext(
 		},
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
-	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
+	} satisfies Pick<
+		ExtensionUIContext,
+		"select" | "confirm" | "input" | "askDialog" | "formDialog" | "approve" | "custom" | "editor"
+	>;
 	const delegatedMethods = new Map<PropertyKey, unknown>();
 
 	return new Proxy(ui, {
@@ -378,6 +398,21 @@ async function raceHandlerWithTimeout<T>(
 	}
 }
 
+/**
+ * Wait for an extension's earlier deliveries until `deadline` (a
+ * `performance.now()` instant). Resolves `false` when the deadline passes
+ * first; an already-settled `ready` wins even at a past deadline.
+ */
+async function awaitDeliveryTurn(ready: Promise<void>, deadline: number): Promise<boolean> {
+	const { promise: expired, resolve } = Promise.withResolvers<boolean>();
+	const timer = setTimeout(resolve, Math.max(0, deadline - performance.now()), false);
+	try {
+		return await Promise.race([ready.then(() => true), expired]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 const MAX_PENDING_CREDENTIAL_DISABLED = 32;
 
 /**
@@ -468,6 +503,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	rerenderMessage: () => {},
+	refreshTranscript: () => {},
 	// A subagent's runner has no UI of its own, yet its links are picked from the interactive screen
 	// while its transcript is focused: answer as the interactive UI does.
 	getLinkClicksAvailable: extensionLinkClicksAvailable,
@@ -499,6 +535,15 @@ interface ToolRegistrationScope {
 	pending: Set<Promise<void>>;
 	signal?: AbortSignal;
 	closed: boolean;
+}
+
+/** One extension's place in its delivery queue for one {@link ExtensionRunner.emit} call. */
+interface DeliveryTurn {
+	/** Settles once the extension has handled every earlier event; undefined when its queue was idle. */
+	ready: Promise<void> | undefined;
+	/** `performance.now()` instant after which the event stops waiting for earlier deliveries. */
+	deadline: number;
+	release: () => void;
 }
 
 /** Identity reported by a session that is not a subagent and received no explicit identity. */
@@ -545,6 +590,7 @@ export class ExtensionRunner {
 	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
 	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
 	#sessionModes?: ExtensionContextActions["sessionModes"];
+	#keybindings?: ExtensionContextActions["keybindings"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -552,6 +598,8 @@ export class ExtensionRunner {
 	#warnedLinkSchemes = new Set<string>();
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
+	/** Latest pending delivery per extension; see {@link #reserveDeliveryTurns}. Absent while idle. */
+	#deliveryTails = new Map<Extension, Promise<void>>();
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
 	#loadOrder: Extension[] | undefined;
@@ -562,6 +610,8 @@ export class ExtensionRunner {
 	#sessionStartEvent: RunnerEmitEvent | undefined;
 	/** Notified after {@link setSuspendedExtensions} suspends or resumes any extension. */
 	#suspensionListeners = new Set<() => void>();
+	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
+	#guardedPresenters = new WeakMap<TranscriptPresenter, TranscriptPresenter>();
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
 	#suspensionParent: ExtensionRunner | undefined;
 	/**
@@ -773,6 +823,7 @@ export class ExtensionRunner {
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
 	}
 
 	/**
@@ -858,6 +909,7 @@ export class ExtensionRunner {
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
 		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
 		this.#sessionModes = contextActions.sessionModes;
+		this.#keybindings = contextActions.keybindings;
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -1035,6 +1087,14 @@ export class ExtensionRunner {
 		this.#sessionApprovals.add(`${this.sessionId}\0${key}`);
 	}
 
+	/** Every key {@link hasSessionApproval} holds for the current session, in grant order. */
+	sessionApprovalKeys(): string[] {
+		const prefix = `${this.sessionId}\0`;
+		const keys: string[] = [];
+		for (const entry of this.#sessionApprovals) if (entry.startsWith(prefix)) keys.push(entry.slice(prefix.length));
+		return keys;
+	}
+
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
 	}
@@ -1127,6 +1187,10 @@ export class ExtensionRunner {
 		if (added.length === 0) return;
 		this.extensions.push(...added);
 		this.#loadOrder?.push(...added);
+		// Presenters their factories registered before they joined.
+		if (added.some(extension => extension.transcriptPresenters.length > 0)) {
+			notifyTranscriptPresentersChanged();
+		}
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
@@ -1347,33 +1411,80 @@ export class ExtensionRunner {
 		this.runtime.flagValues.set(name, value);
 	}
 
-	static readonly #RESERVED_SHORTCUTS: Record<string, true> = {
-		"ctrl+c": true,
-		"ctrl+d": true,
-		"ctrl+z": true,
-		"ctrl+k": true,
-		"ctrl+p": true,
-		"ctrl+l": true,
-		"ctrl+o": true,
-		"ctrl+t": true,
-		"ctrl+g": true,
-		"alt+m": true,
-		// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
-		"ctrl+q": true,
-		"shift+tab": true,
-		"shift+ctrl+p": true,
-		"alt+enter": true,
-		escape: true,
-		enter: true,
-	};
+	/** Chords omp keeps for itself, canonicalized so every modifier spelling matches. */
+	static readonly #RESERVED_SHORTCUTS: ReadonlySet<string> = new Set(
+		[
+			"ctrl+c",
+			"ctrl+d",
+			"ctrl+z",
+			"ctrl+k",
+			"ctrl+p",
+			"ctrl+l",
+			"ctrl+o",
+			"ctrl+t",
+			"ctrl+g",
+			"alt+m",
+			// Default chord for `app.message.followUp` (Windows Terminal can't deliver Ctrl+Enter; #1903).
+			"ctrl+q",
+			"shift+tab",
+			"shift+ctrl+p",
+			"alt+enter",
+			"escape",
+			"enter",
+		].map(canonicalKeyId),
+	);
+
+	/**
+	 * Keymap actions the main editor answers to, where extension shortcuts are bound: app actions,
+	 * and the editing and input keys a shortcut on the same chord would take over.
+	 */
+	static readonly #EDITOR_KEYBINDINGS: readonly Keybinding[] = (Object.keys(KEYBINDINGS) as Keybinding[]).filter(
+		id => id.startsWith("app.") || id.startsWith("tui.editor.") || id.startsWith("tui.input."),
+	);
+
+	/** Default keymap for sessions without a TUI (print, RPC, ACP, SDK). */
+	static #defaultKeybindings: KeybindingsManager | undefined;
+
+	/** Backs `ExtensionAPI.getShortcutConflict`; `extensionPath`'s own registrations are not conflicts. */
+	getShortcutConflict(shortcut: KeyId, extensionPath?: string): ShortcutConflict | undefined {
+		const lowered = shortcut.toLowerCase() as KeyId;
+		if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(lowered))) return { kind: "reserved" };
+		// Compare alias sets, as the TUI matches keys: a bare shifted symbol also fires on `shift+`.
+		const wanted = new Set<string>();
+		addKeyAliases(wanted, lowered);
+		const holds = (bound: Iterable<KeyId>): boolean => {
+			const keys = new Set<string>();
+			for (const key of bound) addKeyAliases(keys, key.toLowerCase() as KeyId);
+			for (const key of wanted) if (keys.has(key)) return true;
+			return false;
+		};
+		const keymap = this.#keybindings ?? (ExtensionRunner.#defaultKeybindings ??= KeybindingsManager.inMemory());
+		// Approve and follow-up fall back to Ctrl+Enter when unbound; everything else is its bound keys.
+		const keybindings = ExtensionRunner.#EDITOR_KEYBINDINGS.filter(action =>
+			holds(
+				action === "app.approval.approve"
+					? appApproveKeys(keymap)
+					: action === "app.message.followUp"
+						? appFollowUpKeys(keymap)
+						: keymap.getKeys(action),
+			),
+		);
+		if (keybindings.length > 0) return { kind: "keybinding", keybindings };
+		// `getShortcuts` binds the last registration of a chord in any spelling; report that one.
+		const holder = this.extensions.findLast(ext => ext.path !== extensionPath && holds(ext.shortcuts.keys()));
+		return holder ? { kind: "extension", extensionPath: holder.path } : undefined;
+	}
 
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
+		// Each match key (alias) to the registration holding it: a later registration of the same chord,
+		// in any spelling, replaces the earlier one, so the editor binds exactly one handler per chord.
+		const holders = new Map<string, KeyId>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
 				const normalizedKey = key.toLowerCase() as KeyId;
 
-				if (ExtensionRunner.#RESERVED_SHORTCUTS[normalizedKey]) {
+				if (ExtensionRunner.#RESERVED_SHORTCUTS.has(canonicalKeyId(normalizedKey))) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,
@@ -1381,14 +1492,20 @@ export class ExtensionRunner {
 					continue;
 				}
 
-				const existing = allShortcuts.get(normalizedKey);
-				if (existing) {
+				const aliases = new Set<string>();
+				addKeyAliases(aliases, normalizedKey);
+				for (const alias of aliases) {
+					const held = holders.get(alias);
+					const existing = held === undefined ? undefined : allShortcuts.get(held);
+					if (held === undefined || existing === undefined) continue;
 					logger.warn("Extension shortcut conflict", {
 						key,
 						extensionPath: shortcut.extensionPath,
 						existingExtensionPath: existing.extensionPath,
 					});
+					allShortcuts.delete(held);
 				}
+				for (const alias of aliases) holders.set(alias, normalizedKey);
 				allShortcuts.set(normalizedKey, shortcut);
 			}
 		}
@@ -1456,6 +1573,52 @@ export class ExtensionRunner {
 	getAssistantTextRenderers(): AssistantTextRenderer[] {
 		if (!this.settings || !cfgExtensionAssistantTextRenderers.get(this.settings)) return [];
 		return this.#drawingExtensions().flatMap(ext => ext.assistantTextRenderers);
+	}
+
+	/**
+	 * Transcript presenters in extension load order, skipping suspended extensions; none while
+	 * `extensionRenderers.transcriptPresenters` is off. Each answers plain data read inside its guard
+	 * (see `readTranscriptPresentation`), or `"full"` when it throws or answers something else,
+	 * reporting its first such failure through {@link emitError}.
+	 */
+	getTranscriptPresenters(): TranscriptPresenter[] {
+		if (!this.settings || !cfgExtensionTranscriptPresenters.get(this.settings)) return [];
+		const presenters: TranscriptPresenter[] = [];
+		for (const ext of this.#drawingExtensions()) {
+			for (const presenter of ext.transcriptPresenters) {
+				let guarded = this.#guardedPresenters.get(presenter);
+				if (!guarded) {
+					let reported = false;
+					const report = (failure: { error: string; stack?: string }): void => {
+						reported = true;
+						this.emitError({ extensionPath: ext.path, event: "transcript_presenter", ...failure });
+					};
+					guarded = block => {
+						try {
+							const answer: unknown = presenter(block);
+							const presentation = readTranscriptPresentation(answer);
+							if (presentation !== null) return presentation;
+							// An async presenter: nothing awaits its Promise, so a rejection must not go unhandled.
+							if (answer instanceof Promise) answer.catch(() => {});
+							if (!reported)
+								report({ error: `Unknown transcript presentation ${Bun.inspect(answer, { depth: 1 })}` });
+						} catch (error) {
+							if (!reported) {
+								report(
+									error instanceof Error
+										? { error: error.message, stack: error.stack }
+										: { error: String(error) },
+								);
+							}
+						}
+						return "full";
+					};
+					this.#guardedPresenters.set(presenter, guarded);
+				}
+				presenters.push(guarded);
+			}
+		}
+		return presenters;
 	}
 
 	/** Link schemes claimed with `registerLinkScheme`; none while `extensionRenderers.assistantText` is off. */
@@ -1594,8 +1757,9 @@ export class ExtensionRunner {
 		const getModel = model ? () => model : this.#getModel;
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		const createAnnotations = this.#createAnnotations;
-		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void =>
-			this.runtime.sendUserMessage(text, options);
+		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
+			void this.runtime.sendUserMessage(text, options);
+		};
 		const getSessionModes = () => this.#sessionModes;
 		return {
 			ui: this.#uiContext,
@@ -1854,50 +2018,59 @@ export class ExtensionRunner {
 			return result as RunnerEmitResult<TEvent>;
 		}
 
-		for (const ext of extensions) {
-			const handlers = ext.handlers.get(event.type);
-			if (!handlers || handlers.length === 0) continue;
-			ctx ??= this.createContext();
-
-			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
-					handler,
-					event,
-					ctx,
-					ext,
-					handlerTimeoutForEvent(event.type),
-				);
-
-				if (this.#isSessionBeforeEvent(event) && handlerResult) {
-					result = handlerResult as SessionBeforeEventResult;
-					if (result.cancel) {
-						return result as RunnerEmitResult<TEvent>;
-					}
+		const timeoutMs = handlerTimeoutForEvent(event.type);
+		const turns = this.#reserveDeliveryTurns(extensions, event.type, timeoutMs);
+		try {
+			for (const ext of extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+				const turn = turns?.get(ext);
+				if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline))) {
+					logger.warn("Extension still handling an earlier event; delivering out of order", {
+						extensionPath: ext.path,
+						event: event.type,
+						timeoutMs,
+					});
 				}
+				ctx ??= this.createContext();
 
-				if (event.type === "session.compacting" && handlerResult) {
-					result = handlerResult as SessionCompactingResult;
-				}
+				for (const handler of handlers) {
+					const handlerResult = await this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs);
 
-				if (event.type === "session_stop" && handlerResult) {
-					const stopResult = handlerResult as SessionStopEventResult;
-					if (stopResult.decision === "block") {
-						return stopResult as RunnerEmitResult<TEvent>;
+					if (this.#isSessionBeforeEvent(event) && handlerResult) {
+						result = handlerResult as SessionBeforeEventResult;
+						if (result.cancel) {
+							return result as RunnerEmitResult<TEvent>;
+						}
 					}
-					const continuationContext = stopResult.additionalContext || stopResult.reason;
-					if (stopResult.continue === true && continuationContext) {
-						if (result) {
-							const prior = result as SessionStopEventResult;
-							result = {
-								continue: true,
-								additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
-							};
-						} else {
-							result = stopResult;
+
+					if (event.type === "session.compacting" && handlerResult) {
+						result = handlerResult as SessionCompactingResult;
+					}
+
+					if (event.type === "session_stop" && handlerResult) {
+						const stopResult = handlerResult as SessionStopEventResult;
+						if (stopResult.decision === "block") {
+							return stopResult as RunnerEmitResult<TEvent>;
+						}
+						const continuationContext = stopResult.additionalContext || stopResult.reason;
+						if (stopResult.continue === true && continuationContext) {
+							if (result) {
+								const prior = result as SessionStopEventResult;
+								result = {
+									continue: true,
+									additionalContext: `${prior.additionalContext || prior.reason}\n\n${continuationContext}`,
+								};
+							} else {
+								result = stopResult;
+							}
 						}
 					}
 				}
+				turn?.release();
 			}
+		} finally {
+			if (turns) for (const turn of turns.values()) turn.release();
 		}
 
 		// Handlers for these events export session-scoped environment (a session
@@ -1913,6 +2086,47 @@ export class ExtensionRunner {
 		}
 
 		return result as RunnerEmitResult<TEvent>;
+	}
+
+	/**
+	 * Queue an event behind each subscribed extension's earlier events before
+	 * the first await, so every extension handles events in emission order even
+	 * while an earlier-loaded extension is still handling one: otherwise a slow
+	 * `tool_execution_start` handler lets the call's `tool_execution_end` reach
+	 * later extensions first (#17680). Load order within one event is kept.
+	 *
+	 * An event waits for the extension's earlier deliveries at most `timeoutMs`
+	 * after it was emitted, then runs out of order. Each handler run is capped
+	 * by the same budget, so an extension that stalls on a stream of events
+	 * (`tool_execution_update`) cannot build an unbounded serial backlog.
+	 *
+	 * Emits made inside a running handler (open handler scope) skip the queue:
+	 * that handler may be awaiting them (`ctx.newSession()` from `agent_end`),
+	 * and queueing them behind it, or behind a later extension still waiting
+	 * for it, would deadlock until the handler timeout.
+	 */
+	#reserveDeliveryTurns(
+		extensions: readonly Extension[],
+		type: string,
+		timeoutMs: number,
+	): Map<Extension, DeliveryTurn> | undefined {
+		const scope = this.#toolRegistrationScope.getStore();
+		if (scope && !scope.closed) return undefined;
+		const deadline = performance.now() + timeoutMs;
+		let turns: Map<Extension, DeliveryTurn> | undefined;
+		for (const ext of extensions) {
+			if (!ext.handlers.get(type)?.length) continue;
+			const ready = this.#deliveryTails.get(ext);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#deliveryTails.set(ext, promise);
+			const release = () => {
+				resolve();
+				if (this.#deliveryTails.get(ext) === promise) this.#deliveryTails.delete(ext);
+			};
+			turns ??= new Map();
+			turns.set(ext, { ready, deadline, release });
+		}
+		return turns;
 	}
 
 	/**

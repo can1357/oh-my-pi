@@ -67,6 +67,7 @@ export type TerminalId =
 	| "rio"
 	| "tern"
 	| "monstar"
+	| "rex"
 	| "base"
 	| "trueColor";
 
@@ -626,10 +627,17 @@ const KNOWN_TERMINALS = Object.freeze({
 	// OSC 99, and OSC 66 text sizing are outside rio's supported set and keep
 	// the conservative defaults.
 	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, true),
+	// Rex (Superlogical's terminal) identifies via TERM_PROGRAM=rex, or
+	// TERM=xterm-rex over SSH. It renders Kitty graphics and OSC 8
+	// hyperlinks — a link opens on command-click, and
+	// Settings > Terminal > Links only decides whether an `ssh://`-style link
+	// that launches another app asks first — so links are on. Notifications
+	// keep the BEL default.
+	rex: new TerminalInfo("rex", ImageProtocol.Kitty, true, true),
 	// Tern (Stencil's terminal, `stencil-term`) sets TERM_PROGRAM=tern and
-	// implements Kitty graphics, OSC 8 and OSC 9/99 notifications. Whether omp
-	// renders natively (Tern Surface Protocol) is decided by the `hello`
-	// handshake alone, never by this identity.
+	// implements Kitty graphics (Unicode placeholders included), OSC 8 and
+	// OSC 9/99 notifications. Whether omp renders natively (Tern Surface
+	// Protocol) is decided by the `hello` handshake alone, never by this identity.
 	tern: new TerminalInfo("tern", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99),
 	// Monstar (rockorager/monstar) is a Wayland terminal built on libghostty. It
 	// sets TERM=monstar and answers XTVERSION with `monstar <version>`. It
@@ -666,6 +674,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		if (caseEq(program, "rio")) return "rio";
 		if (caseEq(program, "tern")) return "tern";
 		if (caseEq(program, "monstar")) return "monstar";
+		if (caseEq(program, "rex")) return "rex";
 		return null;
 	}
 
@@ -717,6 +726,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
+	if (TERM && caseEq(TERM, "xterm-rex")) return "rex";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";
@@ -1467,6 +1477,10 @@ function notificationToLine(n: TerminalNotification): string {
 const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
 const OSC99_APP_NAME = "omp";
+// Kitty matches notification ids across its whole process, not per window, so
+// a bare counter would collide between omp sessions sharing one kitty instance
+// and turn a new notification into a silent replacement of another session's.
+const OSC99_ID_PREFIX = `omp-${crypto.randomUUID().slice(0, 8)}`;
 let nextOsc99NotificationId = 1;
 
 function base64Utf8(value: string): string {
@@ -1480,7 +1494,7 @@ function sanitizeOsc99Id(id: string | undefined): string {
 }
 
 function osc99Id(id: string | undefined): string {
-	return sanitizeOsc99Id(id) || `omp-${nextOsc99NotificationId++}`;
+	return sanitizeOsc99Id(id) || `${OSC99_ID_PREFIX}-${nextOsc99NotificationId++}`;
 }
 
 function utf8CodePointBytes(char: string): number {

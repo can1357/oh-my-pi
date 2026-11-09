@@ -9,6 +9,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -992,7 +993,11 @@ describe("Coding Agent Tools", () => {
 			fs.writeFileSync(testFile, `${firstLine}\n${tail}`);
 			expect(fs.statSync(testFile).size).toBeGreaterThan(4 * 1024 * 1024);
 
-			const result = await readTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
+			// With the column cap on, the line's cut display fits the page; only an uncapped read hits this branch.
+			const uncappedReadTool = wrapToolWithMetaNotice(
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }))),
+			);
+			const result = await uncappedReadTool.execute("test-hashline-preview-large", { path: `${testFile}:1-1` });
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Hashline output requires full lines");
@@ -1031,7 +1036,8 @@ describe("Coding Agent Tools", () => {
 			const artifactsDir = path.join(testDir, "artifact-limit-session");
 			fs.mkdirSync(artifactsDir, { recursive: true });
 			fs.writeFileSync(path.join(artifactsDir, "7.mcp.log"), `skip\n{\n${"x".repeat(60 * 1024)}\ntail`);
-			const artifactSession = createTestToolSession(testDir, Settings.isolated(), {
+			// Uncapped, so the 60KB line is charged its full size rather than its cut display.
+			const artifactSession = createTestToolSession(testDir, Settings.isolated({ "tools.outputMaxColumns": 0 }), {
 				localProtocolOptions: {
 					getArtifactsDir: () => artifactsDir,
 					getSessionId: () => "artifact-limit-session",
@@ -1379,7 +1385,7 @@ describe("Coding Agent Tools", () => {
 			fs.mkdirSync(childDir, { recursive: true });
 			writeFileWithMtime(path.join(testDir, ".hidden-root"), "hidden", base + 20_000);
 			writeFileWithMtime(path.join(testDir, ".DS_Store"), "mac metadata", base + 25_000);
-			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "ignored", base + 24_000);
+			writeFileWithMtime(path.join(testDir, "node_modules", "pkg", "index.js"), "dependency", base + 24_000);
 			for (let i = 0; i < 13; i += 1) {
 				const fileName = `root-${String(i).padStart(2, "0")}.txt`;
 				writeFileWithMtime(path.join(testDir, fileName), fileName, base + i);
@@ -1397,7 +1403,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain(".");
 			expect(output).toContain(".hidden-root");
 			expect(output).not.toContain(".DS_Store");
-			expect(output).not.toContain("node_modules");
+			expect(output).toContain("node_modules/");
+			expect(output).toContain("pkg/");
+			expect(output).not.toContain("index.js");
 			expect(output).toContain("root-00.txt");
 			expect(output).toContain("root-01.txt");
 			expect(output).toContain("root-12.txt");
@@ -2897,6 +2905,26 @@ function b() {
 			expect(output).toContain("first-line");
 			expect(output).toContain("second");
 			expect(output).toContain("third");
+		});
+
+		it("hoists a leading `cd <dir>;` into cwd only when the directory exists", async () => {
+			fs.mkdirSync(path.join(testDir, "sub-dir"));
+			const executeBash = vi.spyOn(bashExecutor, "executeBash");
+
+			const hoistedResult = await bashTool.execute("cd-semicolon-hoist", { command: "cd sub-dir; pwd" });
+			const [hoisted, options] = executeBash.mock.calls[0]!;
+			expect(hoisted).toBe("pwd");
+			expect(options?.cwd).toBe(path.join(testDir, "sub-dir"));
+			// Renderers draw the executed `pwd` under the directory it ran in.
+			expect(hoistedResult.details?.cwd).toBe(path.join(testDir, "sub-dir"));
+			expect(hoistedResult.details?.cdSeparator).toBe(";");
+
+			// A missing directory stays with the shell, which runs the rest anyway.
+			const missing = "cd does-not-exist; echo still-executed";
+			const result = await bashTool.execute("cd-semicolon-missing", { command: missing });
+			expect(executeBash.mock.calls[1]![0]).toBe(missing);
+			expect(getTextOutput(result)).toContain("still-executed");
+			expect(result.details?.cwd).toBeUndefined();
 		});
 	});
 

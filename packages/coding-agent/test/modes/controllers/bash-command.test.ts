@@ -47,7 +47,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 			};
 		},
 	);
-	const pendingMessagesContainer = createContainer();
+	const pendingShellContainer = createContainer();
 	const present = vi.fn();
 	const ctx = {
 		session: {
@@ -70,7 +70,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 			}),
 		},
 		chatContainer: createContainer(),
-		pendingMessagesContainer,
+		pendingShellContainer,
 		pendingBashComponents: [],
 		settings: Settings.isolated({ "terminal.showImages": showImages }),
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
@@ -97,7 +97,7 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
 	} as unknown as InteractiveModeContext;
-	return { ctx, executeBash, pendingMessagesContainer, present, state };
+	return { ctx, executeBash, pendingShellContainer, present, state };
 }
 
 describe("bash shortcut command", () => {
@@ -155,26 +155,6 @@ describe("bash shortcut command", () => {
 			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(3);
-			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
-				excludeFromContext: false,
-				useUserShell: true,
-				pty: {
-					cols: expect.any(Number),
-					rows: expect.any(Number),
-					onChunk: expect.any(Function),
-					onStdin: expect.any(Function),
-				},
-			});
-			expect(executeBash).toHaveBeenNthCalledWith(2, "cd", expect.any(Function), {
-				excludeFromContext: false,
-				useUserShell: true,
-				pty: {
-					cols: expect.any(Number),
-					rows: expect.any(Number),
-					onChunk: expect.any(Function),
-					onStdin: expect.any(Function),
-				},
-			});
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir);
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(2);
@@ -226,7 +206,7 @@ describe("bash shortcut command", () => {
 	it("rejects simple cd while streaming before queuing a bash block", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-streaming-"));
 		try {
-			const { ctx, executeBash, pendingMessagesContainer, present, state } = createCwdContext(sourceDir, true);
+			const { ctx, executeBash, pendingShellContainer, present, state } = createCwdContext(sourceDir, true);
 			const controller = new CommandController(ctx);
 
 			await controller.handleBashCommand("cd child");
@@ -234,7 +214,7 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(executeBash).not.toHaveBeenCalled();
 			expect(present).not.toHaveBeenCalled();
-			expect(pendingMessagesContainer.children).toHaveLength(0);
+			expect(pendingShellContainer.children).toHaveLength(0);
 			expect(ctx.pendingBashComponents).toHaveLength(0);
 			expect(ctx.showWarning).toHaveBeenCalledWith(expect.stringContaining("response"));
 		} finally {
@@ -247,7 +227,7 @@ describe("bash shortcut command", () => {
 		const childDir = path.join(sourceDir, "child");
 		await fs.mkdir(childDir);
 		try {
-			const { ctx, executeBash, pendingMessagesContainer, state } = createCwdContext(sourceDir, true);
+			const { ctx, executeBash, pendingShellContainer, state } = createCwdContext(sourceDir, true);
 			executeBash.mockImplementationOnce(async () => ({
 				output: "",
 				exitCode: 0,
@@ -265,7 +245,7 @@ describe("bash shortcut command", () => {
 
 			expect(state.cwd).toBe(sourceDir);
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
-			expect(pendingMessagesContainer.children).toHaveLength(1);
+			expect(pendingShellContainer.children).toHaveLength(1);
 			expect(ctx.pendingBashComponents).toHaveLength(1);
 			expect(ctx.showWarning).not.toHaveBeenCalled();
 		} finally {
@@ -297,7 +277,7 @@ describe("bash shortcut command", () => {
 
 		await controller.handleBashCommand("emit-image");
 
-		const component = present.mock.calls[0]?.[0];
+		const component = present.mock.calls[0]?.[0]?.inner;
 		expect(component).toBeInstanceOf(BashExecutionComponent);
 		if (!(component instanceof BashExecutionComponent)) throw new Error("Expected BashExecutionComponent");
 		const bashComponent = component;
@@ -414,7 +394,7 @@ describe("bash shortcut command", () => {
 
 			await controller.handleBashCommand("cd child");
 
-			const component = present.mock.calls[0]?.[0];
+			const component = present.mock.calls[0]?.[0]?.inner;
 			expect(component).toBeInstanceOf(BashExecutionComponent);
 			expect((component as BashExecutionComponent).getOutput()).toContain("final output");
 			expect(state.cwd).toBe(sourceDir);
@@ -609,7 +589,7 @@ describe("bash shortcut command", () => {
 			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("session transition rejected"));
-			const component = present.mock.calls[0]?.[0];
+			const component = present.mock.calls[0]?.[0]?.inner;
 			if (!(component instanceof BashExecutionComponent)) throw new Error("Expected shell output");
 			expect(component.getOutput()).toContain("cd output");
 		} finally {

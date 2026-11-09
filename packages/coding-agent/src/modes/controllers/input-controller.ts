@@ -779,6 +779,10 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}
+		// A modifier chord, not a bare letter: it sends text into the main session, mid-run if it is working.
+		for (const key of this.ctx.keybindings.getKeys("app.btw.inject")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleBtwInjectKey());
+		}
 		const hubKeys = new Set([
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),
@@ -850,7 +854,10 @@ export class InputController {
 	 * and HUD rows focus that agent in one action, and pointer motion lights up
 	 * the hover band on the target under the cursor. Every SGR report is consumed
 	 * while inline tracking owns the terminal so button/wheel bytes never reach
-	 * the editor as typed input; clicks on chrome simply swallow.
+	 * the editor as typed input; clicks on chrome simply swallow. Wheel ticks are
+	 * consumed the same way but cannot scroll: the terminal already chose to
+	 * report instead of scrolling, and no escape sequence moves its scrollback
+	 * viewport (#18458).
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
@@ -865,11 +872,12 @@ export class InputController {
 
 	/**
 	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard
-	 * while the editor has focus: a lowercase letter narrows the tags, and any other key cancels and
-	 * is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste cancel and still do
-	 * what they always do. Key releases and repeats (the hint key's own) are ignored; mouse reports
-	 * pass through untouched. Keys the TUI routes before input listeners (a space held for
-	 * push-to-talk) never reach this.
+	 * while the editor has focus: a lowercase letter narrows the tags, the hint key again or Page Up
+	 * opens the fullscreen link browser (for links scrolled into terminal scrollback), and any other
+	 * key cancels and is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste
+	 * cancel and still do what they always do. Key releases and repeats (the hint key's own) are
+	 * ignored; mouse reports pass through untouched. Keys the TUI routes before input listeners (a
+	 * space held for push-to-talk) never reach this.
 	 */
 	#handleLinkHintInput(data: string): { consume?: boolean } | undefined {
 		// Overlays and editor-area dialogs (ask, selectors, hook input) own the keyboard.
@@ -887,6 +895,11 @@ export class InputController {
 		if (matchesKey(data, "ctrl+c") || data.startsWith("\x1b[200~")) {
 			this.ctx.cancelLinkHints();
 			return undefined;
+		}
+		if (this.ctx.keybindings.matches(data, "app.links.hint") || matchesKey(data, "pageUp")) {
+			// Leaves link-hint mode whether or not the browser opens.
+			if (!this.ctx.openLinkBrowser()) this.ctx.showStatus("No extension links in the transcript");
+			return { consume: true };
 		}
 		const key = parseKey(data);
 		if (key !== undefined && /^[a-z]$/.test(key)) this.ctx.typeLinkHint(key);
@@ -1028,6 +1041,11 @@ export class InputController {
 			pasteImage: image =>
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
 			showStatus: message => this.ctx.showStatus(message),
+			pasteNative: () => {
+				if (!this.#clipboardIsTerminalLocal()) return false;
+				void this.handleImagePaste();
+				return true;
+			},
 		});
 		this.ctx.ui.addInputListener(data => (this.#enhancedPaste?.handleInput(data) ? { consume: true } : undefined));
 		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
@@ -1104,7 +1122,7 @@ export class InputController {
 			// agent-core queue.
 			if (!text && !hasPendingImages && this.ctx.session.isStreaming) {
 				if (this.ctx.session.hasInterruptibleInput) {
-					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
 					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 					this.ctx.ui.requestRender();
@@ -1115,12 +1133,21 @@ export class InputController {
 			if (!text && !hasPendingImages) return;
 
 			// Continue shortcuts: "." or "c" resume the agent without a visible user
-			// message (see AgentSession.resume). During a /guided-goal interview "c" is
-			// a plausible answer (e.g. option C), so it is sent as a normal reply there.
+			// message, interrupting a running turn (see AgentSession.resume). During a
+			// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
+			// sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
+				} else if (this.ctx.session.isStreaming) {
+					// The input loop is parked on the running turn's prompt; resume here.
+					this.ctx.editor.clearDraft();
+					try {
+						await this.ctx.session.resume();
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
 				}
 				return;
 			}
@@ -1622,7 +1649,7 @@ export class InputController {
 			images && this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 		if (!text && !images) {
 			if (target.isStreaming && target.hasInterruptibleInput) {
-				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL });
+				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
 				await aborting;
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -1782,18 +1809,14 @@ export class InputController {
 		try {
 			// SIGSTOP — not SIGTSTP — to the foreground process group (pid=0).
 			//
-			// SIGTSTP: brush-core (the embedded shell behind every bash tool call)
-			// installs a tokio SIGTSTP listener on `Process::wait` to detect when
-			// its children have been stopped (`crates/vendor/brush-core/src/sys/
-			// unix/signal.rs::tstp_signal_listener` → `tokio::signal::unix::
-			// signal(SIGTSTP)`). Per tokio's documented contract, the first call
-			// for a given SignalKind permanently replaces the kernel-default
-			// handler for the lifetime of the process. So once the user has
-			// issued even one bash command — e.g. `/usr/bin/true` — SIGTSTP no
-			// longer stops omp: tokio swallows it and the TUI ends up torn down
-			// while the process keeps running with no live terminal (issue
-			// [#3461]). SIGSTOP cannot be caught, blocked, or ignored, so the
-			// kernel stops the process regardless of installed handlers.
+			// SIGTSTP can be caught: any in-process listener (a tokio
+			// `signal(SIGTSTP)` registration permanently replaces the
+			// kernel-default handler for the lifetime of the process) swallows
+			// it, and the TUI ends up torn down while the process keeps running
+			// with no live terminal (issue [#3461], hit when the previous
+			// embedded shell registered such a listener on its first command).
+			// SIGSTOP cannot be caught, blocked, or ignored, so the kernel stops
+			// the process regardless of installed handlers.
 			//
 			// pid=0 (foreground process group, not just our PID): omp is not
 			// always the shell's direct child. Package-manager launchers (`npx`,
@@ -1807,8 +1830,9 @@ export class InputController {
 			// group keeps the shell's job-control view consistent. Long-lived
 			// children that must survive the suspend (Linux/other POSIX MCP stdio
 			// servers via the platform-specific `detached: true` spawn in
-			// `mcp/transports/stdio.ts`, every brush external command via brush's
-			// per-child `setsid` in `crates/vendor/brush-core/src/commands.rs`) are
+			// `mcp/transports/stdio.ts`, every external the embedded bash engine
+			// runs via `Sessions::Detach` in `crates/pi-shell/src/host.rs`, which
+			// `setsid`s the child in `crates/pi-shell/src/sys/spawn/unix.rs`) are
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {
@@ -1929,9 +1953,8 @@ export class InputController {
 			return;
 		}
 		const didRetry = await this.ctx.viewSession.retry();
-		if (didRetry) {
-			this.ctx.editor.clearDraft();
-		} else {
+		// Composer text is an unsent draft, not the request retry() resends.
+		if (!didRetry) {
 			this.ctx.showStatus("Nothing to retry");
 		}
 	}
@@ -3103,7 +3126,8 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
-		for (const child of this.ctx.chatContainer.children) {
+		// `!`/`$` runs queued while the agent streams join the transcript later.
+		for (const child of [...this.ctx.chatContainer.children, ...this.ctx.pendingShellContainer.children]) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
 			}
