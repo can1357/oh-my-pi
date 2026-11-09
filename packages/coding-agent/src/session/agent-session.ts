@@ -1142,6 +1142,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
+	#planReferenceApproved = false;
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
 	/** Session file created by this session's `/move`; removed on dispose if it stayed empty. */
@@ -2163,6 +2164,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		// Only a recorded approval may turn a draft file into an execution reference.
+		for (const entry of this.sessionManager.getBranch().reverse()) {
+			if (entry.type !== "mode_change") continue;
+			if (entry.mode === "plan" || entry.mode === "plan_paused") break;
+			if (typeof entry.data?.approvedPlanFilePath === "string") {
+				this.#planReferencePath = entry.data.approvedPlanFilePath;
+				this.#planReferenceApproved = true;
+				break;
+			}
+		}
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -8061,6 +8072,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (state?.enabled) {
 			this.#planReferenceSent = false;
 			this.#planReferencePath = state.planFilePath;
+			this.#planReferenceApproved = false;
 		} else {
 			this.#planModeReminderCount = 0;
 			this.#planModeReminderAwaitingProgress = false;
@@ -8141,8 +8153,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#planReferenceSent = true;
 	}
 
+	/** Marks a reviewed plan as approved so later prompts may reference it. */
 	setPlanReferencePath(path: string): void {
 		this.#planReferencePath = path;
+		this.#planReferenceApproved = true;
 	}
 
 	getPlanReferencePath(): string {
@@ -8351,6 +8365,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #buildPlanReferenceMessage(): Promise<CustomMessage | null> {
 		if (this.#planModeState?.enabled) return null;
 		if (this.#planReferenceSent) return null;
+		// A draft exists before approval; its file path alone is not execution consent.
+		if (!this.#planReferenceApproved) return null;
 
 		const plan = await loadOverallPlanReference(this.#planReferencePath, this.#localProtocolOptions());
 		if (!plan) return null;
@@ -10972,6 +10988,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			normalizedAppMessage.display,
 			normalizedAppMessage.details,
 			normalizedAppMessage.attribution,
+			// Its own timestamp, as `#persistMessageEnd` keeps one: a view rebuilt while its events are
+			// queued matches the entry to them by it.
+			normalizedAppMessage.timestamp,
 		);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive
@@ -12295,6 +12314,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
 			this.#planReferencePath = "local://PLAN.md";
+			this.#planReferenceApproved = false;
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
