@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Invalid handoff responses no longer replace the session goal: automatic compaction tries the next method, while manual handoff reports an error ([#18570](https://github.com/can1357/oh-my-pi/issues/18570)).
+
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 ### Added
 
