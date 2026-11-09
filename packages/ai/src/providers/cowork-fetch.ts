@@ -60,7 +60,7 @@ function resolveBody(body: RequestInit["body"]): RequestBody | undefined {
 function buildOrderedHeaders(
 	url: URL,
 	source: Record<string, string>,
-	body: RequestBody | undefined,
+	bodyBytes: number | undefined,
 ): Record<string, string> {
 	const headers: Record<string, string> = {};
 	let hasHost = false;
@@ -76,8 +76,7 @@ function buildOrderedHeaders(
 		headers[name] = source[name];
 	}
 	if (!hasHost) headers.Host = url.host;
-	const length = typeof body === "string" ? Buffer.byteLength(body) : body?.byteLength;
-	if (!hasContentLength && length !== undefined) headers["Content-Length"] = String(length);
+	if (!hasContentLength && bodyBytes !== undefined) headers["Content-Length"] = String(bodyBytes);
 	return headers;
 }
 
@@ -192,7 +191,8 @@ async function sendCoworkRequest(
 	const method = init.method ?? "GET";
 	const signal = init.signal ?? undefined;
 	const tlsOptions = resolveTlsOptions(url, init.tls);
-	const headers = buildOrderedHeaders(url, sourceHeaders, body);
+	const bodyBytes = typeof body === "string" ? Buffer.byteLength(body) : body?.byteLength;
+	const headers = buildOrderedHeaders(url, sourceHeaders, bodyBytes);
 	const result = Promise.withResolvers<Response>();
 	const startedAt = performance.now();
 	let connected = false;
@@ -259,8 +259,13 @@ async function sendCoworkRequest(
 			result.reject(error);
 			return;
 		}
-		const bodyBytes = body === undefined ? 0 : typeof body === "string" ? Buffer.byteLength(body) : body.byteLength;
-		result.reject(new ConnectionLostBeforeResponseError(error, bodyBytes, bodySent, performance.now() - startedAt));
+		result.reject(
+			new ConnectionLostBeforeResponseError(error, {
+				bodyBytes: bodyBytes ?? 0,
+				bodySent,
+				elapsedMs: performance.now() - startedAt,
+			}),
+		);
 	});
 	request.end(body);
 	return result.promise;
