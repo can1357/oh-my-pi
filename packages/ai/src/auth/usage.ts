@@ -3,6 +3,7 @@ import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
@@ -142,8 +143,11 @@ export class UsageService implements UsageApi {
 	 * could have fetched usage for but didn't" apart from "a provider with no
 	 * usage concept" (web-search keys, local/keyless servers, inference
 	 * providers without a usage API) — the latter never warrants a usage row.
+	 * A provider paused by its auth rules (`disabled "<reason>"`) has none, so
+	 * no usage collection or probe ever calls it.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
+		if (providerPauseReason(provider) !== undefined) return undefined;
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
 	}
 
@@ -670,6 +674,8 @@ export class UsageService implements UsageApi {
 		credential: AuthCredential,
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
+		// A paused provider is never probed, not even through the broker's per-credential hook.
+		if (providerPauseReason(provider) !== undefined) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
