@@ -58,7 +58,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
 	const events: GoalRuntimeEvent[] = [];
-	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState }> = [];
+	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState; usageOnly?: boolean }> = [];
 	const hiddenMessages: Array<{ customType: string; content: string; deliverAs?: "steer" | "followUp" | "nextTurn" }> =
 		[];
 	const host: GoalRuntimeHost = {
@@ -70,8 +70,8 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		emit: async event => {
 			events.push(cloneEvent(event));
 		},
-		persist: (mode, persistedState) => {
-			persists.push({ mode, state: cloneState(persistedState) });
+		persist: (mode, persistedState, usageOnly) => {
+			persists.push({ mode, state: cloneState(persistedState), usageOnly });
 		},
 		sendHiddenMessage: async message => {
 			hiddenMessages.push({ ...message });
@@ -229,6 +229,11 @@ describe("goal runtime", () => {
 		harness.setUsage({ input: 2 });
 		await harness.runtime.flushUsage("allowed");
 		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.persists[0]).toMatchObject({
+			mode: "goal",
+			state: { goal: { tokensUsed: 10, status: "budget-limited" } },
+			usageOnly: false,
+		});
 		expect(harness.hiddenMessages).toHaveLength(1);
 		expect(harness.hiddenMessages[0]).toMatchObject({
 			customType: "goal-budget-limit",
