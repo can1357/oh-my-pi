@@ -1363,6 +1363,7 @@ export type ResolvedGoogleCompat = Required<
 		| "streamIdleTimeoutMs"
 		| "antigravityUsageLabel"
 		| "supportsSamplingParams"
+		| "base64SkipThoughtSignature"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1371,6 +1372,7 @@ export type ResolvedGoogleCompat = Required<
 	streamIdleTimeoutMs?: number;
 	antigravityUsageLabel?: string;
 	supportsSamplingParams?: boolean;
+	base64SkipThoughtSignature?: boolean;
 	maxImageDimension?: number;
 	maxImagePayloadBytes?: number;
 };
