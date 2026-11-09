@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The models config schema accepts `providers.<id>.compat.translatesResponsesToChatCompletions`, so `models.yml` no longer warns about an unknown key for endpoints that accept Responses requests but serve them by translating them into chat completions. ([#18531](https://github.com/can1357/oh-my-pi/pull/18531) by [@SakurakaiCat](https://github.com/SakurakaiCat))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
