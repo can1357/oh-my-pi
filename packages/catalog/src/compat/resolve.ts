@@ -997,6 +997,7 @@ function resolveGooglePolicy(
 		supportsFunctionPartId: false,
 		requiresSkipThoughtSignature: false,
 		requiresSkipThoughtSignatureOnFirstFunctionCall: false,
+		base64SkipThoughtSignature: false,
 		dropUnsignedThinking: false,
 		ccaLegacyParametersSchema: false,
 		multimodalFunctionResponse: false,

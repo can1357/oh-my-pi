@@ -1314,6 +1314,11 @@ export interface GoogleCompat {
 	requiresSkipThoughtSignature?: boolean;
 	/** Add the bypass sentinel when a Gemini turn's first function call is unsigned. */
 	requiresSkipThoughtSignatureOnFirstFunctionCall?: boolean;
+	/**
+	 * Send the bypass sentinel base64-encoded. For gateways that decode
+	 * `thoughtSignature` as bytes and reject the raw literal.
+	 */
+	base64SkipThoughtSignature?: boolean;
 	/** Drop unsigned thinking blocks from replayed history (Antigravity Claude). */
 	dropUnsignedThinking?: boolean;
 	/** Cloud Code Assist legacy `parameters` schema field instead of `parametersJsonSchema`. */
