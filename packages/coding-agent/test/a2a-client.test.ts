@@ -1780,6 +1780,61 @@ describe("addressed A2A reply jobs", () => {
 		);
 	});
 
+	it("treats an interrupted delivery receipt as a receipt rather than an interrupted task", async () => {
+		const server = mockA2a({
+			onRpc: () =>
+				rpcResult(1, {
+					task: {
+						id: "remote-main",
+						status: { state: TASK_STATE.INPUT_REQUIRED },
+						metadata: { delivery: { to: "Main", outcome: "injected" } },
+					},
+				}),
+		});
+		const run = await new A2aClient({ url: server.url }).sendAndWait("hello");
+		expect(run.state).toBe(TASK_STATE.INPUT_REQUIRED);
+		expect(run.interrupted).toBe(false);
+		expect(server.calls.map(call => call.method)).toEqual(["SendMessage"]);
+	});
+
+	for (const state of [TASK_STATE.COMPLETED, TASK_STATE.FAILED]) {
+		it(`keeps the reply job running for a ${state} delivery with an old artifact`, async () => {
+			const server = mockA2a({
+				onRpc: () =>
+					rpcResult(1, {
+						task: {
+							id: "remote-main",
+							status: { state },
+							metadata: { delivery: { to: "Main", outcome: "injected" } },
+							artifacts: [{ artifactId: "old-output", parts: [{ text: "stale previous answer" }] }],
+						},
+					}),
+			});
+			const { bridge } = await registerFrom(server);
+			const manager = managerFor();
+			const tool = await createTaskTool(bridge, Settings.isolated(), {
+				agentId: OWNER,
+				asyncJobManager: manager,
+			});
+			const result = await tool.execute("tc-terminal-receipt", {
+				agent: "a2a:main",
+				task: "ask the peer",
+			} as TaskParams);
+			const job = replyJob(result);
+			try {
+				expect(job?.state).toBe("running");
+				expect(job?.jobId).toBeString();
+				expect(manager.getJob(job!.jobId)?.status).toBe("running");
+				expect(textOf(result)).toContain("awaiting reply");
+				expect(textOf(result)).not.toContain("stale previous answer");
+				expect(server.calls.map(call => call.method)).toEqual(["SendMessage"]);
+			} finally {
+				if (job?.jobId) manager.cancel(job.jobId, { ownerId: OWNER });
+			}
+			expect(server.calls.every(call => call.method !== "CancelTask")).toBe(true);
+		});
+	}
+
 	it("registers an owned running reply job before SendMessage and reports that job, not a completed task", async () => {
 		const events: string[] = [];
 		const seen = Promise.withResolvers<RpcCall>();

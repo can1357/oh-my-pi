@@ -305,8 +305,6 @@ export class A2aClient {
 			const deadline = this.#totalTimeoutMs > 0 ? Date.now() + this.#totalTimeoutMs : undefined;
 			const sent = await this.sendMessage(prompt, options, runSignal);
 			if (sent.task) {
-				const settled = this.#settled(sent.task);
-				if (settled) return settled;
 				// An addressed delivery to a running agent carries the bus receipt:
 				// the work now happens in the remote session, nothing left to poll.
 				if (isDeliveryReceipt(sent.task))
@@ -316,6 +314,8 @@ export class A2aClient {
 						text: taskText(sent.task),
 						interrupted: false,
 					};
+				const settled = this.#settled(sent.task);
+				if (settled) return settled;
 				return await this.#awaitTask(sent.task, deadline, runSignal);
 			}
 			if (sent.message) {

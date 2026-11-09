@@ -352,10 +352,8 @@ export async function spawnA2aAgent(options: SpawnA2aAgentOptions): Promise<Spaw
 				const reason = typeof receipt?.error === "string" ? receipt.error : "delivery failed";
 				return { exitCode: 1, output: reason, error: reason, state: run.state, remoteTaskId };
 			}
-			if (run.state !== TASK_STATE.COMPLETED && run.state !== TASK_STATE.FAILED) {
-				const delivered = `Delivered to ${agent.name} (${agent.url}) - the task now runs in that terminal's own conversation.`;
-				return { exitCode: 0, output: delivered, state: run.state, remoteTaskId, deliveryReceipt: true };
-			}
+			const delivered = `Delivered to ${agent.name} (${agent.url}) - the task now runs in that terminal's own conversation.`;
+			return { exitCode: 0, output: delivered, state: run.state, remoteTaskId, deliveryReceipt: true };
 		}
 		if (run.interrupted) {
 			const reason = run.state === TASK_STATE.AUTH_REQUIRED ? A2A_AUTH_REQUIRED_TEXT : A2A_WAITING_FOR_INPUT_TEXT;
