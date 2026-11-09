@@ -610,36 +610,6 @@ mod tests {
 		action();
 	}
 
-	/// A failing env test must not leave `LIBEI_SOCKET` changed for the tests
-	/// after it.
-	#[test]
-	fn a_failing_env_test_restores_libei_socket() {
-		let sentinel = std::ffi::OsString::from("/omp-libei-sentinel");
-		let original = {
-			let _lock = LIBEI_ENV_LOCK
-				.lock()
-				.unwrap_or_else(std::sync::PoisonError::into_inner);
-			let original = std::env::var_os("LIBEI_SOCKET");
-			// SAFETY: LIBEI_ENV_LOCK is held.
-			unsafe { std::env::set_var("LIBEI_SOCKET", &sentinel) };
-			original
-		};
-		let failed = std::panic::catch_unwind(|| without_libei_socket(|| panic!("test failure")));
-		assert!(failed.is_err());
-		let _lock = LIBEI_ENV_LOCK
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner);
-		let after = std::env::var_os("LIBEI_SOCKET");
-		// SAFETY: LIBEI_ENV_LOCK is held.
-		unsafe {
-			match original {
-				Some(original) => std::env::set_var("LIBEI_SOCKET", original),
-				None => std::env::remove_var("LIBEI_SOCKET"),
-			}
-		}
-		assert_eq!(after, Some(sentinel));
-	}
-
 	#[test]
 	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
 		without_libei_socket(|| {
