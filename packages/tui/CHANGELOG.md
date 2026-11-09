@@ -12,6 +12,7 @@
 
 - Fixed the `ask` HTML form tab strip in Tern running off the card with long or many questions: tabs are numbered and their labels clipped to fit, fall back to numbers alone, and past that show a window around the current tab with arrows to the rest ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 - Fixed `ask` HTML form Review rows in Tern stacking long questions in a narrow column: each row is keyed by the field's label, else its question clipped like a tab label ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- Fixed the Next, Submit and Show buttons of `ask` HTML forms in Tern drawing their label right of centre ([#18652](https://github.com/can1357/oh-my-pi/pull/18652) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
 
 ## [18.18.4] - 2026-11-09
 
