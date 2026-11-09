@@ -14,7 +14,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, hasFsCode, isEacces, isEnoent, logger, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
 	MessageStatsInput,
@@ -673,17 +673,20 @@ export async function parseSessionFile(
 			await handle.close();
 		}
 	} catch (err) {
-		if (isEnoent(err))
-			return {
-				stats: [],
-				userStats: [],
-				userLinks: [],
-				toolCalls: [],
-				toolResults: [],
-				spotlight: emptySpotlightRows(),
-				newOffset: fromOffset,
-			};
-		throw err;
+		if (isEacces(err) || hasFsCode(err, "EPERM")) {
+			logger.warn("stats: skipped unreadable session transcript", { path: sessionPath, error: String(err) });
+		} else if (!isEnoent(err)) {
+			throw err;
+		}
+		return {
+			stats: [],
+			userStats: [],
+			userLinks: [],
+			toolCalls: [],
+			toolResults: [],
+			spotlight: emptySpotlightRows(),
+			newOffset: fromOffset,
+		};
 	}
 
 	await spotlight.finish();

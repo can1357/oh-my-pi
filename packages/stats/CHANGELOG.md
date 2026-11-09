@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Usage history and Stats continue loading other sessions when a transcript is blocked by file permissions or antivirus software ([#18566](https://github.com/can1357/oh-my-pi/issues/18566)).
+
 ## [18.18.2] - 2026-11-08
 
 ### Fixed
