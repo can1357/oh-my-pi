@@ -252,15 +252,21 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 		}
 		const title = sanitize(spansText(section.title)).replace(/\s+/g, " ").trim();
 		// Where each tab of this section ends: after each loose field (and the text between a group's
-		// options), but never past the next field; the last one at the section's end.
+		// options), but never past the next field; the last one at the section's end. A field the
+		// keyboard cannot reach (only disabled options) gets no tab of its own: it joins the next one.
 		const fieldBlocks = section.blocks.flatMap((block, at) =>
-			block.kind === "field" ? [{ at, through: Math.max(at + 1, block.optionsEnd ?? 0) }] : [],
+			block.kind === "field" ? [{ at, through: Math.max(at + 1, block.optionsEnd ?? 0), field: block.field }] : [],
 		);
 		const cuts =
 			tabbed && !section.fieldset
-				? fieldBlocks.map(({ through }, nth) => Math.min(through, fieldBlocks[nth + 1]?.at ?? through))
-				: [end];
-		cuts[cuts.length - 1] = end;
+				? fieldBlocks.flatMap(({ through, field }, nth) =>
+						field.kind === "text" || field.other || field.options.some(option => !option.disabled)
+							? [Math.min(through, fieldBlocks[nth + 1]?.at ?? through)]
+							: [],
+					)
+				: [];
+		if (cuts.length === 0) cuts.push(end);
+		else cuts[cuts.length - 1] = end;
 		let start = 0;
 		for (const cut of cuts) {
 			const fields = section.blocks

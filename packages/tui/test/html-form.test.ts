@@ -491,6 +491,22 @@ describe("html form", () => {
 			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
 		});
 
+		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
+			const { form } = dialog(`<form>
+				<label><input type="checkbox" name="locked" disabled> Locked</label>
+				<label>Name <input name="name"></label>
+				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
+			</form>`);
+			const root = form.describe(CX);
+			const path = findPath(root, node => node.k === "tabs")!;
+			let strip: NativeNode = root;
+			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
+			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
+			expect(textsOf(root)).toContain("Name");
+		});
+
 		it("natively: a fieldset without a legend stays one tab", () => {
 			const { form } = dialog(`<form>
 				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
