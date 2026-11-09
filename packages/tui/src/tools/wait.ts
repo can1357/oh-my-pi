@@ -683,13 +683,16 @@ function bodyLines(
 	const indent = options.indent ?? "";
 	const tone = options.tone ?? "toolOutput";
 	const quote = theme.fg("dim", theme.md.quoteBorder);
+	const prefix = `${indent}${quote} `;
 	const source = body.split("\n").filter(line => line.trim());
 	// Expanded keeps its own, larger budget: a body with thousands of lines would
 	// otherwise push the transcript off the screen.
 	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : (options.collapsedLines ?? BODY_LINES_COLLAPSED);
 	const shown = cappedHeadLines(source, limit).lines;
 	const hidden = source.length - shown.length;
-	const contentWidth = Math.max(1, width - visibleWidth(indent) - 2);
+	const contentWidth = Math.max(1, width - visibleWidth(prefix));
+	// A row is cut when either the fixed cap or the card's own width clips it.
+	const cap = Math.min(BODY_LINE_WIDTH, contentWidth);
 	let cut = false;
 	const lines: string[] = [];
 	for (const line of shown) {
@@ -697,16 +700,16 @@ function bodyLines(
 		// Expanded: soft-wrap to the card width so a long single-line message
 		// shows in full instead of being cut at BODY_LINE_WIDTH.
 		if (expanded) {
-			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${indent}${quote} ${theme.fg(tone, row)}`);
+			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${prefix}${theme.fg(tone, row)}`);
 			continue;
 		}
-		cut ||= visibleWidth(text) > BODY_LINE_WIDTH;
-		lines.push(`${indent}${quote} ${theme.fg(tone, truncateToWidth(text, BODY_LINE_WIDTH, Ellipsis.Unicode))}`);
+		cut ||= visibleWidth(text) > cap;
+		lines.push(`${prefix}${theme.fg(tone, truncateToWidth(text, cap, Ellipsis.Unicode))}`);
 	}
 	if (hidden > 0 || cut) {
 		const hint = formatExpandHint(theme, expanded, true);
 		const marker = hidden > 0 ? `… +${hidden} more ${hidden === 1 ? "line" : "lines"}` : "…";
-		lines.push(`${indent}${quote} ${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
+		lines.push(`${prefix}${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
 	}
 	return lines;
 }

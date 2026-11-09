@@ -51,32 +51,36 @@ function preview(
 ): string[] {
 	if (!body.trim()) return [];
 	const quote = theme.fg("dim", theme.md.quoteBorder);
+	const prefix = `  ${quote} `;
 	const source = body.split("\n").filter(line => line.trim());
 	// Expanded keeps its own, larger budget: a job log with thousands of lines
 	// would otherwise push the transcript off the screen.
 	const limit = expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES;
 	const shown = cappedHeadLines(source, limit).lines;
 	const hidden = source.length - shown.length;
+	// Each row is clipped to the card width, so the text budget is that width
+	// minus the quote rail; with no card width the fixed cap stands.
+	const contentWidth = width === undefined ? TRUNCATE_LENGTHS.LINE : Math.max(1, width - visibleWidth(prefix));
+	const cap = Math.min(TRUNCATE_LENGTHS.LINE, contentWidth);
 	let cut = false;
 	const lines: string[] = [];
 	for (const line of shown) {
 		const text = safe(line.trim());
 		// IRC cards pass the card width: an expanded body soft-wraps instead of
-		// being cut. Every other preview keeps the fixed 110-column cap.
+		// being cut. Collapsed rows keep the fixed cap, narrowed to the card.
 		if (expanded && width !== undefined) {
-			for (const row of wrapTextWithAnsi(text, Math.max(1, width - 4)))
-				lines.push(`  ${quote} ${theme.fg(tone, row)}`);
+			for (const row of wrapTextWithAnsi(text, contentWidth)) lines.push(`${prefix}${theme.fg(tone, row)}`);
 			continue;
 		}
-		cut ||= visibleWidth(text) > TRUNCATE_LENGTHS.LINE;
-		lines.push(`  ${quote} ${theme.fg(tone, truncateToWidth(text, TRUNCATE_LENGTHS.LINE, Ellipsis.Unicode))}`);
+		cut ||= visibleWidth(text) > cap;
+		lines.push(`${prefix}${theme.fg(tone, truncateToWidth(text, cap, Ellipsis.Unicode))}`);
 	}
 	// The hint is not width-gated: a caller that passes no width (the proc/job
 	// card) still elides lines, and a silent cap reads as if the log ended there.
 	if (hidden > 0 || cut) {
 		const hint = formatExpandHint(theme, expanded, true);
 		const marker = hidden > 0 ? `… +${hidden} more lines` : "…";
-		lines.push(`  ${quote} ${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
+		lines.push(`${prefix}${theme.fg("dim", `${marker}${hint ? ` ${hint}` : ""}`)}`);
 	}
 	return lines;
 }
