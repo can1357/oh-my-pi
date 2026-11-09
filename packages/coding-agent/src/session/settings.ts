@@ -1380,26 +1380,48 @@ export const cfgProvidersFetch = register({
 });
 
 // Codex saved rate-limit resets (auto-redeem)
-export const cfgCodexResetsAutoRedeem = register({
-	id: "codexResets.autoRedeem",
+export const cfgCodexResetsAutoRedeem5h = register({
+	id: "codexResets.autoRedeem5h",
 	type: "enum",
 	values: ["unset", "yes", "no"] as const,
 	default: "unset" as const,
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Codex Auto-Redeem Saved Resets",
+		label: "Codex Auto-Redeem Saved Resets (5h)",
 		description:
-			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
+			"Govern saved Codex resets for 5-hour-only blocks and expiry salvage whose fullest chat window is 5h. Independent of the weekly setting. unset asks first (without prompt UI, only credits expiring within 5 minutes are spent), yes spends without prompting, and no disables this window. Imminent credits can still spend when either window permits it.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description:
-					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
+				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
 			},
-			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
+			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
+			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
+		],
+	},
+});
+
+export const cfgCodexResetsAutoRedeemWeekly = register({
+	id: "codexResets.autoRedeemWeekly",
+	type: "enum",
+	values: ["unset", "yes", "no"] as const,
+	default: "unset" as const,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Auto-Redeem Saved Resets (Weekly)",
+		description:
+			"Govern saved Codex resets that clear any weekly block and expiry salvage whose fullest chat window is weekly. Independent of the 5h setting. unset asks first (without prompt UI, only credits expiring within 5 minutes are spent), yes spends without prompting, and no disables this window. Imminent credits can still spend when either window permits it.",
+		options: [
+			{
+				value: "unset",
+				label: "Unset",
+				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+			},
+			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
+			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
 		],
 	},
 });
@@ -1445,36 +1467,59 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
-	autoRedeem: cfgCodexResetsAutoRedeem,
+	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
+	autoRedeemWeekly: cfgCodexResetsAutoRedeemWeekly,
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */
-export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem>;
+export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem5h>;
 
 // Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
-export const cfgClaudeResetsAutoRedeem = register({
-	id: "claudeResets.autoRedeem",
+export const cfgClaudeResetsAutoRedeem5h = register({
+	id: "claudeResets.autoRedeem5h",
 	type: "enum",
 	values: ["unset", "yes", "no"] as const,
 	default: "unset" as const,
 	ui: {
 		tab: "providers",
 		group: "Services",
-		label: "Claude Auto-Redeem Resets",
+		label: "Claude Auto-Redeem Saved Resets (5h)",
 		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			"Govern Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. Independent of the weekly setting. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Juniper never spends when only weekly spending is enabled.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description:
-					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
+				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
 			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
-			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
+			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
+			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
+		],
+	},
+});
+
+export const cfgClaudeResetsAutoRedeemWeekly = register({
+	id: "claudeResets.autoRedeemWeekly",
+	type: "enum",
+	values: ["unset", "yes", "no"] as const,
+	default: "unset" as const,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Claude Auto-Redeem Saved Resets (Weekly)",
+		description:
+			"Govern Claude Cedar resets that clear any weekly or model-scoped block and expiry salvage whose fullest covered limit is not 5h. Independent of the 5h setting. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Provider eligibility and covered-limit requirements still apply.",
+		options: [
+			{
+				value: "unset",
+				label: "Unset",
+				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+			},
+			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
+			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
 		],
 	},
 });
@@ -1520,7 +1565,8 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 
 /** Claude reset auto-redeem policy (`claudeResets.*`), independent of {@link cfgCodexResets}. */
 export const cfgClaudeResets = combine({
-	autoRedeem: cfgClaudeResetsAutoRedeem,
+	autoRedeem5h: cfgClaudeResetsAutoRedeem5h,
+	autoRedeemWeekly: cfgClaudeResetsAutoRedeemWeekly,
 	minBlockedMinutes: cfgClaudeResetsMinBlockedMinutes,
 	keepCredits: cfgClaudeResetsKeepCredits,
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,

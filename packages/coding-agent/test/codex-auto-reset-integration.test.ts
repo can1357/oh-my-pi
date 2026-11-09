@@ -16,6 +16,12 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import {
+	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemWeekly,
+	cfgCodexResetsAutoRedeem5h,
+	cfgCodexResetsAutoRedeemWeekly,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -118,6 +124,11 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		streamErrorFirst?: boolean;
 		/** Builds the session the way ACP does for a client with or without form elicitation. */
 		acpForm?: boolean;
+		/** Initial per-window consent; both windows start unset when omitted. */
+		codexAutoRedeem5h?: "unset" | "yes" | "no";
+		codexAutoRedeemWeekly?: "unset" | "yes" | "no";
+		/** Answers the auto-redeem consent prompt; implies a prompt UI. */
+		consent?: () => Promise<string | undefined>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
@@ -155,25 +166,40 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
 			"retry.maxRetries": 1,
-			"codexResets.autoRedeem": "unset",
-			"claudeResets.autoRedeem": "no",
 		});
+		// Set through the handles so a consented answer can overwrite them (override-layer values win over set()).
+		cfgClaudeResetsAutoRedeem5h.set(settings, "no");
+		cfgClaudeResetsAutoRedeemWeekly.set(settings, "no");
+		if (options.codexAutoRedeem5h) cfgCodexResetsAutoRedeem5h.set(settings, options.codexAutoRedeem5h);
+		if (options.codexAutoRedeemWeekly) cfgCodexResetsAutoRedeemWeekly.set(settings, options.codexAutoRedeemWeekly);
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
 		coordinator.resetLockPath = `${tempDir.path()}/agent.db`;
+		const interactivePrompts = options.consent !== undefined ? true : options.acpForm;
+		let extensionRunner: ExtensionRunner | undefined;
+		if (options.acpForm !== undefined || options.consent !== undefined) {
+			extensionRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			if (options.consent) {
+				vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
+				vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
+			}
+		}
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
-			extensionRunner:
-				options.acpForm === undefined
-					? undefined
-					: new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry),
-			interactivePrompts: options.acpForm,
+			extensionRunner,
+			interactivePrompts,
 		});
 		sessions.push(session);
 		const notices: string[] = [];
@@ -323,5 +349,32 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(elicitations).toEqual([expect.stringContaining("Spend a saved Codex rate-limit reset?")]);
 		expect(targets).toEqual([]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("remembers a consented weekly restore only on the weekly setting", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 6 * HOUR,
+		};
+		const { session, targets } = buildSession({
+			accounts: [account],
+			streamErrorFirst: true,
+			codexAutoRedeem5h: "no",
+			codexAutoRedeemWeekly: "unset",
+			consent: async () => "Yes",
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		// The 5h window was explicitly off; only the governing weekly key records the answer.
+		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("no");
+		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
+		expect(targets).toHaveLength(1);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 });

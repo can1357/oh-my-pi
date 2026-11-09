@@ -45,6 +45,10 @@ import {
 	cfgDefaultThinkingLevel,
 	cfgInlineToolDescriptors,
 	cfgRetryModelFallback,
+	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemWeekly,
+	cfgCodexResetsAutoRedeem5h,
+	cfgCodexResetsAutoRedeemWeekly,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
 import {
 	cfgToolsXdev,
@@ -1396,6 +1400,55 @@ describe("Settings", () => {
 			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: true }))).toBe("on");
 			expect(cfgInlineToolDescriptors.get(Settings.isolated({ inlineToolDescriptors: false }))).toBe("off");
 			expect(cfgInlineToolDescriptors.get(Settings.isolated())).toBe("auto");
+		});
+
+		it("migrates legacy saved-reset autoRedeem consent into both window keys", () => {
+			const codexDotted = Settings.isolated({ "codexResets.autoRedeem": false });
+			expect(cfgCodexResetsAutoRedeem5h.get(codexDotted)).toBe("no");
+			expect(cfgCodexResetsAutoRedeemWeekly.get(codexDotted)).toBe("no");
+
+			// An explicit new key survives the copy, including the dotted form beside a nested legacy value.
+			const codexNested = Settings.isolated({
+				codexResets: { autoRedeem: true },
+				"codexResets.autoRedeemWeekly": "no",
+			});
+			expect(cfgCodexResetsAutoRedeem5h.get(codexNested)).toBe("yes");
+			expect(cfgCodexResetsAutoRedeemWeekly.get(codexNested)).toBe("no");
+
+			const claudeDotted = Settings.isolated({
+				"claudeResets.autoRedeem": "unset",
+				"claudeResets.autoRedeem5h": "yes",
+			});
+			expect(cfgClaudeResetsAutoRedeem5h.get(claudeDotted)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeDotted)).toBe("unset");
+
+			const claudeBoolean = Settings.isolated({ "claudeResets.autoRedeem": true });
+			expect(cfgClaudeResetsAutoRedeem5h.get(claudeBoolean)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeBoolean)).toBe("yes");
+
+			const claudeNested = Settings.isolated({ claudeResets: { autoRedeem: false } });
+			expect(cfgClaudeResetsAutoRedeem5h.get(claudeNested)).toBe("no");
+			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeNested)).toBe("no");
+		});
+
+		it("persists the migrated saved-reset consent as window keys and drops the old key", async () => {
+			await writeSettings({
+				codexResets: { autoRedeem: true },
+				claudeResets: { autoRedeem: false },
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(cfgCodexResetsAutoRedeem5h.get(settings)).toBe("yes");
+			expect(cfgCodexResetsAutoRedeemWeekly.get(settings)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeem5h.get(settings)).toBe("no");
+			expect(cfgClaudeResetsAutoRedeemWeekly.get(settings)).toBe("no");
+
+			// The next save writes the migrated layers, so the retired key cannot survive on disk.
+			cfgSetupVersion.set(settings, 1);
+			await settings.flush();
+
+			const saved = await readSettings();
+			expect(saved.codexResets).toEqual({ autoRedeem5h: "yes", autoRedeemWeekly: "yes" });
+			expect(saved.claudeResets).toEqual({ autoRedeem5h: "no", autoRedeemWeekly: "no" });
 		});
 	});
 

@@ -27,7 +27,12 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+import {
+	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemWeekly,
+	cfgCodexResetsAutoRedeem5h,
+	cfgCodexResetsAutoRedeemWeekly,
+} from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -143,7 +148,10 @@ describe("Claude saved-reset trigger integration", () => {
 		listFailures?: number;
 		maxDelayMs?: number;
 		quota?: { restored: boolean };
+		/** Sets both Claude windows; a per-window value below wins. */
 		autoRedeem?: "unset" | "yes" | "no";
+		autoRedeem5h?: "unset" | "yes" | "no";
+		autoRedeemWeekly?: "unset" | "yes" | "no";
 		salvageHorizonHours?: number;
 		keepCredits?: number;
 		/** Answers the auto-redeem consent prompt; without it the session has no prompt UI. */
@@ -216,11 +224,14 @@ describe("Claude saved-reset trigger integration", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": options.maxDelayMs ?? 100,
 			"retry.maxRetries": 1,
-			"codexResets.autoRedeem": "no",
-			"claudeResets.autoRedeem": options.autoRedeem ?? "yes",
 			"claudeResets.salvageHorizonHours": options.salvageHorizonHours ?? 12,
 			"claudeResets.keepCredits": options.keepCredits ?? 0,
 		});
+		// Set through the handles so a consented answer can overwrite them (override-layer values win over set()).
+		cfgCodexResetsAutoRedeem5h.set(settings, "no");
+		cfgCodexResetsAutoRedeemWeekly.set(settings, "no");
+		cfgClaudeResetsAutoRedeem5h.set(settings, options.autoRedeem5h ?? options.autoRedeem ?? "yes");
+		cfgClaudeResetsAutoRedeemWeekly.set(settings, options.autoRedeemWeekly ?? options.autoRedeem ?? "yes");
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
@@ -900,7 +911,8 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
-		expect(cfgClaudeResetsAutoRedeem.get(session.settings)).toBe("unset");
+		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("unset");
+		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("unset");
 	});
 
 	it("still asks before spending an imminent reset when a prompt UI is available", async () => {
@@ -939,5 +951,30 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(questions).toEqual([expect.stringContaining("Spend a saved Claude rate-limit reset?")]);
 		expect(targets).toEqual([]);
+	});
+
+	it("remembers a consented weekly restore only on the weekly setting", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			autoRedeem5h: "no",
+			autoRedeemWeekly: "unset",
+			consent: async () => "Yes",
+		});
+		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("recover the weekly-blocked account");
+			await session.waitForIdle();
+		} finally {
+			await pool.release();
+		}
+
+		// The 5h window was explicitly off; only the governing weekly key records the answer.
+		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("no");
+		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
+		expect(targets).toHaveLength(1);
 	});
 });

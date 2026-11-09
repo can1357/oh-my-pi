@@ -10,6 +10,9 @@ import {
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
 const WEEK = 7 * 24 * HOUR;
+const WINDOWS_BOTH = { "5h": true, weekly: true };
+const WINDOWS_5H_ONLY = { "5h": true, weekly: false };
+const WINDOWS_WEEKLY_ONLY = { "5h": false, weekly: true };
 
 interface ReportOptions {
 	orgId?: string;
@@ -102,13 +105,36 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 		trigger: "blocked",
 		provider: "anthropic",
 		modelId: "claude-sonnet-4-6",
-		settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+		settings: { windows: WINDOWS_BOTH, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 		reports: [report()],
 		statuses: [status()],
 		attemptedKeys: new Set(),
 		deferredUntilByKey: new Map(),
 		lastAttemptAtByAccount: new Map(),
 		...overrides,
+	};
+}
+
+function windowSettings(
+	windows: ClaudeResetPlanInput["settings"]["windows"],
+	overrides: Partial<ClaudeResetPlanInput["settings"]> = {},
+): ClaudeResetPlanInput["settings"] {
+	return { windows, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR, ...overrides };
+}
+
+/** A Cedar/Juniper grant clearing only the five-hour limit. */
+function fiveHourOnlyCredit(credit: Partial<UsageResetCredit> = {}): UsageResetCredit {
+	return {
+		id: "cedar-5h",
+		program: "cedar_ember",
+		remainingCount: 1,
+		usable: true,
+		requiresLimit: true,
+		clears: ["anthropic:5h"],
+		blocking: [],
+		usedFractions: { "anthropic:5h": 1 },
+		status: "available",
+		...credit,
 	};
 }
 
@@ -252,7 +278,9 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		expect(cooling.skipped[0]?.reason).toBe("provider-cooldown");
 
 		const reserved = planClaudeResetRedemptions(
-			input({ settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
+			input({
+				settings: { windows: WINDOWS_BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
+			}),
 		);
 		expect(reserved.actions).toEqual([]);
 		expect(reserved.skipped[0]?.reason).toBe("reserve");
@@ -280,7 +308,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		});
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
+				settings: { windows: WINDOWS_BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
 				reports: [report(), report({ orgId: "org-b" })],
 				statuses: [status(), excluded],
 				permitsCredential: credentialId => credentialId === 11,
@@ -295,11 +323,109 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 	});
 });
 
+describe("planClaudeResetRedemptions: independent reset windows", () => {
+	const soleFiveHourBlock = {
+		reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5, sonnetUsed: 0.2 })],
+	};
+
+	it("weekly-only settings never restore a block that only the five-hour window governs", () => {
+		const cedar = status({ credit: { blocking: [], usedFractions: { "anthropic:5h": 1 } } });
+		const juniper = status({
+			credit: fiveHourOnlyCredit({ id: "juniper_tide", program: "juniper_tide" }),
+		});
+
+		for (const grant of [cedar, juniper]) {
+			const plan = planClaudeResetRedemptions(
+				input({ ...soleFiveHourBlock, settings: windowSettings(WINDOWS_WEEKLY_ONLY), statuses: [grant] }),
+			);
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped).toContainEqual({
+				accountKey: "anthropic|org-a|11",
+				rule: "blocked-account",
+				reason: "window-disabled",
+			});
+		}
+	});
+
+	it("restores a weekly block with Cedar under weekly-only settings", () => {
+		const plan = planClaudeResetRedemptions(input({ settings: windowSettings(WINDOWS_WEEKLY_ONLY) }));
+
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "blocked-account",
+				blockedWindows: ["anthropic:7d"],
+				window: "weekly",
+				restorableWindows: ["5h", "weekly"],
+			},
+		]);
+	});
+
+	it("skips a weekly block but restores a five-hour block under five-hour-only settings", () => {
+		const weekly = planClaudeResetRedemptions(input({ settings: windowSettings(WINDOWS_5H_ONLY) }));
+		expect(weekly.actions).toEqual([]);
+		expect(weekly.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "blocked-account",
+			reason: "window-disabled",
+		});
+
+		const fiveHour = planClaudeResetRedemptions(
+			input({
+				...soleFiveHourBlock,
+				settings: windowSettings(WINDOWS_5H_ONLY),
+				statuses: [status({ credit: fiveHourOnlyCredit() })],
+			}),
+		);
+		expect(fiveHour.actions).toMatchObject([
+			{
+				reason: "blocked-account",
+				blockedWindows: ["anthropic:5h"],
+				window: "5h",
+				restorableWindows: ["5h"],
+			},
+		]);
+	});
+
+	it("spends an imminent Juniper credit only when the five-hour window it can restore is enabled", () => {
+		const juniper = status({
+			credit: fiveHourOnlyCredit({
+				id: "juniper_tide",
+				program: "juniper_tide",
+				expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+			}),
+		});
+		const sweep = (windows: ClaudeResetPlanInput["settings"]["windows"]) =>
+			input({
+				trigger: "sweep",
+				settings: windowSettings(windows, { keepCredits: 1, salvageHorizonMs: 0 }),
+				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
+				statuses: [juniper],
+			});
+
+		const weeklyOnly = planClaudeResetRedemptions(sweep(WINDOWS_WEEKLY_ONLY));
+		expect(weeklyOnly.actions).toEqual([]);
+		expect(weeklyOnly.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "expiring-credit",
+			reason: "window-disabled",
+		});
+
+		expect(planClaudeResetRedemptions(sweep(WINDOWS_5H_ONLY)).actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				program: "juniper_tide",
+				window: "5h",
+				restorableWindows: ["5h"],
+			},
+		]);
+	});
+});
+
 describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({
 			trigger: "sweep",
-			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+			settings: { windows: WINDOWS_BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
 			statuses: [
 				status({
@@ -322,7 +448,10 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 			},
 		]);
 		expect(
-			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, enabled: false } }).actions,
+			planClaudeResetRedemptions({
+				...urgentInput,
+				settings: { ...urgentInput.settings, windows: { "5h": false, weekly: false } },
+			}).actions,
 		).toEqual([]);
 		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
 			expect(
@@ -383,7 +512,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("uses urgent salvage rather than bypassing the blocked-recovery reserve", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				settings: { windows: WINDOWS_BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 				statuses: [status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } })],
 			}),
 		);

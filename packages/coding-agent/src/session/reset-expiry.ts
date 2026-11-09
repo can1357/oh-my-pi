@@ -31,18 +31,15 @@ import {
 	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
 	resetAccountLockKey,
+	resetActionMode,
 	resetPlanSettings,
+	type ResetWindow,
+	resetWindowModes,
 	SALVAGE_MIN_USED_FRACTION,
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import {
-	cfgClaudeResets,
-	cfgClaudeResetsAutoRedeem,
-	cfgCodexResets,
-	cfgCodexResetsAutoRedeem,
-	type ResetAutoRedeemMode,
-} from "./settings";
+import { cfgClaudeResets, cfgCodexResets, type ResetAutoRedeemMode } from "./settings";
 
 const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
@@ -142,16 +139,37 @@ function spendableNow(
 	return provider !== "anthropic" || (inventory.nextCreditId !== undefined && inventory.nextCreditId === credit.id);
 }
 
+const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
+
+/** The settings key governing each provider window. */
+const RESET_SETTING_KEY: Record<ResetExpiryWarning["provider"], Record<ResetWindow, string>> = {
+	"openai-codex": { "5h": "codexResets.autoRedeem5h", weekly: "codexResets.autoRedeemWeekly" },
+	anthropic: { "5h": "claudeResets.autoRedeem5h", weekly: "claudeResets.autoRedeemWeekly" },
+};
+
+/** Windows a credit restores: a Codex credit restores both, a Claude grant only its covered limits. */
+function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ResetWindow[] {
+	if (warning.provider === "openai-codex") return ["5h", "weekly"];
+	const credit = (report.resetCredits?.credits ?? []).find(
+		candidate => bankedResetCreditExpiryMs(candidate) === warning.expiresAtMs,
+	);
+	const covered = credit ? claudeCoveredLimits(report.limits, credit) : [warning.limit];
+	const windows = new Set<ResetWindow>(covered.map(limit => (limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly")));
+	windows.add(warning.limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly");
+	return [...windows];
+}
+
 /**
  * What an open interactive omp session does with an account's soonest expiring saved
- * reset. `kind` comes from the provider's `autoRedeem` setting alone: `auto`
- * spends it by its last five minutes if the provider still allows it then,
- * `ask` prompts first, `off` leaves it. `eligibleNow` is the salvage planner's
- * answer for this report today; usage can change it before the reset expires.
+ * reset once it reaches its last five minutes: `auto` spends it, `ask` prompts
+ * first, `off` leaves it. `kind` follows the most permissive mode among the
+ * windows the credit restores, and `setting` names the key or keys that decide
+ * it. `eligibleNow` is the salvage planner's answer for this report today;
+ * usage can change it before the reset expires.
  */
 export interface ResetSpendVerdict {
 	kind: "auto" | "ask" | "off";
-	setting: "codexResets.autoRedeem" | "claudeResets.autoRedeem";
+	setting: string;
 	mode: ResetAutoRedeemMode;
 	eligibleNow: boolean;
 }
@@ -162,14 +180,27 @@ export function resetSpendVerdict(
 	settings: Settings,
 	nowMs: number,
 ): ResetSpendVerdict {
-	const autoRedeem = warning.provider === "anthropic" ? cfgClaudeResetsAutoRedeem : cfgCodexResetsAutoRedeem;
-	const mode = autoRedeem.get(settings);
+	const cfg = (warning.provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(settings);
+	const modes = resetWindowModes(cfg);
+	const restorable = restorableResetWindows(report, warning);
+	// Last-chance spending happens at expiry, so judge consent by that moment's rule.
+	const mode = resetActionMode(
+		{ window: restorable[0] ?? "weekly", restorableWindows: restorable, expiresInMs: 0 },
+		modes,
+	);
 	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
+	const deciding = restorable.filter(window => modes[window] === mode);
+	const keys = RESET_SETTING_KEY[warning.provider];
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
 		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
-	return { kind, setting: autoRedeem.id, mode, eligibleNow };
+	return {
+		kind,
+		setting: (deciding.length > 0 ? deciding : restorable).map(window => keys[window]).join(" + "),
+		mode,
+		eligibleNow,
+	};
 }
 
 /**
@@ -209,7 +240,11 @@ function planAsLastChance(
 			trigger: "sweep",
 			provider: "",
 			modelId: "",
-			settings: resetPlanSettings({ ...cfgCodexResets.get(settings), autoRedeem: "yes" }),
+			settings: resetPlanSettings({
+				...cfgCodexResets.get(settings),
+				autoRedeem5h: "yes",
+				autoRedeemWeekly: "yes",
+			}),
 			identity: undefined,
 			reports: [{ ...lastChance, metadata: { ...report.metadata, resetCreditCredentialId: credentialId } }],
 			...episodes,
@@ -221,7 +256,11 @@ function planAsLastChance(
 		trigger: "sweep",
 		provider: "",
 		modelId: "",
-		settings: resetPlanSettings({ ...cfgClaudeResets.get(settings), autoRedeem: "yes" }),
+		settings: resetPlanSettings({
+			...cfgClaudeResets.get(settings),
+			autoRedeem5h: "yes",
+			autoRedeemWeekly: "yes",
+		}),
 		reports: [lastChance],
 		statuses: [
 			{

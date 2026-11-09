@@ -1038,11 +1038,13 @@ Provider credentials and custom model definitions are configured separately — 
 
 #### Saved reset auto-consumption
 
-`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. A session with no prompt UI to ask (such as `omp -p`) spends a reset under `unset` only when that reset expires within 5 minutes and would otherwise be lost; everything else waits for consent, with a notice pointing at `/usage reset`.
+`codexResets.autoRedeem5h`, `codexResets.autoRedeemWeekly`, `claudeResets.autoRedeem5h` and `claudeResets.autoRedeemWeekly` independently control saved-reset consumption per provider window. A blocked-account restore is governed by the `weekly` key when any window it clears is weekly (for Claude, any covered limit other than `anthropic:5h`), otherwise by the `5h` key; an expiry salvage is governed by the window it measures. Each key is `yes` (automatic spending), `no` (no automatic spending for that window), or `unset` (consent before the first spend). Any combination is valid, including weekly-only and 5h-only.
 
-When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
+A session with no prompt UI to ask (such as `omp -p`) spends under `unset` only a credit expiring within 5 minutes that at least one window it restores enables. A Codex credit restores both windows; a Claude Juniper credit restores only `5h`, so weekly-only settings never spend one. Everything else waits for consent, with a notice pointing at `/usage reset`. A prompt answer is remembered only for the window keys the spend depends on that are still `unset`.
 
-`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
+An older single `autoRedeem` value per provider is migrated: a boolean becomes `yes`/`no`, the value is copied into both new keys unless one is already set, and the old key is removed.
+
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set both of the provider's window keys to `no` to disable all automatic spending.
 
 To spend one by hand, use `/usage reset` in a session or `omp usage reset` from a shell, which needs no session or TTY and works from an auth-broker client: without arguments it lists each account's saved resets by `<provider>/<credential id>`, and with one it spends a single reset on that account.
 

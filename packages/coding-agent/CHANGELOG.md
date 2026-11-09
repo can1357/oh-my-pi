@@ -14,6 +14,10 @@
 
 - On Windows, the bash tool's shell resolves MSYS drive paths (`/c/Users/...`, `/mnt/c/...`) everywhere, so running `/c/.../tool.exe`, `cd /c/...`, `[ -f /c/... ]` and `< /c/...` reach drive C: like they already did for `ls` and other built-in utilities
 
+### Changed
+
+- Saved-reset auto-redeem now sets 5h and weekly spending independently: `codexResets.autoRedeem5h`/`autoRedeemWeekly` and `claudeResets.autoRedeem5h`/`autoRedeemWeekly` replace each provider's single `autoRedeem`, whose value migrates into both new keys.
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
