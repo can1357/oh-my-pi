@@ -77,6 +77,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	const NOTICE_SOURCE = "compaction";
 	const NO_PROGRESS_FRAGMENT = "Compaction freed too little context to make progress";
+	const FIXED_CONTEXT_FRAGMENT = "The system prompt and always-sent tool schemas alone exceed the recovery band";
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -308,7 +309,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		expect(startCount()).toBe(0);
 		expect(promptSpy).not.toHaveBeenCalled();
-		const deadEnd = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes("always-sent tool schemas"));
+		const deadEnd = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(FIXED_CONTEXT_FRAGMENT));
 		expect(deadEnd.length).toBe(1);
 	});
 
