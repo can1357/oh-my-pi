@@ -125,7 +125,9 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 				])
 				.join("") +
 			inputs.map(type => `<input type="${type}"><input type="${type}" list="options" aria-label="L">`).join("") +
-			'<datalist id="options"><option>o</option></datalist>';
+			'<datalist id="options"><option>o</option></datalist>' +
+			// An implicit editing host is generic in Chrome, not the textbox that Tern's rules infer.
+			'<div contenteditable="true" aria-label="Notes">Draft</div>';
 		// Contexts that change an element's role: tables and grids, lists and menus, landmarks and sections.
 		const contexts = [
 			(content: string) => content,
