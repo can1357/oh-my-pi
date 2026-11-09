@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Session titles now record their billed usage on the session's cost ledger, so `/usage`, session statistics, and `omp stats` include title spend from both the default fork title and the tiny title model ([#18491](https://github.com/can1357/oh-my-pi/pull/18491)).
 
 ### Changed
 
@@ -75,7 +76,6 @@
 ### Fixed
 
 - Fixed `ask` notes added with `n` right after picking an answer landing on the previous question instead of the one shown; a Tern click then Note still notes the answer just clicked, and the Note button names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
-- Session titles now record their billed usage on the session's cost ledger, so `/usage`, session statistics, and `omp stats` include title spend from both the default fork title and the tiny title model ([#18491](https://github.com/can1357/oh-my-pi/pull/18491)).
 
 ## [18.18.2] - 2026-11-08
 
