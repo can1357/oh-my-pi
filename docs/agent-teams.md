@@ -292,11 +292,12 @@ the exemption through any tool.
 
 ## Plan submission and approval
 
-Until approval, the exact allowed tool names are `read`, `grep`, `glob`, `lsp`,
-`web_search`, `wait`, terminal reports via `yield`/`handback`, and `write` targeting
-normalized `agent://` or `team://` coordination URLs. This allowlist does not add
-tools a role lacks. Terminal reports let a member finish its current turn while
-awaiting approval; they do not open the mutation gate.
+Until approval, the exact allowed tool names are `read`, `grep`, `glob`, `find`,
+`ast_grep`, `lsp`, `web_search`, `wait`, terminal reports via `yield`/`handback`,
+and `write` targeting normalized `agent://` or `team://` coordination URLs. This
+allowlist does not add tools a role lacks. `find` and `ast_grep` are read-only
+search tools; `ast_edit` is not allowed. Terminal reports let a member finish its
+current turn while awaiting approval; they do not open the mutation gate.
 
 Allowed `lsp` actions are `diagnostics`, `definition`, `type_definition`,
 `implementation`, `references`, `hover`, `symbols`, `status` and `capabilities`.

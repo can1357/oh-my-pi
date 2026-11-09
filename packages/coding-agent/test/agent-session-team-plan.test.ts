@@ -253,9 +253,9 @@ function rewritingRunner(rewrite: () => unknown): ExtensionRunner {
 }
 
 describe("AgentSession authoritative team plan gate", () => {
-	it("allows only the six exact read/wait names, not aliases or unlisted tools", async () => {
+	it("allows only the eight exact read/search/wait names, not aliases or unlisted tools", async () => {
 		const { session } = await fixture();
-		for (const name of ["read", "grep", "glob", "lsp", "web_search", "wait"])
+		for (const name of ["read", "grep", "glob", "find", "ast_grep", "lsp", "web_search", "wait"])
 			expect((await before(session, name, name === "lsp" ? { action: "hover" } : {}))?.block).not.toBe(true);
 		for (const name of [
 			"bash",
@@ -271,6 +271,17 @@ describe("AgentSession authoritative team plan gate", () => {
 		]) {
 			expect(await before(session, name)).toMatchObject({ block: true, reason: required });
 		}
+	});
+	it("admits read-only find and ast_grep, keeping ast_edit, edit, bash and file writes blocked", async () => {
+		const { session } = await fixture();
+		for (const name of ["find", "ast_grep"]) expect((await before(session, name))?.block).not.toBe(true);
+		for (const name of ["ast_edit", "edit", "bash"])
+			expect(await before(session, name)).toMatchObject({ block: true, reason: required });
+		expect(await dispatchWrite(session, { path: "blocked.txt", content: "bad" })).toMatchObject({
+			block: true,
+			reason: required,
+		});
+		expect(await Bun.file(path.join(cwd, "blocked.txt")).exists()).toBe(false);
 	});
 
 	it("blocks mutating LSP actions and extension rewrites to them", async () => {

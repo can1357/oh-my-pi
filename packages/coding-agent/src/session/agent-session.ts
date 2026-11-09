@@ -5762,6 +5762,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				case "read":
 				case "grep":
 				case "glob":
+				case "find":
+				case "ast_grep":
 				case "web_search":
 				case "wait":
 					return undefined;
