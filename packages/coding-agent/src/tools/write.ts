@@ -955,8 +955,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const target = router.writeTarget(path);
 		if (
 			this.session.coordinationOnlyWrite === true &&
-			target?.url.protocol !== "agent:" &&
-			target?.url.protocol !== "team:"
+			((target?.url.protocol !== "agent:" && target?.url.protocol !== "team:") ||
+				target?.spec.write?.scope !== "coordination")
 		) {
 			throw new ToolError("This session has coordination-only write access to agent:// and team://.");
 		}

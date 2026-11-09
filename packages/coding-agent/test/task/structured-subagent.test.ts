@@ -164,6 +164,25 @@ describe("structured subagent primitive", () => {
 		await fs.rm(normal.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("normalizes tool names before granting team coordination-only write", async () => {
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		let agent = { ...AGENT, tools: ["read", "WRITE"] };
+		vi.spyOn(discoveryModule, "discoverAgents").mockImplementation(async () => ({
+			agents: [agent],
+			projectAgentsDir: null,
+		}));
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		for (const tools of [["read", "WRITE"], ["edit"]]) {
+			agent = { ...AGENT, tools };
+			const child = await runStructuredSubagent(request({ teamIrc: true, retainArtifacts: true }));
+			await fs.rm(child.artifactsDir, { recursive: true, force: true });
+		}
+		expect(dispatched.map(options => options.coordinationOnlyWrite)).toEqual([false, true]);
+	});
+
 	it("selects a discovered relative team prompt only for team members", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-team-role-"));
 		try {

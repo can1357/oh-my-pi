@@ -296,6 +296,7 @@ export interface ParsedAgentFields {
 	description: string;
 	team?: boolean;
 	teamPromptPath?: string;
+	teamPromptError?: string;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -398,7 +399,14 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		name,
 		description,
 		team: parseBoolean(frontmatter.team),
-		teamPromptPath: typeof frontmatter.teamPrompt === "string" ? frontmatter.teamPrompt : undefined,
+		teamPromptPath:
+			typeof frontmatter.teamPrompt === "string" && frontmatter.teamPrompt.trim()
+				? frontmatter.teamPrompt
+				: undefined,
+		teamPromptError:
+			"teamPrompt" in frontmatter && (typeof frontmatter.teamPrompt !== "string" || !frontmatter.teamPrompt.trim())
+				? `Invalid team-prompt for agent "${name}": expected a non-empty path`
+				: undefined,
 		tools,
 		spawns,
 		model,

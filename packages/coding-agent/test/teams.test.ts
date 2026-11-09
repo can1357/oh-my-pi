@@ -400,7 +400,7 @@ describe("/team start and stop", () => {
 	for (const definition of [
 		{ name: "scout", tools: ["read"], team: undefined, reason: "read-only" },
 		{ name: "scout", tools: [], team: undefined, reason: "read-only" },
-		{ name: "scout", tools: ["write"], team: false, reason: "team" },
+		{ name: "scout", tools: ["write"], team: false, reason: "team: false" },
 	]) {
 		it(`rejects ${definition.reason} members without a team prompt before side effects`, async () => {
 			const { team, root, cleanup } = await teamFixture({ workspace: true, handles: ["Scout"] });
@@ -418,6 +418,7 @@ describe("/team start and stop", () => {
 				await TEAM_HANDLE({ args: "start audit" }, runtime);
 				expect(outputs.join("\n")).toContain("Scout");
 				expect(outputs.join("\n")).toContain(definition.reason);
+				if (definition.team === false) expect(outputs.join("\n")).not.toContain("read-only");
 				expect(spawn).not.toHaveBeenCalled();
 				expect(
 					await fs.stat(team.workspace!).then(

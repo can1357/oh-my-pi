@@ -20,7 +20,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -166,11 +166,20 @@ export async function discoverAgents(
 	const loadedAgents = await Promise.all(
 		selected.map(async ({ agent, filePath }) => {
 			if (agent.teamPromptPath !== undefined) {
-				const promptPath = path.resolve(path.dirname(filePath), agent.teamPromptPath);
+				const definitionDir = path.dirname(filePath);
+				const promptPath = path.resolve(definitionDir, agent.teamPromptPath);
 				try {
-					agent.teamSystemPrompt = await fs.readFile(promptPath, "utf-8");
+					if (path.isAbsolute(agent.teamPromptPath)) {
+						throw new Error("team-prompt must be a relative path");
+					}
+					const [realDir, realPrompt] = await Promise.all([fs.realpath(definitionDir), fs.realpath(promptPath)]);
+					if (!pathIsWithin(realDir, realPrompt)) {
+						throw new Error("resolved team-prompt is outside the definition directory");
+					}
+					agent.teamSystemPrompt = await fs.readFile(realPrompt, "utf-8");
 				} catch (error) {
-					throw new Error(`Failed to read team prompt ${promptPath} referenced by ${filePath}`, { cause: error });
+					const detail = error instanceof Error ? error.message : String(error);
+					agent.teamPromptError = `Failed to load team prompt for agent "${agent.name}" at ${promptPath} referenced by ${filePath}: ${detail}`;
 				}
 			}
 			return agent;

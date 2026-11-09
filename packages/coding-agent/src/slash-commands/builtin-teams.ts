@@ -137,6 +137,12 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				const members = team.members.slice(0, Math.max(1, max));
 				for (const member of members) {
 					const agent = discovery.agents.find(candidate => candidate.name === member.agent)!;
+					if (agent.teamPromptError !== undefined) {
+						await runtime.output(
+							teamRuntimeError(`member "${member.handle}" (${member.agent}): ${agent.teamPromptError}`),
+						);
+						return commandConsumed();
+					}
 					if (
 						!agent.teamSystemPrompt &&
 						(agent.team === false || agent.tools?.length === 0 || isReadOnlyAgent(agent))

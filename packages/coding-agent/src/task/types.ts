@@ -326,6 +326,8 @@ export interface AgentDefinition {
 	teamSystemPrompt?: string;
 	team?: boolean;
 	teamPromptPath?: string;
+	/** Invalid or unreadable team prompt; ordinary agent use remains available. */
+	teamPromptError?: string;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];

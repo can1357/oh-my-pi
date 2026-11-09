@@ -45,7 +45,11 @@ describe("agent team prompts", () => {
 			path.join(agents, "scout.md"),
 			"---\nname: scout\ndescription: Override\nteam-prompt: prompts/missing.md\n---\nNormal instructions.\n",
 		);
-		await expect(discoverAgents(root, root)).rejects.toThrow(path.join("prompts", "missing.md"));
+		const agent = (await discoverAgents(root, root)).agents.find(candidate => candidate.name === "scout");
+		expect(agent?.description).toBe("Override");
+		expect(agent?.teamPromptError).toContain(path.join("prompts", "missing.md"));
+		expect(agent?.teamPromptError).toContain("ENOENT");
+		expect(agent?.teamSystemPrompt).toBeUndefined();
 	});
 
 	test.each(["scout", "reviewer"])("bundles a distinct team prompt for %s", name => {

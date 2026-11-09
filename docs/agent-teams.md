@@ -32,9 +32,13 @@ unrelated ref that happens to share a handle.
   outside teams are unchanged. Messages use the existing IrcBus and ingress
   guard;
 - **team role prompts**: read-only definitions and definitions with
-  `team: false` require a `team-prompt` to join a team. The path is relative
-  to the agent definition. A team prompt replaces the normal role body for team
-  spawns only. Writable definitions need no team prompt unless `team: false`;
+  `team: false` require a `team-prompt` to join a team. The path must be a
+  non-empty relative path whose resolved real path stays inside the agent
+  definition's directory. Invalid or unreadable prompts are recorded on the
+  definition; `/team start` rejects the affected member before creating a
+  workspace or spawning members, while normal subagent spawns remain available.
+  A team prompt replaces the normal role body for team spawns only. Writable
+  definitions need no team prompt unless `team: false`;
   bundled scout and reviewer include team variants;
 - an optional **shared workspace**: `workspace:` is resolved relative to the
   team file and added to each child's additional directories, not substituted

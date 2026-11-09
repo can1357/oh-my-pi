@@ -796,6 +796,38 @@ describe("coordination-only write", () => {
 		}
 	});
 
+	it("rejects a workspace-scoped team handler before it writes", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "coordination-team-scope-"));
+		const router = InternalUrlRouter.instance();
+		const previousTeamHandler = router.getHandler("team");
+		const output = path.join(dir, "blocked.txt");
+		router.register({
+			scheme: "team",
+			spec: {
+				backing: "virtual",
+				selectors: "lines",
+				immutable: false,
+				singleSlashAlias: true,
+				write: { via: "handler", payload: "verbatim", scope: "workspace", tier: () => "write" },
+			},
+			resolve: async () => ({ url: "team://ops", content: "", contentType: "text/plain" }),
+			write: async (_url, content) => {
+				await Bun.write(output, content);
+			},
+		});
+		try {
+			const write = new WriteTool(xdevSession(dir, { coordinationOnlyWrite: true }));
+			await expect(write.execute("blocked-team", { path: "team://ops", content: "forbidden" })).rejects.toThrow(
+				"coordination-only",
+			);
+			expect(await Bun.file(output).exists()).toBe(false);
+		} finally {
+			if (previousTeamHandler) router.register(previousTeamHandler);
+			else router.unregister("team");
+			await removeWithRetries(dir);
+		}
+	});
+
 	it("keeps eligible built-ins top-level instead of mounting them behind forbidden xd writes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "coordination-xdev-"));
 		try {

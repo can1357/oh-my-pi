@@ -244,10 +244,97 @@ describe("discoverAgents", () => {
 		);
 		injectOmpExtensionCliRoots([extension], tempHome, projectDir);
 
-		await expect(discoverAgents(projectDir, tempHome)).rejects.toThrow(
-			`Failed to read team prompt ${missing} referenced by ${winner}`,
-		);
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		const matches = agents.filter(agent => agent.name === "collision");
+		expect(matches).toHaveLength(1);
+		expect(matches[0].filePath).toBe(winner);
+		expect(matches[0].description).toBe("winner");
+		const error = (matches[0] as (typeof matches)[0] & { teamPromptError?: string }).teamPromptError;
+		expect(error).toContain("collision");
+		expect(error).toContain(missing);
+		expect(error).toContain("ENOENT");
+		expect(agents.some(agent => agent.source === "bundled")).toBe(true);
 	});
+
+	test("keeps ordinary agents usable when another agent's team prompt is missing", async () => {
+		const dir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(dir, { recursive: true });
+		await fs.writeFile(path.join(dir, "normal.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(dir, "broken.md"),
+			"---\nname: broken\ndescription: broken team prompt\nteam-prompt: missing.txt\n---\nOrdinary body\n",
+		);
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		expect(agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain("OMP task agent");
+		expect(agents.find(agent => agent.name === "broken")?.systemPrompt).toContain("Ordinary body");
+	});
+
+	for (const [label, value] of [
+		["empty", '""'],
+		["whitespace", '"   "'],
+		["number", "42"],
+		["boolean", "false"],
+		["null", "null"],
+		["array", "[prompt.txt]"],
+		["object", "{path: prompt.txt}"],
+	] as const) {
+		test(`records an error for a ${label} team-prompt`, async () => {
+			const dir = path.join(projectDir, ".omp", "agents");
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(
+				path.join(dir, "invalid.md"),
+				`---\nname: invalid\ndescription: invalid prompt\nteam-prompt: ${value}\n---\nBody\n`,
+			);
+			const { agents } = await discoverAgents(projectDir, tempHome);
+			const agent = agents.find(candidate => candidate.name === "invalid") as
+				| ((typeof agents)[number] & { teamPromptError?: string })
+				| undefined;
+			expect(agent?.teamPromptError).toContain("invalid");
+			expect(agent?.teamSystemPrompt).toBeUndefined();
+		});
+	}
+
+	test("loads a nested relative team prompt within the definition directory", async () => {
+		const dir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(path.join(dir, "prompts"), { recursive: true });
+		await fs.writeFile(path.join(dir, "prompts", "team.txt"), "Nested team prompt");
+		await fs.writeFile(
+			path.join(dir, "nested.md"),
+			"---\nname: nested\ndescription: nested prompt\nteam-prompt: prompts/team.txt\n---\nBody\n",
+		);
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		expect(agents.find(agent => agent.name === "nested")?.teamSystemPrompt).toBe("Nested team prompt");
+	});
+
+	for (const kind of ["absolute", "traversal", "symlink"] as const) {
+		test(`rejects a team prompt using ${kind} to access an untrusted path`, async () => {
+			const dir = path.join(projectDir, ".omp", "agents");
+			const outside = path.join(projectDir, ".omp", "agents-outside");
+			await fs.mkdir(dir, { recursive: true });
+			await fs.mkdir(outside, { recursive: true });
+			await fs.writeFile(path.join(outside, "secret.txt"), "Outside prompt must not load");
+			let promptPath: string;
+			if (kind === "absolute") {
+				promptPath = path.join(dir, "inside.txt");
+				await fs.writeFile(promptPath, "Absolute path must not load");
+			} else if (kind === "traversal") {
+				promptPath = "../agents-outside/secret.txt";
+			} else {
+				await fs.symlink(outside, path.join(dir, "link"), "junction");
+				promptPath = "link/secret.txt";
+			}
+			await fs.writeFile(
+				path.join(dir, "unsafe.md"),
+				`---\nname: unsafe\ndescription: unsafe prompt\nteam-prompt: ${JSON.stringify(promptPath)}\n---\nBody\n`,
+			);
+			const { agents } = await discoverAgents(projectDir, tempHome);
+			const agent = agents.find(candidate => candidate.name === "unsafe") as
+				| ((typeof agents)[number] & { teamPromptError?: string })
+				| undefined;
+			expect(agent?.teamPromptError).toContain("unsafe");
+			expect(agent?.teamSystemPrompt).toBeUndefined();
+		});
+	}
 
 	test("explicit-only CLI roots expose only explicitly named package agents", async () => {
 		const staleExt = path.join(tempHome, "stale-ext");

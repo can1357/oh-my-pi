@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Agent definitions support `team` and a relative `team-prompt` for team-specific role instructions.
 - Removed the fork's outbound-only telemetry surfaces: automated tool-issue reporting (the `xd://report_issue` device, its consent flow, the `dev.autoqa`/`dev.autoqaConsent`/`dev.autoqaPush.*` settings, the `PI_AUTO_QA*` env vars, the `omp grievances` command and its push to the QA backend) is deleted entirely, and `startup.checkUpdate` now defaults to `false` so a launch no longer phones the build service for a newer release (a check would recommend replacing this fork's binary with an upstream release; `omp update` and `update.auto` still work when enabled explicitly). Local observability is untouched: OTLP export via `OTEL_*` endpoints, `omp stats`, model-perf, session diagnostics and logging all stay
 
 - Subagents can now be bounded by context tokens as well as by requests: `task.tokenBudget` (0 = off) injects one `<total_tokens>N tokens left of M</total_tokens>` aside once a run passes 50% of the budget, then one wrap-up steering notice past 90%, on every run, wake, revival and workpool turn because it rides the same `task.softRequestBudget` paths; it is not the goal-mode token budget, which caps a whole goal across turns. Schema-less subagents also get a `handback` tool, a thin wrapper over `yield` that delivers the plain-text final report framed as model output, with harness tags escaped and one delivery per run; an agent with an output schema keeps `yield` alone, handback is never offered to a root session, and the CC `send`/`flagged`/`withheld` security flags are deliberately not ported (omp's approval guards already cover those surfaces)
@@ -37,7 +38,6 @@
 ### Fixed
 
 - Coordination-only teammates retain their restricted write capability after cold revival, and eligible tools remain directly callable when xdev is enabled rather than being mounted behind forbidden `xd://` writes.
-
 - Addressed A2A requests return an owned reply job after delivery, even when the recipient's previous run has finished; `wait` receives the peer- and message-correlated answer. `a2a.replyTimeoutMs` sets its deadline (30 minutes by default; `0` disables it), independently of the client transport budget.
 - Incoming A2A requests share a process-wide ledger across Main, subagents and worker links. Explicit replies and automatic Main/subagent replies claim only the addressed request; successful subagent wake turns relay their published output or final text without blocking settlement.
 - Interrupting an addressed A2A task before its delivery receipt cancels its local reply job, and delivery failures are reported once rather than repeated as asynchronous job results.
@@ -99,6 +99,7 @@
 
 ### Changed
 
+- Team members without a full `write` grant receive coordination-only `agent://` and `team://` writes instead of unrestricted `write`; existing full-write grants remain unchanged.
 - `task.structured` now defaults to on: the task tool advertises `outputSchema`/`schemaMode`, and task children return results through `yield` or `handback`. Set `task.structured` to `false` to opt out (schema-less, yield-less children that return their final message). Workflow spawns that pass `structured: false`, and agents that set `structured: true` while the setting is off, are unchanged
 - Local Whisper speech-to-text and the local tiny model install their Transformers.js runtime on first use instead of with omp, so installs are smaller; first use needs network access
 - Local Parakeet and Nemotron speech runtimes now install on first use in source and npm installs too, reducing initial install size; first use needs network access
