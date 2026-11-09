@@ -960,9 +960,9 @@ export class RelayBridge {
 			return;
 		}
 		const realTabKey = this.#realSessionTabs.get(sessionId);
-		if (realTabKey !== undefined) {
+		if (realTabKey !== undefined && conn.childParents.has(sessionId)) {
 			const announce =
-				msg.method === "Target.setAutoAttach" && msg.params?.autoAttach === true && conn.childParents.has(sessionId)
+				msg.method === "Target.setAutoAttach" && msg.params?.autoAttach === true
 					? () => this.#announceChildren(conn, realTabKey, sessionId, sessionId)
 					: undefined;
 			await this.#forwardToTab(conn, msg, realTabKey, sessionId, announce);

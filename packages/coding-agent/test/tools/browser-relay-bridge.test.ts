@@ -575,6 +575,21 @@ describe("RelayBridge child targets", () => {
 				["Page.frameNavigated", "CHILD1"],
 				["Target.detachedFromTarget", firstSession],
 			]);
+			const detachedCommand = ++msgSeq;
+			bridge.cdpMessage(
+				first,
+				JSON.stringify({
+					id: detachedCommand,
+					sessionId: "CHILD1",
+					method: "Runtime.evaluate",
+					params: { expression: "1" },
+				}),
+			);
+			await flush();
+			expect(firstCdp.messages.find(message => message.id === detachedCommand)).toMatchObject({
+				error: { message: "Unknown session id CHILD1" },
+			});
+			expect(ext.pending("send")).toEqual([]);
 			const optedOut = firstCdp.messages.length;
 			emit(bridge, ext, NAVIGATE, NESTED_ATTACH);
 			expect(firstCdp.messages).toHaveLength(optedOut);
