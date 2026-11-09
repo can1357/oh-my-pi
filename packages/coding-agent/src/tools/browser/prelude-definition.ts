@@ -50,6 +50,8 @@ export function createBrowserPreludeDefinition(
 		python: browserPython,
 		exports: ["browser"],
 		approval: "exec",
+		// Same name and input shape as the native `browser` tool, so extensions see one contract.
+		extensionToolCalls: true,
 		enabled: () => cfgBrowserEnabled.get(session.settings),
 		invoke: host.invoke,
 		status: host.status,
