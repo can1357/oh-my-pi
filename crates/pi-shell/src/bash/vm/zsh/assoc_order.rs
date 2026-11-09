@@ -203,6 +203,20 @@ impl ZHash {
 	}
 }
 
+/// Where a key absent from the stored table `items` (zsh iteration order,
+/// bucket count from `attrs`) goes when added: the front of its bucket's
+/// chain, the stored entries being ordered by bucket. `None` when adding
+/// it grows the table, which reorders every entry ([`ZHash::insert`]
+/// then rebuilds it).
+pub fn insert_position(items: &[(BString, BString)], attrs: Attrs, key: &[u8]) -> Option<usize> {
+	let hsize = INITIAL_BUCKETS << (2 * u32::from(attrs.base().min(8)));
+	if items.len() + 1 >= hsize * 2 {
+		return None;
+	}
+	let b = bucket(key, hsize);
+	Some(items.partition_point(|(k, _)| bucket(k, hsize) < b))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -243,5 +257,28 @@ mod tests {
 		let k1: Vec<_> = items.iter().map(|e| &e.0).collect();
 		let k2: Vec<_> = items2.iter().map(|e| &e.0).collect();
 		assert_eq!(k1, k2, "replacing a value keeps the order");
+	}
+
+	/// Placing each new key with [`insert_position`] (rebuilding only when
+	/// the table grows) keeps exactly the order zsh's table iterates in.
+	#[test]
+	fn insert_positions_follow_the_table() {
+		let mut items: Vec<(BString, BString)> = Vec::new();
+		let mut attrs = Attrs::NONE;
+		let mut table = ZHash::new();
+		for i in 0..400 {
+			let key = BString::from(format!("k{i}"));
+			table.insert(key.clone(), BString::from("v"));
+			if let Some(at) = insert_position(&items, attrs, &key) {
+				items.insert(at, (key, BString::from("v")));
+			} else {
+				let mut h = ZHash::from_owned(std::mem::take(&mut items), attrs);
+				h.insert(key, BString::from("v"));
+				(items, attrs) = h.into_stored(attrs);
+			}
+		}
+		let (want, want_attrs) = table.into_stored(Attrs::NONE);
+		assert_eq!(items, want);
+		assert_eq!(attrs.base(), want_attrs.base());
 	}
 }

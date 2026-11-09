@@ -78,6 +78,37 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	const write = async (path, data) => callHelper("writeFile", path, data);
 	const env = (key, value) => callHelper("env", key, value);
 
+	// `sh` runs a command on the embedded bash engine (see `eval/shell-bridge.ts`) and resolves to its output.
+	// A template literal keeps its raw text and single-quotes each interpolation; an array becomes one word per element.
+	const shellQuote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
+	const templateCommand = (strings, values) => {
+		let command = strings.raw[0];
+		for (let index = 0; index < values.length; index++) {
+			const value = values[index];
+			const words = Array.isArray(value) ? value.map(shellQuote).join(" ") : shellQuote(value);
+			command += words + strings.raw[index + 1];
+		}
+		return command;
+	};
+	const sh = async (command, ...rest) => {
+		let args;
+		if (Array.isArray(command) && Array.isArray(command.raw)) {
+			args = { command: templateCommand(command, rest) };
+		} else if (typeof command === "string") {
+			args = { ...optionsArg("sh", rest[0], rest.slice(1), ["cwd", "timeout"], "{ cwd, timeout }"), command };
+		} else {
+			throw new TypeError('sh() expects a command string or a template literal: sh("ls -la") or sh`ls ${dir}`');
+		}
+		const { output, exitCode, timedOut } = await globalThis.__omp_call_tool__("__shell__", args);
+		if (exitCode === 0) return output;
+		const status = timedOut ? `timed out after ${args.timeout}s` : `exited with code ${exitCode}`;
+		const error = new Error(`$ ${args.command}: ${status}${output ? `\n${output.trimEnd()}` : ""}`);
+		error.name = "ShellError";
+		error.exitCode = exitCode;
+		error.output = output;
+		throw error;
+	};
+
 	const __tools = new Map();
 	globalThis.__omp_tools__ = __tools;
 	const registerTool = (fn, opts = {}) => {
@@ -765,4 +796,5 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.read = read;
 	globalThis.write = write;
 	globalThis.env = env;
+	globalThis.sh = sh;
 }

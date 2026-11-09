@@ -657,10 +657,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
 				.compat.stripImageInput,
 		).toBe(true);
-		// The lineage glob covers dated SKUs, not just the bare id.
+		// The lineage carve-out covers dated SKUs, not just the bare id.
 		expect(
 			resolveModelPolicy(
 				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Hosts that spell the release with a hyphen (Mistral's live roster:
+		// `deepseek-v4-1-flash-1017`) serve the same multimodal weights (#18405).
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "mistral", id: "deepseek-v4-1-flash-1017", input: ["text", "image"] }),
 			).compat.stripImageInput,
 		).toBe(false);
 		// A V4.1 id that also carries a `vision` token matches both exceptions at
