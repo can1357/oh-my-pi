@@ -1000,19 +1000,6 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
-/** A retry supersedes a failed operation only when its intent matches, allowing a missing append phase to be supplied. */
-function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string, unknown>): boolean {
-	if (Bun.deepEquals(failed, retry)) return true;
-	if (failed.op !== "append" || Object.hasOwn(failed, "phase") || typeof retry.phase !== "string") return false;
-	for (const key in failed) {
-		if (!Object.hasOwn(retry, key) || !Bun.deepEquals(failed[key], retry[key])) return false;
-	}
-	for (const key in retry) {
-		if (key !== "phase" && !Object.hasOwn(failed, key)) return false;
-	}
-	return true;
-}
-
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -4574,10 +4561,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Drops queued `todo-error-reminder`s superseded by a successful `todo` call.
-	 * Exact retries (or an `append` that only supplies the missing phase) clear
-	 * every matching failure. Otherwise the call is treated as a corrected retry
-	 * of the oldest outstanding failure with the same op (placeholder task text,
-	 * missing items, ...); failures of other ops stay queued.
+	 * Exact retries clear every matching failure. Otherwise the call is treated
+	 * as a corrected retry of the oldest outstanding failure with the same op
+	 * (placeholder task text, missing items, ...); failures of other ops stay queued.
 	 */
 	#dropSupersededTodoReminders(retry: Record<string, unknown>, op: string | undefined): void {
 		const reminders: Array<{ message: CustomMessage; details: Record<string, unknown> }> = [];
@@ -4588,7 +4574,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		const exact = reminders.filter(({ details }) => {
 			const failed = details.attemptedArgs;
-			return isRecord(failed) && todoRetryMatches(failed, retry);
+			return isRecord(failed) && Bun.deepEquals(failed, retry);
 		});
 		const superseded =
 			exact.length > 0
