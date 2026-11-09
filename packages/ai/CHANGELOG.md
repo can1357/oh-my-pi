@@ -10,6 +10,9 @@
 
 - Exclusive tools (`edit`, `write`, `eval`, …) called as Cursor MCP tools now keep their place in the tool batch, so a shell or read sent with an edit no longer runs against the old file or starts before an earlier call finishes ([#18502](https://github.com/can1357/oh-my-pi/pull/18502) by [@eggpeat](https://github.com/eggpeat))
 
+- Reduced allocations when preparing transcripts with many assistant turns for providers ([#18619](https://github.com/can1357/oh-my-pi/pull/18619) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
@@ -19,7 +22,6 @@
 
 ### Changed
 
-- Reduced allocations when preparing transcripts with many assistant turns for providers ([#17095](https://github.com/can1357/oh-my-pi/pull/17095) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
