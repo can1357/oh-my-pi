@@ -10,8 +10,9 @@
  * (Tern) terminal gets the form described semantically instead: one tab per
  * question (a top-level `<fieldset>`; context before it rides along) plus a
  * Review tab, the tab's content in a column the terminal scrolls, and an
- * action bar that stays in view below it, with Submit on every tab. Clicks
- * come back through {@link HtmlFormDialog.handleNativeEvent}.
+ * action bar that stays in view below it, with Submit on the last question
+ * tab and on Review. Clicks come back through
+ * {@link HtmlFormDialog.handleNativeEvent}.
  *
  * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
@@ -134,7 +135,7 @@ const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
 /**
  * Tern pads an accent button 14px left and 8px right, leaving room for the keycap after its label,
- * but hides keycaps inside the ask card, so Submit and Show sit 6px right of centre. An en
+ * but hides keycaps inside the ask card, so Next, Submit and Show sit 6px right of centre. An en
  * space (6.25px at the button's 12.5px face) after the label evens the two sides.
  */
 const ACCENT_TAIL = "\u2002";
@@ -1638,7 +1639,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (tabbed) children.push(this.#describeTabs(cols));
 		if (review) children.push(...this.#describeReview());
 		else children.push(...this.#describeTab(this.#tabs[this.#tab]));
-		children.push(this.#describeActions(blocked, tabbed && !review));
+		const next = tabbed && !review;
+		const submit = !next || this.#tab === this.#tabs.length - 1;
+		children.push(this.#describeActions(blocked, next, submit));
 		return col(children, { role: "omp.editor.ask", gap: "md" });
 	}
 
@@ -1798,11 +1801,11 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * Hide, the countdown or draft hint, then Cancel and Submit; a question tab adds Next before
-	 * Submit. Submit stays on every tab so answering never requires walking to Review; it
-	 * validates the whole form and opens the first answer that needs a fix.
+	 * Hide, the countdown or draft hint, then Cancel, Next on a question tab, and Submit where
+	 * `submit` says: an untabbed form, the last question tab, and Review. Submit validates the
+	 * whole form and opens the first answer that needs a fix.
 	 */
-	#describeActions(blocked: boolean, next: boolean): NativeNode {
+	#describeActions(blocked: boolean, next: boolean, submit: boolean): NativeNode {
 		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
 		const guard = this.#options.inputGuard;
 		const lead =
@@ -1816,12 +1819,24 @@ export class HtmlFormDialog implements Component, Focusable {
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 			...(lead ? [null] : []),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
-			...(next ? [actionButton("Next", "next")] : []),
-			actionButton(`${SUBMIT_LABEL}${ACCENT_TAIL}`, "submit", {
-				...(next ? {} : { keys: "enter" }),
-				tone: "accent",
-				title: next ? SUBMIT_LABEL : `${SUBMIT_LABEL}  ${formatTooltipKey("enter")}`,
-			}),
+			...(next
+				? [
+						actionButton(
+							submit ? "Next" : `Next${ACCENT_TAIL}`,
+							"next",
+							submit ? {} : { tone: "accent", title: "Next" },
+						),
+					]
+				: []),
+			...(submit
+				? [
+						actionButton(`${SUBMIT_LABEL}${ACCENT_TAIL}`, "submit", {
+							...(next ? {} : { keys: "enter" }),
+							tone: "accent",
+							title: next ? SUBMIT_LABEL : `${SUBMIT_LABEL}  ${formatTooltipKey("enter")}`,
+						}),
+					]
+				: []),
 		]);
 	}
 
