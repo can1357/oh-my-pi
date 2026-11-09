@@ -27,12 +27,12 @@ import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
 
 const USAGE = [
 	"Usage:",
-	"  /team start <name> [assignment]  spawn every member of team <name>",
-	"  /team list                       show discovered team files",
-	"  /team status [name]              member handles + live registry status",
+	"  /team start <name> [assignment]    spawn every member of team <name>",
+	"  /team list                         show discovered team files",
+	"  /team status [name]                member handles + live registry status",
 	"  /team stop [--force] <name|handle|all>  request stop (or force release)",
 	"  /team approve <handle> [--rev N]   approve a submitted member plan",
-	"  /team reject <handle> [--rev N] <reason>   reject a plan and require resubmission",
+	"  /team reject <handle> [--rev N] <reason>  reject a plan and require resubmission",
 ].join("\n");
 
 function teamRuntimeError(message: string): string {
@@ -145,6 +145,9 @@ export const BUILTIN_TEAMS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (verb === "approve" || verb === "reject") {
 				const words = rest.trim().split(/\s+/).filter(Boolean);
 				const handle = words.shift();
+				// A `--rev` token in handle position is a usage error, not a handle:
+				// `/team approve --rev 1` must reach usage, not an unknown-member error.
+				if (handle === "--rev") return usage(USAGE, runtime);
 				let revision: number | undefined;
 				if (words[0] === "--rev") {
 					words.shift();

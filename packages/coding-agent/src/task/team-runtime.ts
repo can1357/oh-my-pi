@@ -705,7 +705,14 @@ export class TeamRuntime {
 			plan.reservation !== reservation ||
 			(plan.refGeneration !== undefined && plan.refGeneration !== member.ref?.generation)
 		) {
-			plan = { id: member.id, reservation, refGeneration: member.ref?.generation, approved: false, submissions: 0, epoch: 0 };
+			plan = {
+				id: member.id,
+				reservation,
+				refGeneration: member.ref?.generation,
+				approved: false,
+				submissions: 0,
+				epoch: 0,
+			};
 			state.plans.set(handle, plan);
 		}
 		plan.refGeneration ??= member.ref?.generation;

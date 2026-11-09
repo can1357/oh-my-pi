@@ -336,8 +336,8 @@ Only the current lead can approve/reject its members. Ambiguous handles,
 nonmembers, stale generations and replaced refs are refused. The revision
 `N` counts accepted submissions in the member's current generation (1, 2, 3
 …); rejects do not advance it, so the resubmission after a rejected rev 2 is
-rev 3. With `--rev N` the decision is a compare-and-set: if the member has
-submitted a newer revision, the command is refused with
+rev 3. With `--rev N` the decision is a compare-and-set: if `N` differs from
+the member's current revision, the command is refused with
 `Stale plan revision N; current is M` and nothing changes — the gate stays as
 it was. Without `--rev` the command acts on the current submitted plan, not a
 revision token selected by the command; if a member resubmits before approval,

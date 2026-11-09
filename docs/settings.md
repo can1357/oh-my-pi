@@ -1134,6 +1134,8 @@ a2a:
 | `a2a.clientTimeoutMs` | number  | `0`     | Total transport budget in milliseconds for `SendMessage` and any `GetTask` polls. `0` means no total transport deadline; the per-request connect timeout remains 10 s. This does not set the separate addressed-reply deadline. A timeout does not cancel remote work. |
 | `a2a.replyTimeoutMs` | number | `1_800_000` | Deadline in milliseconds for an addressed A2A reply (30 minutes by default); `0` means no deadline. Expiry ends the local wait, not the peer's work. |
 | `session.retentionDays` | number | `30`   | Prune session transcripts and custom-session files older than this many days at startup; `0` disables the GC. Colocated with the A2A settings in the tasks tab because long-lived multi-terminal workloads are what accumulate stale session files. (Registered by the session GC, not the A2A module.)                                                                                                                                                                                                                                                                               |
+| `team.enabled` | boolean | `false` | Enable the `/team` slash commands for declarative agent teams (`.omp/teams/*.md` files whose members reference agent definitions); see [Agent Teams](./agent-teams.md). |
+| `team.maxTeammates` | number | `4` | Cap on members spawned per `/team start`; members past the cap are skipped and the refusal names the setting. |
 | `team.stopAckTimeoutMs` | number | `120000` | Milliseconds (1000..2147483647; out-of-range values are clamped) to wait for a teammate to acknowledge or decline a cooperative `/team stop` request; see [Agent Teams](./agent-teams.md). |
 
 ### Peer messaging guard (IrcBus)
