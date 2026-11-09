@@ -3376,11 +3376,13 @@ impl<'r, 'a, 'c> Gen<'r, 'a, 'c> {
 
 	/// zsh's `ztat` of a file match for `add_match_data` (`LIST_TYPES`):
 	/// the `lstat` and `stat` modes of `prpre`/`./` + `s`, put in the
-	/// completion state's cache.
+	/// completion state's cache. An empty `prpre` is `./`, as the lookup
+	/// in `add_match_data` takes it; keyed apart, no match found its type.
 	fn ztat(&mut self, s: &[u8]) -> G<()> {
 		let mut key = self
 			.prpre
 			.as_ref()
+			.filter(|p| !p.is_empty())
 			.map_or_else(|| b"./".to_vec(), |p| p.to_vec());
 		key.extend_from_slice(s);
 		if self.c.core.ztat_cache.contains_key(key.as_slice()) {

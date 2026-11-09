@@ -181,6 +181,15 @@ export type {
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 
+import type { HtmlFormData } from "@oh-my-pi/pi-tui/html-form/data";
+export type { HtmlFormData, HtmlFormValue } from "@oh-my-pi/pi-tui/html-form/data";
+
+/** A submitted {@link ExtensionUIContext.formDialog}: the form data, flagged when the timeout submitted the defaults. */
+export interface ExtensionFormDialogResult {
+	data: HtmlFormData;
+	timedOut?: boolean;
+}
+
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
 }
@@ -343,6 +352,14 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/**
+	 * Show an HTML `<form>` (see `@oh-my-pi/pi-tui/html-form/parse`) as an interactive form and
+	 * resolve its data on submit, `undefined` on cancel. With `timeout`, the form's current values
+	 * submit when it elapses (`timedOut: true`); input resets the countdown. Absent on hosts that
+	 * cannot draw a form; callers then fall back to field-by-field `select`/`input`/`editor`.
+	 */
+	formDialog?(html: string, dialogOptions?: ExtensionUIDialogOptions): Promise<ExtensionFormDialogResult | undefined>;
 
 	/**
 	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when
@@ -517,6 +534,13 @@ export interface CompactOptions {
 	 * and independent of this option.
 	 */
 	suppressContinuation?: boolean;
+	/**
+	 * The model that will read the compacted context when the caller switches to
+	 * it right after (a switch onto a smaller window compacts first). A
+	 * provider-native method whose replay payload that model cannot read is
+	 * skipped, so the switch does not land on a placeholder summary.
+	 */
+	readerModel?: Model;
 }
 
 /**
@@ -2117,8 +2141,9 @@ export interface ExtensionAPI {
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
-	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
+	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn.
+	 *  Rejects with `PromptDroppedError` if the message was not admitted (e.g. abort or cost cap). */
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -2358,7 +2383,7 @@ export type SendMessageHandler = <T = unknown>(
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: SendUserMessageOptions,
-) => void;
+) => Promise<void>;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 

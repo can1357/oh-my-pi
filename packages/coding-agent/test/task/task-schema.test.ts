@@ -42,7 +42,7 @@ function createSession(
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
+// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
@@ -55,7 +55,13 @@ describe("task schema (single-spawn)", () => {
 	it.each([false, true])("advertises taskFile only while task.file is on (batch=%s)", batchEnabled => {
 		// Enabled first: the disabled schema must not reuse the enabled one from the cache.
 		for (const file of [true, false]) {
-			const schema = getTaskSchema({ batchEnabled, isolationEnabled: false, structured: false, file });
+			const schema = getTaskSchema({
+				batchEnabled,
+				isolationEnabled: false,
+				structured: false,
+				file,
+				perCallModel: true,
+			});
 			const item = {
 				taskFile: "local://assignment.md",
 				model: "mock/file-worker",
@@ -175,10 +181,24 @@ describe("task schema seance fields", () => {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
 				const wireSchema = JSON.stringify(schema.toJsonSchema());
 				expect(wireSchema).not.toContain('"sourceSession"');
-				// Only the per-call `model` remains: one string, never the seance selector list.
-				expect(wireSchema).toContain('"model":{"type":"string"}');
+				expect(wireSchema).not.toContain('"model"');
+				// Per-call model alone advertises one string, never the seance selector list.
+				const perCall = JSON.stringify(
+					getTaskSchema({ batchEnabled, isolationEnabled, perCallModel: true }).toJsonSchema(),
+				);
+				expect(perCall).toContain('"model":{"type":"string"}');
 			}
 		}
+	});
+
+	it.each([
+		["off", false],
+		["eval", false],
+		["on", true],
+	] as const)("advertises model only when task.perCallModel allows task calls (%s)", async (mode, advertised) => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const tool = await TaskTool.create(createSession({ settings: { "task.perCallModel": mode } }));
+		expect(JSON.stringify(tool.parameters.toJsonSchema()).includes('"model"')).toBe(advertised);
 	});
 
 	it("advertises fields only when bundled seance is spawnable", async () => {
@@ -225,7 +245,7 @@ Custom prompt.`,
 		const planSchema = JSON.stringify(planMode.parameters.toJsonSchema());
 		expect(planSchema).not.toContain('"sourceSession"');
 		expect(planSchema).not.toContain("seance");
-		expect(planSchema).toContain('"model":{"type":"string"}');
+		expect(planSchema).not.toContain('"model"');
 		expect(planMode.description).not.toContain("seance");
 		expect(planMode.description).not.toContain("Historical consults");
 

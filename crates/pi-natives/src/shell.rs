@@ -491,6 +491,16 @@ impl Shell {
 		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
 	}
 
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork. Never waits for the running command.
+	#[napi]
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(self.inner.fork()) }
+	}
+
 	/// Run a shell command using the provided options.
 	///
 	/// The `on_chunk` callback receives streamed stdout/stderr output. Returns

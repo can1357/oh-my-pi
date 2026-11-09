@@ -848,7 +848,10 @@ export class InputController {
 	 * and HUD rows focus that agent in one action, and pointer motion lights up
 	 * the hover band on the target under the cursor. Every SGR report is consumed
 	 * while inline tracking owns the terminal so button/wheel bytes never reach
-	 * the editor as typed input; clicks on chrome simply swallow.
+	 * the editor as typed input; clicks on chrome simply swallow. Wheel ticks are
+	 * consumed the same way but cannot scroll: the terminal already chose to
+	 * report instead of scrolling, and no escape sequence moves its scrollback
+	 * viewport (#18458).
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
@@ -1124,12 +1127,21 @@ export class InputController {
 			if (!text && !hasPendingImages) return;
 
 			// Continue shortcuts: "." or "c" resume the agent without a visible user
-			// message (see AgentSession.resume). During a /guided-goal interview "c" is
-			// a plausible answer (e.g. option C), so it is sent as a normal reply there.
+			// message, interrupting a running turn (see AgentSession.resume). During a
+			// /guided-goal interview "c" is a plausible answer (e.g. option C), so it is
+			// sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (this.ctx.onInputCallback) {
 					this.ctx.editor.clearDraft();
 					this.ctx.onInputCallback({ text, cancelled: false, started: true, resume: true });
+				} else if (this.ctx.session.isStreaming) {
+					// The input loop is parked on the running turn's prompt; resume here.
+					this.ctx.editor.clearDraft();
+					try {
+						await this.ctx.session.resume();
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
 				}
 				return;
 			}

@@ -53,6 +53,7 @@ import {
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
 import { stripExtensionLinkMarkers } from "./render/extension-links";
+import { applyRowMove, BLANK_ROW, findRowMove, rowMoveSequence, UNKNOWN_ROW } from "./render/row-moves";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
 import { minFrameIntervalMs } from "./frame-rate";
 import {
@@ -1021,6 +1022,9 @@ export class TUI extends Container {
 	// caps `s` at 7. This bounds spacer lookups and supplies enough context
 	// above the resize viewport to classify every legal heading exactly.
 	static readonly #OSC66_MAX_SPACER_ROWS = 6;
+	// Band moves per unsynchronized frame: a streaming shift, the chrome a
+	// history push displaced, and one spare.
+	static readonly #MAX_ROW_MOVES = 3;
 	// Ghostty can drop Kitty graphics commands sent during its first post-startup
 	// settle window, leaving only Unicode placeholder cells. Hold the first image
 	// paint until that window has passed; later images render normally.
@@ -3655,6 +3659,115 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Rows of a frame for a terminal that may present any prefix of the write
+	 * (no synchronized output), or `undefined` when the frame needs the plain
+	 * row-rewrite paths (images, OSC 66 text, stale row preparation, a viewport
+	 * taller than the screen).
+	 *
+	 * Rows bound for scrollback are first made to show their history line, then
+	 * pushed with line feeds on the bottom row; surviving rows then shift into
+	 * place with DL/IL, and only rows that still differ are rewritten. Every
+	 * intermediate screen is the previous frame scrolled or shifted, never a
+	 * rewritten row beside its stale copy (the duplicated band a top-down
+	 * repaint shows) or an erased band awaiting repaint.
+	 */
+	#movedRowsSequence(
+		width: number,
+		height: number,
+		startTop: number,
+		newTop: number,
+		history: PreparedLines,
+		viewport: PreparedLines,
+	): string | undefined {
+		const window = this.#providerWindow;
+		const rows = viewport.lines.length;
+		if (rows > height || startTop + window.length > height) return undefined;
+		const widthEpoch = getWidthConfigEpoch();
+		const imageProtocol = TERMINAL.imageProtocol;
+		for (const row of this.#providerPreparedRows) {
+			if (
+				row.isImage ||
+				row.width !== width ||
+				row.widthEpoch !== widthEpoch ||
+				row.imageProtocol !== imageProtocol
+			) {
+				return undefined;
+			}
+		}
+		if (viewport.rows.some(row => row.isImage) || history.rows.some(row => row.isImage)) return undefined;
+		if (window.some(isOsc66Line) || viewport.lines.some(isOsc66Line) || history.lines.some(isOsc66Line)) {
+			return undefined;
+		}
+
+		const keys = new Map<string, number>([["", BLANK_ROW]]);
+		const keyOf = (line: string): number => {
+			let key = keys.get(line);
+			if (key === undefined) {
+				key = keys.size;
+				keys.set(line, key);
+			}
+			return key;
+		};
+		// oxlint-disable-next-line unicorn/no-new-array -- screen-height model preallocation
+		const screen: number[] = new Array(height).fill(BLANK_ROW);
+		screen.fill(UNKNOWN_ROW, 0, startTop);
+		for (let index = 0; index < window.length; index++) screen[startTop + index] = keyOf(window[index]!);
+
+		let out = "";
+		// Inserted, deleted, and scrolled-in lines take the current background.
+		let reset = false;
+		const resetOnce = (): string => {
+			if (reset) return "";
+			reset = true;
+			return SEGMENT_RESET;
+		};
+		// Push in screenfuls: physical row r holds combined row `done + r` of the
+		// ledger (history above the old viewport, then the batch, then the
+		// viewport), so each row about to scroll off must show its batch row.
+		const pushed = Math.max(0, startTop + history.lines.length + rows - height);
+		for (let done = 0; done < pushed;) {
+			const count = Math.min(pushed - done, height);
+			for (let r = 0; r < count; r++) {
+				const index = done + r - startTop;
+				if (index < 0) continue;
+				const key = keyOf(history.lines[index]!);
+				if (screen[r] === key) continue;
+				out += `\x1b[${r + 1};1H${this.#lineRewriteSequence(history.rows[index]!, width)}`;
+				screen[r] = key;
+			}
+			out += `${resetOnce()}\x1b[${height};1H${"\n".repeat(count)}`;
+			screen.copyWithin(0, count);
+			screen.fill(BLANK_ROW, height - count);
+			done += count;
+		}
+
+		const base = Math.max(0, startTop - pushed);
+		// oxlint-disable-next-line unicorn/no-new-array -- screen-height model preallocation
+		const target: number[] = new Array(height).fill(BLANK_ROW);
+		target.fill(UNKNOWN_ROW, 0, base);
+		for (let r = base; r < newTop; r++) target[r] = keyOf(history.lines[r + pushed - startTop]!);
+		for (let index = 0; index < rows; index++) target[newTop + index] = keyOf(viewport.lines[index]!);
+
+		for (let moves = 0; moves < TUI.#MAX_ROW_MOVES; moves++) {
+			const move = findRowMove(screen, target, base);
+			if (move === undefined) break;
+			out += `${resetOnce()}${rowMoveSequence(move, height)}`;
+			applyRowMove(screen, move);
+		}
+		for (let r = base; r < newTop + rows; r++) {
+			if (screen[r] === target[r]) continue;
+			const row = r < newTop ? history.rows[r + pushed - startTop]! : viewport.rows[r - newTop]!;
+			out += `\x1b[${r + 1};1H${this.#lineRewriteSequence(row, width)}`;
+		}
+		for (let r = newTop + rows; r < height; r++) {
+			if (screen[r] === BLANK_ROW) continue;
+			out += this.#eraseBelowRow(r, height);
+			break;
+		}
+		return out;
+	}
+
+	/**
 	 * Physical write transaction: append an ordinary batch, or bottom-split one
 	 * complete replay into a history remainder and final viewport, then serialize
 	 * the whole result in one terminal write before acknowledgement.
@@ -3778,7 +3891,22 @@ export class TUI extends Container {
 			this.#providerWindow.length > 0;
 		buffer += this.#retireImagePlacements(this.#screenImagePlacements, prepared.lines, newTop, !diffable);
 		for (const sequence of this.#imageBudget.takeTransmits()) append(sequence);
-		if (diffable) {
+		// Without synchronized output the terminal may show any prefix of this
+		// write, so move surviving rows instead of repainting through them.
+		const moved =
+			!this.#synchronizedOutputEnabled &&
+			geometryStable &&
+			!destructiveReset &&
+			history?.kind !== "replay" &&
+			!this.#forceViewportRepaintOnNextRender &&
+			this.#providerWindow.length > 0 &&
+			pendingAltExit === "" &&
+			this.#screenImagePlacements.size === 0
+				? this.#movedRowsSequence(width, height, startTop, newTop, preparedHistory, prepared)
+				: undefined;
+		if (moved !== undefined) {
+			buffer += moved;
+		} else if (diffable) {
 			for (let index = 0; index < rows; index++) {
 				if (
 					!this.#rowNeedsRewrite(

@@ -7,12 +7,6 @@
 #[cfg(not(unix))]
 use std::io;
 
-#[cfg(not(unix))]
-use bstr::BStr;
-
-#[cfg(not(unix))]
-use crate::bash::{ControlHandle, SigSet, Signal, Vpid};
-
 #[cfg(unix)]
 mod unix {
 	use std::{
@@ -321,38 +315,209 @@ impl RuntimeSignals {
 	}
 }
 
-#[cfg(not(unix))]
-#[derive(Default)]
-pub struct Signals;
+/// Windows has no signals, only console control events: Ctrl-C
+/// (`SIGINT`), Ctrl-Break (`SIGQUIT`, as a terminal's `^\`) and the
+/// console closing (`SIGHUP`). A handler registered while the shell traps
+/// or ignores one of them turns the event into a pending signal (or drops
+/// it) instead of letting Windows end the process; an event the shell
+/// leaves at its default goes on to the next handler (the embedding
+/// runtime's, else Windows ends the process, as the default action does).
+#[cfg(windows)]
+mod windows {
+	use std::{
+		io,
+		sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	};
 
-#[cfg(not(unix))]
-impl Signals {
-	/// Signals ignored when the process started (none tracked off Unix).
-	pub const fn ignored() -> SigSet {
-		SigSet::EMPTY
+	use bstr::BStr;
+	use windows_sys::{
+		Win32::System::Console::{
+			CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+			SetConsoleCtrlHandler,
+		},
+		core::BOOL,
+	};
+
+	use crate::bash::{ControlHandle, Platform, SigSet, SigTarget, Signal, Vpid};
+
+	/// Caught signals not yet delivered, one bit per number.
+	static PENDING: AtomicU64 = AtomicU64::new(0);
+	/// Signals the shell traps (caught into [`PENDING`]).
+	static TRAPPED: AtomicU64 = AtomicU64::new(0);
+	/// Signals the shell ignores.
+	static IGNORED: AtomicU64 = AtomicU64::new(0);
+	/// [`on_event`] is registered.
+	static REGISTERED: AtomicBool = AtomicBool::new(false);
+
+	fn bit(sig: Signal) -> u64 {
+		1u64 << (u32::from(sig.number(Platform::Windows)) - 1)
 	}
 
-	/// Accept every trap disposition (no OS signals to rewire off Unix).
-	#[expect(
-		clippy::unused_self,
-		clippy::needless_pass_by_ref_mut,
-		clippy::missing_const_for_fn,
-		clippy::unnecessary_wraps,
-		reason = "mirrors the Unix `Signals::set` signature"
-	)]
-	pub fn set(&mut self, _sig: Signal, _action: Option<&BStr>) -> io::Result<bool> {
-		Ok(true)
+	/// The signal a console control event stands for.
+	const fn signal_of(event: u32) -> Option<Signal> {
+		match event {
+			CTRL_C_EVENT => Some(Signal::Int),
+			CTRL_BREAK_EVENT => Some(Signal::Quit),
+			CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => Some(Signal::Hup),
+			_ => None,
+		}
 	}
 
-	/// Nothing to remember off Unix.
-	#[expect(
-		clippy::unused_self,
-		clippy::needless_pass_by_ref_mut,
-		clippy::missing_const_for_fn,
-		reason = "mirrors the Unix `Signals::forget_ignored` signature"
-	)]
-	pub fn forget_ignored(&mut self, _sig: Signal) {}
+	/// The console control handler. Windows runs it on a thread of its own,
+	/// not interrupting the shell's (no async-signal constraints): no shell
+	/// calls; the one lock it takes is the spawner's short group registry.
+	pub(super) unsafe extern "system" fn on_event(event: u32) -> BOOL {
+		let Some(sig) = signal_of(event) else {
+			return 0;
+		};
+		let b = bit(sig);
+		if event == CTRL_C_EVENT {
+			// The job `fg` brought to the foreground leads console groups of
+			// its own (one per stage), out of the console's Ctrl-C: they get
+			// it as `CTRL_BREAK`, as a Unix terminal sends `SIGINT` to its
+			// foreground group, and the shell, not in them, does not. A job
+			// whose stages all ended leaves the event to the shell.
+			let fg = crate::sys::console::ctrl_c_forward();
+			if fg != 0 && crate::sys::break_console_groups(fg) {
+				return 1;
+			}
+		}
+		if TRAPPED.load(Ordering::Relaxed) & b != 0 {
+			PENDING.fetch_or(b, Ordering::Relaxed);
+			if sig == Signal::Int {
+				crate::sys::console::ctrl_c_claimed();
+			}
+			return 1;
+		}
+		let ignored = IGNORED.load(Ordering::Relaxed) & b != 0;
+		if ignored && sig == Signal::Int {
+			crate::sys::console::ctrl_c_claimed();
+		}
+		BOOL::from(ignored)
+	}
 
-	/// Deliver caught OS signals (none off Unix).
-	pub const fn dispatch(_ctl: &ControlHandle, _root: Vpid) {}
+	/// The process host's console events; dropping it unregisters the
+	/// handler.
+	#[derive(Default)]
+	pub struct Signals;
+
+	impl Signals {
+		/// Signals ignored when the process started: Windows exposes no
+		/// inherited console-event disposition, so none.
+		pub const fn ignored() -> SigSet {
+			SigSet::EMPTY
+		}
+
+		/// Trap (`Some`), ignore (`Some("")`) or default (`None`) `sig`.
+		#[expect(
+			clippy::needless_pass_by_ref_mut,
+			clippy::unused_self,
+			reason = "the signature of the Unix `Signals::set`"
+		)]
+		pub fn set(&mut self, sig: Signal, action: Option<&BStr>) -> io::Result<bool> {
+			if !matches!(sig, Signal::Int | Signal::Quit | Signal::Hup) {
+				return Ok(true);
+			}
+			let b = bit(sig);
+			let (trap, ignore) = match action {
+				None => (false, false),
+				Some(a) if a.is_empty() => (false, true),
+				Some(_) => (true, false),
+			};
+			if (trap || ignore)
+				&& !REGISTERED.swap(true, Ordering::AcqRel)
+				// SAFETY: `on_event` is a valid handler for the process's
+				// lifetime.
+				&& unsafe { SetConsoleCtrlHandler(Some(on_event), 1) } == 0
+			{
+				REGISTERED.store(false, Ordering::Release);
+				return Err(io::Error::last_os_error());
+			}
+			if trap {
+				if sig == Signal::Int {
+					// A process started in a new group, or under a host that
+					// turned Ctrl-C off, gets no `CTRL_C_EVENT` at all, handler
+					// or not: a shell catching `SIGINT` takes it back on, as
+					// an interactive Unix shell catches a `SIGINT` ignored on
+					// entry.
+					// SAFETY: a null handler with FALSE only clears the flag.
+					unsafe { SetConsoleCtrlHandler(None, 0) };
+				}
+				TRAPPED.fetch_or(b, Ordering::AcqRel);
+			} else {
+				TRAPPED.fetch_and(!b, Ordering::AcqRel);
+			}
+			if ignore {
+				IGNORED.fetch_or(b, Ordering::AcqRel);
+			} else {
+				IGNORED.fetch_and(!b, Ordering::AcqRel);
+			}
+			if sig == Signal::Int {
+				crate::sys::console::claim_ctrl_c(trap || ignore);
+			}
+			Ok(true)
+		}
+
+		/// Nothing to remember: no disposition is inherited but Ctrl-C's.
+		#[expect(
+			clippy::unused_self,
+			clippy::needless_pass_by_ref_mut,
+			clippy::missing_const_for_fn,
+			reason = "mirrors the Unix `Signals::forget_ignored` signature"
+		)]
+		pub fn forget_ignored(&mut self, _sig: Signal) {}
+
+		/// Deliver the console events caught since the last call to the
+		/// root vproc.
+		pub fn dispatch(ctl: &ControlHandle, root: Vpid) {
+			let mut pending = PENDING.swap(0, Ordering::AcqRel);
+			while pending != 0 {
+				let number = pending.trailing_zeros() as u8 + 1;
+				pending &= pending - 1;
+				if let Some(signal) = Signal::from_number(number, Platform::Windows) {
+					ctl.signal(SigTarget::Vpid(root), signal);
+				}
+			}
+		}
+	}
+
+	impl Drop for Signals {
+		fn drop(&mut self) {
+			TRAPPED.store(0, Ordering::Release);
+			crate::sys::console::claim_ctrl_c(false);
+			IGNORED.store(0, Ordering::Release);
+			PENDING.store(0, Ordering::Release);
+			if REGISTERED.swap(false, Ordering::AcqRel) {
+				// SAFETY: removes the handler registered above.
+				unsafe { SetConsoleCtrlHandler(Some(on_event), 0) };
+			}
+		}
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		/// Ctrl-C killed the shell at its prompt: a trapped event must be
+		/// claimed (TRUE) and become a pending `SIGINT`; an untrapped one
+		/// goes on to Windows' default (FALSE).
+		#[test]
+		fn trapped_ctrl_c_becomes_a_pending_sigint() {
+			let mut signals = Signals;
+			// SAFETY: the handler only touches atomics.
+			assert_eq!(unsafe { on_event(CTRL_C_EVENT) }, 0);
+			signals.set(Signal::Int, Some(BStr::new("x"))).unwrap();
+			// SAFETY: as above.
+			assert_eq!(unsafe { on_event(CTRL_C_EVENT) }, 1);
+			assert_eq!(PENDING.swap(0, Ordering::AcqRel), bit(Signal::Int));
+			signals.set(Signal::Int, Some(BStr::new(""))).unwrap();
+			// SAFETY: as above.
+			assert_eq!(unsafe { on_event(CTRL_C_EVENT) }, 1);
+			assert_eq!(PENDING.load(Ordering::Acquire), 0);
+			drop(signals);
+		}
+	}
 }
+
+#[cfg(windows)]
+pub use windows::Signals;

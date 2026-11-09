@@ -12,7 +12,7 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{
-	analysis::{self, Analysis, command_name, literal},
+	analysis::{self, Analysis, command_name, literal, literal_tail},
 	embedded,
 	model::*,
 	raw,
@@ -269,10 +269,11 @@ pub fn render(source: &impl VizSource, runtime: &Runtime<'_>, options: &Options)
 					bytes:    unit.source.as_ref(),
 					map:      source_map(source, &unit),
 					untraced: None,
+					runner:   None,
 					origin:   None,
 					analysis: &analysis,
 				};
-				p.frame(unit.index, 0, "built at runtime · not in the command text", None);
+				p.frame(unit.index, 0, "built at runtime · not in the command text", None, None);
 				p.tree(&syntax.tree, &context, 1);
 			}
 		}
@@ -461,12 +462,25 @@ struct Context<'a> {
 	bytes:    &'a [u8],
 	map:      SourceMap,
 	untraced: Option<&'static str>,
+	/// The traced command running this untraced script: its rows run while
+	/// that command does.
+	runner:   Option<NodeKey>,
 	origin:   Option<ByteOrigins>,
 	analysis: &'a Analysis,
 }
 impl Context<'_> {
 	const fn key(&self, id: NodeId) -> NodeKey {
 		NodeKey::nested(self.unit, self.source, id)
+	}
+
+	/// The traced command whose run rows of `id` follow: the command `id`
+	/// belongs to, or in an untraced script, [`Self::runner`].
+	fn runner_of(&self, id: NodeId) -> Option<NodeKey> {
+		if self.untraced.is_some() {
+			return self.runner;
+		}
+		let key = self.key(id);
+		Some(self.analysis.owners.get(&key).copied().unwrap_or(key))
 	}
 
 	fn text(&self, span: Span) -> String {
@@ -524,6 +538,7 @@ impl<S: VizSource> Printer<'_, S> {
 					bytes:    unit.source.as_ref(),
 					map:      source_map(source, &unit),
 					untraced: None,
+					runner:   None,
 					origin:   None,
 					analysis: self.analysis,
 				};
@@ -582,6 +597,7 @@ impl<S: VizSource> Printer<'_, S> {
 				bytes,
 				map: ahead.map.clone(),
 				untraced: None,
+				runner: None,
 				origin: None,
 				analysis: &ahead.analysis,
 			};
@@ -681,6 +697,7 @@ impl<S: VizSource> Printer<'_, S> {
 			bytes:    first.source.as_ref(),
 			map:      source_map(source, &first),
 			untraced: None,
+			runner:   None,
 			origin:   None,
 			analysis: self.analysis,
 		};
@@ -690,6 +707,7 @@ impl<S: VizSource> Printer<'_, S> {
 			bytes:    middle.source.as_ref(),
 			map:      source_map(source, &middle),
 			untraced: None,
+			runner:   None,
 			origin:   None,
 			analysis: self.analysis,
 		};
@@ -699,6 +717,7 @@ impl<S: VizSource> Printer<'_, S> {
 			bytes:    last.source.as_ref(),
 			map:      source_map(source, &last),
 			untraced: None,
+			runner:   None,
 			origin:   None,
 			analysis: self.analysis,
 		};
@@ -815,6 +834,7 @@ impl<S: VizSource> Printer<'_, S> {
 		self.serial += 1;
 		if let Some(untraced) = c.untraced {
 			row.detail.as_mut().unwrap().push_str(untraced);
+			row.active = self.running(c, cmd.id());
 		} else {
 			row.active = Some(row.segments.iter().any(|s| s.active == Some(true)));
 			if role == "stmt" {
@@ -1320,7 +1340,7 @@ impl<S: VizSource> Printer<'_, S> {
 				if i > start {
 					out.push(self.segment(c, id, span, " ", "", true));
 				}
-				let language = embedded::argument_language(&name, &values, i);
+				let language = embedded::argument_language(&values, i);
 				let nested = self.nested(cmd, s, w, i, c);
 				if self.options.layers.unwrap && nested {
 					let mut seg = self.segment(c, w.id(), w.span(), "⟦script ↓⟧", "chip emb", true);
@@ -1458,21 +1478,17 @@ impl<S: VizSource> Printer<'_, S> {
 		c: &Context<'_>,
 	) -> Vec<Segment> {
 		let mut out = Vec::new();
-		let args = arguments_with_redirs(s, cmd);
-		let name = s.and_then(command_name).unwrap_or_default();
 		for redir in cmd.redirs() {
 			let (op, fd) = (redir.op(), redir.fd());
+			let mut style = if self.options.layers.idioms {
+				"redir badge"
+			} else {
+				"redir"
+			};
 			let text = match redir.target() {
 				RedirTarget::HereDoc(doc) => {
 					if self.options.layers.unwrap {
-						format!(
-							" ⟵ {} ↓",
-							embedded::heredoc_language(
-								&name,
-								&args,
-								&String::from_utf8_lossy(doc.delim())
-							)
-						)
+						format!(" ⟵ {} ↓", heredoc_language(s, cmd, doc))
 					} else {
 						format!(
 							" {}{}{}",
@@ -1485,16 +1501,17 @@ impl<S: VizSource> Printer<'_, S> {
 				RedirTarget::Word(w) => {
 					let raw_target = literal(w);
 					if self.options.layers.idioms && raw_target.as_deref() == Some("/dev/null") {
-						format!(
-							" 🔇 {}",
-							if matches!(op, RedirOp::OutErr | RedirOp::AppendErr) {
-								"silent"
-							} else if matches!(fd, Some(RedirFd::Num(2))) {
-								"err"
-							} else {
-								"out"
-							}
-						)
+						// `badge-discard-*` names the discarded stream so renderers
+						// with an icon font can replace the whole label.
+						let (label, discard) = if matches!(op, RedirOp::OutErr | RedirOp::AppendErr) {
+							("silent", "redir badge badge-discard-all")
+						} else if matches!(fd, Some(RedirFd::Num(2))) {
+							("err", "redir badge badge-discard-err")
+						} else {
+							("out", "redir badge badge-discard-out")
+						};
+						style = discard;
+						format!(" 🔇 {label}")
 					} else if self.options.layers.idioms
 						&& matches!(fd, Some(RedirFd::Num(2)))
 						&& op == RedirOp::DupOut
@@ -1515,18 +1532,7 @@ impl<S: VizSource> Printer<'_, S> {
 					}
 				},
 			};
-			out.push(self.segment(
-				c,
-				cmd.id(),
-				redir.span(),
-				text,
-				if self.options.layers.idioms {
-					"redir badge"
-				} else {
-					"redir"
-				},
-				true,
-			));
+			out.push(self.segment(c, cmd.id(), redir.span(), text, style, true));
 		}
 		out
 	}
@@ -2067,11 +2073,18 @@ impl<S: VizSource> Printer<'_, S> {
 		}
 	}
 
-	fn close_frame(&mut self, unit: u32, depth: u32, range: Option<[u32; 2]>) {
+	/// Whether rows of `id`'s command run now: besides its own words, the
+	/// script, heredoc or untraced script it runs ([`Context::runner_of`]).
+	fn running(&self, c: &Context<'_>, id: NodeId) -> Option<bool> {
+		c.runner_of(id).map(|key| self.runtime.active(key))
+	}
+
+	fn close_frame(&mut self, unit: u32, depth: u32, range: Option<[u32; 2]>, active: Option<bool>) {
 		self.rows.push(Row {
 			id: format!("frame-end-{unit}-{}", self.serial),
 			depth,
 			range,
+			active,
 			role: Some("tail"),
 			segments: vec![Segment {
 				text: "└".into(),
@@ -2084,11 +2097,19 @@ impl<S: VizSource> Printer<'_, S> {
 		self.serial += 1;
 	}
 
-	fn frame(&mut self, unit: u32, depth: u32, title: &str, range: Option<[u32; 2]>) {
+	fn frame(
+		&mut self,
+		unit: u32,
+		depth: u32,
+		title: &str,
+		range: Option<[u32; 2]>,
+		active: Option<bool>,
+	) {
 		self.rows.push(Row {
 			id: format!("frame-{unit}-{}", self.serial),
 			depth,
 			range,
+			active,
 			role: Some("document"),
 			segments: vec![Segment {
 				text: format!("┌ {title}"),
@@ -2122,7 +2143,7 @@ impl<S: VizSource> Printer<'_, S> {
 		{
 			return true;
 		}
-		let Some((body_index, remote)) = shell_body(s) else {
+		let Some((body_index, remote)) = embedded::shell_script(&literal_words(s)) else {
 			return false;
 		};
 		if index != body_index {
@@ -2205,9 +2226,8 @@ impl<S: VizSource> Printer<'_, S> {
 		c: &Context<'_>,
 		depth: u32,
 	) {
-		let name = s.and_then(command_name).unwrap_or_default();
-		let args = arguments_with_redirs(s, cmd);
 		if let Some(s) = s {
+			let words = literal_words(s);
 			for (i, w) in s.words().iter().enumerate() {
 				if self.options.layers.unwrap && self.nested(cmd, s, w, i, c) {
 					self.nested_document(cmd, w, c, depth);
@@ -2215,7 +2235,7 @@ impl<S: VizSource> Printer<'_, S> {
 				}
 				if self.options.layers.unwrap
 					&& let (Some(language), Some(value)) =
-						(embedded::argument_language(&name, &args, i), literal(w))
+						(embedded::argument_language(&words, i), literal(w))
 					&& (value.contains('\n') || value.len() > 64)
 				{
 					self.document(
@@ -2244,11 +2264,9 @@ impl<S: VizSource> Printer<'_, S> {
 				let body = String::from_utf8_lossy(doc.text());
 				let doc_span = doc_spans.get(index).copied().flatten();
 				if self.options.layers.unwrap {
-					let language =
-						embedded::heredoc_language(&name, &args, &String::from_utf8_lossy(doc.delim()));
 					self.document(
 						body.strip_suffix('\n').unwrap_or(&body),
-						language,
+						heredoc_language(s, cmd, doc),
 						c,
 						cmd.id(),
 						doc_span,
@@ -2282,12 +2300,14 @@ impl<S: VizSource> Printer<'_, S> {
 		title: Option<&str>,
 	) {
 		let range = span.and_then(|span| c.map.range(span));
+		let active = self.running(c, id);
 		if let Some(title) = title {
 			self.rows.push(Row {
 				id: format!("doc-head-{}-{}", c.key(id), self.serial),
 				depth,
 				node: Some(c.key(id)),
 				range,
+				active,
 				role: Some("document"),
 				segments: vec![Segment {
 					text: format!("{language} · {title}"),
@@ -2306,6 +2326,7 @@ impl<S: VizSource> Printer<'_, S> {
 				depth,
 				node: Some(c.key(id)),
 				range,
+				active,
 				role: Some("document"),
 				segments: embedded::highlight(line, language, c.key(id), range, self.options.layers),
 				..Row::default()
@@ -2382,7 +2403,8 @@ impl<S: VizSource> Printer<'_, S> {
 			} else {
 				"external/untraced: no per-command inner outcomes"
 			};
-			self.frame(c.unit, depth + 1, title, range);
+			let active = self.running(c, command.id());
+			self.frame(c.unit, depth + 1, title, range, active);
 			let map = nested.map.clone();
 			for ((tree, root), id) in nested.commands.iter().zip(&nested.ids) {
 				let context = Context {
@@ -2395,12 +2417,13 @@ impl<S: VizSource> Printer<'_, S> {
 					} else {
 						"\nexternal/untraced: no per-command inner outcomes"
 					}),
+					runner:   c.runner_of(command.id()),
 					origin:   Some(nested.origin.clone()),
 					analysis: &nested.analysis,
 				};
 				self.list(List::at(tree, *root), &context, depth + 1);
 			}
-			self.close_frame(c.unit, depth + 1, range);
+			self.close_frame(c.unit, depth + 1, range, active);
 			return;
 		}
 		// Actual local children use engine-retained syntax only, never a
@@ -2417,7 +2440,7 @@ impl<S: VizSource> Printer<'_, S> {
 		if children.is_empty() {
 			return;
 		}
-		self.frame(c.unit, depth + 1, "local shell script", range);
+		self.frame(c.unit, depth + 1, "local shell script", range, None);
 		let body = literal(w);
 		let body_map = body
 			.as_ref()
@@ -2439,6 +2462,7 @@ impl<S: VizSource> Printer<'_, S> {
 					bytes:    unit.source.as_ref(),
 					map:      source_map(self.source, &unit),
 					untraced: None,
+					runner:   None,
 					origin:   None,
 					analysis: self.analysis,
 				};
@@ -2451,7 +2475,7 @@ impl<S: VizSource> Printer<'_, S> {
 		{
 			self.pending_mapped(&body.as_bytes()[cursor..], cursor as u32, map, depth + 1);
 		}
-		self.close_frame(c.unit, depth + 1, range);
+		self.close_frame(c.unit, depth + 1, range, None);
 	}
 }
 fn style_for(style: &str, color: bool) -> Option<String> {
@@ -2594,35 +2618,47 @@ fn original_heredoc(
 	}
 	(String::from_utf8_lossy(doc.text()).into_owned(), None)
 }
-fn arguments_with_redirs(simple: Option<Simple<'_>>, command: Command<'_>) -> Vec<String> {
-	let mut args = simple
-		.into_iter()
-		.flat_map(|s| s.words().iter())
+/// Each word's literal value; empty where it expands at run time.
+fn literal_words(simple: Simple<'_>) -> Vec<String> {
+	simple
+		.words()
+		.iter()
 		.map(|word| literal(word).unwrap_or_default())
+		.collect()
+}
+/// [`embedded::heredoc_language`] of `doc`, a heredoc of `command`.
+fn heredoc_language(
+	simple: Option<Simple<'_>>,
+	command: Command<'_>,
+	doc: HereDoc<'_>,
+) -> &'static str {
+	let targets = command
+		.redirs()
+		.iter()
+		.filter(|redir| {
+			matches!(
+				redir.op(),
+				RedirOp::Out
+					| RedirOp::Append
+					| RedirOp::Clobber
+					| RedirOp::OutErr
+					| RedirOp::AppendErr
+					| RedirOp::AppendClobber
+					| RedirOp::OutErrClobber
+					| RedirOp::AppendErrClobber
+			)
+		})
+		.filter_map(|redir| match redir.target() {
+			RedirTarget::Word(word) => Some(literal_tail(word)),
+			RedirTarget::HereDoc(_) => None,
+		})
 		.collect::<Vec<_>>();
-	args.extend(
-		command
-			.redirs()
-			.iter()
-			.filter(|redir| {
-				matches!(
-					redir.op(),
-					RedirOp::Out
-						| RedirOp::Append
-						| RedirOp::Clobber
-						| RedirOp::OutErr
-						| RedirOp::AppendErr
-						| RedirOp::AppendClobber
-						| RedirOp::OutErrClobber
-						| RedirOp::AppendErrClobber
-				)
-			})
-			.filter_map(|redir| match redir.target() {
-				RedirTarget::Word(word) => literal(word),
-				RedirTarget::HereDoc(_) => None,
-			}),
-	);
-	args
+	embedded::heredoc_language(
+		&simple.map_or_default(literal_words),
+		&targets,
+		&String::from_utf8_lossy(doc.delim()),
+		&String::from_utf8_lossy(doc.text()),
+	)
 }
 fn fd_text(fd: Option<RedirFd<'_>>) -> String {
 	match fd {
@@ -2690,69 +2726,6 @@ fn test_words(words: Seq<'_, Word<'_>>, p: &WordPrinter<'_>) -> String {
 		return format!("{} {op} {}", values[0], values[2]);
 	}
 	values.join(" ")
-}
-fn shell_body(s: Simple<'_>) -> Option<(usize, bool)> {
-	let args = s
-		.words()
-		.iter()
-		.map(|word| literal(word).unwrap_or_default())
-		.collect::<Vec<_>>();
-	let name = args.first()?.rsplit('/').next()?;
-	if name == "ssh" {
-		let mut i = 1;
-		while i < args.len() {
-			if args[i] == "--" {
-				i += 1;
-				break;
-			}
-			if !args[i].starts_with('-') {
-				break;
-			}
-			let flag = args[i].as_bytes().get(1).copied();
-			if matches!(
-				flag,
-				Some(
-					b'p'
-						| b'i'
-						| b'l'
-						| b'o'
-						| b'J'
-						| b'F'
-						| b'S'
-						| b'L'
-						| b'R'
-						| b'D'
-						| b'W'
-						| b'b'
-						| b'c'
-						| b'E'
-						| b'e'
-						| b'm'
-						| b'O'
-						| b'Q'
-						| b'w'
-				)
-			) && args[i].len() == 2
-			{
-				i += 1;
-			}
-			i += 1;
-		}
-		return (i + 2 == args.len()).then_some((i + 1, true));
-	}
-	for (i, arg) in args.iter().enumerate() {
-		if matches!(arg.rsplit('/').next(), Some("bash" | "sh" | "zsh" | "dash" | "ksh")) {
-			for (j, flag) in args.iter().enumerate().skip(i + 1) {
-				if flag.starts_with('-') && flag[1..].contains('c') {
-					return (j + 1 < args.len()).then_some((j + 1, false));
-				}
-				if !flag.starts_with('-') {
-					break;
-				}
-			}
-		}
-	}
-	None
 }
 pub(super) fn metadata(
 	o: &super::runtime::Observation<'_>,
