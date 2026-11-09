@@ -228,28 +228,19 @@ function createSettingsSelectField(
  * Renders the real status line as it looks right now, so toggling a segment
  * shows the result instead of a label describing it. The source is the live
  * status-line component, which the settings runtime updates on every change.
+ * Only the ANSI frame draws the editor: a TSP terminal edits the list as the
+ * row's chips and keeps the page-level preview, which carries the bar natively.
  */
 class StatusLineSegmentPreview implements Component {
 	readonly #getPreview: () => string;
-	readonly #describePreview: (() => NativeNode) | undefined;
-	#native: { source: string; node: NativeNode } | undefined;
 
-	constructor(getPreview: () => string, describePreview?: () => NativeNode) {
+	constructor(getPreview: () => string) {
 		this.#getPreview = getPreview;
-		this.#describePreview = describePreview;
 	}
 
 	/** A fresh read every frame: the selection changes while this editor is open. */
 	render(): readonly string[] {
 		return this.#getPreview().split("\n");
-	}
-
-	describe(): NativeNode {
-		const source = this.#getPreview();
-		if (this.#native?.source === source) return this.#native.node;
-		const described = this.#describePreview?.() ?? text(styledSpans(source), { wrap: "none", truncate: "end" });
-		this.#native = { source, node: described };
-		return described;
 	}
 }
 
@@ -907,9 +898,7 @@ export class SettingsSelectorComponent implements Component {
 			}
 		}
 
-		const openComponent = list?.openSubmenu?.component;
-		const editorHasPreview = openComponent instanceof MultiSelectSubmenu && openComponent.hasPreview;
-		if (tab === "appearance" && !searching && !editorHasPreview) {
+		if (tab === "appearance" && !searching) {
 			const source = this.#getStatusPreviewString();
 			if (memo.prefsPreview?.source !== source) {
 				memo.prefsPreview = {
@@ -1783,7 +1772,7 @@ export class SettingsSelectorComponent implements Component {
 		const getPreview = this.#callbacks.getStatusLinePreview;
 		const preview =
 			(def.path === "statusLine.leftSegments" || def.path === "statusLine.rightSegments") && getPreview
-				? new StatusLineSegmentPreview(getPreview, this.#callbacks.describeStatusLinePreview)
+				? new StatusLineSegmentPreview(getPreview)
 				: undefined;
 		return new MultiSelectSubmenu(
 			def.label,

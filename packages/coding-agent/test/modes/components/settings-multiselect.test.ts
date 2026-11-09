@@ -122,6 +122,24 @@ function nativeErrorText(node: TspNode): string {
 	return text.join("\n");
 }
 
+/** Every span in the native tree, whatever its style. */
+function nativeText(node: TspNode): string {
+	const text = node.k === "text" ? (node.p?.spans ?? []).map(span => span.t) : [];
+	for (const child of node.c ?? []) text.push(nativeText(child));
+	return text.join("\n");
+}
+
+/** Describe the selector for a TSP terminal that draws the settings page natively. */
+function nativeSnapshot(component: SettingsSelectorComponent): TspNode {
+	const document = new TspDocument("settings");
+	const ops = new Reconciler("settings").reconcile(
+		{ main: [], dock: [], layer: [component] },
+		{ cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => true },
+	);
+	document.applyFrame({ sf: "settings", s: 1, ops });
+	return document.snapshot();
+}
+
 describe("custom status-line segment editors", () => {
 	function openAppearance(callbacks: Partial<SettingsCallbacks> = {}): SettingsSelectorComponent {
 		const component = createSelector(callbacks);
@@ -169,6 +187,14 @@ describe("custom status-line segment editors", () => {
 		const after = Bun.stripANSI(component.render(120).join("\n"));
 		expect(after).toContain("bar: vim,mode,path,git,pr");
 		expect(after).not.toContain("bar: vim,model,mode,path,git,pr");
+	});
+
+	it("keeps the page-level status preview on a native page while the segment editor is open", () => {
+		cfgStatusLinePreset.set(settings, "custom");
+		const component = openSegmentList("statusLine.leftSegments", { getStatusLinePreview: () => "LIVEBAR" });
+		// A TSP terminal edits the list as the row's chips, so the bar it shows is
+		// the page-level preview — which must survive the editor being open.
+		expect(nativeText(nativeSnapshot(component))).toContain("LIVEBAR");
 	});
 
 	it("previews the saved custom lists, not the preset's baseline defaults", () => {

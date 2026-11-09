@@ -290,7 +290,7 @@ export const cfgStatusLineLeftSegments = register({
 		group: "Status Line",
 		label: "Status Line Left Segments",
 		description:
-			"Segments drawn on the left of the Custom status line, in order. Space toggles, ←/→ moves, 1-9 places; hidden segments reappear on their own when they have something to show",
+			"Segments drawn on the left of the Custom status line, in order; hidden segments reappear on their own when they have something to show",
 		options: STATUS_LINE_SEGMENT_CHOICES,
 		ordered: true,
 		condition: "statusLineCustomPreset",
@@ -307,7 +307,7 @@ export const cfgStatusLineRightSegments = register({
 		group: "Status Line",
 		label: "Status Line Right Segments",
 		description:
-			"Segments drawn on the right of the Custom status line, in order. Space toggles, ←/→ moves, 1-9 places; hidden segments reappear on their own when they have something to show",
+			"Segments drawn on the right of the Custom status line, in order; hidden segments reappear on their own when they have something to show",
 		options: STATUS_LINE_SEGMENT_CHOICES,
 		ordered: true,
 		condition: "statusLineCustomPreset",
