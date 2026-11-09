@@ -85,6 +85,41 @@ describe("stats sync serial mode", () => {
 		expect(overall.totalCost).toBeGreaterThan(0);
 	});
 
+	it("keeps readable history when another transcript is blocked during sync", async () => {
+		await writeSessionFile();
+		const folder = path.join(getSessionsDir(), "--tmp--sync-serial");
+		const blocked = path.join(folder, "blocked.jsonl");
+		await fs.copyFile(path.join(folder, "session.jsonl"), blocked);
+		await Bun.write(blocked, (await Bun.file(blocked).text()).replace("assistant-1", "assistant-2"));
+		const open = fs.open;
+		const denied = vi
+			.spyOn(fs, "open")
+			.mockImplementation((file, flags, mode) =>
+				file === blocked
+					? Promise.reject(Object.assign(new Error("access denied"), { code: "EACCES" }))
+					: open(file, flags, mode),
+			);
+
+		const synced = await syncAllSessions({ workers: 1 });
+		expect(synced.files).toBe(1);
+		expect(getOverallStats().totalRequests).toBe(1);
+		denied.mockRestore();
+		await syncAllSessions({ workers: 1 });
+		expect(getOverallStats().totalRequests).toBe(2);
+		await fs.appendFile(blocked, "\n");
+		const deniedAgain = vi
+			.spyOn(fs, "open")
+			.mockImplementation((file, flags, mode) =>
+				file === blocked
+					? Promise.reject(Object.assign(new Error("operation not permitted"), { code: "EPERM" }))
+					: open(file, flags, mode),
+			);
+		const retried = await syncAllSessions({ workers: 1 });
+		expect(retried.files).toBe(0);
+		expect(getOverallStats().totalRequests).toBe(2);
+		deniedAgain.mockRestore();
+	});
+
 	it("uses the serial parser by default on macOS", async () => {
 		await writeSessionFile();
 		vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
