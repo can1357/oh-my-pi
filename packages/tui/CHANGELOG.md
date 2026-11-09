@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device.
 - Fixed the ask dialog's `n` right after a keyboard pick annotating the previous question's answer instead of the highlighted row shown; only a pointer click still redirects Note to the answer just picked, and the Note button then names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
 ### Breaking Changes
 
