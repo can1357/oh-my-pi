@@ -316,6 +316,29 @@ function buildTabs(form: HtmlForm, questions: ReadonlyMap<FormField, string>): F
 	return tabs;
 }
 
+/**
+ * A one-line field's `input` in the column Tern draws as a rounded field, red while `refused`.
+ * `reveal` scrolls it into view as it gains the keyboard, since the list only reveals its rows.
+ */
+function fieldWell(
+	input: NativeChild,
+	refused: boolean,
+	props: { actions?: { click: string } },
+	key: string,
+	reveal: NativeNode["reveal"],
+): NativeNode {
+	const well = node(
+		"col",
+		{ role: "omp.mcpAdd.field", ...(refused ? { tone: "error" as const } : {}), ...props },
+		[input],
+		key,
+	);
+	return reveal ? { ...well, reveal } : well;
+}
+
+/** Brings a text control into view once each time it turns live (its last description had no reveal). */
+const LIVE_REVEAL = { at: "nearest", n: 1 } as const;
+
 /** Interactive pager over an {@link HtmlForm}; see the module docs for layout and keys. */
 export class HtmlFormDialog implements Component, Focusable {
 	readonly #form: HtmlForm;
@@ -1785,26 +1808,48 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/**
-	 * The focused text field is its live `Input`/`Editor` — the only editor node
-	 * the form describes, so the terminal's keyboard focus (the first editor of
-	 * the focused component) follows the form's. Every other text field is a
-	 * well showing its value or placeholder; clicking it focuses the field.
+	 * The focused text field is its live `Input`/`Editor`. Every other text field is the same
+	 * control read-only, showing its value or placeholder, so all fields look alike; clicking one
+	 * focuses it. The terminal's keyboard focus (the first editable editor of the focused
+	 * component) still lands only on the live one. Tern draws a bare `input` square and strips the
+	 * box off every `editor` inside the ask card (the composer's own rule), so the controls borrow
+	 * the roles Tern rounds: a one-line field is an `input` in `omp.mcpAdd.field` (the MCP wizard's
+	 * field, accent ring while focused, red while refused), a textarea sits in an
+	 * `omp.plan.feedback` card (the plan review's note field), outlined while it has the keyboard.
 	 */
 	#describeTextControl(field: TextField, index: number): NativeChild {
 		const stop = this.#stops[this.#focus];
-		if (stop?.kind === "text" && stop.field === field) {
-			return field.multiline ? this.#editors.get(field)! : this.#inputs.get(field)!;
+		const live = stop?.kind === "text" && stop.field === field;
+		const click = live ? {} : { actions: { click: `${EDIT_ACT}${index}` } };
+		if (!field.multiline) {
+			const value = this.#textValue(field);
+			const shown = field.type === "password" ? "•".repeat(value.length) : sanitize(value).replace(/\n/g, " ");
+			const placeholder = sanitize(field.placeholder).replace(/\s+/g, " ");
+			const box = live
+				? this.#inputs.get(field)!
+				: node("input", { readonly: true, text: shown, placeholder: placeholder || undefined }, undefined, "box");
+			return fieldWell(box, this.#errors.has(field), click, `well${index}`, live ? LIVE_REVEAL : undefined);
 		}
-		const value = this.#textValue(field);
-		const shown = field.type === "password" ? "•".repeat(value.length) : sanitize(value);
-		const content = shown ? [span(shown)] : [span(sanitize(field.placeholder) || " ", "dim")];
-		return text(content, {
-			wrap: field.multiline ? "word" : "none",
-			truncate: field.multiline ? undefined : "end",
-			lines: field.multiline ? this.#textareaRows(field) : 1,
-			role: field.multiline ? "omp.ask.well.multi" : "omp.ask.well",
-			actions: { click: `${EDIT_ACT}${index}` },
-		});
+		const area = live
+			? this.#editors.get(field)!
+			: node(
+					"editor",
+					{
+						readonly: true,
+						text: sanitize(this.#textValue(field)),
+						placeholder: sanitize(field.placeholder) || undefined,
+						maxLines: this.#textareaRows(field),
+					},
+					undefined,
+					"area",
+				);
+		const card = node(
+			"card",
+			{ tone: "neutral", inset: true, selected: live, role: "omp.plan.feedback", ...click },
+			[area],
+			`well${index}`,
+		);
+		return live ? { ...card, reveal: LIVE_REVEAL } : card;
 	}
 
 	#describeField(field: FormField): NativeNode {
@@ -1853,7 +1898,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			}
 			children.push(list(items, { selected: focusedOption, role: "omp.ask.options" }, `f${index}`));
 			// Typing the Other answer: its input is the form's one live editor, so the terminal focuses it.
-			if (focusedOption === OTHER_ITEM) children.push(this.#others.get(field)!);
+			if (focusedOption === OTHER_ITEM) {
+				children.push(fieldWell(this.#others.get(field)!, error !== undefined, {}, "other-box", "nearest"));
+			}
 		}
 		if (error) children.push(text([span(error, "error")], { role: "omp.ask.error" }));
 		return col(children, { gap: "xs", role: "omp.ask.field" });

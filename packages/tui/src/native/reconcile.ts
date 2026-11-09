@@ -372,7 +372,7 @@ export class Reconciler {
 		return unescapeKey(id.slice(Math.max(dot, slash) + 1));
 	}
 
-	/** Wire id of the first `editor`/`input` `component` describes (for `focus`), or null. */
+	/** Wire id of the first editable `editor`/`input` `component` describes (for `focus`), or null. */
 	focusTarget(component: Component): string | null {
 		const state = this.#states.get(component);
 		return state ? this.#findEditor(state, 0) : null;
@@ -419,9 +419,10 @@ export class Reconciler {
 	}
 
 	/**
-	 * The first editor under `node`. An `overlay`/`picker` child outside a hoisted
-	 * sheet is hoisted into `layer` under its `^` keypath (see {@link #entries}), so
-	 * a field in a sheet a dock component describes is found under that id.
+	 * The first editable editor under `node`; a read-only one shows text and never takes the
+	 * keyboard. An `overlay`/`picker` child outside a hoisted sheet is hoisted into `layer`
+	 * under its `^` keypath (see {@link #entries}), so a field in a sheet a dock component
+	 * describes is found under that id.
 	 */
 	#findEditorIn(
 		node: NativeNode,
@@ -431,7 +432,7 @@ export class Reconciler {
 		depth: number,
 		hoist = true,
 	): string | null {
-		if (node.k === "editor" || node.k === "input") return id;
+		if ((node.k === "editor" || node.k === "input") && !node.p?.readonly) return id;
 		for (const entry of this.#entries(node.c, keypath, owner, false, null)) {
 			let found: string | null;
 			if (entry.comp !== undefined) {

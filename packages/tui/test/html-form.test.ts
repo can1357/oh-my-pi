@@ -529,7 +529,7 @@ describe("html form", () => {
 			expect(onCancel).toHaveBeenCalled();
 		});
 
-		it("natively: docks in the composer's place, and only the focused text field is a live editor", async () => {
+		it("natively: docks in the composer's place, and only the focused text field is editable and takes the keyboard", async () => {
 			const form = new HtmlFormDialog(
 				parseHtmlForm(
 					`${DB_FORM.replace("</form>", "")}<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><pre>x = 1</pre><ul><li>one</li></ul></form>`,
@@ -553,13 +553,26 @@ describe("html form", () => {
 				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(2);
 				// Focus is on a radio: no editor node, so the terminal keeps sending keys to the form.
 				expect(harness.findAll(node => node.k === "input" || node.k === "editor")).toEqual([]);
-				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toEqual([]);
+				expect(harness.findAll(node => node.p?.role === "omp.mcpAdd.field")).toEqual([]);
 				// Clicking the workers well (field 3) focuses it: its tab opens and it becomes the one live input.
 				form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
 				await harness.render();
-				const inputs = harness.findAll(node => node.k === "input");
-				expect(inputs.map(node => (node.p && "text" in node.p ? node.p.text : undefined))).toEqual(["4"]);
-				expect(harness.findAll(node => node.k === "editor")).toEqual([]);
+				const editable = (node: { k: string; p?: unknown }) =>
+					(node.k === "input" || node.k === "editor") &&
+					!(node.p && typeof node.p === "object" && "readonly" in node.p && node.p.readonly);
+				expect(
+					harness.findAll(editable).map(node => (node.p && "text" in node.p ? node.p.text : undefined)),
+				).toEqual(["4"]);
+				// The notes textarea beside it is the same control, read-only; both sit in rounded boxes.
+				const readonly = harness.findAll(node => node.k === "editor" && !editable(node));
+				expect(readonly.map(node => node.p)).toEqual([
+					expect.objectContaining({ readonly: true, placeholder: "anything else" }),
+				]);
+				expect(harness.findAll(node => node.k === "col" && node.p?.role === "omp.mcpAdd.field")).toHaveLength(1);
+				expect(harness.findAll(node => node.k === "card" && node.p?.role === "omp.plan.feedback")).toHaveLength(1);
+				// The terminal's keyboard goes to the live field, never to a read-only well.
+				const live = harness.findAll(editable);
+				expect(harness.terminal.docs.get(harness.terminal.surface!)!.focus).toBe(live[0]?.id);
 			} finally {
 				harness.stop();
 			}
