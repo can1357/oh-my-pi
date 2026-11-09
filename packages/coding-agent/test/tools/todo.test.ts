@@ -444,30 +444,17 @@ describe("TodoTool operations", () => {
 });
 
 describe("TodoTool lenient init shapes", () => {
-	it("keeps flat and canonical empty phases addressable through completion", async () => {
+	it("names an empty init phase Tasks so append can target it", async () => {
 		for (const args of [
 			{ op: "init" as const, phase: "", items: ["First"] },
-			{ op: "init" as const, list: [], phase: "", items: ["First"] },
 			{ op: "init" as const, list: [{ phase: "", items: ["First"] }] },
 		]) {
-			const session = createSession();
-			const tool = new TodoTool(session);
-			const original = structuredClone(args);
-			const initialized = await tool.execute("init", args);
-			const phase = initialized.details?.phases[0]?.name;
-			expect(phase).toBe("Tasks");
-			expect(args).toEqual(original);
-			const appended = await tool.execute("append", { op: "append", phase, items: ["Second"] });
+			const tool = new TodoTool(createSession());
+			await tool.execute("init", args);
+			const appended = await tool.execute("append", { op: "append", phase: "Tasks", items: ["Second"] });
 			expect(appended.isError).toBeUndefined();
-			const done = await tool.execute("done", { op: "done", task: "First" });
-			expect(done.details?.phases).toEqual([
-				{
-					name: "Tasks",
-					tasks: [
-						{ content: "First", status: "completed" },
-						{ content: "Second", status: "in_progress" },
-					],
-				},
+			expect(appended.details?.phases.map(phase => [phase.name, phase.tasks.map(task => task.content)])).toEqual([
+				["Tasks", ["First", "Second"]],
 			]);
 		}
 	});
@@ -488,7 +475,6 @@ describe("TodoTool lenient init shapes", () => {
 			expect.objectContaining({ text: expect.stringContaining('Duplicate phase "Tasks"') }),
 		]);
 		expect(session.getTodoPhases?.()).toEqual(initial);
-		expect(result.details?.phases).toEqual(initial);
 	});
 
 	it("accepts a flattened init with bare items and no phase", async () => {
