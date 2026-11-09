@@ -15,6 +15,7 @@
 - Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
 
 ### Changed
+- Setup splash, transition, and outro phases are skipped when `tui.motion` is `none` (`--motion none`), covering the startup splash and the `/setup` wizard ([#18066](https://github.com/can1357/oh-my-pi/issues/18066), [#18097](https://github.com/can1357/oh-my-pi/pull/18097) by [@Miruameli](https://github.com/Miruameli))
 
 - The ask dialog's Note right after a pointer click now annotates the highlighted answer of the question shown instead of the answer just clicked, and the Note button no longer names a redirect target ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 

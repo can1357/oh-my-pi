@@ -9,6 +9,7 @@
 - The `ask` tool takes one HTML form (`{ html }`) instead of `questions[]`: the model writes a `<form>` of radios, checkboxes, selects, text inputs and textareas with its recommendation preselected, and receives the submitted form data as JSON. `AskToolDetails` is now `{ answers: { name, question, answer }[]; timedOut? }`; `QuestionResult`, the "Other", "Chat about this", answer-note and answer-image paths of the tool are removed, and `/tree` re-answer reopens the original form (`NavigateTreeResult.reopenAsk` carries `html`).
 
 ### Added
+- `--motion none` / `tui.motion: none` now also skips the setup wizard's splash, transition, and outro phases (covers both startup splash and `/setup` wizard) ([#18066](https://github.com/can1357/oh-my-pi/issues/18066), [#18097](https://github.com/can1357/oh-my-pi/pull/18097) by [@Miruameli](https://github.com/Miruameli))
 
 - In Tern, right-clicking an `ask` answer offers Note, which annotates that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
 - `task.eager` (`preferred`/`always`) now shapes only the main agent's system prompt; subagents fall back to their model's own delegation policy instead of being pushed to spawn further subagents

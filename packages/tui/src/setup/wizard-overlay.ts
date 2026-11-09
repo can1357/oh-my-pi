@@ -127,6 +127,12 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 			this.#complete();
 			return this.#done.promise;
 		}
+		if (this.ctx.motion === "none") {
+			this.#phase = "scene";
+			this.#phaseStartedAt = performance.now();
+			this.#beginScene();
+			return this.#done.promise;
+		}
 		this.#phase = "splash";
 		this.#phaseStartedAt = performance.now();
 		this.#startTimer();
@@ -531,7 +537,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 
 	/** Enter the first scene through a dissolve from the splash (a row effect, so native cuts straight in). */
 	#beginScene(): void {
-		this.#mountSceneController(isNativeRendering() ? "scene" : "transition");
+		this.#mountSceneController(isNativeRendering() || this.ctx.motion === "none" ? "scene" : "transition");
 	}
 
 	#mountCurrentScene(): void {
@@ -555,6 +561,10 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	#beginOutro(): void {
 		if (this.#phase === "done") return;
 		this.#unmountActiveScene();
+		if (this.ctx.motion === "none") {
+			this.#complete();
+			return;
+		}
 		this.#phase = "outro";
 		this.#outroModel = undefined;
 		this.#phaseStartedAt = performance.now();
