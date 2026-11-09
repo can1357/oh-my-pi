@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Eval's `sh()` helper now applies Bash command policies, including required approval; unmatched commands in restrictive approval modes can prompt or fail without an interactive UI.
+- Eval's `sh()` helper now applies Bash command policies, including required approval; unmatched commands in restrictive approval modes can prompt or fail without an interactive UI. ([#18594](https://github.com/can1357/oh-my-pi/pull/18594) by [@jasonharrison](https://github.com/jasonharrison))
 
 ## [18.18.3] - 2026-11-09
 
