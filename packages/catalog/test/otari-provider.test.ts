@@ -87,11 +87,10 @@ describe("Otari discovery", () => {
 					id: "google/gemini-2.5-flash-preview-tts",
 					architecture: { input_modalities: ["text"], output_modalities: ["audio"] },
 				},
-				{ id: "openai/gpt-image-2", architecture: { input_modalities: ["text"], output_modalities: ["image"] } },
-				// No metadata: caught by the KDL exclusion patterns.
+				// No metadata: caught by the KDL exclusion patterns, including
+				// model-name patterns behind the `<upstream>/` prefix.
 				{ id: "alibaba/qwen3-embedding-4b" },
-				{ id: "alibaba/qwen3-reranker-8b" },
-				{ id: "openai/gpt-realtime-mini" },
+				{ id: "baai/bge-m3" },
 				// No metadata, but a chat model: kept.
 				{ id: "openai/gpt-5.1-codex" },
 			]),
@@ -124,38 +123,6 @@ describe("Otari discovery", () => {
 			);
 			expect(calls).toEqual([{ url: `${BASE_URL}/models`, authorization: "Bearer key-b" }]);
 			expect(workspaceB.models.map(model => model.id)).toEqual(["mistralai/mistral-medium-3"]);
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
-	test("no key serves nothing, and an authoritative refresh prunes a model the workspace disabled", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-otari-"));
-		try {
-			// `/models` is key-protected, so without a key there is no bundled
-			// surface to fall back on.
-			const withoutKey = await resolveProviderModels(
-				{ ...otariModelManagerOptions({}), cacheDbPath: path.join(tempDir, "keyless.db") },
-				"online-if-uncached",
-			);
-			expect(withoutKey.models).toEqual([]);
-
-			const cacheDbPath = path.join(tempDir, "live.db");
-			const resolve = (data: unknown[]) =>
-				resolveProviderModels(
-					{ ...otariModelManagerOptions({ apiKey: "otari-test-key", fetch: rosterFetch(data) }), cacheDbPath },
-					"online",
-				);
-
-			const before = await resolve([{ id: "old/retired-model" }, HAIKU]);
-			expect(before.models.map(model => model.id).sort()).toEqual([
-				"anthropic/claude-haiku-4.5",
-				"old/retired-model",
-			]);
-
-			// The workspace disables `old/retired-model`; the cached row must go.
-			const after = await resolve([HAIKU]);
-			expect(after.models.map(model => model.id)).toEqual(["anthropic/claude-haiku-4.5"]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

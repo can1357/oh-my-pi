@@ -1,39 +1,23 @@
-// Provider-wire compat for "otari": an OpenAI-compatible AI gateway and
-// control plane at https://api.otari.ai/api/v1. The gateway routes requests
-// to upstream providers on the workspace's behalf; the model roster is
-// workspace-scoped and dynamic (a workspace enables upstream providers and
-// models in Otari), so nothing is bundled. Verified live 2026-11-02:
-// `/api/v1/models` is key-protected (401 without and with a bad key) and
-// returns OpenRouter-style rows (`supported_parameters`, `architecture`,
-// per-million `pricing`, limits); discovery is authoritative so a successful
-// fetch prunes whatever the workspace has since disabled.
-// Self-hosted gateways are reached by overriding the provider `baseUrl` in
-// `models.yml` to the deployment's API root (`https://host.example.com/api/v1`).
+// Otari: an OpenAI-compatible AI gateway (https://api.otari.ai/api/v1) that
+// routes to upstream providers on a workspace's behalf. The roster is the set
+// of models one workspace enables, so nothing is bundled: discovery is
+// credential-scoped and authoritative. Self-hosted gateways set
+// `OTARI_BASE_URL` to the deployment's API root (`https://host/api/v1`).
 
 provider "otari" {
-	// A placeholder, not a guaranteed id: the roster is per-workspace and
-	// `/models` marks no workspace default. `default-model` only ranks
-	// already-available models and never fabricates a row, so when the
-	// workspace does not enable this id the resolver falls back to the first
-	// available model. `deepseek/deepseek-v4.1-flash` is the catalog id
-	// Otari's own `/models` API docs use as the example selector. Otari
-	// selectors are `<upstream-provider>/<model>`.
+	// Placeholder: `/models` marks no workspace default, so this only ranks the
+	// id when the workspace enables it. It is the example selector in Otari's
+	// `/models` API docs; ids are `<upstream-provider>/<model>`.
 	default-model "deepseek/deepseek-v4.1-flash"
 	env "OTARI_API_KEY"
 	dynamic-models-authoritative #true
-	// The workspace roster is the whole catalog for this token; never borrow
-	// capabilities from same-id rows on other hosts, which may serve the same
-	// upstream model with different limits or prices.
+	// Same-id rows on other hosts may carry different limits or prices.
 	skip-cross-provider-reference-fills #true
 	discovery label="Otari"
 
-	// Otari forwards chat requests through any-llm to whichever upstream
-	// serves the model, and not every upstream accepts the `developer` role:
-	// a streamed request to `anthropic/claude-haiku-4.5` answers 400 with a
-	// `developer` message and 200 with `system` (verified live 2026-11-02).
-	// `store`, `max_completion_tokens`, tool calls, and every
-	// `reasoning_effort` level (`minimal`..`xhigh`) passed through for
-	// `anthropic/` and `google/` rows in the same check; the gateway maps the
-	// effort to each upstream's own control.
+	// Requests forward through any-llm, and some upstreams reject `developer`:
+	// `anthropic/claude-haiku-4.5` answers 400 with it and 200 with `system`
+	// (verified 2026-11-02). `store`, `max_completion_tokens`, tools, and
+	// `reasoning_effort` minimal..xhigh passed on `anthropic/` and `google/`.
 	supports-developer-role #false
 }

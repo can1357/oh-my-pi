@@ -9,9 +9,6 @@ import {
 	normalizeSingularityApiBaseUrl,
 } from "../wire/singularityapi";
 
-/** Otari's hosted API root; self-hosted gateways override it via `OTARI_BASE_URL` or `models.yml`. */
-export const OTARI_API_BASE_URL = "https://api.otari.ai/api/v1";
-
 export interface ModelCacheProviderIdOptions extends AccountScope {
 	apiKey?: string;
 	baseUrl?: string;
@@ -56,6 +53,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "otari":
+			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
 		case "opencode-go":
 			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
@@ -155,10 +154,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const scope = `${jwtCredentialSubject(apiKey) ?? apiKey}\u0000${baseUrl}`;
 			return `kimi-code:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
-		case "muse-code": {
+		// Per-key rosters (Otari: one workspace's enabled models) behind a
+		// configurable endpoint: scope by both so switching either re-runs discovery.
+		case "muse-code":
+		case "otari": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "singularityapi-dev":
 		case "singularityapi-tech": {
@@ -180,14 +182,6 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
-		}
-		case "otari": {
-			// Workspace-scoped roster behind each key, on the hosted gateway or a
-			// self-hosted deployment: scope by both so switching either re-runs
-			// discovery instead of reading another workspace's rows.
-			const baseUrl = (options.baseUrl ?? OTARI_API_BASE_URL).trim().replace(/\/+$/, "");
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `otari:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
