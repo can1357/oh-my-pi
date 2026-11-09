@@ -6,6 +6,7 @@
 
 - `ask` HTML forms in Tern set a question's leading prose (paragraphs, lists, preformatted text) as a Markdown context card that scrolls on its own, and its legend as the question heading, instead of one monospace column
 - Text fields of `ask` HTML forms in Tern are rounded boxes whether or not they have the keyboard, with an accent ring while focused and a red one while refused; the radio group's Other answer is the same box, and a field that gains the keyboard scrolls into view
+- In `ask` HTML forms in Tern, ↑/↓ on a radio group pick the option like a browser, ↑/↓ past a tab's first or last control scroll the tab instead of jumping to the next one, and ←/→ (also on an empty Other answer) turn tabs
 
 ### Fixed
 

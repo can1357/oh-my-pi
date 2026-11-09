@@ -472,7 +472,7 @@ describe("html form", () => {
 			expect(checked()).toEqual(["t0"]);
 		});
 
-		it("natively: ↑/↓ cross into the next tab past its last stop; ←/→ turn tabs", () => {
+		it("natively: ↑/↓ pick radios and stay on the tab, scrolling past its edges; ←/→ turn tabs", () => {
 			const { form } = dialog(DB_FORM);
 			const activeTab = () => {
 				const root = form.describe(CX);
@@ -484,13 +484,24 @@ describe("html form", () => {
 			setNativeRendering(true);
 			try {
 				expect(activeTab()).toBe("t0");
-				for (let press = 0; press < 3; press++) form.handleInput(DOWN); // Postgres, Other, then CI
-				expect(activeTab()).toBe("t1");
-				form.handleInput("\x1b[D"); // ←
+				form.handleInput(DOWN); // Postgres: a radio group follows the arrows
+				expect(form.data()).toMatchObject({ db: "pg" });
+				form.handleInput(DOWN); // Other: typed text, so the pick stays
+				const body = () => (form.describe(CX).c ?? []).filter(isNode).find(child => child.k === "list");
+				form.handleInput(DOWN); // past the tab's last stop: scrolls instead of leaving
 				expect(activeTab()).toBe("t0");
+				expect(body()?.scroll).toMatchObject({ by: "line-down" });
+				form.handleInput("\x1b[A"); // back on Postgres, where ←/→ turn tabs
 				form.handleInput(RIGHT);
+				expect(activeTab()).toBe("t1");
+				form.handleInput(TAB); // Region dropdown: ↓ steps its answer
+				form.handleInput(DOWN);
+				expect(form.data()).toMatchObject({ region: "eu" });
 				form.handleInput(RIGHT);
 				expect(activeTab()).toBe("review");
+				const answers = () => (form.describe(CX).c ?? []).filter(isNode).find(child => child.k === "kv");
+				form.handleInput(DOWN);
+				expect(answers()?.scroll).toMatchObject({ by: "line-down" });
 				form.handleInput("\x1b[D");
 				expect(activeTab()).toBe("t1");
 			} finally {

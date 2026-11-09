@@ -51,6 +51,7 @@ import {
 	leafKey,
 	type NativeChild,
 	type NativeNode,
+	type NativeScroll,
 	type NativeUiEvent,
 	type TspSpan,
 } from "../native/node";
@@ -394,6 +395,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	#hidden = false;
 	/** Question tabs the native strip shows when it is too narrow for all of them. */
 	#tabWindow = { start: 0, end: 0 };
+	/** Natively, ↑/↓ past the shown tab's first or last stop scroll it a line instead of leaving the tab. */
+	#tabScroll: NativeScroll = { by: "start", n: 0 };
 
 	constructor(form: HtmlForm, options: HtmlFormDialogOptions) {
 		this.#form = form;
@@ -554,6 +557,14 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
 			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
+			// Natively a radio group follows the arrows, as a browser's does: the option moved
+			// to within the group is the answer. Entering the group from another field picks nothing.
+			const next = this.#stops[this.#focus]!;
+			if (stop.kind === "option" && !stop.field.multi && isNativeRendering()) {
+				if (next !== stop && next.kind === "option" && next.field === stop.field) {
+					this.#choose(next.field, next.option);
+				}
+			}
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "right")) {
@@ -971,6 +982,11 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		const input = this.#others.get(field)!;
+		// With nothing typed there is no caret to move, so ←/→ turn tabs as on any option.
+		if (input.getValue() === "" && isNativeRendering() && (matchesKey(data, "left") || matchesKey(data, "right"))) {
+			this.#turnPage(matchesKey(data, "right") ? 1 : -1);
+			return;
+		}
 		if (getKeybindings().matches(data, "tui.select.confirm")) {
 			// Back on Other after picking an option: Enter makes the kept text the answer again.
 			if (!field.multi && input.getValue().trim() !== "") this.#checked.get(field)!.clear();
@@ -982,20 +998,33 @@ export class HtmlFormDialog implements Component, Focusable {
 		if (input.getValue() !== before) this.#errors.delete(field);
 	}
 
-	/** A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option. */
+	/**
+	 * A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option.
+	 * Natively its options are listed like a radio group's: ↑/↓ step the answer through them
+	 * (as a browser's select does), leaving the field past either end, and ←/→ turn tabs.
+	 */
 	#selectInput(field: ChoiceField, data: string): void {
 		const current = this.#current(field) ?? -1;
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
-			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
+			const delta = matchesSelectDown(data) ? 1 : -1;
+			const next = isNativeRendering() ? this.#step(field, current, delta) : current;
+			if (next !== current && next >= 0) this.#choose(field, next);
+			else this.#moveStop(delta);
 			return;
 		}
 		if (matchesKey(data, "left") || matchesKey(data, "right")) {
-			const next = this.#step(field, current, matchesKey(data, "right") ? 1 : -1);
+			const delta = matchesKey(data, "right") ? 1 : -1;
+			if (isNativeRendering()) {
+				this.#turnPage(delta);
+				return;
+			}
+			const next = this.#step(field, current, delta);
 			if (next >= 0) this.#choose(field, next);
 			return;
 		}
 		if (matchesKey(data, "space")) {
-			this.#open = { field, highlight: current >= 0 ? current : this.#step(field, -1, 1) };
+			// The open dropdown is drawn only in rows; natively the options are already listed.
+			if (!isNativeRendering()) this.#open = { field, highlight: current >= 0 ? current : this.#step(field, -1, 1) };
 			return;
 		}
 		if (getKeybindings().matches(data, "tui.select.confirm")) {
@@ -1045,7 +1074,16 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#moveStop(delta: number): void {
-		this.#setFocus(this.#focus + delta);
+		const target = this.#focus + delta;
+		const past = target < 0 || target >= this.#stops.length;
+		if (isNativeRendering() && this.#tabbed() && (past || this.#tabOfStop(target) !== this.#tabOfStop(this.#focus))) {
+			// Tabs change on Enter, Tab, Next or ←/→; the arrows reach what lies past the edge
+			// stops instead (Review has only Submit, so they always scroll its answers).
+			this.#tabScroll = { by: delta > 0 ? "line-down" : "line-up", n: this.#tabScroll.n + 1 };
+			this.#changed();
+			return;
+		}
+		this.#setFocus(target);
 	}
 
 	/** Jump to the first stop of the next (or previous) field; Submit counts as a field. */
@@ -1690,7 +1728,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			);
 		}
 		const form = col(body, { gap: "lg", role: "omp.ask.form" });
-		children.push(list([form], { role: "omp.ask.options" }, `body${this.#tab}`));
+		children.push({ ...list([form], { role: "omp.ask.options" }, `body${this.#tab}`), scroll: this.#tabScroll });
 		return children;
 	}
 
@@ -1725,7 +1763,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		});
 		return [
 			text(notice, { wrap: "word", role: "omp.ask.notice" }),
-			node("kv", { items, role: "omp.ask.answers" }, undefined, REVIEW_ID),
+			{ ...node("kv", { items, role: "omp.ask.answers" }, undefined, REVIEW_ID), scroll: this.#tabScroll },
 		];
 	}
 
