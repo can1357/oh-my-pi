@@ -908,12 +908,11 @@ export class CollabHost {
 		// Welcome, chunks and replayed asks are one queue entry: up to
 		// MAX_PENDING_UI_REQUESTS asks would exceed the peer's share on their own.
 		const replayed = canWrite ? [...this.#pendingUi.values()].filter(pending => !pending.responsePending) : [];
+		const asks = replayed.map(pending => encodeFrame({ t: "ui-request", request: pending.request }));
 		let retainedBytes = Buffer.byteLength(welcome);
 		for (const bytes of snapshotEntries.bytes) retainedBytes += bytes;
-		for (const pending of replayed) {
-			retainedBytes += Buffer.byteLength(JSON.stringify({ t: "ui-request", request: pending.request }));
-		}
-		if (!socket.sendBatch(this.#welcomeBatch(welcome, snapshotEntries, replayed), fromPeer, retainedBytes)) {
+		for (const ask of asks) retainedBytes += Buffer.byteLength(ask);
+		if (!socket.sendBatch(this.#welcomeBatch(welcome, snapshotEntries, asks), fromPeer, retainedBytes)) {
 			// The guest applies nothing before a welcome, so record nothing for it either.
 			if (registered) this.#peers.set(fromPeer, registered);
 			else this.#peers.delete(fromPeer);
@@ -1006,6 +1005,17 @@ export class CollabHost {
 		return { json, bytes };
 	}
 
+	/** The welcome, its snapshot chunks, then the replayed asks, as one lazily drained batch. */
+	*#welcomeBatch(
+		welcome: EncodedFrame,
+		entries: { json: string[]; bytes: number[] },
+		asks: readonly EncodedFrame[],
+	): Generator<EncodedFrame> {
+		yield welcome;
+		yield* this.#snapshotChunks(entries.json, entries.bytes);
+		yield* asks;
+	}
+
 	/**
 	 * Slice pre-serialized entries into byte-bounded `snapshot-chunk` frames.
 	 * Every batch carries at least one entry, and the last batch is tagged
@@ -1013,16 +1023,6 @@ export class CollabHost {
 	 * still emits one `final` chunk so the guest never blocks on a missing
 	 * terminator. Each batch's strings are released once its frame is built.
 	 */
-	*#welcomeBatch(
-		welcome: EncodedFrame,
-		entries: { json: string[]; bytes: number[] },
-		replayed: readonly PendingCollabUiRequest[],
-	): Generator<CollabFrame | EncodedFrame> {
-		yield welcome;
-		yield* this.#snapshotChunks(entries.json, entries.bytes);
-		for (const pending of replayed) yield { t: "ui-request", request: pending.request };
-	}
-
 	*#snapshotChunks(entries: string[], bytes: number[]): Generator<EncodedFrame> {
 		if (entries.length === 0) {
 			yield encodeSnapshotChunk([], true);

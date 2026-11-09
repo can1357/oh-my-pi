@@ -201,17 +201,6 @@ export class CollabSocket {
 		return !this.#retiredPeers.has(peerId) && !this.#shedPeers.has(peerId);
 	}
 
-	/**
-	 * Captures who a not-yet-computed reply is for. The returned check, called at the
-	 * reply site, is false once the peer left or the room was recreated (ids are
-	 * reissued from 1). Past retirement-record eviction a departed id reads as served
-	 * again; that costs one frame the relay drops.
-	 */
-	addressee(peerId: number): () => boolean {
-		const generation = this.#roomGeneration;
-		return () => generation === this.#roomGeneration && this.isServing(peerId);
-	}
-
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
 	onRoomRecreated?: () => void;
 
@@ -368,7 +357,7 @@ export class CollabSocket {
 	 * attributable to the peer that causes it:
 	 *
 	 * - Targeted work for a retired or just-shed peer is refused.
-	 * - A batch supersedes the same peer's queued batch: only the newest welcome is consistent.
+	 * - An admitted batch supersedes the same peer's queued batch: only the newest welcome is consistent.
 	 * - A peer at its {@link MAX_PEER_PENDING_SENDS} share is shed, not the room.
 	 * - Over capacity, advisories and targeted work never evict another peer: an
 	 *   advisory is refused, targeted work may only displace queued advisories.
@@ -385,14 +374,20 @@ export class CollabSocket {
 		const peer = entry.targetPeer;
 		if (peer !== 0) {
 			if (this.#retiredPeers.has(peer) || this.#shedPeers.has(peer)) return this.#refuse(entry);
-			if (entry.lazy) this.#discardWhere(pending => pending.targetPeer === peer && pending.lazy);
-			if (this.#pendingForPeer(peer) >= MAX_PEER_PENDING_SENDS) {
+			const superseded = entry.lazy
+				? (pending: PendingSend) => pending.targetPeer === peer && pending.lazy
+				: undefined;
+			if (this.#pendingForPeer(peer, superseded) >= MAX_PEER_PENDING_SENDS) {
 				this.#shedPeer(peer);
 				return this.#refuse(entry);
 			}
+			// Decided against the queue the supersede would leave, so a refused batch
+			// keeps the peer's queued one instead of leaving it with neither.
+			if (!this.#fits(entry.bytes, false, superseded)) return this.#refuse(entry);
+			if (superseded) this.#discardWhere(superseded);
 		}
 		if (!this.#fits(entry.bytes, true)) {
-			if (entry.advisory || (peer !== 0 && !this.#fits(entry.bytes, false))) return this.#refuse(entry);
+			if (entry.advisory) return this.#refuse(entry);
 			this.#discardWhere(pending => pending.advisory);
 			while (!this.#fits(entry.bytes, true)) {
 				if (this.#shedHeaviestPeer()) continue;
@@ -412,22 +407,22 @@ export class CollabSocket {
 		return false;
 	}
 
-	/** Whether {@link bytes} more fits the queue, optionally as if its advisories were gone. */
-	#fits(bytes: number, withAdvisories: boolean): boolean {
+	/** Whether {@link bytes} more fits the queue, optionally as if its advisories, or the entries {@link without} matches, were gone. */
+	#fits(bytes: number, withAdvisories: boolean, without?: (pending: PendingSend) => boolean): boolean {
 		let count = 0;
 		let charged = 0;
 		for (const pending of this.#pendingSends) {
-			if (!withAdvisories && pending.advisory) continue;
+			if ((!withAdvisories && pending.advisory) || without?.(pending)) continue;
 			count++;
 			charged += pending.bytes;
 		}
 		return count === 0 || (count < MAX_PENDING_SENDS && charged + bytes <= MAX_PENDING_SEND_BYTES);
 	}
 
-	#pendingForPeer(peerId: number): number {
+	#pendingForPeer(peerId: number, without?: (pending: PendingSend) => boolean): number {
 		let count = 0;
 		for (const pending of this.#pendingSends) {
-			if (pending.targetPeer === peerId) count++;
+			if (pending.targetPeer === peerId && !without?.(pending)) count++;
 		}
 		return count;
 	}

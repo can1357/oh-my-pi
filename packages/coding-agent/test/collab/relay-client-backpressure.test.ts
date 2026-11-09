@@ -352,6 +352,32 @@ describe("CollabSocket send backpressure", () => {
 		}
 	}, 15_000);
 
+	it("keeps a peer's queued welcome when its replacement is refused", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/rehello", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			socket.send({ t: "bye", reason: "the turn ended" });
+			expect(socket.sendBatch(welcomeBatch("first welcome"), 5, 1024)).toBe(true);
+			// A repeated hello whose batch cannot fit must not cost the peer the one already queued.
+			expect(socket.sendBatch(welcomeBatch("second welcome"), 5, 17 * 1024 * 1024)).toBe(false);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !ws.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 5)) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(ws.sent.filter(bytes => unpackEnvelope(bytes)?.peerId === 5)).toHaveLength(1);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("keeps a retirement whose queued decryption has not settled", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;

@@ -23,6 +23,7 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger, toError } from "@oh-my-pi/pi-utils";
+import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -202,22 +203,6 @@ function omittedStreamDeltas(
 		);
 	}
 	return omitted;
-}
-
-/**
- * Each automatic rejoin costs the host a full snapshot, and a guest on a link
- * too slow for the session is shed again after every one. Past the cap the
- * guest stops rejoining on its own and leaves the decision to the user.
- */
-export const MAX_AUTO_REJOINS = 3;
-export const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
-
-/** Records an automatic rejoin in {@link history} if the window has room for one. */
-export function takeAutoRejoin(history: number[], now = Date.now()): boolean {
-	while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
-	if (history.length >= MAX_AUTO_REJOINS) return false;
-	history.push(now);
-	return true;
 }
 
 export class CollabGuestLink {

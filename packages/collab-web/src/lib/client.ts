@@ -25,6 +25,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
+import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
@@ -78,9 +79,6 @@ const MAX_NOTICES = 50;
 const TRANSCRIPT_TIMEOUT_MS = 10_000;
 /** Mirrors the TUI guest's WELCOME_TIMEOUT_MS: a host that never answers hello ends the join. */
 const WELCOME_TIMEOUT_MS = 30_000;
-/** Mirrors the TUI guest's cap: each automatic rejoin costs the host a full snapshot. */
-const MAX_AUTO_REJOINS = 3;
-const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
 /** Mirrors the TUI guest's SNAPSHOT_PROGRESS_TIMEOUT_MS: every snapshot chunk must make progress. */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
 /** Commit delay when `requestAnimationFrame` is unavailable (tests, non-DOM hosts). */
@@ -271,21 +269,13 @@ export class GuestClient {
 		this.#commit();
 	}
 
-	#takeAutoRejoin(now = Date.now()): boolean {
-		const history = this.#autoRejoins;
-		while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
-		if (history.length >= MAX_AUTO_REJOINS) return false;
-		history.push(now);
-		return true;
-	}
-
 	/**
 	 * Say hello again after the host dropped this guest, within the auto-rejoin
 	 * budget. A welcome that does not follow retries through the same budget.
 	 * @returns false, with an error notice, once the budget is spent.
 	 */
 	#rejoin(message: string): boolean {
-		if (!this.#takeAutoRejoin()) {
+		if (!takeAutoRejoin(this.#autoRejoins)) {
 			this.#pushNotice("error", message);
 			return false;
 		}

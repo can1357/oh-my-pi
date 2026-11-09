@@ -14,7 +14,8 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
-import { CollabGuestLink, MAX_AUTO_REJOINS } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { MAX_AUTO_REJOINS } from "@oh-my-pi/pi-wire";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	COLLAB_PROTO,
