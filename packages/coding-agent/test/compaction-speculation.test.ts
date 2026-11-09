@@ -137,6 +137,7 @@ describe("async speculative compaction", () => {
 			reconnectToAgent: () => {},
 			drainStrandedQueuedMessages: () => {},
 			buildDisplaySessionContext: () => sessionManager.buildSessionContext(),
+			replaceMessagesFromSessionContext: (messages: AgentMessage[]) => agent.replaceMessages(messages),
 			persistEvalStateContext: () => {},
 			convertToLlmForSideRequest:
 				options.convertToLlmForSideRequest ?? ((messages: AgentMessage[]) => messages as never),
@@ -1111,6 +1112,6 @@ describe("resolveSpeculationMethod", () => {
 		const settings = cfgCompaction.get(Settings.isolated({ "compaction.methodOrder": ["snapcompact", "soft"] }));
 		// Same declared input; only the second drops images on the wire.
 		expect(resolveSpeculationMethod(getBundledModel("anthropic", "claude-sonnet-4-5"), settings)).toBeUndefined();
-		expect(resolveSpeculationMethod(getBundledModel("venice", "deepseek-v4-1-flash"), settings)).toBe("soft");
+		expect(resolveSpeculationMethod(getBundledModel("deepseek", "deepseek-v4-flash"), settings)).toBe("soft");
 	});
 });

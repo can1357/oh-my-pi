@@ -13,7 +13,11 @@ pub use model::Options;
 use runtime::{Runtime, SourceUnit, VizSource};
 use serde::Deserialize;
 
-use super::{Inner, Node, history::HistoryEvent, syntax::UnitSyntax};
+use super::{
+	Inner, Node,
+	history::HistoryEvent,
+	syntax::{RootKind, SyntaxTree, UnitSyntax},
+};
 use crate::bash::{
 	ids::{ModeId, Vpid},
 	ir,
@@ -87,6 +91,9 @@ struct StoredUnit {
 	source:     Option<BString>,
 	#[serde(default)]
 	nodes:      Vec<Node>,
+	#[serde(default, rename = "syntax")]
+	archived:   Option<Archived>,
+	#[serde(skip)]
 	syntax:     Option<UnitSyntax>,
 	#[serde(default)]
 	projection: u32,
@@ -99,6 +106,25 @@ struct StoredUnit {
 }
 const fn first_line() -> u32 {
 	1
+}
+/// A unit's syntax archive as saved: this build's, or (a session saved
+/// before an upgrade) another build's, of which only the root kind is
+/// read; that unit is parsed again from its source.
+enum Archived {
+	Current(UnitSyntax),
+	Other(Option<RootKind>),
+}
+impl<'de> Deserialize<'de> for Archived {
+	fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+		let encoded = String::deserialize(d)?;
+		Ok(
+			match UnitSyntax::deserialize(serde::de::value::StrDeserializer::<D::Error>::new(&encoded))
+			{
+				Ok(syntax) => Self::Current(syntax),
+				Err(_) => Self::Other(UnitSyntax::archived_kind(&encoded)),
+			},
+		)
+	}
 }
 #[derive(Deserialize)]
 struct StoredTrace {
@@ -126,12 +152,19 @@ impl StoredVisualization {
 	/// Restore persisted native syntax once for historical presentation.
 	///
 	/// # Errors
-	/// Rejects malformed trace JSON, invalid source bounds, unsupported syntax
-	/// archives, and legacy units that cannot be parsed with their retained
-	/// context.
+	/// Rejects malformed trace JSON, invalid source bounds, and legacy units
+	/// that cannot be parsed with their retained context.
 	pub fn from_snapshot_json(json: &str) -> Result<Self, VizError> {
 		let mut trace: StoredTrace = serde_json::from_str(json)?;
 		for unit in &mut trace.units {
+			let other = match unit.archived.take() {
+				Some(Archived::Current(syntax)) => {
+					unit.syntax = Some(syntax);
+					None
+				},
+				Some(Archived::Other(kind)) => Some(kind),
+				None => None,
+			};
 			if unit.source.is_none() {
 				let at = unit
 					.at
@@ -170,26 +203,46 @@ impl StoredVisualization {
 				));
 			}
 			if unit.syntax.is_none() {
-				// Older traces did not carry canonical syntax. Restore at precisely
-				// the announced boundary, never by parsing the
-				// not-yet-compiled remainder.
-				let mut input = ir::Unit::empty(
-					unit
-						.source
-						.as_ref()
-						.map_or_default(|source| source.as_slice()),
-					ModeId::Bash,
-					unit.features,
-				);
-				input.aliases = std::mem::take(&mut unit.aliases);
-				input.line = unit.line;
-				unit.syntax = UnitSyntax::restore(&input);
-				if unit.syntax.is_none() && !unit.nodes.is_empty() {
-					return Err(VizError(
-						"legacy trace cannot restore its announced command without its original parser \
-						 context"
-							.into(),
-					));
+				let source = unit
+					.source
+					.as_ref()
+					.map_or_default(|source| source.as_slice());
+				match other {
+					// Older traces did not carry canonical syntax, and another
+					// build's command list parses again the same: restore at
+					// precisely the announced boundary, never by parsing the
+					// not-yet-compiled remainder.
+					None | Some(Some(RootKind::List)) => {
+						let mut input = ir::Unit::empty(source, ModeId::Bash, unit.features);
+						input.aliases = std::mem::take(&mut unit.aliases);
+						input.line = unit.line;
+						unit.syntax = UnitSyntax::restore(&input);
+						if unit.syntax.is_none() && !unit.nodes.is_empty() && other.is_none() {
+							return Err(VizError(
+								"legacy trace cannot restore its announced command without its original \
+								 parser context"
+									.into(),
+							));
+						}
+					},
+					// Another build's run-time parsed text: a here-document
+					// body, as this build parses one (an arithmetic operand,
+					// the other kind, rarely is a unit of its own).
+					Some(Some(RootKind::Word)) => {
+						unit.syntax = crate::bash::syntax::parse_text(
+							source,
+							crate::bash::syntax::Features::NONE,
+							crate::bash::syntax::TextMode::HereDoc,
+						)
+						.ok()
+						.map(|(tree, root)| {
+							UnitSyntax::new(0, SyntaxTree::from_word(tree, root))
+								.with_context(ModeId::Bash, unit.features)
+						});
+					},
+					// A function body compiled on use, or no readable header:
+					// drawn without syntax rather than failing the trace.
+					Some(_) => {},
 				}
 			}
 		}

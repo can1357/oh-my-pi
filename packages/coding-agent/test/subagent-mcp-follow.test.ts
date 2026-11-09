@@ -18,7 +18,7 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createMCPProxyTools, followMCPTools } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { followMCPTools } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { manyToolName } from "./fixtures/many-tools-mcp";
 

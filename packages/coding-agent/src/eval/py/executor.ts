@@ -254,11 +254,6 @@ const formatTimeoutAnnotation = formatSessionTimeoutAnnotation;
 
 const formatKernelTimeoutAnnotation = formatSessionKernelTimeoutAnnotation;
 
-function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
-	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
-	return createCancelledKernelResult(output);
-}
-
 // ---------------------------------------------------------------------------
 // Kernel start helpers
 // ---------------------------------------------------------------------------
@@ -655,10 +650,12 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		}
 		return await sessionRegistry.executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
-		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(
-				isTimedOutCancellation(err, PythonExecutionCancelledError, executionOptions.signal),
-			);
+		// Only a cancellation someone asked for is reported as one; any other
+		// failure, whatever its name, reaches the caller with its text.
+		const request = { signal: executionOptions.signal, deadlineMs };
+		if (isCancellationError(err, PythonExecutionCancelledError, request)) {
+			const timedOut = isTimedOutCancellation(err, PythonExecutionCancelledError, request.signal, deadlineMs);
+			return createCancelledKernelResult(timedOut ? formatTimeoutAnnotation(executionOptions.timeoutMs) : "");
 		}
 		throw err;
 	}

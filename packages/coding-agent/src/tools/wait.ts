@@ -123,6 +123,16 @@ function noReplyText(replies: PendingReplies): string {
 	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
 }
 
+/**
+ * The line an elapsed wait reports: the window it spent and the one a
+ * back-to-back wait gets. A bare still-running snapshot reads as an empty
+ * result, and agents then start `sleep` jobs to block for longer.
+ */
+function elapsedReport(what: string, rung: number): string {
+	const next = WAIT_LADDER_MS[Math.min(rung + 1, WAIT_LADDER_MS.length - 1)];
+	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}; a back-to-back wait allows up to ${formatDuration(next)}.`;
+}
+
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
 export function hasWaitTool(session: ToolSession): boolean {
 	return session.isToolActive?.("wait") ?? true;
@@ -361,17 +371,21 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 			if (manager && jobs.length > 0) {
 				const result = buildJobResult(this.session, manager, "wait", jobs, []);
-				if (wake === "timeout") return this.#elapsed(result, rung, streak);
+				if (wake === "timeout") {
+					// The report is one text block (`buildJobResult`); the timeout line joins it.
+					const report = result.content.find(block => block.type === "text")?.text ?? "";
+					const text = `${report}\n\n${elapsedReport("No job finished", rung)}`;
+					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, streak);
+				}
 				// A finished service is news even while every watched job still runs.
 				if (wake !== "service") return result;
 				const { useless: _idle, ...woke } = result;
 				return woke;
 			}
 			if (wake === "timeout") {
-				const span = formatDuration(WAIT_LADDER_MS[rung]);
 				const text = replyWait
-					? `No reply within ${span}.`
-					: `No service finished within ${span}. Read proc:// for status.`;
+					? elapsedReport("No reply", rung)
+					: `${elapsedReport("No service finished", rung)} Read proc:// for status.`;
 				// A wait that ran out with nothing to report is an idle poll.
 				const result: AgentToolResult<CoordinationDetails> = {
 					content: [{ type: "text", text }],

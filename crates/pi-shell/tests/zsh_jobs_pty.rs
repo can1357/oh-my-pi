@@ -31,8 +31,8 @@ fn line(pty: &mut Pty, text: &str) -> io::Result<()> {
 }
 
 /// The job lines of `out` (`zsh: suspended  …`, `[1]  + running    …`,
-/// `zsh: you have …`), the pid of `[1]  + 12345 …` and `[1] 12345`
-/// replaced by `PID`.
+/// `zsh: you have …`), the pid of `[1]  + 12345 …` and the pids of
+/// `[1] 12345 12346` replaced by `PID`.
 fn job_lines(out: &str) -> Vec<String> {
 	out.split('\n')
 		.map(|l| {
@@ -45,12 +45,14 @@ fn job_lines(out: &str) -> Vec<String> {
 		.filter(|l| l.starts_with("zsh: ") || l.starts_with('['))
 		.map(|l| {
 			let job = l.starts_with('[');
+			let is_pid = |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
+			// `[n] pid…`: a background job's start, one pid per process.
+			let start = job && l.split(' ').skip(1).all(is_pid);
 			let words: Vec<&str> = l
 				.split(' ')
 				.enumerate()
 				.map(|(i, w)| {
-					let pid = !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit());
-					if pid && job && (i == 1 || i == 3) {
+					if is_pid(w) && job && (start || i == 3) {
 						"PID"
 					} else {
 						w
@@ -129,6 +131,25 @@ fn bg_then_fg_then_ctrl_c() -> io::Result<()> {
 		pty.read_until("st=130", TIMEOUT)?;
 		Ok(())
 	})?;
+	if let Some(real) = real {
+		assert_eq!(ours, real);
+	}
+	Ok(())
+}
+
+/// A background pipeline's start line names each of its processes, as
+/// zsh's does (`[1] 1846 1847`), not only the one `$!` names.
+#[test]
+fn a_background_pipeline_names_each_process() -> io::Result<()> {
+	let (ours, real) = both(|pty| {
+		line(pty, "sleep 100 | sleep 100 &")?;
+		thread::sleep(START);
+		line(pty, "kill %1")?;
+		line(pty, "echo next")?;
+		pty.read_until("terminated", TIMEOUT)?;
+		pty.settle(Duration::from_millis(300), TIMEOUT)
+	})?;
+	assert_eq!(ours.first().map(String::as_str), Some("[1] PID PID"), "{ours:?}");
 	if let Some(real) = real {
 		assert_eq!(ours, real);
 	}

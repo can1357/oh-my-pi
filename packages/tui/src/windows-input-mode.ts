@@ -225,6 +225,19 @@ export class Win32InputModeDecoder {
 	}
 
 	/**
+	 * Whether the held relayed text is an OSC/DCS/APC string still waiting for
+	 * its terminator (a TSP event, a clipboard or colour reply). Unlike a lone
+	 * ESC or a short CSI, releasing it early cannot be mistaken for a key: the
+	 * head would be handed on as a fragment and the tail typed as text. A bare
+	 * two-byte introducer is not a string yet: it may be an Alt chord (Alt+]).
+	 */
+	get hasPendingString(): boolean {
+		if (this.#pendingVt.length < 3) return false;
+		const introducer = this.#pendingVt[1];
+		return introducer === "]" || introducer === "P" || introducer === "_";
+	}
+
+	/**
 	 * Release held VT text as-is. The caller invokes this once no further bytes
 	 * arrived in time, so a lone relayed ESC still acts as the Escape key.
 	 */
@@ -423,8 +436,13 @@ export class Win32PasteMarkerNormalizer {
 		if (output) this.#onInput(output);
 		if (this.#candidate || this.#pending) {
 			this.#timer = setTimeout(() => {
-				this.flush();
-				this.#onExpired?.();
+				// A stalled loop can have the rest of this record waiting in stdin's
+				// poll queue; release only after it has had a chance to arrive.
+				this.#timer = setTimeout(() => {
+					this.#timer = undefined;
+					this.flush();
+					this.#onExpired?.();
+				});
 			}, 75);
 		}
 	}

@@ -8,7 +8,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { countNewlines, escapeXmlText } from "@oh-my-pi/pi-utils";
+import { countNewlines, escapeXmlText, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
 	BashExecutionMessage,
@@ -51,7 +51,7 @@ export interface HistoryFormatOptions {
 	 */
 	expandEditDiffs?: boolean;
 	/**
-	 * Append bounded tool-result text and, for `ask`, the structured questions.
+	 * Append bounded tool-result text and, for `ask`, the form it showed.
 	 * Advisor transcripts enable this so reviewers see user decisions and the
 	 * evidence returned by primary tools without admitting unbounded output.
 	 */
@@ -297,42 +297,16 @@ function boundedFencedToolContext(text: string, language: string, maxLines = EXP
 	);
 }
 
-function expandedAskArguments(
-	args: Record<string, unknown> | undefined,
-	transform?: (text: string) => string,
-): string | undefined {
-	if (!args) return undefined;
-	const visibleArgs = Object.fromEntries(Object.entries(args).filter(([key]) => key !== INTENT_FIELD));
-	try {
-		return boundedAskJson(visibleArgs, transform);
-	} catch {
-		return undefined;
-	}
-}
-
 function expandedAskDetails(
 	result: ToolResultMessage | undefined,
 	transform?: (text: string) => string,
 ): string | undefined {
-	if (!result?.details || typeof result.details !== "object") return undefined;
-	const details = result.details as {
-		question?: unknown;
-		questions?: unknown;
-		results?: unknown;
-	};
-	const questions = Array.isArray(details.results)
-		? details.results
-				.map(item =>
-					item && typeof item === "object" && typeof (item as { question?: unknown }).question === "string"
-						? (item as { question: string }).question
-						: undefined,
-				)
-				.filter((question): question is string => question !== undefined)
-		: Array.isArray(details.questions)
-			? details.questions.filter((question): question is string => typeof question === "string")
-			: typeof details.question === "string"
-				? [details.question]
-				: [];
+	const details = result?.details;
+	if (!isRecord(details)) return undefined;
+	const answers = details.answers;
+	const questions = Array.isArray(answers)
+		? answers.flatMap(item => (isRecord(item) && typeof item.question === "string" ? [item.question] : []))
+		: [];
 	return questions.length > 0 ? boundedAskJson({ questions }, transform) : undefined;
 }
 
@@ -378,9 +352,14 @@ function toolCallLine(
 	if (expandToolIO) {
 		const sections: string[] = [];
 		if (name === "ask") {
-			const askArguments =
-				expandedAskArguments(args, transformExpandedToolIO) ?? expandedAskDetails(result, transformExpandedToolIO);
-			if (askArguments) sections.push(`Ask input:\n${boundedFencedToolContext(askArguments, "json")}`);
+			const html = args?.html;
+			if (typeof html === "string") {
+				sections.push(`Ask input:\n${boundedFencedToolContext(transformExpandedToolIO?.(html) ?? html, "html")}`);
+			} else {
+				// An orphaned result (its call not in view) still names the questions it answered.
+				const askQuestions = expandedAskDetails(result, transformExpandedToolIO);
+				if (askQuestions) sections.push(`Ask input:\n${boundedFencedToolContext(askQuestions, "json")}`);
+			}
 		}
 		if (result) {
 			const resultText = expandedToolResultText(visibleResultText);

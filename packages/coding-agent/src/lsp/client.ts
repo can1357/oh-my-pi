@@ -11,6 +11,7 @@ import { getConfig } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
+import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type {
 	DocumentBuildStatus,
 	LspClient,
@@ -24,7 +25,14 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types";
-import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
+import {
+	detectLanguageId,
+	EquivalentUriMap,
+	fileToUri,
+	mergeDiagnosticLists,
+	readTextFromDisk,
+	uriToFile,
+} from "./utils";
 
 /**
  * A JSON-RPC error response to one of our requests. The message keeps the code, so
@@ -554,10 +562,21 @@ async function startMessageReader(client: LspClient): Promise<void> {
 							// Server notification
 							if (message.method === "textDocument/publishDiagnostics" && message.params) {
 								const params = message.params as PublishDiagnosticsParams;
-								client.diagnostics.set(params.uri, {
+								const record = {
 									diagnostics: params.diagnostics,
 									version: params.version ?? null,
-								});
+								};
+								client.publishedDiagnostics.set(params.uri, record);
+								if (supportsDocumentDiagnostics(client)) {
+									const pulled = client.pulledDiagnostics.get(params.uri)?.diagnostics ?? [];
+									const combined = mergeDiagnosticLists(pulled, params.diagnostics);
+									client.diagnostics.set(params.uri, {
+										diagnostics: combined,
+										version: record.version,
+									});
+								} else {
+									client.diagnostics.set(params.uri, record);
+								}
 								client.diagnosticsVersion += 1;
 								if (typeof params.version === "number") client.publishesDocumentVersions = true;
 							} else if (message.method === "$/progress" && message.params) {
@@ -1290,7 +1309,7 @@ export function shutdownStaleClients(
 		const stale = Array.from(clients.values()).filter(
 			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
 		);
-		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
+		const results = await Promise.all(stale.map(client => shutdownClientServer(client)));
 		const failed = stale.filter((_client, index) => results[index] !== true);
 		if (failed.length > 0) {
 			throw new Error(
@@ -1420,6 +1439,8 @@ export async function getOrCreateClient(
 			config,
 			requestId: 0,
 			diagnostics: new EquivalentUriMap(),
+			publishedDiagnostics: new EquivalentUriMap(),
+			pulledDiagnostics: new EquivalentUriMap(),
 			diagnosticsVersion: 0,
 			dynamicCapabilityRegistrations: new Map(),
 			openFiles: new Map(),
@@ -1611,6 +1632,8 @@ function closeIdleFiles(client: LspClient, signal?: AbortSignal): void {
 		if (pendingDiskWrites.has(uri) || fileOperationLocks.has(`${client.name}:${uri}`)) continue;
 		client.openFiles.delete(uri);
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
+		client.publishedDiagnostics.delete(uri);
 		(client.idleClosedFiles ??= new Map()).set(uri, info.version);
 		const notification: LspJsonRpcNotification = {
 			jsonrpc: "2.0",
@@ -1822,6 +1845,7 @@ async function syncOpenFileFromDisk(
 		// Drop cached diagnostics computed against the stale document before the
 		// server recomputes them for the reconciled content.
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 		const version = ++info.version;
 		throwIfAborted(signal);
 		await sendNotification(
@@ -1920,6 +1944,7 @@ export async function syncContent(
 	const syncPromise = (async () => {
 		// Clear stale diagnostics before syncing new content
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 
 		const info = client.openFiles.get(uri);
 
@@ -2060,7 +2085,10 @@ export async function notifyWorkspaceWatchedFiles(
 						pendingDiskWrites.has(uri) &&
 						published !== undefined &&
 						published.version === client.openFiles.get(uri)?.version;
-					if (!current) client.diagnostics.delete(uri);
+					if (!current) {
+						client.diagnostics.delete(uri);
+						client.pulledDiagnostics.delete(uri);
+					}
 					return { uri, type: change.type };
 				});
 			if (clientChanges.length === 0) return;
@@ -2142,6 +2170,7 @@ async function refreshDocument(
 		// Otherwise an unrelated publishDiagnostics notification can advance the global
 		// diagnostics version and cause waiters to accept stale unversioned diagnostics.
 		client.diagnostics.delete(uri);
+		client.pulledDiagnostics.delete(uri);
 		const info = client.openFiles.get(uri);
 
 		if (!info) {
@@ -2254,6 +2283,8 @@ async function closeDocument(client: LspClient, uri: string, signal?: AbortSigna
 	await sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal);
 	client.openFiles.delete(uri);
 	client.diagnostics.delete(uri);
+	client.pulledDiagnostics.delete(uri);
+	client.publishedDiagnostics.delete(uri);
 }
 
 async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolean> {
@@ -2303,6 +2334,22 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 		maybeStartIdleChecker(client);
 	}
 	return exited;
+}
+
+/**
+ * Tear down a client together with the language-server process behind it.
+ *
+ * A broker-shared link's own `shutdown`/`exit` only detaches it: the mux answers
+ * both and keeps the server idle for reuse. When the server must not survive —
+ * a restart, or a superseded configuration that no reconnect will ask for —
+ * ask the mux to kill the link's server first (best-effort: the link may be the
+ * wedged part), then confirm the link exits like any other client.
+ */
+export async function shutdownClientServer(client: LspClient): Promise<boolean> {
+	if (client.proc.sharedMux) {
+		await sendNotification(client, MUX_RESTART_METHOD, undefined, AbortSignal.timeout(2_000)).catch(() => {});
+	}
+	return await shutdownClientInstance(client);
 }
 
 /**

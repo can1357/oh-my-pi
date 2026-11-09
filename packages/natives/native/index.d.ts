@@ -99,7 +99,13 @@ export declare class DesktopSession {
   captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Drags along `path`. A macOS background left drag across the text of one
+   * native text element is made as that element's selection through
+   * accessibility, with no mouse event, and resolves to the selection read
+   * back; a drag posted as input resolves to where a takeover left focus.
+   */
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
   scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
@@ -614,6 +620,14 @@ export declare class Shell {
    * The options set session-scoped environment variables and a snapshot path.
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * A new shell with this one's options whose session starts from this
+   * session's state (variables, functions, aliases, options, working
+   * directory) as of its last command boundary: while a command runs, the
+   * state that command started from. What the fork sets stays in the
+   * fork. Never waits for the running command.
+   */
+  fork(): Shell
   /**
    * Run a shell command using the provided options.
    *
@@ -1596,6 +1610,21 @@ export interface DesktopDisplay {
   pixelWidth: number
   pixelHeight: number
   isPrimary: boolean
+}
+
+/** What a drag call did: made a text selection, or posted input. */
+export interface DesktopDragResult {
+  /**
+   * The selection a macOS background left drag across the text of one
+   * native text element made through accessibility, read back; absent when
+   * the drag was posted as input.
+   */
+  selection?: AxTextSelection
+  /**
+   * Where focus ended when the drag ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /**

@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	Lexer,
@@ -393,6 +394,58 @@ export function speculativeStreamingSource(text: string): string {
 function replaceLast(raw: string, from: string, to: string): string | undefined {
 	const at = raw.lastIndexOf(from);
 	return at < 0 ? undefined : raw.slice(0, at) + to + raw.slice(at + from.length);
+}
+
+// The lone `-` line a streaming source ends on while a bullet is still being typed.
+const PENDING_BULLET_LINE = /\n[ \t>]*-[ \t]*$/;
+
+/** `text` without its last line (and the newline in front of it). */
+function dropLastLine(text: string): string {
+	return text.slice(0, Math.max(0, text.lastIndexOf("\n")));
+}
+
+/**
+ * A copy of `token`, the last block of a streaming render, without the lone
+ * `-` line the source ends on when that line underlines a paragraph, or
+ * `undefined` when the source does not end that way. Under a paragraph a lone
+ * `-` is a setext H2 underline, but a stream ending on one is almost always
+ * typing a bullet (`- item`), which leaves the paragraph a paragraph: held
+ * back, the paragraph keeps its rows instead of flashing as a heading for a
+ * frame. A `-` line followed by a newline, or a longer underline, is a heading
+ * as written. Follows the last list item or blockquote child; every `raw` on
+ * the way drops the held line, so row caches keyed on it see the source the
+ * copy renders.
+ */
+function holdPendingBullet(token: Token): Token | undefined {
+	if (!PENDING_BULLET_LINE.test(token.raw)) return undefined;
+	const raw = dropLastLine(token.raw);
+	switch (token.type) {
+		case "heading":
+			return { type: "paragraph", raw, text: token.text, tokens: token.tokens ?? [] };
+		case "blockquote": {
+			const children: Token[] = token.tokens ?? [];
+			const inner = children.at(-1);
+			const held = inner && holdPendingBullet(inner);
+			if (!held) return undefined;
+			return { ...token, raw, text: dropLastLine(token.text), tokens: [...children.slice(0, -1), held] };
+		}
+		case "list": {
+			const items: Tokens.ListItem[] = token.items;
+			const item = items.at(-1);
+			const inner = item?.tokens.at(-1);
+			const held = inner && holdPendingBullet(inner);
+			if (!item || !held) return undefined;
+			const grown = {
+				...item,
+				raw: dropLastLine(item.raw),
+				text: dropLastLine(item.text),
+				tokens: [...item.tokens.slice(0, -1), held],
+			};
+			return { ...token, raw, items: [...items.slice(0, -1), grown] };
+		}
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -814,6 +867,9 @@ const MIN_TREE_CONTENT_WIDTH = 8;
 const SGR_SEQUENCE_STICKY = /\x1b\[[0-9;:]*m/y;
 const SGR_SEQUENCE_GLOBAL = /\x1b\[[0-9;:]*m/g;
 
+/** An SGR sequence that only turns styling off: a full reset or attribute/color closes (`22`–`29`, `39`, `49`, `59`). */
+const SGR_CLOSER_SEQUENCE = /^\x1b\[(?:(?:0|2[2-9]|39|49|59)(?:;(?:0|2[2-9]|39|49|59))*)?m$/;
+
 /**
  * Everything before the last full SGR reset is dead state — drop it so the
  * re-played `carry` stays bounded by the paragraph's live style run instead
@@ -827,10 +883,21 @@ function compactSgrCarry(carry: string): string {
 }
 
 interface TreeGuidePrefix {
-	/** Index of the first char past the guide run (start of the node text). */
+	/**
+	 * Index just past the last guide glyph. SGR sequences between that glyph
+	 * and the node text (a `**bold**` opener, a prose-color close) stay with
+	 * the node text, so the slice from here is the styled node text.
+	 */
 	end: number;
-	/** SGR sequences interleaved with the guides, in order (zero visible width). */
+	/** SGR sequences opened before or among the guides, in order (zero visible width). */
 	codes: string;
+	/**
+	 * Closer-only SGR sequences between the last guide glyph and the node text,
+	 * in order: the author ending the guides' styling before the text starts
+	 * (`\x1b[2m├── \x1b[22mtext`). Replayed after each continuation rail so
+	 * the rail wears the guide styling and the text does not.
+	 */
+	closers: string;
 	/** Guide characters with SGR stripped, exactly as they appear on screen. */
 	guides: string;
 }
@@ -844,24 +911,32 @@ interface TreeGuidePrefix {
  */
 function matchTreeGuidePrefix(line: string): TreeGuidePrefix | undefined {
 	let codes = "";
+	let pendingCodes = "";
 	let guides = "";
+	let end = 0;
 	let i = 0;
 	while (i < line.length) {
 		if (line.charCodeAt(i) === 0x1b) {
 			SGR_SEQUENCE_STICKY.lastIndex = i;
 			const match = SGR_SEQUENCE_STICKY.exec(line);
 			if (!match) break;
-			codes += match[0];
+			pendingCodes += match[0];
 			i = SGR_SEQUENCE_STICKY.lastIndex;
 			continue;
 		}
 		const char = line[i]!;
 		if (!(char in TREE_GUIDE_CONTINUATION)) break;
 		guides += char;
-		i++;
+		codes += pendingCodes;
+		pendingCodes = "";
+		end = ++i;
 	}
 	if (i >= line.length || !TREE_BRANCH_CONNECTOR_RE.test(guides)) return undefined;
-	return { end: i, codes, guides };
+	let closers = "";
+	for (const sequence of pendingCodes.match(SGR_SEQUENCE_GLOBAL) ?? []) {
+		if (SGR_CLOSER_SEQUENCE.test(sequence)) closers += sequence;
+	}
+	return { end, codes, closers, guides };
 }
 
 /**
@@ -906,8 +981,12 @@ function hangWrapTreeGuideLines(text: string, width: number): string[] | undefin
 		const hangShortfall = visibleWidth(prefix.guides) - visibleWidth(hang);
 		if (hangShortfall > 0) hang += padding(hangShortfall);
 		out.push(carry + line.slice(0, prefix.end) + rows[0]!.slice(activeCodes.length));
+		// Continuation rails wear what the first row's guides wore (`activeCodes`),
+		// end it the way the first row did (`closers`), and the wrapped row then
+		// restores its own live state.
+		const rail = activeCodes + hang + prefix.closers;
 		for (let i = 1; i < rows.length; i++) {
-			out.push(activeCodes + hang + rows[i]!);
+			out.push(rail + rows[i]!);
 		}
 		carry = compactSgrCarry(carry + (line.match(SGR_SEQUENCE_GLOBAL)?.join("") ?? ""));
 	}
@@ -2006,7 +2085,7 @@ function plainInlineTokens(tokens: Token[]): string {
 	let result = "";
 	for (const token of tokens) {
 		if (isMathToken(token)) {
-			result += renderMathToken(token.text);
+			result += stripVTControlCharacters(renderMathToken(token.text));
 			continue;
 		}
 		switch (token.type) {
@@ -3225,7 +3304,9 @@ export class Markdown implements Component {
 		// being written renders its open link or math span as already closed.
 		const lexed = this.#lexTokens(normalizedText);
 		const tail = lexed.at(-1);
-		const speculated = this.transientRenderCache && tail ? speculateStreamingToken(tail) : undefined;
+		const held = this.transientRenderCache && tail ? holdPendingBullet(tail) : undefined;
+		const open = held ?? tail;
+		const speculated = this.transientRenderCache && open ? (speculateStreamingToken(open) ?? held) : undefined;
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
@@ -3972,10 +4053,8 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
-				let styledHeading: string;
 				// A sized heading draws plain text, which would drop a clickable extension link's marker.
 				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
 					const plainWidth = visibleWidth(headingPlainText);
@@ -3991,14 +4070,7 @@ export class Markdown implements Component {
 						break;
 					}
 				}
-				if (headingLevel === 1) {
-					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)), 1);
-				} else if (headingLevel === 2) {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingText), 2);
-				} else {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingPrefix + headingText), headingLevel);
-				}
-				lines.push(renderedLine(styledHeading));
+				lines.push(renderedLine(this.#styleHeading(headingLevel, headingText)));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(renderedLine("")); // Add spacing after headings (unless space token follows)
 				}
@@ -4572,6 +4644,11 @@ export class Markdown implements Component {
 				} else {
 					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
 				}
+			} else if (token.type === "heading") {
+				// A heading in a list item (an ATX line, or a paragraph over a setext
+				// underline) keeps its inline formatting and heading style.
+				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
+				lines.push({ text: this.#styleHeading(token.depth, headingText), nested: false });
 			} else if (token.type === "code") {
 				// Code block in list item
 				const codeIndent = padding(this.#codeBlockIndent);
@@ -4598,6 +4675,13 @@ export class Markdown implements Component {
 		}
 
 		return lines;
+	}
+
+	/** Rendered inline heading text styled for its level, as one (unsized) line. */
+	#styleHeading(depth: number, headingText: string): string {
+		if (depth === 1) return this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)), 1);
+		if (depth === 2) return this.#theme.heading(this.#theme.bold(headingText), 2);
+		return this.#theme.heading(this.#theme.bold(`${"#".repeat(depth)} ${headingText}`), depth);
 	}
 
 	/**
