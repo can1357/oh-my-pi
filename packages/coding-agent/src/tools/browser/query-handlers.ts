@@ -750,6 +750,7 @@ async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: n
 			} finally {
 				await slice.dispose();
 			}
+			let probeFailed = false;
 			const nodes = await Promise.all(
 				probed.map(candidate =>
 					client
@@ -760,10 +761,22 @@ async function queryRoleInAXTree(root: ElementHandle, query: RoleQuery, limit: n
 						// A candidate the page removed meanwhile matches nothing.
 						.then(
 							({ nodes }) => nodes[0],
-							() => undefined,
+							() => {
+								probeFailed = true;
+								return undefined;
+							},
 						),
 				),
 			);
+			if (probeFailed) {
+				try {
+					// A removed candidate may be skipped, but a replaced document must reach the navigation retry.
+					await root.evaluate(() => undefined);
+				} catch (error) {
+					await Promise.all(probed.map(candidate => candidate.dispose()));
+					throw error;
+				}
+			}
 			const rejected: ElementHandle[] = [];
 			for (const [index, candidate] of probed.entries()) {
 				const node = nodes[index];
@@ -832,14 +845,7 @@ async function waitForRole(
 			} catch (error) {
 				// A navigation that replaced the document mid-poll leaves nothing to report yet; the next poll reads the
 				// new one.
-				if (
-					element ||
-					!(
-						isNavigatedContextError(error) ||
-						(error instanceof Error && error.message.includes("should belong to the same JavaScript world"))
-					)
-				)
-					throw error;
+				if (element || !isNavigatedContextError(error)) throw error;
 			}
 			await found?.dispose();
 			const remaining = deadline - Date.now();

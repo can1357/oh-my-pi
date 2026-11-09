@@ -1,9 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { isNavigatedContextError } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
 import { registerSemanticQueryHandlers } from "@oh-my-pi/pi-coding-agent/tools/browser/query-handlers";
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { Page } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
+import { rejectionOf } from "../helpers/rejection";
 
 const available = await chromiumAvailable();
 
@@ -61,6 +63,34 @@ describe.skipIf(!available)("Chromium role/ selectors through the accessibility 
 			const waiting = page.waitForSelector('role/heading[name="Next" exact]', { timeout: 10_000 });
 			await page.goto("data:text/html,<h1>Next</h1>");
 			expect(await (await waiting)?.evaluate(heading => heading.textContent)).toBe("Next");
+		} finally {
+			await browser.close();
+		}
+	});
+
+	it("propagates a navigation that invalidates an accessibility probe batch", async () => {
+		const puppeteer = await loadPuppeteer();
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent("<button>Before</button>");
+			const client = page.mainFrame().client;
+			const send = client.send.bind(client);
+			let navigated = false;
+			const probe = spyOn(client, "send").mockImplementation(async (method, ...args) => {
+				if (method === "Accessibility.getPartialAXTree" && !navigated) {
+					navigated = true;
+					await page.goto("data:text/html,<button>After</button>");
+				}
+				return await send(method, ...args);
+			});
+			try {
+				expect(isNavigatedContextError(await rejectionOf(page.$$("role/button")))).toBe(true);
+			} finally {
+				probe.mockRestore();
+			}
+			expect(await ids(page, 'role/button[name="After" exact]')).toHaveLength(1);
 		} finally {
 			await browser.close();
 		}
