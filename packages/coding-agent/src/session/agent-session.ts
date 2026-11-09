@@ -5747,7 +5747,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async #teamPlanGate(name: string, args: unknown): Promise<BeforeToolCallResult | undefined> {
 		const identity = this.#evalToolSession?.teamIdentity;
-		if (!identity || identity.planApproval === false) return undefined;
+		if (!identity) return undefined;
 		const blocked: BeforeToolCallResult = {
 			block: true,
 			reason: `plan approval required: send it via write team://${identity.team}/plan`,
@@ -5762,6 +5762,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				case "glob":
 				case "web_search":
 				case "wait":
+				case "yield":
+				case "handback":
 					return undefined;
 				case "lsp":
 					if (isRecord(args) && typeof args.action === "string" && LSP_READONLY_ACTIONS.has(args.action))
@@ -5777,8 +5779,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						return undefined;
 				}
 			}
-		} catch {
-			// Never fall back to a cached approval, local flag or tool capability.
+		} catch (error) {
+			// Only a former ungated teammate may outlive its team authority.
+			// Transport failures and live member/ref mismatches still fail closed.
+			if (
+				identity.planApproval === false &&
+				error instanceof Error &&
+				(error.message === "Unknown or stale team generation" ||
+					error.message === "Team lead is no longer registered")
+			)
+				return undefined;
 		}
 		return blocked;
 	}

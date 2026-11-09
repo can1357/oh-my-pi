@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { Settings } from "../src/config/settings";
-import { IrcBus } from "../src/irc/bus";
+import { IrcBus, ircWaitAccepts } from "../src/irc/bus";
 import { AgentRegistry } from "../src/registry/agent-registry";
 import type { AgentSession } from "../src/session/agent-session";
 import { BUILTIN_TEAMS_SLASH_COMMANDS } from "../src/slash-commands/builtin-teams";
@@ -14,7 +15,7 @@ beforeEach(() => {
 });
 
 async function fixture() {
-	const notices: Array<{ body: string; progress?: boolean }> = [];
+	const notices: IrcMessage[] = [];
 	const receive = async (message: (typeof notices)[number]) => {
 		notices.push(message);
 		return "injected";
@@ -92,5 +93,12 @@ describe("team plan commands", () => {
 		await teamRuntime.submitPlan(child, identity, "Revised plan with tests");
 		expect(await command("approve worker")).toContain("approved");
 		expect(await teamRuntime.planPending(child, identity)).toBe(false);
+		const approvals = notices.filter(message => message.body.includes("Plan approved"));
+		expect(approvals).toHaveLength(1);
+		expect(approvals[0]).toMatchObject({ from: "lead", to: "worker", progress: true, teamControl: true });
+		expect(approvals[0]!.body).toContain("mutation tools are available");
+		expect(ircWaitAccepts({ directOnly: true }, approvals[0]!)).toBe(false);
+		expect(IrcBus.global().unansweredSends("lead", 0)).toEqual([]);
+		expect(IrcBus.global().unansweredSends("worker", 0)).toEqual([]);
 	});
 });

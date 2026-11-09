@@ -647,10 +647,18 @@ export class TeamRuntime {
 	}
 
 	async approve(lead: object, handle: string): Promise<void> {
-		const { state, plan } = this.#planTarget(lead, handle);
+		const { state, member, plan } = this.#planTarget(lead, handle);
 		if (!plan.submitted)
 			throw new Error(`No submitted plan; ask the member to send it via write team://${state.name}/plan`);
 		plan.approved = true;
+		const receipt = await IrcBus.global().send({
+			from: state.leadId,
+			to: member.id,
+			body: `Plan approved for team ${state.name}; mutation tools are available within your existing permissions.`,
+			progress: true,
+			teamControl: true,
+		});
+		if (receipt.outcome === "failed") throw new Error(`Plan approved, but notification failed: ${receipt.error}`);
 	}
 
 	async reject(lead: object, handle: string, reason: string): Promise<void> {

@@ -15,12 +15,15 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { BUILTIN_TEAMS_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-teams";
+import { HandbackTool } from "@oh-my-pi/pi-coding-agent/task/handback";
 import { teamRuntime, type TeamIdentity } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
 import type { TeamDefinition } from "@oh-my-pi/pi-coding-agent/task/teams";
 import { getTeamClient } from "@oh-my-pi/pi-coding-agent/thread/services/team-client";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 
 const required = "plan approval required: send it via write team://audit/plan";
 const sessions: AgentSession[] = [];
@@ -52,9 +55,14 @@ function basicTool(name: string): AgentTool {
 }
 
 function makeSession(
-	options: { coordinationOnlyWrite?: boolean; xdev?: boolean; extensionRunner?: ExtensionRunner } = {},
+	options: {
+		coordinationOnlyWrite?: boolean;
+		xdev?: boolean;
+		extensionRunner?: ExtensionRunner;
+		requireYieldTool?: boolean;
+	} = {},
 ) {
-	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false, "team.enabled": true });
 	const toolSession: ToolSession = {
 		cwd,
 		settings,
@@ -65,6 +73,9 @@ function makeSession(
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
 		getSessionInstanceKey: () => session.instanceKey,
 		coordinationOnlyWrite: options.coordinationOnlyWrite,
+		requireYieldTool: options.requireYieldTool,
+		taskDepth: 1,
+		getToolByName: name => registry.get(name),
 	};
 	const write = new WriteTool(toolSession);
 	const registry = new Map<string, Tool>(
@@ -85,6 +96,10 @@ function makeSession(
 		].map(name => [name, basicTool(name)]),
 	);
 	registry.set("write", write);
+	if (options.requireYieldTool) {
+		registry.set("yield", new YieldTool(toolSession));
+		registry.set("handback", new HandbackTool(toolSession));
+	}
 	if (options.xdev) {
 		const xdev: XdevState = {
 			tools: registry,
@@ -121,6 +136,7 @@ async function fixture(
 		coordinationOnlyWrite?: boolean;
 		xdev?: boolean;
 		extensionRunner?: ExtensionRunner;
+		requireYieldTool?: boolean;
 	} = {},
 ) {
 	const lead = makeSession();
@@ -204,6 +220,25 @@ async function dispatchWrite(session: AgentSession, args: { path: string; conten
 	const gate = await before(session, "write", args);
 	if (gate?.block) return gate;
 	return session.getToolByName("write")!.execute("write-test", gate?.args ?? args);
+}
+
+async function teamCommand(lead: AgentSession, args: string) {
+	const outputs: string[] = [];
+	await BUILTIN_TEAMS_SLASH_COMMANDS[0]!.handle!(
+		{ name: "team", args, text: `/team ${args}` },
+		{
+			session: lead,
+			sessionManager: lead.sessionManager,
+			settings: lead.settings,
+			cwd,
+			output: text => {
+				outputs.push(text);
+			},
+			refreshCommands() {},
+			async reloadPlugins() {},
+		},
+	);
+	return outputs.join("\n");
 }
 
 function rewritingRunner(rewrite: () => unknown): ExtensionRunner {
@@ -363,16 +398,22 @@ describe("AgentSession authoritative team plan gate", () => {
 	});
 
 	it("uses runtime approval on every call: reject, resubmit, approve then actually write", async () => {
-		const { session, lead, client, leadMessages, memberMessages } = await fixture();
+		const { session, lead, leadMessages, memberMessages } = await fixture();
 		const args = { path: "result.txt", content: "approved output" };
 		expect(await dispatchWrite(session, args)).toMatchObject({ block: true, reason: required });
 		await dispatchWrite(session, { path: "[team:/audit/plan#ABCD]", content: "First plan" });
 		expect(leadMessages.some(message => message.body.includes("First plan"))).toBe(true);
-		await client.reject(lead.instanceKey, "Scout", "Include verification");
+		expect(await teamCommand(lead, "reject Scout Include verification")).toContain("rejected");
 		expect(memberMessages.some(message => message.body.includes("Include verification"))).toBe(true);
 		expect(await dispatchWrite(session, args)).toMatchObject({ block: true, reason: required });
 		await dispatchWrite(session, { path: "team://audit/plan", content: "Revised plan with verification" });
-		await client.approve(lead.instanceKey, "Scout");
+		expect(await teamCommand(lead, "approve Scout")).toContain("approved");
+		const approvals = memberMessages.filter(message => message.body.includes("Plan approved"));
+		expect(approvals).toHaveLength(1);
+		expect(approvals[0]).toMatchObject({ from: "Lead", to: "Scout", progress: true, teamControl: true });
+		expect(approvals[0]!.body).toContain("mutation tools are available");
+		expect(IrcBus.global().unansweredSends("Lead", 0)).toEqual([]);
+		expect(IrcBus.global().unansweredSends("Scout", 0)).toEqual([]);
 		await dispatchWrite(session, args);
 		expect(await Bun.file(path.join(cwd, "result.txt")).text()).toBe("approved output");
 	});
@@ -387,6 +428,59 @@ describe("AgentSession authoritative team plan gate", () => {
 		expect(toolSession.coordinationOnlyWrite).toBe(true);
 		expect(await Bun.file(path.join(cwd, "blocked.txt")).exists()).toBe(false);
 	});
+
+	it("blocks a locally ungated identity when the runtime still requires approval", async () => {
+		const { session, toolSession } = await fixture();
+		toolSession.teamIdentity = { ...toolSession.teamIdentity!, planApproval: false };
+		expect(await dispatchWrite(session, { path: "blocked.txt", content: "bad" })).toMatchObject({
+			block: true,
+			reason: required,
+		});
+		expect(await Bun.file(path.join(cwd, "blocked.txt")).exists()).toBe(false);
+	});
+
+	it("does not trust a false identity on service failure or a live member authority mismatch", async () => {
+		const { session, client, toolSession } = await fixture();
+		toolSession.teamIdentity = { ...toolSession.teamIdentity!, planApproval: false, memberId: "outsider" };
+		expect(await before(session, "read")).toMatchObject({ block: true, reason: required });
+		vi.spyOn(client, "planPending").mockRejectedValue(new Error("thread service unavailable"));
+		expect(await before(session, "read")).toMatchObject({ block: true, reason: required });
+	});
+
+	for (const name of ["yield", "handback"]) {
+		it(`lets a forced ${name} finish a gated member turn without a reminder loop`, async () => {
+			const { session, client, toolSession } = await fixture({ requireYieldTool: true });
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [
+							{
+								type: "toolCall",
+								name,
+								arguments:
+									name === "yield"
+										? { type: "result", data: "Plan submitted; awaiting approval" }
+										: { report: "Plan submitted; awaiting approval" },
+							},
+						],
+					},
+				],
+			});
+			session.agent.streamFn = mock.stream;
+			session.agent.setModel(mock.model);
+			await session.agent.prompt("Finish the current turn while awaiting approval", {
+				toolChoice: { type: "tool", name },
+			});
+			const results = session.agent.state.messages.filter(message => message.role === "toolResult");
+			expect(results).toHaveLength(1);
+			expect(results[0]).toMatchObject({ toolName: name, isError: false, details: { status: "success" } });
+			expect(await client.planPending(session.instanceKey, toolSession.teamIdentity!)).toBe(true);
+			expect(await dispatchWrite(session, { path: "blocked.txt", content: "bad" })).toMatchObject({
+				block: true,
+				reason: required,
+			});
+		});
+	}
 
 	it("fails closed even for allowlisted tools on runtime failure", async () => {
 		const { session, client } = await fixture();

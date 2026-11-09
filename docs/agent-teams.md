@@ -132,8 +132,10 @@ overrides the team value. Omitted settings do not add a gate. Malformed values
 are refused rather than silently starting an ungated teammate.
 
 Until approval, the exact allowed tool names are `read`, `grep`, `glob`,
-`lsp`, `web_search`, `wait`, and `write` targeting `agent://` or `team://`
-coordination URLs. `lsp` is limited to read-only actions (for example, hover,
+`lsp`, `web_search`, `wait`, terminal reports via `yield`/`handback`, and `write`
+targeting `agent://` or `team://` coordination URLs. Terminal reports let a
+member finish its current turn while awaiting approval; they do not open the
+mutation gate. `lsp` is limited to read-only actions (for example, hover,
 definitions and diagnostics); rename, all `code_actions` calls (including
 listing), raw requests and other state-changing actions are blocked. Other tools, disk writes and `xd://`
 dispatch are blocked:
@@ -144,10 +146,11 @@ plan approval required: send it via write team://audit/plan
 
 This is not session plan mode: IRC wake turns remain enabled. Gated sessions
 consult the main runtime for each call, including worker calls and
-extension-rewritten arguments. The gate remains closed if its authority cannot
-be reached, including after revival with stale membership. Teammates started
-without an approval requirement remain usable after their team ends or they
-are cold-revived; approval itself is never persisted as a grant.
+extension-rewritten arguments, even when the local identity says approval is
+not required. The gate remains closed on service failure or invalid live
+membership. Only teammates started without an approval requirement may continue
+after their team or lead authority ends, including on cold revival; approval
+itself is never persisted as a grant.
 
 1. The member submits its plan as the content of `write team://audit/plan`.
    Its trusted session identifies the author; the URL/body cannot select
@@ -155,8 +158,10 @@ are cold-revived; approval itself is never persisted as a grant.
 2. The lead runs `/team reject Reviewer Explain how you will verify the result`.
    The member receives the reason, and the gate stays closed. The member can
    revise and submit again through the same URL.
-3. The lead runs `/team approve Reviewer` after submission. Approving without
-   a submitted plan is refused and leaves the gate closed.
+3. The lead runs `/team approve Reviewer` after submission. The member receives
+   a non-request notice that its plan was approved and mutation tools are
+   available within its existing permissions; no reply is required. Approving
+   without a submitted plan is refused and leaves the gate closed.
 
 Only the current lead can approve or reject its members. Ambiguous handles,
 nonmembers, stale generations and replaced refs are refused. Approval belongs

@@ -676,7 +676,7 @@ describe("team plan approval", () => {
 	it("honors false overrides and resets approval for a new reservation and team generation", async () => {
 		const registry = AgentRegistry.global();
 		const lead = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
-		const child = session();
+		const child = { deliverIrcMessage: async () => "injected" } as unknown as AgentSessionHandle;
 		registry.register({ id: "lead", displayName: "lead", kind: "main", session: lead });
 		const ref = registry.register({ id: "worker", displayName: "worker", kind: "sub", session: child });
 		const runtime = new TeamRuntime();
