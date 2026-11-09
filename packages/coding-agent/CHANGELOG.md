@@ -26,6 +26,10 @@
 - Changing or unsetting `PATH` in the bash tool's shell now forgets remembered command locations, as bash does, so a command no longer runs from a directory that has left `PATH`
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
 
+### Fixed
+
+- Browser role selectors keep input roles and names in Tern under Turkish and Azeri locales, and visibility waits for Chrome's document root no longer fail on element-only layout APIs
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
