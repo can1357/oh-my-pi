@@ -122,6 +122,14 @@ type ActivityFilter = "all" | "errors" | "responses" | "tools";
 type ActivityScope = "all" | "agent" | "subtree";
 
 type HubViewMode = "roster" | "tree";
+/** The roster's status scopes: what a phone filters agents by. */
+type StatusScope = "all" | "running" | "done" | "parked";
+const STATUS_SCOPES: readonly { id: StatusScope; label: string; status?: AgentRecordLike["status"] }[] = [
+	{ id: "all", label: "All" },
+	{ id: "running", label: "Running", status: "running" },
+	{ id: "done", label: "Done", status: "idle" },
+	{ id: "parked", label: "Parked", status: "parked" },
+];
 
 const SECTION_TABS = [
 	{ id: "agents", label: "1 Agents" },
@@ -425,6 +433,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#treeMaxDepth = 0;
 	/** Fuzzy agent filter (`/`), applied to id and display name. */
 	readonly #agentFilter = filterInput();
+	#statusScope: StatusScope = "all";
 	#agentFilterEditing = false;
 	/** Current observer index and summary data, rebuilt on source changes rather than every paint. */
 	#observedById = new Map<string, ObservableSession>();
@@ -854,6 +863,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			case "scope":
 				if (activity && ACTIVITY_FILTERS.includes(event.value as ActivityFilter)) {
 					this.#setActivityFilter(event.value as ActivityFilter);
+				} else if (!activity && STATUS_SCOPES.some(scope => scope.id === event.value)) {
+					this.#statusScope = event.value as StatusScope;
+					this.#refreshRows();
+					this.#requestRender();
 				}
 				return;
 			case "close":
@@ -957,6 +970,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			preview: "side",
 			...pickerQuery(this.#agentFilterEditing || this.#agentFilter.getValue() ? this.#agentFilter : null),
 			placeholder: "Filter agents…",
+			scopes: this.#statusScopes(),
+			scope: this.#statusScope,
 			columns: AGENT_COLUMNS,
 			items: this.#agentPickerItems(),
 			selected: selected?.id ?? null,
@@ -966,6 +981,16 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			actions,
 			focus: "list",
 		};
+	}
+
+	/** The status scopes with their counts over the whole session. */
+	#statusScopes(): { id: string; label: string; count: number }[] {
+		const refs = this.#sessionRefs();
+		return STATUS_SCOPES.map(scope => ({
+			id: scope.id,
+			label: scope.label,
+			count: scope.status ? refs.filter(ref => ref.status === scope.status).length : refs.length,
+		}));
 	}
 
 	/**
@@ -1019,11 +1044,15 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: undefined,
 			badges: badges.length > 0 ? badges.slice(0, 3) : undefined,
 		};
-		if (this.#viewMode === "tree") {
-			const depth = this.#treeDepthById.get(ref.id) ?? 0;
-			return { ...item, depth, open: this.#childrenByParent.has(ref.id) ? true : undefined };
-		}
-		if (!metrics) return item;
+		const placed: TspPickerItem =
+			this.#viewMode === "tree"
+				? {
+						...item,
+						depth: this.#treeDepthById.get(ref.id) ?? 0,
+						open: this.#childrenByParent.has(ref.id) ? true : undefined,
+					}
+				: item;
+		if (!metrics) return placed;
 		// A running agent's active time ticks terminal-side from the age at send; a settled one
 		// is frozen text. Progress `durationMs` was current when its frame arrived, so a send ages
 		// it to now — re-sending the stale value rewinds Tern's clock. A first frame can report
@@ -1044,7 +1073,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			facts.ctx = Math.max(0, Math.min(1, metrics.contextTokens / metrics.contextWindow));
 			title = `Context ${formatNumber(metrics.contextTokens)} / ${formatNumber(metrics.contextWindow)}`;
 		}
-		return { ...item, facts, title };
+		return { ...placed, facts, title };
 	}
 
 	/** Selected agent's preview: title with status, facts, context meter, recent activity. */
@@ -1653,9 +1682,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			query.length > 0
 				? ordered.filter(ref => fuzzyMatch(query, `${ref.id} ${ref.displayName ?? ""}`).matches)
 				: ordered;
+		const scoped = STATUS_SCOPES.find(scope => scope.id === this.#statusScope)?.status;
+		const statusRows = scoped ? rosterRows.filter(ref => ref.status === scoped) : rosterRows;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows, ref => this.#frozenRank.get(ref)!.batch < 0);
+			const tree = projectAgentTree(statusRows, ref => this.#frozenRank.get(ref)!.batch < 0);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -1663,7 +1694,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#treeMaxDepth = 0;
 			for (const depth of tree.depthById.values()) this.#treeMaxDepth = Math.max(this.#treeMaxDepth, depth);
 		} else {
-			this.#rows = rosterRows;
+			this.#rows = statusRows;
 			this.#treeDepthById.clear();
 			this.#treeParentById.clear();
 			this.#treeLastSiblingById.clear();
