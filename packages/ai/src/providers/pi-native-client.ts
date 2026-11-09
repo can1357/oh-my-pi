@@ -116,7 +116,21 @@ function resolveStreamUrl(model: Model<Api>): string {
 			`pi-native transport requires \`baseUrl\` on model ${model.id} (set it on the provider config in models.yml)`,
 		);
 	}
-	return `${model.baseUrl.replace(/\/+$/, "")}/v1/pi/stream`;
+	return piNativeEndpoint(model.baseUrl, "/v1/pi/stream");
+}
+
+/** Join a gateway `baseUrl` and an endpoint path; a trailing slash on the base never doubles. */
+export function piNativeEndpoint(baseUrl: string, path: string): string {
+	return `${baseUrl.replace(/\/+$/, "")}${path}`;
+}
+
+/**
+ * Whether `headers` already carry an `Authorization` header, whatever its case.
+ * The stream and gateway discovery share this rule, so both add the configured
+ * bearer under the same condition and never send two credentials.
+ */
+export function hasAuthorizationHeader(headers: Record<string, string> | undefined): boolean {
+	return headers !== undefined && Object.keys(headers).some(name => name.toLowerCase() === "authorization");
 }
 
 function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<string, string> {
@@ -132,7 +146,7 @@ function buildHeaders(model: Model<Api>, apiKey: string | undefined): Record<str
 		"x-omp-app": getAppName(),
 		...model.headers,
 	};
-	if (apiKey && !headers.Authorization) {
+	if (apiKey && !hasAuthorizationHeader(headers)) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
 	return headers;

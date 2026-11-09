@@ -5,8 +5,10 @@
  * `discoverModelsByProviderType` with a `DiscoveryContext`; built-in provider
  * discovery lives in pi-catalog's provider-models.
  */
+import { BUILTIN_API_IDS, getCustomApi } from "@oh-my-pi/pi-ai/api-registry";
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/apple-foundation-models";
+import { hasAuthorizationHeader, piNativeEndpoint } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
@@ -16,6 +18,8 @@ import {
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
+import { getBundledModel, isGeneratedProvider } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import {
 	fetchLiteLLMRichModels,
 	fetchLmStudioNativeModelMetadata,
@@ -25,16 +29,18 @@ import {
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
+	apiServesKind,
 	type KindApiKind,
 	type ModelKind,
 	type ModelSpec,
 	type OpenAICompat,
-	type ThinkingConfig,
 	runnerApiKind,
+	type ThinkingConfig,
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { redactUrlForLog } from "../mcp/json-rpc";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -186,6 +192,19 @@ export function discoveryDefaultMaxTokens(api: Api | undefined): number {
 	return api === "anthropic-messages" ? DISCOVERY_DEFAULT_MAX_TOKENS_ANTHROPIC : DISCOVERY_DEFAULT_MAX_TOKENS;
 }
 
+/**
+ * Internal discovery type for a provider configured with `transport: pi-native`
+ * and no `discovery` block: the roster is the gateway's own
+ * `GET {baseUrl}/v1/models`. The models.yml schema does not accept it; the
+ * registry derives it from the transport.
+ */
+export interface PiNativeGatewayDiscovery {
+	type: "pi-native-gateway";
+	timeoutMs?: undefined;
+	injectV1?: undefined;
+	advertisedReasoning?: undefined;
+}
+
 export interface DiscoveryProviderConfig {
 	provider: string;
 	api: Api;
@@ -193,7 +212,7 @@ export interface DiscoveryProviderConfig {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
-	discovery: ProviderDiscovery;
+	discovery: ProviderDiscovery | PiNativeGatewayDiscovery;
 	optional?: boolean;
 	/**
 	 * Extra roots probed in order when `baseUrl` yields no reachable server.
@@ -465,6 +484,8 @@ export function discoverModelsByProviderType(
 			return discoverProxyModels(providerConfig, ctx);
 		case "litellm":
 			return discoverLiteLLMModels(providerConfig, ctx);
+		case "pi-native-gateway":
+			return discoverPiNativeGatewayModels(providerConfig, ctx);
 		case "apple-foundation-models":
 			return discoverAppleFoundationModels(providerConfig);
 	}
@@ -1355,6 +1376,185 @@ export async function discoverOpenAIModelsList(
 	return providerConfig.discovery.type === "litellm"
 		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
 		: specs.map(spec => buildModel(spec));
+}
+
+/** Most rows read from one gateway reply; a gateway serves a few hundred models, so a longer list is hostile or broken. */
+const PI_NATIVE_GATEWAY_MAX_ROWS = 2_000;
+/** Longest model id (after the provider prefix) and display name kept from a gateway row. */
+const PI_NATIVE_GATEWAY_MAX_ID_LENGTH = 256;
+const PI_NATIVE_GATEWAY_MAX_NAME_LENGTH = 200;
+/** C0 and C1 control characters, DEL included. */
+const CONTROL_CHARACTER_RE = /\p{Cc}/u;
+const CONTROL_CHARACTERS_RE = /\p{Cc}/gu;
+
+/** Positive safe integer, or `undefined`: gateway limits are counts, never fractions or numeric strings. */
+function positiveIntegerOrUndefined(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Origin a redirect `Location` points at (path and query dropped), for an error message. */
+function redirectTargetOrigin(location: string | null, requestUrl: string): string {
+	if (!location) return "an unspecified location";
+	try {
+		return new URL(location, requestUrl).origin;
+	} catch {
+		return "an unparseable location";
+	}
+}
+
+/**
+ * Discover the roster of a provider configured with `transport: pi-native` from
+ * the gateway it streams through: `GET {baseUrl}/v1/models`, authenticated like
+ * `POST /v1/pi/stream` (provider `headers`, and `Authorization: Bearer <key>`
+ * unless the headers already carry `Authorization`, whatever its case). The
+ * `x-omp-*` attribution headers are not sent: the gateway's model list does not
+ * read them. The request does not follow redirects, so no header ever reaches
+ * another origin; a 3xx reply is an error.
+ *
+ * The bearer is `ctx.getBearerApiKeyResolver(provider)`; the registry supplies
+ * only the provider's configured gateway key there, never a stored login for
+ * the upstream provider.
+ *
+ * Rows are provider-qualified (`<provider>/<id>`; the stream sends the same
+ * form back as `modelId`), so only this provider's rows count and the prefix is
+ * stripped for the local id. Only chat rows are published: the gateway rejects
+ * other kinds on `/v1/pi/stream`, and the non-chat runners dispatch by `api`
+ * without the pi-native transport. A row's `api` (a known api only),
+ * `display_name`, `context_length`, `max_output_tokens`, `input_modalities` and
+ * `supports_tools` carry over; whatever the row omits comes from the bundled
+ * model of the same provider and id, when there is one. Rows hold neither
+ * pricing nor reasoning metadata, so those come from the bundled model or the
+ * catalog rules.
+ *
+ * The reply is untrusted: at most {@link PI_NATIVE_GATEWAY_MAX_ROWS} rows are
+ * read, ids with control characters or excess length are skipped, display names
+ * lose control characters and are capped, and limits must be positive safe
+ * integers.
+ *
+ * A reply that is not a model list throws, so the caller keeps its last usable
+ * snapshot instead of treating the roster as emptied. Errors carry the URL
+ * with userinfo and sensitive query values removed.
+ */
+export async function discoverPiNativeGatewayModels(
+	providerConfig: DiscoveryProviderConfig,
+	ctx: DiscoveryContext,
+): Promise<Model<Api>[]> {
+	const baseUrl = providerConfig.baseUrl;
+	if (!baseUrl) {
+		throw new Error(`pi-native provider ${providerConfig.provider} has no baseUrl to discover models from`);
+	}
+	const modelsUrl = piNativeEndpoint(baseUrl, "/v1/models");
+	const logUrl = redactUrlForLog(modelsUrl);
+	const headers: Record<string, string> = { Accept: "application/json", ...providerConfig.headers };
+	const attempt = (requestHeaders: Record<string, string>) =>
+		withTimeoutSignal(REMOTE_DISCOVERY_TIMEOUT_MS, async signal => {
+			let res: Response;
+			try {
+				res = await ctx.fetch(modelsUrl, { headers: requestHeaders, signal, redirect: "manual" });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new Error(`${logUrl}: ${message.replaceAll(modelsUrl, logUrl)}`);
+			}
+			if (res.status >= 300 && res.status < 400) {
+				const target = redirectTargetOrigin(res.headers.get("location"), modelsUrl);
+				throw new Error(`${logUrl} redirected to ${target}; discovery does not follow redirects`);
+			}
+			if (!res.ok) throw new DiscoveryHttpError(res.status, logUrl);
+			return (await res.json()) as unknown;
+		});
+	const apiKey = hasAuthorizationHeader(headers)
+		? undefined
+		: await ctx.getBearerApiKeyResolver(providerConfig.provider);
+	const payload = apiKey
+		? await withAuth(apiKey, key => attempt({ ...headers, Authorization: `Bearer ${key}` }))
+		: await attempt(headers);
+	const rows = isRecord(payload) ? payload.data : undefined;
+	if (!Array.isArray(rows)) {
+		throw new Error(`${logUrl} did not return a model list`);
+	}
+
+	const prefix = `${providerConfig.provider}/`;
+	const references = getBundledModelReferenceIndex();
+	const seen = new Set<string>();
+	const models: Model<Api>[] = [];
+	for (const row of rows.slice(0, PI_NATIVE_GATEWAY_MAX_ROWS)) {
+		if (!isRecord(row) || typeof row.id !== "string" || !row.id.startsWith(prefix)) continue;
+		const id = row.id.slice(prefix.length);
+		if (!id || id.length > PI_NATIVE_GATEWAY_MAX_ID_LENGTH || CONTROL_CHARACTER_RE.test(id) || seen.has(id)) continue;
+		// Absent means chat. Another kind is unusable here: the gateway refuses it on
+		// `/v1/pi/stream` and its runner dispatches by `api`, ignoring the transport.
+		if (row.kind !== undefined && row.kind !== "chat") continue;
+		const exact = isGeneratedProvider(providerConfig.provider)
+			? (getBundledModel(providerConfig.provider, id) as Model<Api> | undefined)
+			: undefined;
+		let api: Api;
+		if (row.api === undefined || row.api === null) {
+			api = exact?.api ?? providerConfig.api;
+		} else if (
+			typeof row.api === "string" &&
+			((BUILTIN_API_IDS as readonly string[]).includes(row.api) || getCustomApi(row.api) !== undefined)
+		) {
+			api = row.api;
+		} else {
+			// An api this build cannot dispatch.
+			continue;
+		}
+		if (!apiServesKind(api, "chat")) continue;
+		seen.add(id);
+
+		const reference = exact ?? resolveModelReference(id, references);
+		const name =
+			typeof row.display_name === "string"
+				? row.display_name
+						.replace(CONTROL_CHARACTERS_RE, "")
+						.trim()
+						.slice(0, PI_NATIVE_GATEWAY_MAX_NAME_LENGTH)
+						.trim()
+				: "";
+		const input = extractOpenAIModelsListInputCapabilities(row) ?? reference?.input ?? ["text"];
+		const reportedContextWindow = positiveIntegerOrUndefined(row.context_length);
+		const reportedMaxTokens = positiveIntegerOrUndefined(row.max_output_tokens);
+		// The bundled row of this provider and id describes the same upstream
+		// model; it stays the base only while it speaks the api the gateway
+		// reports, otherwise its api-specific thinking and compat would mislead.
+		const bundled = exact !== undefined && exact.api === api ? exact : undefined;
+		const base: ModelSpec<Api> = bundled
+			? { ...toModelSpec(bundled), headers: undefined, resolveHeaders: undefined }
+			: ({
+					id,
+					name: name || reference?.name || id,
+					api,
+					provider: providerConfig.provider,
+					reasoning: reference?.reasoning === true,
+					thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
+					input,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				} as ModelSpec<Api>);
+		const contextWindow =
+			reportedContextWindow ??
+			bundled?.contextWindow ??
+			reference?.contextWindow ??
+			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+		const maxTokens = Math.min(
+			reportedMaxTokens ?? bundled?.maxTokens ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+			contextWindow,
+		);
+		const supportsTools = row.supports_tools === false ? false : base.supportsTools;
+		models.push(
+			buildModel({
+				...base,
+				name: name || base.name,
+				// The gateway's row decides the kind: a chat row stays chat even when the bundled id is not.
+				kind: undefined,
+				baseUrl,
+				input,
+				contextWindow,
+				maxTokens,
+				...(supportsTools !== undefined ? { supportsTools } : {}),
+			} as ModelSpec<Api>),
+		);
+	}
+	return models;
 }
 
 export async function discoverLiteLLMModels(

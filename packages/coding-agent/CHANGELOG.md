@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a `transport: pi-native` provider listing models its gateway does not serve (and missing ones it does): without a `discovery` block, its chat roster now comes from the gateway's `GET /v1/models` (provider-qualified ids, `api` and capability fields carried over), replaces the bundled chat roster, and keeps the last snapshot when the gateway is unreachable. Discovery authenticates only with the provider's configured gateway `apiKey` or `Authorization` header (never a stored login for the upstream provider), does not follow redirects, treats the reply as untrusted, and caches snapshots per `baseUrl` and credential ([#18580](https://github.com/can1357/oh-my-pi/pull/18580) by [@enieuwy](https://github.com/enieuwy))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes
