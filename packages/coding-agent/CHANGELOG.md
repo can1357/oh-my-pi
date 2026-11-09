@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- `omp://` documentation links in the transcript open the doc in every install, not only a source checkout: the embedded doc is materialized into a read-only cache copy and linked, while the label still shows the `omp://` URL ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.8] - 2026-11-11
 
@@ -230,7 +231,6 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
-- `omp://` documentation links in the transcript open the doc in every install, not only a source checkout: the embedded doc is materialized into a read-only cache copy and linked, while the label still shows the `omp://` URL ([#15163](https://github.com/can1357/oh-my-pi/pull/15163) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
