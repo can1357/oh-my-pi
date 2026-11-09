@@ -117,7 +117,7 @@ ASI <key>=<value>
 
 `OMP_AUTORESEARCH_DB_DIR` **relocates the directory holding a local SQLite file. It does not select a backend.** `resolveAutoresearchPaths` in `autoresearch/storage.ts` is the only code that reads the variable, and the only thing it does is join the override directory with the project key instead of the default root. There is no driver registry and no remote option: `AutoresearchStorage` is a concrete class over `bun:sqlite`, reached through `openAutoresearchStorage` and `openAutoresearchStorageIfExists`.
 
-**Set it to an absolute path with no surrounding whitespace.** The value is passed straight to `path.join`: unlike the neighbouring overrides in the environment-variable reference it is not trimmed, `~` is not expanded, and it need not be absolute, so any other spelling reaches the filesystem exactly as omp received it. Three of them, each measured against this code:
+**Set it to an absolute path with no surrounding whitespace.** The value is passed straight to `path.join`: unlike the neighbouring overrides in the environment-variable reference it is not trimmed, `~` is not expanded, and it need not be absolute. Three other spellings, each measured against this code:
 
 - A **relative** value such as `bench-db` puts the database and the artifact directory in the same tree under the process working directory, and a later process finds them.
 - A value beginning with a **literal tilde** does the same under a directory named `~`; nothing is created at the home-expanded path. In a shell that takes `OMP_AUTORESEARCH_DB_DIR='~/bench-db'`, since an unquoted `~/bench-db` is expanded before omp sees it.
