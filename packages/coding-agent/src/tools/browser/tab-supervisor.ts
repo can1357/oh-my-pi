@@ -1245,7 +1245,7 @@ async function runInTabWithSnapshot(
 		}
 	}
 	const cancellation = Promise.withResolvers<never>();
-	let abortTimer: ReturnType<typeof setTimeout> | undefined;
+	let abortTimer: Timer | undefined;
 	let cancellationExpired = false;
 	const abort = (): void => {
 		safeSend(tab, { type: "abort", id });
@@ -1389,7 +1389,10 @@ async function runInTabWithSnapshot(
 				const reason = runTimedOut
 					? "Browser code execution timed out; tab killed"
 					: "Browser request interception cleanup failed; tab killed";
-				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
+				const recoveryTimeoutMs = runTimedOut
+					? Math.min(opts.timeoutMs, WORKER_RECOVERY_TIMEOUT_MS - GRACE_MS)
+					: opts.timeoutMs;
+				const reattached = await recoverWorkerTab(tab, name, recoveryTimeoutMs, reason);
 				if (runTimedOut) {
 					throw new ToolError(
 						reattached
@@ -1433,9 +1436,7 @@ async function recoverWorkerTab(
 	};
 	try {
 		if (tab.worker.mode === "inline") return await killTab(reason);
-		return await recycleTimedOutWorkerTab(tab, Math.min(timeoutMs + GRACE_MS, WORKER_RECOVERY_TIMEOUT_MS), {
-			recover: opts.recover,
-		});
+		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, { recover: opts.recover });
 	} catch (recycleError) {
 		logger.warn("Failed to recycle browser tab worker; killing tab", {
 			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
