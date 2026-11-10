@@ -357,17 +357,26 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
  * loaded another checkpoint answers `chunk.model` with the weights it has. The
  * transcript already names such turns through the shared detector; the status
  * line carries the same verdict so the model chip is never read as the truth.
+ *
+ * The id is host-chosen text, so it goes through the same sanitizer and width
+ * cap as every other host-reported string in this file (`u.tier`, reset reasons):
+ * an echo can be an absolute checkpoint path, and control characters in it must
+ * not reach the renderer as layout.
  */
 function servedModelMismatch(ctx: SegmentContext): string | undefined {
-	const selected = ctx.session.state.model?.id;
+	const selected = ctx.session.state.model;
 	const messages = ctx.session.state.messages;
-	if (!selected || !messages) return undefined;
+	if (!selected?.id || !messages) return undefined;
 	for (let i = messages.length - 1; i >= 0; --i) {
 		const message = messages[i];
-		// Only turns produced for the currently selected model describe it.
-		if (message.role !== "assistant" || message.model !== selected) continue;
+		// Only turns produced for the currently selected model describe it — including
+		// the transport that produced them. Two providers can expose the same id, so a
+		// turn from the other one must neither add a badge nor hide the current one.
+		if (message.role !== "assistant" || message.model !== selected.id) continue;
+		if (message.provider !== selected.provider || message.api !== selected.api) continue;
 		// The newest matching turn decides; older turns describe older requests.
-		return detectServedModelMismatch(message)?.served;
+		const served = detectServedModelMismatch(message)?.served;
+		return served ? truncateToWidth(sanitizeStatusText(served), TRUNCATE_LENGTHS.SHORT) : undefined;
 	}
 	return undefined;
 }

@@ -11,7 +11,7 @@ beforeAll(async () => {
 function createModelContext(advisorActive: boolean): SegmentContext {
 	return {
 		session: {
-			state: { model: { id: "test-model", name: "Test Model" } },
+			state: { model: { id: "test-model", name: "Test Model", api: "openai-completions", provider: "openrouter" } },
 			isFastModeActive: () => false,
 			isAutoThinking: false,
 			autoResolvedThinkingLevel: () => undefined,
@@ -242,5 +242,26 @@ describe("status line model segment served-model badge", () => {
 			createServedContext("claude-opus-4-6", [servedTurn("gpt-4o-mini", "gpt-4o")]),
 		);
 		expect(rendered.content).not.toContain(theme.sep.dot);
+	});
+
+	it("ignores a same-id turn produced through another provider", () => {
+		const rendered = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [
+				{ ...servedTurn("claude-opus-4-6", "claude-opus-4-7"), provider: "ollama" },
+			]),
+		);
+		expect(rendered.content).not.toContain(theme.sep.dot);
+	});
+
+	it("strips host control characters and caps the echo at the badge width", () => {
+		const echo = "/home/runner/models/claude-opus-4-7-Q4_K_M-GGUF\u0007latest";
+		const rendered = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [servedTurn("claude-opus-4-6", echo)]),
+		);
+		expect(rendered.content).not.toContain("\u0007");
+		expect(rendered.content).not.toContain("Q4_K_M");
+		expect(rendered.content).toContain("…");
 	});
 });
