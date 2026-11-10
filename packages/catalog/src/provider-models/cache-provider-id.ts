@@ -33,6 +33,8 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// is authoritative, so a shared namespace would serve one workspace's ids,
 	// prices, and limits to another workspace's key for the full TTL.
 	otari: true,
+	// LiteLLM virtual keys have different /v1/models rosters on the same proxy.
+	litellm: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -184,17 +186,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
-			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			// rich-v14 fetches every /v2/model/info page rather than caching only
-			// its first 50 models. rich-v13 moves `mode: decisions` groups off chat.
-			// rich-v12 invalidates namespaced ids that missed bare catalog references.
-			// rich-v11 excluded ClinePass gateway metadata (issue #10932). rich-v10
-			// filtered known non-conversational LiteLLM modes, unioned compat across
-			// the management endpoints, and keyed the deployment's `supports_vision`
-			// declaration into it; earlier versions invalidated rows whose
-			// `compatConfig` retained a colliding bundled model's provider-specific
-			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
-			return `litellm:rich-v14:${Bun.hash(baseUrl).toString(36)}`;
+			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
+			// The selectable roster is issued per virtual key; old rich-only
+			// snapshots must not survive the switch to scoped discovery. Bump the
+			// version whenever the LiteLLM mappers change, or warm caches keep
+			// serving pre-change rows for the full TTL (rich-v1…v14 history in git).
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":
