@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -56,7 +55,7 @@ describe.skipIf(skip)("output delivery", () => {
 		const session = new PtySession();
 		// The callback's failure stops the command first: its TERM trap writes
 		// the marker, and only then does the kill arrive.
-		let watch: ReturnType<typeof setInterval> | undefined;
+		let watch: Timer | undefined;
 		const killed = Promise.withResolvers<void>();
 		const run = session.start(
 			{
@@ -65,8 +64,8 @@ describe.skipIf(skip)("output delivery", () => {
 				timeoutMs: 30_000,
 			},
 			() => {
-				watch ??= setInterval(() => {
-					if (existsSync(marker)) {
+				watch ??= setInterval(async () => {
+					if (await Bun.file(marker).exists()) {
 						clearInterval(watch);
 						try {
 							session.kill();
@@ -75,7 +74,7 @@ describe.skipIf(skip)("output delivery", () => {
 						}
 						killed.resolve();
 					}
-				}, 1);
+				}, 50);
 				throw new Error("callback failed");
 			},
 		);

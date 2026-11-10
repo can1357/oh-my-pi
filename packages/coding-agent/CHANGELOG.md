@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Bash commands report failed or stalled output delivery instead of hiding it behind a later cancellation or native timeout, and keep session state when only output delivery fails ([#17858](https://github.com/can1357/oh-my-pi/pull/17858)).
+- Bash commands report failed or stalled output delivery instead of hiding it behind a later cancellation or native timeout, and keep session state when only output delivery fails ([#17858](https://github.com/can1357/oh-my-pi/pull/17858) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.18.4] - 2026-11-09
 
