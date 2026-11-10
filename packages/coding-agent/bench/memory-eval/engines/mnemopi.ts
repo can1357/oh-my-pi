@@ -3,16 +3,17 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
 import { embed, embedQuery } from "@oh-my-pi/pi-mnemopi/core/embeddings";
+import { loadedFastembedVersions } from "@oh-my-pi/pi-mnemopi/core/fastembed-runtime";
 import {
 	type MnemopiEmbeddingProvider,
 	type ResolvedMnemopiRuntimeOptions,
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
+import { getFastembedCacheDir, normalizeEnvKey } from "@oh-my-pi/pi-utils";
 import { sha256File } from "../../../src/utils/file-hash";
 import type { EngineAdapter, MnemopiRecall, ProtocolName, RecallHit } from "../engine";
-import { envName, PythonProcess } from "./python-process";
+import { PythonProcess } from "./python-process";
 import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
@@ -44,7 +45,7 @@ export interface MnemopiEngineOptions {
 export function assertMnemopiEnvClean(): void {
 	// OPENROUTER_BASE_URL is the one non-MNEMOPI_ variable that can route its embeddings to an API.
 	const set = Object.keys(Bun.env).filter(key => {
-		const name = envName(key);
+		const name = normalizeEnvKey(key);
 		return (name.startsWith("MNEMOPI_") || name === "OPENROUTER_BASE_URL") && Bun.env[key];
 	});
 	if (set.length > 0) {
@@ -146,17 +147,18 @@ export function mnemopiEngine(options: MnemopiEngineOptions = {}): EngineAdapter
 		name: "mnemopi",
 		describe: async () => {
 			const pkg: { version: string } = await Bun.file(PACKAGE_JSON).json();
-			// The Python embedder's numerical runtime decides near-tie order, so it is part of the configuration;
-			// fts-only never starts the embedder, and asking it for versions must not either.
+			// The numerical runtime decides near-tie order, so it is part of the configuration: the Python embedder's
+			// versions, or the JS installation fastembed actually loaded (workspace and runtime install differ, notably
+			// in the tokenizer). fts-only never starts the embedder, and asking for versions must not either.
 			const embedding = opts.embeddings?.disabled !== true;
-			const runtime =
-				embedder === "python" && embedding
-					? Object.fromEntries(
-							Object.entries((await startEmbedder().call("versions")) as Record<string, string>).map(
-								([name, version]) => [`${name}_version`, version],
-							),
-						)
-					: {};
+			const versions: Record<string, string> = !embedding
+				? {}
+				: embedder === "python"
+					? ((await startEmbedder().call("versions")) as Record<string, string>)
+					: await loadedFastembedVersions();
+			const runtime = Object.fromEntries(
+				Object.entries(versions).map(([name, version]) => [`${name}_version`, version]),
+			);
 			// The model files actually loaded: the name maps to an unversioned download. Warmup loaded them, so the
 			// digest taken there is the one that produced the vectors; a different one now means they were replaced.
 			const modelDigest: Record<string, string> = {};

@@ -308,6 +308,37 @@ export function loadFastembed(): Promise<FastembedModule> {
 	return fastembedLoad;
 }
 
+/** The `package.json` version of the installed package at `packageDir`. */
+async function installedVersion(packageDir: string): Promise<string> {
+	const manifest: { version?: unknown } = await Bun.file(path.join(packageDir, "package.json")).json();
+	if (typeof manifest.version !== "string") throw new Error(`${packageDir} has no package version`);
+	return manifest.version;
+}
+
+/**
+ * Versions of the installation {@link loadFastembed} resolved: `fastembed`, the `onnxruntime-node` paired with it and
+ * the `@anush008/tokenizers` its tokenizer loads. The workspace lockfile and the on-demand runtime install pin different
+ * tokenizers ({@link TOKENIZERS_SPEC}), so the package manifest alone does not say which one produced a vector.
+ */
+export async function loadedFastembedVersions(): Promise<{
+	fastembed: string;
+	onnxruntime: string;
+	tokenizers: string;
+}> {
+	await loadFastembed();
+	if (loadedFastembed === null) throw new Error("fastembed is not loaded");
+	const { fastembedPackageDir } = loadedFastembed;
+	// Node resolution from the fastembed package: its own node_modules first, then the hoisted copy beside it.
+	const nested = path.join(fastembedPackageDir, "node_modules", "@anush008", "tokenizers");
+	const hoisted = path.join(path.dirname(fastembedPackageDir), "@anush008", "tokenizers");
+	const tokenizersDir = (await Bun.file(path.join(nested, "package.json")).exists()) ? nested : hoisted;
+	return {
+		fastembed: await installedVersion(fastembedPackageDir),
+		onnxruntime: await installedVersion(resolveFastembedOrt(fastembedPackageDir).ortPackageDir),
+		tokenizers: await installedVersion(tokenizersDir),
+	};
+}
+
 async function loadFastembedOnce(): Promise<FastembedModule> {
 	try {
 		const requireDirect = createRequire(import.meta.url);
