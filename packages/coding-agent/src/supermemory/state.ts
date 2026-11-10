@@ -35,6 +35,8 @@ const MAX_RETAIN_CHARS = 60_000;
 const DISPOSE_FLUSH_TIMEOUT_MS = 2_000;
 /** Custom transcript entry recording how far automatic retention got; see {@link SupermemorySessionState}. */
 const RETENTION_CURSOR_ENTRY_TYPE = "supermemory_retention";
+/** Custom transcript entry recording a `/memory clear`, so a resume does not restore the cleared recall. */
+const RECALL_CLEAR_ENTRY_TYPE = "supermemory_recall_clear";
 
 /** A tool-initiated write in `<agentDir>/supermemory-outbox/<destination>/`; `id` is its `customId`. */
 interface SupermemoryOutboxEvent extends MemoryOutboxEvent {
@@ -272,6 +274,15 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#unsubscribe = undefined;
 		if (!this.automatic) return;
 		this.#unsubscribe = this.session.subscribe(event => {
+			if (
+				(event.type === "agent_start" || event.type === "agent_end") &&
+				this.#config.autoRetain &&
+				!this.#hasCursor
+			) {
+				// Record where retention starts before any upload: a transcript without a cursor reads as
+				// pre-cursor on resume, which skips every turn it already holds.
+				this.#appendCursor(this.lastRetainedTurn);
+			}
 			if (event.type !== "agent_end") return;
 			// A non-terminal settle is followed by the agent's own continuation; closing the window now
 			// would leave that continuation's answer out of every window.
@@ -391,7 +402,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!query) return undefined;
 		const generation = ++this.#recallGeneration;
 		// Reuse this transcript's recall so a resumed session sends the same prompt bytes.
-		const persisted = findPersistedRecall(this.session.sessionManager, this.#scope());
+		const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
 		if (persisted !== undefined) {
 			return {
 				context: persisted.text || undefined,
@@ -434,8 +445,35 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (this.#recallGeneration !== generation) return false;
 		this.hasRecalledForFirstTurn = true;
 		if (context) this.lastRecallSnippet = context;
-		if (persist) persistRecall(this.session.sessionManager, this.#scope(), { text: context, memories: [] });
+		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
 		return true;
+	}
+
+	/**
+	 * `/memory clear`: drop the cached recall, and record the clear so a resumed session asks the
+	 * server again instead of restoring the cleared block from the transcript.
+	 */
+	clearRecall(): void {
+		this.lastRecallSnippet = undefined;
+		if (this.aliasOf) return;
+		this.session.sessionManager.appendCustomEntry(RECALL_CLEAR_ENTRY_TYPE, { version: 1, scope: this.#scope() });
+	}
+
+	/** Recall scope: {@link #scope} plus how many times `/memory clear` ran on this branch. */
+	#recallScope(): string {
+		const scope = this.#scope();
+		const clears = this.session.sessionManager
+			.getBranch()
+			.filter(
+				entry =>
+					entry.type === "custom" &&
+					entry.customType === RECALL_CLEAR_ENTRY_TYPE &&
+					typeof entry.data === "object" &&
+					entry.data !== null &&
+					"scope" in entry.data &&
+					entry.data.scope === scope,
+			).length;
+		return clears === 0 ? scope : JSON.stringify([scope, clears]);
 	}
 
 	/** Server, account (hashed key) and container; a persisted recall or retention cursor applies only to the same ones. */
@@ -479,7 +517,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const every = this.#config.retainEveryNTurns;
 		const { messages } = history;
 		const userStarts = userTurnStarts(messages);
-		while (userStarts.length - this.lastRetainedTurn >= every) {
+		// A trailing turn with no answer yet (aborted or errored) stays open: a bare resume answers
+		// it without adding a user turn, so closing it now would leave that answer out of every window.
+		const settledTurns = messages.at(-1)?.role === "user" ? userStarts.length - 1 : userStarts.length;
+		while (settledTurns - this.lastRetainedTurn >= every) {
 			const start = this.lastRetainedTurn;
 			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
 		}

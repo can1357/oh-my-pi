@@ -86,7 +86,7 @@ export const supermemoryBackend: MemoryBackend = {
 		const state = session?.getSupermemorySessionState();
 		if (state) {
 			await state.flush();
-			state.lastRecallSnippet = undefined;
+			state.clearRecall();
 		}
 		logger.warn(
 			"Supermemory memory is server-side; only the local recall cache was cleared. " +

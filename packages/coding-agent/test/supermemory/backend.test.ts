@@ -219,6 +219,73 @@ describe("supermemoryBackend", () => {
 		expect(search).not.toHaveBeenCalled();
 	});
 
+	it("a resume after /memory clear asks the server again instead of restoring the cleared recall", async () => {
+		spyRecall();
+		const session = makeSession();
+		await start(session);
+		(await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined))?.commit();
+		session.addTurn("first");
+		await supermemoryBackend.clear("/tmp", "/tmp", session as never);
+
+		vi.restoreAllMocks();
+		const { profile, search } = spyRecall();
+		await start(session);
+		await supermemoryBackend.beforeAgentStartPrompt!(session as never, "again", undefined);
+		expect(profile).toHaveBeenCalledTimes(1);
+		expect(search).toHaveBeenCalledTimes(1);
+	});
+
+	it("a transcript that exits before its first window keeps its completed turns for the next process", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		// The process exits during turn three, before its agent_end.
+		session.addTurn("three");
+		await session.getSupermemorySessionState()?.dispose();
+
+		await start(session);
+		await session.endTurn();
+		expect(create.mock.calls.map(call => call[0]?.metadata?.turnStart)).toEqual([0]);
+	});
+
+	it("leaves an unanswered aborted turn open so its later answer is retained", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		const entries = session.sessionManager.getEntries();
+		const at = new Date(0).toISOString();
+		entries.push({
+			type: "message",
+			id: "u-aborted",
+			parentId: null,
+			timestamp: at,
+			message: { role: "user", content: "two", timestamp: 0 },
+		} as never);
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(1);
+		// A bare resume answers the same prompt without a new user entry.
+		entries.push({
+			type: "message",
+			id: "a-resumed",
+			parentId: null,
+			timestamp: at,
+			message: { role: "assistant", content: [{ type: "text", text: "resumed answer" }], timestamp: 0 },
+		} as never);
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(2);
+		expect(create.mock.calls[1]?.[0]?.content).toContain("resumed answer");
+	});
+
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),
