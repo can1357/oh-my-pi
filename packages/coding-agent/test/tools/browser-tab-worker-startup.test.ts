@@ -543,6 +543,66 @@ describe("OMP-owned browser evaluation", () => {
 							Promise.resolve().then(() => Promise.resolve()).then(() => flash.remove());
 						});
 						const mutation = await mutationWait.then(handle => handle.jsonValue(), error => String(error));
+						const methods = [];
+						const cancelled = [];
+						for (const polling of ["raf", "mutation"]) {
+							const method = polling === "raf"
+								? { ready() { return globalThis.__ompPageMarker; } }.ready
+								: new class { async ready() { return globalThis.__ompPageMarker; } }().ready;
+							const methodHandle = await page.waitForFunction(method, { polling, timeout: 2_000 });
+							methods.push(await methodHandle.jsonValue());
+							await methodHandle.dispose();
+							await page.evaluate(() => { globalThis.__ompAbortChecks = 0; });
+							const controller = new AbortController();
+							const waiting = page.waitForFunction(() => {
+								globalThis.__ompAbortChecks++;
+								return false;
+							}, { polling, timeout: 0, signal: controller.signal })
+								.then(() => "resolved", error => error.name);
+							await page.waitForFunction(() => globalThis.__ompAbortChecks > 0);
+							controller.abort();
+							const outcome = await waiting;
+							// Real Chromium RAF/mutation delivery is outside Bun's fake clock.
+							await page.evaluate(() => {
+								const { promise, resolve } = Promise.withResolvers();
+								setTimeout(resolve, 100);
+								return promise;
+							});
+							const before = await page.evaluate(() => globalThis.__ompAbortChecks);
+							await page.evaluate(() => { document.body.append(document.createElement("b")); });
+							await page.evaluate(() => {
+								const { promise, resolve } = Promise.withResolvers();
+								setTimeout(resolve, 100);
+								return promise;
+							});
+							cancelled.push({ outcome, stopped: before === await page.evaluate(() => globalThis.__ompAbortChecks) });
+						}
+						// A timer predicate can resolve after the host timeout. Its result handle must still be released.
+						const sample = await page.evaluateHandle(() => ({}));
+						const prototype = Object.getPrototypeOf(sample);
+						const originalDispose = prototype.dispose;
+						let lateDisposals = 0;
+						prototype.dispose = function() { lateDisposals++; return originalDispose.call(this); };
+						let late;
+						try {
+							late = await page.waitForFunction(
+								() => {
+									const { promise, resolve } = Promise.withResolvers();
+									setTimeout(() => resolve({ late: true }), 200);
+									return promise;
+								},
+								{ timeout: 50 },
+							).then(() => "resolved", error => error.name);
+							// Exercise a real protocol result arriving after the real wait deadline.
+							await page.evaluate(() => {
+								const { promise, resolve } = Promise.withResolvers();
+								setTimeout(resolve, 400);
+								return promise;
+							});
+						} finally {
+							prototype.dispose = originalDispose;
+							await sample.dispose();
+						}
 						const seen = {
 							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
 							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
@@ -554,6 +614,10 @@ describe("OMP-owned browser evaluation", () => {
 							timedOut,
 							stalled,
 							mutation,
+							methods,
+							cancelled,
+							late,
+							lateDisposals,
 							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
 							registry: await page.evaluate(() => String(customElements)),
 							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
@@ -583,6 +647,10 @@ describe("OMP-owned browser evaluation", () => {
 						timedOut: "TimeoutError: Waiting failed: 200ms exceeded",
 						stalled: "TimeoutError: Waiting failed: 200ms exceeded",
 						mutation: "flash",
+						methods: [47, 47],
+						cancelled: [{ outcome: "AbortError", stopped: true }, { outcome: "AbortError", stopped: true }],
+						late: "TimeoutError",
+						lateDisposals: 1,
 						chained: 47,
 						registry: "[object CustomElementRegistry]",
 						leaked: [],

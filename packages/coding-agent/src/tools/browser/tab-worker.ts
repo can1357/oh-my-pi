@@ -23,6 +23,7 @@ import type {
 	SerializedAXNode,
 	Target,
 } from "puppeteer-core";
+import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
@@ -782,32 +783,40 @@ async function evaluateInRealm(
 		await dispose();
 	}
 }
+type PagePoller = { promise: Promise<unknown>; stop(): void };
+
 
 /**
- * Page-side half of the run page's `waitForFunction` for `"raf"` and `"mutation"` polling: resolve with the first
- * truthy value of `predicate(...args)`, checked at once and then on every animation frame, or on every DOM
- * mutation in the document, or with `undefined` after `ms` (never when `null`).
+ * Page-side half of the run page's `waitForFunction` for `"raf"` and `"mutation"` polling: its promise resolves
+ * with the first truthy value of `predicate(...args)`, checked at once and then on every animation frame, or DOM
+ * mutation, or with `undefined` after `ms` (never when `null`). `stop` releases the poller on host cancellation.
  */
 function waitInPage(
 	predicate: (...args: unknown[]) => unknown,
 	mode: string,
 	ms: number | null,
 	...args: unknown[]
-): Promise<unknown> {
+): PagePoller {
 	type Observer = { observe(node: unknown, options: object): void; disconnect(): void };
 	const pageGlobal = globalThis as unknown as {
 		document: unknown;
-		requestAnimationFrame(callback: () => void): void;
-		setTimeout(callback: () => void, ms: number): void;
+		requestAnimationFrame(callback: () => void): number;
+		cancelAnimationFrame(id: number): void;
+		setTimeout(callback: () => void, ms: number): number;
+		clearTimeout(id: number): void;
 		MutationObserver: new (callback: () => void) => Observer;
 	};
 	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 	let settled = false;
 	let observer: Observer | undefined;
+	let frame: number | undefined;
+	let timer: number | undefined;
 	const finish = (failed: boolean, value: unknown) => {
 		if (settled) return;
 		settled = true;
 		observer?.disconnect();
+		if (frame !== undefined) pageGlobal.cancelAnimationFrame(frame);
+		if (timer !== undefined) pageGlobal.clearTimeout(timer);
 		if (failed) reject(value);
 		else resolve(value);
 	};
@@ -819,9 +828,9 @@ function waitInPage(
 		} catch (error) {
 			finish(true, error);
 		}
-		if (!settled && mode === "raf") pageGlobal.requestAnimationFrame(() => void check());
+		if (!settled && mode === "raf") frame = pageGlobal.requestAnimationFrame(() => void check());
 	};
-	if (ms !== null) pageGlobal.setTimeout(() => finish(false, undefined), ms);
+	if (ms !== null) timer = pageGlobal.setTimeout(() => finish(false, undefined), ms);
 	if (mode === "mutation") {
 		observer = new pageGlobal.MutationObserver(() => void check());
 		observer.observe(pageGlobal.document, {
@@ -832,7 +841,7 @@ function waitInPage(
 		});
 	}
 	void check();
-	return promise;
+	return { promise, stop: () => finish(false, undefined) };
 }
 
 /**
@@ -899,16 +908,31 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
 				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
 				const timedOut = () => puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
-				const attempt = async (target: Realm, left: number): Promise<JSHandle> => {
-					if (!inPage) return (await evaluateInRealm(target, fn, args, true)) as JSHandle;
+				const attempt = async (target: Realm, left: number, evalSignal: AbortSignal): Promise<JSHandle> => {
+					if (!inPage) return (await evaluateInRealm(target, fn, args, true, evalSignal)) as JSHandle;
 					const predicate = await target.evaluateHandle(
-						typeof fn === "string" ? `() => (${fn})` : `(${fn.toString()})`,
+						typeof fn === "string" ? `() => (${fn})` : `(${stringifyFunction(fn)})`,
 					);
+					let poller: JSHandle<PagePoller> | undefined;
+					const stop = () => {
+						if (poller) void target.evaluate(held => held.stop(), poller).catch(() => {});
+					};
 					try {
+						throwIfAborted(evalSignal);
 						const ms = Number.isFinite(left) ? left : null;
 						const waitArgs = [predicate, options.polling, ms, ...args];
-						return (await evaluateInRealm(target, waitInPage as PageFunction, waitArgs, true)) as JSHandle;
+						poller = (await evaluateInRealm(
+							target, waitInPage as PageFunction, waitArgs, true, evalSignal,
+						)) as JSHandle<PagePoller>;
+						evalSignal.addEventListener("abort", stop, { once: true });
+						throwIfAborted(evalSignal);
+						return await target.evaluateHandle(held => held.promise, poller);
 					} finally {
+						evalSignal.removeEventListener("abort", stop);
+						if (poller) {
+							await target.evaluate(held => held.stop(), poller).catch(() => {});
+							await poller.dispose();
+						}
 						await predicate.dispose();
 					}
 				};
@@ -921,7 +945,12 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						: waitSignal;
 					try {
 						const target = realm();
-						const value = (await untilAborted(evalSignal, () => attempt(target, left))) as JSHandle;
+						const pending = attempt(target, left, evalSignal);
+						// The protocol evaluation can finish after the host-side deadline or cancellation won.
+						void pending.then(value => {
+							if (evalSignal.aborted) return value.dispose();
+						}).catch(() => {});
+						const value = await untilAborted(evalSignal, () => pending);
 						if (await target.evaluate(held => Boolean(held), value)) return value;
 						await value.dispose();
 					} catch (error) {
