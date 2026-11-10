@@ -55,6 +55,18 @@ export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
 }
 
+/** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
+const PAGE_ONLY_GLOBAL_RE =
+	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
+
+/**
+ * Whether run code itself, in omp's runtime, reached for a page-only global. An exception thrown in the page arrives
+ * as a plain `Error` that Puppeteer names after it, so it never counts.
+ */
+export function isMissingPageGlobal(error: unknown): boolean {
+	return error instanceof ReferenceError && PAGE_ONLY_GLOBAL_RE.test(error.message);
+}
+
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
@@ -148,6 +160,8 @@ export interface RunErrorPayload {
 	isAbort: boolean;
 	/** The worker could not restore tab-scoped browser state and must be recycled. */
 	recoverTab?: boolean;
+	/** The run's own code reached for a page-only global ({@link isMissingPageGlobal}). */
+	missingPageGlobal?: boolean;
 	/** `tab.goto` outlasted its budget; the page stays on what loaded. */
 	navigationTimeout?: boolean;
 	/** The page's renderer crashed; the worker runs nothing more and must be recycled. */
