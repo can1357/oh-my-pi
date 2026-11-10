@@ -1282,7 +1282,7 @@ Every started prediction produces exactly one settling frame:
 An `offered` prediction is later followed by exactly one `retired` frame, after
 which the host must stop showing it and must not accept it. It retires when
 the host cancels it or requests another, when the host sends `prompt` (builtins
-such as `/handoff` included), `abort_and_prompt`, `bash` (excluded or not) or
+such as `/handoff` included), `steer`, `follow_up`, `abort_and_prompt`, `bash` (excluded or not) or
 `handoff`, before that command runs, when a new message lands, when a run or
 a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
 `fork`, `navigate_tree`, `open_session`, extension-initiated session changes,

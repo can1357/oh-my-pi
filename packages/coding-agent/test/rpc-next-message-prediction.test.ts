@@ -327,6 +327,8 @@ describe("RPC next-message prediction and host input", () => {
 		["a bash command", () => client.bash("printf done")],
 		["the handoff command", () => client.handoff().catch(() => null)],
 		["a /handoff prompt", () => client.prompt("/handoff")],
+		["a steer", () => client.steer("deploy it")],
+		["a follow-up", () => client.followUp("deploy it")],
 	])(
 		"retires the offered prediction before answering %s",
 		async (_label, send) => {

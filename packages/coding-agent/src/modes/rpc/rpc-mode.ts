@@ -447,6 +447,8 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 /** Host input that ends any next-message prediction before it runs; see `handleCommandImpl`. */
 const PREDICTION_RETIRING_COMMANDS: Partial<Record<RpcCommand["type"], true>> = {
 	prompt: true,
+	steer: true,
+	follow_up: true,
 	abort_and_prompt: true,
 	bash: true,
 	handoff: true,
