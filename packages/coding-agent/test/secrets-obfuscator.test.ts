@@ -45,6 +45,7 @@ import {
 	sanitizeSecretFriendlyName,
 	secretEntriesNeedPlaceholderKey,
 	secretEntryNeedsPlaceholderKey,
+	SecretValueSet,
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
@@ -3669,6 +3670,62 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 
 		// Fixed point: re-obfuscating the already-stripped batch changes nothing further.
 		expect(JSON.stringify(obfuscateMessages(obfuscator, result))).toEqual(serialized);
+	});
+
+	describe("repeated obfuscate() of the same text follows the shared regex values", () => {
+		// A memoized result reused across a change in shared regex values would ship
+		// a friendly label that spells a regex secret (or strip one that is safe).
+		// Each call must equal a fresh instance's single call with that content.
+		const entries: SecretEntry[] = [
+			{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+			{ type: "regex", content: "tok_[a-z0-9]+" },
+		];
+		// Same size, one shared member: only content tells them apart.
+		const colliding = ["tok_abc123", "tok_q1"];
+		const unrelated = ["tok_zzz999", "tok_q1"];
+		const mintText = "remember OTHERSECRET";
+		const setup = () => {
+			const obf = new SecretObfuscator(entries);
+			const stale = obf.obfuscate(mintText);
+			expect(stale).toContain("TOKABC123_");
+			// A stale friendly placeholder plus a raw occurrence exercises both
+			// prefix stripping and the label chosen for an existing placeholder.
+			const text = `${stale} then OTHERSECRET again`;
+			// Reference: a fresh instance with the same mint replayed, then ONE call,
+			// so no earlier result for `text` can be reused.
+			const expectedFor = (shared: readonly string[]): string => {
+				const fresh = new SecretObfuscator(entries);
+				fresh.obfuscate(mintText);
+				return fresh.obfuscate(text, new SecretValueSet(shared));
+			};
+			const withColliding = expectedFor(colliding);
+			const withUnrelated = expectedFor(unrelated);
+			expect(withColliding).not.toContain("TOKABC123_");
+			expect(withUnrelated).toContain("TOKABC123_");
+			return { obf, text, withColliding, withUnrelated };
+		};
+		const sequence = [colliding, colliding, unrelated, unrelated, colliding];
+
+		it("recomputes when the same text arrives with a new set of different content", () => {
+			const { obf, text, withColliding, withUnrelated } = setup();
+			for (const shared of sequence) {
+				const expected = shared === colliding ? withColliding : withUnrelated;
+				expect(obf.obfuscate(text, new SecretValueSet(shared))).toBe(expected);
+			}
+		});
+
+		it.each([
+			["SecretValueSet", (values: readonly string[]): Set<string> => new SecretValueSet(values)],
+			["Set", (values: readonly string[]): Set<string> => new Set(values)],
+		])("recomputes when one %s is cleared and refilled in place to the same size", (_kind, makeSet) => {
+			const { obf, text, withColliding, withUnrelated } = setup();
+			const shared = makeSet(colliding);
+			for (const values of sequence) {
+				shared.clear();
+				for (const value of values) shared.add(value);
+				expect(obf.obfuscate(text, shared)).toBe(values === colliding ? withColliding : withUnrelated);
+			}
+		});
 	});
 });
 
