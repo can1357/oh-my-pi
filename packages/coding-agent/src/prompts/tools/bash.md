@@ -1,4 +1,5 @@
 Persistent shell: one fact command/pipeline; dependencies use `&&`.
+{{#if isWindows}}Windows host, emulated bash environment: write bash, NEVER cmd/PowerShell syntax (run PowerShell as `powershell -c '…'`): `$TEMP` not `%TEMP%`, `&&`/`;` not `&` (it backgrounds), no `dir`/`copy`/`set X=`; paths `C:/x` or `/c/x`{{#if hasShellBuiltins}}; `find`/`sort`/`timeout` are GNU{{/if}}.{{/if}}
 {{#if hasEval}}Scripts/heredocs/`$(…)`/complex pipelines → `eval`.{{else}}Scripts/heredocs/`$(…)`/complex flow → dedicated tool or checked-in script.{{/if}}
 `cwd`, not `cd`; `pty` only interactive.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.
