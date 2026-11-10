@@ -1001,6 +1001,9 @@ exit 64
 				fs.writeFileSync(gateFile, "ok");
 				expect(await pending).toEqual({ kind: "continue" });
 				expect(liveJobsSpy).toHaveBeenCalledTimes(1);
+				// Drop `liveJobsSpy.mock.contexts` so the spy does not keep the released
+				// `Shell` alive across `Bun.gc(true)` below.
+				liveJobsSpy.mockRestore();
 
 				// A follow-up condition starts a fresh shell while the released one stays
 				// retained until its background child exits.
@@ -1012,6 +1015,7 @@ exit 64
 				).toEqual({ kind: "continue" });
 
 				Bun.gc(true);
+				await Bun.sleep(50);
 				let alive = true;
 				try {
 					process.kill(pid, 0);
