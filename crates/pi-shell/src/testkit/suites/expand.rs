@@ -704,8 +704,8 @@ fn caller_reports_the_calling_frames() {
 /// [`out`] with the files `/d/x1` and `/d/x2`, for pathname expansion.
 fn out_with_files(src: &str) -> String {
 	let fs = MemFs::new();
-	fs.add_file("/d/x1", b"", 0o644);
-	fs.add_file("/d/x2", b"", 0o644);
+	fs.add_file("/dir/x1", b"", 0o644);
+	fs.add_file("/dir/x2", b"", 0o644);
 	let res =
 		run_script(FakeHost::new().with_fs(fs), format!("{P}{src}").as_bytes(), &[], Fault::None);
 	assert_eq!(String::from_utf8_lossy(&res.stderr), "");
@@ -731,12 +731,14 @@ fn literal_words_honour_run_time_options() {
 fn literal_and_quoted_words_glob_only_through_unquoted_characters() {
 	assert_eq!(
 		out_with_files(
-			"p /d/x*; set -f; p /d/x*; set +f; p \"/d/x*\" /d/x\\* '/d/x'*; v='*'; p \"$v\" \
-			 \"/d/$v\" \"$v\"/d /d/$v; p \"$e\"/d/x? /d/[x]1 '/d/[x]1' /d/y*; shopt -s nullglob; p \
-			 /d/y* \"/d/y*\"; shopt -u nullglob\nshopt -s extglob\np /d/+(x1) '/d/+(x1)'"
+			"p /dir/x*; set -f; p /dir/x*; set +f; p \"/dir/x*\" /dir/x\\* '/dir/x'*; v='*'; p \
+			 \"$v\" \"/dir/$v\" \"$v\"/dir /dir/$v; p \"$e\"/dir/x? /dir/[x]1 '/dir/[x]1' /dir/y*; \
+			 shopt -s nullglob; p /dir/y* \"/dir/y*\"; shopt -u nullglob\nshopt -s extglob\np \
+			 /dir/+(x1) '/dir/+(x1)'"
 		),
-		"2:</d/x1></d/x2>\n1:</d/x*>\n4:</d/x*></d/x*></d/x1></d/x2>\n5:<*></d/*><*/d></d/x1></d/\
-		 x2>\n5:</d/x1></d/x2></d/x1></d/[x]1></d/y*>\n1:</d/y*>\n2:</d/x1></d/+(x1)>\n"
+		"2:</dir/x1></dir/x2>\n1:</dir/x*>\n4:</dir/x*></dir/x*></dir/x1></dir/x2>\n5:<*></dir/*><*/\
+		 dir></dir/x1></dir/x2>\n5:</dir/x1></dir/x2></dir/x1></dir/[x]1></dir/y*>\n1:</dir/y*>\n2:\
+		 </dir/x1></dir/+(x1)>\n"
 	);
 }
 
