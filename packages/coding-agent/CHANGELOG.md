@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Mnemopi no longer labels fused rank scores as confidence, and polyphonic recall interleaves scoped-bank rankings instead of comparing their fused score magnitudes ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+- Fixed cross-bank recall dropping distinct memories when their clipped previews were identical ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+
+### Changed
+
+- Mnemopi recall now fuses its vector, graph, fact and temporal voices by default (`mnemopi.polyphonicRecall`); set it to `false` or `MNEMOPI_POLYPHONIC_RECALL=0` to restore linear ranking. Retained memories' extracted facts are consolidated for the fact voice, including backfill of existing banks ([#15896](https://github.com/can1357/oh-my-pi/pull/15896) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
