@@ -1773,6 +1773,65 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		}
 	});
 
+	it("cancels, unjudged, a settling wake when a driven follow-up's turn is admitted, so only the follow-up's pass judges its yield", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const run = await setup({
+			manager,
+			parentId: "Parent",
+			responses: [
+				yieldCall("WAKE-PAYLOAD"),
+				yieldCall("FOLLOW-UP-YIELD"),
+				// The follow-up now owns the job: it waits on it, then yields again with its result.
+				{ content: ["waiting on the job"] },
+				yieldCall("FOLLOW-UP-FINAL"),
+			],
+			onStop: () => undefined,
+		});
+		// Owner background work keeps the wake's observation open after its turn yielded.
+		manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "ok"), {
+			id: "bg-job",
+			ownerId: AGENT_ID,
+		});
+		const wakeEnded = Promise.withResolvers<string | undefined>();
+		run.eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			const frame = toLifecycleFrame(data);
+			if (frame.status !== undefined && frame.status !== "started") wakeEnded.resolve(frame.status);
+		});
+
+		try {
+			await deliverWake(run.session, "m1");
+			await run.session.waitForIdle();
+			// A workpool follow-up passes its ownership waits while the wake still settles its owner job.
+			const followUp = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: wakeAgent,
+				message: "do more",
+				artifactsDir: tempDir.path(),
+			});
+			// The owner job settles once the follow-up's turn has run.
+			for (let tick = 0; run.mock.calls.length < 2 && tick < 500; tick++) await scheduler.yield();
+			gate.resolve("ok");
+			const result = await followUp;
+			await manager.waitForAll();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			// The wake was superseded unjudged; one pass judged one candidate: the follow-up's.
+			expect(await Promise.race([wakeEnded.promise, Promise.resolve("still open")])).toBe("aborted");
+			expect(result.error).toBeUndefined();
+			expect(result.output).toContain("FOLLOW-UP-FINAL");
+			expect(result.output).not.toContain("WAKE-PAYLOAD");
+			expect(run.stopEvents).toHaveLength(1);
+		} finally {
+			gate.resolve("ok");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+			await manager.waitForAll();
+		}
+	});
+
 	it("judges a continuation's yield only after its owner async work quiesced", async () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
