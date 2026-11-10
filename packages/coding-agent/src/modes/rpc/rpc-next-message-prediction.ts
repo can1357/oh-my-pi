@@ -129,18 +129,14 @@ export class RpcNextMessagePredictor {
 
 	/** Retire what a new turn or message made stale, so the host never offers or accepts it. */
 	observe(event: AgentSessionEvent): void {
-		if (CANCELLING_EVENTS[event.type]) {
+		// Queued user input (an extension's `followUp` the current tail cannot run yet) may start no
+		// turn and leave the history the prediction read untouched, yet the user has moved on.
+		const queuedInput = event.type === "queue_update" && event.steering.length + event.followUp.length > 0;
+		if (CANCELLING_EVENTS[event.type] || queuedInput) {
 			this.#controller.cancel();
 			return;
 		}
-		this.retireStale();
-	}
-
-	/**
-	 * Retire an offered prediction the conversation moved past, for appends that emit no session event
-	 * (a recorded `bash` result). A pending request settles `stale` on its own.
-	 */
-	retireStale(): void {
+		// An offered prediction the conversation moved past; a pending request settles `stale` on its own.
 		if (this.#offered !== undefined && this.#controller.offeredId !== this.#offered) this.#controller.cancel();
 	}
 

@@ -39,4 +39,11 @@ session.runEphemeralTurn = async () => ({
 		stopReason: "stop",
 	} as unknown as AssistantMessage,
 });
+// A command starting with `: slow-hook` waits first, as a slow extension `user_bash` hook does before
+// the session counts the shell as running.
+const executeBash = session.executeBash.bind(session);
+session.executeBash = async (command, onChunk, options) => {
+	if (command.startsWith(": slow-hook")) await Bun.sleep(1000);
+	return executeBash(command, onChunk, options);
+};
 await runRpcMode(session);

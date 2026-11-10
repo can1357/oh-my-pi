@@ -1471,9 +1471,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const btw = new RpcBtwController(session, output);
 	// Frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
 	const nextMessagePredictor = new RpcNextMessagePredictor(session, output, {
-		// Admission and session changes run on background tasks the serial queue no longer waits for.
-		isHostBusy: () => orderedInputsInFlight > 0 || sessionChangesInProgress > 0,
+		// Admission, host `bash` and session changes run on background tasks the serial queue no longer waits for.
+		isHostBusy: () => orderedInputsInFlight > 0 || hostBashInFlight > 0 || sessionChangesInProgress > 0,
 	});
+	// Counted from handler entry through the recorded result: an extension `user_bash` hook runs before
+	// the session reports the shell as running, and the result lands without a session event.
+	let hostBashInFlight = 0;
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
@@ -2683,15 +2686,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
 					return error(id, "bash", "excludeFromContext must be a boolean");
 				}
+				hostBashInFlight++;
 				try {
 					const result = await session.executeBash(command.command, undefined, {
 						excludeFromContext: command.excludeFromContext,
 					});
 					return success(id, "bash", result);
 				} finally {
-					// The result is appended without a session event; an offer that settled meanwhile (an
-					// extension `user_bash` hook runs before the shell counts as running) is now stale.
-					nextMessagePredictor.retireStale();
+					hostBashInFlight--;
 				}
 			}
 

@@ -198,6 +198,27 @@ describe("RpcNextMessagePredictor", () => {
 		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: pending, status: "cancelled" });
 	});
 
+	it("retires an offered prediction and cancels a pending one when user input is queued", async () => {
+		const { predictor, frames, reply, settled } = harness();
+		const queued = {
+			type: "queue_update",
+			steering: [],
+			followUp: ["deploy it"],
+			liveSteered: 0,
+		} as AgentSessionEvent;
+		const offered = predictor.request()!;
+		await reply(0, "ship it");
+		predictor.observe({ type: "queue_update", steering: [], followUp: [], liveSteered: 0 } as AgentSessionEvent);
+		expect(frames.at(-1)?.status).toBe("offered");
+		predictor.observe(queued);
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: offered, status: "retired" });
+
+		const pending = predictor.request()!;
+		predictor.observe(queued);
+		await settled(1);
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: pending, status: "cancelled" });
+	});
+
 	it("cancels when composer.predictions is turned off, even before the reply arrives", async () => {
 		const { predictor, frames, reply, settled, settings } = harness();
 		const offered = predictor.request()!;
@@ -365,10 +386,17 @@ describe("RPC next-message prediction and host input", () => {
 		30_000,
 	);
 
-	it("starts no prediction while a contextual bash command is still running", async () => {
-		const bash = client.bash("sleep 1; printf done");
-		expect(await client.predictNextMessage()).toBeNull();
-		await bash;
-		expect(frames).toEqual([]);
-	}, 30_000);
+	it.each([
+		["while its shell runs", "sleep 1; printf done"],
+		["before its shell starts (a slow user_bash hook)", ": slow-hook; printf done"],
+	])(
+		"starts no prediction while a contextual bash command is pending %s",
+		async (_label, command) => {
+			const bash = client.bash(command);
+			expect(await client.predictNextMessage()).toBeNull();
+			await bash;
+			expect(frames).toEqual([]);
+		},
+		30_000,
+	);
 });
