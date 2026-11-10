@@ -6411,7 +6411,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		done: PromiseWithResolvers<void>,
 		fromOutside: boolean,
 	): Promise<void> {
-		while (turn.nested.size > 0) await Promise.allSettled([...turn.nested]);
+		while (turn.nested.size > 0) await Promise.allSettled(turn.nested);
 		turn.released = true;
 		if (fromOutside) this.#queuedSessionTransitions--;
 		done.resolve();
@@ -7693,7 +7693,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.refreshBaseSystemPrompt(commitIf);
 	}
 
-	/** Replaces connected MCP tools and enables them immediately. */
+	/** Replaces connected MCP tools, enabling new names without changing existing selections. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
 	}
