@@ -632,6 +632,7 @@ export class ExtensionRunner {
 	#sessionModes?: ExtensionContextActions["sessionModes"];
 	#keybindings?: ExtensionContextActions["keybindings"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
+	#getActivePersonaNameFn: () => string | null = () => null;
 	#createAnnotations?: ExtensionAnnotationsFactory;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	/** Link schemes already reported as claimed by more than one extension. */
@@ -852,6 +853,7 @@ export class ExtensionRunner {
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
+		getActivePersonaName?: () => string | null,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
@@ -861,6 +863,7 @@ export class ExtensionRunner {
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
+		this.#getActivePersonaNameFn = getActivePersonaName ?? (() => null);
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
@@ -1795,6 +1798,7 @@ export class ExtensionRunner {
 		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const getActivePersonaName = () => this.#getActivePersonaNameFn();
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
 		const createAnnotations = this.#createAnnotations;
 		const sendUserMessage = (text: string, options?: SendUserMessageOptions): void => {
@@ -1829,6 +1833,9 @@ export class ExtensionRunner {
 				return getSessionModes();
 			},
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			get activePersonaName() {
+				return getActivePersonaName();
+			},
 			runEphemeralTurn: runEphemeralTurn
 				? async options => {
 						if (this.#ephemeralTurnBlocker.getStore()) {
@@ -1911,8 +1918,12 @@ export class ExtensionRunner {
 	}
 
 	createCommandContext(): ExtensionCommandContext {
+		const base = this.createContext();
 		return {
-			...this.createContext(),
+			...base,
+			get activePersonaName() {
+				return base.activePersonaName;
+			},
 			getContextUsage: () => this.#getContextUsageFn(),
 			waitForIdle: () => this.#waitForIdleFn(),
 			newSession: options => this.#newSessionHandler(options),

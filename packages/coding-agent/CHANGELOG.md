@@ -5,6 +5,9 @@
 ### Added
 
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
+- Added agent persona cycling: agents with `mode: "primary"` in their frontmatter join a `Tab` / `Ctrl+Tab` cycle in the main chat editor (while the editor is empty), `--agent <name>` picks the starting persona, and the `model` and `order` frontmatter fields set the model a persona loads with and its place in the cycle ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added an `agent_persona` status-line segment showing the active persona, and `activePersonaName` on `ExtensionContext` for extensions ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Added persona restore on `/resume` and `--resume`: saved messages now record the active persona, and a resumed session reselects the last one, falling back to the first primary agent ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ### Fixed
 
@@ -13,6 +16,8 @@
 ### Fixed
 
 - On Windows, the bash tool's shell resolves MSYS drive paths (`/c/Users/...`, `/mnt/c/...`) everywhere, so running `/c/.../tool.exe`, `cd /c/...`, `[ -f /c/... ]` and `< /c/...` reach drive C: like they already did for `ls` and other built-in utilities
+- Fixed the startup persona overriding an explicit `--model` or thinking level with its own; explicit startup options now win ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
+- Fixed the active persona's instructions being dropped from the system prompt by any later rebuild, such as a tool-set or model change or the rebuild before each turn ([#4705](https://github.com/can1357/oh-my-pi/pull/4705) by [@Flare576](https://github.com/Flare576))
 
 ## [18.18.6] - 2026-11-09
 

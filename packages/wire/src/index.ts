@@ -158,13 +158,20 @@ export interface ThinkingLevelChangeEntry extends EntryBase {
 	thinkingLevel?: string | null;
 }
 
+export interface PersonaChangeEntry extends EntryBase {
+	type: "persona_change";
+	/** Name of the persona that became active, or null when explicitly cleared. */
+	personaName: string | null;
+}
+
 export type SessionEntry =
 	| MessageEntry
 	| CustomMessageEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| ModelChangeEntry
-	| ThinkingLevelChangeEntry;
+	| ThinkingLevelChangeEntry
+	| PersonaChangeEntry;
 
 /** customType of collab guest prompts injected on the host. */
 export const COLLAB_PROMPT_MESSAGE_TYPE = "collab-prompt";
@@ -195,7 +202,8 @@ export type AgentEvent =
 	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "thinking_level_changed"; thinkingLevel?: string };
+	| { type: "thinking_level_changed"; thinkingLevel?: string }
+	| { type: "persona_changed"; personaName: string | null; source?: string };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // State & agents
@@ -230,6 +238,8 @@ export interface SessionState {
 	cwd: string;
 	model?: WireModel;
 	thinkingLevel?: string;
+	/** Host's active persona name, or null when no persona is loaded. Mirrored onto guest replicas. */
+	activePersonaName?: string | null;
 	contextUsage?: ContextUsage;
 	participants: Participant[];
 	isAborting?: boolean;

@@ -1255,6 +1255,14 @@ class GoalUpdatedEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class PersonaChangedEvent:
+    """The active persona changed; `personaName` is null when it was explicitly cleared."""
+    type: Literal["persona_changed"] = "persona_changed"
+    persona_name: str | None
+    source: AgentSource | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class QueueUpdateEvent:
     """Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
     type: Literal["queue_update"] = "queue_update"
@@ -1711,7 +1719,7 @@ UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
 """Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
 
 
-RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
+RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | ManualCompactionStartEvent | ManualCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | PersonaChangedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
@@ -2707,6 +2715,15 @@ def parse_goal_updated_event(value: object, path: str = "GoalUpdatedEvent") -> G
     )
 
 
+def parse_persona_changed_event(value: object, path: str = "PersonaChangedEvent") -> PersonaChangedEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["persona_changed"]]', literal(frozenset({"persona_changed"}))), path)
+    return PersonaChangedEvent(
+        persona_name=required(payload, "personaName", nullable(decode_str), path),
+        source=optional(payload, "source", _decode_agent_source, path),
+    )
+
+
 def parse_queue_update_event(value: object, path: str = "QueueUpdateEvent") -> QueueUpdateEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["queue_update"]]', literal(frozenset({"queue_update"}))), path)
@@ -3262,6 +3279,7 @@ _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
         "notice": parse_notice_event,
         "thinking_level_changed": parse_thinking_level_changed_event,
         "goal_updated": parse_goal_updated_event,
+        "persona_changed": parse_persona_changed_event,
         "queue_update": parse_queue_update_event,
 }
 
@@ -3321,6 +3339,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "notice": parse_rpc_agent_event,
         "thinking_level_changed": parse_rpc_agent_event,
         "goal_updated": parse_rpc_agent_event,
+        "persona_changed": parse_rpc_agent_event,
         "queue_update": parse_rpc_agent_event,
 }
 
@@ -3994,6 +4013,10 @@ class WireClient:
         """Subscribe to `goal_updated`: Goal mode changed, by a host `goal` command or the agent's `goal` tool."""
         return self._listen("goal_updated", listener)
 
+    def on_persona_changed(self, listener: Callable[[PersonaChangedEvent], None]) -> Callable[[], None]:
+        """Subscribe to `persona_changed`: The active persona changed; `personaName` is null when it was explicitly cleared."""
+        return self._listen("persona_changed", listener)
+
     def on_queue_update(self, listener: Callable[[QueueUpdateEvent], None]) -> Callable[[], None]:
         """Subscribe to `queue_update`: Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes."""
         return self._listen("queue_update", listener)
@@ -4122,6 +4145,7 @@ __all__ = [
     "OpenSessionResult",
     "OpenUrlUiRequest",
     "ParentIrc",
+    "PersonaChangedEvent",
     "PromoteQueuedMessageResult",
     "PromptAck",
     "PromptError",
@@ -4306,6 +4330,7 @@ __all__ = [
     "parse_open_session_result",
     "parse_open_url_ui_request",
     "parse_parent_irc",
+    "parse_persona_changed_event",
     "parse_promote_queued_message_result",
     "parse_prompt_ack",
     "parse_prompt_error",

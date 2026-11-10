@@ -63,6 +63,7 @@ const NO_USAGE = {
 function startupSession(data: StatusLineStartupData): StatusLineSession {
 	return {
 		state: { model: data.model, thinkingLevel: data.thinkingLevel, messages: NO_MESSAGES },
+		activePersonaName: null,
 		model: data.model,
 		messages: NO_MESSAGES,
 		isStreaming: false,

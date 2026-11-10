@@ -14,9 +14,10 @@ function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): Exte
 		"/tmp",
 		{ getCwd: () => "/tmp" } as never,
 		{} as never,
-		undefined,
-		undefined,
-		undefined,
+		undefined, // getMemory
+		undefined, // settings
+		undefined, // getActivePersonaName
+		undefined, // localProtocolOptions
 		getAsyncJobSnapshot,
 	);
 }
