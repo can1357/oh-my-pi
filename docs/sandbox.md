@@ -13,10 +13,20 @@ It is off by default.
 | Commands run through the `exec()` API of extensions, hooks, custom tools, and custom commands                                                    | `exec`  |
 | MCP stdio servers whose config sets `sandbox: true` (see [MCP servers](#mcp-servers))                                                            | per server |
 
+In-process file tools (`read`, `write`, `edit` including deletes and moves, `ast_edit`, `grep`, `glob`, `find`, `ast_grep`, the `lsp` tool's file and `rename_file` destination, an `ida` `.i64`/`.idb` opened in place, and the same tools called from an eval cell as `tool.write`, `tool.edit`, …) run inside omp, so the OS backend cannot contain them. While the sandbox is active, omp checks every local path such a call names against the same filesystem policy before the tool runs, in every approval mode. Workspace edits an LSP server sends (rename, code actions, `workspace/applyEdit`) are checked file by file before any is applied.
+
+- A write (any call that modifies: write, edit, delete, move, `ast_edit`) must land under a writable root: the workspace, the private temp directory, `allowWrite`, or a `sandbox_request` write grant. In `read-only` mode only the temp directory.
+- A read must not touch a `denyRead` path; with `readScope: workspace` it must also lie under a readable root (the workspace, `allowRead`, tool paths, or a read grant). A recursive search rooted above a `denyRead` path is refused; name a narrower path.
+- A refused call fails with a sandbox message that points the agent at `sandbox_request`; a granted request then covers the file tools as well as contained commands. A `denyRead` path cannot be requested.
+- Internal URLs (`local://`, `skill://`, `artifact://`, …) are omp's own storage and are not checked.
+
+The eval helpers that write directly (`write()` in Python, the JS prelude's `write`) run inside the eval kernel, so they are contained with it.
+
 Not contained:
 
-- In-process file tools (`read`, `write`, `edit`, `grep`, …). They run inside omp itself; govern them with [approval mode](./approval-mode.md) and `tools.restrictedFolders`. The same holds for eval helpers that call those tools from a cell (`tool.write`, `tool.edit`, …): they run in the parent omp process, so a contained cell can still write outside the workspace through them.
 - LSP servers and `debug` launches. LSP server binaries resolve from the workspace's `node_modules/.bin` and `.venv/bin` first, and `debug` runs the program the agent names, so a contained command can plant a binary the parent then runs uncontained.
+- The `ida` tool's IDA worker. It runs on the host: `ida` with `action: "exec"` runs the Python the agent writes there, with your user's full filesystem and network access, and the structured actions (rename, comment, set_type, make_function, save) write the database it opened. Only an `.i64`/`.idb` named by path is policy-checked (see above); a binary is read from wherever it is and its database lives in omp's store (`<agentDir>/idbs`). Turn `ida.enabled` off, or set `tools.approval.ida: prompt` (honored in every approval mode, yolo included), when the sandbox must bound everything the agent runs.
+- The `ask` tool's form images: a local `<img src>` is read on the host to show it to you (it is not returned to the model).
 - The browser, SSH, and host helpers omp runs itself (git/VCS operations, updates, clipboard).
 - JS eval `%packages`: `bun add --ignore-scripts` runs in the parent (network access and writes to omp's package cache; no lifecycle scripts).
 - URL paths in bash commands (`skill://`, `pr://`, `mcp://`, …): the parent resolves them. File-backed schemes return a host path the contained shell then opens under the sandbox policy; virtual and remote schemes are rendered by the parent with the same reach as the `read` tool.
@@ -303,7 +313,7 @@ MXC can emit telemetry. omp builds `mxc-sdk` with `MXC_TELEMETRY_COMPONENT_PATH`
 - **A repository rooted at your home directory (or above it) never gets its `.git` granted.** A session started in a subdirectory of such a repository (a dotfiles repository at `~`) cannot `git add`/`commit` contained; add that `.git` to `sandbox.filesystem.allowWrite` if you want it.
 - **Denied paths that do not exist when a process starts are not protected** for that process.
 - **Pinned roots leave a short window.** omp checks that a writable root is still the directory it pinned just before starting a contained process; a swap between that check and the backend applying the policy is not caught.
-- **In-process file tools are not OS-contained** (see [What is contained](#what-is-contained)).
+- **In-process file tools are policy-checked, not OS-contained** (see [What is contained](#what-is-contained)): omp checks the paths a call names before it runs, resolving symlinks at that moment; a symlink swapped in between the check and the write is not caught, and a path a tool reaches without naming it (an edit's auto-repair, an extension's own file access) is not checked.
 - **Exported secrets still reach contained processes.** Only variables from omp's own `.env` files are withheld. An API key exported by your shell or its rc files is in the contained environment, and with allowlisted hosts that remains a way to send it out. A variable from omp's `.env` can also reach contained bash when a function in your shell rc references it, unless its name looks like a secret (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`, `*SESSION_KEY*`).
 - **Linux: the environment is visible on the host.** bubblewrap receives the environment as arguments of the host-side `bwrap` process, so other local users can read it (API keys included) from `/proc/<pid>/cmdline` while a contained process runs.
 - **Linux: no host loopback.** Contained processes cannot reach services on the host's `127.0.0.1`, even in `allow` mode.

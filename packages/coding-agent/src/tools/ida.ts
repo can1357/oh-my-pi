@@ -17,6 +17,7 @@ import {
 	cfgIdaAvailable,
 	findOpenIdaDatabase,
 	type IdaDatabase,
+	isIdaDatabasePath,
 	listIdaDatabases,
 	locateIdb,
 	splitSliceRef,
@@ -93,6 +94,22 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		const code = stringArg(args, "code");
 		if (code) lines.push(`Code: ${truncateForPrompt(code)}`);
 		return lines;
+	};
+	/**
+	 * A `.i64`/`.idb` named by path is opened and saved in place, so restricted folders and the
+	 * sandbox's file policy see it. A binary's database lives in omp's own store; the binary is
+	 * only read.
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const ref = stringArg(args, "db");
+		if (!ref) return undefined;
+		const { path: sourcePath } = splitSliceRef(ref);
+		if (!isIdaDatabasePath(sourcePath)) return undefined;
+		try {
+			return [resolveToCwd(sourcePath, this.session.cwd)];
+		} catch {
+			return undefined;
+		}
 	};
 	readonly label = "IDA";
 	readonly summary = "Open, edit, and script IDA Pro databases shared across agents";

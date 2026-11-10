@@ -4,11 +4,13 @@ import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
+import { sandboxWritePathsDenial } from "../sandbox/file-tools";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, workspaceEditPaths } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
@@ -938,6 +940,9 @@ export async function applyWorkspaceEditWithLsp(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<string[]> {
+	// The server picks the files: hold them to the sandbox's write policy before anything changes.
+	const denial = await sandboxWritePathsDenial(cwd, "lsp", workspaceEditPaths(edit));
+	if (denial !== undefined) throw new ToolError(denial);
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {

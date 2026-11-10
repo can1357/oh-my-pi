@@ -193,6 +193,25 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 		return lines;
 	};
+	/**
+	 * The paths a call names, for restricted folders and the sandbox's file policy: `file` (not the
+	 * workspace scope `*`) and a `rename_file` destination. Workspace edits a server computes are
+	 * checked again where they are applied ({@link applyWorkspaceEditWithLsp}).
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const params = args as Partial<LspParams> | null | undefined;
+		const named = [params?.file, params?.action === "rename_file" ? params.new_name : undefined];
+		const paths: string[] = [];
+		for (const entry of named) {
+			if (typeof entry !== "string" || entry.length === 0 || entry === "*") continue;
+			try {
+				paths.push(resolveToCwd(entry, this.session.cwd));
+			} catch {
+				// Not a local path.
+			}
+		}
+		return paths;
+	};
 	readonly label = "LSP";
 	readonly loadMode = "discoverable";
 	readonly summary = "Query LSP (language server) for diagnostics, hover info, and references";

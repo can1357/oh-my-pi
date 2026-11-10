@@ -1124,6 +1124,43 @@ export class SandboxRuntime {
 	}
 
 	/**
+	 * Why omp's in-process file tools may not `kind` the absolute path `target` under the effective
+	 * policy (configured lists plus session grants), or `undefined` when they may. `protected` marks
+	 * a `denyRead` hit, which no access request can lift. `recursive` is a call that reaches below
+	 * `target` (a tree search or a glob rewrite): a protected path inside it refuses it too.
+	 */
+	fileAccessDenial(
+		kind: "read" | "write",
+		target: string,
+		recursive = false,
+	): { reason: string; protected: boolean } | undefined {
+		const platform = process.platform;
+		const resolved = realpathThroughAncestors(target);
+		const policy = this.effectivePolicy();
+		const under = (roots: readonly string[]) => roots.some(root => isWithin(resolved, root, platform));
+		if (under(policy.deniedPaths)) {
+			return { reason: `${resolved} is protected by sandbox.filesystem.denyRead`, protected: true };
+		}
+		if (recursive) {
+			const inside = policy.deniedPaths.find(denied => isWithin(denied, resolved, platform));
+			if (inside !== undefined) {
+				return {
+					reason: `${resolved} contains ${inside}, protected by sandbox.filesystem.denyRead; name a narrower path`,
+					protected: true,
+				};
+			}
+		}
+		// `readScope: all` reads the whole filesystem except denied paths: the root-children list the
+		// backends get leaves out system entries no file tool needs refusing (`/private` on macOS).
+		const allowed =
+			under(policy.readwritePaths) ||
+			(kind === "read" && (this.#current().config.readScope === "all" || under(policy.readonlyPaths)));
+		if (allowed) return undefined;
+		const roots = kind === "write" ? "writable" : "readable";
+		return { reason: `${resolved} is outside the sandbox's ${roots} roots`, protected: false };
+	}
+
+	/**
 	 * Absolute, realpath-or-self form of a requested path (`~` expanded, relative against `cwd` or the
 	 * workspace).
 	 * @throws SandboxAccessError for a filesystem root or a path at or under a denied entry.

@@ -303,6 +303,20 @@ export interface WorkspaceEditResult {
 	executed: ExecutedWorkspaceChange[];
 }
 
+/** Every file a workspace edit writes, creates, renames (both ends) or deletes. */
+export function workspaceEditPaths(edit: WorkspaceEdit): string[] {
+	const paths: string[] = [];
+	if (edit.documentChanges) {
+		for (const op of planDocumentChanges(edit.documentChanges)) {
+			if (op.kind === "rename") paths.push(uriToFile(op.oldUri), uriToFile(op.newUri));
+			else paths.push(uriToFile(op.uri));
+		}
+	} else if (edit.changes) {
+		for (const uri in edit.changes) paths.push(uriToFile(uri));
+	}
+	return paths;
+}
+
 /**
  * Apply a workspace edit (collection of file changes).
  * All text-edit batches are overlap-validated before anything is written so a

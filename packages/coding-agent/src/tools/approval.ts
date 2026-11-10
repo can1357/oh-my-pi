@@ -56,7 +56,7 @@ export interface ResolvedExecuteTimeApproval {
 	userPolicies: Record<string, unknown>;
 }
 
-type ApprovalSubject = Pick<
+export type ApprovalSubject = Pick<
 	AgentTool,
 	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
 > & {
@@ -543,17 +543,12 @@ function isWithinFolder(root: string, candidate: string): boolean {
 }
 
 /**
- * Absolute filesystem paths a call touches, keyed like grants (symlinks resolved, case-folded on
- * Windows); `recursive` marks a search that reads the whole tree below its path. A call whose tool
- * reports no targets is matched by the directory it runs in — its own `cwd` argument when it names
- * one, else the session's — plus any `approvalRestrictionPaths`. Non-filesystem targets (internal
- * and web URLs) touch no folder.
+ * Absolute filesystem paths a call names, keyed like grants (symlinks resolved, case-folded on
+ * Windows): its cache targets, else its `approvalRestrictionPaths`. `recursive` marks a path the
+ * call reaches below: a tree search, or a restriction path (which may be a folder a glob walks).
+ * Non-filesystem targets (internal and web URLs) are left out.
  */
-function restrictionSubjects(
-	tool: ApprovalSubject,
-	args: unknown,
-	cwd: string | undefined,
-): { path: string; recursive: boolean }[] {
+export function approvalPathSubjects(tool: ApprovalSubject, args: unknown): { path: string; recursive: boolean }[] {
 	const targets = approvalCacheTargets(tool, args);
 	if (targets.length > 0) {
 		const subjects: { path: string; recursive: boolean }[] = [];
@@ -567,10 +562,23 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
-	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
+	return (tool.approvalRestrictionPaths?.(args) ?? [])
 		.filter(target => path.isAbsolute(target))
-		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));
-	if (cwd === undefined) return subjects;
+		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: true }));
+}
+
+/**
+ * The paths a call touches ({@link approvalPathSubjects}); a call that names none, or only
+ * `approvalRestrictionPaths`, is also matched by the directory it runs in — its own `cwd` argument
+ * when it names one, else the session's.
+ */
+function restrictionSubjects(
+	tool: ApprovalSubject,
+	args: unknown,
+	cwd: string | undefined,
+): { path: string; recursive: boolean }[] {
+	const subjects = approvalPathSubjects(tool, args);
+	if (approvalCacheTargets(tool, args).length > 0 || cwd === undefined) return subjects;
 	let workingDirectory = cwd;
 	const requested = isRecord(args) ? args.cwd : undefined;
 	if (typeof requested === "string" && requested.trim().length > 0) {

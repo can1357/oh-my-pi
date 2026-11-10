@@ -27,7 +27,14 @@ import { parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
 import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 
-import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
+import {
+	normalizePathLikeInput,
+	parseSearchPath,
+	relativeSearchResultPath,
+	resolveSearchResultPath,
+	resolveToCwd,
+	resolveToolSearchScope,
+} from "./path-utils";
 import {
 	capParseErrors,
 	formatCodeFrameLine,
@@ -167,6 +174,28 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			decisions.push(router.writeTier(target, undefined, undefined));
 		}
 		return strictestApproval(decisions);
+	};
+	/**
+	 * The folder (or file) each local path entry rewrites below — a glob's non-glob base — so
+	 * restricted folders and the sandbox's file policy see where the rewrite writes. Internal URLs
+	 * name no local folder.
+	 */
+	readonly approvalRestrictionPaths = (args: unknown): readonly string[] | undefined => {
+		const paths = isRecord(args) ? args.paths : undefined;
+		if (!Array.isArray(paths)) return undefined;
+		const router = InternalUrlRouter.instance();
+		const bases: string[] = [];
+		for (const entry of paths) {
+			if (typeof entry !== "string") continue;
+			const normalized = normalizePathLikeInput(entry);
+			if (normalized.length === 0 || router.canHandle(router.normalize(normalized))) continue;
+			try {
+				bases.push(resolveToCwd(parseSearchPath(normalized).basePath, this.session.cwd));
+			} catch {
+				// Not a local path: nothing on disk to match.
+			}
+		}
+		return bases;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<AstEditSchemaInfer>;
