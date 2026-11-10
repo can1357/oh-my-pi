@@ -133,7 +133,16 @@ export type MnemopiSessionStateProtocol = {
 	consolidate: RpcMethod<[options?: MnemopiConsolidateOptions], void>;
 };
 
-type MnemosyneOssOperation = "recall" | "remember" | "save" | "get" | "edit" | "capabilities" | "status" | "clearAndRehydrate" | "retain";
+type MnemosyneOssOperation =
+	| "recall"
+	| "remember"
+	| "save"
+	| "get"
+	| "edit"
+	| "capabilities"
+	| "status"
+	| "clearAndRehydrate"
+	| "retain";
 
 /** Route parent-state operations and the live Python worker through main. */
 export type MnemosyneOssSessionStateProtocol = {
