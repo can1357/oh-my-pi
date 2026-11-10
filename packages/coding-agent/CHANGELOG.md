@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extensions can pass `expandPromptTemplates: true` to `pi.sendUserMessage()` so a `/skill:<name>` command or prompt template they send expands like typed input, matching Pi; Pi extensions with skill-alias commands now load the skill instead of sending the literal command text ([#14608](https://github.com/can1357/oh-my-pi/pull/14608) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
