@@ -60,6 +60,12 @@ export interface ResetExpiryWarning {
 	count: number;
 	/** Soonest expiry among them (epoch ms). */
 	expiresAtMs: number;
+	/**
+	 * Provider id of the warned grant. Several grants can expire at the same moment;
+	 * the verdict reads this grant, never whichever one an expiry lookup finds first.
+	 * Absent when the provider reports no ids (Codex), whose verdict needs none.
+	 */
+	creditId?: string;
 	/** Whether the provider lets the soonest one be spent now. */
 	usableNow: boolean;
 	/** The chat window the salvage planner measures for this account. */
@@ -94,8 +100,10 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 				: undefined;
 		}
 		// A Fable grant restores only Fable weekly usage, so only that limit can make it worth salvaging.
-		const fable = fableClaudeLimit(report.limits, credit);
-		if (fable) {
+		// A report without the Fable row has no Fable usage to restore, however full the 5h window is.
+		if (credit.clears?.includes(FABLE_WEEKLY_LIMIT_ID)) {
+			const fable = fableClaudeLimit(report.limits, credit);
+			if (!fable) return undefined;
 			const used = resolveUsedFraction(fable);
 			return used !== undefined && Number.isFinite(used) && used >= SALVAGE_MIN_USED_FRACTION
 				? { limit: fable, usedFraction: Math.max(0, used) }
@@ -130,6 +138,7 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		tier,
 		count,
 		expiresAtMs: warned.expiresAtMs,
+		...(warned.credit.id === undefined ? {} : { creditId: warned.credit.id }),
 		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
 		...fullest,
 	};
@@ -152,6 +161,8 @@ function spendableNow(
 }
 
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
+/** The Fable weekly cap's limit id: a grant clearing it restores only that window. */
+const FABLE_WEEKLY_LIMIT_ID = "anthropic:7d:fable";
 
 /** The settings key governing each provider window. */
 const RESET_SETTING_KEY: {
@@ -166,19 +177,21 @@ const RESET_SETTING_KEY: {
 	},
 };
 
-/** The Fable limit a Claude grant clears: its own weekly cap, outside the shared weekly window. */
+/** The Fable limit row a Fable grant restores; absent rows mean no Fable usage to restore. */
 function fableClaudeLimit(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit | undefined {
-	return claudeCoveredLimits(limits, credit).find(limit => limit.scope.tier === "fable");
+	return claudeCoveredLimits(limits, credit).find(limit => limit.id === FABLE_WEEKLY_LIMIT_ID);
 }
 
 /** Windows a credit restores: a Codex credit restores both, a Claude grant only its covered limits. */
 function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ClaudeResetWindow[] {
 	if (warning.provider === "openai-codex") return ["5h", "weekly"];
-	const credit = (report.resetCredits?.credits ?? []).find(
-		candidate => bankedResetCreditExpiryMs(candidate) === warning.expiresAtMs,
-	);
+	// Several grants can share an expiry, so the warned grant is the one its id names, never an expiry match.
+	const credit =
+		warning.creditId === undefined
+			? undefined
+			: (report.resetCredits?.credits ?? []).find(candidate => candidate.id === warning.creditId);
 	// A Fable grant also clears the 5h window, but only the Fable key governs spending it.
-	if (credit && fableClaudeLimit(report.limits, credit)) return ["fable"];
+	if (credit?.clears?.includes(FABLE_WEEKLY_LIMIT_ID)) return ["fable"];
 	const covered = credit ? claudeCoveredLimits(report.limits, credit) : [warning.limit];
 	const windows = new Set<ClaudeResetWindow>(covered.map(claudeExpiryWindow));
 	windows.add(claudeExpiryWindow(warning.limit));
