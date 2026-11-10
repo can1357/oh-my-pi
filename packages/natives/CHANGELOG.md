@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell reporting the kernel's bare error for a command it refused to execute when that command's own redirection had to be applied by the spawned process: a bad `#!` interpreter is now named (`…: bad interpreter: …`, status 126), a directory is `Is a directory`, a binary without `#!` is `cannot execute binary file`, and a file whose missing interpreter cannot be read is `cannot execute: required file not found` (status 127), as in Bash 5.3 ([#18213](https://github.com/can1357/oh-my-pi/pull/18213) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell reporting the kernel's bare error for a command it refused to execute when that command's own redirection had to be applied by the spawned process: a bad `#!` interpreter is now named (`…: bad interpreter: …`, status 126), a directory is `Is a directory`, a binary without `#!` is `cannot execute binary file`, a file the shell may execute but not read is `Permission denied`, and a file whose missing interpreter cannot be read is `cannot execute: required file not found` (status 127), as in Bash 5.3 ([#18213](https://github.com/can1357/oh-my-pi/pull/18213) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell misreading an over-long, unterminated or `NUL`-bearing `#!` line in that diagnostic: like Bash it now reads the interpreter out of one sample of the file's first bytes, so the name stops where Bash stops it ([#18213](https://github.com/can1357/oh-my-pi/pull/18213) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.2] - 2026-11-08
