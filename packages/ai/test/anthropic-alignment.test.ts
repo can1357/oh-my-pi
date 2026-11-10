@@ -784,6 +784,64 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(result.stopReason).toBe("error");
 	});
 
+	it("retries every concurrent request that sent a stale Claude Code version", async () => {
+		const [major, minor, patch] = getClaudeCodeVersion().split(".").map(Number);
+		const requiredVersion = `${major}.${minor}.${patch + 1}`;
+		const tooOld = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: `Claude Code does not support this model; version ${requiredVersion} or newer is required.`,
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const { promise: allSent, resolve: releaseInitialRequests } = Promise.withResolvers<void>();
+		let initialRequests = 0;
+		let retriedRequests = 0;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const version = new Headers(init?.headers).get("User-Agent");
+			if (version !== `claude-cli/${requiredVersion} (external, cli)`) {
+				if (++initialRequests === 3) releaseInitialRequests();
+				await allSent;
+				return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+			}
+			retriedRequests++;
+			const events = [
+				{ type: "message_start", message: { id: "msg_retry", usage: { input_tokens: 1, output_tokens: 0 } } },
+				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+				{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hello" } },
+				{ type: "content_block_stop", index: 0 },
+				{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+				{ type: "message_stop" },
+			];
+			return new Response(
+				`${events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`,
+				{
+					status: 200,
+					headers: { "Content-Type": "text/event-stream" },
+				},
+			);
+		};
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+		const results = await Promise.all(
+			Array.from({ length: 3 }, (_, index) =>
+				streamAnthropic(ANTHROPIC_MODEL, context, {
+					apiKey: "sk-ant-oat-test",
+					fetch: fetchMock,
+					sessionId: `bench-${index}`,
+				}).result(),
+			),
+		);
+
+		expect(initialRequests).toBe(3);
+		expect(retriedRequests).toBe(3);
+		expect(results.map(result => result.content.map(block => (block.type === "text" ? block.text : null)))).toEqual(
+			Array.from({ length: 3 }, () => ["Hello"]),
+		);
+		expect(results.every(result => result.stopReason === "stop")).toBe(true);
+	});
+
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody:

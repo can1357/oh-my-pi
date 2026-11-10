@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent Anthropic subscription requests now each retry when their Claude Code version is rejected, instead of failing after another request adopts the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651)).
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
