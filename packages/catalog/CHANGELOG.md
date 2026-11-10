@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor has a login warning  ([#18781](https://github.com/can1357/oh-my-pi/pull/18781) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
