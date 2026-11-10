@@ -12,16 +12,16 @@ use uiautomation::{
 	types::{ControlType, ExpandCollapseState, Handle, ToggleState},
 };
 use windows_sys::Win32::{
-	Foundation::{E_POINTER, HWND},
+	Foundation::{E_POINTER, HWND, LPARAM},
 	System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
 	UI::{
 		Input::KeyboardAndMouse::IsWindowEnabled,
 		WindowsAndMessaging::{
-			GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW, GetWindowThreadProcessId, HMENU,
-			IsWindow, MENUINFO, MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE,
-			MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_NOTIFYBYPOS,
-			SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_COMMAND,
-			WM_MENUCOMMAND,
+			EnumThreadWindows, GW_OWNER, GetMenu, GetMenuInfo, GetMenuItemCount, GetMenuItemInfoW,
+			GetWindow, GetWindowThreadProcessId, HMENU, IsWindow, IsWindowVisible, MENUINFO,
+			MENUITEMINFOW, MFS_CHECKED, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MIIM_STATE,
+			MIIM_STRING, MIIM_SUBMENU, MIM_STYLE, MNS_NOTIFYBYPOS, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+			SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_COMMAND, WM_MENUCOMMAND, WM_NULL,
 		},
 	},
 };
@@ -34,6 +34,7 @@ use super::{
 		types::DesktopWindow,
 	},
 	ax::Win32Ax,
+	menu_delivery::{ModalPopup, command_completed},
 	window,
 };
 
@@ -290,6 +291,61 @@ fn native_message(id: u32, position: u32, style: u32) -> CoreResult<(u32, usize)
 	}
 }
 
+fn thread_windows(thread: u32) -> Option<Vec<usize>> {
+	unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> i32 {
+		// SAFETY: EnumThreadWindows calls synchronously with our live Vec.
+		unsafe { &mut *(data as *mut Vec<usize>) }.push(hwnd.expose_provenance());
+		1
+	}
+	let mut windows = Vec::new();
+	// SAFETY: the callback only writes to windows during this call.
+	if unsafe { EnumThreadWindows(thread, Some(collect), &raw mut windows as LPARAM) } == 0 {
+		return None;
+	}
+	Some(windows)
+}
+
+fn modal_popups(target: &Target, before: &[usize]) -> Vec<ModalPopup> {
+	let mut popups = Vec::new();
+	for id in thread_windows(target.thread).unwrap_or_default() {
+		if before.contains(&id) {
+			continue;
+		}
+		let hwnd = with_exposed_provenance_mut(id);
+		let mut pid = 0;
+		// SAFETY: pid is writable and Windows validates the window handles.
+		let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+		let mut popup = ModalPopup {
+			id,
+			// SAFETY: GetWindow only queries ownership of the opaque HWND.
+			owned_by_target: unsafe { GetWindow(hwnd, GW_OWNER) } == target.hwnd,
+			same_thread: thread == target.thread && pid == target.pid,
+			// SAFETY: IsWindowEnabled only queries the opaque HWND.
+			enabled: unsafe { IsWindowEnabled(hwnd) } != 0,
+			// SAFETY: IsWindowVisible only queries the opaque HWND.
+			visible: unsafe { IsWindowVisible(hwnd) } != 0,
+			responsive: false,
+		};
+		if popup.owned_by_target && popup.same_thread && popup.enabled && popup.visible {
+			let mut result = 0;
+			// SAFETY: WM_NULL carries no data and has no window side effects.
+			popup.responsive = unsafe {
+				SendMessageTimeoutW(
+					hwnd,
+					WM_NULL,
+					0,
+					0,
+					SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+					200,
+					&mut result,
+				)
+			} != 0;
+		}
+		popups.push(popup);
+	}
+	popups
+}
+
 fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()> {
 	let original = native_resolve(root, path)?;
 	require_command(&original.item)?;
@@ -320,12 +376,13 @@ fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()
 		0
 	};
 	target.attached(root)?;
+	let before = thread_windows(target.thread);
 	let mut result = 0;
 	control::check()?;
 	// SAFETY: only scalar command data is sent to the exact validated HWND.
 	// A finite timeout avoids waiting indefinitely on a hung target or modal
 	// command handler. A timeout is NOT evidence that dispatch did not occur.
-	if unsafe {
+	let sent = unsafe {
 		SendMessageTimeoutW(
 			target.hwnd,
 			message,
@@ -335,8 +392,19 @@ fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()
 			1500,
 			&mut result,
 		)
-	} == 0
-	{
+	} != 0;
+	// A modal handler cannot return until its dialog closes. Only a newly
+	// observed, responsive owned dialog with a disabled owner confirms it.
+	// SAFETY: IsWindowEnabled only inspects the opaque HWND.
+	let owner_enabled = unsafe { IsWindowEnabled(target.hwnd) } != 0;
+	let popups = if sent || owner_enabled {
+		Vec::new()
+	} else if let Some(before) = before.as_deref() {
+		modal_popups(target, before)
+	} else {
+		Vec::new()
+	};
+	if !command_completed(sent, owner_enabled, before.as_deref(), &popups) {
 		return Err(failed(
 			"native menu command delivery failed or timed out and may already have taken effect; do \
 			 not replay automatically",
