@@ -58,6 +58,11 @@ export interface SessionInfo {
 	 * synthesized {@link SessionInfo}s (cross-project stubs, tests) leave it unset.
 	 */
 	status?: SessionStatus;
+	/**
+	 * The journal could not be read through for its latest title, so `title` is the
+	 * indexed or header title; it is never recorded into the title index.
+	 */
+	titleUnread?: true;
 }
 
 export interface ResolvedSessionMatch {
@@ -458,16 +463,21 @@ async function scanSessionFile(
 			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 			return undefined;
 		}
-		// A journal that cannot be read through still lists under its header title, so callers such as
-		// gc meet the read error themselves; the result is not cached, so a later scan finds the title.
+		// A journal that cannot be read through still lists, under its indexed or header title, so
+		// callers such as gc meet the read error themselves. That result is neither cached nor
+		// indexed, so a later scan reads the title again.
 		let latestTitle: SessionTitleUpdate | undefined;
-		let titleRead = true;
+		let titleUnread = false;
 		try {
 			latestTitle = await readLatestSessionTitle(file, storage);
 		} catch {
-			titleRead = false;
+			titleUnread = true;
 		}
-		const resolvedTitle = latestTitle ? (normalizeTitleOverride(latestTitle.title) ?? undefined) : header.title;
+		const resolvedTitle = titleUnread
+			? ((storage instanceof FileSessionStorage ? lookupSessionTitle(header.id) : undefined) ?? header.title)
+			: latestTitle
+				? (normalizeTitleOverride(latestTitle.title) ?? undefined)
+				: header.title;
 
 		let parsedMessageCount = 0;
 		let assistantTurns = 0;
@@ -550,9 +560,13 @@ async function scanSessionFile(
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
 			status: withStatus ? deriveSessionStatus(suffix) : undefined,
 		};
+		if (titleUnread) {
+			info.titleUnread = true;
+			return info;
+		}
 		// The cache keeps its own shallow copy; hits also hand out copies, so
 		// callers can never mutate the shared cached object.
-		if (titleRead) cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
+		cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
 		return info;
 	} catch {
 		return undefined;
@@ -885,6 +899,7 @@ async function indexedSessions(files: readonly string[], titles: ReadonlyMap<str
 function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyMap<string, string>): void {
 	const changed = new Map<string, string | undefined>();
 	for (const session of sessions) {
+		if (session.titleUnread) continue;
 		const title = sanitizeSessionName(session.title);
 		if (title ? indexed.get(session.id) !== title : indexed.has(session.id))
 			changed.set(session.id, title || undefined);
@@ -1649,7 +1664,7 @@ export async function getRecentSessions(
 		const info = await scanSessionFile(file, storage, true, stat);
 		if (!info || isEmptySession(info)) continue;
 		const title = sanitizeSessionName(info.title);
-		if (useIndex && title && info.id) recordSessionTitle(info.id, title);
+		if (useIndex && title && info.id && !info.titleUnread) recordSessionTitle(info.id, title);
 		recent.push({ path: file, name: sessionDisplayName(info), timeAgo: formatTimeAgo(info.modified) });
 	}
 	return recent;

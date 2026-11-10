@@ -1,10 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getRecentSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { getRecentSessions, listSessionsForPicker } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import {
+	closeSessionIndex,
+	lookupSessionTitle,
+	recordSessionTitle,
+} from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "../session-manager/helpers";
 
@@ -90,6 +95,75 @@ describe("recent sessions title index", () => {
 		const second = await getRecentSessions(sessionDir);
 		expect(second).toHaveLength(1);
 		expect(second[0].name).toBe("Legacy title");
+	});
+
+	it("keeps the index while a journal cannot be read for its title, and reads the title once it can", async () => {
+		const sessionDir = SessionManager.getDefaultSessionDir(cwd);
+		fs.mkdirSync(sessionDir, { recursive: true });
+		const timestamp = "2024-01-01T00:00:00.000Z";
+		const writeRenamed = (id: string): string => {
+			const file = path.join(sessionDir, `2024-01-01T00-00-00-000Z_${id}.jsonl`);
+			const records = [
+				{ type: "session", version: 3, id, timestamp, cwd, title: "Header title" },
+				{
+					type: "message",
+					id: "root",
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: "hello", timestamp: 1 },
+				},
+				{
+					type: "title_change",
+					id: "renamed",
+					parentId: "root",
+					timestamp,
+					title: "Journal title",
+					source: "user",
+				},
+			];
+			fs.writeFileSync(file, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
+			return file;
+		};
+		const indexedId = Bun.randomUUIDv7();
+		const unindexedId = Bun.randomUUIDv7();
+		const unreadable = new Set([writeRenamed(indexedId), writeRenamed(unindexedId)]);
+		recordSessionTitle(indexedId, "Journal title");
+		const scanTitles = async () =>
+			Object.fromEntries(
+				(await (await listSessionsForPicker(sessionDir, new FileSessionStorage(), new Set())).complete).map(
+					session => [session.id, session.title],
+				),
+			);
+
+		const realFile = Bun.file.bind(Bun);
+		const fileSpy = spyOn(Bun, "file").mockImplementation((source, options) => {
+			const file = realFile(source as string, options);
+			if (unreadable.has(source as string)) {
+				file.stream = () =>
+					new ReadableStream<Uint8Array<ArrayBuffer>>({
+						pull(controller) {
+							controller.error(new Error("title read failed"));
+						},
+					});
+			}
+			return file;
+		});
+		try {
+			// Listed under the indexed title, else the header's; neither is written to the index.
+			expect(await scanTitles()).toEqual({ [indexedId]: "Journal title", [unindexedId]: "Header title" });
+			expect((await getRecentSessions(sessionDir)).map(recent => recent.name).sort()).toEqual([
+				"Header title",
+				"Journal title",
+			]);
+			expect(lookupSessionTitle(indexedId)).toBe("Journal title");
+			expect(lookupSessionTitle(unindexedId)).toBeUndefined();
+		} finally {
+			fileSpy.mockRestore();
+		}
+
+		// The files' stat identity is unchanged: only an uncached scan finds the journal title.
+		expect(await scanTitles()).toEqual({ [indexedId]: "Journal title", [unindexedId]: "Journal title" });
+		expect(lookupSessionTitle(unindexedId)).toBe("Journal title");
 	});
 
 	it("orders by file mtime, enforces the limit, and names untitled sessions from their first prompt", async () => {
