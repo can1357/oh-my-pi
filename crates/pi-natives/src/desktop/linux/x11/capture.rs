@@ -8,7 +8,8 @@ use x11rb::{
 		ErrorKind,
 		randr::ConnectionExt as _,
 		xproto::{
-			Atom, AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, MapState, VisualClass, Window,
+			Atom, AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, MapState, VisualClass,
+			Window, WindowClass,
 		},
 	},
 	rust_connection::RustConnection,
@@ -24,11 +25,25 @@ use crate::desktop::{
 const MAX_WINDOWS: usize = 48;
 const MIN_WINDOW_EDGE: u32 = 16;
 
+/// A rectangle in root coordinates: x, y, width, height.
+type Area = (i32, i32, u32, u32);
+
+/// What stacks above a window ([`X11Capture::above`]).
+struct Above {
+	/// Another client's window overlaps it.
+	covered: bool,
+	/// The window's own popups over it: each window, the part of the area it
+	/// covers, and its origin.
+	popups:  Vec<(Window, Area, (i32, i32))>,
+}
+
 #[derive(Clone, Copy)]
 struct ColorMasks {
 	red:   u32,
 	green: u32,
 	blue:  u32,
+	/// Premultiplied alpha of a 32-bit ARGB visual; 0 for opaque visuals.
+	alpha: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -67,11 +82,17 @@ pub struct X11Capture {
 	root_height: u32,
 	masks:       ColorMasks,
 	selector:    DisplaySelector,
+	/// The selection a compositing manager owns on this screen (EWMH).
+	compositor:  Atom,
 }
 
 impl X11Capture {
 	pub(crate) fn new(selector: DisplaySelector) -> CoreResult<Self> {
-		let (conn, screen_num) = x11rb::connect(None).map_err(|error| {
+		Self::connect(None, selector)
+	}
+
+	fn connect(display: Option<&str>, selector: DisplaySelector) -> CoreResult<Self> {
+		let (conn, screen_num) = x11rb::connect(display).map_err(|error| {
 			DesktopError::capture_failed(format!(
 				"X11 connection failed; ensure DISPLAY points at a reachable X server: {error}"
 			))
@@ -96,12 +117,22 @@ impl X11Capture {
 				visual.class
 			)));
 		}
-		let masks =
-			ColorMasks { red: visual.red_mask, green: visual.green_mask, blue: visual.blue_mask };
+		let masks = ColorMasks {
+			red:   visual.red_mask,
+			green: visual.green_mask,
+			blue:  visual.blue_mask,
+			alpha: 0,
+		};
 		let root = screen.root;
 		let root_width = u32::from(screen.width_in_pixels);
 		let root_height = u32::from(screen.height_in_pixels);
-		let capture = Self { conn, root, root_width, root_height, masks, selector };
+		let compositor = conn
+			.intern_atom(false, format!("_NET_WM_CM_S{screen_num}").as_bytes())
+			.map_err(request_failed)?
+			.reply()
+			.map_err(request_failed)?
+			.atom;
+		let capture = Self { conn, root, root_width, root_height, masks, selector, compositor };
 		capture.capture_root(0, 0, 1, 1)?;
 		Ok(capture)
 	}
@@ -326,6 +357,9 @@ impl X11Capture {
 				Ok((composite, frame))
 			},
 			Target::Window(id) => {
+				let client = id.parse::<Window>().map_err(|_| {
+					DesktopError::window_not_found(format!("invalid X11 window id {id}"))
+				})?;
 				let window = self
 					.windows()?
 					.into_iter()
@@ -333,7 +367,7 @@ impl X11Capture {
 					.ok_or_else(|| {
 						DesktopError::window_not_found(format!("window {id} was not found"))
 					})?;
-				let (x, y, width, height) = clip_to_root(
+				let area = clip_to_root(
 					window.x,
 					window.y,
 					window.width,
@@ -344,7 +378,28 @@ impl X11Capture {
 				.ok_or_else(|| {
 					DesktopError::capture_failed(format!("window {id} has no visible root area"))
 				})?;
-				let image = self.capture_root(x, y, width, height)?;
+				let (x, y, width, height) = area;
+				// The root holds what is on screen, which is this window only where
+				// nothing covers it. A window's own drawable holds its covered part
+				// too only while a compositing manager redirects it into a pixmap.
+				let above = self.above(client, area)?;
+				let image = if !above.covered {
+					self.capture_root(x, y, width, height)?
+				} else if self.compositing()? {
+					let mut image =
+						self.capture_window(client, x - window.x, y - window.y, width, height)?;
+					for (popup, (px, py, pw, ph), (ox, oy)) in above.popups {
+						let part = self.capture_window(popup, px - ox, py - oy, pw, ph)?;
+						image::imageops::overlay(&mut image, &part, i64::from(px - x), i64::from(py - y));
+					}
+					image
+				} else {
+					return Err(DesktopError::capture_failed(format!(
+						"window {id} is covered by another window, and without a compositing manager \
+						 the X server keeps no image of its covered part; win.ax() still reads it, and \
+						 a screenshot of its display shows what is on top"
+					)));
+				};
 				let frame_window = DesktopWindow { x, y, width, height, ..window };
 				let frame = FrameGeometry::for_window(&frame_window, image.width(), image.height());
 				Ok((image, frame))
@@ -385,18 +440,156 @@ impl X11Capture {
 		let y = i16::try_from(y).map_err(|_| {
 			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
 		})?;
-		let width16 = u16::try_from(width).map_err(|_| {
-			DesktopError::capture_failed("capture width exceeds the X11 coordinate space")
-		})?;
-		let height16 = u16::try_from(height).map_err(|_| {
-			DesktopError::capture_failed("capture height exceeds the X11 coordinate space")
-		})?;
 		let reply = self
 			.conn
-			.get_image(ImageFormat::Z_PIXMAP, self.root, x, y, width16, height16, !0)
+			.get_image(ImageFormat::Z_PIXMAP, self.root, x, y, edge(width)?, edge(height)?, !0)
 			.map_err(request_failed)?
 			.reply()
 			.map_err(root_capture_failed)?;
+		self.decode(&reply, width, height, self.masks)
+	}
+
+	/// A compositing manager owns this screen's `_NET_WM_CM_S<n>` selection.
+	fn compositing(&self) -> CoreResult<bool> {
+		let owner = self
+			.conn
+			.get_selection_owner(self.compositor)
+			.map_err(request_failed)?
+			.reply()
+			.map_err(request_failed)?
+			.owner;
+		Ok(owner != x11rb::NONE)
+	}
+
+	/// What the server stacks above `client`'s top-level window inside `area`,
+	/// frames and unmanaged windows included. A window of the server's own,
+	/// such as the compositing overlay, covers nothing; an override-redirect
+	/// window `client`'s own process made (a menu, a tooltip) belongs to it.
+	fn above(&self, client: Window, area: Area) -> CoreResult<Above> {
+		let parent = |window| -> CoreResult<Window> {
+			Ok(self
+				.conn
+				.query_tree(window)
+				.map_err(request_failed)?
+				.reply()
+				.map_err(request_failed)?
+				.parent)
+		};
+		let mut top = client;
+		loop {
+			let next = parent(top)?;
+			if next == self.root || next == x11rb::NONE {
+				break;
+			}
+			top = next;
+		}
+		// Bottom to top.
+		let children = self
+			.conn
+			.query_tree(self.root)
+			.map_err(request_failed)?
+			.reply()
+			.map_err(request_failed)?
+			.children;
+		let start = children
+			.iter()
+			.position(|&window| window == top)
+			.map_or(children.len(), |index| index + 1);
+		let children = &children[start..];
+		let attributes = children
+			.iter()
+			.map(|&window| self.conn.get_window_attributes(window))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(request_failed)?;
+		let geometries = children
+			.iter()
+			.map(|&window| self.conn.get_geometry(window))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(request_failed)?;
+		let owner = |window: Window| window & !self.conn.setup().resource_id_mask;
+		let mut above = Above { covered: false, popups: Vec::new() };
+		for ((&window, attributes), geometry) in children.iter().zip(attributes).zip(geometries) {
+			// A window destroyed since the tree was read covers nothing.
+			let (Ok(attributes), Ok(geometry)) = (attributes.reply(), geometry.reply()) else {
+				continue;
+			};
+			if attributes.map_state != MapState::VIEWABLE
+				|| attributes.class != WindowClass::INPUT_OUTPUT
+				|| owner(window) == 0
+			{
+				continue;
+			}
+			let border = u32::from(geometry.border_width);
+			let outer = (
+				i32::from(geometry.x),
+				i32::from(geometry.y),
+				u32::from(geometry.width) + 2 * border,
+				u32::from(geometry.height) + 2 * border,
+			);
+			if attributes.override_redirect && owner(window) == owner(client) {
+				let origin = (outer.0 + border as i32, outer.1 + border as i32);
+				let inner = (origin.0, origin.1, u32::from(geometry.width), u32::from(geometry.height));
+				if let Some(part) = intersect(area, inner) {
+					above.popups.push((window, part, origin));
+				}
+			} else if intersect(area, outer).is_some() {
+				above.covered = true;
+			}
+		}
+		Ok(above)
+	}
+
+	/// The rectangle at `x, y` inside `window`, read from its own drawable.
+	fn capture_window(
+		&self,
+		window: Window,
+		x: i32,
+		y: i32,
+		width: u32,
+		height: u32,
+	) -> CoreResult<RgbaImage> {
+		let x = i16::try_from(x).map_err(|_| {
+			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
+		})?;
+		let y = i16::try_from(y).map_err(|_| {
+			DesktopError::capture_failed("capture origin exceeds the X11 coordinate space")
+		})?;
+		let reply = self
+			.conn
+			.get_image(ImageFormat::Z_PIXMAP, window, x, y, edge(width)?, edge(height)?, !0)
+			.map_err(request_failed)?
+			.reply()
+			.map_err(|error| {
+				DesktopError::capture_failed(format!("X11 GetImage of window {window} failed: {error}"))
+			})?;
+		let visual = self
+			.conn
+			.setup()
+			.roots
+			.iter()
+			.flat_map(|screen| &screen.allowed_depths)
+			.flat_map(|depth| &depth.visuals)
+			.find(|visual| visual.visual_id == reply.visual)
+			.ok_or_else(|| {
+				DesktopError::capture_failed("X11 setup does not describe the window's visual")
+			})?;
+		let color = visual.red_mask | visual.green_mask | visual.blue_mask;
+		let masks = ColorMasks {
+			red:   visual.red_mask,
+			green: visual.green_mask,
+			blue:  visual.blue_mask,
+			alpha: if reply.depth == 32 { !color } else { 0 },
+		};
+		self.decode(&reply, width, height, masks)
+	}
+
+	fn decode(
+		&self,
+		reply: &x11rb::protocol::xproto::GetImageReply,
+		width: u32,
+		height: u32,
+		masks: ColorMasks,
+	) -> CoreResult<RgbaImage> {
 		let setup = self.conn.setup();
 		let format = setup
 			.pixmap_formats
@@ -416,7 +609,7 @@ impl X11Capture {
 			format.bits_per_pixel,
 			format.scanline_pad,
 			setup.image_byte_order == ImageOrder::LSB_FIRST,
-			self.masks,
+			masks,
 		)
 	}
 }
@@ -503,6 +696,20 @@ fn clip_to_root(
 	))
 }
 
+fn edge(length: u32) -> CoreResult<u16> {
+	u16::try_from(length)
+		.map_err(|_| DesktopError::capture_failed("capture size exceeds the X11 coordinate space"))
+}
+
+fn intersect(a: Area, b: Area) -> Option<Area> {
+	let left = a.0.max(b.0);
+	let top = a.1.max(b.1);
+	let right = (i64::from(a.0) + i64::from(a.2)).min(i64::from(b.0) + i64::from(b.2));
+	let bottom = (i64::from(a.1) + i64::from(a.3)).min(i64::from(b.1) + i64::from(b.3));
+	(right > i64::from(left) && bottom > i64::from(top))
+		.then(|| (left, top, (right - i64::from(left)) as u32, (bottom - i64::from(top)) as u32))
+}
+
 fn parse_wm_class(value: &[u8]) -> String {
 	let mut parts = value
 		.split(|&byte| byte == 0)
@@ -544,6 +751,9 @@ fn zpixmap_to_rgba(
 	if masks.red & masks.green != 0 || masks.red & masks.blue != 0 || masks.green & masks.blue != 0 {
 		return Err(DesktopError::capture_failed("X11 TrueColor masks overlap"));
 	}
+	let alpha = (masks.alpha != 0)
+		.then(|| ComponentMask::new("alpha", masks.alpha))
+		.transpose()?;
 	let pad_bits = usize::from(scanline_pad).max(8);
 	let stride = ((width as usize) * usize::from(bits_per_pixel)).div_ceil(pad_bits) * pad_bits / 8;
 	let needed = stride.saturating_mul(height as usize);
@@ -570,9 +780,253 @@ fn zpixmap_to_rgba(
 					.iter()
 					.fold(0u32, |acc, &byte| acc << 8 | u32::from(byte))
 			};
-			rgba.extend_from_slice(&[red.decode(value), green.decode(value), blue.decode(value), 255]);
+			let [r, g, b] = [red.decode(value), green.decode(value), blue.decode(value)];
+			match alpha.map(|alpha| alpha.decode(value)) {
+				None | Some(255) => rgba.extend_from_slice(&[r, g, b, 255]),
+				Some(0) => rgba.extend_from_slice(&[0; 4]),
+				// ARGB visuals hold premultiplied colour; PNG wants it straight.
+				Some(a) => {
+					let a16 = u16::from(a);
+					let straight = |c: u8| ((u16::from(c) * 255 + a16 / 2) / a16).min(255) as u8;
+					rgba.extend_from_slice(&[straight(r), straight(g), straight(b), a]);
+				},
+			}
 		}
 	}
 	RgbaImage::from_raw(width, height, rgba)
 		.ok_or_else(|| DesktopError::capture_failed("X11 image dimensions are inconsistent"))
+}
+
+#[cfg(test)]
+mod tests {
+	//! The Xvfb tests start their own server and play its window manager:
+	//! `cargo test -p pi-natives -- --ignored covered_window`
+
+	use std::{
+		io::{BufRead, BufReader, IoSlice},
+		process::{Child, Command, Stdio},
+	};
+
+	use x11rb::{
+		CURRENT_TIME,
+		connection::RequestConnection as _,
+		protocol::xproto::{ConfigureWindowAux, CreateWindowAux, PropMode, StackMode},
+		wrapper::ConnectionExt as _,
+	};
+
+	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	const RED: u32 = 0x00ff_0000;
+	const BLUE: u32 = 0x0000_00ff;
+	const GREY: u32 = 0x0080_8080;
+	const YELLOW: u32 = 0x00ff_ff00;
+	/// In red's frame-covered strip.
+	const STRIP: (u32, u32) = (150, 145);
+	/// Under red's own popup.
+	const POPUP: (u32, u32) = (20, 20);
+
+	struct Server(Child);
+
+	impl Drop for Server {
+		fn drop(&mut self) {
+			let _ = self.0.kill();
+			let _ = self.0.wait();
+		}
+	}
+
+	fn start_server() -> (Server, String) {
+		let mut child = Command::new("Xvfb")
+			.args(["-displayfd", "1", "-screen", "0", "320x320x24", "-nolisten", "tcp"])
+			.stdout(Stdio::piped())
+			.stderr(Stdio::null())
+			.spawn()
+			.expect("Xvfb starts");
+		let mut number = String::new();
+		BufReader::new(child.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		(Server(child), format!(":{}", number.trim()))
+	}
+
+	fn window(
+		conn: &RustConnection,
+		parent: Window,
+		(x, y, width, height): (i16, i16, u16, u16),
+		aux: &CreateWindowAux,
+	) -> Window {
+		let id = conn.generate_id().expect("window id");
+		conn
+			.create_window(
+				x11rb::COPY_DEPTH_FROM_PARENT,
+				id,
+				parent,
+				x,
+				y,
+				width,
+				height,
+				0,
+				WindowClass::INPUT_OUTPUT,
+				x11rb::COPY_FROM_PARENT,
+				aux,
+			)
+			.expect("create window");
+		conn.map_window(id).expect("map window");
+		id
+	}
+
+	/// A red window whose bottom strip only the grey title bar of a framed
+	/// blue window covers, both listed in `_NET_CLIENT_LIST_STACKING`, and a
+	/// yellow override-redirect popup of red's client over red.
+	fn covered_pair(conn: &RustConnection) -> (Window, Window, Window) {
+		let root = conn.setup().roots[0].root;
+		let red = window(conn, root, (0, 0, 200, 150), &CreateWindowAux::new().background_pixel(RED));
+		let frame =
+			window(conn, root, (100, 140, 200, 160), &CreateWindowAux::new().background_pixel(GREY));
+		let blue =
+			window(conn, frame, (0, 10, 200, 150), &CreateWindowAux::new().background_pixel(BLUE));
+		window(
+			conn,
+			root,
+			(10, 10, 40, 30),
+			&CreateWindowAux::new()
+				.background_pixel(YELLOW)
+				.override_redirect(1),
+		);
+		let stacking = conn
+			.intern_atom(false, b"_NET_CLIENT_LIST_STACKING")
+			.expect("intern")
+			.reply()
+			.expect("atom")
+			.atom;
+		conn
+			.change_property32(PropMode::REPLACE, root, stacking, AtomEnum::WINDOW, &[red, blue])
+			.expect("list windows");
+		conn.sync().expect("sync");
+		(red, blue, frame)
+	}
+
+	fn pixel(image: &RgbaImage, (x, y): (u32, u32)) -> [u8; 4] {
+		image.get_pixel(x, y).0
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn covered_window_without_a_compositing_manager_is_reported_covered() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let (red, blue, _) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(blue.to_string()), None)
+			.expect("uncovered window");
+		assert_eq!(pixel(&image, (50, 50)), [0, 0, 255, 255]);
+
+		let error = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect_err("a window under another's frame");
+		assert_eq!(error.code, ErrorCode::CaptureFailed);
+		assert!(error.message.contains("covered"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn covered_window_follows_the_servers_stacking_and_keeps_its_popups() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let (red, _, frame) = covered_pair(&wm);
+		// Blue moved over red but stacked below it, while the stacking list still
+		// says blue is on top.
+		wm.configure_window(frame, &ConfigureWindowAux::new().y(60).stack_mode(StackMode::BELOW))
+			.expect("lower");
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("a window on top");
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+	}
+
+	/// Does what a compositing manager does on start: redirects every top-level
+	/// into a pixmap of its own and takes the screen's `_NET_WM_CM_S0`.
+	fn become_compositing_manager(conn: &RustConnection) {
+		let root = conn.setup().roots[0].root;
+		let opcode = conn
+			.extension_information("Composite")
+			.expect("query Composite")
+			.expect("Xvfb has Composite")
+			.major_opcode;
+		// CompositeRedirectSubwindows(root, Manual): minor opcode 2, three words.
+		let mut request = vec![opcode, 2];
+		request.extend_from_slice(&3u16.to_ne_bytes());
+		request.extend_from_slice(&root.to_ne_bytes());
+		request.extend_from_slice(&[1, 0, 0, 0]);
+		conn
+			.send_request_without_reply(&[IoSlice::new(&request)], Vec::new())
+			.expect("redirect")
+			.check()
+			.expect("redirect accepted");
+		let owner = conn.generate_id().expect("owner id");
+		conn
+			.create_window(
+				0,
+				owner,
+				root,
+				0,
+				0,
+				1,
+				1,
+				0,
+				WindowClass::INPUT_ONLY,
+				x11rb::COPY_FROM_PARENT,
+				&CreateWindowAux::new(),
+			)
+			.expect("owner window");
+		let selection = conn
+			.intern_atom(false, b"_NET_WM_CM_S0")
+			.expect("intern")
+			.reply()
+			.expect("atom")
+			.atom;
+		conn
+			.set_selection_owner(owner, selection, CURRENT_TIME)
+			.expect("own selection");
+		conn.sync().expect("sync");
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn covered_window_under_a_compositing_manager_is_read_from_its_own_pixels() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		become_compositing_manager(&wm);
+		let (red, ..) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("covered window");
+		assert_eq!(image.dimensions(), (200, 150));
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+	}
+
+	#[test]
+	fn argb_pixels_come_out_with_straight_alpha() {
+		let masks = ColorMasks {
+			red:   0x00ff_0000,
+			green: 0x0000_ff00,
+			blue:  0x0000_00ff,
+			alpha: 0xff00_0000,
+		};
+		let data: Vec<u8> = [0x8080_0000u32, 0, 0xffff_0000]
+			.iter()
+			.flat_map(|pixel| pixel.to_le_bytes())
+			.collect();
+		let image = zpixmap_to_rgba(&data, 3, 1, 32, 32, 32, true, masks).expect("decode");
+		assert_eq!(image.as_raw().as_slice(), [255, 0, 0, 128, 0, 0, 0, 0, 255, 0, 0, 255]);
+	}
 }
