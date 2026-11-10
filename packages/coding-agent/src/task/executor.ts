@@ -3906,17 +3906,25 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// result, and is not offered.
 			const structured = options.structured !== false;
 			const publishMessageResult = ownerWoken || ownerPrompted || userPrompted;
+			// What the turn now ends on is rechecked on every pass, not only on entry: a refusal's continuation
+			// can end on a provider error or an abort with partial text the monitor still takes as its report,
+			// and a failed reply is no result to offer (again) however many times a handler refuses.
 			const hasCandidate = structured
 				? () =>
 						turnMonitor.yieldCalled() ||
 						(!turnMonitor.yieldInvalidatedByStop() &&
 							!turnMonitor.yieldInvalidatedByAsync() &&
 							(turnMonitor.progress.extractedToolData?.yield?.length ?? 0) > 0)
-				: () => publishMessageResult && turnMonitor.lastReportTurnText() !== undefined;
-			const replyTurn = session.getLastAssistantMessage();
-			const judgeable =
-				structured ||
-				(turnError === undefined && replyTurn?.stopReason !== "error" && replyTurn?.stopReason !== "aborted");
+				: () => {
+						const replyStop = session.getLastAssistantMessage()?.stopReason;
+						return (
+							publishMessageResult &&
+							turnMonitor.lastReportTurnText() !== undefined &&
+							replyStop !== "error" &&
+							replyStop !== "aborted"
+						);
+					};
+			const judgeable = structured || turnError === undefined;
 			const judging = judgeable && hasCandidate() && session.extensionRunner?.hasHandlers("subagent_stop") === true;
 			// Taken before anything awaits, so no other turn starts on the session
 			// until this turn's result is published, and the monitor stays attached

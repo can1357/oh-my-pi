@@ -366,6 +366,36 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(run.lifecycle.at(-1)?.status).toBe("failed");
 		});
 
+		it.each(["error", "aborted"] as const)(
+			"ends an owner wake as failed instead of offering again a refusal's continuation that ended on %s",
+			async stopReason => {
+				const run = await setup({
+					structured: false,
+					parentId: "Parent",
+					disableAutoRetry: true,
+					responses: [
+						{ content: ["REFUSED-REPLY"] },
+						// The continuation's partial text still counts as the monitor's report turn.
+						{ content: ["PARTIAL-REPLY"], stopReason, errorMessage: "provider exploded" },
+						{ content: ["would be a third request"] },
+						{ content: ["would be a fourth request"] },
+					],
+					// An always-block handler: only a failed continuation can end the pass.
+					onStop: (_event, callIndex) => (callIndex <= 3 ? { decision: "block", reason: "not done" } : undefined),
+				});
+
+				await deliverWake(run.session, "m1", "Parent");
+				await run.session.waitForIrcReplies();
+				await run.session.waitForIdle();
+
+				// One verdict, one continuation: the failed reply is never offered a second time.
+				expect(run.stopEvents).toHaveLength(1);
+				expect(run.mock.calls).toHaveLength(2);
+				expect(await Bun.file(run.artifact).exists()).toBe(false);
+				expect(run.lifecycle.at(-1)?.status).toBe("failed");
+			},
+		);
+
 		it("does not offer a peer relay, which is not a result", async () => {
 			const run = await setup({
 				structured: false,
