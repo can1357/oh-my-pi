@@ -600,6 +600,30 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			);
 			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Medium);
 		});
+
+		it("leaves an unresolved startup model to the session's per-model ceiling instead of the * entry", async () => {
+			const spy = vi
+				.spyOn(sdkModule, "createAgentSession")
+				.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+			const result = await runSubprocess({
+				...baseOptions,
+				agent: { ...baseAgent, model: ["extension/deferred-model"] },
+				modelOverride: ["extension/deferred-model"],
+				id: "subagent-actual-effort-deferred-model",
+				actualEffort: Effort.High,
+				settings: Settings.isolated({
+					"task.maxActualEffort": { "*": "low", "extension/deferred-model": "high" },
+				}),
+				modelRegistry: createModelRegistry([]),
+			});
+
+			expect(result.exitCode).toBe(0);
+			const forwarded = spy.mock.calls[0]?.[0];
+			expect(forwarded?.model).toBeUndefined();
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
+			const deferred = { ...sol, provider: "extension", id: "deferred-model" } as Model;
+			expect(forwarded?.thinkingLevelCeiling?.(deferred)).toBe(Effort.High);
+		});
 	});
 
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {

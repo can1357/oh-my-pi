@@ -4913,7 +4913,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				ceilingValue === undefined
 					? undefined
 					: ceilingModel => resolveEffortCeilingForModel(ceilingValue, ceilingModel);
-			const modelEffortCeiling = spawnEffortCeiling?.(model);
+			// An unresolved model (settled later by createAgentSession) is not clamped here:
+			// the "*" entry would wrongly cap it, so the session clamps to its own entry.
+			const modelEffortCeiling = model ? spawnEffortCeiling?.(model) : undefined;
 			if (model && modelEffortCeiling)
 				assertModelSupportsEffortCeiling(model, modelEffortCeiling, ceilingSetting?.id);
 			const effortLevel =
