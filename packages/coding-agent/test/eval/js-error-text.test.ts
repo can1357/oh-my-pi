@@ -67,7 +67,7 @@ describe("uncaught JavaScript cell errors", () => {
 	});
 
 	it("keeps multiline diagnostics when folding an unawaited rejection", async () => {
-		const message = "first\n    at map (native:1:11)\nlast";
+		const message = "first $& $$\n    at map (native:1:11)\nlast";
 		const result = await executeJs(
 			`Promise.reject(new Error(${JSON.stringify(message)})); const { promise, resolve } = Promise.withResolvers(); setImmediate(resolve); await promise;`,
 			options,
