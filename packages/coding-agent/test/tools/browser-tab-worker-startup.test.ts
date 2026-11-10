@@ -608,6 +608,10 @@ describe("OMP-owned browser evaluation", () => {
 							const realm = page.mainFrame().mainRealm();
 							const originalEvaluate = realm.evaluate;
 							const controller = new AbortController();
+							// Simulate a protocol release stuck behind a busy renderer without blocking the test's cleanup.
+							prototype.dispose = function() {
+								return originalDispose.call(this).then(() => Promise.withResolvers().promise);
+							};
 							realm.evaluate = function(_fn, ...args) {
 								// Delay the real CDP truthiness evaluation, not the predicate evaluation.
 								// Chromium's clock is separate from Bun's fake timers.
@@ -629,6 +633,7 @@ describe("OMP-owned browser evaluation", () => {
 								}, error => error.name));
 							} finally {
 								realm.evaluate = originalEvaluate;
+								prototype.dispose = originalDispose;
 							}
 						}
 						await page.evaluate(() => {
@@ -657,6 +662,19 @@ describe("OMP-owned browser evaluation", () => {
 								delete globalThis.__ompOriginalBoolean;
 							});
 						}
+						await page.evaluate(() => {
+							globalThis.__ompUnhandledWaits = 0;
+							addEventListener("unhandledrejection", event => {
+								if (String(event.reason).includes("expected poller rejection")) globalThis.__ompUnhandledWaits++;
+							});
+						});
+						const thrown = [];
+						for (const polling of ["raf", "mutation"]) {
+							thrown.push(await page.waitForFunction(() => {
+								throw new Error("expected poller rejection");
+							}, { polling, timeout: 1_000 }).then(() => "resolved", error => error.message));
+						}
+						const unhandledWaits = await page.evaluate(() => globalThis.__ompUnhandledWaits);
 						const seen = {
 							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
 							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
@@ -674,6 +692,8 @@ describe("OMP-owned browser evaluation", () => {
 							lateDisposals,
 							truthiness,
 							shimmed,
+							thrown,
+							unhandledWaits,
 							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
 							registry: await page.evaluate(() => String(customElements)),
 							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
@@ -713,6 +733,8 @@ describe("OMP-owned browser evaluation", () => {
 						truthiness: ["TimeoutError", "AbortError"],
 						chained: 47,
 						shimmed: [47, 47, 47],
+						thrown: ["expected poller rejection", "expected poller rejection"],
+						unhandledWaits: 0,
 						registry: "[object CustomElementRegistry]",
 						leaked: [],
 					},
