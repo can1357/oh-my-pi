@@ -178,9 +178,9 @@ async function restoreInterruptedChild(
 		defaultThinkingLevel: Effort.Medium,
 	});
 	const session = {
-		sessionId: "main-session-1",
 		sessionFile: mainFile,
 		sessionManager: {
+			getSessionId: () => "main-session-1",
 			getSessionFile: () => mainFile,
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
