@@ -36,10 +36,11 @@ pub use self::host::{NativeHost, ignored_on_entry, inherited_fds};
 use self::signals::RuntimeSignals;
 use crate::{
 	bash::{
-		Budget, CallOutcome, Cx, Dialect, Engine, EngineConfig, EventMask, MemStore, ModeId, Origin,
-		Profile, RunId, Script, Shell, ShellInit, Step, Vpid,
+		BinaryCheck, Budget, CallOutcome, Cx, Dialect, Engine, EngineConfig, EventMask, MemStore,
+		ModeId, Origin, Profile, RunId, Script, Shell, ShellInit, Step, Vpid,
 		diag::strerror,
 		invocation::{self, ShellArgs},
+		looks_binary,
 		store::OptId,
 		zshopt::ZshOpt,
 	},
@@ -191,7 +192,7 @@ pub fn read_script(
 	// (and 127) runs. ELF magic is refused only in regular files; FIFO
 	// input beginning with the same four bytes runs as shell text.
 	if metadata.as_ref().is_some_and(|m| m.is_file())
-		&& crate::bash::looks_binary(&text, crate::bash::BinaryCheck {
+		&& looks_binary(&text, BinaryCheck {
 			sample_len: 80,
 			elf_magic:  args.mode.dialect() != Dialect::Zsh,
 		}) {
