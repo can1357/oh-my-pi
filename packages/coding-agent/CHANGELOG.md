@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Issue and PR references to other repositories are now written as `owner/repo#N` or full URLs, so bare `#N` only ever means the current repository ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
+
+### Added
+
+- GitHub issue/PR references in assistant replies (`#123`, `owner/repo#123`) are now clickable terminal hyperlinks; bare `#123` links to the current directory's GitHub repository and the visible text is unchanged ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
