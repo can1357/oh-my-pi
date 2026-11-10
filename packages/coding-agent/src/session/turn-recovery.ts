@@ -873,15 +873,21 @@ export class TurnRecovery {
 		return (await recorded).switchedCredential;
 	}
 
-	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
-	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
+	/**
+	 * Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously right after a
+	 * successful `agent.prompt` claim (before the run is awaited), letting the caller mark the exact moment its
+	 * own run went live. `mayRetry` is consulted right before each retry (after the wait for the running turn);
+	 * when it returns false nothing is dispatched.
+	 *
+	 * @returns whether the prompt ran.
+	 */
 	promptAgentWithIdleRetry(
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
+		mayRetry?: () => boolean,
+	): Promise<boolean> {
+		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, mayRetry);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3367,7 +3373,8 @@ export class TurnRecovery {
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-	): Promise<void> {
+		mayRetry?: () => boolean,
+	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			// A claim whose synchronous prefix throws (busy agent, missing
@@ -3388,7 +3395,7 @@ export class TurnRecovery {
 				await Promise.resolve();
 				if (!claimFailed) onClaimed?.();
 				await claim;
-				return;
+				return true;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
 					throw err;
@@ -3397,6 +3404,9 @@ export class TurnRecovery {
 					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
 				}
 				await this.#host.agent.waitForIdle();
+				// The wait can end on a turn that leaves a state the caller must not dispatch into: it is
+				// consulted right before the retry, with nothing awaited between.
+				if (mayRetry && !mayRetry()) return false;
 			}
 		}
 	}

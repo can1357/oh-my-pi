@@ -698,19 +698,19 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(await Bun.file(run.artifact).text()).toContain("REPLACEMENT");
 	});
 
-	describe("a turn whose setup outlasted a stop-pass hold taken after its hold check", () => {
-		/** Usage preflight health lookups park on `gate`: the real await a turn's setup spends before it dispatches. */
-		function parkPreflight() {
-			const gate = Promise.withResolvers<void>();
-			const entered = Promise.withResolvers<void>();
-			vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
-				entered.resolve();
-				await gate.promise;
-				return { state: "healthy", accounts: [] };
-			});
-			return { gate, entered };
-		}
+	/** Usage preflight health lookups park on `gate`: the real await a turn's setup spends before it dispatches. */
+	function parkPreflight() {
+		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
+			entered.resolve();
+			await gate.promise;
+			return { state: "healthy", accounts: [] };
+		});
+		return { gate, entered };
+	}
 
+	describe("a turn whose setup outlasted a stop-pass hold taken after its hold check", () => {
 		it("parks an idle aside for the hold's release instead of starting its turn inside the held pass", async () => {
 			const preflight = parkPreflight();
 			const run = await setup({
@@ -851,6 +851,176 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			// The holder's yield belongs to the holder's pass; the follow-up's result is its own turn's.
 			expect(result.output).toContain("FOLLOW-UP-YIELD");
 			expect(result.extractedToolData?.yield).toHaveLength(1);
+		});
+	});
+
+	describe("a hidden next-turn message that a stop-pass hold keeps from starting its turn", () => {
+		const payloadOf = (call: { context: { messages: unknown } } | undefined): string =>
+			JSON.stringify(call?.context.messages);
+		const streaming = async (target: AgentSession): Promise<void> => {
+			for (let tick = 0; !target.agent.state.isStreaming && tick < 100; tick++) await scheduler.yield();
+		};
+
+		it("runs it once the hold releases when it was queued during the holder's streaming continuation", async () => {
+			const continuationGate = Promise.withResolvers<void>();
+			const hiddenRan = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				responses: [
+					async () => {
+						await continuationGate.promise;
+						return { content: ["continuation done"] };
+					},
+					() => {
+						hiddenRan.resolve();
+						return { content: ["hidden turn ran"] };
+					},
+				],
+				onStop: () => undefined,
+			});
+			const hold = run.session.holdForStopPass();
+			const continuation = hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			await streaming(run.session);
+
+			await run.session.sendCustomMessage(
+				{ customType: "ext-next", content: "NEXT-TURN-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await scheduler.yield();
+			continuationGate.resolve();
+			await continuation;
+			expect(run.mock.calls).toHaveLength(1);
+			hold.release();
+			await hiddenRan.promise;
+			await run.session.waitForIdle();
+
+			// The message was held back, not dropped: it ran as its own turn after the pass published.
+			expect(run.mock.calls).toHaveLength(2);
+			expect(payloadOf(run.mock.calls[1])).toContain("NEXT-TURN-PAYLOAD");
+		});
+
+		it("does not start it inside a hold taken while it waited behind a running turn, and runs it after the release", async () => {
+			const turnGate = Promise.withResolvers<void>();
+			const hiddenRan = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				responses: [
+					async () => {
+						await turnGate.promise;
+						return { content: ["first turn done"] };
+					},
+					() => {
+						hiddenRan.resolve();
+						return { content: ["hidden turn ran"] };
+					},
+				],
+				onStop: () => undefined,
+			});
+			const first = run.session.prompt("first");
+			await streaming(run.session);
+			await run.session.sendCustomMessage(
+				{ customType: "ext-next", content: "NEXT-TURN-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			// Its prompt is now retrying behind the running turn.
+			await scheduler.yield();
+			// The turn's observer takes its hold as the turn ends.
+			const hold = run.session.holdForStopPass();
+			turnGate.resolve();
+			await first;
+			await scheduler.yield();
+
+			expect(run.mock.calls).toHaveLength(1);
+			hold.release();
+			await hiddenRan.promise;
+			await run.session.waitForIdle();
+			expect(run.mock.calls).toHaveLength(2);
+			expect(payloadOf(run.mock.calls[1])).toContain("NEXT-TURN-PAYLOAD");
+		});
+
+		it("keeps, in order, every message it and the prompt it handed back had taken", async () => {
+			const turnGate = Promise.withResolvers<void>();
+			const hiddenRan = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [
+					async () => {
+						await turnGate.promise;
+						return { content: ["first turn done"] };
+					},
+					() => {
+						hiddenRan.resolve();
+						return { content: ["hidden turn ran"] };
+					},
+				],
+				onStop: () => undefined,
+			});
+			vi.spyOn(authStorage.health, "model").mockResolvedValue({ state: "healthy", accounts: [] });
+			const first = run.session.prompt("first");
+			await streaming(run.session);
+			const preflight = parkPreflight();
+			await run.session.sendCustomMessage(
+				{ customType: "ext-first", content: "FIRST-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await preflight.entered.promise;
+			// Queued while the hidden turn's setup is parked: the turn takes it next, then is handed back.
+			await run.session.sendCustomMessage(
+				{ customType: "ext-second", content: "SECOND-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			preflight.gate.resolve();
+			await scheduler.yield();
+			const hold = run.session.holdForStopPass();
+			turnGate.resolve();
+			await first;
+			await scheduler.yield();
+
+			expect(run.mock.calls).toHaveLength(1);
+			hold.release();
+			await hiddenRan.promise;
+			await run.session.waitForIdle();
+			const hiddenTurn = payloadOf(run.mock.calls[1]);
+			expect(hiddenTurn).toContain("FIRST-PAYLOAD");
+			expect(hiddenTurn).toContain("SECOND-PAYLOAD");
+			expect(hiddenTurn.indexOf("FIRST-PAYLOAD")).toBeLessThan(hiddenTurn.indexOf("SECOND-PAYLOAD"));
+		});
+
+		it("is not run after an abort cancelled the turn the hold had deferred", async () => {
+			const continuationGate = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				responses: [
+					async () => {
+						await continuationGate.promise;
+						return { content: ["continuation done"] };
+					},
+					{ content: ["must not run"] },
+				],
+				onStop: () => undefined,
+			});
+			const hold = run.session.holdForStopPass();
+			const continuation = hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			const settled = continuation.then(
+				() => undefined,
+				() => undefined,
+			);
+			await streaming(run.session);
+			await run.session.sendCustomMessage(
+				{ customType: "ext-next", content: "NEXT-TURN-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await scheduler.yield();
+
+			await run.session.abort();
+			continuationGate.resolve();
+			await settled;
+			hold.release();
+			await run.session.waitForIdle();
+			await scheduler.yield();
+
+			expect(run.mock.calls).toHaveLength(1);
 		});
 	});
 
