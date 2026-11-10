@@ -1409,4 +1409,132 @@ mod tests {
 		drop(w2);
 		assert!(matches!(r.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(0))), "then EOF");
 	}
+
+	/// The finding "Preserve command tags for pinned writes" (PR #17684,
+	/// thread `PRRT_kwDOQxs0bc61iYZT`): `FdImager::fd` uses `FdRef::key()`,
+	/// which deliberately collapses a `TaggedOutput` to its base, so a
+	/// tagged and an untagged handle for the same object share one
+	/// `FdObjImage` — and `FdObjImage` carries no tag.  After an
+	/// externalize → restore round-trip the rebuilt pin is always untagged.
+	#[test]
+	fn a_tagged_pin_loses_its_command_tag_through_the_frame_image() {
+		use std::io;
+		use std::sync::{Arc, Mutex};
+
+		use crate::bash::{
+			fd::{FdOrigin, FdRef},
+			fs::{File, FileKind, SeekFrom},
+			host::{OsHandle, StdFd},
+			ids::{CmdTag, RunId, Vpid},
+		};
+
+		/// A file that observes output and records the tag each write
+		/// receives.  Both `poll_write` and `poll_write_tagged` push
+		/// onto the shared log so a caller can tell tagged from plain.
+		struct TagRecorder(Arc<Mutex<Vec<Option<CmdTag>>>>);
+
+		impl File for TagRecorder {
+			fn poll_read(
+				&mut self,
+				_cx: &mut Context<'_>,
+				_buf: &mut [u8],
+			) -> Poll<io::Result<usize>> {
+				Poll::Ready(Ok(0))
+			}
+
+			fn poll_write(
+				&mut self,
+				cx: &mut Context<'_>,
+				buf: &[u8],
+			) -> Poll<io::Result<usize>> {
+				self.poll_write_tagged(cx, buf, None)
+			}
+
+			fn poll_write_tagged(
+				&mut self,
+				_cx: &mut Context<'_>,
+				buf: &[u8],
+				tag: Option<CmdTag>,
+			) -> Poll<io::Result<usize>> {
+				self.0.lock().unwrap().push(tag);
+				Poll::Ready(Ok(buf.len()))
+			}
+
+			fn poll_flush(
+				&mut self,
+				_cx: &mut Context<'_>,
+			) -> Poll<io::Result<()>> {
+				Poll::Ready(Ok(()))
+			}
+
+			fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+				Err(io::ErrorKind::Unsupported.into())
+			}
+
+			fn kind(&self) -> FileKind {
+				FileKind::Pipe
+			}
+
+			fn os_handle(&self) -> Option<OsHandle> {
+				None
+			}
+
+			fn observes_output(&self) -> bool {
+				true
+			}
+
+			fn dup(&self) -> io::Result<Box<dyn File>> {
+				Ok(Box::new(TagRecorder(Arc::clone(&self.0))))
+			}
+		}
+
+		// ---- set-up ----
+		let tags_pre = Arc::new(Mutex::new(Vec::new()));
+		let base = FdRef::open(
+			Box::new(TagRecorder(Arc::clone(&tags_pre))),
+			FdOrigin::Std(StdFd::Stderr),
+		);
+		let cmd_tag = CmdTag { run: RunId(1), vpid: Vpid(0), seq: 42 };
+		let tagged = base.clone().with_tag(cmd_tag);
+
+		// ---- pre-image: a tagged write carries the tag ----
+		let mut cx = Context::from_waker(Waker::noop());
+		assert!(matches!(tagged.poll_write(&mut cx, b"diag"), Poll::Ready(Ok(4))));
+		assert_eq!(
+			*tags_pre.lock().unwrap(),
+			vec![Some(cmd_tag)],
+			"before imaging, a write through the tagged handle passes the tag",
+		);
+
+		// ---- image: both handles map to one FdObjImage ----
+		let mut img = FdImager::default();
+		let base_idx = img.fd(&base);
+		let tagged_idx = img.fd(&tagged);
+		assert_eq!(
+			base_idx, tagged_idx,
+			"FdImager collapses tagged and base to the same index — tag is lost",
+		);
+
+		// ---- rebuild: the restored handle is always untagged ----
+		let tags_post = Arc::new(Mutex::new(Vec::new()));
+		let mut stdio = [None, None, None];
+		let mut rebuild = FdRebuild {
+			built: vec![None; img.objs.len()],
+			objs:  img.objs,
+			mems:  vec![],
+			stdio: &mut stdio,
+		};
+		let restored = rebuild.build(tagged_idx, |_| {
+			Some(Box::new(TagRecorder(Arc::clone(&tags_post))))
+		});
+		drop(rebuild);
+
+		// ---- post-restore: the same write now arrives with tag=None ----
+		assert!(matches!(restored.poll_write(&mut cx, b"diag"), Poll::Ready(Ok(4))));
+		assert_eq!(
+			*tags_post.lock().unwrap(),
+			vec![None],
+			"after restore, the write carries tag=None — the command attribution is lost",
+		);
+	}
 }
