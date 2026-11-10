@@ -69,10 +69,11 @@ use crate::{
 	},
 };
 
-/// Include Linux realtime signal 64; macOS has only signals 1 through 31.
-#[cfg(target_os = "linux")]
+/// Include the Linux kernel's realtime signal 64, Android's as well as
+/// Linux's; macOS has only signals 1 through 31.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const NSIG: usize = 65;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const NSIG: usize = 32;
 
 /// Waiter and escalation threads only wait and signal.
@@ -1243,14 +1244,7 @@ const fn close_mechanism(os: &str) -> CloseMechanism {
 		CloseMechanism::Ranges
 	} else if is_one_of(os, &["macos", "ios", "tvos", "watchos", "visionos"]) {
 		CloseMechanism::Listed
-	} else if is_one_of(os, &[
-		"freebsd",
-		"dragonfly",
-		"netbsd",
-		"openbsd",
-		"illumos",
-		"solaris",
-	]) {
+	} else if is_one_of(os, &["freebsd", "dragonfly", "netbsd", "openbsd", "illumos", "solaris"]) {
 		CloseMechanism::Above
 	} else {
 		CloseMechanism::PerNumber
@@ -1260,10 +1254,8 @@ const fn close_mechanism(os: &str) -> CloseMechanism {
 /// What the arms below compiled for this target, by the gates they
 /// carry. The Apple arm is gated on the vendor rather than on each
 /// system's name, which is the same set as the table's.
-const COMPILED_MECHANISM: CloseMechanism = if cfg!(any(
-	target_os = "linux",
-	target_os = "android"
-)) {
+const COMPILED_MECHANISM: CloseMechanism = if cfg!(any(target_os = "linux", target_os = "android"))
+{
 	CloseMechanism::Ranges
 } else if cfg!(target_vendor = "apple") {
 	CloseMechanism::Listed

@@ -632,7 +632,9 @@ fn give_back_slots(saved: Vec<(i32, i32)>) {
 fn in_a_process_of_its_own(name: &str) -> bool {
 	const CHILD: &str = "PI_SHELL_TEST_SPAWN_ALONE";
 	let module = module_path!();
-	let module = module.split_once("::").map_or(module, |(_crate, rest)| rest);
+	let module = module
+		.split_once("::")
+		.map_or(module, |(_crate, rest)| rest);
 	let path = format!("{module}::{name}");
 	if std::env::var(CHILD).is_ok_and(|running| running == path) {
 		return true;
