@@ -614,8 +614,8 @@ describe("devin native display filtering", () => {
 			config({ uid: "gpt-6-sol-high-priority" }),
 			config({ uid: "claude-opus-5-high" }),
 			config({ uid: "claude-opus-5-high-priority", disabled: true }),
-			config({ uid: "swe-1-6-fast" }),
-			config({ uid: "swe-1-6-priority" }),
+			config({ uid: "claude-opus-5-5-high-fast" }),
+			config({ uid: "claude-opus-5-5-high-priority" }),
 			config({ uid: "swe-2-high" }),
 			config({ uid: "kimi-k3", disabled: true }),
 			pairing("fusion-gpt-6-sol-high-sidekick-swe-2-high", {
@@ -628,7 +628,7 @@ describe("devin native display filtering", () => {
 			}),
 			pairing("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-claude-opus-5-high-fast-sidekick-swe-2-high"),
-			pairing("fusion-swe-1-6-fast-sidekick-swe-2-high"),
+			pairing("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high"),
 			pairing("fusion-kimi-k3-sidekick-swe-2-high"),
 			pairing("fusion-sidekick-swe-2-high"),
 			pairing("fusion"),
@@ -647,7 +647,7 @@ describe("devin native display filtering", () => {
 		expect(wireId("fusion-gpt-6-sol-high-fast-sidekick-swe-2-high")).toBe("gpt-6-sol-high-priority");
 		expect(wireId("fusion-claude-opus-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-high");
 		// A lead whose own uid ends in `-fast` routes as written, not to a `-priority` lane.
-		expect(wireId("fusion-swe-1-6-fast-sidekick-swe-2-high")).toBe("swe-1-6-fast");
+		expect(wireId("fusion-claude-opus-5-5-high-fast-sidekick-swe-2-high")).toBe("claude-opus-5-5-high-fast");
 		// No live lead: the composite uid is unservable, so the pairing is not listed.
 		expect(find("fusion-kimi-k3-sidekick-swe-2-high")).toBeUndefined();
 		expect(wireId("fusion-sidekick-swe-2-high")).toBeUndefined();
