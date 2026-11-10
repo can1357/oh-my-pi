@@ -11397,6 +11397,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const sessionId = this.sessionId;
 		await this.settleInFlightMessagePersistence();
 		await this.#messageEndPersistenceTail;
+		// Only entries journaled before this flush are confirmed by it: one appended while it awaits
+		// storage (or an artifact copy) may still be unpublished, so it is not reported as persisted.
+		const persisted = ids.filter(id => this.sessionManager.hasClientMessageEntry(id));
+		const resolved = ids.filter(id => this.sessionManager.isClientMessageResolved(id));
 		await this.sessionManager.flush();
 		if (this.sessionId !== sessionId) throw new Error("Session changed during client message reconciliation");
 		const requested = new Set(ids);
@@ -11412,8 +11416,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (id !== null) queued.add(id);
 			}
 		}
-		const persisted = ids.filter(id => this.sessionManager.hasClientMessageEntry(id));
-		const resolved = ids.filter(id => this.sessionManager.isClientMessageResolved(id));
 		const build = (
 			messages: ClientMessageStatus["messages"],
 			queue: ClientMessageQueueSnapshot = queuedMessages,

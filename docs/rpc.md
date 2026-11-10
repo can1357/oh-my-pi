@@ -164,7 +164,8 @@ recorded as non-message custom entries so it survives reopen. The input is
 withdrawn first and the resolution journaled after, so a journal write failure
 never blocks or reverts the withdrawal. Absence alone is
 unresolved. `persistedClientMessageIds` follows ordinary in-flight persistence
-settlement and journal flush; write failures fail the query, with no additional
+settlement and journal flush, and lists only entries journaled before that
+flush began; write failures fail the query, with no additional
 fsync guarantee. A persisted-only ID is not a display replacement: finish
 transcript catch-up before retiring a pending intent from the UI.
 Correlated message entries and explicit resolutions materialize an otherwise

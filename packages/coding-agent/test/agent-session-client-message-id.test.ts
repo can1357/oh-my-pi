@@ -20,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -551,5 +552,28 @@ describe("AgentSession client intent identity", () => {
 		await session.prompt("persist this", intent("intent-flush-failure"));
 		vi.spyOn(manager, "flush").mockRejectedValueOnce(new Error("disk write failed"));
 		await expect(status(session, ["intent-flush-failure"])).rejects.toThrow("disk write failed");
+	});
+
+	test("does not confirm an entry journaled while the status flush awaits storage", async () => {
+		const storage = new MemorySessionStorage();
+		const { session, manager } = setup({ manager: SessionManager.create("/cwd", "/sessions", storage) });
+		await session.prompt("flushed before", intent("intent-flushed"));
+		const draining = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(storage, "drain").mockImplementation(async () => {
+			draining.resolve();
+			await release.promise;
+		});
+		const pending = status(session, ["intent-flushed", "intent-late"]);
+		await withTimeout(draining.promise, 2_000, "Status never drained storage");
+		// Journaled after the flush handed its writes to storage, so this flush does not cover it.
+		manager.appendMessage(
+			{ role: "user", content: [{ type: "text", text: "late" }], attribution: "user", timestamp: Date.now() },
+			{ clientMessageId: "intent-late" },
+		);
+		release.resolve();
+		const found = await pending;
+		expect(found.persistedClientMessageIds).toEqual(["intent-flushed"]);
+		expect(found.unresolvedClientMessageIds).toEqual(["intent-late"]);
 	});
 });
