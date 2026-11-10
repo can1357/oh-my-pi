@@ -2,13 +2,19 @@
  * Benchmark: outbound secret obfuscation over a long conversation history.
  *
  * Each "request" runs both SDK boundaries (transcript conversion, then provider
- * context) over the whole history, as every turn does. Inputs are synthetic.
+ * context) over the whole history, as every turn does, each with its own
+ * redaction memo like the main session's. Inputs are synthetic.
  *
  * Run: bun packages/coding-agent/bench/secrets-history.bench.ts [messages...]
  */
 import type { Message } from "@oh-my-pi/pi-ai";
 import { builtinCredentialSecretEntries } from "../src/secrets";
-import { obfuscateMessages, obfuscateProviderContext } from "../src/secrets/message-transform";
+import {
+	createMessageRedactionMemo,
+	type ObfuscatorMemo,
+	obfuscateMessages,
+	obfuscateProviderContext,
+} from "../src/secrets/message-transform";
 import { type SecretEntry, SecretObfuscator } from "../src/secrets/obfuscator";
 
 const PLAIN = "SYNTHETIC_PLAIN_SECRET_7_ABCDEFGHIJK";
@@ -62,24 +68,30 @@ function buildHistory(count: number): Message[] {
 	});
 }
 
-function request(obfuscator: SecretObfuscator, history: Message[]): Message[] {
-	const converted = obfuscateMessages(obfuscator, history);
-	return obfuscateProviderContext(obfuscator, { messages: converted }).messages;
+interface Memos {
+	convert: ObfuscatorMemo;
+	provider: ObfuscatorMemo;
+}
+
+function request(obfuscator: SecretObfuscator, history: Message[], memos: Memos): Message[] {
+	const converted = obfuscateMessages(obfuscator, history, memos.convert);
+	return obfuscateProviderContext(obfuscator, { messages: converted }, memos.provider).messages;
 }
 
 const sizes = process.argv.slice(2).map(Number);
 for (const count of sizes.length > 0 ? sizes : [400, 1600]) {
 	const obfuscator = new SecretObfuscator(buildEntries(), "synthetic-bench-key");
 	const history = buildHistory(count);
+	const memos: Memos = { convert: createMessageRedactionMemo(), provider: createMessageRedactionMemo() };
 	const characters = JSON.stringify(history).length;
 	let start = Bun.nanoseconds();
-	const output = JSON.stringify(request(obfuscator, history));
+	const output = JSON.stringify(request(obfuscator, history, memos));
 	const coldMs = (Bun.nanoseconds() - start) / 1e6;
 	for (const secret of [PLAIN, AWS, "synthetic_token_0_000000000000"]) {
 		if (output.includes(secret)) throw new Error(`leaked ${secret}`);
 	}
 	start = Bun.nanoseconds();
-	for (let i = 0; i < ITERS; i++) request(obfuscator, history);
+	for (let i = 0; i < ITERS; i++) request(obfuscator, history, memos);
 	const warmMs = (Bun.nanoseconds() - start) / 1e6 / ITERS;
 	console.log(
 		`${count} messages, ${(characters / 1024 / 1024).toFixed(2)} MiB: first request ${coldMs.toFixed(1)}ms, steady ${warmMs.toFixed(1)}ms/request`,

@@ -182,8 +182,10 @@ import {
 } from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
+	createMessageRedactionMemo,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
+	type ObfuscatorMemo,
 	obfuscateMessages,
 	obfuscateProviderContext,
 	type SecretObfuscator,
@@ -4637,12 +4639,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
-		// then applies secret obfuscation to the remaining outbound context.
-		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
-			return obfuscateMessages(obfuscator, converted);
-		};
+		// then applies secret obfuscation to the remaining outbound context. A
+		// conversation that re-sends its history every turn passes its own
+		// redaction memo; one-off and side requests use `convertToLlmFinal`.
+		const createConvertToLlmFinal =
+			(redaction?: ObfuscatorMemo) =>
+			(messages: AgentMessage[]): Message[] => {
+				const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
+				if (!obfuscator?.hasSecrets()) return converted;
+				return obfuscateMessages(obfuscator, converted, redaction);
+			};
+		const convertToLlmFinal = createConvertToLlmFinal();
 
 		const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages, signal);
@@ -4685,11 +4692,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		// One transform per conversation: the date/cwd reminder remembers what each
 		// conversation was sent, so the main loop and every advisor get their own.
-		// Only the main loop journals its reminders in the session.
-		const createTransformProviderContext = (journal?: DateCwdReminderJournal) => {
+		// Only the main loop journals its reminders in the session. `redaction`
+		// memoizes secret redaction for a conversation that re-sends its history.
+		const createTransformProviderContext = (journal?: DateCwdReminderJournal, redaction?: ObfuscatorMemo) => {
 			const dateCwdReminder = new DateCwdReminderInjector(journal);
 			return async (context: Context, transformModel: Model): Promise<Context> => {
-				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+				let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context, redaction) : context;
 				// The archive was sized for the model active at the last context build; a model switch may have lowered the budget.
 				transformed = capArchiveFrameBytes(transformed, transformModel);
 				transformed = await snapcompactInline.transform(transformed, transformModel);
@@ -4712,8 +4720,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			};
 		};
+		// The main loop redacts twice per request (raw history in convertToLlm, its
+		// redacted output again here), so each boundary keeps its own memo.
 		const transformProviderContext = createTransformProviderContext(
 			createSessionDateCwdReminderJournal(sessionManager),
+			createMessageRedactionMemo(),
 		);
 		const onPayload = async (payload: unknown, model?: Model, signal?: AbortSignal) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload, model, signal);
@@ -4844,7 +4855,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// namespace/project discovery on the original repo's git remote. Re-read it
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
-			convertToLlm: convertToLlmFinal,
+			convertToLlm: createConvertToLlmFinal(createMessageRedactionMemo()),
 			onPayload,
 			onResponse,
 			sessionId: providerSessionId,
@@ -5182,7 +5193,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
 			transformProviderContext,
-			createAdvisorTransformProviderContext: () => createTransformProviderContext(),
+			createAdvisorTransformProviderContext: () =>
+				createTransformProviderContext(undefined, createMessageRedactionMemo()),
 			onPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,

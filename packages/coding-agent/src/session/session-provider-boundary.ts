@@ -9,7 +9,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
-import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
+import { deobfuscateSessionContext, type ObfuscatorMemo, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
@@ -212,11 +212,15 @@ export class SessionProviderBoundary {
 		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
-	/** Converts side-request messages through the session's secret boundary. */
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
+	/**
+	 * Converts side-request messages through the session's secret boundary. A
+	 * conversation that converts its own history every turn (an advisor) passes
+	 * its {@link ObfuscatorMemo}; one-off side requests pass none.
+	 */
+	convertToLlmForSideRequest(messages: AgentMessage[], redaction?: ObfuscatorMemo): Message[] {
 		const converted = convertToLlm(messages);
 		const obfuscator = this.#host.obfuscator();
-		return obfuscator ? obfuscateMessages(obfuscator, converted) : converted;
+		return obfuscator ? obfuscateMessages(obfuscator, converted, redaction) : converted;
 	}
 
 	/** Converts session messages using the configured pre-LLM pipeline. */

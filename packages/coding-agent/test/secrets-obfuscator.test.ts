@@ -32,9 +32,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/secrets";
 import {
 	collectNativeReplayRegexSecretValues,
+	createMessageRedactionMemo,
 	deobfuscateAssistantContent,
 	deobfuscateAgentMessages,
 	deobfuscateToolArguments,
+	type ObfuscatorMemo,
 	obfuscateMessages,
 	obfuscateNativeReplay,
 	obfuscateProviderContext,
@@ -3741,6 +3743,125 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 			expect(obf.obfuscate(text, new SecretValueSet(nulAfterSecret))).toBe(withNulAfterSecret);
 			expect(obf.obfuscate(text, new SecretValueSet(nulBeforeLast))).toBe(withNulBeforeLast);
 		});
+	});
+});
+
+describe("obfuscateMessages redaction memo", () => {
+	// convertToLlm / transformProviderContext hand the same message objects to
+	// every request, so a memo reuses each message's earlier redaction. Every
+	// memoized request must equal what a fresh, memo-less instance replaying
+	// the same requests produces: a reused result that outlives a change in the
+	// request's shared regex values or in the registry ships stale redaction.
+	type Streams = { convert?: ObfuscatorMemo; provider?: ObfuscatorMemo };
+	/** One request, or an out-of-band redaction returning nothing, issued identically to both instances. */
+	type Step = (obf: SecretObfuscator, streams: Streams) => Message[] | undefined;
+
+	const friendlyCollision: SecretEntry[] = [
+		{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+		// Replace mode: `tok_abc123` never gets a placeholder of its own, so only
+		// the request's shared regex values decide whether the label is safe.
+		{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace", replacement: "[hidden]" },
+	];
+	const user = (content: string, timestamp: number): Message => ({ role: "user", content, timestamp });
+	const textOf = (output: Message[] | undefined, index: number): string => {
+		const message = output?.[index];
+		if (message?.role !== "user" || typeof message.content !== "string") throw new Error("expected user text");
+		return message.content;
+	};
+
+	/** Runs `steps` on a memoized instance and on a fresh memo-less one, asserting equal outputs; returns the fresh outputs. */
+	function expectMatchesFreshReplay(
+		entries: SecretEntry[],
+		steps: Step[],
+		key?: () => string,
+	): (Message[] | undefined)[] {
+		const memoized = new SecretObfuscator(entries, key);
+		const fresh = new SecretObfuscator(entries, key);
+		const streams: Streams = { convert: createMessageRedactionMemo(), provider: createMessageRedactionMemo() };
+		return steps.map((step, index) => {
+			const expected = step(fresh, {});
+			const actual = step(memoized, streams);
+			expect({ step: index, output: actual }).toEqual({ step: index, output: expected });
+			return expected;
+		});
+	}
+
+	it("re-redacts a cached message once a later message reveals the regex value its friendly label spells", () => {
+		const earlier = user("remember OTHERSECRET", 1);
+		const reveal = user("then tok_abc123 appears", 2);
+		const outputs = expectMatchesFreshReplay(friendlyCollision, [
+			(obf, { convert }) => obfuscateMessages(obf, [earlier], convert),
+			(obf, { convert }) => obfuscateMessages(obf, [earlier, reveal], convert),
+		]);
+		// The reveal must flip the earlier message's label for the case to bite.
+		expect(textOf(outputs[0], 0)).toContain("TOKABC123_");
+		expect(textOf(outputs[1], 0)).not.toContain("TOKABC123_");
+	});
+
+	it("redacts a cached message anew after the only message holding a regex value is dropped", () => {
+		const earlier = user("remember OTHERSECRET", 1);
+		const reveal = user("then tok_abc123 appears", 2);
+		const outputs = expectMatchesFreshReplay(friendlyCollision, [
+			(obf, { convert }) => obfuscateMessages(obf, [earlier, reveal], convert),
+			(obf, { convert }) => obfuscateMessages(obf, [earlier, reveal], convert),
+			(obf, { convert }) => obfuscateMessages(obf, [earlier], convert),
+		]);
+		expect(textOf(outputs[1], 0)).not.toContain("TOKABC123_");
+		expect(textOf(outputs[2], 0)).toContain("TOKABC123_");
+	});
+
+	describe("redacts a cached message anew after a registry write between requests", () => {
+		// A lazy placeholder key registers itself as a replace-mode secret on the
+		// first regex mint, so text holding the key bytes stops being clean.
+		const key = "memo-lazy-placeholder-key-7f3a9c";
+		const entries: SecretEntry[] = [{ type: "regex", content: "tok_[a-z0-9]+" }];
+		const holder = user(`the key file reads ${key}`, 1);
+		const reveal = user("then tok_abc123 appears", 2);
+		it.each<[string, Step[]]>([
+			[
+				"an out-of-band mint resolves the key",
+				[
+					(obf, { convert }) => obfuscateMessages(obf, [holder], convert),
+					obf => {
+						obf.obfuscate("tool output tok_abc123");
+						return undefined;
+					},
+					(obf, { convert }) => obfuscateMessages(obf, [holder], convert),
+				],
+			],
+			[
+				"a new message's mint resolves the key",
+				[
+					(obf, { convert }) => obfuscateMessages(obf, [holder], convert),
+					(obf, { convert }) => obfuscateMessages(obf, [holder, reveal], convert),
+					(obf, { convert }) => obfuscateMessages(obf, [holder, reveal], convert),
+					(obf, { convert }) => obfuscateMessages(obf, [holder], convert),
+				],
+			],
+		])("%s", (_name, steps) => {
+			const outputs = expectMatchesFreshReplay(entries, steps, () => key);
+			expect(textOf(outputs[0], 0)).toContain(key);
+			expect(textOf(outputs.at(-1), 0)).not.toContain(key);
+		});
+	});
+
+	it("keeps two memos on one instance independent when their streams carry different shared values", () => {
+		// Both streams reach shared-set version 1 with different values; neither
+		// may reuse the other's redaction of the message they have in common.
+		const earlier = user("remember OTHERSECRET", 1);
+		const reveal = user("then tok_abc123 appears", 2);
+		const unrelated = user("then tok_zzz999 appears", 3);
+		const convertRequest: Step = (obf, { convert }) => obfuscateMessages(obf, [earlier, reveal], convert);
+		const providerRequest: Step = (obf, { provider }) =>
+			obfuscateProviderContext(obf, { messages: [earlier, unrelated] }, provider).messages;
+		const outputs = expectMatchesFreshReplay(friendlyCollision, [
+			convertRequest,
+			providerRequest,
+			convertRequest,
+			providerRequest,
+		]);
+		expect(textOf(outputs[0], 0)).not.toContain("TOKABC123_");
+		expect(textOf(outputs[1], 0)).toContain("TOKABC123_");
 	});
 });
 

@@ -1,4 +1,3 @@
-import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	buildHashBase,
 	buildKeyedReplacementRun,
@@ -91,21 +90,7 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 /** Distinct placeholder prefixes whose regex verdict is memoized; forged prefixes beyond this are just re-tested. */
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
-/**
- * How long a redaction cache entry survives unused. There is deliberately no
- * size cap: provider context is re-redacted on every request and walks the
- * whole history in order, so any cap below the live context evicts every entry
- * before its next use. Text in the live context is read every turn and never
- * expires; entries for text that left it are dropped only if read again.
- */
-const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
-
-/** Text-keyed redaction cache; see {@link TEXT_CACHE_IDLE_MS}. */
-function createTextCache<V>(): LRUCache<string, V> {
-	return new LRUCache<string, V>({ ttl: TEXT_CACHE_IDLE_MS, updateAgeOnGet: true });
-}
-
-/** Per-string scan results, reused across calls while the registry revision holds. */
+/** Per-string results reused within one {@link SecretObfuscator.batch}. */
 interface TextScan {
 	/** Registry revision the entry was computed under; stale entries are recomputed. */
 	revision: number;
@@ -115,20 +100,6 @@ interface TextScan {
 	literalFree: boolean;
 	/** Standalone collection result, i.e. after replace simulation; filled on first use. */
 	collectedValues: readonly string[] | undefined;
-}
-
-/** A top-level {@link SecretObfuscator.obfuscate} result and the state it was computed under. */
-interface ObfuscateMemo {
-	revision: number;
-	/** {@link SecretObfuscator.#sharedValuesKey} of the shared regex values. */
-	sharedKey: string;
-	result: string;
-}
-
-/** Content key of one shared value set, revalidated against a snapshot on every use. */
-interface SharedValuesKey {
-	snapshot: ReadonlySet<string>;
-	key: string;
 }
 
 interface RegexScanMemo {
@@ -161,11 +132,11 @@ function buildLiteralDetector(literals: readonly string[], flags?: string): RegE
  * Invariant: every piece of state redaction reads either never changes after
  * construction (regex entries, a readonly field of a readonly array) or lives
  * in a collection bound to `#revision` (`TrackedMap`, `TrackedSet`,
- * `SecretValueSet` with a revision), whose writes bump it. Every reused
- * result (per-string scans, whole `obfuscate` results, the regex scan memo,
- * sorted literal caches) is keyed by `#revision.value`, so a mint can never
- * leave a stale result in use. Regex values found in a text are a pure
- * function of the text and need no revision.
+ * `SecretValueSet` with a revision), whose writes bump it. The short-lived
+ * reuse inside one batch or call (per-string scans, the regex scan memo,
+ * sorted literal caches) is keyed by `#revision.value`, so a mint partway
+ * through can never leave a stale result in use. No redaction result is kept
+ * across batches.
  */
 export class SecretObfuscator {
 	/** Registry version; see the class invariant. Declared first: the tracked fields below bind to it. */
@@ -214,7 +185,7 @@ export class SecretObfuscator {
 	/** Regex values seen in the current obfuscate input, used to keep friendly labels from exposing normalized matches that are discovered later in the same pass. */
 	#currentRegexSecretValues = new SecretValueSet();
 
-	/** Request-wide regex values supplied by the caller for the call in progress; checked beside the current values, never copied. */
+	/** Batch-wide regex values supplied by the caller for the call in progress; checked beside the current values, never copied. */
 	#sharedRegexSecretValues: ReadonlySet<string> = EMPTY_SECRET_VALUES;
 
 	/** Placeholder prefix → whether a configured regex matches it. Regex entries are fixed after construction. */
@@ -239,17 +210,8 @@ export class SecretObfuscator {
 	/** `i`-flag form of the folded probes, set only when every folded probe is ASCII; see {@link #foldedProbeHit}. */
 	#asciiFoldedProbeDetector: RegExp | undefined;
 
-	/** Per-string scan results; an entry from an older registry revision is recomputed. */
-	readonly #textScans = createTextCache<TextScan>();
-
-	/** Text → regex values found in it. Regex entries never change, so this outlives registry revisions. */
-	readonly #regexValueMemo = createTextCache<readonly string[]>();
-
-	/** Top-level {@link obfuscate} results; see {@link ObfuscateMemo}. */
-	readonly #obfuscateMemo = createTextCache<ObfuscateMemo>();
-
-	/** Content keys of the shared value sets passed to {@link obfuscate}. */
-	readonly #sharedValuesKeys = new WeakMap<ReadonlySet<string>, SharedValuesKey>();
+	/** Per-string scan results of the {@link batch} in progress, if any; dropped when it ends. */
+	#batchScans: Map<string, TextScan> | undefined;
 
 	/** Placeholder ranges and expanded scan view of the last text `#collectRegexMatches` scanned. */
 	#lastRegexScan: RegexScanMemo | undefined;
@@ -494,6 +456,14 @@ export class SecretObfuscator {
 	}
 
 	/**
+	 * Registry revision: changes whenever a write could change any redaction
+	 * result, so a result computed under one revision stays valid while it holds.
+	 */
+	get revision(): number {
+		return this.#revision.value;
+	}
+
+	/**
 	 * Toggle outbound obfuscation. When off, {@link obfuscate} is identity, while
 	 * placeholders minted earlier keep deobfuscating so prior turns stay readable.
 	 */
@@ -570,57 +540,10 @@ export class SecretObfuscator {
 		return matches;
 	}
 
-	/**
-	 * Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace.
-	 *
-	 * Provider context is re-redacted on every request, so a top-level call
-	 * reuses its earlier result for the same text while the registry revision
-	 * and the shared values' content are unchanged: redaction is deterministic
-	 * in exactly those inputs (see the class invariant). A call that minted is
-	 * not stored; its revision no longer matches.
-	 */
+	/** Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace. */
 	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string {
 		if (!this.obfuscates()) return text;
 		const sharedValues = sharedRegexSecretValues ?? EMPTY_SECRET_VALUES;
-		const topLevel = this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
-		if (!topLevel) return this.#obfuscateUncached(text, sharedValues);
-		const revision = this.#revision.value;
-		const sharedKey = this.#sharedValuesKey(sharedValues);
-		const memo = this.#obfuscateMemo.get(text);
-		if (memo !== undefined && memo.revision === revision && memo.sharedKey === sharedKey) return memo.result;
-		const result = this.#obfuscateUncached(text, sharedValues);
-		if (this.#revision.value === revision) this.#obfuscateMemo.set(text, { revision, sharedKey, result });
-		return result;
-	}
-
-	/**
-	 * Content key of `shared`: its sorted values as a JSON array, which is
-	 * injective (a separator-joined key is not: values may contain the
-	 * separator). Callers build a fresh set per
-	 * request, so equal content must give an equal key; a set mutated since its
-	 * key was computed fails the snapshot check (same size and every snapshot
-	 * value still present means equal sets) and is re-keyed.
-	 */
-	#sharedValuesKey(shared: ReadonlySet<string>): string {
-		if (shared.size === 0) return "";
-		const cached = this.#sharedValuesKeys.get(shared);
-		if (cached !== undefined && cached.snapshot.size === shared.size) {
-			let same = true;
-			for (const value of cached.snapshot) {
-				if (!shared.has(value)) {
-					same = false;
-					break;
-				}
-			}
-			if (same) return cached.key;
-		}
-		const snapshot = new Set(shared);
-		const key = JSON.stringify([...snapshot].sort());
-		this.#sharedValuesKeys.set(shared, { snapshot, key });
-		return key;
-	}
-
-	#obfuscateUncached(text: string, sharedValues: ReadonlySet<string>): string {
 		const { values: currentValues, literalFree } = this.#collectStandalone(text);
 		// Clean (no regex value, no literal, no placeholder candidate) text came
 		// back from collection as the empty raw scan.
@@ -698,6 +621,21 @@ export class SecretObfuscator {
 			if (matches.length > 0) return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Run `run` as one outbound batch (collect, then redact, over one message
+	 * list) so each string is scanned once for both. Nothing outlives the batch.
+	 * Nested calls join the outer batch.
+	 */
+	batch<T>(run: () => T): T {
+		if (this.#batchScans !== undefined) return run();
+		this.#batchScans = new Map();
+		try {
+			return run();
+		} finally {
+			this.#batchScans = undefined;
+		}
 	}
 
 	/**
@@ -1317,15 +1255,7 @@ export class SecretObfuscator {
 	// pattern). Any of these means the text is meant to be redacted, not
 	// stamped unredacted onto every use of this secret.
 	/** `rawProbeHit`, when the caller already knows no case-sensitive probe occurs, skips that detector. */
-	#collectRegexSecretValues(text: string, rawProbeHit?: boolean): readonly string[] {
-		const cached = this.#regexValueMemo.get(text);
-		if (cached !== undefined) return cached;
-		const values = this.#scanRegexSecretValues(text, rawProbeHit);
-		this.#regexValueMemo.set(text, values);
-		return values;
-	}
-
-	#scanRegexSecretValues(text: string, rawProbeHit: boolean | undefined): readonly string[] {
+	#collectRegexSecretValues(text: string, rawProbeHit?: boolean): Set<string> {
 		const values = new Set<string>();
 		const folded = this.#foldedOnce(text);
 		// One combined scan per haystack rules out every probed entry at once;
@@ -1347,7 +1277,7 @@ export class SecretObfuscator {
 			}
 			entry.regex.lastIndex = 0;
 		}
-		return values.size === 0 ? NO_VALUES : [...values];
+		return values;
 	}
 
 	collectRegexSecretValuesForObfuscation(text: string): ReadonlySet<string> {
@@ -1356,36 +1286,40 @@ export class SecretObfuscator {
 
 	/**
 	 * Raw regex scan and literal check for `text`, shared by every collection
-	 * and redaction of the same string while the registry revision holds.
+	 * and redaction of the same string within a {@link batch}.
 	 */
 	#scanText(text: string): TextScan {
-		const cached = this.#textScans.get(text);
+		const scans = this.#batchScans;
+		const cached = scans?.get(text);
 		if (cached !== undefined && cached.revision === this.#revision.value) return cached;
 		// Clean text (the common case) is ruled out in one combined pass.
 		const mayNeedRedaction = this.#mayNeedRedaction(text);
 		const rawValues = this.#collectRegexSecretValues(text, mayNeedRedaction ? undefined : false);
 		const scan: TextScan = {
 			revision: this.#revision.value,
-			initialValues: rawValues,
+			initialValues: rawValues.size === 0 ? NO_VALUES : [...rawValues],
 			literalFree: !mayNeedRedaction || this.#isLiteralFree(text),
 			collectedValues: undefined,
 		};
-		this.#textScans.set(text, scan);
+		scans?.set(text, scan);
 		return scan;
 	}
 
 	/**
 	 * Standalone collection (no current/shared values in play): the raw scan
-	 * plus replace simulation, computed once per string and registry revision;
-	 * the simulation can mint (e.g. resolve the key), in which case it is not
-	 * reused.
+	 * plus replace simulation. Within a batch the result is computed once per
+	 * string and registry revision; the simulation can mint (e.g. resolve the
+	 * key), in which case it is not reused.
 	 */
 	#collectStandalone(text: string): { values: ReadonlySet<string>; literalFree: boolean } {
 		const scan = this.#scanText(text);
 		if (scan.initialValues.length === 0 && scan.literalFree)
 			return { values: EMPTY_SECRET_VALUES, literalFree: true };
 		const values = new Set(scan.initialValues);
-		const reusable = this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
+		const reusable =
+			this.#batchScans !== undefined &&
+			this.#currentRegexSecretValues.size === 0 &&
+			this.#sharedRegexSecretValues.size === 0;
 		if (reusable && scan.collectedValues !== undefined && scan.revision === this.#revision.value) {
 			return { values: new Set(scan.collectedValues), literalFree: scan.literalFree };
 		}

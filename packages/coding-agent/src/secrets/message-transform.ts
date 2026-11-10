@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { messageEstimateVersion } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
@@ -120,8 +121,14 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
+	// `batch()` joins an outer batch when one is already open.
+	return obfuscator.batch(() => {
+		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
+			string,
+			unknown
+		>;
+	});
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -535,7 +542,7 @@ function deobfuscateTextBlocks(
 
 /**
  * Re-obfuscate assistant content before it returns to a provider after session
- * restoration, removing friendly prefixes made unsafe by this request. A changed
+ * restoration, removing friendly prefixes made unsafe by this batch. A changed
  * thinking block loses its byte-bound replay signature, and so does a tool call
  * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
  * attestation over the function call it rides on, so replaying obfuscated
@@ -619,55 +626,135 @@ function obfuscateAnthropicCompactionFiles(
 	return { ...payload, filesText, retainedFiles };
 }
 
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
-	const values = new SecretValueSet();
+/** Add the regex secret values one outbound message contributes to the request-wide shared set. */
+function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, message: Message, values: Set<string>): void {
 	const addText = (text: string | undefined): void => {
 		if (text === undefined) return;
 		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) {
 			values.add(value);
 		}
 	};
-	for (const message of messages) {
-		// File metadata replayed beside a native compaction block carries the
-		// same harness paths as the summary text, so its regex-secret values
-		// join the shared set.
-		const compactionFiles = anthropicCompactionFilesText(message);
-		if (compactionFiles !== undefined) addText(compactionFiles);
-		for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) addText(files.text);
-		if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
-			collectNativeReplayRegexSecretValues(obfuscator, message, values);
-		}
-		if (message.role === "assistant") {
-			for (const block of message.content) {
-				if (block.type === "text") addText(block.text);
-				else if (block.type === "thinking") addText(block.thinking);
-				else if (block.type === "toolCall") {
-					for (const value of collectJsonRegexSecretValues(obfuscator, block.arguments as JsonValue)) {
-						values.add(value);
-					}
-					addText(block.intent);
-					addText(block.rawBlock);
-				}
-			}
-			continue;
-		}
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
-			continue;
-		}
-		const target = message as UserFacingMessage;
-		if (typeof target.content === "string") {
-			addText(target.content);
-			continue;
-		}
-		for (const block of target.content) {
-			if (block.type === "text") addText(block.text);
-		}
+	// File metadata replayed beside a native compaction block carries the
+	// same harness paths as the summary text, so its regex-secret values
+	// join the shared set.
+	const compactionFiles = anthropicCompactionFilesText(message);
+	if (compactionFiles !== undefined) addText(compactionFiles);
+	for (const files of anthropicCompactionPayload(message)?.retainedFiles ?? []) addText(files.text);
+	if (message.role === "user" || message.role === "developer" || message.role === "assistant") {
+		collectNativeReplayRegexSecretValues(obfuscator, message, values);
 	}
-	return values;
+	if (message.role === "assistant") {
+		for (const block of message.content) {
+			if (block.type === "text") addText(block.text);
+			else if (block.type === "thinking") addText(block.thinking);
+			else if (block.type === "toolCall") {
+				for (const value of collectJsonRegexSecretValues(obfuscator, block.arguments as JsonValue)) {
+					values.add(value);
+				}
+				addText(block.intent);
+				addText(block.rawBlock);
+			}
+		}
+		return;
+	}
+	if (
+		message.role !== "user" &&
+		message.role !== "toolResult" &&
+		!(message.role === "developer" && message.attribution === "user")
+	) {
+		return;
+	}
+	const target = message as UserFacingMessage;
+	if (typeof target.content === "string") {
+		addText(target.content);
+		return;
+	}
+	for (const block of target.content) {
+		if (block.type === "text") addText(block.text);
+	}
+}
+
+/** Redact one outbound message against the request-wide shared regex values; unchanged messages come back as-is. */
+function obfuscateMessage(
+	obfuscator: SecretObfuscator,
+	message: Message,
+	sharedRegexSecretValues: SecretValueSet,
+): Message {
+	let current = message;
+	const compactionPayload = anthropicCompactionPayload(current);
+	if (compactionPayload !== undefined) {
+		const providerPayload = obfuscateAnthropicCompactionFiles(obfuscator, compactionPayload, sharedRegexSecretValues);
+		if (providerPayload !== compactionPayload) current = { ...current, providerPayload } as Message;
+	}
+	if (current.role === "user" || current.role === "developer" || current.role === "assistant") {
+		current = obfuscateNativeReplay(obfuscator, current, sharedRegexSecretValues);
+	}
+	if (
+		current.role !== "user" &&
+		current.role !== "toolResult" &&
+		!(current.role === "developer" && current.attribution === "user")
+	) {
+		if (current.role !== "assistant") return current;
+		const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
+		return content === current.content ? current : { ...current, content };
+	}
+	const target = current as UserFacingMessage;
+	if (typeof target.content === "string") {
+		const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
+		return content === target.content ? current : ({ ...target, content } as Message);
+	}
+	const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
+	return content === target.content ? current : ({ ...target, content } as Message);
+}
+
+/** One message's outbound redaction state in an {@link ObfuscatorMemo}. */
+interface ObfuscatedMessage {
+	/** {@link SecretObfuscator.revision} `regexValues`, and `output` once set, were computed under. */
+	revision: number;
+	/** {@link messageEstimateVersion} of the message; owners bump it when they rewrite a message in place. */
+	messageVersion: number;
+	/** Regex secret values this message contributes to the request-wide shared set. */
+	regexValues: readonly string[];
+	/** {@link ObfuscatorMemo.sharedVersion} `output` was redacted under. */
+	sharedVersion: number;
+	/** Redacted message (may be the input itself); unset until redacted under `revision`. */
+	output: Message | undefined;
+}
+
+/**
+ * Redaction state of one outbound message stream (one conversation at one
+ * {@link obfuscateMessages} call site), created by
+ * {@link createMessageRedactionMemo} and owned by the caller. Opaque outside
+ * this module.
+ */
+export interface ObfuscatorMemo {
+	/** The obfuscator the entries were computed by; a different one resets the memo. */
+	obfuscator: SecretObfuscator | undefined;
+	/** Keyed by message identity; an entry lives as long as its message. */
+	messages: WeakMap<Message, ObfuscatedMessage>;
+	/** The previous request's shared regex values. */
+	shared: ReadonlySet<string>;
+	/** Version of `shared`; bumped whenever a request's shared set differs from it. */
+	sharedVersion: number;
+}
+
+/**
+ * A memo for one stream of {@link obfuscateMessages} calls. Each stream needs
+ * its own: requests over different message lists have different shared regex
+ * values, and alternating them through one memo would invalidate it every call.
+ */
+export function createMessageRedactionMemo(): ObfuscatorMemo {
+	return { obfuscator: undefined, messages: new WeakMap(), shared: new Set(), sharedVersion: 0 };
+}
+
+const NO_REGEX_VALUES: readonly string[] = [];
+
+function sameValues(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	if (a.size !== b.size) return false;
+	for (const value of a) {
+		if (!b.has(value)) return false;
+	}
+	return true;
 }
 
 /**
@@ -676,64 +763,101 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  * Assistant replay content is re-obfuscated too, because session restoration
  * expands keyed placeholders locally before the next provider request. Inline
  * image bytes are never walked.
+ *
+ * With a `memo`, unchanged history is not re-scanned: each message's regex
+ * values and redacted form are kept by message identity and reused while the
+ * registry revision, the message's version and the request-wide shared values
+ * hold. Without one, every message is scanned and redacted.
  */
-export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
+export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[], memo?: ObfuscatorMemo): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
-	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
+	return obfuscator.batch(() =>
+		memo === undefined
+			? obfuscateMessageBatch(obfuscator, messages)
+			: obfuscateMemoizedBatch(obfuscator, messages, memo),
+	);
+}
+
+function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
+	// Every message's regex values join one request-wide set, so a value found
+	// in one message is redacted wherever it appears.
+	const sharedRegexSecretValues = new SecretValueSet();
+	for (const message of messages) collectMessageRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
 	let changed = false;
 	const result = messages.map((message): Message => {
-		let current = message;
-		const compactionPayload = anthropicCompactionPayload(current);
-		if (compactionPayload !== undefined) {
-			const providerPayload = obfuscateAnthropicCompactionFiles(
-				obfuscator,
-				compactionPayload,
-				sharedRegexSecretValues,
-			);
-			if (providerPayload !== compactionPayload) {
-				current = { ...current, providerPayload } as Message;
-				changed = true;
+		const output = obfuscateMessage(obfuscator, message, sharedRegexSecretValues);
+		if (output !== message) changed = true;
+		return output;
+	});
+	return changed ? result : messages;
+}
+
+function obfuscateMemoizedBatch(obfuscator: SecretObfuscator, messages: Message[], memo: ObfuscatorMemo): Message[] {
+	if (memo.obfuscator !== obfuscator) {
+		memo.obfuscator = obfuscator;
+		memo.messages = new WeakMap();
+		memo.shared = new Set();
+	}
+	const entries: ObfuscatedMessage[] = [];
+	const sharedRegexSecretValues = new SecretValueSet();
+	for (const message of messages) {
+		const revision = obfuscator.revision;
+		const messageVersion = messageEstimateVersion(message);
+		let entry = memo.messages.get(message);
+		if (entry === undefined || entry.revision !== revision || entry.messageVersion !== messageVersion) {
+			const values = new Set<string>();
+			collectMessageRegexSecretValues(obfuscator, message, values);
+			const regexValues = values.size === 0 ? NO_REGEX_VALUES : [...values];
+			if (entry === undefined) {
+				entry = { revision, messageVersion, regexValues, sharedVersion: 0, output: undefined };
+				memo.messages.set(message, entry);
+			} else {
+				entry.revision = revision;
+				entry.messageVersion = messageVersion;
+				entry.regexValues = regexValues;
+				entry.output = undefined;
 			}
 		}
-		if (current.role === "user" || current.role === "developer" || current.role === "assistant") {
-			const replay = obfuscateNativeReplay(obfuscator, current, sharedRegexSecretValues);
-			if (replay !== current) {
-				changed = true;
-				current = replay;
+		for (const value of entry.regexValues) sharedRegexSecretValues.add(value);
+		entries.push(entry);
+	}
+	// Redaction depends on the shared set, so it is versioned once per request.
+	if (!sameValues(sharedRegexSecretValues, memo.shared)) {
+		memo.shared = sharedRegexSecretValues;
+		memo.sharedVersion++;
+	}
+	const sharedVersion = memo.sharedVersion;
+	let changed = false;
+	const result = messages.map((message, index): Message => {
+		const entry = entries[index];
+		const revision = obfuscator.revision;
+		let output = entry.output;
+		if (output === undefined || entry.revision !== revision || entry.sharedVersion !== sharedVersion) {
+			output = obfuscateMessage(obfuscator, message, sharedRegexSecretValues);
+			// Kept only when collection and redaction both ran under the current
+			// registry; a mint in between ties the result to an older state.
+			if (entry.revision === revision && obfuscator.revision === revision) {
+				entry.output = output;
+				entry.sharedVersion = sharedVersion;
 			}
 		}
-		if (
-			current.role !== "user" &&
-			current.role !== "toolResult" &&
-			!(current.role === "developer" && current.attribution === "user")
-		) {
-			if (current.role !== "assistant") return current;
-			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
-			if (content === current.content) return current;
-			changed = true;
-			return { ...current, content };
-		}
-		const target = current as UserFacingMessage;
-		if (typeof target.content === "string") {
-			const content = obfuscator.obfuscate(target.content, sharedRegexSecretValues);
-			if (content === target.content) return current;
-			changed = true;
-			return { ...target, content } as Message;
-		}
-		const content = obfuscateTextBlocks(obfuscator, target.content, sharedRegexSecretValues);
-		if (content === target.content) return current;
-		changed = true;
-		return { ...target, content } as Message;
+		if (output !== message) changed = true;
+		return output;
 	});
 	return changed ? result : messages;
 }
 
 /**
  * Redact outbound provider context. Only conversation messages are rewritten;
- * the static system prompt and tool schemas pass through unchanged.
+ * the static system prompt and tool schemas pass through unchanged. `memo` is
+ * passed to {@link obfuscateMessages}.
  */
-export function obfuscateProviderContext(obfuscator: SecretObfuscator | undefined, context: Context): Context {
+export function obfuscateProviderContext(
+	obfuscator: SecretObfuscator | undefined,
+	context: Context,
+	memo?: ObfuscatorMemo,
+): Context {
 	if (!obfuscator?.obfuscates()) return context;
-	const messages = obfuscateMessages(obfuscator, context.messages);
+	const messages = obfuscateMessages(obfuscator, context.messages, memo);
 	return messages === context.messages ? context : { ...context, messages };
 }

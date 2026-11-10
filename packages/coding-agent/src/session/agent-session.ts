@@ -220,6 +220,7 @@ import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
 	deobfuscateToolArguments,
+	type ObfuscatorMemo,
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -2860,7 +2861,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
-			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			convertToLlmForSideRequest: (messages, redaction) => this.#convertToLlmForSideRequest(messages, redaction),
 			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
 			resolveContextPromotionTarget: (model, contextWindow, signal) =>
 				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal),
@@ -7953,8 +7954,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#providerBoundary.deobfuscateDelta(text);
 	}
 
-	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		return this.#providerBoundary.convertToLlmForSideRequest(messages);
+	#convertToLlmForSideRequest(messages: AgentMessage[], redaction?: ObfuscatorMemo): Message[] {
+		return this.#providerBoundary.convertToLlmForSideRequest(messages, redaction);
 	}
 
 	/**

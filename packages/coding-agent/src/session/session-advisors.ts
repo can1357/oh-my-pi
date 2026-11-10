@@ -90,6 +90,7 @@ import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/co
 import type { PlanModeState } from "../plan-mode/state";
 import advisorBoundaryGuidance from "../prompts/advisor/boundary-guidance.md" with { type: "text" };
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
+import { createMessageRedactionMemo, type ObfuscatorMemo } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	AUTO_THINKING,
@@ -503,7 +504,7 @@ export interface SessionAdvisorsHost {
 	dropPendingAdvisorCards(): void;
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
+	convertToLlmForSideRequest(messages: AgentMessage[], redaction?: ObfuscatorMemo): Message[];
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
@@ -1455,6 +1456,9 @@ export class SessionAdvisors {
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
+			// The advisor re-sends its whole history every update; its settled
+			// messages keep their identity, so secret redaction is memoized for it.
+			const advisorRedaction = createMessageRedactionMemo();
 			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
@@ -1472,7 +1476,7 @@ export class SessionAdvisors {
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
 				// default converter drops custom roles and would discard their replay.
-				convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+				convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages, advisorRedaction),
 				onPayload: this.#host.onPayload,
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
