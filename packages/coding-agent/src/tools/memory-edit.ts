@@ -108,7 +108,7 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 					: params.replacement_id
 						? `superseded by ${params.replacement_id}`
 						: "invalidated";
-			await state.client.forgetMemory({ id: params.id, containerTag: state.containerTag, reason }, signal);
+			await state.forgetMemory(params.id, reason, signal);
 			const status = params.op === "forget" ? "forgotten" : "invalidated";
 			return {
 				content: [{ type: "text", text: `Memory ${params.id} ${status} ${location}.` }],

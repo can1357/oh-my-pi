@@ -181,6 +181,7 @@ supermemory:
 - **Base URL**: must be a plain `https:` origin, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, with no credentials, query or fragment; redirects are refused. Anything else leaves the backend inert.
 - **Clear**: `/memory clear` waits for pending writes and drops the cached recall; the backend stays active. Server-side memories are untouched; delete them from the Supermemory console.
 - **Edit**: `memory_edit` edits memories by the `(id: …)` that `recall` shows, in the session container. `update` creates a new memory version (`PATCH /v4/memories`, content redacted; `importance` is unsupported). `invalidate` and `forget` both soft-forget (`DELETE /v4/memories`): the memory leaves search but stays on the server. `invalidate` records `superseded by <replacement_id>` as the reason; unlike Mnemopi, `forget` is not a hard delete. Document-chunk results have no editable id.
+- **Subagents** alias the parent session's state, in-process or on a worker thread: their `recall`, `retain`, `learn` and `memory_edit` calls run on the parent's container and land in the parent's outbox (its notices included), and their prompt carries the parent's recall. They never auto-recall, auto-retain or write retention cursors; `/memory clear` or disposing a subagent leaves the parent's state alone. A subagent whose parent has no Supermemory state gets its own tool-only state.
 - `reflect` is not available with this backend.
 
 ## Sharpshooter backend

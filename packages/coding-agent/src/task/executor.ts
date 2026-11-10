@@ -99,6 +99,7 @@ import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import type { SupermemorySessionStateApi } from "../supermemory/state";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -613,6 +614,7 @@ export interface ExecutorOptions {
 	parentArtifactManager?: ArtifactManagerApi;
 	parentHindsightSessionState?: HindsightSessionStateApi;
 	parentMnemopiSessionState?: MnemopiSessionStateApi;
+	parentSupermemorySessionState?: SupermemorySessionStateApi;
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -5012,6 +5014,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					subagentEventBus: options.subagentEventBus,
 					parentHindsightSessionState: options.parentHindsightSessionState,
 					parentMnemopiSessionState: options.parentMnemopiSessionState,
+					parentSupermemorySessionState: options.parentSupermemorySessionState,
 					parentTaskPrefix: id,
 					asyncJobManager: options.asyncJobManager,
 					parentAgentId: options.parentAgentId,

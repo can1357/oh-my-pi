@@ -10,6 +10,11 @@ import { mnemopiBackend } from "../../src/mnemopi/backend";
 import type { MnemopiSessionStateApi } from "../../src/mnemopi/state";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
+import { supermemoryBackend } from "../../src/supermemory/backend";
+import type { SupermemorySessionStateApi } from "../../src/supermemory/state";
+import type { ToolSession } from "../../src/tools";
+import { MemoryEditTool } from "../../src/tools/memory-edit";
+import { MemoryRetainTool } from "../../src/tools/memory-retain";
 import type { WorkerThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import { memoryThreadService } from "../../src/thread/services/memory";
@@ -18,6 +23,7 @@ import {
 	RemoteHindsightClient,
 	RemoteHindsightSessionState,
 	RemoteMnemopiSessionState,
+	RemoteSupermemorySessionState,
 } from "../../src/thread/services/memory-remote";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -41,11 +47,20 @@ export interface MnemopiChildReport {
 	workingCount: number | undefined;
 }
 
+/** What a worker-hosted Supermemory child saw and did through its alias. */
+export interface SupermemoryChildReport {
+	aliasesRemoteParent: boolean;
+	containerTag: string;
+	retained: string;
+	editError: string;
+}
+
 /** Worker-side operations the test drives; each crosses to main as an async function. */
 export interface MemoryProbe {
 	hindsightChild(parent: HindsightSessionStateApi, fact: string, query: string): Promise<HindsightChildReport>;
 	mnemopiChild(parent: MnemopiSessionStateApi, fact: string): Promise<MnemopiChildReport>;
 	mnemopiForget(id: string): Promise<string>;
+	supermemoryChild(parent: SupermemorySessionStateApi, fact: string): Promise<SupermemoryChildReport>;
 }
 
 /** Test-only boot globals next to the services' own. */
@@ -137,6 +152,36 @@ function buildProbe(): MemoryProbe {
 			const alias = mnemopiChild?.getMnemopiSessionState();
 			if (!alias) throw new Error("no mnemopi child");
 			return alias.editScopedMemory("forget", id).status;
+		},
+		supermemoryChild: async (parent, fact) => {
+			const settings = Settings.isolated({ "memory.backend": "supermemory" });
+			const session = childSession(settings);
+			await supermemoryBackend.start({
+				session,
+				settings,
+				modelRegistry,
+				agentDir: "/nonexistent-worker-agent-dir",
+				taskDepth: 1,
+				parentSupermemorySessionState: parent,
+			});
+			const alias = session.getSupermemorySessionState();
+			if (!alias) throw new Error("supermemory alias was not installed");
+			const tools = { settings, getSupermemorySessionState: () => alias } as unknown as ToolSession;
+			const retained = await new MemoryRetainTool(tools).execute("worker-retain", { items: [{ content: fact }] });
+			const editError = await new MemoryEditTool(tools)
+				.execute("worker-edit", { op: "update", id: "missing", content: "new" })
+				.then(
+					() => "no error",
+					(error: unknown) => (error instanceof Error ? error.message : String(error)),
+				);
+			const report: SupermemoryChildReport = {
+				aliasesRemoteParent: alias.aliasOf === parent && parent instanceof RemoteSupermemorySessionState,
+				containerTag: alias.containerTag,
+				retained: retained.content.map(part => (part.type === "text" ? part.text : "")).join(""),
+				editError,
+			};
+			await session.dispose();
+			return report;
 		},
 	};
 }

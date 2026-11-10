@@ -1,8 +1,9 @@
 /**
  * Wire protocols of the main-thread memory objects a subagent worker reaches by
  * reference: the Hindsight client, a parent `HindsightSessionState` (routing,
- * config, snippets, and its confirmed-bank set), and a parent
- * `MnemopiSessionState` (identity, config, and every scoped-bank operation).
+ * config, snippets, and its confirmed-bank set), a parent `MnemopiSessionState`
+ * (identity, config, and every scoped-bank operation), and a parent
+ * `SupermemorySessionState` (container, config, recall snippet, and tool operations).
  *
  * Bank targets cross as `{ bank }`; main resolves the name to its live store.
  */
@@ -48,6 +49,9 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
+import type { SupermemoryDocument, SupermemorySearchItem } from "../../supermemory/client";
+import type { ConfiguredSupermemoryConfig } from "../../supermemory/config";
+import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RpcMethod } from "../rpc";
 
 /** Exported-class kind of `HindsightApi`. */
@@ -56,6 +60,8 @@ export const HINDSIGHT_CLIENT_KIND = "hindsight-client";
 export const HINDSIGHT_SESSION_STATE_KIND = "hindsight-session-state";
 /** Exported-class kind of `MnemopiSessionState`. */
 export const MNEMOPI_SESSION_STATE_KIND = "mnemopi-session-state";
+/** Exported-class kind of `SupermemorySessionState`. */
+export const SUPERMEMORY_SESSION_STATE_KIND = "supermemory-session-state";
 
 /** Every `HindsightApi` request, one method each. */
 export type HindsightClientProtocol = {
@@ -126,4 +132,20 @@ export type MnemopiSessionStateProtocol = {
 	>;
 	getScopedStats: RpcMethod<[], MnemopiBankStats[]>;
 	consolidate: RpcMethod<[options?: MnemopiConsolidateOptions], void>;
+};
+
+/** A parent Supermemory state's fields (read live) and the tool reads, writes and edits it runs. */
+export type SupermemorySessionStateProtocol = {
+	containerTag: RpcMethod<[], string>;
+	config: RpcMethod<[], ConfiguredSupermemoryConfig>;
+	aliasOf: RpcMethod<[], SupermemorySessionStateApi | undefined>;
+	lastRecallSnippet: RpcMethod<[], string | undefined>;
+	search: RpcMethod<[query: string, limit: number | undefined, signal?: AbortSignal], SupermemorySearchItem[]>;
+	enqueueRetain: RpcMethod<[toolCallId: string, items: SupermemoryRetainInput[]], void>;
+	save: RpcMethod<
+		[content: string, metadata: Record<string, string | number | boolean>, customId?: string],
+		SupermemoryDocument
+	>;
+	updateMemory: RpcMethod<[id: string, content: string, signal?: AbortSignal], string | undefined>;
+	forgetMemory: RpcMethod<[id: string, reason: string | undefined, signal?: AbortSignal], void>;
 };

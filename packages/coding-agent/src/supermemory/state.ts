@@ -82,6 +82,39 @@ export interface SupermemorySessionStateOptions {
 	agentDir: string;
 }
 
+/** A subagent's alias of its parent's state; see {@link SupermemorySessionState.aliasOf}. */
+export interface SupermemoryAliasOptions {
+	session: AgentSession;
+	aliasOf: SupermemorySessionStateApi;
+}
+
+/**
+ * What a subagent alias routes to its parent: container, config, recall snippet, and every
+ * tool read, write and edit. A subagent worker holds a remote implementation whose calls run
+ * on main's state, so writes land in the parent's outbox.
+ */
+export interface SupermemorySessionStateApi {
+	readonly containerTag: string;
+	readonly config: ConfiguredSupermemoryConfig;
+	readonly aliasOf?: SupermemorySessionStateApi;
+	readonly lastRecallSnippet?: string;
+	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]>;
+	enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void>;
+	save(
+		content: string,
+		metadata: Record<string, string | number | boolean>,
+		customId?: string,
+	): Promise<SupermemoryDocument>;
+	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined>;
+	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void>;
+}
+
+/** Client and outbox a primary state owns. */
+interface SupermemoryOwnResources {
+	client: SupermemoryClient;
+	outbox: MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>;
+}
+
 /** Escaped bullet lines for `items` within `budget` chars; an item that does not fit is skipped, not the rest. */
 function renderLines(items: readonly string[], budget: number): string {
 	const lines: string[] = [];
@@ -96,18 +129,23 @@ function renderLines(items: readonly string[], budget: number): string {
 }
 
 /** Per-session Supermemory runtime state owned by its AgentSession. */
-export class SupermemorySessionState {
+export class SupermemorySessionState implements SupermemorySessionStateApi {
 	readonly session: AgentSession;
-	readonly client: SupermemoryClient;
 	readonly config: ConfiguredSupermemoryConfig;
 	readonly containerTag: string;
 	readonly automatic: boolean;
+	/**
+	 * Parent state of a subagent alias: every tool read, write and edit runs there (its container,
+	 * outbox and notices). An alias never auto-recalls, auto-retains, or writes retention cursors.
+	 */
+	readonly aliasOf?: SupermemorySessionStateApi;
 	lastRecallSnippet?: string;
 	hasRecalledForFirstTurn = false;
 	/** User turns already covered by automatic retention documents. */
 	lastRetainedTurn = 0;
 	readonly #writes = new Set<Promise<unknown>>();
-	readonly #outbox: MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>;
+	/** Client and outbox of a primary state; an alias has none. */
+	readonly #own: SupermemoryOwnResources | undefined;
 	#retention: Promise<void> = Promise.resolve();
 	#recallGeneration = 0;
 	/** Bumped when the transcript changes identity; stale retention never advances {@link lastRetainedTurn}. */
@@ -116,13 +154,20 @@ export class SupermemorySessionState {
 	#hasCursor = false;
 	#unsubscribe?: () => void;
 
-	constructor(options: SupermemorySessionStateOptions) {
+	constructor(options: SupermemorySessionStateOptions | SupermemoryAliasOptions) {
 		this.session = options.session;
-		this.client = options.client;
+		if ("aliasOf" in options) {
+			this.aliasOf = options.aliasOf;
+			this.config = options.aliasOf.config;
+			this.containerTag = options.aliasOf.containerTag;
+			this.automatic = false;
+			return;
+		}
+		const client = options.client;
 		this.config = options.config;
 		this.containerTag = options.containerTag;
 		this.automatic = options.automatic;
-		this.#outbox = new MemoryOutboxQueue({
+		const outbox = new MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>({
 			label: "Supermemory",
 			// One document per request: drain as soon as a write lands.
 			flushBatchSize: 1,
@@ -152,7 +197,7 @@ export class SupermemorySessionState {
 						Object.values(event.metadata).every(value => typeof value === "string"),
 					send: async ([event]) => {
 						try {
-							await this.client.createDocument({
+							await client.createDocument({
 								content: event.content,
 								containerTag: this.containerTag,
 								customId: event.id,
@@ -165,6 +210,7 @@ export class SupermemorySessionState {
 					},
 				}),
 		});
+		this.#own = { client, outbox };
 		this.#resumeRetention();
 	}
 
@@ -219,6 +265,12 @@ export class SupermemorySessionState {
 		return this.session.sessionManager.getSessionId();
 	}
 
+	/** This state's client and outbox; an alias routes through {@link aliasOf} before reaching here. */
+	#local(): SupermemoryOwnResources {
+		if (this.#own) return this.#own;
+		throw new Error("A Supermemory subagent alias has no client or outbox; use its parent state.");
+	}
+
 	/** Strips the API key and recognizable secrets from text bound for the server. */
 	#redact(text: string): string {
 		return redactMemorySecrets(text.replaceAll(this.config.apiKey, "[REDACTED]"));
@@ -229,12 +281,13 @@ export class SupermemorySessionState {
 	 * them. A retried call has the same event ids, so it neither queues nor uploads twice.
 	 */
 	async enqueueRetain(toolCallId: string, items: SupermemoryRetainInput[]): Promise<void> {
-		await this.#outbox.enqueue(toolCallId, items);
+		if (this.aliasOf) return this.aliasOf.enqueueRetain(toolCallId, items);
+		await this.#local().outbox.enqueue(toolCallId, items);
 	}
 
 	/** Delivers this destination's outbox, including events earlier processes left; tracked so {@link flush} awaits it. */
 	drainOutbox(): Promise<void> {
-		return this.#track(this.#outbox.flush());
+		return this.#track(this.#local().outbox.flush());
 	}
 
 	/** Stores one document in this state's container (redacted); tracked so {@link flush} awaits it. */
@@ -243,8 +296,9 @@ export class SupermemorySessionState {
 		metadata: Record<string, string | number | boolean>,
 		customId?: string,
 	): Promise<SupermemoryDocument> {
+		if (this.aliasOf) return this.aliasOf.save(content, metadata, customId);
 		return this.#track(
-			this.client.createDocument({
+			this.#local().client.createDocument({
 				content: this.#redact(content),
 				containerTag: this.containerTag,
 				customId,
@@ -255,15 +309,23 @@ export class SupermemorySessionState {
 
 	/** `memory_edit update`: new version of memory `id` in this state's container (redacted). */
 	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
-		return this.client.updateMemory(
+		if (this.aliasOf) return this.aliasOf.updateMemory(id, content, signal);
+		return this.#local().client.updateMemory(
 			{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
 			signal,
 		);
 	}
 
+	/** `memory_edit forget`/`invalidate`: soft-forgets memory `id` in this state's container. */
+	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
+		if (this.aliasOf) return this.aliasOf.forgetMemory(id, reason, signal);
+		return this.#local().client.forgetMemory({ id, containerTag: this.containerTag, reason }, signal);
+	}
+
 	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
+		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
 		const resultLimit = Math.max(1, Math.min(limit ?? this.config.recallLimit, this.config.recallLimit));
-		const results = await this.client.search(
+		const results = await this.#local().client.search(
 			{
 				q: this.#redact(query),
 				containerTag: this.containerTag,
@@ -295,7 +357,7 @@ export class SupermemorySessionState {
 		}
 
 		const [profile, memories] = await Promise.allSettled([
-			this.client.profile(this.containerTag, signal),
+			this.#local().client.profile(this.containerTag, signal),
 			this.search(query.slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal),
 		]);
 		if (signal?.aborted || generation !== this.#recallGeneration) return undefined;
@@ -448,12 +510,17 @@ export class SupermemorySessionState {
 		while (this.#writes.size > 0) await Promise.allSettled(this.#writes);
 	}
 
-	/** Stops automatic work and gives pending writes and the outbox a bounded chance to land. */
+	/**
+	 * Stops automatic work and gives pending writes and the outbox a bounded chance to land.
+	 * An alias owns nothing: its writes sit in the parent's outbox, which the parent disposes.
+	 */
 	async dispose(): Promise<void> {
 		// No transcript-generation bump: the bounded flush below must finish queued due windows.
 		this.#recallGeneration++;
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
+		const own = this.#own;
+		if (!own) return;
 		void this.drainOutbox();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const timer = setTimeout(resolve, DISPOSE_FLUSH_TIMEOUT_MS);
@@ -461,7 +528,7 @@ export class SupermemorySessionState {
 			await Promise.race([this.flush(), promise]);
 		} finally {
 			clearTimeout(timer);
-			this.#outbox.dispose();
+			own.outbox.dispose();
 		}
 	}
 }

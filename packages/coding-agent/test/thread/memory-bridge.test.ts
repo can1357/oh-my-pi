@@ -14,6 +14,8 @@ import type { MnemopiBackendConfig } from "../../src/mnemopi/config";
 import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "../../src/mnemopi/state";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
+import { SupermemoryClient } from "../../src/supermemory/client";
+import { SupermemorySessionState } from "../../src/supermemory/state";
 import type { MainThreadLink } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { WorkerPeer } from "../../src/thread/services";
@@ -187,6 +189,70 @@ describe("memory thread service", () => {
 			expect(parent.getScopedMemory(report.storedId)).toBeNull();
 		} finally {
 			await parent.dispose({ consolidate: false });
+		}
+	});
+
+	it("lands a worker Supermemory alias's retain in main's outbox and maps a remote 404", async () => {
+		const requests: Array<{ method: string; path: string; body: Record<string, unknown> }> = [];
+		using server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const { pathname } = new URL(request.url);
+				const body = (await request.json()) as Record<string, unknown>;
+				requests.push({ method: request.method, path: pathname, body });
+				// Documents stay undelivered so the write is observable in the outbox; edits find nothing.
+				return Response.json({}, { status: pathname === "/v3/documents" ? 503 : 404 });
+			},
+		});
+		const notices: string[] = [];
+		vi.spyOn(parentSession, "emitNotice").mockImplementation((_level, message) => {
+			notices.push(message);
+		});
+		const apiKey = "sm-synthetic-bridge-key";
+		const parent = new SupermemorySessionState({
+			session: parentSession,
+			client: new SupermemoryClient(server.url.origin, apiKey),
+			config: {
+				baseUrl: server.url.origin,
+				apiKey,
+				scoping: "global",
+				autoRecall: false,
+				autoRetain: false,
+				retainEveryNTurns: 1,
+				recallLimit: 5,
+				threshold: 0.5,
+				searchMode: "hybrid",
+			},
+			containerTag: "omp-global",
+			automatic: true,
+			agentDir: tempDir,
+		});
+		try {
+			const report = await probe.supermemoryChild(parent, "worker fact");
+			await parent.drainOutbox();
+
+			expect(report).toEqual({
+				aliasesRemoteParent: true,
+				containerTag: "omp-global",
+				retained: "1 memory queued.",
+				editError: "Memory missing was not found in container omp-global.",
+			});
+			// Delivery runs in the background and the drain retries it, so dedupe and ignore order.
+			const sent = new Set(
+				requests.map(request => `${request.method} ${request.path} ${request.body.containerTag}`),
+			);
+			expect([...sent].sort()).toEqual(["PATCH /v4/memories omp-global", "POST /v3/documents omp-global"]);
+			expect(requests.find(request => request.method === "POST")?.body).toMatchObject({
+				content: "worker fact",
+				metadata: { source: "coding-agent-retain" },
+			});
+			// The undelivered write waits in main's outbox, reported on the parent session.
+			const files = await fs.readdir(path.join(tempDir, "supermemory-outbox"), { recursive: true });
+			expect(files.filter(name => name.endsWith(".json"))).toHaveLength(1);
+			expect(notices.join(" ")).toContain("1 memory kept in the Supermemory outbox");
+		} finally {
+			await parent.dispose();
 		}
 	});
 });

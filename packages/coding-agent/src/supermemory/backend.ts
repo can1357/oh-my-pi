@@ -21,6 +21,15 @@ export const supermemoryBackend: MemoryBackend = {
 
 	async start(options: MemoryBackendStartOptions): Promise<void> {
 		const { session, settings } = options;
+		// Subagents alias the parent's state so tool recalls, retains and edits reach the same
+		// container and the parent's outbox. Auto-recall and auto-retain stay with the parent.
+		const parent = options.taskDepth > 0 ? options.parentSupermemorySessionState : undefined;
+		if (parent) {
+			await session
+				.setSupermemorySessionState(new SupermemorySessionState({ session, aliasOf: parent.aliasOf ?? parent }))
+				?.dispose();
+			return;
+		}
 		const config = loadSupermemoryConfig(settings);
 		if (!isSupermemoryConfigured(config)) {
 			if (options.taskDepth === 0) {
@@ -31,8 +40,8 @@ export const supermemoryBackend: MemoryBackend = {
 			return;
 		}
 		try {
-			// Subagents get their own state for the recall/retain tools, but never
-			// auto-recall or auto-retain: that stays with the top-level session.
+			// A subagent without a Supermemory parent gets its own tool-only state: it never
+			// auto-recalls or auto-retains, which stays with the top-level session.
 			const state = new SupermemorySessionState({
 				session,
 				client: new SupermemoryClient(config.baseUrl, config.apiKey),
@@ -55,7 +64,8 @@ export const supermemoryBackend: MemoryBackend = {
 		const parts = [
 			prompt.render(supermemoryInstructions, { toolRefs: memoryToolRefs(session?.getXdevToolEntries()) }),
 		];
-		const snippet = session?.getSupermemorySessionState()?.lastRecallSnippet;
+		const state = session?.getSupermemorySessionState();
+		const snippet = (state?.aliasOf ?? state)?.lastRecallSnippet;
 		if (snippet) parts.push(snippet);
 		return parts.join("\n\n");
 	},
@@ -100,7 +110,7 @@ export const supermemoryBackend: MemoryBackend = {
 			writable: true,
 			searchable: true,
 			scope: state.containerTag,
-			lastRecall: state.lastRecallSnippet !== undefined,
+			lastRecall: (state.aliasOf ?? state).lastRecallSnippet !== undefined,
 		};
 	},
 
