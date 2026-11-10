@@ -1,3 +1,5 @@
+import { maskBlockquotes } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
+
 /**
  * "+Nk" turn token-budget directive.
  *
@@ -20,7 +22,7 @@ export interface TurnBudget {
 
 /** Parse the first `+Nk`/`+N`/`+Nm`(`!`) directive outside blockquoted references. */
 export function parseTurnBudget(text: string): TurnBudget | null {
-	const match = TURN_BUDGET.exec(text.replace(/^[\t ]*>[^\r\n]*/gm, ""));
+	const match = TURN_BUDGET.exec(maskBlockquotes(text));
 	if (!match) return null;
 	const value = Number(match[1]);
 	if (!Number.isFinite(value) || value <= 0) return null;

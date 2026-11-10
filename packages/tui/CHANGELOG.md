@@ -6,6 +6,10 @@
 
 - Selectors can show bounded Markdown previews, and command reports can expose a primary action with a configurable shortcut or native button ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 
+### Fixed
+
+- Quoted prompt references no longer activate magic keywords ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Changed
