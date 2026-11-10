@@ -1,12 +1,13 @@
 import * as path from "node:path";
-import { getPackageDir } from "../../config";
+import { walkUpForPackageDir } from "../../config";
 
 /**
- * The tree omp runs from: the `node_modules` holding an installed omp, or a source checkout's root, so frames
- * in omp's own code and in its dependencies both fall under it. Compiled binaries run from `$bunfs` instead.
+ * The tree omp's code runs from: the `node_modules` holding an installed omp, or a source checkout's root, so
+ * frames in omp's own code and in its dependencies both fall under it. Taken from this module's location, not
+ * `getPackageDir()`, whose `PI_PACKAGE_DIR` override names an asset folder. Compiled binaries run from `$bunfs`.
  */
 const OMP_ROOT = (() => {
-	const packageDir = getPackageDir();
+	const packageDir = walkUpForPackageDir(import.meta.dir);
 	return packageDir ? path.dirname(path.dirname(packageDir)) : undefined;
 })();
 
@@ -14,14 +15,27 @@ const OMP_ROOT = (() => {
 const HOST_LOCATION = /^(?:native\b|unknown$|node:|bun:|\[eval-prelude:)|\$bunfs|~BUN/;
 const FRAME_LINE = /^\s+at (?:.*\((.*)\)|(.*))$/;
 
+export interface CellErrorSource {
+	/** The cell's file name as its frames show it. */
+	filename: string;
+	/** The cell's working directory; when it lies inside omp's own tree, frames under it are the user's code. */
+	cwd: string;
+	/** Defaults to the tree this omp runs from. */
+	ompRoot?: string;
+}
+
 /**
  * The text a failed cell prints for an uncaught error: its stack without the frames from omp's own runtime,
- * its dependencies and engine internals, which say nothing about the cell. Message lines, the cell's frames
- * (with line and column), functions the cell sent to the page or worker and modules it imported are kept,
- * and one line says how many frames were hidden; the error's own `stack` is left whole.
+ * its dependencies and engine internals, which say nothing about the cell. Message lines, the cell's frames,
+ * functions the cell sent to a page or worker, and the user's own code are kept, and one line counts the hidden
+ * frames; the error's own `stack` is left whole, so a cell that catches it can print them.
  */
-export function formatCellError(stack: string, ompRoot: string | undefined = OMP_ROOT): string {
-	const rootPrefix = ompRoot === undefined ? undefined : ompRoot.endsWith(path.sep) ? ompRoot : ompRoot + path.sep;
+export function formatCellError(stack: string, source: CellErrorSource): string {
+	const ompRoot = "ompRoot" in source ? source.ompRoot : OMP_ROOT;
+	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
+	const cwdPrefix = path.join(source.cwd, path.sep);
+	// Someone working inside an omp checkout: their files share its root, so the cwd marks which are theirs.
+	const userPrefix = rootPrefix !== undefined && cwdPrefix.startsWith(rootPrefix) ? cwdPrefix : undefined;
 	const kept: string[] = [];
 	let hidden = 0;
 	for (const line of stack.split("\n")) {
@@ -29,7 +43,11 @@ export function formatCellError(stack: string, ompRoot: string | undefined = OMP
 		const location = frame ? (frame[1] ?? frame[2]).trim() : undefined;
 		if (
 			location !== undefined &&
-			(HOST_LOCATION.test(location) || (rootPrefix !== undefined && location.startsWith(rootPrefix)))
+			!location.startsWith(source.filename) &&
+			(HOST_LOCATION.test(location) ||
+				(rootPrefix !== undefined &&
+					location.startsWith(rootPrefix) &&
+					!(userPrefix !== undefined && location.startsWith(userPrefix))))
 		) {
 			hidden++;
 			continue;
@@ -37,8 +55,12 @@ export function formatCellError(stack: string, ompRoot: string | undefined = OMP
 		kept.push(line);
 	}
 	if (hidden === 0) return stack;
+	const count = `${hidden} omp frame${hidden === 1 ? "" : "s"} hidden`;
+	// Only an error raised through the cell can be caught by it; a worker exit or a failed install cannot.
 	kept.push(
-		`    (${hidden} omp frame${hidden === 1 ? "" : "s"} hidden; catch the error and print e.stack to see them)`,
+		stack.includes(source.filename)
+			? `    (${count}; catch the error and print e.stack to see them)`
+			: `    (${count})`,
 	);
 	return kept.join("\n");
 }

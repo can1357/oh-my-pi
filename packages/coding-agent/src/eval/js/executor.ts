@@ -126,6 +126,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		: options.signal;
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
+	const filename = options.filename ?? `js-cell-${crypto.randomUUID()}.js`;
 
 	try {
 		const cwd = options.cwd ?? options.session.cwd;
@@ -168,7 +169,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			packageEnvironment: install.environment.description,
 			reset: options.reset,
 			code,
-			filename: options.filename ?? `js-cell-${crypto.randomUUID()}.js`,
+			filename,
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
@@ -233,7 +234,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? formatCellError(error.stack ?? error.message) : String(error);
+		const message =
+			error instanceof Error
+				? formatCellError(error.stack ?? error.message, { filename, cwd: options.cwd ?? options.session.cwd })
+				: String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

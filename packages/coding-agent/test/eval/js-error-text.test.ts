@@ -4,40 +4,26 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { formatCellError } from "@oh-my-pi/pi-coding-agent/eval/js/error-text";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
-import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 /** The checkout this test runs from; every frame under it is omp's own code or one of its dependencies. */
 const REPO_ROOT = path.resolve(import.meta.dir, "../../../..");
+const ERROR_TEXT = path.resolve(import.meta.dir, "../../src/eval/js/error-text.ts");
 
-const failingPrelude: EvalPreludeDefinition = {
-	name: "fixture",
-	documentation: "fixture",
-	javascript: `{ globalThis.fixture = { invoke: parameters => __omp_prelude__("fixture", parameters) }; }`,
-	python: "",
-	exports: ["fixture"],
-	async invoke() {
-		throw new Error("host helper failed");
-	},
+const session: ToolSession = {
+	cwd: process.cwd(),
+	hasUI: false,
+	getSessionFile: () => null,
+	getSessionSpawns: () => null,
+	settings: Settings.isolated(),
 };
-
-function session(): ToolSession {
-	return {
-		cwd: process.cwd(),
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => null,
-		settings: Settings.isolated(),
-		getEvalPreludes: () => [failingPrelude],
-	};
-}
 
 describe("uncaught JavaScript cell errors", () => {
 	afterAll(async () => {
 		await disposeAllVmContexts();
 	});
 
-	const options = { cwd: process.cwd(), sessionId: `js-error-text-${crypto.randomUUID()}`, session: session() };
+	const options = { cwd: "/tmp", sessionId: `js-error-text-${crypto.randomUUID()}`, session };
 
 	it("print the message and the cell's own frames, not omp's", async () => {
 		const result = await executeJs(
@@ -55,27 +41,39 @@ describe("uncaught JavaScript cell errors", () => {
 		);
 	});
 
-	it("print a bridged helper's failure with the cell it came from, not the host stack", async () => {
-		const result = await executeJs("await fixture.invoke({});", options);
+	it("keep the frames of a cell file that lives inside omp's own tree", async () => {
+		const filename = path.join(REPO_ROOT, "scripts", "cell-under-omp-root.js");
+		const result = await executeJs('function inner() {\n  throw new Error("file cell");\n}\ninner();', {
+			...options,
+			filename,
+		});
 		expect(result.exitCode).toBe(1);
-		expect(result.output).toStartWith("Error: host helper failed\n");
-		expect(result.output.split("\n").filter(line => /^\s+at /.test(line))).toEqual([
-			expect.stringMatching(/^ {4}at fixture \(js-cell-[0-9a-f-]+\.js\)$/),
-		]);
-		expect(result.output).not.toContain(REPO_ROOT);
+		expect(result.output).toContain(`(${filename}:`);
 	});
 
-	it("leave the whole stack on the error for a cell that prints it", async () => {
-		const result = await executeJs(
-			"try { await fixture.invoke({}); } catch (error) { print(error.stack); }",
-			options,
-		);
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain(REPO_ROOT);
+	it("do not tell the cell to catch an error it never saw", async () => {
+		const result = await executeJs("process.exit(3);", options);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).not.toContain("catch the error");
+	});
+
+	it("take omp's tree from its own code, not from PI_PACKAGE_DIR", async () => {
+		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
+console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)", { filename: "js-cell-1.js", cwd: "/tmp" }));`;
+		const child = Bun.spawn(["bun", "-e", script], {
+			env: { ...process.env, PI_PACKAGE_DIR: "/opt/omp" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		expect(code).toBe(0);
+		expect(stdout).toContain("at f (/home/me/project/lib.ts:1:2)");
 	});
 });
 
 describe("formatCellError", () => {
+	const source = { filename: "js-cell-1d89.js", cwd: "/home/me/project", ompRoot: "/opt/omp/node_modules" };
+
 	it("hides engine, compiled-omp, prelude and install-tree frames and keeps everything else", () => {
 		const stack = [
 			"TypeError: x is not a function",
@@ -93,7 +91,7 @@ describe("formatCellError", () => {
 			"    at <anonymous> (:0:43)",
 			"    at browser.call (js-cell-1d89.js)",
 		].join("\n");
-		expect(formatCellError(stack, "/opt/omp/node_modules")).toBe(
+		expect(formatCellError(stack, source)).toBe(
 			[
 				"TypeError: x is not a function",
 				"1 | foo()",
@@ -107,9 +105,20 @@ describe("formatCellError", () => {
 		);
 	});
 
+	it("keeps code under a working directory inside omp's tree and hides the rest of the tree", () => {
+		const stack = [
+			"Error: x",
+			"    at mine (/opt/omp/node_modules/my-project/a.ts:1:2)",
+			"    at theirs (/opt/omp/node_modules/puppeteer-core/lib/b.js:3:4)",
+		].join("\n");
+		expect(formatCellError(stack, { ...source, cwd: "/opt/omp/node_modules/my-project" })).toBe(
+			["Error: x", "    at mine (/opt/omp/node_modules/my-project/a.ts:1:2)", "    (1 omp frame hidden)"].join("\n"),
+		);
+	});
+
 	it("returns a stack with nothing to hide unchanged", () => {
-		const stack = "Error: boom\n    at <anonymous> (js-cell-1.js:1:7)";
-		expect(formatCellError(stack, "/opt/omp/node_modules")).toBe(stack);
-		expect(formatCellError("plain message", undefined)).toBe("plain message");
+		const stack = "Error: boom\n    at <anonymous> (js-cell-1d89.js:1:7)";
+		expect(formatCellError(stack, source)).toBe(stack);
+		expect(formatCellError("plain message", source)).toBe("plain message");
 	});
 });
