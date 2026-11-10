@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `supermemory` memory backend: first-turn recall, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit`, writes that survive outages, and subagents that share the parent's memory
+- Added the `supermemory` memory backend: first-turn recall, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit`, writes that survive outages, and subagents that share the parent's memory ([#18755](https://github.com/can1357/oh-my-pi/pull/18755) by [@panosAthDBX](https://github.com/panosAthDBX))
 
 ## [18.18.3] - 2026-11-09
 
