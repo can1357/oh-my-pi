@@ -337,7 +337,11 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
-import { assertClientMessageId, assertClientMessageIds } from "./client-message-id";
+import {
+	assertClientMessageId,
+	assertClientMessageIds,
+	CLIENT_MESSAGE_RESOLUTION_CUSTOM_TYPE,
+} from "./client-message-id";
 import { type PowerAssertionHandle, startPowerAssertion } from "./power-assertion-backend";
 import { renderAttachmentSourceNotice } from "./attachment-source-notice";
 import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -521,7 +525,6 @@ export * from "./agent-session-types";
 export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
-const MAX_CLIENT_MESSAGE_STATUS_BYTES = 16 * 1024 * 1024;
 /** Assistant thinking+reply words a deferred auto-title waits for before retitling from context. */
 const DEFERRED_TITLE_MIN_WORDS = 40;
 /** Cap on the forked title request itself (measured p90 2.3s). */
@@ -4328,6 +4331,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (entry.type !== "message") continue;
 			if (sessionMessagePersistenceKey(entry.message) !== key) continue;
 			if (!sameMessageContent(entry.message, message)) continue;
+			// Identical submissions in one millisecond are distinct intents when their client IDs differ.
+			const clientMessageId = this.#clientMessageIds.get(message);
+			if (clientMessageId !== undefined && entry.clientMessageId !== clientMessageId) continue;
 			if (
 				entry.message.role === "assistant" &&
 				message.role === "assistant" &&
@@ -11223,7 +11229,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const followUpAll = [...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()];
 		const steering = steeringAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
 		const followUp = followUpAll.filter(isUserAuthoredQueuedMessage).map(toRestoredQueuedMessage);
-		this.#resolveWithdrawnClientMessages([...steeringAll, ...followUpAll].filter(isUserAuthoredQueuedMessage));
+		const withdrawnUserMessages = [...steeringAll, ...followUpAll].filter(isUserAuthoredQueuedMessage);
 		const recordable = (m: AgentMessage): boolean =>
 			m.role !== "developer" && isDisplayableQueuedMessage(m) && !isUserAuthoredQueuedMessage(m);
 		const recordedOnInterrupt = new Set<AgentMessage>();
@@ -11257,6 +11263,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
 		this.#reconcileQueuedMessageDrain();
+		this.#resolveWithdrawnClientMessages(withdrawnUserMessages);
 		return { steering, followUp };
 	}
 
@@ -11290,20 +11297,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#clientMessageAdmissions?.sessionId === this.sessionId && this.#clientMessageAdmissions.ids.has(id)) {
 			throw new Error(`clientMessageId already submitted: ${id}`);
 		}
-		for (const entry of this.sessionManager.getEntries()) {
-			if ((entry.type === "message" || entry.type === "custom_message") && entry.clientMessageId === id) {
-				throw new Error(`clientMessageId already submitted: ${id}`);
-			}
-			if (
-				entry.type === "custom" &&
-				entry.customType === "client-message-resolution" &&
-				isRecord(entry.data) &&
-				Array.isArray(entry.data.clientMessageIds) &&
-				entry.data.clientMessageIds.includes(id)
-			) {
-				throw new Error(`clientMessageId already resolved: ${id}`);
-			}
-		}
+		if (this.sessionManager.hasClientMessageEntry(id)) throw new Error(`clientMessageId already submitted: ${id}`);
+		if (this.sessionManager.isClientMessageResolved(id)) throw new Error(`clientMessageId already resolved: ${id}`);
 	}
 
 	#reserveClientMessageId(id: string | undefined): void {
@@ -11324,17 +11319,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return clientMessageId === undefined ? undefined : { clientMessageId };
 	}
 
-	/** Explicit consumption is journaled separately from model-facing messages. */
+	/**
+	 * Journal explicit consumption separately from model-facing messages. Callers have already
+	 * withdrawn or consumed the input, so a journal failure is logged, never thrown: the status
+	 * query then reports the ID unresolved instead of the caller losing the withdrawn input.
+	 * `forceFileCreation` lets the ordinary writer materialize an otherwise lazy session for it.
+	 */
 	resolveClientMessages(ids: readonly string[]): void {
 		if (ids.length === 0) return;
 		for (const id of ids) assertClientMessageId(id);
-		this.sessionManager.appendCustomEntry(
-			"client-message-resolution",
-			{ clientMessageIds: [...new Set(ids)] },
-			{ forceFileCreation: true },
-		);
-		// Withdrawals/local commands may be the only journal entry in an otherwise lazy session.
-		this.sessionManager.flushSync();
+		try {
+			this.sessionManager.appendCustomEntry(
+				CLIENT_MESSAGE_RESOLUTION_CUSTOM_TYPE,
+				{ clientMessageIds: [...new Set(ids)] },
+				{ forceFileCreation: true },
+			);
+		} catch (error) {
+			logger.warn("Failed to journal client message resolution", { ids, error: toError(error).message });
+		}
 	}
 
 	#resolveWithdrawnClientMessages(messages: readonly AgentMessage[]): void {
@@ -11346,8 +11348,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.resolveClientMessages(ids);
 	}
 
-	/** Read-only during streaming; persistence settlement never waits for the active turn. */
-	async getClientMessageStatus(ids: readonly string[]): Promise<ClientMessageStatus> {
+	/**
+	 * Read-only during streaming; persistence settlement never waits for the active turn.
+	 * `maxBytes` bounds the UTF-8 JSON of the whole result: native messages that do not fit are
+	 * omitted whole, never truncated.
+	 */
+	async getClientMessageStatus(ids: readonly string[], maxBytes: number): Promise<ClientMessageStatus> {
 		assertClientMessageIds(ids);
 		const sessionId = this.sessionId;
 		await this.settleInFlightMessagePersistence();
@@ -11355,49 +11361,43 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.sessionManager.flush();
 		if (this.sessionId !== sessionId) throw new Error("Session changed during client message reconciliation");
 		const requested = new Set(ids);
-		const messages: ClientMessageStatus["messages"] = [];
-		let messageBytes = 2; // JSON array brackets, matching the RPC history page's UTF-8 accounting.
-		const represented = new Set<string>();
+		const candidates: ClientMessageStatus["messages"] = [];
 		for (const message of this.messages) {
 			const id = this.#clientMessageIds.get(message);
-			if (id !== undefined && requested.has(id)) {
-				const envelope = { clientMessageId: id, message };
-				const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8") + (messages.length === 0 ? 0 : 1);
-				if (messageBytes + bytes >= MAX_CLIENT_MESSAGE_STATUS_BYTES) continue;
-				messageBytes += bytes;
-				messages.push(envelope);
-				represented.add(id);
-			}
+			if (id !== undefined && requested.has(id)) candidates.push({ clientMessageId: id, message });
 		}
 		const queuedMessages = this.getQueuedMessages();
+		const queued = new Set<string>();
 		if (queuedMessages.clientMessageIds) {
 			for (const id of [...queuedMessages.clientMessageIds.steering, ...queuedMessages.clientMessageIds.followUp]) {
-				if (id !== null) represented.add(id);
+				if (id !== null) queued.add(id);
 			}
 		}
-		const persisted = new Set<string>();
-		const resolved = new Set<string>();
-		for (const entry of this.sessionManager.getEntries()) {
-			if ((entry.type === "message" || entry.type === "custom_message") && entry.clientMessageId !== undefined) {
-				if (requested.has(entry.clientMessageId)) persisted.add(entry.clientMessageId);
-			} else if (
-				entry.type === "custom" &&
-				entry.customType === "client-message-resolution" &&
-				isRecord(entry.data)
-			) {
-				const resolvedIds = entry.data.clientMessageIds;
-				if (Array.isArray(resolvedIds)) {
-					for (const id of resolvedIds) if (typeof id === "string" && requested.has(id)) resolved.add(id);
-				}
-			}
-		}
-		return {
-			messages,
-			queuedMessages,
-			resolvedClientMessageIds: ids.filter(id => resolved.has(id)),
-			persistedClientMessageIds: ids.filter(id => persisted.has(id)),
-			unresolvedClientMessageIds: ids.filter(id => !represented.has(id) && !persisted.has(id) && !resolved.has(id)),
+		const persisted = ids.filter(id => this.sessionManager.hasClientMessageEntry(id));
+		const resolved = ids.filter(id => this.sessionManager.isClientMessageResolved(id));
+		const build = (messages: ClientMessageStatus["messages"]): ClientMessageStatus => {
+			const represented = new Set(queued);
+			for (const { clientMessageId } of messages) represented.add(clientMessageId);
+			return {
+				messages,
+				queuedMessages,
+				resolvedClientMessageIds: resolved,
+				persistedClientMessageIds: persisted,
+				unresolvedClientMessageIds: ids.filter(
+					id => !represented.has(id) && !persisted.includes(id) && !resolved.includes(id),
+				),
+			};
 		};
+		// Measured with no messages, the unresolved list is at its longest; each message added only shortens it.
+		let remaining = maxBytes - Buffer.byteLength(JSON.stringify(build([])), "utf8");
+		const messages: ClientMessageStatus["messages"] = [];
+		for (const envelope of candidates) {
+			const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8") + (messages.length === 0 ? 0 : 1);
+			if (bytes > remaining) continue;
+			remaining -= bytes;
+			messages.push(envelope);
+		}
+		return build(messages);
 	}
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
@@ -11481,11 +11481,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const dropped = new Set(messages);
 		if (dropped.size === 0) return;
 		const kept = (queue: readonly AgentMessage[]): AgentMessage[] => queue.filter(message => !dropped.has(message));
-		this.#resolveWithdrawnClientMessages(
-			[...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue()].filter(message => dropped.has(message)),
+		const withdrawn = [...this.agent.peekSteeringQueue(), ...this.agent.peekFollowUpQueue()].filter(message =>
+			dropped.has(message),
 		);
 		this.agent.replaceQueues(kept(this.agent.peekSteeringQueue()), kept(this.agent.peekFollowUpQueue()));
 		this.#reconcileQueuedMessageDrain();
+		this.#resolveWithdrawnClientMessages(withdrawn);
 	}
 
 	/**
@@ -11498,9 +11499,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (index < 0) return undefined;
 
 		const removed = selected[index];
-		this.#resolveWithdrawnClientMessages([removed]);
 		this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(selected, index));
 		this.#reconcileQueuedMessageDrain();
+		this.#resolveWithdrawnClientMessages([removed]);
 		return toRestoredQueuedMessage(removed);
 	}
 
@@ -11578,17 +11579,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const fromSteer = lastUserIndex(steering);
 		if (fromSteer >= 0) {
 			const removed = steering[fromSteer];
-			this.#resolveWithdrawnClientMessages([removed]);
 			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, fromSteer), followUp.slice());
 			this.#reconcileQueuedMessageDrain();
+			this.#resolveWithdrawnClientMessages([removed]);
 			return toRestoredQueuedMessage(removed);
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
-			this.#resolveWithdrawnClientMessages([removed]);
 			this.agent.replaceQueues(steering.slice(), this.#withoutQueuedUserMessage(followUp, fromFollowUp));
 			this.#reconcileQueuedMessageDrain();
+			this.#resolveWithdrawnClientMessages([removed]);
 			return toRestoredQueuedMessage(removed);
 		}
 		return undefined;
@@ -11614,19 +11615,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			index = pending.indexOf(message);
 		}
 		if (index >= 0) {
-			this.#resolveWithdrawnClientMessages([message]);
 			this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(pending, index));
 			this.#reconcileQueuedMessageDrain();
+			this.#resolveWithdrawnClientMessages([message]);
 			return true;
 		}
 		if (!this.#heldQueuedMessages.has(message)) return false;
-		this.#resolveWithdrawnClientMessages([message]);
 		const held = [...this.#heldQueuedMessages];
 		const heldIndex = held.indexOf(message);
 		for (let i = this.#queuedUserGroupStart(held, heldIndex); i <= heldIndex; i++) {
 			this.#heldQueuedMessages.delete(held[i]);
 			this.#withdrawnHeldMessages.add(held[i]);
 		}
+		this.#resolveWithdrawnClientMessages([message]);
 		return true;
 	}
 

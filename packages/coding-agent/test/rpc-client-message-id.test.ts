@@ -63,8 +63,17 @@ async function start(script = "") {
 		await child.stdin.flush();
 		return next(frame => frame.type === "response" && frame.id === id);
 	}
+	/** Write several frames in one stdin chunk, so all are accepted before any handler runs. */
+	async function pipeline(...requests: [type: string, fields?: Record<string, unknown>][]) {
+		const ids = requests.map(() => `request-${++sequence}`);
+		child.stdin.write(
+			requests.map(([type, fields], index) => `${JSON.stringify({ id: ids[index], type, ...fields })}\n`).join(""),
+		);
+		await child.stdin.flush();
+		return Promise.all(ids.map(id => next(frame => frame.type === "response" && frame.id === id)));
+	}
 	await next(frame => frame.type === "ready");
-	return { command, next, frames };
+	return { command, pipeline, next, frames };
 }
 
 function data(frame: Record<string, unknown>): Record<string, unknown> {
@@ -252,5 +261,59 @@ describe("RPC client message identity", () => {
 			messageCount: 0,
 			queuedMessageCount: 0,
 		});
+	});
+
+	test("omits a message that would overflow the v1 response limit instead of failing reconciliation", async () => {
+		const rpc = await start();
+		// Each prompt fits a v1 input frame; together they exceed the 1 MiB v1 response limit.
+		const first = `${"a".repeat(700 * 1024)}first`;
+		await rpc.command("prompt", { message: first, clientMessageId: "intent-large-a" });
+		await rpc.next(frame => frame.type === "agent_end");
+		await rpc.command("prompt", { message: `${"b".repeat(700 * 1024)}second`, clientMessageId: "intent-large-b" });
+		await rpc.next(frame => frame.type === "message_end" && frame.clientMessageId === "intent-large-b");
+		const response = await rpc.command("get_client_message_status", {
+			clientMessageIds: ["intent-large-a", "intent-large-b"],
+		});
+		expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(1024 * 1024);
+		expect(data(response)).toMatchObject({
+			messages: [{ clientMessageId: "intent-large-a", message: { content: [{ type: "text", text: first }] } }],
+			persistedClientMessageIds: ["intent-large-a", "intent-large-b"],
+			unresolvedClientMessageIds: [],
+		});
+	});
+
+	test("rejects an abort_and_prompt reusing a pending prompt's ID instead of superseding it", async () => {
+		const rpc = await start("hold");
+		const [original, duplicate] = await rpc.pipeline(
+			["prompt", { message: "original", clientMessageId: "intent-pending" }],
+			["abort_and_prompt", { message: "replacement", clientMessageId: "intent-pending" }],
+		);
+		expect(original).toMatchObject({ success: true });
+		expect(duplicate).toMatchObject({ success: false, command: "abort_and_prompt" });
+		await rpc.next(frame => frame.type === "message_end" && frame.clientMessageId === "intent-pending");
+		const found = data(await rpc.command("get_client_message_status", { clientMessageIds: ["intent-pending"] }));
+		expect(found.messages).toMatchObject([{ message: { content: [{ type: "text", text: "original" }] } }]);
+		expect(data(await rpc.command("get_state"))).toMatchObject({ isStreaming: true });
+	});
+
+	test("checks a prompt pipelined behind new_session against the new session, not the old one", async () => {
+		const rpc = await start();
+		await rpc.command("prompt", { message: "old session", clientMessageId: "intent-per-session" });
+		await rpc.next(frame => frame.type === "agent_end");
+		const [switched, prompted] = await rpc.pipeline(
+			["new_session"],
+			["prompt", { message: "new session", clientMessageId: "intent-per-session" }],
+		);
+		expect(switched).toMatchObject({ success: true });
+		expect(prompted).toMatchObject({ success: true });
+		await rpc.next(
+			frame =>
+				frame.type === "message_end" &&
+				frame.clientMessageId === "intent-per-session" &&
+				isRecord(frame.message) &&
+				JSON.stringify(frame.message.content).includes("new session"),
+		);
+		const found = data(await rpc.command("get_client_message_status", { clientMessageIds: ["intent-per-session"] }));
+		expect(found.messages).toMatchObject([{ message: { content: [{ type: "text", text: "new session" }] } }]);
 	});
 });

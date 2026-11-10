@@ -156,7 +156,9 @@ It starts no turn and does not wait for the active turn to end. Success data:
 `messages` contains actual current native representations, not reconstructed
 submitted text. The queue snapshot describes the whole current queue.
 `resolvedClientMessageIds` reports only explicit withdrawal or local consumption,
-recorded as non-message custom entries so it survives reopen. Absence alone is
+recorded as non-message custom entries so it survives reopen. The input is
+withdrawn first and the resolution journaled after, so a journal write failure
+never blocks or reverts the withdrawal. Absence alone is
 unresolved. `persistedClientMessageIds` follows ordinary in-flight persistence
 settlement and journal flush; write failures fail the query, with no additional
 fsync guarantee. A persisted-only ID is not a display replacement: finish
@@ -164,10 +166,11 @@ transcript catch-up before retiring a pending intent from the UI.
 Correlated message entries and explicit resolutions materialize an otherwise
 lazy journal before the first assistant reply; requests without IDs retain the
 existing lazy-file behavior.
-The combined UTF-8 JSON `messages` array stays below 16 MiB. Oversized actual
-representations are omitted, never truncated: use their successfully flushed
-persisted IDs and transcript catch-up, or leave them unresolved when no durable
-entry or queued representation exists. Normal transport frame limits still apply.
+The response fits the negotiated response limit (1 MiB per frame on v1, 64 MiB
+reassembled on v2). Native representations that would exceed it are omitted,
+never truncated: use their successfully flushed persisted IDs and transcript
+catch-up, or leave them unresolved when no durable entry or queued
+representation exists.
 
 ## Command Schema (canonical)
 

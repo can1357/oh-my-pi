@@ -55,6 +55,7 @@ import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
+import { assertClientMessageId } from "../../session/client-message-id";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
 import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -530,6 +531,19 @@ const SESSION_CHANGE_TYPES: Record<string, true> = {
 	fork: true,
 	open_session: true,
 };
+
+/** The client message ID an input command correlates, if it carries one. */
+function correlatedClientMessageId(command: RpcCommand): string | undefined {
+	switch (command.type) {
+		case "prompt":
+		case "steer":
+		case "follow_up":
+		case "abort_and_prompt":
+			return command.clientMessageId;
+		default:
+			return undefined;
+	}
+}
 
 /**
  * Orders user input and decides whether an accepted frame is still wanted.
@@ -1899,13 +1913,81 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	await emitAvailableCommandsUpdate();
 
 	const inputGate = new RpcUserInputGate();
+	// Client message IDs are session-scoped. A correlated input holds its ID from acceptance until its
+	// ordered dispatch settles: by then the session has reserved it, journaled it resolved, or dropped
+	// the input (the ID is free again). Input accepted after the same number of session-change frames
+	// targets the same session, so duplicates among them are rejected at acceptance, before the frame
+	// can invalidate earlier input or abort a turn. Availability in the session is checked once: at
+	// acceptance when no session change is pending, otherwise when the handler starts, against the
+	// session the earlier serial commands selected.
+	interface ClientMessageAdmission {
+		id: string;
+		acceptKey: string;
+		/** Session the acceptance check ran against; undefined when deferred to the handler. */
+		checkedSessionId?: string;
+		sessionKey?: string;
+	}
+	const clientMessageIdsInFlight = new Set<string>();
+	const clientMessageAdmissions = new WeakMap<RpcCommand, ClientMessageAdmission | Error>();
+	const dispatchedUserInput = new WeakSet<RpcCommand>();
+	const pendingSessionChanges = new Set<RpcCommand>();
+	let sessionChangeEpoch = 0;
+	const sessionClientMessageKey = (id: string): string => `session:${session.sessionId}\u0000${id}`;
+	const assertClientMessageAvailableInSession = (id: string): void => {
+		session.assertClientMessageAvailable(id);
+		if (clientMessageIdsInFlight.has(sessionClientMessageKey(id))) {
+			throw new Error(`clientMessageId already submitted: ${id}`);
+		}
+	};
+	/** Returns false when the frame must be rejected without entering the input gate. */
+	const acceptClientMessageId = (command: RpcCommand): boolean => {
+		if (Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) {
+			sessionChangeEpoch++;
+			pendingSessionChanges.add(command);
+			return true;
+		}
+		const id = correlatedClientMessageId(command);
+		if (id === undefined) return true;
+		const acceptKey = `epoch:${sessionChangeEpoch}\u0000${id}`;
+		const checkedSessionId = pendingSessionChanges.size === 0 ? session.sessionId : undefined;
+		try {
+			assertClientMessageId(id);
+			if (clientMessageIdsInFlight.has(acceptKey)) throw new Error(`clientMessageId already submitted: ${id}`);
+			if (checkedSessionId !== undefined) assertClientMessageAvailableInSession(id);
+		} catch (admissionError) {
+			clientMessageAdmissions.set(command, toError(admissionError));
+			return false;
+		}
+		clientMessageIdsInFlight.add(acceptKey);
+		clientMessageAdmissions.set(command, { id, acceptKey, checkedSessionId });
+		return true;
+	};
+	/** Throw the acceptance rejection, or run the deferred check, then hold the ID in the target session. */
+	const requireClientMessageAdmission = (command: RpcCommand): void => {
+		if (correlatedClientMessageId(command) === undefined) return;
+		if (!clientMessageAdmissions.has(command)) acceptClientMessageId(command);
+		const admission = clientMessageAdmissions.get(command)!;
+		if (admission instanceof Error) throw admission;
+		if (admission.checkedSessionId !== session.sessionId) assertClientMessageAvailableInSession(admission.id);
+		admission.sessionKey = sessionClientMessageKey(admission.id);
+		clientMessageIdsInFlight.add(admission.sessionKey);
+	};
+	const releaseClientMessageId = (command: RpcCommand): void => {
+		if (pendingSessionChanges.delete(command)) return;
+		const admission = clientMessageAdmissions.get(command);
+		if (admission === undefined || admission instanceof Error) return;
+		clientMessageAdmissions.delete(command);
+		clientMessageIdsInFlight.delete(admission.acceptKey);
+		if (admission.sessionKey !== undefined) clientMessageIdsInFlight.delete(admission.sessionKey);
+	};
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	type OrderedInputOutcome = "local" | "cancelled" | "admitted" | "builtin-agent";
 	const dispatchOrderedUserInput = (
 		command: OrderedUserInput,
 		ticket: RpcPromptTicket | undefined,
-	): Promise<OrderedInputOutcome> =>
-		inputGate.enqueue(async () => {
+	): Promise<OrderedInputOutcome> => {
+		dispatchedUserInput.add(command);
+		const outcome = inputGate.enqueue(async (): Promise<OrderedInputOutcome> => {
 			const sessionId = session.sessionId;
 			const isCurrent = () =>
 				inputGate.isCurrent(command) && !shutdownState.requested && session.sessionId === sessionId;
@@ -1914,7 +1996,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return "local";
 			};
 			if (!isCurrent()) return "cancelled";
-			if (command.clientMessageId !== undefined) session.assertClientMessageAvailable(command.clientMessageId);
 			let text = command.message;
 			let images = command.images;
 			const runner = session.extensionRunner;
@@ -2025,6 +2106,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			});
 			return "admitted";
 		});
+		return outcome.finally(() => releaseClientMessageId(command));
+	};
 	// Abort controllers for builtin commands whose work outlives the prompt
 	// response (e.g. the `/mcp reauth` browser wait, dispatched through
 	// `runCommandInBackground`). Host abort and disconnect must tear those
@@ -2039,15 +2122,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Handle a single command
 	const handleCommandImpl = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
-		if (
-			(command.type === "prompt" ||
-				command.type === "steer" ||
-				command.type === "follow_up" ||
-				command.type === "abort_and_prompt") &&
-			command.clientMessageId !== undefined
-		) {
-			session.assertClientMessageAvailable(command.clientMessageId);
-		}
+		requireClientMessageAdmission(command);
 
 		switch (command.type) {
 			case "negotiate_protocol": {
@@ -2283,8 +2358,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// State
 			// =================================================================
 
-			case "get_client_message_status":
-				return success(id, command.type, await session.getClientMessageStatus(command.clientMessageIds));
+			case "get_client_message_status": {
+				// The status data gets whatever the negotiated response limit leaves after the envelope.
+				const envelopeBytes = encodedBytes(success(id, command.type, {})) - encodedBytes({});
+				const status = await session.getClientMessageStatus(
+					command.clientMessageIds,
+					frameEncoder.maxResponseBytes - envelopeBytes,
+				);
+				return success(id, command.type, status);
+			}
 
 			case "get_state": {
 				// A goal exit triggered by the last turn restores tools asynchronously; report after it.
@@ -2941,8 +3023,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
-		if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return handleCommandImpl(command);
-		return withSessionChange(() => handleCommandImpl(command));
+		try {
+			if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return await handleCommandImpl(command);
+			return await withSessionChange(() => handleCommandImpl(command));
+		} finally {
+			// Ordered dispatch frees its ID when it settles; input that never got there frees it here.
+			if (!dispatchedUserInput.has(command)) releaseClientMessageId(command);
+		}
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
@@ -2976,21 +3063,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		deps: dispatchFrameDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
 		acceptInput: command => {
-			if (
-				(command.type === "prompt" ||
-					command.type === "steer" ||
-					command.type === "follow_up" ||
-					command.type === "abort_and_prompt") &&
-				command.clientMessageId !== undefined
-			) {
-				try {
-					session.assertClientMessageAvailable(command.clientMessageId);
-				} catch {
-					// The handler returns the correlated error; invalid input must not invalidate prior submissions.
-					return;
-				}
-			}
-			inputGate.accept(command);
+			// A rejected correlation is reported by its handler and must not invalidate prior submissions.
+			if (acceptClientMessageId(command)) inputGate.accept(command);
 		},
 	});
 

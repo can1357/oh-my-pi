@@ -35,7 +35,7 @@ interface ClientMessageStatus {
 	unresolvedClientMessageIds: string[];
 }
 type CorrelatedSession = AgentSession & {
-	getClientMessageStatus(ids: readonly string[]): Promise<ClientMessageStatus>;
+	getClientMessageStatus(ids: readonly string[], maxBytes: number): Promise<ClientMessageStatus>;
 };
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -90,9 +90,11 @@ function intent(clientMessageId: string): PromptOptions & { clientMessageId: str
 	return { clientMessageId };
 }
 
+const STATUS_BYTES = 16 * 1024 * 1024;
+
 async function status(session: CorrelatedSession, ids: readonly string[]) {
 	expect(typeof session.getClientMessageStatus).toBe("function");
-	return session.getClientMessageStatus(ids);
+	return session.getClientMessageStatus(ids, STATUS_BYTES);
 }
 
 function expectNoProviderMetadata(mock: { calls: { context: { messages: unknown[] } }[] }, ids: string[]) {
@@ -129,6 +131,18 @@ describe("AgentSession client intent identity", () => {
 		expect(found.unresolvedClientMessageIds).toEqual(["never-submitted"]);
 		expect(mock.calls).toHaveLength(2);
 		expectNoProviderMetadata(mock, ["intent-idle-a", "intent-idle-b"]);
+	});
+
+	test("journals both IDs when identical prompts share a millisecond", async () => {
+		const { session, manager } = setup();
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		await session.prompt("same request", intent("intent-same-ms-a"));
+		await session.prompt("same request", intent("intent-same-ms-b"));
+		await session.settleInFlightMessagePersistence();
+		const entries = manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "user");
+		expect(entries).toMatchObject([{ clientMessageId: "intent-same-ms-a" }, { clientMessageId: "intent-same-ms-b" }]);
+		const found = await status(session, ["intent-same-ms-a", "intent-same-ms-b"]);
+		expect(found.persistedClientMessageIds).toEqual(["intent-same-ms-a", "intent-same-ms-b"]);
 	});
 
 	test("materializes a correlated first user entry before the assistant produces any output", async () => {
@@ -358,6 +372,25 @@ describe("AgentSession client intent identity", () => {
 		expect(found.messages).toEqual([]);
 	});
 
+	test("withdraws queued input and returns it while an atomic journal batch refuses synchronous flushes", async () => {
+		const disk = TempDir.createSync("@client-message-atomic-");
+		cleanup.push(async () => disk.removeSync());
+		const { session, manager } = setup({ manager: SessionManager.create(disk.path(), disk.path()) });
+		await session.followUp("take me", undefined, intent("intent-taken"));
+		await session.followUp("restore me", undefined, intent("intent-restored"));
+		// The callback runs inside the staged batch, as an Esc restore during an atomic rewrite would.
+		const { taken, restored } = await manager.appendEntriesAtomically(() => ({
+			taken: session.takeQueuedMessage("take me", "followUp"),
+			restored: session.clearQueue({ forInterrupt: true }),
+		}));
+		expect(taken).toMatchObject({ text: "take me" });
+		expect(restored.followUp).toMatchObject([{ text: "restore me" }]);
+		expect(session.getQueuedMessages()).toMatchObject({ steering: [], followUp: [] });
+		const found = await status(session, ["intent-taken", "intent-restored"]);
+		expect(found.resolvedClientMessageIds).toEqual(["intent-taken", "intent-restored"]);
+		expect(found.unresolvedClientMessageIds).toEqual([]);
+	});
+
 	test("queries actual state during streaming without consuming queues or starting another turn", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -436,7 +469,7 @@ describe("AgentSession client intent identity", () => {
 		await session.prompt(`${padding}third`, intent("intent-large-c"));
 		const found = await status(session, ["intent-large-a", "intent-large-b", "intent-large-c"]);
 		expect(found.messages.map(item => item.clientMessageId)).toEqual(["intent-large-a", "intent-large-b"]);
-		expect(Buffer.byteLength(JSON.stringify(found.messages), "utf8")).toBeLessThan(16 * 1024 * 1024);
+		expect(Buffer.byteLength(JSON.stringify(found), "utf8")).toBeLessThanOrEqual(STATUS_BYTES);
 		expect<unknown>(found.messages[0]?.message).toBe(session.messages.find(message => message.role === "user"));
 		expect(found.persistedClientMessageIds).toEqual(["intent-large-a", "intent-large-b", "intent-large-c"]);
 		expect(found.resolvedClientMessageIds).toEqual([]);
