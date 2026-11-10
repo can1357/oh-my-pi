@@ -15,6 +15,8 @@ mod session;
 pub(super) use session::screen_state;
 #[cfg(target_os = "windows")]
 mod window;
+#[cfg(any(target_os = "windows", test))]
+mod value_write;
 
 #[cfg(target_os = "windows")]
 use enigo::Enigo;

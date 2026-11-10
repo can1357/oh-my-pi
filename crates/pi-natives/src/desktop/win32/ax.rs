@@ -473,14 +473,29 @@ impl AxBackend for Win32Ax {
 		})
 	}
 
-	fn set_value(&mut self, handle: &AxHandle, value: &str) -> CoreResult<()> {
+	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
-		self.contained(element, || {
-			element
-				.get_pattern::<UIValuePattern>()
-				.and_then(|pattern| pattern.set_value(value))
-				.map_err(ax_error)
-		})
+		let secure = element.is_password().unwrap_or(true);
+		let hwnd = native_window(element);
+		let class = hwnd.map(window::class_name).unwrap_or_default();
+		let combo = element.get_control_type().map_err(ax_error)? == ControlType::ComboBox;
+		match super::value_write::route(&class, combo) {
+			super::value_write::ValueRoute::Combo => {
+				super::value_write::set_combo(hwnd.ok_or_else(|| {
+					DesktopError::ax_failed("combo box has no native window; select the item via press/click instead")
+				})?, text)?;
+			},
+			super::value_write::ValueRoute::RefuseCombo => return Err(DesktopError::ax_failed(
+				"this combo box cannot notify the app through setValue; select the item via press/click instead",
+			)),
+			super::value_write::ValueRoute::Pattern => self.contained(element, || {
+				element
+					.get_pattern::<UIValuePattern>()
+					.and_then(|pattern| pattern.set_value(text))
+					.map_err(ax_error)
+			})?,
+		}
+		super::value_write::verify(text, value(element).as_deref(), secure)
 	}
 
 	fn focus(&mut self, handle: &AxHandle) -> CoreResult<()> {
