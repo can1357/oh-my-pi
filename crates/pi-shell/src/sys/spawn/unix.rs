@@ -579,12 +579,27 @@ fn may_need_script_fallback(path: &[u8], cwd: &[u8]) -> bool {
 		return false;
 	};
 	let head = &head[..n];
-	!head.starts_with(b"#!")
-		&& !head
+	let Some(rest) = head.strip_prefix(b"#!") else {
+		return !head
 			.split(|&c| c == b'\n')
 			.next()
 			.unwrap_or_default()
-			.contains(&0)
+			.contains(&0);
+	};
+	// A `#!` line that names NO interpreter — only blanks before its
+	// newline — is refused by the kernel with `ENOEXEC` like a file with no
+	// `#!` at all, and both Bash versions then RUN it as a shell script
+	// (measured on 5.2.21 and 5.3.0: `#!\necho hi` prints `hi` and exits
+	// 0). The forked child cannot run a script after it has returned its
+	// pid, so this file needs the engine as much as a plain text one does.
+	// A carriage return is not a blank: bash names it `^M` and reports a
+	// bad interpreter, which the child does report. Without a newline in
+	// the sample there is no `#!` line to be empty, and bash names the
+	// empty interpreter instead of running the file.
+	let Some(nl) = rest.iter().position(|&c| c == b'\n') else {
+		return false;
+	};
+	rest[..nl].iter().all(|c| matches!(c, b' ' | b'\t'))
 }
 
 pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
