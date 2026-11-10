@@ -864,7 +864,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						// Credential selection only needs its own provider. Do not hold
 						// that request behind unrelated providers' cold usage probes.
 						const provider = url.searchParams.get("provider") ?? undefined;
-						const reports = (await opts.storage.usage.reports?.({ provider, signal: req.signal })) ?? [];
+						// The client's disabled providers: never probed on its behalf.
+						const exclude = new Set(url.searchParams.getAll("exclude"));
+						const reports = (await opts.storage.usage.reports?.({ provider, exclude, signal: req.signal })) ?? [];
 						// Drop the `raw` field — it's the provider-specific upstream body,
 						// large and unstable. Everything UI-relevant lives in `limits` and
 						// `metadata`.

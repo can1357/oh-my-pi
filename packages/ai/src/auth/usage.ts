@@ -108,6 +108,8 @@ export interface UsageServiceDeps {
 
 type UsageReportsOptions = {
 	provider?: Provider;
+	/** Providers this caller has disabled: neither probed nor reported (e.g. a broker client's set). */
+	exclude?: ReadonlySet<Provider>;
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
 };
@@ -117,6 +119,8 @@ export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
 	/** Runtime extension providers take precedence over the configured/default resolver. */
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
+	/** Host-disabled providers: no usage concept at all while present. */
+	#disabledProviders: ReadonlySet<Provider> = new Set();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
@@ -143,12 +147,34 @@ export class UsageService implements UsageApi {
 	 * could have fetched usage for but didn't" apart from "a provider with no
 	 * usage concept" (web-search keys, local/keyless servers, inference
 	 * providers without a usage API) — the latter never warrants a usage row.
-	 * A provider paused by its auth rules (`disabled "<reason>"`) has none, so
-	 * no usage collection or probe ever calls it.
+	 * A provider paused by its auth rules (`disabled "<reason>"`) or disabled by
+	 * the host ({@link replaceDisabledProviders}) has none, so no usage
+	 * collection or probe ever calls it.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
-		if (providerPauseReason(provider) !== undefined) return undefined;
+		if (providerPauseReason(provider) !== undefined || this.#disabledProviders.has(provider)) return undefined;
+		return this.registeredProviderFor(provider);
+	}
+
+	/**
+	 * Registration lookup that ignores the pause and disabled gates: runtime
+	 * override, then the injected resolver. Cache namespaces follow it so a
+	 * disabled provider's snapshots keep their version segment and survive re-enabling.
+	 */
+	registeredProviderFor(provider: Provider): UsageProvider | undefined {
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
+	}
+
+	/**
+	 * Replace the providers the host has disabled. A disabled provider has no
+	 * usage concept for every consumer: it is neither enumerated nor probed by
+	 * this process (local probes with stored, env, or pinned keys, per-credential
+	 * `report()`, and broker requests, which exclude it), reports no health, and
+	 * its accounts are not listed as lacking usage. Snapshots stay cached for
+	 * re-enabling.
+	 */
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void {
+		this.#disabledProviders = new Set(providers);
 	}
 
 	/**
@@ -164,9 +190,10 @@ export class UsageService implements UsageApi {
 		});
 		this.#deps.cache.invalidateForProvider(provider);
 	}
-	/** Carry runtime usage provider overrides over from the service this one replaces (store swap). */
-	adoptRuntimeProviders(previous: UsageService): void {
+	/** Carry runtime usage provider overrides and the disabled set over from the service this one replaces (store swap). */
+	adoptRegistrations(previous: UsageService): void {
 		this.#runtimeUsageProviderOverrides = previous.#runtimeUsageProviderOverrides;
+		this.#disabledProviders = previous.#disabledProviders;
 	}
 
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
@@ -358,6 +385,10 @@ export class UsageService implements UsageApi {
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			// A provider disabled while this probe ran has no usage concept now:
+			// answer nothing and leave the store untouched (its older snapshot
+			// stays for re-enabling, this result is dropped).
+			if (this.#disabledProviders.has(request.provider)) return null;
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
@@ -598,7 +629,7 @@ export class UsageService implements UsageApi {
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
 			const providerImpl = this.providerFor(provider);
-			if (!providerImpl) continue;
+			if (!providerImpl || options?.exclude?.has(provider)) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
 			let entries = this.#deps.pool.entries(providerId);
 			if (entries.length > 0) {
@@ -674,8 +705,9 @@ export class UsageService implements UsageApi {
 		credential: AuthCredential,
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
-		// A paused provider is never probed, not even through the broker's per-credential hook.
-		if (providerPauseReason(provider) !== undefined) return null;
+		// A paused or disabled provider is never probed, not even through the
+		// broker's per-credential hook, and serves no cached snapshot.
+		if (providerPauseReason(provider) !== undefined || this.#disabledProviders.has(provider)) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
@@ -766,6 +798,12 @@ export class UsageService implements UsageApi {
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
 	async reports(options?: UsageReportsOptions): Promise<UsageReport[] | null> {
+		const excluded =
+			options?.exclude && options.exclude.size > 0
+				? new Set([...this.#disabledProviders, ...options.exclude])
+				: this.#disabledProviders;
+		// A poll scoped to a disabled provider asks nobody: not the broker, not local probes.
+		if (options?.provider !== undefined && excluded.has(options.provider)) return [];
 		// The broker owns its providers' reports; runtime providers registered
 		// only in this process still need local per-credential probes.
 		const storeOverride = this.#deps.store.fetchUsageReports?.bind(this.#deps.store);
@@ -774,22 +812,30 @@ export class UsageService implements UsageApi {
 			// dispatch + credential selection) coalesce into one upstream call.
 			// Each caller's `signal` only cancels THAT caller's await; the
 			// shared upstream fetch runs to completion so peers aren't punished.
-			const scope = options?.provider === undefined ? "*" : `provider:${options.provider}`;
+			// An unscoped poll tells the broker which providers to skip; a scoped
+			// poll already names an enabled provider.
+			const exclude = options?.provider === undefined && excluded.size > 0 ? [...excluded].sort() : undefined;
+			const scope =
+				options?.provider === undefined ? `*\0${exclude?.join(",") ?? ""}` : `provider:${options.provider}`;
 			const overrideKey = `__override__\0${this.#deps.cache.epoch}\0${scope}`;
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
 				// Don't forward the caller signal into the shared fetch — first caller's
 				// abort would otherwise cancel the upstream for every peer.
-				shared = storeOverride(undefined, options?.provider).finally(() => {
+				shared = storeOverride(undefined, options?.provider, exclude).finally(() => {
 					this.#usageReportsInFlight.delete(overrideKey);
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
-			const reports =
-				fetched && options?.provider !== undefined
-					? fetched.filter(report => report.provider === options.provider)
-					: fetched;
+			// Brokers that predate `exclude` still return excluded providers' rows; drop them here.
+			const reports = fetched
+				? fetched.filter(
+						report =>
+							(options?.provider === undefined || report.provider === options.provider) &&
+							!excluded.has(report.provider),
+					)
+				: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
 

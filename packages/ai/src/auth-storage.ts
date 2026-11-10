@@ -301,7 +301,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		}
 		const previous = this.#modules;
 		next.pool.adoptSubscribers(previous.pool);
-		next.usage.adoptRuntimeProviders(previous.usage);
+		next.usage.adoptRegistrations(previous.usage);
 		this.#modules = next;
 		retire(previous);
 		next.pool.bump("store-replaced");
@@ -328,9 +328,10 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			overrideMints: options.refreshOAuthCredentialMints,
 		});
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
-		// Key reports by the effective provider (runtime extension override first), so an
+		// Key reports by the effective registration (runtime extension override first), so an
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
-		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
+		// Disabled providers keep their namespace so re-enabling finds the snapshot again.
+		const usageCache = new UsageCache(store, pool, provider => usage.registeredProviderFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({

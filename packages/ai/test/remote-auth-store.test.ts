@@ -1409,6 +1409,40 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		remoteStore.close();
 	});
 
+	test("fetchUsageReports asks the broker to skip excluded providers and never reuses an aggregate with other exclusions", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: {
+				generation: 0,
+				generatedAt: 0,
+				serverNowMs: 0,
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [],
+			},
+		});
+		const report = (provider: string): UsageReport => ({ provider, fetchedAt: Date.now(), limits: [] });
+		// Answers like a broker that predates `exclude`: every provider, whatever the query.
+		const fetchSpy = vi.spyOn(brokerClient, "fetchUsage").mockImplementation(async () => ({
+			generatedAt: Date.now(),
+			reports: [report("anthropic"), report("openai-codex")],
+		}));
+		const providers = (reports: UsageReport[] | null) => reports?.map(entry => entry.provider);
+
+		expect(providers(await remoteStore.fetchUsageReports(undefined, undefined, ["openai-codex"]))).toEqual([
+			"anthropic",
+		]);
+		expect(fetchSpy.mock.calls.map(([options]) => options?.exclude)).toEqual([["openai-codex"]]);
+		// Re-enabling within the cache TTL must not be answered by the narrower aggregate.
+		expect(providers(await remoteStore.fetchUsageReports())).toEqual(["anthropic", "openai-codex"]);
+		expect(fetchSpy.mock.calls.map(([options]) => options?.exclude)).toEqual([["openai-codex"], undefined]);
+		// A provider lookup the aggregate did not exclude is served from it.
+		expect(providers(await remoteStore.fetchUsageReports(undefined, "anthropic"))).toEqual(["anthropic"]);
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+		remoteStore.close();
+	});
+
 	test("client AuthStorage.set forwards api_key login to the broker (replace semantics)", async () => {
 		// Pre-existing api_key for the same provider on the server side — a fresh
 		// login should disable it and replace it with the new key.

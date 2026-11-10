@@ -1256,6 +1256,8 @@ export interface UsageApi {
 	/** Fetch usage reports for configured providers, optionally restricted to one provider. */
 	reports(options?: {
 		provider?: Provider;
+		/** Providers to leave out for this call only, on top of {@link replaceDisabledProviders}. */
+		exclude?: ReadonlySet<Provider>;
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null>;
@@ -1311,6 +1313,15 @@ export interface UsageApi {
 	setProvider(provider: Provider, usageProvider: UsageProvider, apiKey?: string): void;
 	/** Remove a runtime usage provider override and restore configured/default resolution. */
 	removeProvider(provider: Provider): void;
+	/**
+	 * Replace the providers the host has disabled. A disabled provider has no
+	 * usage concept: {@link providerFor} returns undefined, so it is neither
+	 * enumerated nor probed by this process with any credential (local probes,
+	 * per-credential reports, and provider-scoped broker requests are skipped;
+	 * unscoped broker requests exclude it), reports no health, and its accounts
+	 * are not listed as lacking usage. Cached snapshots are kept for re-enabling.
+	 */
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void;
 }
 
 /** Credential and model-level health probes. */
