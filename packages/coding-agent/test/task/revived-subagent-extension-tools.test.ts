@@ -198,7 +198,11 @@ async function spawnAndPark() {
 		/** The reviver a restarted process builds for the parked agent from its session file. */
 		async coldRevive(): Promise<AgentSession> {
 			const owner = {
-				sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
+				sessionManager: {
+					getCwd: () => cwd,
+					getArtifactManager: () => undefined,
+					getSessionId: () => "owner-session-1",
+				},
 				effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 				preparedExtensions,
 			} as unknown as AgentSession;
