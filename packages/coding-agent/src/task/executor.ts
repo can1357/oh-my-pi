@@ -2931,7 +2931,7 @@ async function driveSessionToResult(
 				candidateAllowed = true;
 				return false;
 			}
-			stopPassHold ??= session.holdForStopPass();
+			stopPassHold ??= session.holdForStopPass(abortSignal);
 			const verdict = await runSubagentStopPass(session, monitor, stopHook, {
 				hold: stopPassHold,
 				awaitAbortable,
@@ -3918,7 +3918,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// for the continuations. A turn a newer one superseded while its owned
 			// async work was still settling no longer has the session: its candidate
 			// cannot be judged, so it is dropped and the turn reports as cancelled.
-			if (judging && !superseded) hold = session.holdForStopPass();
+			if (judging && !superseded) hold = session.holdForStopPass(turnMonitor.abortSignal);
 			else unsubscribeTurn();
 			let stopVerdict: "allowed" | "refused" | "cancelled" | undefined;
 			let cancelReason: string | undefined;

@@ -906,7 +906,7 @@ type StopPassHoldState = {
  * the run's result is published (see {@link AgentSession.holdForStopPass}).
  */
 export interface StopPassHold {
-	/** Aborts when an explicit user prompt cancels the pass. */
+	/** Aborts when an explicit user prompt or the run's own cancellation cancels the pass. */
 	readonly signal: AbortSignal;
 	/** Handlers are about to judge the candidate: hold idle deliveries until the next {@link prompt} or {@link release}. */
 	consult(): void;
@@ -13754,9 +13754,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * continuations), and prompts other than {@link StopPassHold.prompt} wait. An
 	 * explicit user prompt also aborts {@link StopPassHold.signal}, cancelling the
 	 * pass. The hold spans refusal continuations and their owned async work, so
-	 * the run's cancellation and runtime limit bound it, not the handler timeout.
+	 * the run's cancellation and runtime limit bound it, not the handler timeout:
+	 * `runSignal`, the run's abort signal, cancels the pass as well.
 	 */
-	holdForStopPass(): StopPassHold {
+	holdForStopPass(runSignal?: AbortSignal): StopPassHold {
 		const state: StopPassHoldState = { cancel: new AbortController(), consulting: false };
 		this.#stopPassHolds.add(state);
 		const stopConsulting = (): void => {
@@ -13766,6 +13767,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.yieldQueue.requestIdleFlush();
 		};
 		let released = false;
+		// The run's own cancellation (caller abort, runtime limit, teardown) cancels the pass too: it
+		// aborts the running turn, but a continuation still in prompt setup has no turn to stop, and
+		// the generation it captures after that abort would let it dispatch.
+		let unlinkRunSignal: (() => void) | undefined;
+		if (runSignal) {
+			const cancelWithRun = (): void => state.cancel.abort(runSignal.reason);
+			if (runSignal.aborted) cancelWithRun();
+			else {
+				runSignal.addEventListener("abort", cancelWithRun, { once: true });
+				unlinkRunSignal = () => runSignal.removeEventListener("abort", cancelWithRun);
+			}
+		}
 		return {
 			signal: state.cancel.signal,
 			consult: () => {
@@ -13788,6 +13801,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			release: () => {
 				if (released) return;
 				released = true;
+				unlinkRunSignal?.();
 				stopConsulting();
 				this.#stopPassHolds.delete(state);
 				this.#notifyStopPassChanged();
