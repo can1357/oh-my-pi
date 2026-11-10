@@ -509,6 +509,37 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.map(frame => frame.status)).not.toContain("failed");
 	});
 
+	it("does not start a continuation whose pass a user cancelled before its dispatch", async () => {
+		const run = await setup({
+			driven: true,
+			responses: [{ content: ["answer to the user"] }],
+			onStop: () => undefined,
+		});
+		const hold = run.session.holdForStopPass();
+
+		// The user's prompt cancels the pass while the continuation's prompt is still in setup.
+		const continuation = hold.prompt("CANCELLED-CONTINUATION", {
+			attribution: "agent",
+			synthetic: true,
+			runCommands: false,
+			throwOnDrop: true,
+		});
+		const userTurn = run.session.promptCustomMessage({
+			customType: "user-note",
+			content: "user says hi",
+			display: true,
+			attribution: "user",
+		});
+		await expect(continuation).rejects.toThrow();
+		hold.release();
+		await userTurn;
+		await run.session.waitForIdle();
+
+		// Only the user's turn reached the model.
+		expect(run.mock.calls).toHaveLength(1);
+		expect(JSON.stringify(run.mock.calls[0]?.context.messages)).not.toContain("CANCELLED-CONTINUATION");
+	});
+
 	it("holds an extension's idle aside until the wake's result is published", async () => {
 		const stopEntered = Promise.withResolvers<void>();
 		const releaseStop = Promise.withResolvers<void>();
