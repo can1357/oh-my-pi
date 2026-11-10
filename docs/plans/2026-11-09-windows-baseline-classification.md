@@ -445,3 +445,50 @@ set per cluster to confirm the split and resolve the [INFERENCE] markers:
 the ""-signature family split (S3/S5), `grep_quiet_and_line_regexp`'s root
 cause (S6), `strftime_reverse`'s post-W2 Windows behavior (S2), and
 `zsh_mod_files_mkdir`'s exact mode-string diff (S5).
+
+## C-3: pi-shell Clippy on Windows (865 errors, 80 lints)
+
+**Question 1 — does upstream run Clippy for Windows? No.** The only Clippy execution on `upstream/main` is `.github/workflows/ci.yml` job `rust_validate` (upstream lines 244–265; `if: github.event_name != 'pull_request'`, `runs-on: vmon-large/from=omp-ci`, a Linux runner pool): three bazelisk `--config=clippy-strict`/`clippy`/`clippy-ported` builds over `//crates/...` rust_library targets. The only Windows runners in upstream CI (release job, lines 892–893: `windows-2025`, `windows-11-arm`) build and smoke the release binary only. Windows clippy errors reach upstream only through contributor-run fixes (e.g. `3d6344d5ba`, `63fe0eae7a`), never a CI gate.
+
+**Question 2 — which errors are Windows-only? Overwhelmingly none.** Sampling the top-error files (top 10 files ≈ 35% of all 865 errors): `zle/comp/complist/print.rs` (47), `zle/comp/compmatch/join.rs` (39), `zle/comp/compmatch.rs` (35), `zle/comp/compctl/generate.rs` (33), `zle/comp/compresult.rs` (33) + `list.rs` (26), `builtins/zsh_mod_datetime.rs` (24), `zle/comp/complete.rs` (21), `builtins/zsh_mod_zprof.rs` (20), `zle/exec.rs` (20) — **zero `cfg(windows)` occurrences in any of them; all are the platform-independent zle completion engine and zsh module builtins.** Only 16 files in all of `crates/pi-shell/src` contain `cfg(windows)`, and none of those are top-error files. The genuine Windows-only regions are small and already fixed upstream: `sys/langinfo.rs`'s non-apple/non-linux `mod native` stub (8 errors; `missing_const_for_fn`) and `sys/pump/os.rs`'s named-pipe `mod imp` — both addressed by `3d6344d5ba` via targeted `#[expect(..., reason)]` attributes. A Linux comparison run was not possible (no Linux host; the classification host is macOS), so the identical command was run on this macOS host as a near-linux proxy: **856 errors with a near-identical lint and file distribution to the Windows 865** (`many_single_char_names` 279 = 279; `missing_const_for_fn` 81 vs 89; `single_match_else` 58 vs 57; top files identical in the same order). The ~9-error delta matches the platform-gated stubs (langinfo apple-native vs Windows stub, pump/os) — the bulk of the Windows errors are platform-independent.
+
+**Question 3 — why doesn't upstream Linux CI report the common-code sites? Because the fork's Windows repro used `-D warnings`, a stricter severity than upstream's CI.** Upstream runs Clippy through the Bazel aspect with `bazel/clippy.bazelrc`'s `--config=clippy-strict`: groups `nursery`/`pedantic`/`perf`/`style`/`all` at **`-W` (warn, non-failing)** and only `correctness`/`suspicious` at `-D`. The bazel build does not fail on warn-level lints. The data-file repro `cargo clippy -p pi-shell --no-deps -- -D warnings` promotes every warn-level lint to an error, which is what produced "865 errors". Every top lint is a nursery/pedantic/style lint (`many_single_char_names` nursery, `missing_const_for_fn` nursery, `single_match_else` pedantic, `useless_let_if_seq` nursery, `map_unwrap_or` pedantic, `doc_markdown` pedantic, ...), and none of them appear individually in the generated bazelrc. The lint *policy* (`Cargo.toml [workspace.lints]`, mirrored into `bazel/clippy.bazelrc` by `scripts/gen-clippy-bazelrc.ts`) is identical between fork and upstream — there is no policy divergence to fix.
+
+**Classification summary (Step 3 decision):**
+
+| Cluster | Evidence | Decision |
+|---|---|---|
+| Windows-only sites (`sys/langinfo.rs` native stub, `sys/pump/os.rs` named-pipe imp, and the other `3d6344d5ba`/`63fe0eae7a` files incl. `pi-vcs/git/cli.rs`) | 8+ errors in cfg-gated stubs; upstream fixed them 2026-11-07 | Port upstream fixes (cherry-pick `3d6344d5ba`, `63fe0eae7a`); no local invention |
+| Common-code style/nursery lints (~840+ of 865) | All top-error files are `cfg(windows)`-free zle/zsh-module code; lints are warn-level in upstream CI; macOS darwin proxy reproduces 856 of them | No code change; re-baseline the Windows gate to upstream severity (`-D clippy::correctness -D clippy::suspicious`) instead of `-D warnings`. No global lint relaxation — `Cargo.toml [workspace.lints]` stays byte-identical to upstream |
+
+**Proposed fix tasks (C-3):**
+
+**P-C3.1 — Port upstream Windows-only Clippy fixes (cherry-pick).** Files: `crates/pi-shell/src/{host.rs, sys/fs_ops.rs, sys/langinfo.rs, sys/lifecycle.rs, sys/pump/os.rs, sys/spawn/mod.rs, sys/uname.rs, vfs.rs, windows.rs}`, `crates/pi-vcs/src/git/cli.rs`. Evidence: upstream commits `3d6344d5ba` (10 files, +46/−7) and `63fe0eae7a` (pump/os.rs, +18/−2), both on `upstream/main` and absent from fork HEAD; data-file langinfo.rs (8 errors) maps to the stub fixed there. Change: `git cherry-pick 3d6344d5ba 63fe0eae7a`. Verification: `cargo clippy -p pi-shell -p pi-vcs --no-deps -- -D clippy::correctness -D clippy::suspicious` clean on macOS; on Windows the langinfo/pump errors disappear. Size: S (two cherry-picks, ~65 lines).
+
+**P-C3.2 — Re-baseline the Windows Clippy gate to upstream strictness.** Files: `docs/plans/2026-11-09-windows-baseline-data.md` (repro-severity note); optional follow-up CI task (out of scope here) adding a Windows clippy job. Evidence: Question 3 — upstream clippy-strict = warn-level groups + deny correctness/suspicious; the 865 count comes from `-D warnings`. Change: document the Windows acceptance criterion as `cargo clippy -p pi-shell --no-deps -- -D clippy::correctness -D clippy::suspicious`; record the resulting count as the true baseline. No `Cargo.toml` lint-level changes. Verification: rerun the corrected command on Windows; expect near-zero residual. Size: S (doc + one Windows run).
+
+## Consolidated proposed fix tasks (C-1 + C-2 + C-3)
+
+Unified list for the repository owner; fix tasks are appended to the plan only after approval.
+
+| ID | Cluster(s) | Task | Size | Source section |
+|---|---|---|---|---|
+| A1 | C-1 A (28 tests) | Port `470f94702e` (test-only): 9 test files + goal-rpc fixture | M | C-1 Cluster A |
+| B1 | C-1 B (13) | Port `19ef041ec5` websocket-recovery hunk (first-event timeout 0.2 s → 1 s) | S | C-1 Cluster B |
+| B2 | C-1 B (1) | Port `463d44a950` cost-gate `PI_TEST_RUNTIME` env isolation | S | C-1 Cluster B |
+| B3 | C-1 B (1) | Port `adf978c1b6` cmux assertion fix ("multiply x by 0.98") | S | C-1 Cluster B |
+| B4 | C-1 B2 (2) | Fix source template `system-prompt.md` `toolInfo` block (restore base shape, fork regression `31b752b304`) | S | C-1 Cluster B2 |
+| C1 | C-1 C (12) | Replace `"/tmp"` with `os.tmpdir()` in `test/bash-failure-result.test.ts` :19 and `test/fixtures/bash-autobg-exit-probe.ts` :23 | S | C-1 Cluster C |
+| D1 | C-1 D (10) | Pending Windows host: bind `servePage` to `127.0.0.1` / navigate literal IP, or gate on live launch probe | M | C-1 Cluster D |
+| E1 | C-1 E (5) | Isolate ambient prompt leakage in `test/sdk-mcp-instructions.test.ts` (F-3 pattern; identify leaking source on Windows) | M | C-1 Cluster E |
+| — | C-1 E2 (4) | No task yet: pending Windows isolation re-run of `test/skills.test.ts` (3) + `test/usage-cli.test.ts` (1) | — | C-1 Cluster E2 |
+| — | C-1 F (4) | Already fixed by Task 7 (`6ac3ba7d69`) — no new task | — | C-1 Cluster F |
+| W1 | C-2 S3+S4 (+~5 of S5/S6) | Port the "omp zsh on Windows" series (9 commits listed in the pi-shell section; core `df6fcdf98c` +2897/−392) | L | C-2 Proposed tasks |
+| W2 | C-2 S1+S2 (+expandmb) | Port test-only fixes: `4f15085863` (corrupted string literals) + `251a2fab8e` test hunks & langinfo guard | M | C-2 Proposed tasks |
+| W3 | C-2 S5/S6 remainder | Local Windows-expectation fixes after W1/W2 + Windows re-run (`Platform::Windows` config / `#[cfg_attr(windows, ignore)]` / `OutputDecoder::utf8()`) | M | C-2 Proposed tasks |
+| P-C3.1 | C-3 Windows-only sites | Cherry-pick `3d6344d5ba` + `63fe0eae7a` (Windows-only clippy `#[expect]` fixes) | S | C-3 above |
+| P-C3.2 | C-3 severity gap | Re-baseline Windows clippy gate to upstream severity (`-D clippy::correctness -D clippy::suspicious`); fix doc + record true baseline | S | C-3 above |
+
+Cross-cutting: every Windows verification step in this table is blocked on Windows host access (controller ruling, ledgered; see both "Windows isolation re-run" sections). macOS-verifiable steps (A1, B1–B4, C1, W1 regression, W2, P-C3.1) can land and be verified on this host first.
+
+**STOP — presented to the repository owner for approval.** Fix tasks are appended to `docs/plans/2026-11-09-foundation-infra-windows.md` only after explicit approval.
