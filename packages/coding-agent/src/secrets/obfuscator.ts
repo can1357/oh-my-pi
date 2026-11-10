@@ -91,37 +91,40 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
 /**
- * Total key length (UTF-16 units) each {@link TextCache} retains. Provider
- * context is re-redacted on every request, so the whole live context must fit
- * or unchanged history misses on every turn; longer texts are not cached.
+ * How long a {@link TextCache} entry survives unused. There is no size cap:
+ * provider context is re-redacted on every request, so text in the live
+ * context is touched every turn and never evicted; only text that left it
+ * (compacted history, superseded prompts) ages out.
  */
-const MAX_TEXT_CACHE_CHARS = 32 * 1024 * 1024;
+const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
 
-/**
- * Text-keyed LRU bounded by total key length. Keys are usually the live
- * message strings themselves, so retention costs little beyond evicted history.
- */
+/** Minimum time between idle sweeps of one {@link TextCache}. */
+const TEXT_CACHE_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/** Text-keyed cache whose entries expire only after {@link TEXT_CACHE_IDLE_MS} unused. */
 class TextCache<V> {
-	readonly #map = new Map<string, V>();
-	#chars = 0;
+	/** Least recently used first, so a sweep stops at the first live entry. */
+	readonly #map = new Map<string, { value: V; usedAt: number }>();
+	#sweptAt = 0;
 
 	get(text: string): V | undefined {
-		const value = this.#map.get(text);
-		if (value !== undefined) {
-			this.#map.delete(text);
-			this.#map.set(text, value);
-		}
-		return value;
+		const entry = this.#map.get(text);
+		if (entry === undefined) return undefined;
+		entry.usedAt = Date.now();
+		this.#map.delete(text);
+		this.#map.set(text, entry);
+		return entry.value;
 	}
 
 	set(text: string, value: V): void {
-		if (text.length > MAX_TEXT_CACHE_CHARS) return;
-		if (!this.#map.delete(text)) this.#chars += text.length;
-		this.#map.set(text, value);
-		for (const oldest of this.#map.keys()) {
-			if (this.#chars <= MAX_TEXT_CACHE_CHARS) break;
-			this.#map.delete(oldest);
-			this.#chars -= oldest.length;
+		const now = Date.now();
+		this.#map.delete(text);
+		this.#map.set(text, { value, usedAt: now });
+		if (now - this.#sweptAt < TEXT_CACHE_SWEEP_INTERVAL_MS) return;
+		this.#sweptAt = now;
+		for (const [key, entry] of this.#map) {
+			if (now - entry.usedAt < TEXT_CACHE_IDLE_MS) break;
+			this.#map.delete(key);
 		}
 	}
 }
