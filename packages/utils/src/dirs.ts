@@ -333,12 +333,6 @@ export function getConfigDirName(): string {
 	return process.env.PI_CONFIG_DIR || CONFIG_DIR_NAME;
 }
 
-/** Get the config agent directory name relative to home (e.g. ".omp/agent" or PI_CONFIG_DIR + "/agent"). */
-export function getConfigAgentDirName(): string {
-	const profile = getActiveProfile();
-	return profile ? path.join(getConfigDirName(), "profiles", profile, "agent") : `${getConfigDirName()}/agent`;
-}
-
 // =============================================================================
 // DirResolver — cached, XDG-aware path resolution
 // =============================================================================

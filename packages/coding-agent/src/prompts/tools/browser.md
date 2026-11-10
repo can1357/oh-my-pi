@@ -41,7 +41,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 
 Application modes:
 
-- Omit `app` → settings pick the browser: the user's Chrome through the relay when `browser.relay` is on (`PI_BROWSER_RELAY=1` turns it on even with the setting off, `=0` off), else `browser.cdpUrl`, else Tern inside a Tern pane, else cmux, else managed Chromium (installs on first use).
+- Omit `app` → settings pick the browser: the user's Chrome through the relay when `browser.relay` is on (`PI_BROWSER_RELAY=1` turns it on even with the setting off, `=0` off), else `browser.cdpUrl`, else Tern inside a Tern pane, else cmux, else managed Chromium (installs on first use). Tern and cmux are skipped when another omp session drawn in that terminal started this one (for example `omp -p` from its bash tool).
 - `headed` picks a visible or hidden managed browser per open. `allow_file_access` is a launch flag and cannot change an already-running shared Chromium; use a dedicated `app.path` with `app.args`. `ignore_https_errors` applies per tab through CDP.
 - `app.path`: launch the specified browser or Electron executable. Chromium-family browsers use an omp-owned profile unless `args` supplies `--user-data-dir`.
 - `app.cdp_url`: attach to an existing CDP endpoint.
@@ -79,6 +79,7 @@ await tab.close()
 <critical>
 - MUST open a tab before direct use; `browser.tab(name)` does not open one.
 - Default to `tab.observe()`; use screenshots for visual confirmation.
+- Report a step as done only when the page did it. NEVER alter the page with scripts to make a step look done (inserting controls, writing app state, revealing hidden elements); when a step cannot be done through the page, say so. When the user asks you to change the page with a script, do it.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
 - Relay and CDP actions operate on real user sessions.
 </critical>

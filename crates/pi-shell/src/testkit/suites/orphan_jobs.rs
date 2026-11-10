@@ -172,7 +172,7 @@ fn a_subshell_exit_ends_its_background_shell_loop() {
 fn a_subshell_exit_ends_a_background_loop_waiting_on_an_external() {
 	let signals = Signals::default();
 	let mut r = rig(true, &signals);
-	assert_eq!(run(&mut r, "(while :; do /x/sleeper; done &)"), 0);
+	assert_eq!(run(&mut r, "(while :; do /fake/sleeper; done &)"), 0);
 	assert_eq!(settle(&mut r, 1_000), Settled::Idle);
 	assert_eq!(r.host.live_externals(), 0);
 	assert_eq!(*signals.lock(), [Signal::Term]);
@@ -185,7 +185,7 @@ fn a_subshell_exit_ends_a_background_loop_waiting_on_an_external() {
 fn a_background_job_that_is_just_an_external_outlives_its_subshell() {
 	let signals = Signals::default();
 	let mut r = rig(true, &signals);
-	assert_eq!(run(&mut r, "(/x/sleeper &); (cd / && /x/sleeper &)"), 0);
+	assert_eq!(run(&mut r, "(/fake/sleeper &); (cd / && /fake/sleeper &)"), 0);
 	assert_eq!(settle(&mut r, 1_000), Settled::Blocked);
 	assert_eq!(r.host.live_externals(), 2);
 	assert!(signals.lock().is_empty(), "an external was signalled");
@@ -197,7 +197,7 @@ fn a_background_job_that_is_just_an_external_outlives_its_subshell() {
 fn a_nested_job_is_judged_on_its_own_when_its_parent_job_ends() {
 	let signals = Signals::default();
 	let mut r = rig(true, &signals);
-	assert_eq!(run(&mut r, "( { /x/sleeper & while :; do :; done; } & )"), 0);
+	assert_eq!(run(&mut r, "( { /fake/sleeper & while :; do :; done; } & )"), 0);
 	assert_eq!(settle(&mut r, 1_000), Settled::Blocked);
 	assert_eq!(r.host.live_externals(), 1);
 	assert!(signals.lock().is_empty(), "an external was signalled");
@@ -218,7 +218,7 @@ fn a_detached_tree_outlives_its_subshell() {
 #[test]
 fn orphans_are_found_again_after_a_restore() {
 	let mut r = rig(true, &Signals::default());
-	assert_eq!(run(&mut r, "( { /x/sleeper; while :; do :; done; } & )"), 0);
+	assert_eq!(run(&mut r, "( { /fake/sleeper; while :; do :; done; } & )"), 0);
 	assert_eq!(settle(&mut r, 1_000), Settled::Blocked);
 	// The external is lost: the job goes on to its loop.
 	r.snapshot();

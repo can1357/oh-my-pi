@@ -153,7 +153,8 @@ describe("Tern block adoption", () => {
 });
 
 describe("Tern open result", () => {
-	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN"];
+	// PI_TERMINAL_OWNER_PID: a test run from an interactive omp's bash tool inherits that omp's claim on the pane.
+	const envKeys = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_TERMINAL_OWNER_PID"];
 	let savedEnv: Map<string, string | undefined>;
 
 	beforeEach(() => {
@@ -171,6 +172,7 @@ describe("Tern open result", () => {
 		process.env.TERN_PANE_SOCKET = fake.socketPath;
 		process.env.TERN_PANE = String(PANE);
 		delete process.env.PI_BROWSER_TERN;
+		delete process.env.PI_TERMINAL_OWNER_PID;
 		const session: ToolSession = {
 			cwd: "/tmp",
 			hasUI: false,

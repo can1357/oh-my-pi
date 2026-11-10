@@ -77,7 +77,7 @@ use bstr::{BStr, BString};
 
 pub use self::{
 	io::select_next,
-	names::{Aliases, alias_table, flush_hash, legal_alias_name},
+	names::{Aliases, alias_table, flush_hash, legal_alias_name, resets_hash},
 	test::cond_test,
 	trap::hard_ignore,
 	vars::{

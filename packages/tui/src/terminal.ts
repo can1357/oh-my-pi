@@ -2350,13 +2350,16 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.on("data", onData);
 		const endTime = Date.now() + maxMs;
 
-		// A terminal that answers DA1 (`#sixelSupport` is set from its first
-		// reply) answers this one after everything it sent before reading it:
-		// replies to output already written (TSP acks for the last frames, which
-		// a terminal may send well after the idle window) are read here instead
-		// of reaching the shell as typed text.
+		// For an active or pending optimistic TSP session, the terminal may emit
+		// asynchronous frame acknowledgments (`tsp;e;{"ev":"ack",…}`) after the
+		// idle window. A DA1 sentinel is processed in FIFO order after everything
+		// written before it, so awaiting its reply swallows in-flight acks before
+		// handing the terminal back to the shell. Ordinary non-TSP terminals emit
+		// no background output acks and must not be queried, or their DA1 reply
+		// risks leaking into the shell prompt.
 		let sentinelAnswered = true;
-		if (this.#sixelSupport !== undefined && !this.#dead) {
+		const tspActive = this.#tspResult ? true : this.#tspPending && this.tspExpected;
+		if (tspActive && this.#sixelSupport !== undefined && !this.#dead) {
 			sentinelAnswered = false;
 			this.#da1SentinelOwners.push({
 				kind: "drain",

@@ -10,7 +10,8 @@
  * (Tern) terminal gets the form described semantically instead: one tab per
  * question (a top-level `<fieldset>`; context before it rides along) plus a
  * Review tab, the tab's content in a column the terminal scrolls, and an
- * action bar that stays in view below it. Clicks come back through
+ * action bar that stays in view below it, with Submit on the last question
+ * tab and on Review. Clicks come back through
  * {@link HtmlFormDialog.handleNativeEvent}.
  *
  * Keys: ↑/↓ move between choices and fields, Tab/Shift+Tab jump fields,
@@ -32,7 +33,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
 import { Editor } from "../components/editor";
-import { Image } from "../components/image";
+import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
 import { renderTableRow, type TableColumn } from "../components/table";
 import {
@@ -85,9 +86,11 @@ import {
 	type TextField,
 } from "./parse";
 
-/** What the dialog needs from its `TUI`: the terminal's height and a way to ask for a frame. */
+/** What the dialog needs from its `TUI`: the terminal's height, a way to ask for a frame, and its image budget. */
 export interface HtmlFormHost {
 	readonly terminal: { readonly rows: number };
+	/** Gives pictures stable Kitty ids, so their placements leave with the form instead of outliving it. */
+	readonly imageBudget?: ImageBudget;
 	requestRender(): void;
 }
 
@@ -159,6 +162,11 @@ interface Layout {
 	stopAtoms: number[];
 	/** Where the open dropdown hangs from: its field's atom and the value row inside it. */
 	dropdown?: { atom: number; row: number };
+	/**
+	 * Picture atoms, measured under {@link measureRender} so a picture on another page claims no
+	 * image slot; `#renderPage` renders the shown ones again, in display order.
+	 */
+	pictures: Map<PageAtom, Component>;
 }
 
 /** A native question tab: indices of the sections it shows, and the fields in them. */
@@ -582,7 +590,10 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#stopCountdown();
 		this.#mediaAbort.abort();
 		for (const slot of this.#media.values()) {
-			if (slot.state === "ready" && slot.rows instanceof SvgFigure) slot.rows.dispose();
+			if (slot.state !== "ready") continue;
+			// By the component's own id: one retired and sent again no longer maps from a key.
+			slot.rows.release();
+			if (slot.rows instanceof SvgFigure) slot.rows.dispose();
 		}
 		this.#panel.dispose();
 	}
@@ -598,7 +609,8 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#media.set(block, { state: "loading" });
 		const signal = this.#mediaAbort.signal;
 		loadFormImage(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal }).then(
-			media => this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
+			// A picture landing after dispose must not take an image key nobody will release.
+			media => signal.aborted || this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
 			(error: unknown) => {
 				const reason = error instanceof Error ? error.message : String(error);
 				this.#settleMedia(block, { state: "failed", reason });
@@ -618,12 +630,22 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#options.tui?.requestRender();
 	}
 
-	/** Rows draw a raster through {@link Image} and an SVG through {@link SvgFigure}; natively both are image blobs. */
+	/**
+	 * Rows draw a raster through {@link Image} and an SVG through {@link SvgFigure}; natively both are image blobs.
+	 * Both go through the TUI's image budget: without an id, a Kitty image is a self-contained
+	 * `a=T` placement that repainting the rows never removes, so it outlives the form.
+	 */
 	#readyMedia(media: FormMedia, alt: string): MediaSlot {
 		const maxRows = this.#pictureRows();
+		const budget = this.#options.tui?.imageBudget;
 		const native = nativeImageNode(media.bytes, media.mime, { alt, max: { h: `${maxRows}lines` } });
 		if (isSvgMedia(media)) {
-			const figure = new SvgFigure({ maxRows: () => maxRows, onChange: () => this.#mediaChanged() });
+			const figure = new SvgFigure({
+				budget,
+				releaseSuperseded: true,
+				maxRows: () => maxRows,
+				onChange: () => this.#mediaChanged(),
+			});
 			figure.update(new TextDecoder().decode(media.bytes), true);
 			return { state: "ready", rows: figure, native };
 		}
@@ -631,7 +653,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			media.bytes.toBase64(),
 			media.mime,
 			{ fallbackColor: text => theme.fg("dim", text) },
-			{ maxHeightCells: maxRows, filename: alt, requestRender: () => this.#mediaChanged() },
+			{ maxHeightCells: maxRows, filename: alt, budget, requestRender: () => this.#mediaChanged() },
 		);
 		return { state: "ready", rows: image, native };
 	}
@@ -1085,7 +1107,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#renderPage(layout: Layout, page: Page, rows: number, width: number): string[] {
-		const { atoms, dropdown } = layout;
+		const { atoms, dropdown, pictures } = layout;
 		const lines: string[] = [];
 		const continuation = atoms[page.start]?.continuation;
 		if (continuation !== undefined) {
@@ -1096,7 +1118,8 @@ export class HtmlFormDialog implements Component, Focusable {
 			const atom = atoms[index]!;
 			if (index > page.start) for (let gap = 0; gap < atom.gap; gap++) lines.push("");
 			if (dropdown?.atom === index) anchor = { top: lines.length, row: lines.length + dropdown.row };
-			lines.push(...atom.lines);
+			// A picture measured off the display order is rendered again here, so only shown pictures take image slots.
+			lines.push(...(pictures.get(atom)?.render(width) ?? atom.lines));
 		}
 		const shown = lines.slice(0, rows);
 		if (anchor && this.#open && anchor.row < rows) this.#overlayDropdown(shown, anchor, rows, width);
@@ -1189,6 +1212,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const atoms: PageAtom[] = [];
 		const stopAtoms: number[] = [];
 		let dropdown: Layout["dropdown"];
+		const pictures: Layout["pictures"] = new Map();
 		let stop = 0;
 		const focusedStop = this.#focused ? this.#focus : -1;
 		this.#form.sections.forEach((section, sectionIndex) => {
@@ -1226,7 +1250,7 @@ export class HtmlFormDialog implements Component, Focusable {
 						dropdown = { atom: atoms.length, row: field.label.length > 0 ? blockAtoms[0]!.lines.length - 1 : 0 };
 					}
 				} else {
-					blockAtoms.push(...this.#contextAtoms(block, width));
+					blockAtoms.push(...this.#contextAtoms(block, width, pictures));
 				}
 				if (blockAtoms.length === 0) continue;
 				blockAtoms[0]!.gap = gap;
@@ -1253,7 +1277,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const pending = this.#errors.size > 0 ? theme.fg("error", `  ${this.#errors.size} to fix`) : "";
 		stopAtoms[stop] = atoms.length;
 		atoms.push({ lines: [`${submit}${pending}`], gap: 1, breakRank: BreakRank.Block });
-		return { atoms, stopAtoms, dropdown };
+		return { atoms, stopAtoms, dropdown, pictures };
 	}
 
 	/** Atoms of one field, each flagged when it is a focus stop; stops are numbered from `firstStop`. */
@@ -1406,7 +1430,11 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/** Atoms of a non-field block: one per wrapped line, list item or table row. */
-	#contextAtoms(block: Exclude<FormBlock, { kind: "field" }>, width: number): PageAtom[] {
+	#contextAtoms(
+		block: Exclude<FormBlock, { kind: "field" }>,
+		width: number,
+		pictures: Layout["pictures"],
+	): PageAtom[] {
 		const atom = (lines: string[], breakRank = BreakRank.Inside): PageAtom => ({ lines, gap: 0, breakRank });
 		switch (block.kind) {
 			case "text": {
@@ -1431,8 +1459,12 @@ export class HtmlFormDialog implements Component, Focusable {
 			case "image":
 			case "svg": {
 				const slot = this.#media.get(block)!;
-				const rows = slot.state === "ready" ? slot.rows.render(width) : [];
-				if (rows.length > 0) return [atom([...rows])];
+				const rows = slot.state === "ready" ? measureRender(() => slot.rows.render(width)).value : [];
+				if (rows.length > 0 && slot.state === "ready") {
+					const picture = atom([...rows]);
+					pictures.set(picture, slot.rows);
+					return [picture];
+				}
 				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
 			}
 			case "table": {
@@ -1484,7 +1516,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			// stays clear of `f<index>`, the option lists' keys `handleNativeEvent` reads.
 			children.push(list([form], { role: "omp.ask.options" }, `body${this.#tab}`));
 		}
-		children.push(this.#describeActions(blocked, tabbed && !review));
+		const next = tabbed && !review;
+		const submit = !next || this.#tab === this.#tabs.length - 1;
+		children.push(this.#describeActions(blocked, next, submit));
 		return col(children, { role: "omp.editor.ask", gap: "md" });
 	}
 
@@ -1555,8 +1589,12 @@ export class HtmlFormDialog implements Component, Focusable {
 		];
 	}
 
-	/** Hide, the countdown or draft hint, then Cancel and the primary action: Next on a question tab, else Submit. */
-	#describeActions(blocked: boolean, next: boolean): NativeNode {
+	/**
+	 * Hide, the countdown or draft hint, then Cancel, Next on a question tab, and Submit where
+	 * `submit` says: an untabbed form, the last question tab, and Review. Submit validates the
+	 * whole form and opens the first answer that needs a fix.
+	 */
+	#describeActions(blocked: boolean, next: boolean, submit: boolean): NativeNode {
 		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
 		const guard = this.#options.inputGuard;
 		const lead =
@@ -1570,9 +1608,10 @@ export class HtmlFormDialog implements Component, Focusable {
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 			...(lead ? [null] : []),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
-			next
-				? actionButton("Next", "next", { tone: "accent" })
-				: actionButton(SUBMIT_LABEL, "submit", { keys: "enter", tone: "accent" }),
+			...(next ? [actionButton("Next", "next", submit ? {} : { tone: "accent" })] : []),
+			...(submit
+				? [actionButton(SUBMIT_LABEL, "submit", { ...(next ? {} : { keys: "enter" }), tone: "accent" })]
+				: []),
 		]);
 	}
 

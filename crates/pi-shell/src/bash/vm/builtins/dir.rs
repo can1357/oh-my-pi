@@ -31,8 +31,13 @@ fn physical(ctx: &mut Ctx<'_, '_>, o: &Opts<'_>) -> Result<bool, Need> {
 
 /// `dir` made absolute against `cwd` with `.` and `..` resolved textually
 /// (`cd -L`). A URL path ([`url_root_len`]) keeps its `scheme://` root, which
-/// `..` never climbs above.
+/// `..` never climbs above. On Windows an MSYS drive alias (`/c/x`) is the
+/// drive path it names.
 pub fn logical(cwd: &[u8], dir: &[u8]) -> BString {
+	#[cfg(windows)]
+	let drive_path = crate::bash::fs::msys_drive_path(dir);
+	#[cfg(windows)]
+	let dir: &[u8] = drive_path.as_deref().map_or(dir, Vec::as_slice);
 	#[cfg(windows)]
 	if url_root_len(dir).is_none()
 		&& let (Ok(cwd), Ok(dir)) = (cwd.to_path(), dir.to_path())
@@ -376,7 +381,7 @@ mod tests {
 	#[test]
 	fn logical_paths_resolve_dot_and_dotdot_textually() {
 		assert_eq!(logical(b"/a/b", b"../c/./d"), "/a/c/d");
-		assert_eq!(logical(b"/a", b"/x/../y"), "/y");
+		assert_eq!(logical(b"/a", b"/top/../y"), "/y");
 		assert_eq!(logical(b"/", b".."), "/");
 	}
 
@@ -393,6 +398,7 @@ mod tests {
 		assert_eq!(logical(b"virtual://dir", br"C:\work"), br"C:\work".as_slice());
 		assert_eq!(logical(b"virtual://dir", br"C:\work\..\target"), br"C:\target".as_slice());
 		assert_eq!(logical(b"virtual://dir", br"\\server\share\a"), br"\\server\share\a".as_slice());
+		assert_eq!(logical(br"C:\work", b"/d/other/../target"), br"D:\target".as_slice());
 	}
 
 	#[test]

@@ -9,6 +9,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
+import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
 import { withRepoLock } from "../utils/repo-lock";
 import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -360,35 +361,10 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
 }
 
-function unquoteGitDiffPath(rawPath: string): string {
-	let value = rawPath;
-	if (value.startsWith('"') && value.endsWith('"')) {
-		try {
-			value = JSON.parse(value) as string;
-		} catch {
-			value = value.slice(1, -1);
-		}
-	}
-	return value.replace(/^[ab]\//, "");
-}
-
-function parseDiffGitLinePaths(line: string): string[] {
-	if (!line.startsWith("diff --git ")) return [];
-	const rest = line.slice("diff --git ".length);
-	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
-	if (parts.length < 2) return [];
-	const paths = parts
-		.slice(0, 2)
-		.map(unquoteGitDiffPath)
-		.filter(file => file && file !== "/dev/null");
-	return [...new Set(paths)];
-}
-
 function patchTouchedFiles(patch: string): string[] {
 	const files = new Set<string>();
-	for (const line of patch.split("\n")) {
-		for (const file of parseDiffGitLinePaths(line)) files.add(file);
+	for (const section of splitPatchSections(patch)) {
+		for (const file of patchSectionPaths(section)) files.add(file);
 	}
 	return [...files];
 }
@@ -774,8 +750,9 @@ function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
 
 /** Keep only the `diff --git` sections of `patch` that touch one of `files`. */
 function filterPatchFiles(patch: string, files: ReadonlySet<string>): string {
-	const sections = patch.split(/^(?=diff --git )/m);
-	return sections.filter(section => parseDiffGitLinePaths(section.split("\n", 1)[0]).some(f => files.has(f))).join("");
+	return splitPatchSections(patch)
+		.filter(section => patchSectionPaths(section).some(file => files.has(file)))
+		.join("");
 }
 
 /**

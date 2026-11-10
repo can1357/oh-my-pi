@@ -23,6 +23,7 @@ import type {
 	ServiceTier,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
+	TextContent,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
@@ -32,6 +33,7 @@ import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-pre
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -237,6 +239,7 @@ import {
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
 import { describeUsageFallback } from "./session/retry-fallback-reason";
+import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { SHAPE_RULE } from "./spotlight/shape";
@@ -4827,6 +4830,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// a session recreate. The single shared host keeps its evidence across
 		// toggles; per-turn coordinator close never touches it.
 		const speculativeToolExecution = createSpeculativeToolExecutionConfig(settings, toolSession, extensionRunner);
+		let mainRequestProvider: string | undefined;
 
 		agent = new Agent({
 			initialState: {
@@ -4857,6 +4861,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: effectiveGetApiKey,
 			streamFn: (streamModel, context, streamOptions) => {
+				mainRequestProvider = undefined;
 				options.assertDispatchModel?.(streamModel);
 				// The loop checks the cap before each request, but a side request can finish
 				// in between: refuse here, as this run's refusal, before announcing a dispatch.
@@ -4890,6 +4895,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
 				// slot: the prompt cache entry's lifetime starts there, not here.
 				const onPayload = merged.onPayload;
+				mainRequestProvider = streamModel.provider;
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
@@ -4930,7 +4936,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				const content = await session?.extensionRunner?.emitAssistantMessage(message, signal);
-				if (content) message.content = content;
+				if (content) {
+					// Same-model Responses replay sends the captured payload items
+					// verbatim; sync the rewrite into them or it never reaches the wire.
+					const texts = content
+						.filter((block): block is TextContent => block.type === "text")
+						.map(block => block.text);
+					const synced = syncOpenAIResponsesHistoryTexts(message.providerPayload, texts);
+					message.content = content;
+					if (synced) message.providerPayload = synced;
+				}
 			},
 			// Recovery only fires on turns without tool calls and appends a new one,
 			// so streamed calls (and their speculation sessions) are never rewritten.
@@ -4953,6 +4968,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? new AppendOnlyContextManager()
 					: undefined
 				: undefined,
+		});
+		// The main Agent's issued provider is available before AgentSession accounts
+		// for the finalized message, including errors synthesized after a stream throws.
+		agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "assistant" && mainRequestProvider !== undefined) {
+				(event.message as typeof event.message & { [kUsageLimitRequestProvider]?: string })[
+					kUsageLimitRequestProvider
+				] = mainRequestProvider;
+			} else if (event.type === "turn_end" || event.type === "agent_end") {
+				mainRequestProvider = undefined;
+			}
 		});
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
 		// session adopts every model with the window its own settings select (a
