@@ -11517,11 +11517,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#todoWrites.queued;
 	}
 
-	/** Call once, after {@link setDeferredExtensionLoader}. */
-	initializeTodoBackend(): void {
-		this.#todoWrites.arm();
-	}
-
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
 	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		return this.#todoWrites.commit(update);

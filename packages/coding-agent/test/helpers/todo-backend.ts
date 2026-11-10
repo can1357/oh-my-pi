@@ -2,7 +2,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionContext, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -22,6 +22,8 @@ interface RecordedTodoBackendCall {
 export interface TodoBackendRecorder {
 	readonly calls: RecordedTodoBackendCall[];
 	created: number;
+	/** The ctx the latest `create` received. */
+	ctx?: ExtensionContext;
 	createError?: Error;
 	/** Awaited at the start of `apply` with the call's signal, before the error check and before the call is recorded. */
 	beforeApply?: (signal: AbortSignal) => void | Promise<void>;
@@ -44,8 +46,9 @@ export function createTodoBackendRecorder(id: string, label = `Tracker ${id}`): 
 				pi.registerTodoBackend({
 					id,
 					label,
-					create() {
+					create(ctx) {
 						recorder.created++;
+						recorder.ctx = ctx;
 						if (recorder.createError) throw recorder.createError;
 						return {
 							async apply(op, params, next, signal) {

@@ -5945,8 +5945,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await extensionRunner.addExtensions(loaded.extensions);
 			});
 		}
-		// Extensions are bound now, or bind on the deferred load; the session resolves `todo.backend` then.
-		session.initializeTodoBackend();
 		startDeferredMCPDiscovery?.(session);
 
 		startupCleanup.move();

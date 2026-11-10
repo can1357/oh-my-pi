@@ -492,6 +492,25 @@ export default function(pi) {
 		expect(notices[0]).toContain("tracker is offline");
 	});
 
+	test("/new sends replace([]) to the same instance, whose ctx already reports the new session id", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		await todo(session, { op: "init", items: ["old"] });
+		const oldId = session.sessionManager.getSessionId();
+		const idsDuringReplace: (string | undefined)[] = [];
+		recorder.beforeReplace = () => {
+			idsDuringReplace.push(recorder.ctx?.sessionManager.getSessionId());
+		};
+
+		await session.newSession();
+		await flushTodoWrites(session);
+
+		expect(recorder.created).toBe(1);
+		expect(recorder.calls.filter(call => call.method === "replace").map(call => call.phases)).toEqual([[]]);
+		expect(idsDuringReplace).toEqual([session.sessionManager.getSessionId()]);
+		expect(idsDuringReplace[0]).not.toBe(oldId);
+	});
+
 	test("an edit whose replace settles while switchSession is swapping files never lands in the target session", async () => {
 		const recorder = createTodoBackendRecorder("tracker");
 		const replaceGate = hold(recorder, "replace");

@@ -49,6 +49,11 @@ export interface TodoBackend {
 	 * committed list yet, after a change already in place (a Cursor mirror, a subagent auto-complete,
 	 * a reset or reload: `/new`, a session switch, rewind, tree navigation, a fork from a message),
 	 * where a throw only warns, and before an `apply` that follows a lost call (see above).
+	 *
+	 * A reset goes to the same instance (`/new` sends `replace([])`; `create` does not run again) and
+	 * carries no reason. While it runs, `ctx.sessionManager.getSessionId()` already returns the new
+	 * session's id, and it can arrive before the extension's `session_switch` handler. A backend whose
+	 * store outlives a session keys it by session id, or `/new` empties it.
 	 */
 	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }

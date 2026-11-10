@@ -8,6 +8,7 @@ import {
 	type ActiveTodoBackend,
 	NATIVE_TODO_BACKEND_ID,
 	sanitizeTodoBackendText,
+	type TodoBackendDefinition,
 	type TodoPhasesUpdate,
 	type TodoWrite,
 } from "../tools/todo-backend";
@@ -26,7 +27,7 @@ class TodoListChangedError extends Error {
 export interface TodoWritesHost extends SettingsScope {
 	readonly sessionManager: SessionManager;
 	readonly todo: TodoTracker;
-	/** Read live: the runner is attached after the session is built. */
+	/** Read live: the session assigns its runner after constructing this. */
 	extensionRunner(): ExtensionRunner | undefined;
 	isMainAgent(): boolean;
 	isDisposed(): boolean;
@@ -46,11 +47,20 @@ export class TodoWrites {
 	readonly #host: TodoWritesHost;
 	readonly #queue = new Serial();
 	#active: ActiveTodoBackend | undefined;
-	#requestedId: string | undefined;
-	#requestedAvailable = false;
-	#armed = false;
-	#resolvable = false;
+	/**
+	 * What the last resolution was for: the definition when an enabled extension registers the
+	 * selected id, else the id. Unset until {@link allowBackendResolution}.
+	 */
+	#requested: TodoBackendDefinition | string | undefined;
+	/**
+	 * Queued writes and resolutions not yet settled. Native writes queue behind them too: one running
+	 * inline could commit before an earlier one still draining (two `set_todos` landing reversed).
+	 */
 	#pending = 0;
+	/**
+	 * Set when a queued write leaves the queue; `queued` cannot stand in for it, because the backend
+	 * can go inactive (switch to native, extension disabled) before the tool result is saved.
+	 */
 	#queuedWriteSinceSave = false;
 	#epoch = 0;
 
@@ -58,29 +68,36 @@ export class TodoWrites {
 		this.#host = host;
 	}
 
-	arm(): void {
-		const runner = this.#host.extensionRunner();
-		if (this.#armed || !runner) return;
-		this.#armed = true;
-		cfgTodoBackend.listen(this.#host, () => this.#observeSetting());
-		this.#host.addDisposer?.(runner.onSuspensionChange(() => this.#observeSetting()));
-	}
-
 	/**
 	 * Call at the first prompt admission, after the deferred load, or at the first queued write: these
 	 * all run after the mode subscribed its event listeners, so a fallback notice reaches the client.
+	 * A disabled or re-enabled extension is noticed at the next queued write, which compares the
+	 * registry with {@link #requested}; native sessions never touch the runner.
 	 */
 	allowBackendResolution(): void {
-		if (!this.#armed || this.#resolvable) return;
-		this.#resolvable = true;
+		if (
+			this.#requested !== undefined ||
+			!this.#host.extensionRunner() ||
+			!this.#host.isMainAgent() ||
+			this.#host.isDisposed()
+		)
+			return;
+		// Nothing resolved yet: the session starts on native todos.
+		this.#requested = NATIVE_TODO_BACKEND_ID;
+		cfgTodoBackend.listen(this.#host, () => this.#observeSetting());
 		this.#observeSetting();
 	}
 
 	get queued(): boolean {
 		if (this.#pending > 0 || this.#active) return true;
-		if (!this.#armed || !this.#host.isMainAgent()) return false;
+		if (!this.#host.extensionRunner() || !this.#host.isMainAgent()) return false;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		return isBackendId(id) && id !== this.#requestedId;
+		return isBackendId(id) && this.#target(id) !== this.#requested;
+	}
+
+	/** What a resolution for `id` would resolve: see {@link #requested}. */
+	#target(id: string): TodoBackendDefinition | string {
+		return (isBackendId(id) && this.#host.extensionRunner()?.getTodoBackend(id)) || id;
 	}
 
 	run<T>(write: TodoWrite<T>, signal?: AbortSignal): Promise<T> {
@@ -194,7 +211,7 @@ export class TodoWrites {
 	 * setting up its extensions (ACP loads a session before initializing them), so nothing is queued then.
 	 */
 	#syncAfterReset(): void {
-		if (!this.#resolvable || !this.queued) return;
+		if (this.#requested === undefined || !this.queued) return;
 		this.run(active => this.#sync(active)).catch((error: unknown) => {
 			// A later reset invalidated this one and queued its own sync.
 			if (!(error instanceof TodoListChangedError))
@@ -212,13 +229,12 @@ export class TodoWrites {
 	}
 
 	#observeSetting(): void {
-		if (!this.#resolvable || !this.#host.isMainAgent() || this.#host.isDisposed()) return;
+		if (this.#requested === undefined || this.#host.isDisposed()) return;
 		const id = cfgTodoBackend.get(this.#host.settings);
-		const available = this.#host.extensionRunner()?.getTodoBackend(id) !== undefined;
-		if (id === this.#requestedId && available === this.#requestedAvailable) return;
-		const wasBackend = this.#requestedId !== undefined && isBackendId(this.#requestedId);
-		this.#requestedId = id;
-		this.#requestedAvailable = available;
+		const target = this.#target(id);
+		if (target === this.#requested) return;
+		const wasBackend = typeof this.#requested !== "string" || isBackendId(this.#requested);
+		this.#requested = target;
 		if (!isBackendId(id) && !wasBackend && !this.#active) return;
 		this.#track(this.#queue.run(() => this.#resolve(id))).catch((error: unknown) => {
 			logger.warn("Todo backend resolution failed", { id, error: String(error) });
