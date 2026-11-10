@@ -1009,7 +1009,7 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 	async #warmEmbeddings(signal: AbortSignal): Promise<void> {
 		for (const target of this.#local().recall) {
 			if (signal.aborted) return;
-			await target.memory.beam.warmRecallCache({ channelId: target.bank }, signal);
+			await target.memory.warmRecallCache({ channelId: target.bank }, signal);
 		}
 	}
 
