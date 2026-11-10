@@ -353,19 +353,40 @@ function quarantineShellSession(
 		.catch(() => undefined);
 }
 
+/** A surface label as it appears in a namespaced shell key (`eval`, `loop-condition`). */
+const SHELL_SESSION_LABEL = /^[A-Za-z][A-Za-z0-9_-]*$/;
+
 /**
- * Drops every persistent Shell owned by an agent session (keys built with
- * `agentSessionKey` as the {@link BashExecutorOptions.sessionKey}). The map is
- * process-global, so without this each disposed session keeps its native shell
- * for the life of the process. A Shell with live background jobs is retained
- * until they exit, matching the `:async:` teardown; an in-flight run keeps its
- * own reference and drops the Shell when it settles.
+ * Whether a shell cache key belongs to `agentSessionKey`, matching the session
+ * key the shell was cached under: the id itself (the bash tool's own shells) or
+ * one namespace of it, `<label>:<id>` (the eval `sh` helper uses `eval:<id>`, a
+ * `/loop` condition uses `loop-condition:<id>`). A per-job `<id>:async:<jobId>`
+ * key names no session, and a label must read like one, so a key whose prefix is
+ * a path (`/work/repo:main`) is another session's, not a namespace.
+ * The id itself is matched before any colon is read, so a session whose own id
+ * contains one (a cwd-derived `/work/repo:main`) still releases its shells.
+ */
+function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
+	const sessionField = key.split("\n", 1)[0];
+	if (sessionField === agentSessionKey) return true;
+	const separator = sessionField.indexOf(":");
+	if (separator === -1) return false;
+	if (!SHELL_SESSION_LABEL.test(sessionField.slice(0, separator))) return false;
+	return sessionField.slice(separator + 1) === agentSessionKey;
+}
+
+/**
+ * Drops every persistent Shell owned by an agent session (see
+ * {@link isShellSessionOwnedBy}: the id itself or one namespace of it). The map
+ * is process-global, so without this each disposed session keeps its native
+ * shell for the life of the process. A Shell with live background jobs is
+ * retained until they exit, matching the `:async:` teardown; an in-flight run
+ * keeps its own reference and drops the Shell when it settles.
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
-	const prefix = `${agentSessionKey}\n`;
 	for (const [key, shell] of shellSessions) {
-		if (!key.startsWith(prefix)) continue;
+		if (!isShellSessionOwnedBy(key, agentSessionKey)) continue;
 		shellSessions.delete(key);
 		if (!shellSessionsInUse.has(key)) void retainShellWithLiveBackgroundJobs(shell);
 	}

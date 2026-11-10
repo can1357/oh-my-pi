@@ -11,6 +11,7 @@ import {
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
+	releaseShellSessions,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -914,6 +915,53 @@ exit 64
 			sessionKey: "settled-native-abort",
 		});
 		expect(next.output.trim()).toBe("still_persistent");
+	});
+
+	it("releases a session's own and namespaced shells, leaving other sessions alone", async () => {
+		// A session's shells are cached under the session key itself (the bash tool's
+		// own) or under one namespace of it, `<label>:<session id>` (the eval `sh`
+		// helper, a /loop condition). Release must collect both, or a disposed
+		// session keeps a native shell for the life of the process; another
+		// session's namespaced shell is not its to drop.
+		const id = crypto.randomUUID();
+		const other = crypto.randomUUID();
+		const colonId = `/work/repo:${crypto.randomUUID()}`;
+		const run = (sessionKey: string, command: string) =>
+			executeBash(command, { cwd: tempDir, timeout: 5000, sessionKey });
+		try {
+			await run(id, "PI_PLAIN=kept");
+			await run(`eval:${id}`, "PI_EVAL=kept");
+			await run(`loop-condition:${id}`, "PI_LOOP=kept");
+			await run(other, "PI_OTHER=kept");
+			await run(`eval:${other}`, "PI_OTHER_EVAL=kept");
+			// A key whose front part is a path, not a surface label, is no namespace of
+			// `id` even though its tail reads like one.
+			const pathLike = `/work/repo:${id}`;
+			await run(pathLike, "PI_PATH_KEY=kept");
+			// A session id may itself contain a colon (a cwd-derived session name);
+			// that session's own shells are still its to release.
+			await run(colonId, "PI_COLON=kept");
+			await run(`eval:${colonId}`, "PI_COLON_EVAL=kept");
+
+			releaseShellSessions(id);
+			releaseShellSessions(colonId);
+
+			expect((await run(id, 'printf "[%s]" "$PI_PLAIN"')).output).toBe("[]");
+			expect((await run(`eval:${id}`, 'printf "[%s]" "$PI_EVAL"')).output).toBe("[]");
+			expect((await run(`loop-condition:${id}`, 'printf "[%s]" "$PI_LOOP"')).output).toBe("[]");
+			expect((await run(colonId, 'printf "[%s]" "$PI_COLON"')).output).toBe("[]");
+			expect((await run(`eval:${colonId}`, 'printf "[%s]" "$PI_COLON_EVAL"')).output).toBe("[]");
+			// A key that is neither the id nor a namespace of it survives the other
+			// session's release, and another session's shells survive both.
+			expect((await run(pathLike, 'printf "[%s]" "$PI_PATH_KEY"')).output).toBe("[kept]");
+			expect((await run(other, 'printf "[%s]" "$PI_OTHER"')).output).toBe("[kept]");
+			expect((await run(`eval:${other}`, 'printf "[%s]" "$PI_OTHER_EVAL"')).output).toBe("[kept]");
+		} finally {
+			releaseShellSessions(id);
+			releaseShellSessions(other);
+			releaseShellSessions(colonId);
+			releaseShellSessions(`/work/repo:${id}`);
+		}
 	});
 
 	it("aborts the shell without aborting its native signal when the JavaScript timeout fallback wins", async () => {

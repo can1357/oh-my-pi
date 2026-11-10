@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A disposed or switched session now releases every persistent shell it owns, including the ones a surface keeps under a name of its own (eval `sh`, `/loop` conditions), instead of holding one native shell per surface for the life of the process ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
