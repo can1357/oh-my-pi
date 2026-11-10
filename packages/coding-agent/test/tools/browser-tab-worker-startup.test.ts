@@ -452,14 +452,15 @@ describe("OMP-owned browser input", () => {
 				// Closed roots still expose their browser hit test through a handle to the target.
 				const page = (await browser.browser.pages()).find(page => page.url().startsWith("data:text/html,"));
 				if (!page) throw new Error("Missing hover test page");
-				const inner = await page.evaluateHandle(() => {
+				const inner = (await page.evaluateHandle(`(() => {
 					const host = document.createElement("div");
 					host.style.cssText = "position:absolute;left:200px;top:350px";
 					document.body.append(host);
 					const root = host.attachShadow({ mode: "closed" });
 					root.innerHTML = "<button>Closed target</button>";
-					return root.firstElementChild!;
-				});
+					return root.firstElementChild;
+				})()`)).asElement();
+				if (!inner) throw new Error("Missing closed-root target");
 				try {
 					await hoverElement(inner, "closed target", AbortSignal.timeout(2_000));
 				} finally {
