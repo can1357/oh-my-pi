@@ -562,11 +562,16 @@ export function resolveAddressedRef(
 }
 
 /**
- * Resolve an omp address to a ref A2A delivery can actually reach (A2A-1):
- * the normal address resolution gated by {@link a2aReachableGroup} and, for
- * `parked` refs, the lifecycle's proven revive capability. Unreachable
- * recipients (advisors, aborted tombstones, unwakeable idle corpses,
- * unrevivable parked refs) are refused exactly like an unknown agent.
+ * Resolve an omp address to a ref A2A delivery can deliver to (A2A-1): the
+ * normal address resolution gated by {@link a2aReachableGroup} and, for
+ * `parked` refs, the lifecycle's proven revive capability. Advisors, aborted
+ * tombstones and unrevivable parked refs resolve to `undefined` and are
+ * refused like an unknown agent (`TASK_NOT_FOUND`, HTTP 404), as is a ref
+ * removed between discovery and delivery. A still-registered idle corpse
+ * (no live session) resolves normally: it is a legitimate lookup whose
+ * delivery the IRC bus then refuses, surfacing as the existing
+ * `DELIVERY_FAILED` error (HTTP 200) — never a 404 and never a fresh
+ * replacement spawn.
  */
 export function resolveDeliverableRef(
 	registry: Pick<AgentRegistryApi, "get">,

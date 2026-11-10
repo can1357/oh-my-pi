@@ -77,14 +77,17 @@ peers whose bridge is gone.
 Addressed delivery reaches idle and parked subagents too. An idle kept-alive
 child is woken with a real turn through the IRC bus; a parked child is
 revived through the existing lifecycle path (its persisted transcript) and
-then woken the same way. A recipient that cannot be reached — removed between
-discovery and delivery, an aborted agent, an idle corpse with no live session,
-or a parked ref nothing can revive — is refused like an unknown agent
+then woken the same way. A recipient whose ref is gone — removed between
+discovery and delivery — or that nothing can deliver to (an aborted agent, a
+parked ref with no revive path) is refused like an unknown agent
 (`TASK_NOT_FOUND`, HTTP 404), never delivered to a fresh or unrelated
 replacement, and a wake/revive is never started before the bearer token is
-verified. Not every parked ref can revive: the card only advertises parked
-agents the lifecycle can actually rebuild (a persisted session contract and
-an existing workspace).
+verified. A still-registered idle agent whose live session is gone (a finished
+one-shot corpse) is a legitimate lookup that the delivery itself then refuses:
+the bridge answers `DELIVERY_FAILED` (HTTP 200) naming the reason, exactly as
+for any recipient the IRC bus cannot hand the message to. Not every parked
+ref can revive: the card only advertises parked agents the lifecycle can
+actually rebuild (a persisted session contract and an existing workspace).
 
 ```text
 # In terminal A, after B's roster is registered:

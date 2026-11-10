@@ -2985,6 +2985,41 @@ describe("a2a addressed delivery to reachable idle and parked agents", () => {
 		expect(await IncomingRequests.global().list("GoneChild")).toEqual([]);
 	});
 
+	it("a2a addressed delivery to a registered idle corpse fails with DELIVERY_FAILED, not 404", async () => {
+		// A still-registered idle ref with no live session is a legitimate
+		// lookup: the addressed resolution succeeds and the IRC bus then
+		// refuses the hand-off, so the client sees the existing
+		// DELIVERY_FAILED error (HTTP 200), never TASK_NOT_FOUND/404.
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({ id: "IdleCorpse", kind: "sub", status: "idle", session: null }),
+		]);
+		const bus = new IrcBus(registry.asApi(), undefined, { settings: Settings.isolated({}) });
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "idle-corpse",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "corpse-1", role: "ROLE_USER", parts: [{ text: "resume" }] },
+				metadata: { to: "IdleCorpse", from: "peer" },
+			},
+		});
+		expect(status).toBe(200);
+		const error = errorResult(json);
+		expect(error.code).toBe(RPC_ERRORS.DELIVERY_FAILED);
+		expect(error.message).toContain("no live session");
+		// The refused delivery rolled its incoming record back.
+		expect(await IncomingRequests.global().list("IdleCorpse")).toEqual([]);
+	});
+
 	it("refuses unauthenticated and wrong-token requests to an idle/parked address without waking or reviving", async () => {
 		const { session } = idleChildHarness();
 		const registry = new FakeRegistry([
