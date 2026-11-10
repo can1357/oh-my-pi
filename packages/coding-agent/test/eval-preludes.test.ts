@@ -203,9 +203,16 @@ describe("eval prelude host invocation", () => {
 		// A compaction summarized the delivering result away.
 		revision++;
 		expect(text(await call())).toContain("PROBE GUIDE");
-		// A rewind kept it, and a resumed process (a fresh tool session) finds it in history.
+		// Rewording the guide does not change its delivery marker across rewind or resume.
 		context = [
-			{ role: "toolResult", toolCallId: "call", toolName: "eval", content: delivered, isError: false, timestamp: 0 },
+			{
+				role: "toolResult",
+				toolCallId: "call",
+				toolName: "eval",
+				content: [{ type: "text", text: '<eval-guide name="probe">\nReworded guide.\n</eval-guide>' }],
+				isError: false,
+				timestamp: 0,
+			},
 		];
 		revision++;
 		expect(text(await call())).toBe("ran");

@@ -1,6 +1,7 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
-import { untilAborted } from "@oh-my-pi/pi-utils";
+import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
+import firstCallGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import {
 	approvalRestrictions,
 	denyError,
@@ -8,6 +9,7 @@ import {
 	resolveApproval,
 	resolveApprovalFromContext,
 } from "../tools/approval";
+import { isBareBridgeResult } from "./tool-result";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -174,8 +176,7 @@ export async function invokeEvalPrelude(
 	const result = await definition.invoke(parameters, context);
 	// The bridge hands a result with no details or images to the VM as a bare string, which the facades
 	// return rather than print, so the guide waits for a call whose text reaches the cell output.
-	const bareString = result.details === undefined && !result.isError && !result.content.some(p => p.type === "image");
-	if (bareString) return result;
+	if (isBareBridgeResult(result)) return result;
 	const guide = takeFirstCallGuide(definition, context.session);
 	if (!guide) return result;
 	const lead = result.content.some(part => part.type === "text" && part.text.length > 0) ? "\n\n" : "";
@@ -188,12 +189,8 @@ const firstCallDeliveries = new WeakMap<
 	{ conversation: string | null; revision: number; preludes: Set<string> }
 >();
 
-/** Heads every first-call guide, after the prelude's name; read back to find the guides still in context. */
-const FIRST_CALL_GUIDE_HEADER = " guide (sent once per conversation; ";
-const FIRST_CALL_GUIDE_PATTERN = new RegExp(
-	`(?:^|\\n)([\\w-]+)${FIRST_CALL_GUIDE_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-	"g",
-);
+/** Structural marker shared with the static first-call prompt, independent of its prose. */
+const FIRST_CALL_GUIDE_PATTERN = /(?:^|\n)<eval-guide name="([^"]+)">/g;
 
 /**
  * The prelude's first-call guide, headed, if this is its first call in the
@@ -217,7 +214,7 @@ function takeFirstCallGuide(definition: EvalPreludeDefinition, session: ToolSess
 	}
 	if (delivered.preludes.has(definition.name)) return undefined;
 	delivered.preludes.add(definition.name);
-	return `${definition.name}${FIRST_CALL_GUIDE_HEADER}full reference at \`xd://eval/${definition.name}\`):\n${guide}`;
+	return prompt.render(firstCallGuidePrompt, { name: definition.name, guide }).trimEnd();
 }
 
 /** Names of the preludes whose first-call guide a tool result in the session's context still carries. */

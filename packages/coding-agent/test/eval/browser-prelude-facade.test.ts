@@ -74,6 +74,7 @@ function makeSession(getPreludes?: () => readonly EvalPreludeDefinition[]): Tool
 			"browser.relay": false,
 			"browser.cmux": false,
 			"browser.tern": false,
+			"tools.outputMaxColumns": 256,
 		}),
 		...(getPreludes === undefined ? {} : { getEvalPreludes: getPreludes }),
 	};
@@ -95,9 +96,10 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 }
 
 function withoutFirstCallGuide<T extends { output: string }>(result: T): T {
-	const documentation = createBrowserPrelude(makeSession()).firstCallDocumentation?.trim();
-	const guide = `browser guide (sent once per conversation; full reference at \`xd://eval/browser\`):\n${documentation}`;
-	const parts = result.output.split(guide);
+	const guide = createBrowserPrelude(makeSession()).firstCallDocumentation?.trim();
+	if (!guide) throw new Error("Expected browser first-call guide");
+	expect(result.output).toContain(guide);
+	const parts = result.output.split(/<eval-guide name="browser">[\s\S]*?<\/eval-guide>/);
 	expect(parts).toHaveLength(2);
 	return { ...result, output: `${parts[0].trimEnd()}\n${parts[1].trimStart()}` };
 }

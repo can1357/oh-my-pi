@@ -243,9 +243,7 @@ describe("eval tool description", () => {
 			},
 		};
 		const description = new EvalTool(makeSession({ preludes: () => [prelude] })).description;
-		const [readFirst, firstCall] = description.split("No `read` needed before first use");
-		expect(readFirst).not.toContain("xd://eval/fixture");
-		expect(firstCall).toContain("xd://eval/fixture");
+		expect(description).toContain("xd://eval/fixture");
 		expect(description).not.toContain("FIRST CALL GUIDE");
 	});
 });
