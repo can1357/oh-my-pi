@@ -2253,13 +2253,8 @@ mod tests {
 		let mut field = p(&normalize_role_macos("AXTextField"), Some("Name"));
 		field.native_role = "AXTextField".into();
 		let mut m = Mock {
-			props: [
-				(1, p("window", None)),
-				(2, radio),
-				(3, field),
-				(4, p("tabgroup", Some("Tabs"))),
-			]
-			.into(),
+			props: [(1, p("window", None)), (2, radio), (3, field), (4, p("tabgroup", Some("Tabs")))]
+				.into(),
 			children: [(1, vec![2, 3, 4])].into(),
 			..Default::default()
 		};
