@@ -894,7 +894,12 @@ export class EventController {
 		// the listener's first await, preserving the timing the coalescing
 		// tests assert on. `message_update` enqueue is itself synchronous and
 		// needs no serialization.
-		this.ctx.unsubscribe = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+		const unsubscribeEvents = this.ctx.session.subscribe(event => this.dispatchSessionEvent(event));
+		const unsubscribeDaybreak = this.ctx.session.subscribeDaybreakChange?.(() => this.ctx.ui.requestRender());
+		this.ctx.unsubscribe = () => {
+			unsubscribeEvents();
+			unsubscribeDaybreak?.();
+		};
 	}
 
 	/**

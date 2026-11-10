@@ -651,6 +651,7 @@ export class Theme {
 	get icon() {
 		return {
 			model: this.#symbols["icon.model"],
+			daybreak: this.#symbols["icon.daybreak"],
 			plan: this.#symbols["icon.plan"],
 			prewalk: this.#symbols["icon.prewalk"],
 			goal: this.#symbols["icon.goal"],

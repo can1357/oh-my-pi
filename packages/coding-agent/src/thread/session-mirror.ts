@@ -185,6 +185,10 @@ export interface SessionViewState {
 	availableEffortSelectors: ConfiguredThinkingLevel[];
 	serviceTierByFamily: ServiceTierByFamily;
 	fastModeActive: boolean;
+	/** Model whose account eligibility was evaluated, to avoid mixing separate state and view patches. */
+	daybreakModelId: string | undefined;
+	/** Account ids still eligible for Daybreak after provider rejections; main applies its live setting and account. */
+	daybreakEligibleAccounts: string[];
 	anthropicSlowModeLabel: string | undefined;
 	prewalk: Prewalk | undefined;
 	goalMode: GoalModeState | undefined;

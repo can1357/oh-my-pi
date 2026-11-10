@@ -337,6 +337,10 @@ export interface AgentViewSession extends AgentSessionHandle {
 	effectiveServiceTier(model: Model): ServiceTier | undefined;
 	/** Whether fast mode is active. */
 	isFastModeActive(): boolean;
+	/** Whether the selected Codex OAuth account can request Daybreak Blue. */
+	isDaybreakSelected(): boolean;
+	/** Notify a view when Daybreak eligibility changes without an agent event. */
+	subscribeDaybreakChange?(listener: () => void): () => void;
 	/** Anthropic usage-limit label, when one applies. */
 	getAnthropicSlowModeLabel(): string | undefined;
 	/** Active prewalk state. */

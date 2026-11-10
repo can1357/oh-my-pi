@@ -85,6 +85,10 @@ import type {
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
+import {
+	onCodexAccessProgramRejected,
+	wouldRequestCodexAccessProgram,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -383,6 +387,7 @@ import {
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { selectedOAuthAccountId } from "./daybreak-status";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
@@ -547,6 +552,7 @@ import {
 	cfgProviderAppendOnlyContext,
 	cfgProvidersCacheWarming,
 	cfgProvidersCacheRetention,
+	cfgProvidersOpenaiCodexDaybreak,
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
@@ -12620,6 +12626,42 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Reports whether priority service is realized by the active model. */
 	isFastModeActive(): boolean {
 		return this.#models.isFastModeActive();
+	}
+
+	/** Whether the active Codex OAuth account can request Daybreak Blue. */
+	isDaybreakSelected(): boolean {
+		const model = this.model;
+		if (!model || model.api !== "openai-codex-responses" || !cfgProvidersOpenaiCodexDaybreak.get(this.settings))
+			return false;
+		// Avoid an OAuth storage lookup when no account can still request it.
+		if (
+			!Object.keys(model.accountAccess ?? {}).some(accountId =>
+				wouldRequestCodexAccessProgram(model, accountId, true),
+			)
+		)
+			return false;
+		const accountId = selectedOAuthAccountId(this.#modelRegistry.authStorage, model.provider, this.sessionId);
+		return wouldRequestCodexAccessProgram(model, accountId, true);
+	}
+
+	subscribeDaybreakChange(listener: () => void): () => void {
+		const unsubscribe = onCodexAccessProgramRejected((modelId, accountId) => {
+			const model = this.model;
+			if (model?.api !== "openai-codex-responses" || model.id !== modelId) return;
+			const activeAccountId = selectedOAuthAccountId(
+				this.#modelRegistry.authStorage,
+				model.provider,
+				this.sessionId,
+			);
+			if (activeAccountId === accountId) listener();
+		});
+		const dispose = () => {
+			unsubscribe();
+			const index = this.#disposers.indexOf(dispose);
+			if (index !== -1) this.#disposers.splice(index, 1);
+		};
+		this.addDisposer(dispose);
+		return dispose;
 	}
 
 	/** Reports whether a fresh session on `model` realizes a fast tier from configured `tier.*` settings. */

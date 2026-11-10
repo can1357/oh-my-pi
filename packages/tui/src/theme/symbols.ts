@@ -82,6 +82,7 @@ export type SymbolKey =
 	| "sep.pipe"
 	// Icons
 	| "icon.model"
+	| "icon.daybreak"
 	| "icon.plan"
 	| "icon.prewalk"
 	| "icon.goal"
@@ -472,6 +473,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"sep.pipe": " │ ",
 	// Icons
 	"icon.model": "⬢",
+	"icon.daybreak": "☼",
 	"icon.plan": "🗺",
 	"icon.prewalk": "🏃",
 	"icon.goal": "🎯",
@@ -838,6 +840,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	// Icons - Nerd Font specific
 	// pick:  | alt:   ◆
 	"icon.model": "\uec19",
+	"icon.daybreak": "\ue34c",
 	// pick:  | alt:  
 	"icon.plan": "\uf2d2",
 	"icon.prewalk": "\uf29d",
@@ -1273,6 +1276,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"sep.pipe": " | ",
 	// Icons
 	"icon.model": "[M]",
+	"icon.daybreak": "[DB]",
 	// Mode icons are always followed by their word label ("Plan", "Prewalk", "Goal");
 	// an ASCII word here would just repeat it, so render the label alone.
 	"icon.plan": "",
