@@ -191,8 +191,10 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// snapshots must not survive the switch to scoped discovery. Bump the
 			// version whenever the LiteLLM mappers change, or warm caches keep
 			// serving pre-change rows for the full TTL (rich-v1…v14 history in git).
+			// scoped-v2: rows cached before deployment-declared effort ladders
+			// were read carry no ladder for gateway aliases.
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `litellm:scoped-v1:${Bun.hash(scope).toString(36)}`;
+			return `litellm:scoped-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":

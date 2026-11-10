@@ -238,16 +238,20 @@ async function fetchCatalogPayload(
 	return payload;
 }
 
+/** The omp tiers a published wire tier list names, in canonical order; undefined when it names none. */
+function knownEffortLadder(values: unknown): Effort[] | undefined {
+	if (!Array.isArray(values)) return undefined;
+	const ladder = THINKING_EFFORTS.filter(effort => values.includes(effort));
+	return ladder.length > 0 ? ladder : undefined;
+}
+
 /**
  * The wire effort tiers the catalog publishes for a model, in canonical order.
  * Undefined when the row has no effort-addressed thinking, or names no tier
  * omp knows.
  */
 function publishedEffortLadder(model: ModelsDevModel): Effort[] | undefined {
-	const values = model.reasoning_options?.find(option => option?.type === "effort")?.values;
-	if (!Array.isArray(values)) return undefined;
-	const ladder = THINKING_EFFORTS.filter(effort => values.includes(effort));
-	return ladder.length > 0 ? ladder : undefined;
+	return knownEffortLadder(model.reasoning_options?.find(option => option?.type === "effort")?.values);
 }
 
 /**
@@ -5703,6 +5707,8 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasCost: boolean;
 	/** Whether an endpoint reported a string `mode`, the only signal that selects a runner api. */
 	hasMode: boolean;
+	/** Whether `model.thinking` is a ladder the deployment declared rather than the bundled reference's. */
+	declaresThinking: boolean;
 	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
 type LiteLLMRichEndpointFailure = {
@@ -5894,6 +5900,28 @@ function getSupportedOpenAIParams(entry: LiteLLMRichModelEntry): string[] | unde
 	return value.flatMap(item => (typeof item === "string" ? [item] : []));
 }
 
+/**
+ * The effort ladder a LiteLLM deployment declares: the group's
+ * `supported_reasoning_efforts`, which LiteLLM resolves across the group's
+ * deployments, else a deployment's own `reasoning_effort_levels`, which yield
+ * to its explicit `supports_reasoning: false` as they do in that resolution.
+ * `default_reasoning_effort` sets the default when it is on the ladder; tiers
+ * omp lacks (LiteLLM's `none` off-switch) are dropped. The levels are
+ * `reasoning_effort` values, so only the OpenAI-wire routes take them.
+ */
+function getLiteLLMDeclaredThinking(entry: LiteLLMRichModelEntry, api: Api): ThinkingConfig | undefined {
+	if (api !== "openai-completions" && api !== "openai-responses") return undefined;
+	const efforts =
+		knownEffortLadder(getLiteLLMMetadataValue(entry, "supported_reasoning_efforts")) ??
+		(getLiteLLMMetadataValue(entry, "supports_reasoning") === false
+			? undefined
+			: knownEffortLadder(getLiteLLMMetadataValue(entry, "reasoning_effort_levels")));
+	if (efforts === undefined) return undefined;
+	const declaredDefault = getLiteLLMMetadataValue(entry, "default_reasoning_effort");
+	const defaultLevel = efforts.find(effort => effort === declaredDefault);
+	return { mode: "effort", efforts, ...(defaultLevel !== undefined ? { defaultLevel } : {}) };
+}
+
 function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined {
 	if (!Array.isArray(entry.providers)) {
 		return undefined;
@@ -6080,6 +6108,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 		...(supportsVision === true ? { stripImageInput: false } : {}),
 	};
 	const api = options.resolveApi?.(entry, id) ?? options.api;
+	const declaredThinking = getLiteLLMDeclaredThinking(entry, api);
 	return {
 		id,
 		name: toLiteLLMDisplayName(modelName, reference?.name, id),
@@ -6095,12 +6124,27 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 				: supportsVision === false
 					? ["text"]
 					: (reference?.input ?? ["text"]),
-		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
-		thinking: reference?.thinking,
+		reasoning:
+			declaredThinking !== undefined ||
+			(typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false)),
+		thinking: declaredThinking ?? reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
-		compat: compat as ModelSpec<TApi>["compat"],
+		compat: (declaredThinking ? withDeclaredReasoningEffort(compat) : compat) as ModelSpec<TApi>["compat"],
 	};
+}
+
+/**
+ * Compat for a declared effort ladder. LiteLLM derives
+ * `supported_openai_params` from its provider adapter and model map, which can
+ * omit `reasoning_effort` for a gateway alias, while the declared levels are
+ * what the deployment accepts and routes. So a declared ladder sends
+ * `reasoning_effort`, and no borrowed reference map may rewrite a declared
+ * tier nor a borrowed omission suppress it.
+ */
+function withDeclaredReasoningEffort<T>(compat: T): T {
+	const { reasoningEffortMap: _map, omitReasoningEffort: _omit, ...rest } = (compat ?? {}) as OpenAICompat;
+	return { ...rest, supportsReasoningEffort: true } as T;
 }
 
 /**
@@ -6154,6 +6198,11 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 	// mode carries no news for it, so a runner api reported by either side wins.
 	const runnerApi = [next.model.api, existing.model.api].find(api => runnerApiKind(api) !== undefined);
 	const api = runnerApi ?? (next.apiRoute === apiRoute ? next.model.api : existing.model.api);
+	const declaresThinking = existing.declaresThinking || next.declaresThinking;
+	const compat = mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
+		existingReportedParams: existing.hasSupportedOpenAIParams,
+		nextReportedParams: next.hasSupportedOpenAIParams,
+	});
 	const model: ModelSpec<TApi> = {
 		...existing.model,
 		api,
@@ -6162,12 +6211,15 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		contextWindow: next.hasContextWindow ? next.model.contextWindow : existing.model.contextWindow,
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
-		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
+		reasoning:
+			next.declaresThinking || typeof next.supportsReasoning === "boolean"
+				? next.model.reasoning
+				: existing.model.reasoning,
+		// A declared ladder and its default are one axis: an endpoint declaring
+		// one replaces it, and one declaring none leaves it in place.
+		thinking: next.declaresThinking ? next.model.thinking : existing.model.thinking,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
-		compat: mergeLiteLLMCompat(existing.model.compat, next.model.compat, {
-			existingReportedParams: existing.hasSupportedOpenAIParams,
-			nextReportedParams: next.hasSupportedOpenAIParams,
-		}),
+		compat: declaresThinking ? withDeclaredReasoningEffort(compat) : compat,
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
@@ -6183,6 +6235,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
 		hasCost: existing.hasCost || next.hasCost,
 		hasMode: existing.hasMode || next.hasMode,
+		declaresThinking,
 	};
 }
 
@@ -6315,6 +6368,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
 				hasCost: getLiteLLMCost(entry) !== undefined,
 				hasMode: typeof getLiteLLMMetadataValue(entry, "mode") === "string",
+				declaresThinking: getLiteLLMDeclaredThinking(entry, model.api) !== undefined,
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
 			const existing = deduped.get(model.id);
@@ -6392,6 +6446,11 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
 					(options.resolveApi !== undefined && (entry.apiRoute === "unknown" || !entry.hasMode)) ||
+					// `/model_group/info` has no default-level field; a deployment's
+					// `default_reasoning_effort` arrives with its `model_info`.
+					(endpoint === "/model_group/info" &&
+						entry.declaresThinking &&
+						entry.model.thinking?.defaultLevel === undefined) ||
 					(Object.keys(entry.reportedCost).length > 0 &&
 						(entry.reportedCost.input === undefined ||
 							entry.reportedCost.output === undefined ||

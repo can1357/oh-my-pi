@@ -7,6 +7,7 @@
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 ### Added
 
+- LiteLLM models offer the reasoning levels their deployment declares (`supported_reasoning_efforts` on `/model_group/info`, or `model_info.reasoning_effort_levels` with `default_reasoning_effort`) and send `reasoning_effort` for them, including gateway aliases the bundled catalog does not know
 - Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
 - Added the `login-warning "<text>"` auth rule, which makes a new login accept the stated account risk first ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
 

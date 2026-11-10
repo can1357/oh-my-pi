@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import {
 	fetchLiteLLMRichModels,
 	litellmModelManagerOptions,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 
@@ -2084,5 +2086,172 @@ describe("LiteLLM declared model capabilities", () => {
 		);
 
 		expect(effortOf(spec)).toBe(true);
+	});
+});
+
+describe("LiteLLM declared reasoning ladders", () => {
+	// A gateway alias as a live LiteLLM proxy reported it: an OpenAI-backed
+	// group whose `supported_openai_params` omits `reasoning_effort`, and no
+	// bundled reference to borrow a ladder from.
+	const alias = "claude-opus-5-5-1m-fast";
+	const aliasGroup = {
+		model_group: alias,
+		providers: ["openai"],
+		mode: "chat",
+		supports_reasoning: true,
+		supports_vision: true,
+		supported_openai_params: ["max_tokens", "stream", "temperature", "tools", "tool_choice"],
+	};
+	const aliasDeployment = (modelInfo: Record<string, unknown>) => ({
+		model_name: alias,
+		litellm_params: { model: `openai/${alias}` },
+		model_info: modelInfo,
+	});
+	const discover = async (endpoints: Record<string, unknown[]>, id = alias): Promise<Model<Api>> => {
+		const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			if (url === MODELS_DEV_URL) return Response.json({});
+			if (url === "http://primary:4000/v1/models") return Response.json({ data: [{ id }] });
+			const data = endpoints[url.slice("http://primary:4000".length)];
+			return data ? Response.json({ data }) : new Response("{}", { status: 404 });
+		}) as FetchImpl;
+		const options = litellmModelManagerOptions({
+			apiKey: "sk-rich",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchImpl,
+		});
+		const spec = (await options.fetchDynamicModels?.())?.find(model => model.id === id);
+		if (!spec) throw new Error(`LiteLLM discovery dropped ${id}`);
+		return buildModel(spec);
+	};
+	const sendsReasoningEffort = (model: Model<Api>) =>
+		(model.compat as { supportsReasoningEffort?: boolean } | undefined)?.supportsReasoningEffort;
+
+	test("turns on the effort dial for a gateway alias only when its group declares levels", async () => {
+		const silent = await discover({ "/model_group/info": [aliasGroup] });
+		expect(silent.thinking).toBeUndefined();
+		expect(clampThinkingLevelForModel(silent, Effort.Max)).toBeUndefined();
+
+		const declared = await discover({
+			"/model_group/info": [
+				{ ...aliasGroup, supported_reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
+			],
+		});
+		expect(declared.api).toBe("openai-responses");
+		expect(declared.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+		});
+		expect(sendsReasoningEffort(declared)).toBe(true);
+		expect(clampThinkingLevelForModel(declared, Effort.Max)).toBe(Effort.Max);
+	});
+
+	test("reads a deployment's model_info levels in effort order, skipping unknown tiers and an off-ladder default", async () => {
+		const model = await discover({
+			"/model/info": [
+				aliasDeployment({
+					supports_reasoning: true,
+					reasoning_effort_levels: ["max", "ultra", "low", 3, "high", "high"],
+					default_reasoning_effort: "medium",
+				}),
+			],
+		});
+
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+		expect(model.thinking?.defaultLevel).toBeUndefined();
+		expect(sendsReasoningEffort(model)).toBe(true);
+	});
+
+	test("continues past the group endpoint for the default a deployment declares beside its levels", async () => {
+		const levels = ["low", "medium", "high", "xhigh", "max"];
+		const model = await discover({
+			"/model_group/info": [{ ...aliasGroup, supported_reasoning_efforts: levels }],
+			"/v2/model/info": [
+				aliasDeployment({
+					supports_reasoning: true,
+					reasoning_effort_levels: levels,
+					default_reasoning_effort: "high",
+				}),
+			],
+		});
+
+		expect(model.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			defaultLevel: Effort.High,
+		});
+	});
+
+	test("keeps a declared ladder when a later endpoint reports only a params list without reasoning_effort", async () => {
+		const model = await discover({
+			"/model_group/info": [{ ...aliasGroup, supported_reasoning_efforts: ["low", "high"] }],
+			"/v2/model/info": [
+				aliasDeployment({ supports_reasoning: true, supported_openai_params: ["tools", "stream"] }),
+			],
+		});
+
+		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+		expect(sendsReasoningEffort(model)).toBe(true);
+	});
+
+	test("lets declared levels outrank the bundled reference ladder unless they name no omp tier", async () => {
+		const group = { model_group: "glm-5.2", model_name: "GLM-5.2", supports_reasoning: true };
+
+		const unusable = await discover(
+			{ "/model_group/info": [{ ...group, supported_reasoning_efforts: ["none"] }] },
+			"glm-5.2",
+		);
+		expect(unusable.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+
+		const declared = await discover(
+			{ "/model_group/info": [{ ...group, supported_reasoning_efforts: ["low", "high"] }] },
+			"glm-5.2",
+		);
+		expect(declared.thinking?.efforts).toEqual([Effort.Low, Effort.High]);
+	});
+
+	test("lets a deployment's explicit supports_reasoning: false outrank its declared levels", async () => {
+		const model = await discover({
+			"/model/info": [aliasDeployment({ supports_reasoning: false, reasoning_effort_levels: ["low", "high"] })],
+		});
+
+		expect(model.reasoning).toBe(false);
+		expect(model.thinking).toBeUndefined();
+	});
+
+	test("leaves an anthropic-messages route on its catalog thinking", async () => {
+		// The levels are `reasoning_effort` values; a custom provider's Anthropic
+		// route never sends that field, and an effort-mode ladder there would
+		// replace adaptive thinking with budget thinking.
+		const discoverAnthropic = async (group: Record<string, unknown>) => {
+			const fetchImpl = vi.fn(async (input: string | URL | Request) =>
+				inputUrl(input).endsWith("/model_group/info")
+					? Response.json({ data: [group] })
+					: new Response("{}", { status: 404 }),
+			) as FetchImpl;
+			const specs = await fetchLiteLLMRichModels<Api>({
+				api: "anthropic-messages",
+				provider: "litellm-anthropic",
+				baseUrl: "http://primary:4000/v1",
+				fetch: fetchImpl,
+				resolveApi: (entry, id) => resolveLiteLLMApi(entry, id, "anthropic-messages"),
+			});
+			const spec = specs?.[0];
+			if (!spec) throw new Error("LiteLLM discovery dropped the Anthropic group");
+			return buildDiscoveredModel(spec, "litellm");
+		};
+		const group = {
+			model_group: "claude-opus-5-5",
+			providers: ["anthropic"],
+			mode: "chat",
+			supports_reasoning: true,
+			supports_vision: true,
+		};
+
+		const catalog = await discoverAnthropic(group);
+		const declared = await discoverAnthropic({ ...group, supported_reasoning_efforts: ["low", "high"] });
+
+		expect(catalog.api).toBe("anthropic-messages");
+		expect(catalog.thinking).toBeDefined();
+		expect(declared.thinking).toEqual(catalog.thinking);
 	});
 });

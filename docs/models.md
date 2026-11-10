@@ -606,6 +606,22 @@ Runtime discovery probes LiteLLM management metadata in order: `GET /model_group
 
 If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Fallback pricing remains unknown (represented by zero); configured generic discovery uses a 128,000-token context default when neither the endpoint nor a bundled reference supplies a limit. Rich management metadata can supply provider-specific prices. Later probes fill or override reported metadata for models in the first usable roster rather than unioning every endpoint's roster.
 
+A deployment can declare the reasoning levels each model group accepts. LiteLLM resolves a group's `supported_reasoning_efforts` on `/model_group/info` from its deployments' `model_info.reasoning_effort_levels`, or from the per-level flags its model map carries for models it knows, and reports a deployment's `model_info.default_reasoning_effort` on `/v2/model/info` and `/model/info`. A declared list becomes the model's effort ladder in least-to-most order, and a declared default on that ladder becomes its default level. The declaration outranks the bundled reference and enables `reasoning_effort` even when LiteLLM's generated `supported_openai_params` leaves it out, as it can for gateway aliases. Levels omp has no tier for, such as LiteLLM's `none` off-switch, are skipped; a list naming no omp tier is ignored; an explicit `supports_reasoning: false` wins over declared levels. Declared levels apply to models on the Chat Completions and Responses routes. LiteLLM resolves `reasoning_effort_levels` only for deployments it treats as reasoning, so set `supports_reasoning: true` beside it:
+
+```yaml
+model_list:
+   - model_name: claude-opus-5-5-1m-fast
+     litellm_params:
+        model: openai/claude-opus-5-5-1m-fast
+        api_base: https://gateway.example/v1
+     model_info:
+        supports_reasoning: true
+        reasoning_effort_levels: [low, medium, high, xhigh, max]
+        default_reasoning_effort: high
+```
+
+`modelOverrides.<id>.thinking` and `compat.supportsReasoningEffort` in `models.yml` still win over a declared ladder.
+
 ### Generic OpenAI-compatible discovery
 
 `openai-models-list` reads `{baseUrl}/v1/models` by default (without adding a second `/v1`).
