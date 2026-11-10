@@ -637,6 +637,37 @@ describe("supermemoryBackend", () => {
 		expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
 	});
 
+	it("/memory enqueue stops at a failed complete window instead of uploading the rest as one tail", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 503."))
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({
+			settings: { "supermemory.retainEveryNTurns": 2, "supermemory.autoRetain": false },
+		});
+		await start(session);
+		for (const turn of ["one", "two", "three", "four"]) session.addTurn(turn);
+		await supermemoryBackend.enqueue!(temp.path(), "/tmp", session as never);
+		expect(create.mock.calls.map(call => [call[0]?.metadata?.turnStart, call[0]?.metadata?.turnEnd])).toEqual([
+			[0, 2],
+		]);
+		expect(cursors(session).map(([, turn]) => turn)).not.toContain(4);
+	});
+
+	it("a disposed state refuses new saves and edits instead of writing to its old container", async () => {
+		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument");
+		const update = vi.spyOn(SupermemoryClient.prototype, "updateMemory");
+		const forget = vi.spyOn(SupermemoryClient.prototype, "forgetMemory");
+		const session = makeSession();
+		await start(session);
+		const state = session.getSupermemorySessionState();
+		await state?.dispose();
+		await expect(state!.save("x", { source: "t" })).rejects.toThrow("memory NOT stored");
+		await expect(state!.updateMemory("m1", "y")).rejects.toThrow("memory NOT stored");
+		await expect(state!.forgetMemory("m1", undefined)).rejects.toThrow("memory NOT stored");
+		expect([create, update, forget].map(spy => spy.mock.calls.length)).toEqual([0, 0, 0]);
+	});
+
 	it("repeated /memory enqueue tails upsert one open window instead of adding documents", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")

@@ -67,6 +67,11 @@ interface SettledHistory {
 	transcriptId: string;
 }
 
+/** A write through a state that was disposed (e.g. a subagent's alias after a settings change). */
+function closedError(): Error {
+	return new Error("Supermemory state is closed after a settings change; memory NOT stored. Restart the subagent.");
+}
+
 function isRetentionCursor(data: unknown): data is RetentionCursorData {
 	return (
 		typeof data === "object" &&
@@ -323,6 +328,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		customId?: string,
 	): Promise<SupermemoryDocument> {
 		if (this.aliasOf) return this.aliasOf.save(content, metadata, customId);
+		if (this.#disposed) return Promise.reject(closedError());
 		return this.#track(
 			this.#local().client.createDocument({
 				content: this.#redact(content),
@@ -341,6 +347,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `memory_edit update`: new version of memory `id` in this state's container (redacted). */
 	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
 		if (this.aliasOf) return this.aliasOf.updateMemory(id, content, signal);
+		if (this.#disposed) return Promise.reject(closedError());
 		return this.#local().client.updateMemory(
 			{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
 			signal,
@@ -350,6 +357,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `memory_edit forget`/`invalidate`: soft-forgets memory `id` in this state's container. */
 	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
 		if (this.aliasOf) return this.aliasOf.forgetMemory(id, reason, signal);
+		if (this.#disposed) return Promise.reject(closedError());
 		return this.#local().client.forgetMemory(
 			{ id, containerTag: this.containerTag, reason: reason === undefined ? undefined : this.#redact(reason) },
 			signal,
@@ -447,7 +455,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			await this.#retainDue(history);
 			const { messages } = history;
 			const userStarts = userTurnStarts(messages);
-			if (userStarts.length > this.lastRetainedTurn) {
+			// Only a genuine partial tail: if a complete window failed above, uploading everything
+			// after it as one document would truncate it and skip those windows for good.
+			const open = userStarts.length - this.lastRetainedTurn;
+			if (open > 0 && open < this.#config.retainEveryNTurns) {
 				await this.#retainWindow(messages, userStarts, this.lastRetainedTurn, userStarts.length, history);
 			}
 		});
