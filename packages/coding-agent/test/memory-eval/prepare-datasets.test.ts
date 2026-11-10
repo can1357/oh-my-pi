@@ -35,10 +35,10 @@ publish(other, text, "rev")
 # Another writer's data next to this marker, as two racing setups can leave them, is not taken for "rev".
 other.write_text(json.dumps(["other writer"]), encoding="utf-8")
 assert read_current(other, "rev") is None
-# A marker from before digests were recorded is upgraded to the data as it stands, then holds it.
+# A marker from before digests were recorded names no digest to attest the file by: it is not current, and is left as found.
 marker.write_text("rev\\n", encoding="utf-8")
-assert read_current(other, "rev") == json.dumps(["other writer"])
-assert len(marker.read_text(encoding="utf-8").split()) == 2
+assert read_current(other, "rev") is None
+assert marker.read_text(encoding="utf-8") == "rev\\n"
 `,
 			PY,
 			out,
