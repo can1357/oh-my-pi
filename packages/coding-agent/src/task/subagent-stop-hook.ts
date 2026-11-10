@@ -85,7 +85,9 @@ export class SubagentStopHook {
 		if (!runner?.hasHandlers("subagent_stop")) return { kind: "allow" };
 		const signal = AbortSignal.any([this.#signal, hold.signal]);
 		if (signal.aborted) return { kind: "aborted" };
-		hold.consult();
+		// Queued behind another pass's hold, this one judges only once it holds the session.
+		await hold.consult();
+		if (signal.aborted) return { kind: "aborted" };
 		const result = await runner.emitSubagentStop({
 			agent_id: this.#identity.agentId,
 			agent_type: this.#identity.agentType,

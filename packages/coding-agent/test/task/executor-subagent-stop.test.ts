@@ -264,7 +264,7 @@ function createHarness(args: {
 			holds.push(record);
 			return {
 				signal: record.cancel.signal,
-				consult: () => {},
+				consult: async () => {},
 				prompt: (text: string, options?: PromptOptions) => session.prompt(text, options),
 				release: () => {
 					if (record.released) return;
