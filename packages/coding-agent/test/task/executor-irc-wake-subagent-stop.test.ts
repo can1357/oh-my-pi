@@ -702,6 +702,36 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.at(-1)?.status).toBe("failed");
 	});
 
+	it("fails, rather than publishes unjudged, a wake yield an owner job's result superseded and prose answered", async () => {
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const gate = Promise.withResolvers<string>();
+		const run = await setup({
+			manager,
+			responses: [
+				() => {
+					// The owner job finishes while the yield turn is still in flight.
+					gate.resolve("BUILD GREEN");
+					return yieldCall("STALE-PAYLOAD");
+				},
+				// The delivered job result's turn: prose, no fresh yield.
+				{ content: ["noted the job result"] },
+			],
+			onStop: () => ({ decision: "block", reason: "not done" }),
+		});
+		manager.register("bash", "bg build", ({ signal }) => untilAborted(signal, gate.promise).then(() => "build ok"), {
+			id: "bg-job",
+			ownerId: AGENT_ID,
+		});
+
+		await wake(run.session);
+
+		// The yield predates the job's result, so handlers can no longer judge it; an always-block
+		// handler must not be bypassed by publishing it anyway.
+		expect(await Bun.file(run.artifact).exists()).toBe(false);
+		expect(run.lifecycle.at(-1)?.status).toBe("failed");
+	});
+
 	it("reports a wake turn cancelled while handlers were consulting as cancelled, not as a refusal", async () => {
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
