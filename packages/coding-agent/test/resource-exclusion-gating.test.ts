@@ -13,6 +13,7 @@ import {
 	applyExclusionsToPreloadedPluginRoots,
 	getPreloadedPluginRoots,
 	injectPluginDirRoots,
+	preloadPluginRoots,
 	listClaudePluginRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { getManagedSkillsDir } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
@@ -153,6 +154,42 @@ describe("reviewed package exclusions in discovery", () => {
 		expect(await discoverNative(exclusions)).toEqual([path.join(keepRoot, "index.ts")]);
 	});
 
+	it("loads the user copy of an extension once the same-named project copy that shadowed it is hidden", async () => {
+		const originalAgentDir = getAgentDir();
+		setAgentDir(path.join(cwd, "agent"));
+		try {
+			const projectCopy = path.join(extensionsDir, "dup.ts");
+			const userCopy = path.join(getAgentDir(), "extensions", "dup.ts");
+			await Bun.write(projectCopy, extensionCode);
+			await Bun.write(userCopy, "export default function (pi) { /* user copy */ }\n");
+			const { exclusions } = await reviewPair(undefined, userCopy, projectCopy);
+			const dup = async (value: ResourceExclusions) =>
+				(await discoverNative(value)).filter(file => path.basename(file) === "dup.ts");
+			expect(await dup({})).toEqual([projectCopy]);
+			expect(await dup(exclusions)).toEqual([userCopy]);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	it("loads the user copy of a hook once the same-named project copy that shadowed it is hidden", async () => {
+		const originalAgentDir = getAgentDir();
+		setAgentDir(path.join(cwd, "agent"));
+		try {
+			const projectCopy = path.join(getProjectAgentDir(cwd), "hooks", "pre", "dup.ts");
+			const userCopy = path.join(getAgentDir(), "hooks", "pre", "dup.ts");
+			await Bun.write(projectCopy, extensionCode);
+			await Bun.write(userCopy, "export default function (pi) { /* user copy */ }\n");
+			const { exclusions } = await reviewPair(undefined, userCopy, projectCopy);
+			const dup = async (value: ResourceExclusions) =>
+				(await discoverNative(value)).filter(file => path.basename(file) === "dup.ts");
+			expect(await dup({})).toEqual([projectCopy]);
+			expect(await dup(exclusions)).toEqual([userCopy]);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
 	it("honors a confirmed exclusion for both ambient and explicit-only loading", async () => {
 		const { exclusions } = await reviewPair();
 		const ambient = await discoverExtensionPaths([hideRoot], cwd, [], {
@@ -213,6 +250,34 @@ describe("reviewed package exclusions in discovery", () => {
 				.filter(name => name.endsWith("-pkg"))
 				.sort(),
 		).toEqual(["hide-pkg", "keep-pkg"]);
+	});
+
+	describe("when two installs of one plugin ID are reviewed", () => {
+		// The project install shadows the user install of the same plugin ID until the project one is hidden.
+		beforeEach(async () => {
+			const register = (dir: string, installPath: string, scope: "user" | "project") =>
+				Bun.write(
+					path.join(dir, ".omp", "plugins", "installed_plugins.json"),
+					JSON.stringify({ version: 2, plugins: { "dup@market": [{ scope, installPath, version: "1.0.0" }] } }),
+				);
+			await register(home, keepRoot, "user");
+			await register(cwd, hideRoot, "project");
+		});
+		const names = (roots: readonly { path: string }[]) => roots.map(root => path.basename(root.path));
+
+		it("hands the plugin to the user-scope install the hidden project install had shadowed", async () => {
+			const { exclusions } = await reviewPair();
+			expect(names((await listClaudePluginRoots(home, cwd, {})).roots)).toEqual(["hide-pkg"]);
+			expect(names((await listClaudePluginRoots(home, cwd, exclusions)).roots)).toEqual(["keep-pkg"]);
+		});
+
+		it("does the same for the preloaded roots LSP/DAP config reads", async () => {
+			const { exclusions } = await reviewPair();
+			await preloadPluginRoots(home, cwd);
+			expect(names(getPreloadedPluginRoots())).toEqual(["hide-pkg"]);
+			await applyExclusionsToPreloadedPluginRoots(exclusions);
+			expect(names(getPreloadedPluginRoots())).toEqual(["keep-pkg"]);
+		});
 	});
 
 	it("keeps a hidden package's skills out of skill discovery until the package changes", async () => {
@@ -361,6 +426,18 @@ describe("reviewed package exclusions in discovery", () => {
 		// A later session whose decision no longer applies restores the hidden copy from the raw list.
 		await applyExclusionsToPreloadedPluginRoots({});
 		expect(names().sort()).toEqual(["hide-pkg", "keep-pkg"]);
+	});
+
+	it("loads the user copy of a tool once the same-named project copy that shadowed it is hidden", async () => {
+		const agentDir = path.join(cwd, "agent");
+		const projectCopy = path.join(getProjectAgentDir(cwd), "tools", "dup.ts");
+		const userCopy = path.join(agentDir, "tools", "dup.ts");
+		await Bun.write(projectCopy, "export default function () {}\n");
+		await Bun.write(userCopy, "export default function () { /* user copy */ }\n");
+		const settings = await Settings.init({ inMemory: true, cwd });
+		await reviewPair(settings, userCopy, projectCopy);
+		const tools = await discoverCustomToolPaths([], cwd, agentDir);
+		expect(tools.map(tool => tool.path).filter(file => path.basename(file) === "dup.ts")).toEqual([userCopy]);
 	});
 
 	it("keeps a hidden package's tool modules from loading", async () => {

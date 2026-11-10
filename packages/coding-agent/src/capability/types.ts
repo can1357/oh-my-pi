@@ -139,9 +139,9 @@ export interface LoadOptions<T = unknown> {
 	 * Drop items before deduplication as if they never existed (e.g. scope
 	 * exclusions). A dropped item neither survives nor claims its dedupe key,
 	 * so it cannot shadow anything. Receives the item with its attached
-	 * `_source`.
+	 * `_source`; may be async.
 	 */
-	filter?(item: T & { _source: SourceMeta }): boolean;
+	filter?(item: T & { _source: SourceMeta }): boolean | Promise<boolean>;
 	/**
 	 * Exclude items from the results while letting them claim their dedupe key.
 	 * A suppressed higher-priority item still shadows same-key lower-priority

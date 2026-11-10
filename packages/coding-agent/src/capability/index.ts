@@ -253,7 +253,7 @@ async function loadImpl<T>(
 				continue;
 			}
 
-			if (options.filter && !options.filter(itemWithSource)) {
+			if (options.filter && !(await options.filter(itemWithSource))) {
 				continue;
 			}
 

@@ -100,3 +100,19 @@ export async function dropExcludedPaths<T>(
 	const verdicts = await Promise.all(real.map(target => target !== null && isExcluded(target)));
 	return items.filter((_, index) => !verdicts[index]);
 }
+
+/**
+ * A capability `filter` that drops items inside a still-valid excluded root before the capability
+ * resolves same-key precedence, so hiding the winning copy promotes the copy it had shadowed (a filter
+ * applied to the deduplicated result cannot). `undefined` when nothing is excluded.
+ */
+export function excludedItemFilter<T extends { path: string }>(
+	exclusions: ResourceExclusions,
+): ((item: T) => Promise<boolean>) | undefined {
+	if (Object.keys(exclusions).length === 0) return undefined;
+	const isExcluded = excludedPathGate(exclusions);
+	return async item => {
+		const real = await realpathOrNull(item.path);
+		return real === null || !(await isExcluded(real));
+	};
+}
