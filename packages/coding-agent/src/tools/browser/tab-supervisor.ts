@@ -903,7 +903,7 @@ async function acquireTernTab(
 
 function notAliveMessage(name: string): string {
 	const quoted = JSON.stringify(name);
-	return `Tab ${quoted} is not open (never opened, or closed since). Open it with browser.open({ name: ${quoted} }) (Python: browser.open(name=${quoted})), passing the url and app it was opened with.`;
+	return `Tab ${quoted} is not open (never opened, or closed since). Open it with await browser.open({ name: ${quoted} }) (Python: await browser.open(name=${quoted})), passing the url and app it was opened with.`;
 }
 
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {

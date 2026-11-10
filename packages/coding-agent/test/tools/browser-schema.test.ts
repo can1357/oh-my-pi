@@ -94,8 +94,8 @@ describe("browser prelude", () => {
 				() => "",
 				(error: Error) => error.message,
 			);
-		expect(message).toContain(`browser.open({ name: "${name}" })`);
-		expect(message).toContain(`browser.open(name="${name}")`);
+		expect(message).toContain(`await browser.open({ name: "${name}" })`);
+		expect(message).toContain(`await browser.open(name="${name}")`);
 		expect(message).not.toContain("action:");
 	});
 
