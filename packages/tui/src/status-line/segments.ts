@@ -20,6 +20,7 @@ import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
 import { sanitizeStatusText } from "../chrome/shared";
+import { detectServedModelMismatch } from "../chat/served-model-marker";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -349,6 +350,37 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
 	return icon ? { icon, color } : undefined;
 }
 
+/**
+ * Served model id from the newest turn for the selected model, when the host
+ * provably served different weights. Local OpenAI-compatible servers keep their
+ * own roster, so the chip's id can be a lie: a `serve`/llama.cpp instance that
+ * loaded another checkpoint answers `chunk.model` with the weights it has. The
+ * transcript already names such turns through the shared detector; the status
+ * line carries the same verdict so the model chip is never read as the truth.
+ *
+ * The id is host-chosen text, so it goes through the same sanitizer and width
+ * cap as every other host-reported string in this file (`u.tier`, reset reasons):
+ * an echo can be an absolute checkpoint path, and control characters in it must
+ * not reach the renderer as layout.
+ */
+function servedModelMismatch(ctx: SegmentContext): string | undefined {
+	const selected = ctx.session.state.model;
+	const messages = ctx.session.state.messages;
+	if (!selected?.id || !messages) return undefined;
+	for (let i = messages.length - 1; i >= 0; --i) {
+		const message = messages[i];
+		// Only turns produced for the currently selected model describe it — including
+		// the transport that produced them. Two providers can expose the same id, so a
+		// turn from the other one must neither add a badge nor hide the current one.
+		if (message.role !== "assistant" || message.model !== selected.id) continue;
+		if (message.provider !== selected.provider || message.api !== selected.api) continue;
+		// The newest matching turn decides; older turns describe older requests.
+		const served = detectServedModelMismatch(message)?.served;
+		return served ? truncateToWidth(sanitizeStatusText(served), TRUNCATE_LENGTHS.SHORT) : undefined;
+	}
+	return undefined;
+}
+
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
@@ -387,6 +419,10 @@ const modelSegment: StatusLineSegment = {
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) content += theme.fg("warning", `${theme.sep.dot}${slowModeLabel}`);
+		// A host that served different weights than the selected id: name the
+		// served model so the chip is never read as the truth.
+		const servedModel = servedModelMismatch(ctx);
+		if (servedModel) content += theme.fg("warning", `${theme.sep.dot}${servedModel}`);
 		return { content, visible: true };
 	},
 	describe(ctx) {
@@ -401,7 +437,10 @@ const modelSegment: StatusLineSegment = {
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
 		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
-		return segView(spans, "model", slowModeLabel ? "warning" : undefined);
+		// Keep the segment tone warning so the native chrome colours the chip.
+		const servedModel = servedModelMismatch(ctx);
+		if (servedModel) spans.push(span(`${theme.sep.dot}${servedModel}`, "warning"));
+		return segView(spans, "model", servedModel || slowModeLabel ? "warning" : undefined);
 	},
 };
 

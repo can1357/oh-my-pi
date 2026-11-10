@@ -25,6 +25,14 @@
 
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 
+### Added
+
+- The status line's model chip carries a warning badge naming the served model id when a host provably served different weights than the selected id, using the same classifier as the turn marker; canonicalised echoes (snapshot suffixes, gateway prefixes, checkpoint paths) stay silent ([#18670](https://github.com/can1357/oh-my-pi/pull/18670) by [@l473n79c618e](https://github.com/l473n79c618e))
+
+### Fixed
+
+- Fixed the served-model turn marker painting a host's model echo straight into the transcript: escape sequences or a newline in an echoed id could reflow the row, and an absolute checkpoint path exposed the home directory. Both label paths now sanitize, shorten home paths and cap width as the status line does ([#18670](https://github.com/can1357/oh-my-pi/pull/18670) by [@l473n79c618e](https://github.com/l473n79c618e))
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
