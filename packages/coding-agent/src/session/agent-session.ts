@@ -9031,11 +9031,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// abort that landed after its capture) must not start the continuation.
 		// Checked after preprocessing and after the abort check above, since
 		// cancelling the pass aborts the holder's turn, with no await between here
-		// and dispatch.
+		// and dispatch. A plain wait can outlast an abort() the same way the
+		// preprocessing can, so the generation is checked again after it; a user's
+		// prompt needs no second check, as the abort that cancels the holder's turn
+		// bumps the generation itself.
 		if (holder) {
 			holder.cancel.signal.throwIfAborted();
 		} else if (this.#stopPassHolds.size > 0) {
-			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
+			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
+			await this.#waitOutStopPasses(cancelsPass);
+			if (!cancelsPass && this.#promptGeneration !== preflightGeneration) {
+				outcome.sessionClaimed = false;
+				this.#reportDroppedPrompt(typedText, options, followUps);
+				if (options?.throwOnDrop) throw new PromptDroppedError();
+				return true;
+			}
 		}
 
 		// A concurrent prompt() can start a turn during the awaits above: image
@@ -9185,8 +9195,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		},
 	): Promise<boolean> {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
-		// A user skill prompt cancels an active stop pass; agent prompts wait for it.
-		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(message.attribution === "user");
+		// A user skill prompt cancels an active stop pass; agent prompts wait for it, and are dropped when an
+		// abort() lands meanwhile (the abort that cancels the holder's turn for a user's prompt is not one).
+		if (this.#stopPassHolds.size > 0) {
+			const cancelsPass = message.attribution === "user";
+			const waitGeneration = this.#promptGeneration;
+			await this.#waitOutStopPasses(cancelsPass);
+			if (!cancelsPass && this.#promptGeneration !== waitGeneration) {
+				this.#reportDroppedCustomPrompt(message, options, followUps);
+				return false;
+			}
+		}
 		try {
 			this.#rejectQueuedExtensionCommands(options?.followUps);
 			// Same barrier/claim protocol as prompt(): skill invocations, collab peer
@@ -9322,7 +9341,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits
 		// it out. Checked after preprocessing and the abort check above, with no await
 		// between here and dispatch, so a hold taken meanwhile is honored too.
-		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(message.attribution === "user");
+		if (this.#stopPassHolds.size > 0) {
+			const cancelsPass = message.attribution === "user";
+			await this.#waitOutStopPasses(cancelsPass);
+			// A plain wait can outlast an abort() like the image preparation above: drop the prompt the same
+			// way. A user's prompt cancels the pass, and the abort that stops the holder's turn bumps the generation.
+			if (!cancelsPass && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
+				outcome.sessionClaimed = false;
+				this.#reportDroppedCustomPrompt(message, options, followUps);
+				return false;
+			}
+		}
 
 		// Image normalization and the vision-description call suspend after the
 		// isStreaming check above, so a concurrent submission can start a turn in
@@ -11080,7 +11109,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			!this.isStreaming &&
 			this.#stopPassHolds.size > 0
 		) {
-			await this.#waitOutStopPasses(normalizedAppMessage.attribution === "user");
+			const cancelsPass = normalizedAppMessage.attribution === "user";
+			const waitGeneration = this.#promptGeneration;
+			await this.#waitOutStopPasses(cancelsPass);
+			// An abort() during a plain wait supersedes only the turn, as one during the context-replacement
+			// wait above does: the message stays in the transcript, delivered like one that triggers none. A
+			// user's message needs no check, as the abort that cancels the holder's turn bumps the generation.
+			if (!cancelsPass && this.#promptGeneration !== waitGeneration) {
+				options = { ...options, triggerTurn: false, deliverAs: undefined };
+			}
 		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only

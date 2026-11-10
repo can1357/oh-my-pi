@@ -8,6 +8,7 @@
  * observer nor races the session's settle — so these tests pin it end to end.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -851,6 +852,111 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(result.output).toContain("FOLLOW-UP-YIELD");
 			expect(result.extractedToolData?.yield).toHaveLength(1);
 		});
+	});
+
+	describe("a submission that waits out a stop-pass hold and is aborted meanwhile", () => {
+		// Their setup awaits only already-settled promises, so after one event-loop turn they are parked on the hold.
+		it("drops an agent prompt instead of starting its turn once the hold releases", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["never asked"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+			const prompted = run.session.prompt("AGENT-PROMPT", {
+				attribution: "agent",
+				synthetic: true,
+				throwOnDrop: true,
+			});
+			const outcome = prompted.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			await scheduler.yield();
+
+			await run.session.abort();
+			hold.release();
+
+			// The drop surfaces as a rejection (throwOnDrop), and no turn ran.
+			expect(await outcome).toBeInstanceOf(Error);
+			expect(run.mock.calls).toHaveLength(0);
+		});
+
+		it("drops an agent custom prompt instead of starting its turn once the hold releases", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["never asked"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+			const prompted = run.session.promptCustomMessage({
+				customType: "agent-prompt",
+				content: "AGENT-CUSTOM-PROMPT",
+				display: false,
+				attribution: "agent",
+			});
+			await scheduler.yield();
+
+			await run.session.abort();
+			hold.release();
+
+			expect(await prompted).toBe(false);
+			expect(run.mock.calls).toHaveLength(0);
+		});
+
+		it("records a turn-triggering custom message without its turn once the hold releases", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["never asked"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+			const sent = run.session.sendCustomMessage(
+				{ customType: "agent-note", content: "AGENT-NOTE", display: false, attribution: "agent" },
+				{ triggerTurn: true },
+			);
+			await scheduler.yield();
+
+			await run.session.abort();
+			hold.release();
+			await sent;
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(0);
+			expect(JSON.stringify(run.session.messages)).toContain("AGENT-NOTE");
+		});
+	});
+
+	it("keeps a follow-up that lost its prompt race to a wake off the wake's stop pass until the pass publishes", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const run = await setup({
+			driven: true,
+			parentId: "Parent",
+			responses: [yieldCall("WAKE-YIELD"), yieldCall("WAKE-REPLACEMENT"), yieldCall("FOLLOW-UP-YIELD")],
+			onStop: async (_event, callIndex) => {
+				if (callIndex !== 1) return undefined;
+				stopEntered.resolve();
+				await releaseStop.promise;
+				return { decision: "block", reason: "keep going" };
+			},
+		});
+		attachIrcWakeTurnMonitor(run.session, { id: AGENT_ID, agent: wakeAgent, artifactsDir: tempDir.path() });
+		// The owner's wake takes the session between the follow-up's ownership check and its first prompt.
+		const prompt = run.session.prompt.bind(run.session);
+		let raced = false;
+		vi.spyOn(run.session, "prompt").mockImplementation(async (text, options) => {
+			if (!raced && text === "do more") {
+				raced = true;
+				await deliverWake(run.session, "m1", "Parent");
+				for (let tick = 0; !run.session.agent.state.isStreaming && tick < 100; tick++) await scheduler.yield();
+			}
+			return prompt(text, options);
+		});
+
+		const followUp = runSubagentFollowUpTurn({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do more",
+			artifactsDir: tempDir.path(),
+		});
+		await stopEntered.promise;
+		releaseStop.resolve();
+		const result = await followUp;
+
+		// The wake's refused turn ended in a replacement yield; it belongs to the wake, not to the follow-up.
+		expect(result.error).toBeUndefined();
+		expect(result.extractedToolData?.yield).toHaveLength(1);
+		expect(result.output).toContain("FOLLOW-UP-YIELD");
+		expect(result.output).not.toContain("WAKE-REPLACEMENT");
 	});
 
 	describe("a stop-pass holder whose run is cancelled", () => {
