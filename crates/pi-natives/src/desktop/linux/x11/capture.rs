@@ -8,8 +8,8 @@ use x11rb::{
 		ErrorKind,
 		randr::ConnectionExt as _,
 		xproto::{
-			Atom, AtomEnum, ConnectionExt as _, ImageFormat, ImageOrder, MapState, VisualClass,
-			Window, WindowClass,
+			Atom, AtomEnum, ConnectionExt as _, GetImageReply, ImageFormat, ImageOrder, MapState,
+			VisualClass, Window, WindowClass,
 		},
 	},
 	rust_connection::RustConnection,
@@ -388,10 +388,7 @@ impl X11Capture {
 				} else if self.compositing()? {
 					let mut image =
 						self.capture_window(client, x - window.x, y - window.y, width, height)?;
-					for (popup, (px, py, pw, ph), (ox, oy)) in above.popups {
-						let part = self.capture_window(popup, px - ox, py - oy, pw, ph)?;
-						image::imageops::overlay(&mut image, &part, i64::from(px - x), i64::from(py - y));
-					}
+					self.overlay_popups(&mut image, (x, y), above)?;
 					image
 				} else {
 					return Err(DesktopError::capture_failed(format!(
@@ -539,6 +536,36 @@ impl X11Capture {
 		Ok(above)
 	}
 
+	fn overlay_popups(
+		&self,
+		image: &mut RgbaImage,
+		(x, y): (i32, i32),
+		above: Above,
+	) -> CoreResult<()> {
+		for (popup, (px, py, pw, ph), (ox, oy)) in above.popups {
+			let part = match self.capture_window(popup, px - ox, py - oy, pw, ph) {
+				Ok(part) => part,
+				Err(error) => {
+					// A popup unmapped or destroyed since above() covers nothing.
+					match self
+						.conn
+						.get_window_attributes(popup)
+						.map_err(request_failed)?
+						.reply()
+					{
+						Ok(attributes) if attributes.map_state != MapState::VIEWABLE => continue,
+						Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
+							continue;
+						},
+						_ => return Err(error),
+					}
+				},
+			};
+			image::imageops::overlay(image, &part, i64::from(px - x), i64::from(py - y));
+		}
+		Ok(())
+	}
+
 	/// The rectangle at `x, y` inside `window`, read from its own drawable.
 	fn capture_window(
 		&self,
@@ -585,7 +612,7 @@ impl X11Capture {
 
 	fn decode(
 		&self,
-		reply: &x11rb::protocol::xproto::GetImageReply,
+		reply: &GetImageReply,
 		width: u32,
 		height: u32,
 		masks: ColorMasks,
@@ -1012,6 +1039,38 @@ mod tests {
 		assert_eq!(image.dimensions(), (200, 150));
 		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
 		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn popup_unmapped_after_stacking_is_read_does_not_fail_capture() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		become_compositing_manager(&wm);
+		let (red, ..) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let above = capture.above(red, (0, 0, 200, 150)).expect("stacking");
+		assert!(above.covered);
+		assert_eq!(above.popups.len(), 1);
+		let popup = above.popups[0].0;
+		let mut image = capture.capture_window(red, 0, 0, 200, 150).expect("target pixels");
+
+		wm.unmap_window(popup).expect("unmap popup");
+		wm.sync().expect("popup is unmapped before GetImage");
+		capture.overlay_popups(&mut image, (0, 0), above).expect("capture without vanished popup");
+
+		assert_eq!(image.dimensions(), (200, 150));
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
+
+		wm.map_window(popup).expect("remap popup");
+		wm.sync().expect("popup is mapped");
+		let above = capture.above(red, (0, 0, 200, 150)).expect("stacking before destroy");
+		assert_eq!(above.popups.len(), 1);
+		wm.destroy_window(popup).expect("destroy popup");
+		wm.sync().expect("popup is destroyed before GetImage");
+		capture.overlay_popups(&mut image, (0, 0), above).expect("capture without destroyed popup");
+		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
 	}
 
 	#[test]
