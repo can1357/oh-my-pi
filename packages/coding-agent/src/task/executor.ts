@@ -3183,11 +3183,18 @@ async function driveSessionToResult(
 		}
 	} finally {
 		error ??= monitor.terminalError();
-		// A yield the run latched but handlers never judged (the run was cancelled
-		// or failed before its pass) is no more confirmed than one cancelled
-		// mid-pass: drop it rather than publish it, as the rescue above would. The
+		// A candidate the run latched but handlers never judged (the run was
+		// cancelled or failed before its pass) is no more confirmed than one
+		// cancelled mid-pass: drop it rather than publish it, as the rescue above
+		// would. The candidate is the latched yield or the incremental sections
+		// recorded without one, which finalization would publish just the same. The
 		// run then reports whatever ended it, with the usual salvage.
-		if (monitor.yieldCalled() && !candidateAllowed && session.extensionRunner?.hasHandlers("subagent_stop")) {
+		const recordedSections = (monitor.progress.extractedToolData?.yield?.length ?? 0) > 0;
+		if (
+			(monitor.yieldCalled() || recordedSections) &&
+			!candidateAllowed &&
+			session.extensionRunner?.hasHandlers("subagent_stop")
+		) {
 			monitor.rejectCandidate("cancelled");
 			if (exitCode === 0) exitCode = 1;
 		}
