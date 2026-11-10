@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `retry.preferSlowMode` setting ("Prefer Slow Mode Over Fallback"): with `/slow` on a Claude subscription model, usage-aware fallback keeps Claude past its usage limits on low priority and switches models only when Claude refuses a request, such as at the weekly limit ([#14365](https://github.com/can1357/oh-my-pi/pull/14365) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
