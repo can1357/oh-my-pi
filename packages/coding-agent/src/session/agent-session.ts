@@ -865,11 +865,21 @@ type ScheduledAgentContinueOptions = {
 	 * hold's release re-requests it). Unset requests are the held turn's own recovery and run under it.
 	 */
 	stopPass?: "cancel" | "skip";
+	/** Called when a hold made a `"skip"` request give way at dispatch, for a request that must be run again at the release. */
+	onStopPassHeld?: () => void;
 };
 
 type ScheduledAgentContinueRequest = {
 	schedulerToken: number;
 	options: ScheduledAgentContinueOptions;
+};
+
+/** What decides a compaction's continuation: see `#scheduleCompactionContinuation`. */
+type CompactionContinuationOptions = {
+	generation: number;
+	autoContinue: boolean;
+	terminalTextAnswer: boolean;
+	suppressContinuation: boolean;
 };
 
 type AgentContinueOutcome =
@@ -1152,6 +1162,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	/** The prompt generation in which a `subagent_stop` hold deferred the hidden next-turn messages; the hold's release runs them. */
 	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
+	/** A compaction continuation a `subagent_stop` hold stopped from starting; the hold's release schedules it again. */
+	#heldCompactionContinuation: { options: CompactionContinuationOptions; promptSequence: number } | undefined =
+		undefined;
 	/** Queued messages a session path took out of the agent queues to put back later (follow-ups
 	 *  parked behind an IRC wake turn, a session switch's rollback snapshot), in queue order. */
 	readonly #heldQueuedMessages = new Set<AgentMessage>();
@@ -5585,12 +5598,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					if (request.options.stopPass === "cancel") {
 						while (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
 					}
-					if (
-						signal.aborted ||
-						this.#isDisposed ||
-						this.#abortInProgress ||
-						(request.options.stopPass === "skip" && this.#stopPassHolds.size > 0)
-					) {
+					if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
+						return { status: "skipped", reason: "session-unavailable" };
+					}
+					if (request.options.stopPass === "skip" && this.#stopPassHolds.size > 0) {
+						request.options.onStopPassHeld?.();
 						return { status: "skipped", reason: "session-unavailable" };
 					}
 					if (!this.agent.state.isStreaming) onStart?.();
@@ -5742,29 +5754,57 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		);
 	}
 
-	#scheduleCompactionContinuation(options: {
-		generation: number;
-		autoContinue: boolean;
-		terminalTextAnswer: boolean;
-		suppressContinuation: boolean;
-	}): boolean {
+	#scheduleCompactionContinuation(options: CompactionContinuationOptions): boolean {
 		if (options.suppressContinuation) return false;
-		if (this.agent.hasQueuedMessages()) {
+		const queued = this.agent.hasQueuedMessages();
+		if (!queued) {
+			if (!options.autoContinue) return false;
+			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+			if (options.terminalTextAnswer && !activeGoal) return false;
+		}
+		// A `subagent_stop` pass is judging the session's candidate: a turn started now would change it under
+		// the verdict. The continuation waits for the hold's release, which schedules it again. Compaction
+		// itself never waits on the hold: an extension compacting from inside a pass would deadlock on it.
+		if (this.#stopPassHolds.size > 0) {
+			this.#holdCompactionContinuation(options);
+			return true;
+		}
+		if (queued) {
 			this.#scheduleAgentContinue({
 				source: "compaction-queued-message",
 				delayMs: 100,
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
+				stopPass: "skip",
+				onStopPassHeld: () => this.#holdCompactionContinuation(options),
 			});
 			return true;
 		}
-		if (!options.autoContinue) return false;
-		const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
-		if (options.terminalTextAnswer && !activeGoal) return false;
-		return this.#scheduleAutoContinuePrompt(options.generation);
+		return this.#scheduleAutoContinuePrompt(options);
 	}
 
-	#scheduleAutoContinuePrompt(generation: number): boolean {
+	/** Keep a compaction continuation a hold stopped from starting, stamped so a later abort or prompt cancels it. */
+	#holdCompactionContinuation(options: CompactionContinuationOptions): void {
+		this.#heldCompactionContinuation = { options, promptSequence: this.#promptSequence };
+	}
+
+	/** The hold released: schedule its deferred compaction continuation again, unless it was superseded meanwhile. */
+	#resumeCompactionContinuation(): void {
+		const held = this.#heldCompactionContinuation;
+		this.#heldCompactionContinuation = undefined;
+		// An abort since the deferral cancelled the continuation, and a prompt that ran since carried the run on itself.
+		if (
+			!held ||
+			this.#isDisposed ||
+			held.options.generation !== this.#promptGeneration ||
+			held.promptSequence !== this.#promptSequence
+		) {
+			return;
+		}
+		this.#scheduleCompactionContinuation(held.options);
+	}
+
+	#scheduleAutoContinuePrompt(options: CompactionContinuationOptions): boolean {
 		const continuePrompt = async () => {
 			// Compaction summarizes away the first-message eager preludes, so re-assert the
 			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
@@ -5786,6 +5826,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					// A hold taken since the check below, or while the prompt waited behind a running turn,
+					// hands the prompt back: the release resumes it.
+					onStopPassHeld: () => this.#holdCompactionContinuation(options),
 				},
 			);
 		};
@@ -5793,17 +5836,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			async signal => {
 				await Promise.resolve();
 				if (signal.aborted) return;
+				if (this.#stopPassHolds.size > 0) {
+					this.#holdCompactionContinuation(options);
+					return;
+				}
 				if (this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
 						source: "auto-continue-queued-message",
-						generation,
+						generation: options.generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
+						stopPass: "skip",
+						onStopPassHeld: () => this.#holdCompactionContinuation(options),
 					});
 					return;
 				}
 				await continuePrompt();
 			},
-			{ generation },
+			{ generation: options.generation },
 		);
 		return true;
 	}
@@ -13944,13 +13993,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.#stopPassHolds.size > 0) return;
 				this.#scheduleIdleQueueDrain();
 				this.yieldQueue.requestIdleFlush();
-				// A prompt that waited out the hold goes first; parked wakes and the hidden next-turn messages
-				// the hold deferred follow it. An abort since the deferral cancelled that turn, as it does an
-				// undeferred one.
+				// A prompt that waited out the hold goes first; parked wakes, the hidden next-turn messages and
+				// the compaction continuation the hold deferred follow it. An abort since the deferral cancelled
+				// that turn, as it does an undeferred one.
 				const resumeParked = (): void => {
 					this.#resumeStrandedIrcAsides();
 					if (this.#hiddenNextTurnHeldGeneration === this.#promptGeneration) this.#scheduleHiddenNextTurn();
 					this.#hiddenNextTurnHeldGeneration = undefined;
+					this.#resumeCompactionContinuation();
 				};
 				if (this.hasAdmittedSubmission) {
 					void this.waitForAdmittedSubmissions().then(resumeParked);
