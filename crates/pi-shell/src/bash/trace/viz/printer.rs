@@ -324,7 +324,9 @@ fn physical_rows(rows: Vec<Row>) -> Vec<Row> {
 			continue;
 		}
 		let segments = std::mem::take(&mut row.segments);
+		let detail = row.detail.take();
 		let mut continuation = row.clone();
+		row.detail = detail;
 		continuation.meta = None;
 		continuation.executed_at_ns = None;
 		continuation.execution_seq = None;

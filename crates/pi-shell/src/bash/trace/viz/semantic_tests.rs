@@ -335,6 +335,27 @@ fn embedded_documents_are_physical_rows_and_unwrap_restores_delimiters() {
 }
 
 #[test]
+fn multiline_command_detail_is_kept_only_on_its_first_physical_row() {
+	let script = "git commit -m '\nfirst line\nsecond line\nthird line\n'";
+	let rows = Fixture::new(script).present(&[], &Options::default()).rows;
+	assert!(rows.iter().filter(|row| row.id.contains("-line")).count() >= 3);
+	assert_eq!(
+		rows
+			.iter()
+			.filter(|row| row.detail.as_deref() == Some(script))
+			.count(),
+		1,
+		"the full command must not be copied into every continuation row"
+	);
+	assert!(
+		rows
+			.iter()
+			.filter(|row| row.id.contains("-line"))
+			.all(|row| row.detail.is_none())
+	);
+}
+
+#[test]
 fn guards_suppress_only_real_builtin_status_one_and_keep_leaf_identity() {
 	for guard in [
 		"[[ phase == build ]]",
