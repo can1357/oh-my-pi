@@ -347,6 +347,48 @@ describe("snapshotResource", () => {
 		expect(pure.complete).toBe(true);
 	});
 
+	it("covers what an extension manifest makes omp load: an entry outside the root is incomplete, one inside is not", async () => {
+		const parent = await tempRoot();
+		const ext = path.join(parent, "ext");
+		await writeTree(parent, { "shared/entry.ts": "export default function () { /* OUTSIDE-ENTRY */ }\n" });
+		await writeTree(ext, {
+			"package.json": JSON.stringify({ name: "ext", omp: { extensions: ["../shared/entry.ts"] } }),
+			"notes.md": "Notes.\n",
+		});
+
+		const outside = await snapshotResource(candidate("a", ext, { kind: "extension" }));
+		expect(outside.complete).toBe(false);
+		expect(outside.omissions).toContain("entrypoint resolves outside the resource root");
+		expect(JSON.stringify(outside.files)).not.toContain("OUTSIDE-ENTRY");
+
+		await writeTree(ext, {
+			"package.json": JSON.stringify({ name: "ext", omp: { extensions: ["./src/main.ts"] } }),
+			"src/main.ts": "export default function () {}\n",
+		});
+		const inside = await snapshotResource(candidate("b", ext, { kind: "extension" }));
+		expect(inside.complete).toBe(true);
+		expect(inside.omissions).toEqual([]);
+	});
+
+	it("does not descend into a credential-shaped directory, whatever its files are called", async () => {
+		const root = await tempRoot();
+		await writeTree(root, {
+			"SKILL.md": "Instructions.\n",
+			"credentials/account-notes.md": "Account notes: ACCOUNT-NOTES-CONTENT\n",
+			"docs/secrets/team-notes.md": "Team notes: TEAM-NOTES-CONTENT\n",
+		});
+
+		const snapshot = await snapshotResource(candidate("a", root));
+		const everything = JSON.stringify([snapshot.files, snapshot.omissions]);
+
+		for (const hidden of ["NOTES-CONTENT", "account-notes", "team-notes", "credentials", "secrets"]) {
+			expect(everything).not.toContain(hidden);
+		}
+		expect(snapshot.files.map(file => file.path)).toEqual(["SKILL.md"]);
+		expect(snapshot.omissions.filter(omission => omission === "credential-like directory not read")).toHaveLength(2);
+		expect(snapshot.complete).toBe(false);
+	});
+
 	// Code only counts as covered when everything it can load at run time is in the snapshot or in the platform.
 	it.each<[string, string, string]>([
 		[

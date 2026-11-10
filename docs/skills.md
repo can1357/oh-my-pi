@@ -297,6 +297,9 @@ Code checks are deliberately bounded:
 - Python imports must be known standard-library modules or actual local module
   paths. Shell external/dynamic sourcing and unsupported code languages are
   reported as incomplete.
+- An extension directory's manifest entries (`package.json` `omp`/`pi` `extensions`),
+  index file and one-level sub-extensions are resolved as omp would load them;
+  any that lies outside the directory makes coverage incomplete.
 - Checks do not execute code, resolve a full module graph, simulate search paths,
   or inspect programs merely launched by scripts. Static checks can conservatively
   reject valid code.
