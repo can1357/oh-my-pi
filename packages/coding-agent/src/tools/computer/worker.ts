@@ -337,13 +337,18 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter, appPids?: ReadonlySet<number>): boolean {
+function matchesFilter(
+	window: DesktopWindow,
+	filter?: WindowFilter,
+	appPids?: ReadonlySet<number>,
+	exactApp = false,
+): boolean {
 	if (!filter) return true;
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
 		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || matchesWindowApp(window, app, appPids)) &&
+		(!app || (exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
 }
@@ -1745,6 +1750,8 @@ export class ComputerWorkerCore {
 			const windows = await nativeCall(signal, () => session.listWindows());
 			let appPids: Set<number> | undefined;
 			const app = filter?.app?.toLocaleLowerCase();
+			// Decide before title/id filtering, so another app cannot substitute for the named app.
+			const exactApp = !!app && windows.some(window => window.app.toLocaleLowerCase() === app);
 			// An app filter that names no window's app is looked up as an application id or path.
 			if (
 				app &&
@@ -1762,7 +1769,7 @@ export class ComputerWorkerCore {
 					}
 				}
 			}
-			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids)) };
+			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids, exactApp)) };
 		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
