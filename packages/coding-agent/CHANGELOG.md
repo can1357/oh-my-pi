@@ -39,6 +39,7 @@
 
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
+- Added an Auto Thinking Source setting (`providers.autoThinkingSource`): `vendor` makes the `auto` thinking level use the model vendor's default effort (for example `medium` on Claude Opus 5.5 and GPT-5.6, `high` on other Claude models) instead of classifying each prompt ([#14114](https://github.com/can1357/oh-my-pi/pull/14114) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
