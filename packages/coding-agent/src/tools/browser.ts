@@ -177,7 +177,8 @@ interface BrowserPreludeDetails {
  * over the `browser.tern` setting to adopt a block; `headed` does not opt out),
  * a cmux surface, then omp's own browser ({@link ownBrowserKind}). `app: "auto"`
  * is that chain without the relay. Tern and cmux are automatic only while no
- * other omp owns the terminal. `app: "tern"` and `app: "webkit"` are explicit:
+ * other omp owns the terminal, and none of the user's own surfaces (relay, Tern,
+ * cmux) is automatic for a subagent. `app: "tern"` and `app: "webkit"` are explicit:
  * they throw when Tern or omp's WebKit host is unavailable.
  */
 export function resolveBrowserKind(
@@ -233,8 +234,9 @@ export function resolveBrowserKind(
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
 	// endpoint. A configured endpoint is a default, not an override: an
-	// explicit app wins.
-	if (app !== "auto") {
+	// explicit app wins. Subagents select the user's Chrome only with app: "relay".
+	const subagent = session.subagent === true;
+	if (app !== "auto" && !subagent) {
 		const relayKind = resolveRelayKind(
 			{
 				settingEnabled: cfgBrowserRelay.get(session.settings),
@@ -250,8 +252,9 @@ export function resolveBrowserKind(
 	}
 	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
 	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
-	// pane env, and its tabs would float over the other session's work.
-	const ownsPane = ownsTerminal(env);
+	// pane env, and its tabs would float over the other session's work. A subagent has no pane
+	// of its own either: its tabs would pile up over the parent's.
+	const ownsPane = ownsTerminal(env) && !subagent;
 	// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
 	const ternKind = resolveTernKind(
 		{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },

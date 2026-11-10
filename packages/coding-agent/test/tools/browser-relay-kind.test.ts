@@ -131,3 +131,51 @@ describe("browser prelude relay guidance", () => {
 		}
 	});
 });
+
+describe("resolveBrowserKind in a subagent", () => {
+	// `taskDepth: 0` like a `/tan` clone: subagent-ness comes from the session, not the task depth.
+	const subagent = (settings: Record<string, unknown>): ToolSession =>
+		({
+			cwd: process.cwd(),
+			hasUI: false,
+			taskDepth: 0,
+			subagent: true,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(settings),
+		}) as ToolSession;
+	const pane = { TERN_PANE_SOCKET: "/tmp/tern.sock", TERN_PANE: "1", CMUX_SOCKET_PATH: "/tmp/cmux.sock" };
+
+	it("skips the relay, Tern and cmux the parent would use for an open without app", () => {
+		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane).kind).toBe("headless");
+		expect(resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" }).kind).toBe(
+			"headless",
+		);
+		expect(
+			resolveBrowserKind(
+				{ action: "open" },
+				subagent({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9222" }),
+				pane,
+			).kind,
+		).toBe("connected");
+	});
+
+	it("still opens the user's Chrome or Tern when the open asks", () => {
+		const session = subagent({ "browser.relay": true });
+		expect(resolveBrowserKind({ action: "open", app: { relay: true } }, session, pane).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open", app: { tern: true } }, session, pane).kind).toBe("tern");
+		expect(
+			resolveBrowserKind({ action: "open", app: { relay: true } }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
+		).toBe("headless");
+	});
+
+	it("gets no relay guidance, since its open without app stays out of the user's Chrome", () => {
+		const saved = process.env.PI_BROWSER_RELAY;
+		delete process.env.PI_BROWSER_RELAY;
+		try {
+			expect(createBrowserPrelude(subagent({ "browser.relay": true })).guidance).toBeUndefined();
+		} finally {
+			if (saved !== undefined) process.env.PI_BROWSER_RELAY = saved;
+		}
+	});
+});
