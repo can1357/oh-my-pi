@@ -6,6 +6,7 @@ process.  Only ``emit`` writes protocol records to the original stdout; SDK
 logging and tracebacks are redirected to stderr.
 """
 
+import gc
 import importlib.metadata
 import json
 import os
@@ -73,6 +74,7 @@ class MnemosyneWorker:
         self.sdk_version = None
         self.python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         self.Mnemosyne = None
+        self.release_connection = None
 
     def initialize(self, params):
         context = params.get("context") if isinstance(params, dict) else None
@@ -113,6 +115,8 @@ class MnemosyneWorker:
         self.sdk_version = str(version)
         self.manager = manager
         self.Mnemosyne = Mnemosyne
+        # 4.0 exports the helper that closes the thread-local cached connection; older builds lack it.
+        self.release_connection = getattr(mnemosyne, "close_thread_connection", None)
         return {"protocol": PROTOCOL_VERSION}
 
     @staticmethod
@@ -375,14 +379,23 @@ class MnemosyneWorker:
         return {"bank": bank, "deleted": True}
 
     def close(self):
-        for memory in self.memories.values():
-            closer = getattr(memory, "close", None)
-            if callable(closer):
-                try:
+        """Release every SQLite handle: Mnemosyne has no close(), and an open database cannot be unlinked on Windows."""
+        for bank, memory in self.memories.items():
+            try:
+                closer = getattr(memory, "close", None)
+                if callable(closer):
                     closer()
-                except Exception:
-                    traceback.print_exc(file=sys.stderr)
+                # Mnemosyne and its BEAM store share the connection the SDK also caches thread-locally.
+                for owner in (memory, getattr(memory, "beam", None)):
+                    connection = getattr(owner, "conn", None)
+                    if connection is not None:
+                        connection.close()
+                if self.release_connection is not None:
+                    self.release_connection(self._bank_path(bank), allow_main_thread=True)
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
         self.memories = {}
+        gc.collect()
 
     def dispatch(self, method, params):
         if method == "initialize":
