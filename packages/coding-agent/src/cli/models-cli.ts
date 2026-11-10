@@ -11,7 +11,7 @@
  * `ls`/`find` use the cache when fresh (`online-if-uncached`); only `refresh`
  * forces the network (`online`).
  */
-import type { Api, Effort, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type Effort, type Model, type PausedProvider, pausedProviders } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -87,8 +87,16 @@ interface ModelJson {
 	pricingStatus: ModelPricingStatus;
 }
 
+interface PausedProviderJson {
+	provider: string;
+	name: string;
+	reason: string;
+}
+
 interface ModelsJson {
 	models: ModelJson[];
+	/** Providers the auth rules pause; they contribute no models until resumed. */
+	paused: PausedProviderJson[];
 }
 
 function writeLine(line = ""): void {
@@ -180,18 +188,21 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 }
 
 /**
- * The two registry reads the listing performs. Structural so the renderer can be
+ * The registry reads the listing performs. Structural so the renderer can be
  * exercised without booting a full {@link ModelRegistry}.
  */
 export interface ModelsListingSource {
 	/** Return models available for the selected catalog kind, or every kind for `all`. */
 	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
+	/** Return one provider's catalog regardless of credentials, for paused kind filtering. */
+	getProviderModels(provider: string): Model<Api>[];
 	getError(): ConfigError | undefined;
 }
 
 /**
  * Render `omp models ls`/`find` as one box table per provider, selecting chat
- * models by default or the caller-requested catalog kind.
+ * models by default or the caller-requested catalog kind. Paused providers
+ * matching the filter are named with their pause reason, since they list no models.
  */
 export function renderProviderModels(
 	source: ModelsListingSource,
@@ -203,6 +214,9 @@ export function renderProviderModels(
 	const available = source.getAvailable(kind);
 	const needle = pattern?.toLowerCase();
 	let filtered = available;
+	let paused: PausedProvider[] = pausedProviders().filter(
+		provider => kind === "all" || source.getProviderModels(provider.id).some(model => modelKind(model) === kind),
+	);
 
 	if (needle) {
 		let exactFound = false;
@@ -222,6 +236,11 @@ export function renderProviderModels(
 					model.name.toLowerCase().includes(needle),
 			);
 		}
+		paused = exactFound
+			? []
+			: paused.filter(
+					provider => provider.id.toLowerCase().includes(needle) || provider.name.toLowerCase().includes(needle),
+				);
 	}
 
 	const configError = source.getError();
@@ -232,7 +251,10 @@ export function renderProviderModels(
 				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
 			);
 		}
-		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
+		const output: ModelsJson = {
+			models: filtered.slice().sort(byProviderThenId).map(toModelJson),
+			paused: paused.map(({ id, name, reason }) => ({ provider: id, name, reason })),
+		};
 		writeLine(JSON.stringify(output));
 		return;
 	}
@@ -241,13 +263,21 @@ export function renderProviderModels(
 		writeModelsConfigError(configError);
 	}
 
-	if (available.length === 0) {
-		writeLine("No models available. Set API keys in environment variables.");
-		return;
-	}
+	// Sections (status line, provider tables, paused providers) are separated by one blank line.
+	let firstSection = true;
+	const startSection = () => {
+		if (!firstSection) writeLine();
+		firstSection = false;
+	};
+
 	if (filtered.length === 0) {
-		writeLine(`No models matching "${pattern}"`);
-		return;
+		if (available.length === 0) {
+			startSection();
+			writeLine("No models available. Set API keys in environment variables.");
+		} else if (paused.length === 0) {
+			writeLine(`No models matching "${pattern}"`);
+			return;
+		}
 	}
 
 	// One section per provider: bold heading + a box table of that provider's models.
@@ -261,10 +291,8 @@ export function renderProviderModels(
 		group.push(model);
 	}
 
-	let firstProvider = true;
 	for (const [provider, models] of byProvider) {
-		if (!firstProvider) writeLine();
-		firstProvider = false;
+		startSection();
 		writeLine(`${chalk.bold.cyan(provider)} ${chalk.dim(`(${models.length})`)}`);
 		const rows = models.map(model => [
 			model.id,
@@ -287,6 +315,13 @@ export function renderProviderModels(
 		)) {
 			writeLine(line);
 		}
+	}
+
+	for (const provider of paused) {
+		startSection();
+		writeLine(`${chalk.bold.cyan(provider.id)} ${chalk.yellow("(paused)")}`);
+		writeLine(`  ${provider.reason}`);
+		writeLine(chalk.dim("  Stored logins are kept and work again once the provider is resumed."));
 	}
 }
 

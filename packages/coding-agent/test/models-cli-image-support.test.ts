@@ -48,7 +48,12 @@ function imagesCell(model: Model<Api>): string {
 		output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 		return true;
 	});
-	renderProviderModels({ getAvailable: () => [model], getError: () => undefined }, "ls", undefined, false);
+	renderProviderModels(
+		{ getAvailable: () => [model], getProviderModels: () => [], getError: () => undefined },
+		"ls",
+		undefined,
+		false,
+	);
 	vi.restoreAllMocks();
 
 	const row = stripAnsi(output.join(""))
@@ -89,6 +94,7 @@ describe("omp models kind filtering", () => {
 				requested.push(kind);
 				return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
 			},
+			getProviderModels: () => [],
 			getError: () => undefined,
 		};
 		const render = (kind?: ModelKind | "all", json = false): string => {
