@@ -119,9 +119,15 @@ export class ReportPanel extends OverlayPanel {
 		this.#bodyRows = Math.min(rows, bodyMax);
 		this.#view.setHeight(this.#bodyRows);
 		const scrollHint = `${editorKey("tui.select.pageUp")}/${editorKey("tui.select.pageDown")} scroll · `;
-		this.#footer.setText(theme.fg("muted", overflows ? scrollHint + this.#closeHint : this.#closeHint));
+		const hint = this.footerHint(this.#closeHint);
+		this.#footer.setText(theme.fg("muted", overflows ? scrollHint + hint : hint));
 		const lines = super.render(width);
 		return cap !== undefined && lines.length > cap ? lines.slice(0, Math.max(0, cap)) : lines;
+	}
+
+	/** The footer's key hint; a subclass with keys of its own builds on `closeHint`. */
+	footerHint(closeHint: string): string {
+		return closeHint;
 	}
 
 	/** Text mode: rows the whole box takes at `width` when nothing caps it. */

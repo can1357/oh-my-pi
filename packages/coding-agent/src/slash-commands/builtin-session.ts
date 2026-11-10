@@ -12,6 +12,7 @@ import {
 } from "../utils/changelog";
 import { formatTokenCount, refreshStatusLine } from "./builtin-modes";
 import { buildContextReportText } from "./helpers/context-report";
+import { loadSandboxReport, sandboxReportText, sandboxReportView } from "./helpers/sandbox-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildJobTree, jobTreeGuide, jobTreeIndent } from "@oh-my-pi/pi-tui/overlays/job-tree";
@@ -565,6 +566,30 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.handleContextCommand();
 			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "sandbox",
+		icon: "shield",
+		description: "Show the sandbox omp runs in: layer, files, network, approvals and kernel facts",
+		acpDescription: "Show the detected sandbox",
+		allowArgs: true,
+		subcommands: [
+			{ name: "network", description: "Network access each layer reports, and the proxy variables" },
+			{ name: "namespaces", description: "Which Linux namespaces omp runs in" },
+			{ name: "evidence", description: "What each probe read and concluded" },
+		],
+		subcommandOptional: true,
+		acpInputHint: "[section]",
+		handle: async (command, runtime) => {
+			const report = await loadSandboxReport(runtime.session.settings);
+			await runtime.output(sandboxReportText(report, command.args));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const report = await loadSandboxReport(runtime.ctx.session.settings);
+			runtime.ctx.showCommandReport(sandboxReportView(report, command.args));
 		},
 	},
 	{

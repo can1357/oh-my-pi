@@ -12,6 +12,10 @@
 
 - Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
 
+### Added
+
+- Added `SectionsReport`, a report panel that shows a summary over a list of sections: Up/Down picks a section, Enter opens it in place and Esc returns to the list ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.18.7] - 2026-11-10
 
 ### Changed
