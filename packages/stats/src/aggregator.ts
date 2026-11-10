@@ -84,24 +84,33 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
 }
 
 /**
- * Drop every stats row ingested from a deleted transcript and from the nested
- * subagent transcripts under its artifacts directory; the next full sync lets
- * surviving forks re-own entries the transcript owned. A store that was never
- * created is left uncreated. Returns the number of rows deleted.
+ * Drop every stats row ingested from a deleted session: each of `sessionFiles`
+ * (its current transcript and any pre-move locations the rows are still keyed
+ * by) plus the nested subagent transcripts under each one's artifacts
+ * directory. The next full sync lets surviving forks re-own entries the session
+ * owned. A store that was never created is left uncreated. Returns the number
+ * of rows deleted.
  */
-export async function purgeSessionStats(sessionFile: string, dbPath = getStatsDbPath()): Promise<number> {
+export async function purgeSessionStats(sessionFiles: readonly string[], dbPath = getStatsDbPath()): Promise<number> {
+	if (sessionFiles.length === 0) return 0;
 	try {
 		await fs.promises.stat(dbPath);
 	} catch (error) {
 		if (isEnoent(error)) return 0;
 		throw error;
 	}
-	const nestedPrefix = `${sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : sessionFile}${path.sep}`;
 	return await withStatsSyncLock(dbPath, async () => {
 		const database = new Database(dbPath);
 		try {
 			database.run("PRAGMA busy_timeout = 5000");
-			return deleteSessionFileRows(database, sessionFile, nestedPrefix);
+			return database.transaction(() => {
+				let deleted = 0;
+				for (const sessionFile of sessionFiles) {
+					const stem = sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : sessionFile;
+					deleted += deleteSessionFileRows(database, sessionFile, `${stem}${path.sep}`);
+				}
+				return deleted;
+			})();
 		} finally {
 			database.close();
 		}

@@ -7,7 +7,8 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import { purgeSessionStats } from "@oh-my-pi/omp-stats/aggregator";
-import { getHistoryDbPath, isEnoent, logger, tableExists, tableHasColumn } from "@oh-my-pi/pi-utils";
+import { getHistoryDbPath, getSessionsDir, isEnoent, logger, tableExists, tableHasColumn } from "@oh-my-pi/pi-utils";
+import { managedHistoricalSessionPaths, readSessionLineageHeader, type SessionLineageHeader } from "./session-loader";
 import type { SessionStorage } from "./session-storage";
 
 /**
@@ -49,14 +50,22 @@ export function purgeSessionHistory(
 	}
 }
 
+/** A deleted session as its records are keyed: history rows by id, stats rows by transcript path. */
+export interface DeletedSession {
+	path: string;
+	id?: string;
+	/** The header's `previousSessionFiles`: stats rows ingested before a `/move` keep those paths. */
+	previousSessionFiles?: readonly string[];
+}
+
 /**
  * Purge the history.db and stats.db records of a deleted session. History rows
- * are keyed by session id, so they are kept when `id` is unknown; stats rows
- * are keyed by transcript path, including nested subagent transcripts. Stores
- * that do not exist are left uncreated. Best-effort: the transcript is already
- * gone, so a failure is logged rather than failing the delete.
+ * are kept when `id` is unknown; stats rows are purged for the transcript path,
+ * its managed pre-move paths, and nested subagent transcripts under each.
+ * Stores that do not exist are left uncreated. Best-effort: the transcript is
+ * already gone, so a failure is logged rather than failing the delete.
  */
-export async function purgeSessionRecords(session: { path: string; id?: string }): Promise<void> {
+export async function purgeSessionRecords(session: DeletedSession): Promise<void> {
 	const historyDbPath = getHistoryDbPath();
 	if (session.id) {
 		try {
@@ -68,8 +77,12 @@ export async function purgeSessionRecords(session: { path: string; id?: string }
 			}
 		}
 	}
+	const statsPaths = [
+		session.path,
+		...managedHistoricalSessionPaths(session.previousSessionFiles ?? [], session.path, getSessionsDir()),
+	];
 	try {
-		await purgeSessionStats(session.path);
+		await purgeSessionStats(statsPaths);
 	} catch (error) {
 		logger.warn("Failed to purge deleted session stats", { path: session.path, error: String(error) });
 	}
@@ -77,10 +90,23 @@ export async function purgeSessionRecords(session: { path: string; id?: string }
 
 /**
  * Delete a session the user picked: transcript, artifacts, then its records.
+ * The header is read first, since its pre-move paths are gone with the file.
  * The interactive pickers and `/session delete` call this; a live
  * `SessionManager` drops its own session through `dropSession` instead.
  */
 export async function deleteSession(storage: SessionStorage, session: { path: string; id?: string }): Promise<void> {
+	let header: SessionLineageHeader | undefined;
+	try {
+		header = await readSessionLineageHeader(session.path);
+	} catch (error) {
+		// The header only widens the purge; an unreadable one must not block the delete.
+		if (!isEnoent(error))
+			logger.warn("Failed to read deleted session header", { path: session.path, error: String(error) });
+	}
 	await storage.deleteSessionWithArtifacts(session.path);
-	await purgeSessionRecords(session);
+	await purgeSessionRecords({
+		path: session.path,
+		id: session.id ?? header?.id,
+		previousSessionFiles: header?.previousSessionFiles,
+	});
 }

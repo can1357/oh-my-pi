@@ -9,7 +9,12 @@ import {
 	recordSessionTitle,
 } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, getHistoryDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { deleteSession } from "@oh-my-pi/pi-coding-agent/session/session-purge";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+import { closeDb } from "@oh-my-pi/omp-stats/db";
+import { getAgentDir, getHistoryDbPath, getStatsDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { makeAssistantMessage } from "../session-manager/helpers";
 
 const XDG_KEYS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
 const originalAgentDir = getAgentDir();
@@ -32,6 +37,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeDb();
 	HistoryStorage.close();
 	closeSessionIndex();
 	for (const key in originalEnv) {
@@ -83,4 +89,48 @@ describe("SessionManager.dropSession", () => {
 			db.close();
 		}
 	});
+
+	it.each(["dropSession", "picker delete"] as const)(
+		"%s purges stats rows still keyed by the session's pre-move path",
+		async action => {
+			const session = SessionManager.create(tempDir.join("project"));
+			session.appendMessage({ role: "user", content: "moved-marker", timestamp: 1 });
+			session.appendMessage(makeAssistantMessage());
+			await session.flush();
+			const originalFile = session.getSessionFile();
+			if (!originalFile) throw new Error("Expected session file");
+			await syncAllSessions({ workers: 1 });
+			closeDb();
+
+			await session.moveTo(tempDir.join("elsewhere"));
+			const movedFile = session.getSessionFile();
+			if (!movedFile || movedFile === originalFile) throw new Error("Expected the move to relocate the transcript");
+			await session.flush();
+			if (action === "dropSession") {
+				await session.dropSession(movedFile);
+			} else {
+				// The picker deletes by path through a fresh storage; the pre-move paths come from the file's header.
+				await deleteSession(new FileSessionStorage(), { path: movedFile, id: session.getSessionId() });
+			}
+
+			const stats = new Database(getStatsDbPath(), { readonly: true });
+			try {
+				const remaining = ["messages", "user_messages", "file_offsets"].map(table => ({
+					table,
+					rows: stats
+						.query<{ n: number }, [string, string]>(
+							`SELECT count(*) AS n FROM ${table} WHERE session_file IN (?, ?)`,
+						)
+						.get(originalFile, movedFile)?.n,
+				}));
+				expect(remaining).toEqual([
+					{ table: "messages", rows: 0 },
+					{ table: "user_messages", rows: 0 },
+					{ table: "file_offsets", rows: 0 },
+				]);
+			} finally {
+				stats.close();
+			}
+		},
+	);
 });

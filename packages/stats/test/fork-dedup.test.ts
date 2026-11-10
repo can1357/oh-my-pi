@@ -312,7 +312,7 @@ describe("stats sync deduplicates forked-session entries", () => {
 		// The session is deleted: its transcript and artifacts go first, then its rows.
 		await fs.rm(parentFile);
 		await fs.rm(parentFile.slice(0, -".jsonl".length), { recursive: true });
-		expect(await purgeSessionStats(parentFile)).toBeGreaterThan(0);
+		expect(await purgeSessionStats([parentFile])).toBeGreaterThan(0);
 		const raw = new Database(getStatsDbPath(), { readonly: true });
 		try {
 			for (const table of ["messages", "user_messages", "file_offsets"]) {

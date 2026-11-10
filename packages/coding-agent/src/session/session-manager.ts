@@ -2512,18 +2512,24 @@ export class SessionManager {
 
 	/**
 	 * Delete a session file, its artifact directory, and its history/stats
-	 * records. ENOENT is treated as success. Prompts, title, and recaps are keyed
-	 * by session id, so they are purged only when `sessionPath` is this session's file.
+	 * records. ENOENT is treated as success. Prompts, title, recaps, and pre-move
+	 * stats paths come from this session's header, so they are purged only when
+	 * `sessionPath` is this session's file.
 	 */
 	async dropSession(sessionPath: string): Promise<void> {
-		const sessionId = sessionPath === this.#sessionFile ? this.#sessionId : undefined;
+		const own = sessionPath === this.#sessionFile;
+		const record = {
+			path: sessionPath,
+			id: own ? this.#sessionId : undefined,
+			previousSessionFiles: own ? this.#header.previousSessionFiles : undefined,
+		};
 		await this.#drainAndCloseWriter();
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 		}
-		await purgeSessionRecords({ path: sessionPath, id: sessionId });
+		await purgeSessionRecords(record);
 	}
 
 	/**

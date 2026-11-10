@@ -32,7 +32,13 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
-import { readSessionHeaderId } from "../session/session-loader";
+import {
+	managedHistoricalSessionPaths,
+	readSessionHeaderId,
+	readSessionLineageHeader,
+	type SessionLineageHeader,
+	SessionLineageHeaderReader,
+} from "../session/session-loader";
 import { purgeSessionHistory } from "../session/session-purge";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
@@ -990,60 +996,6 @@ function sessionArtifactsPath(sessionPath: string): string {
 	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
-interface SessionLineageHeader {
-	id: string;
-	parentSession?: string;
-	previousSessionFiles: string[];
-}
-
-class SessionLineageHeaderReader {
-	header: SessionLineageHeader | undefined;
-	done = false;
-	#sawTitleSlot = false;
-
-	read(line: string): void {
-		if (this.done) return;
-		line = line.trim();
-		if (!line) return;
-		try {
-			const record = JSON.parse(line) as {
-				type?: unknown;
-				id?: unknown;
-				parentSession?: unknown;
-				previousSessionFiles?: unknown;
-			};
-			if (!this.#sawTitleSlot && record.type === "title") {
-				this.#sawTitleSlot = true;
-				return;
-			}
-			this.done = true;
-			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
-			this.header = {
-				id: record.id,
-				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
-				previousSessionFiles: Array.isArray(record.previousSessionFiles)
-					? record.previousSessionFiles.filter(
-							(previousSessionFile): previousSessionFile is string =>
-								typeof previousSessionFile === "string" && previousSessionFile.length > 0,
-						)
-					: [],
-			};
-		} catch {
-			this.done = true;
-		}
-	}
-}
-
-async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
-	const decoder = new TextDecoder();
-	const reader = new SessionLineageHeaderReader();
-	for await (const line of readLines(Bun.file(file).stream())) {
-		reader.read(decoder.decode(line));
-		if (reader.done) break;
-	}
-	return reader.header;
-}
-
 async function scanArchivedSession(
 	file: string,
 	identities?: Record<StatsEntryTable, StatsEntryIdentity[]>,
@@ -1276,32 +1228,6 @@ function logicalSessionRootForStatsPath(statsPath: string, sessionPath: string):
 function sessionPathEncodesId(sessionPath: string, sessionId: string): boolean {
 	const stem = path.basename(sessionPath, SESSION_SUFFIX);
 	return stem === sessionId || stem.endsWith(`_${sessionId}`);
-}
-
-function managedHistoricalSessionPaths(
-	header: SessionLineageHeader,
-	currentSessionPath: string,
-	sessionsRoot: string,
-): string[] {
-	const root = path.resolve(sessionsRoot);
-	const filename = path.basename(currentSessionPath);
-	const paths = new Set<string>();
-	for (const previousSessionFile of header.previousSessionFiles) {
-		if (!path.isAbsolute(previousSessionFile) || path.basename(previousSessionFile) !== filename) continue;
-		const resolved = path.resolve(previousSessionFile);
-		const relative = path.relative(root, resolved);
-		if (
-			!relative ||
-			relative === ".." ||
-			relative.startsWith(`..${path.sep}`) ||
-			path.isAbsolute(relative) ||
-			!resolved.endsWith(SESSION_SUFFIX)
-		) {
-			continue;
-		}
-		paths.add(resolved);
-	}
-	return [...paths];
 }
 
 function resolveLogicalSessionMatch(
@@ -1684,7 +1610,7 @@ async function collectArchivedStatsSessions(
 				path: sourcePath,
 				id: header.id,
 				parentSession: header.parentSession,
-				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
+				historicalPaths: managedHistoricalSessionPaths(header.previousSessionFiles, sourcePath, sessionsRoot),
 				identities,
 			});
 		} catch (error) {
@@ -1755,7 +1681,11 @@ async function cleanupStatsRowsForArchivedSessions(
 						path: session.path,
 						id: session.id,
 						parentSession: header.parentSession,
-						historicalPaths: managedHistoricalSessionPaths(header, session.path, sessionsRoot),
+						historicalPaths: managedHistoricalSessionPaths(
+							header.previousSessionFiles,
+							session.path,
+							sessionsRoot,
+						),
 						identities: createStatsIdentities(),
 					};
 				}),
