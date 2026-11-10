@@ -15,15 +15,15 @@ function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child && typeof child.k === "string";
 }
 
-function markdownText(root: NativeNode): string[] {
-	const texts: string[] = [];
+function markdownNodes(root: NativeNode): Extract<NativeNode, { k: "md" }>[] {
+	const nodes: Extract<NativeNode, { k: "md" }>[] = [];
 	const stack = [root];
 	while (stack.length > 0) {
 		const current = stack.pop()!;
-		if (current.k === "md" && typeof current.p?.text === "string") texts.push(current.p.text);
+		if (current.k === "md") nodes.push(current);
 		for (const child of current.c ?? []) if (isNode(child)) stack.push(child);
 	}
-	return texts;
+	return nodes;
 }
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
@@ -231,27 +231,27 @@ describe("HookSelectorComponent model slider", () => {
 			() => {},
 		);
 		for (const key of "FAR_ONLY_MATCH") component.handleInput(key);
-		expect(markdownText(component.describe(pickerCx))).toEqual([]);
+		expect(markdownNodes(component.describe(pickerCx))).toEqual([]);
 		component.handleInput("\n");
 		expect(selected).toEqual([]);
 	});
 
 	it.each([true, false])("updates a bounded native preview with picker support=%s", supportsPicker => {
+		const longParagraph = "unbroken ".repeat(400);
 		const component = new HookSelectorComponent(
 			"Browse",
 			[
 				{ label: "first", preview: "# First preview" },
-				{ label: "second", preview: `# Second preview\n${"extra line\n".repeat(100)}HIDDEN_NATIVE_TAIL` },
+				{ label: "second", preview: longParagraph },
 			],
 			() => {},
 			() => {},
 		);
 		const cx = { ...pickerCx, supports: () => supportsPicker };
-		expect(markdownText(component.describe(cx)).join("\n")).toContain("# First preview");
+		expect(markdownNodes(component.describe(cx)).map(node => node.p?.text)).toContain("# First preview");
 		component.handleNativeEvent({ type: "select", key: supportsPicker ? "^picker" : "list", item: "1" });
-		const preview = markdownText(component.describe(cx)).join("\n");
-		expect(preview).toContain("# Second preview");
-		expect(preview).not.toContain("# First preview");
-		expect(preview).not.toContain("HIDDEN_NATIVE_TAIL");
+		const [preview] = markdownNodes(component.describe(cx));
+		expect(preview?.p?.text).toBe(longParagraph);
+		expect(preview?.p?.max).toEqual({ h: "6lines" });
 	});
 });

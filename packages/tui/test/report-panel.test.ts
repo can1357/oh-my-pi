@@ -198,13 +198,12 @@ describe("ReportPanel in text mode", () => {
 });
 
 describe("ReportPanel natively", () => {
-	it.each([false, true])("invokes the native primary action and honors closeOnAction=%s", closeOnAction => {
+	it("invokes the native primary action and closes the focused report", () => {
 		let added = 0;
 		let closed = 0;
 		const action = {
 			label: "Inject",
 			keys: ["ctrl+alt+r"] as const,
-			closeOnAction,
 			onAction: () => added++,
 		};
 		const panel = new ReportPanel({
@@ -217,7 +216,7 @@ describe("ReportPanel natively", () => {
 		panel.describe();
 		panel.handleNativeEvent({ type: "action", key: "actions/primary", act: "primary", mods: [] });
 		expect(added).toBe(1);
-		expect(closed).toBe(closeOnAction ? 1 : 0);
+		expect(closed).toBe(1);
 	});
 	it("describes the report as the scrolled reading body, then Close, which closes it like Esc", () => {
 		let closed = 0;

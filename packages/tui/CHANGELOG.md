@@ -4,7 +4,7 @@
 
 ### Added
 
-- Selectors can preview selected Markdown content, and command reports can expose a primary action with a configurable shortcut or native button ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+- Selectors can show bounded Markdown previews, and command reports can expose a primary action with a configurable shortcut or native button ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 
 ### Changed
 

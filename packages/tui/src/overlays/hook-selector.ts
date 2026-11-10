@@ -185,7 +185,7 @@ function renderPreview(source: string, rows: number, width = 80): string[] {
 }
 
 function describePreview(source: string): NativeNode {
-	return md(source.split("\n", PREVIEW_LIMITS.PICKER_LINES).join("\n"));
+	return md(source, { max: { h: `${PREVIEW_LIMITS.PICKER_LINES}lines` } });
 }
 const ENTER_KEYS: readonly KeyName[] = ["enter"];
 

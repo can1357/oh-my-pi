@@ -34,8 +34,6 @@ export interface ReportPanelOptions {
 		readonly label: string;
 		readonly keys: readonly KeyId[];
 		readonly onAction: () => void;
-		/** Close a focused report after the action; docked reports remain visible. */
-		readonly closeOnAction?: boolean;
 	};
 	/**
 	 * Display form of the key that dismisses the report while it sits above the
@@ -129,7 +127,7 @@ export class ReportPanel extends OverlayPanel {
 	handleAction(): boolean {
 		if (!this.#action) return false;
 		this.#action.onAction();
-		if (this.#action.closeOnAction) this.#onClose();
+		this.#onClose();
 		return true;
 	}
 
