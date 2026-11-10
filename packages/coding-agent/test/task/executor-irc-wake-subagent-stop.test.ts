@@ -7,7 +7,7 @@
  * nested prompt from the observer is safe — that it neither re-triggers the
  * observer nor races the session's settle — so these tests pin it end to end.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -20,7 +20,7 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type { SubagentStopEvent, SubagentStopEventResult } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type StopPassHold } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -121,6 +121,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		outputSchema?: Record<string, unknown>;
 		/** Turn automatic retry off, so a provider error leaves the turn for a manual retry. */
 		disableAutoRetry?: boolean;
+		/** Check usage health before each turn, a real await in every turn's setup. */
+		usageAwareFallback?: boolean;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -174,6 +176,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			"compaction.enabled": false,
 			"todo.enabled": false,
 			...(args.disableAutoRetry ? { "retry.enabled": false } : {}),
+			...(args.usageAwareFallback ? { "retry.usageAwareFallback": true } : {}),
 		});
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
@@ -683,6 +686,162 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		// The first verdict judged the old sections only: the retry's yield is a new candidate with its own pass.
 		expect(run.stopEvents).toHaveLength(2);
 		expect(await Bun.file(run.artifact).text()).toContain("REPLACEMENT");
+	});
+
+	describe("a turn whose setup outlasted a stop-pass hold taken after its hold check", () => {
+		/** Usage preflight health lookups park on `gate`: the real await a turn's setup spends before it dispatches. */
+		function parkPreflight() {
+			const gate = Promise.withResolvers<void>();
+			const entered = Promise.withResolvers<void>();
+			vi.spyOn(authStorage.health, "model").mockImplementation(async () => {
+				entered.resolve();
+				await gate.promise;
+				return { state: "healthy", accounts: [] };
+			});
+			return { gate, entered };
+		}
+
+		it("parks an idle aside for the hold's release instead of starting its turn inside the held pass", async () => {
+			const preflight = parkPreflight();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [{ content: ["handled the aside"] }],
+				onStop: () => undefined,
+			});
+
+			const sent = run.session.sendCustomMessage(
+				{ customType: "ext-aside", content: "extension aside", display: false },
+				{ deliverAs: "aside" },
+			);
+			await preflight.entered.promise;
+			// A wake's observation takes its hold while the aside's setup is still awaiting.
+			const hold = run.session.holdForStopPass();
+			preflight.gate.resolve();
+			await sent;
+
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+			// The hold's release wakes for the parked aside: it is delayed, not lost.
+			expect(run.mock.calls).toHaveLength(1);
+			expect(JSON.stringify(run.mock.calls[0]?.context.messages)).toContain("extension aside");
+		});
+
+		it("drops an agent prompt rather than dispatching it inside the held pass", async () => {
+			const preflight = parkPreflight();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [{ content: ["never asked"] }],
+				onStop: () => undefined,
+			});
+
+			const prompted = run.session.prompt("AGENT-PROMPT", {
+				attribution: "agent",
+				synthetic: true,
+				throwOnDrop: true,
+			});
+			await preflight.entered.promise;
+			const hold = run.session.holdForStopPass();
+			preflight.gate.resolve();
+
+			await expect(prompted).rejects.toThrow();
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+		});
+
+		it("cancels the pass for a user retry whose continuation was scheduled before the hold", async () => {
+			const run = await setup({
+				driven: true,
+				disableAutoRetry: true,
+				usageAwareFallback: true,
+				responses: [{ content: [], stopReason: "error", errorMessage: "provider exploded" }, yieldCall("RETRIED")],
+				onStop: () => undefined,
+			});
+			vi.spyOn(authStorage.health, "model").mockResolvedValue({ state: "healthy", accounts: [] });
+			await run.session.prompt("first try");
+			await run.session.waitForIdle();
+			const preflight = parkPreflight();
+
+			expect(await run.session.retry()).toBe(true);
+			await preflight.entered.promise;
+			// The pass starts after the retry passed its own hold check, while its continuation is still in setup.
+			const hold = run.session.holdForStopPass();
+			// A cancelled pass drops its candidate and releases afterwards, as the executor's does.
+			hold.signal.addEventListener("abort", () => queueMicrotask(() => hold.release()), { once: true });
+			preflight.gate.resolve();
+			await run.session.waitForIdle();
+
+			expect(hold.signal.aborted).toBe(true);
+			expect(run.mock.calls).toHaveLength(2);
+			hold.release();
+		});
+
+		it("skips a queued-message drain until the hold's release re-requests it", async () => {
+			const preflight = parkPreflight();
+			const answered = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [
+					() => {
+						answered.resolve();
+						return { content: ["answered the queued message"] };
+					},
+				],
+				onStop: () => undefined,
+			});
+
+			await run.session.sendUserMessage("QUEUED", { deliverAs: "steer" });
+			await preflight.entered.promise;
+			const hold = run.session.holdForStopPass();
+			preflight.gate.resolve();
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+			await answered.promise;
+			await run.session.waitForIdle();
+			expect(JSON.stringify(run.mock.calls[0]?.context.messages)).toContain("QUEUED");
+		});
+
+		it("keeps a follow-up's monitor off the holder's turn when the hold was taken while the follow-up installed its contract", async () => {
+			const run = await setup({
+				driven: true,
+				responses: [yieldCall("HOLDER-YIELD"), yieldCall("FOLLOW-UP-YIELD")],
+				onStop: () => undefined,
+			});
+			const holdTaken = Promise.withResolvers<StopPassHold>();
+			const install = run.session.setWorkPoolYieldItems.bind(run.session);
+			let held = false;
+			vi.spyOn(run.session, "setWorkPoolYieldItems").mockImplementation(async items => {
+				await install(items);
+				if (held) return;
+				held = true;
+				// A wake's observation takes its hold while the follow-up is still installing its contract.
+				holdTaken.resolve(run.session.holdForStopPass());
+			});
+
+			const followUp = runSubagentFollowUpTurn({
+				id: AGENT_ID,
+				agent: wakeAgent,
+				message: "do more",
+				artifactsDir: tempDir.path(),
+			});
+			const hold = await holdTaken.promise;
+			// Real delay: the follow-up's attach-and-park is a chain of internal awaits no event marks; the
+			// holder's continuation must start after it, as the pass's refusal continuation would.
+			await Bun.sleep(20);
+			await hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			hold.release();
+			const result = await followUp;
+
+			// The holder's yield belongs to the holder's pass; the follow-up's result is its own turn's.
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
+			expect(result.extractedToolData?.yield).toHaveLength(1);
+		});
 	});
 
 	it("cancels, unjudged, a wake that a newer wake superseded while its owner work settled", async () => {

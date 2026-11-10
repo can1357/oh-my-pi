@@ -304,6 +304,8 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		/** What a `subagent_stop` hold taken after scheduling does to this request; see the session's scheduler. */
+		stopPass?: "cancel" | "skip";
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -3609,7 +3611,7 @@ export class TurnRecovery {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1, stopPass: "cancel" });
 
 		return true;
 	}
