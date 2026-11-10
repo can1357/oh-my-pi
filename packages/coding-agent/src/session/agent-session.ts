@@ -45,6 +45,7 @@ import {
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	type ThinkingLevel,
 	type ToolChoiceDirective,
+	TurnGateRefusedError,
 	wireToolsFingerprint,
 } from "@oh-my-pi/pi-agent-core";
 import {
@@ -511,6 +512,7 @@ import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./sess
 import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
+import { type HoldState, type TurnClaim, TurnGate, type TurnReservation } from "./turn-gate";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
@@ -858,11 +860,11 @@ type ScheduledAgentContinueOptions = {
 	/** Messages the continued turn answers, handed to the turn observer (see `#startTurnObservation`). */
 	turnRecords?: AgentMessage[];
 	/**
-	 * What a `subagent_stop` hold taken after this request was scheduled does to it, decided at dispatch:
-	 * a user's retry or continue `"cancel"`s the pass and goes on, a background request `"skip"`s (the
-	 * hold's release re-requests it). Unset requests are the held turn's own recovery and run under it.
+	 * What the continued turn is to a `subagent_stop` hold, decided by the turn gate at dispatch: unset, the running
+	 * work's own `recovery` (it waits while handlers consult); a `"background"` request gives way, and the hold's
+	 * release requests it again; a user's retry or continue (`"user"`) cancels the pass and goes on.
 	 */
-	stopPass?: "cancel" | "skip";
+	claim?: "recovery" | "background" | "user";
 	/** Called when a hold made a `"skip"` request give way at dispatch, for a request that must be run again at the release. */
 	onStopPassHeld?: () => void;
 };
@@ -883,7 +885,9 @@ type CompactionContinuationOptions = {
 type AgentContinueOutcome =
 	| { status: "completed" }
 	| { status: "skipped"; reason: AgentContinueSkipReason }
-	| { status: "failed"; error: unknown };
+	| { status: "failed"; error: unknown }
+	/** The running work's own recovery, refused while `subagent_stop` handlers consult: the turn gate replays it. */
+	| { status: "parked" };
 
 /**
  * Reported by `#dispatchPrompt` to `prompt()`: whether the prompt took the
@@ -904,12 +908,12 @@ type TurnObservation = {
 	turnError: unknown;
 };
 
-/** One {@link AgentSession.holdForStopPass} hold. */
-type StopPassHoldState = {
-	readonly cancel: AbortController;
-	/** Handlers are judging the candidate: idle deliveries wait so it cannot change under the verdict. */
-	consulting: boolean;
-};
+/** An in-flight bracket: what `isStreaming` counts, and the claim's reservation the turn gate sees. */
+type InFlightBracket = { readonly epoch: number; readonly reservation: TurnReservation };
+
+/** Turn-gate claims of the sites that start a turn on their own and handle a refusal themselves. */
+const BACKGROUND_CLAIM: TurnClaim = { kind: "background" };
+const USER_CLAIM: TurnClaim = { kind: "user" };
 
 /**
  * A `subagent_stop` pass's hold on the session, from the start of the pass until
@@ -1162,8 +1166,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
 	/** Aborts that only stopped a settled turn (see `abort({ turnStop })`): counted out of the cancellation generation. */
 	#turnStopAborts = 0;
-	/** An abort() is cancelling the held passes: their prompts' cancellation listeners must not abort the turn again. */
-	#cancellingHoldsForAbort = false;
 	/** A compaction continuation a `subagent_stop` hold stopped from starting; the hold's release schedules it again. */
 	#heldCompactionContinuation:
 		| { options: CompactionContinuationOptions; cancellationGeneration: number; promptSequence: number }
@@ -1283,10 +1285,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	readonly #ircWakeHoldListeners = new Set<() => void>();
 	/** Set while an `awaitingAssignment` session has not started its first prompt; see {@link #wakeForIrc}. */
 	#ircAwaitingAssignment = false;
-	/** Active {@link holdForStopPass} holds. */
-	readonly #stopPassHolds = new Set<StopPassHoldState>();
-	/** Settles whenever a stop-pass hold is released or stops consulting. */
-	#stopPassChanged = Promise.withResolvers<void>();
+	/** Admission of every turn start on {@link agent}, under the {@link holdForStopPass} holds it owns. */
+	readonly #turnGate = new TurnGate({
+		cancellationGeneration: () => this.#cancellationGeneration(),
+		whenAdmittedSubmissionsSettled: () =>
+			this.hasAdmittedSubmission ? this.waitForAdmittedSubmissions() : undefined,
+	});
+	/** Idle deliveries of the yield queue: they wait while handlers consult, and flush again once they may run. */
+	readonly #idleDeliveryClaim: TurnClaim = { kind: "recovery", park: () => this.yieldQueue.requestIdleFlush() };
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1575,31 +1581,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	#beginInFlight(): number {
+	/**
+	 * The one place a turn starts on {@link agent}: `dispatch` (its `prompt` or `continue`) runs only if the turn
+	 * gate admits `claim`, decided in this tick, with `onAdmitted` right before it. `undefined` when refused (see
+	 * {@link TurnGate.start}). Throws {@link AgentBusyError}, before anything is admitted, while a turn runs.
+	 */
+	#startAgentTurn<T>(claim: TurnClaim, dispatch: () => Promise<T>, onAdmitted?: () => void): Promise<T> | undefined {
+		if (this.agent.state.isStreaming) throw new AgentBusyError();
+		return this.#turnGate.start(claim, onAdmitted, dispatch);
+	}
+
+	#beginInFlight(claim: TurnClaim): InFlightBracket {
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 			this.#beginComputerTurn();
 		}
-		return this.#inFlightEpoch;
+		return { epoch: this.#inFlightEpoch, reservation: this.#turnGate.reserve(claim) };
 	}
 
-	/** Settles, once, the next time an in-flight bracket ends or is reset: a holder waiting out other prompts' setup rechecks then. */
-	#inFlightChanged = Promise.withResolvers<void>();
-
-	#notifyInFlightChanged(): void {
-		const changed = this.#inFlightChanged;
-		this.#inFlightChanged = Promise.withResolvers<void>();
-		changed.resolve();
-	}
-
-	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
+	#endInFlight(bracket: InFlightBracket, onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		// Abort has already taken an earlier epoch's bracket out of the count, so its late finalizer leaves the
 		// count to a newer turn; with none in flight it still settles, since a turn begun while abort() was
 		// finishing has its bracket reset by it and ends here.
-		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
-		this.#notifyInFlightChanged();
+		if (bracket.epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		void bracket.reservation.end();
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -1718,7 +1725,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		// A `subagent_stop` pass holds the session; its release resumes these.
-		if (this.#stopPassHolds.size > 0) return;
+		if (this.#turnGate.held) return;
 		// A pooled yield contract means a pool turn owns this worker (installed,
 		// dispatching, or dispatch-imminent). Waking here would either emit keyed
 		// yields against its items or re-queue into the deferral path forever, so
@@ -1862,7 +1869,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		// A `subagent_stop` pass holds the session until its verdict is published:
 		// every wake, the parent's included, waits for a turn of its own.
-		if (this.#stopPassHolds.size > 0) {
+		if (this.#turnGate.held) {
 			this.#irc.queueDeferredWake(wakeRecords);
 			return;
 		}
@@ -1903,7 +1910,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// delaying the observation's finish and mis-attributing the successor's RPC
 		// progress to this now-dead wake monitor.
 		const generation = this.#promptGeneration;
-		const inFlightEpoch = this.#beginInFlight();
+		const inFlight = this.#beginInFlight(BACKGROUND_CLAIM);
 		let turnError: unknown;
 		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
 		// in flight when the wake lands. Starting the turn on the stale prompt would
@@ -1930,12 +1937,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
-				if (this.#stopPassHolds.size > 0) {
+				// The turn gate decides in this tick: a hold taken while the wake waited parks it for a turn of its own.
+				const run = this.#startAgentTurn(
+					BACKGROUND_CLAIM,
+					() => this.agent.prompt(records),
+					() => {
+						observation = this.#startTurnObservation(records);
+					},
+				);
+				if (!run) {
 					this.#irc.queueDeferredWake(records);
 					return;
 				}
-				observation = this.#startTurnObservation(records);
-				return this.agent.prompt(records);
+				return run;
 			})
 			.catch(error => {
 				if (error instanceof AgentBusyError) {
@@ -1969,7 +1983,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
 				}
 				// Release the in-flight bracket BEFORE settling owned async work.
-				this.#endInFlight(inFlightEpoch);
+				this.#endInFlight(inFlight);
 				await this.#finishTurnObservation(observation, turnError);
 			});
 	}
@@ -1989,7 +2003,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * observes every turn until the release.
 	 */
 	#startTurnObservation(records: AgentMessage[]): TurnObservation | undefined {
-		if (this.#stopPassHolds.size > 0) return undefined;
+		if (this.#turnGate.held) return undefined;
 		const open = this.#openTurnObservation;
 		if (open) {
 			if (!open.turnEnded) return undefined;
@@ -2124,7 +2138,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
 		this.#clientPromptInFlightCount = 0;
-		this.#notifyInFlightChanged();
+		this.#turnGate.clearReservations();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
@@ -2239,6 +2253,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		// Every turn start goes through the turn gate: under a hold, a prompt() or continue() that bypassed it is refused.
+		this.agent.setTurnGate(() => !this.#turnGate.held || this.#turnGate.dispatching);
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -2462,6 +2478,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: () => this.sessionId,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
+			startTurn: (claim, messages, options, onAdmitted) =>
+				this.#startAgentTurn(claim, () => this.agent.prompt(messages, options), onAdmitted),
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
@@ -2621,19 +2639,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#recordWithoutTurn(messages);
 					return;
 				}
-				const observation =
-					this.#ircWakeTurnObserver && !this.#openTurnObservation
-						? this.#startTurnObservation(messages)
-						: undefined;
+				let observation: TurnObservation | undefined;
 				let turnError: unknown;
-				const inFlightEpoch = this.#beginInFlight();
+				const inFlight = this.#beginInFlight(this.#idleDeliveryClaim);
 				try {
-					await this.agent.prompt(messages.length === 1 ? first : messages);
+					// Admitted in the tick the idle flush below was (nothing awaits in between), so a refusal here
+					// would be a bug: these deliveries were already taken off the queue.
+					const run = this.#startAgentTurn(
+						this.#idleDeliveryClaim,
+						() => this.agent.prompt(messages.length === 1 ? first : messages),
+						() => {
+							if (this.#ircWakeTurnObserver && !this.#openTurnObservation) {
+								observation = this.#startTurnObservation(messages);
+							}
+						},
+					);
+					if (!run) throw new TurnGateRefusedError();
+					await run;
 				} catch (error) {
 					turnError = error;
 					throw error;
 				} finally {
-					this.#endInFlight(inFlightEpoch);
+					this.#endInFlight(inFlight);
 					// The delivery receipt settles when injectIdle returns; waiting for
 					// owned deliveries here would wait on this very flush.
 					void this.#finishTurnObservation(observation, turnError);
@@ -2653,10 +2680,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								return;
 							}
 						}
-						// A `subagent_stop` pass is judging this session's candidate: a delivery
-						// turn now would change it under the verdict. The entries stay queued; the
-						// hold re-requests the flush once turns may run again.
-						if (this.#stopPassConsulting()) {
+						// Decided here, in the tick the flush dispatches: while a `subagent_stop` pass judges this
+						// session's candidate the entries stay queued, and the turn gate requests the flush again
+						// once the verdict is in.
+						if (!this.#turnGate.tryAdmit(this.#idleDeliveryClaim)) {
 							this.yieldQueue.cancelIdleFlushScheduling();
 							return;
 						}
@@ -2826,6 +2853,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
+			startRecoveryTurn: (onAdmitted, park) =>
+				this.#startAgentTurn({ kind: "recovery", park }, () => this.agent.continue(), onAdmitted),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
@@ -5585,24 +5614,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 				return { status: "skipped", reason: "session-unavailable" };
 			}
+			const kind = request.options.claim ?? "recovery";
+			// Refused while handlers consult, the running work's own recovery is requested again once the verdict is in.
+			const claim: TurnClaim =
+				kind === "recovery" ? { kind, park: () => this.#scheduleAgentContinue(request.options) } : { kind };
 			for (;;) {
 				try {
-					// The awaits above (and an earlier busy wait) can outlast a wake taking its `subagent_stop`
-					// hold after this request was scheduled. A user's retry or continue cancels that pass, as a
-					// prompt does; a background request is skipped, and the hold's release re-requests it.
-					// Nothing awaits between the last check and dispatch.
-					if (request.options.stopPass === "cancel") {
-						while (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
-					}
 					if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
 						return { status: "skipped", reason: "session-unavailable" };
 					}
-					if (request.options.stopPass === "skip" && this.#stopPassHolds.size > 0) {
+					// The awaits above (and an earlier busy wait) can outlast a wake taking its `subagent_stop` hold
+					// after this request was scheduled: the turn gate decides now, in the tick of the dispatch.
+					const run = this.#startAgentTurn(claim, () => this.agent.continue(signal), onStart);
+					if (!run) {
+						// A user's retry or continue cancelled the pass, as a prompt does, and goes on once it releases.
+						if (claim.kind === "user") {
+							await this.#turnGate.whenAdmissible(claim);
+							continue;
+						}
+						// The running work's own recovery waits for the verdict: the gate parked it, so it is not skipped.
+						if (claim.kind === "recovery") return { status: "parked" };
+						// A background request gives way: the hold's release requests it again.
 						request.options.onStopPassHeld?.();
 						return { status: "skipped", reason: "session-unavailable" };
 					}
-					if (!this.agent.state.isStreaming) onStart?.();
-					await this.agent.continue(signal);
+					await run;
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5708,7 +5744,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 				}
 
-				const inFlightEpoch = this.#beginInFlight();
+				const inFlight = this.#beginInFlight({ kind: options.claim ?? "recovery" });
 				const coalescedSources = new Set([options.source]);
 				let observation: TurnObservation | undefined;
 				const onStart = this.#ircWakeTurnObserver
@@ -5738,7 +5774,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						this.#activeAgentContinue = undefined;
 					}
 					this.#usagePreflightReadyForNextModelCall = false;
-					this.#endInFlight(inFlightEpoch);
+					this.#endInFlight(inFlight);
 					void this.#finishTurnObservation(observation, outcome?.status === "failed" ? outcome.error : undefined);
 				}
 			},
@@ -5761,7 +5797,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A `subagent_stop` pass is judging the session's candidate: a turn started now would change it under
 		// the verdict. The continuation waits for the hold's release, which schedules it again. Compaction
 		// itself never waits on the hold: an extension compacting from inside a pass would deadlock on it.
-		if (this.#stopPassHolds.size > 0) {
+		if (this.#turnGate.held) {
 			this.#holdCompactionContinuation(options);
 			return true;
 		}
@@ -5771,7 +5807,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				delayMs: 100,
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
-				stopPass: "skip",
+				claim: "background",
 				onStopPassHeld: () => this.#holdCompactionContinuation(options),
 			});
 			return true;
@@ -5840,7 +5876,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			async signal => {
 				await Promise.resolve();
 				if (signal.aborted) return;
-				if (this.#stopPassHolds.size > 0) {
+				if (this.#turnGate.held) {
 					this.#holdCompactionContinuation(options);
 					return;
 				}
@@ -5849,7 +5885,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						source: "auto-continue-queued-message",
 						generation: options.generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
-						stopPass: "skip",
+						claim: "background",
 						onStopPassHeld: () => this.#holdCompactionContinuation(options),
 					});
 					return;
@@ -8800,7 +8836,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async resume(): Promise<void> {
 		// A user continue cancels a held `subagent_stop` pass, like a typed prompt.
-		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
+		if (this.#turnGate.held) await this.#waitOutStopPasses(true);
 		if (!this.isStreaming) return this.#resumeIdle();
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
@@ -8851,7 +8887,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#noteUserTurn();
 		this.#todo.resetCycle();
 		this.#resetPromptMaintenanceState();
-		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt], stopPass: "cancel" });
+		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt], claim: "user" });
 	}
 
 	/**
@@ -8867,7 +8903,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 	}
 
-	async #prompt(text: string, options?: PromptOptions, holder?: StopPassHoldState): Promise<boolean> {
+	async #prompt(text: string, options?: PromptOptions, holder?: HoldState): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -8925,7 +8961,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
 		followUps: PromptFollowUps | undefined,
-		holder?: StopPassHoldState,
+		holder?: HoldState,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
@@ -9085,7 +9121,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const waitGeneration = this.#promptGeneration;
 			while (this.isStreaming) {
 				await untilAborted(holder.cancel.signal, () =>
-					this.agent.state.isStreaming ? this.agent.waitForIdle() : this.#inFlightChanged.promise,
+					this.agent.state.isStreaming ? this.agent.waitForIdle() : this.#turnGate.changed,
 				);
 			}
 			if (this.#promptGeneration !== waitGeneration) {
@@ -9094,7 +9130,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (options?.throwOnDrop) throw new PromptDroppedError();
 				return true;
 			}
-		} else if (this.#stopPassHolds.size > 0) {
+		} else if (this.#turnGate.held) {
 			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
@@ -9255,7 +9291,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
 		// A user skill prompt cancels an active stop pass; agent prompts wait for it. Either is dropped when an
 		// abort() lands meanwhile (the abort that stops the holder's turn for a user's prompt is a turn-stop).
-		if (this.#stopPassHolds.size > 0) {
+		if (this.#turnGate.held) {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
@@ -9399,7 +9435,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits
 		// it out. Checked after preprocessing and the abort check above, with no await
 		// between here and dispatch, so a hold taken meanwhile is honored too.
-		if (this.#stopPassHolds.size > 0) {
+		if (this.#turnGate.held) {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
@@ -9672,7 +9708,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			/** Follow-ups held until this run goes live; queued behind it then. */
 			followUpBatch?: PromptFollowUps;
 			/** The `subagent_stop` hold this prompt is a continuation of. */
-			stopPassHolder?: StopPassHoldState;
+			stopPassHolder?: HoldState;
 			/** Called when a `subagent_stop` hold, taken after the caller's own check, made this prompt hand itself back. */
 			onStopPassHeld?: () => void;
 		},
@@ -9681,7 +9717,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
-		const inFlightEpoch = this.#beginInFlight();
+		// What this prompt is to a `subagent_stop` hold, by attribution: a user's cancels the pass, the holder's own
+		// turn continues it, anything else is handed back. An agent-attributed prompt (the executor's assignment, an
+		// IRC wake's) is a user-role message but never the user's.
+		const holder = options?.stopPassHolder;
+		const messageAttribution = "attribution" in message ? message.attribution : undefined;
+		const claim: TurnClaim = holder
+			? { kind: "holder", hold: holder }
+			: options?.userInitiated === true || (isUserAuthoredMessage(message) && messageAttribution !== "agent")
+				? USER_CLAIM
+				: BACKGROUND_CLAIM;
+		const inFlight = this.#beginInFlight(claim);
 		// Client ownership is reserved by #prompt before dispatch preprocessing
 		// and released when its bracket settles; callers that reach this
 		// directly (auto-continue, queued-hidden drain) are autonomous and
@@ -9874,38 +9920,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (autoPrewalk && this.#promptGeneration !== generation) {
 				return false;
 			}
-			// The setup awaits above can outlast a wake taking its `subagent_stop` hold, after the caller's
-			// own check. A turn started now would run inside the held pass, so a user's prompt cancels the
-			// pass and goes on, the holder's own turn is dropped once its pass was cancelled, and any other
-			// prompt is handed back (waiting here would stall the holder's wait for idle: this prompt is in
-			// flight). What this call already took is put back, and the caller is told, so nothing is lost
-			// with the prompt: the next-turn messages it consumed return to their queue, and a caller that
-			// owns messages of its own (the hidden next-turn turn) retries them once the hold releases. The
-			// check sits before the prewalk is armed and nothing awaits between it and dispatch.
-			const holder = options?.stopPassHolder;
-			const stopPassBlocks = (): boolean => (holder ? holder.cancel.signal.aborted : this.#stopPassHolds.size > 0);
-			// Whose prompt this is decides what a hold does to it: a user's cancels the pass, anything else is handed
-			// back. By attribution, as at the early wait: an agent-attributed prompt (the executor's assignment, an
-			// IRC wake's) is a user-role message but never the user's.
-			const messageAttribution = "attribution" in message ? message.attribution : undefined;
-			const userPrompted =
-				options?.userInitiated === true || (isUserAuthoredMessage(message) && messageAttribution !== "agent");
-			// Whether this prompt may go on while a hold blocks it; false hands it back, put back what it took.
-			const admitPastStopPass = async (): Promise<boolean> => {
-				while (stopPassBlocks()) {
-					holder?.cancel.signal.throwIfAborted();
-					if (!userPrompted) {
+			// The setup awaits above can outlast a wake taking its `subagent_stop` hold, after the caller's own
+			// check: the turn gate decides here, and again at every dispatch attempt, with nothing awaited in
+			// between. A user's prompt cancels the pass and goes on; the holder's own turn waits out other claims'
+			// setup and is dropped once its pass was cancelled; any other prompt is handed back (waiting here
+			// would stall the holder's wait: this prompt is in flight). What this call already took is put back,
+			// and the caller is told, so nothing is lost with the prompt: the next-turn messages it consumed return
+			// to their queue, and a caller that owns messages of its own (the hidden next-turn turn) retries them
+			// once the hold releases. Checked before the prewalk is armed.
+			const admitPastTurnGate = async (): Promise<boolean> => {
+				while (!this.#turnGate.admits(claim)) {
+					if (claim.kind === "background") {
 						this.#pendingNextTurnMessages = [...consumedNextTurnMessages, ...this.#pendingNextTurnMessages];
 						options?.onStopPassHeld?.();
 						return false;
 					}
+					if (claim.kind === "holder") {
+						await this.#turnGate.whenAdmissible(claim, holder?.cancel.signal);
+						continue;
+					}
 					const waitGeneration = this.#cancellationGeneration();
-					await this.#waitOutStopPasses(true);
+					await this.#turnGate.whenAdmissible(claim);
 					if (this.#cancellationGeneration() !== waitGeneration) return false;
 				}
 				return true;
 			};
-			if (stopPassBlocks() && !(await admitPastStopPass())) return false;
+			if (!(await admitPastTurnGate())) return false;
 			if (autoPrewalk) {
 				// Synchronous from here to dispatch, so the arm and its plan nudge travel with this task.
 				const planMessage = this.#prewalk.applyAuto(prewalkDecision);
@@ -9978,9 +10018,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			try {
 				// A turn that waits behind a running one is retried when that one ends, which is when a wake's
-				// observer takes its hold: the retry rechecks the hold, and a prompt it stops goes through the
-				// same admission as at the guard above (a user's cancels the pass; anything else hands itself
-				// back, with what it consumed put back).
+				// observer takes its hold: the turn gate decides each attempt, and a prompt it refuses goes through
+				// the same admission as above.
 				const dispatch = (): Promise<boolean> =>
 					this.#recovery.promptAgentWithIdleRetry(
 						messages,
@@ -9995,10 +10034,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							this.#wakeDispatchLiveWaiters();
 							options?.followUpBatch?.release();
 						},
-						() => !stopPassBlocks(),
+						claim,
 					);
 				while (!(await dispatch())) {
-					if (!(await admitPastStopPass())) {
+					if (!(await admitPastTurnGate())) {
 						if (planReferenceMessage) this.#planReferenceSent = false;
 						return false;
 					}
@@ -10038,7 +10077,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Client ownership is released by #prompt's bracket, which settles
 			// after this frame returns; its wake re-checks parked steers
 			// against zero.
-			this.#endInFlight(inFlightEpoch);
+			this.#endInFlight(inFlight);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
 	}
@@ -10773,7 +10812,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#queuedMessageDrainScheduled ||
 			this.#modeExitDrainSuppressionDepth > 0 ||
 			// A `subagent_stop` pass holds the session; its release drains the queue.
-			this.#stopPassHolds.size > 0 ||
+			this.#turnGate.held ||
 			this.#queuedMessageDrainBlocked ||
 			!this.#canAutoContinueForFollowUp() ||
 			!this.agent.hasQueuedMessages()
@@ -10783,12 +10822,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#queuedMessageDrainScheduled = true;
 		this.#scheduleAgentContinue({
 			source: "queued-message-drain",
-			stopPass: "skip",
+			claim: "background",
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
 					this.#modeExitDrainSuppressionDepth === 0 &&
-					this.#stopPassHolds.size === 0 &&
+					!this.#turnGate.held &&
 					this.#canAutoContinueForFollowUp() &&
 					this.agent.hasQueuedMessages()
 				);
@@ -10905,7 +10944,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		// A `subagent_stop` pass holds the session: these wait for its release, which schedules them again.
-		if (this.#stopPassHolds.size > 0) {
+		if (this.#turnGate.held) {
 			this.#hiddenNextTurnHeldGeneration = this.#cancellationGeneration();
 			return;
 		}
@@ -10971,7 +11010,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
-		const inFlightEpoch = this.#beginInFlight();
+		const inFlight = this.#beginInFlight(BACKGROUND_CLAIM);
 		const sessionGeneration = this.#sessionGeneration;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
@@ -10984,15 +11023,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
 			const prepared = await this.#prepareUserAuthoredWake(message, setupAbort.signal, sessionGeneration);
 			if (!prepared) return false;
-			// A wake can take its `subagent_stop` hold during the awaits above, after the caller's own
-			// hold check: a turn started now would run inside the held pass, whose monitor would take its
-			// output under the verdict for the earlier candidate. Park the message as a stranded aside;
-			// the hold's release wakes for it.
-			if (this.#stopPassHolds.size > 0) {
+			// A wake can take its `subagent_stop` hold during the awaits above, after the caller's own hold
+			// check: a turn started now would run inside the held pass, whose monitor would take its output
+			// under the verdict for the earlier candidate. The turn gate refuses it; the message parks as a
+			// stranded aside, and the hold's release wakes for it.
+			const run = this.#startAgentTurn(BACKGROUND_CLAIM, () =>
+				this.agent.prompt(prepared.length > 1 ? prepared : message),
+			);
+			if (!run) {
 				this.#irc.queueAside(prepared);
 				return false;
 			}
-			const run = this.agent.prompt(prepared.length > 1 ? prepared : message);
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -11005,7 +11046,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
-			this.#endInFlight(inFlightEpoch);
+			this.#endInFlight(inFlight);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
 	}
@@ -11243,11 +11284,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		// A turn-starting message (an idle aside starts one too) waits out a held
 		// `subagent_stop` pass; a user's cancels it.
-		if (
-			(options?.triggerTurn || options?.deliverAs === "aside") &&
-			!this.isStreaming &&
-			this.#stopPassHolds.size > 0
-		) {
+		if ((options?.triggerTurn || options?.deliverAs === "aside") && !this.isStreaming && this.#turnGate.held) {
 			const cancelsPass = normalizedAppMessage.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
@@ -12516,13 +12553,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// `subagent_stop` pass: a handler still pending must not, with its later `block`, start a continuation
 				// after the cancellation finished. The internal stop of a settled turn and a manual compaction's startup
 				// abort are not interrupts. The holders' pending prompts stop on the cancelled hold; this abort already
-				// stops the running turn, so the cancellation does not abort it again.
-				this.#cancellingHoldsForAbort = true;
-				try {
-					for (const hold of this.#stopPassHolds) hold.cancel.abort();
-				} finally {
-					this.#cancellingHoldsForAbort = false;
-				}
+				// stops the running turn, so the cancellation (an "interrupt") does not abort it again.
+				this.#turnGate.cancelAll("interrupt");
 			}
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
@@ -13772,7 +13804,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * were judging could no longer be the one published.
 	 */
 	async retry(): Promise<boolean> {
-		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
+		if (this.#turnGate.held) await this.#waitOutStopPasses(true);
 		const didRetry = await this.#recovery.retry();
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
@@ -14008,60 +14040,39 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `runSignal`, the run's abort signal, cancels the pass as well.
 	 */
 	holdForStopPass(runSignal?: AbortSignal): StopPassHold {
-		const state: StopPassHoldState = { cancel: new AbortController(), consulting: false };
-		this.#stopPassHolds.add(state);
-		const stopConsulting = (): void => {
-			if (!state.consulting) return;
-			state.consulting = false;
-			this.#notifyStopPassChanged();
-			this.yieldQueue.requestIdleFlush();
-		};
+		// The run's own cancellation (caller abort, runtime limit, teardown) cancels the pass too: it aborts the
+		// running turn, but a continuation still in prompt setup has no turn to stop, and the generation it captures
+		// after that abort would let it dispatch.
+		const hold = this.#turnGate.hold(runSignal);
 		let released = false;
-		// The run's own cancellation (caller abort, runtime limit, teardown) cancels the pass too: it
-		// aborts the running turn, but a continuation still in prompt setup has no turn to stop, and
-		// the generation it captures after that abort would let it dispatch.
-		let unlinkRunSignal: (() => void) | undefined;
-		if (runSignal) {
-			const cancelWithRun = (): void => state.cancel.abort(runSignal.reason);
-			if (runSignal.aborted) cancelWithRun();
-			else {
-				runSignal.addEventListener("abort", cancelWithRun, { once: true });
-				unlinkRunSignal = () => runSignal.removeEventListener("abort", cancelWithRun);
-			}
-		}
 		return {
-			signal: state.cancel.signal,
-			consult: () => {
-				state.consulting = true;
-			},
+			signal: hold.cancel.signal,
+			consult: () => this.#turnGate.consult(hold),
 			prompt: async (text, options) => {
+				// The handlers' verdict is in: the running work's own recovery, held while they consulted, may run
+				// again, and this continuation waits for it to settle.
+				this.#turnGate.endConsult(hold);
 				// A user prompt cancelling the pass must not wait behind the holder's own
 				// turn: stop it, so the pass can drop its candidate and release.
 				const stopTurn = (): void => {
 					// An abort() that cancelled this pass stops the turn itself. A user prompt's cancel stops it as a
 					// turn-stop, which is no cancellation of what the session still owes (and not of that prompt).
-					if (!this.#cancellingHoldsForAbort) void this.abort({ turnStop: true });
+					if (this.#turnGate.cancelling !== "interrupt") void this.abort({ turnStop: true });
 				};
-				state.cancel.signal.addEventListener("abort", stopTurn, { once: true });
+				hold.cancel.signal.addEventListener("abort", stopTurn, { once: true });
 				try {
-					state.cancel.signal.throwIfAborted();
-					return await this.#admitSubmission(() => this.#prompt(text, options, state));
+					hold.cancel.signal.throwIfAborted();
+					return await this.#admitSubmission(() => this.#prompt(text, options, hold));
 				} finally {
-					state.cancel.signal.removeEventListener("abort", stopTurn);
-					// Deliveries held during the verdict now reach the continuation's settle.
-					stopConsulting();
+					hold.cancel.signal.removeEventListener("abort", stopTurn);
 				}
 			},
 			release: () => {
 				if (released) return;
 				released = true;
-				unlinkRunSignal?.();
-				stopConsulting();
-				this.#stopPassHolds.delete(state);
-				this.#notifyStopPassChanged();
-				if (this.#stopPassHolds.size > 0) return;
+				this.#turnGate.release(hold);
+				if (this.#turnGate.held) return;
 				this.#scheduleIdleQueueDrain();
-				this.yieldQueue.requestIdleFlush();
 				// A prompt that waited out the hold goes first; parked wakes, the hidden next-turn messages and
 				// the compaction continuation the hold deferred follow it. An abort since the deferral cancelled
 				// that turn, as it does an undeferred one.
@@ -14087,16 +14098,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * mistake the cancellation for ownership.
 	 */
 	waitForStopPasses(signal?: AbortSignal): Promise<void> {
-		return this.#waitOutStopPasses(false, signal);
+		return this.#turnGate.whenAdmissible(BACKGROUND_CLAIM, signal);
 	}
 
 	/** Waits until no stop-pass hold is active; `cancel` (an explicit user prompt) first cancels every held pass. */
-	async #waitOutStopPasses(cancel: boolean, signal?: AbortSignal): Promise<void> {
-		while (this.#stopPassHolds.size > 0) {
-			if (cancel) for (const hold of this.#stopPassHolds) hold.cancel.abort();
-			const changed = this.#stopPassChanged.promise;
-			await (signal ? untilAborted(signal, changed) : changed);
-		}
+	#waitOutStopPasses(cancel: boolean, signal?: AbortSignal): Promise<void> {
+		return this.#turnGate.whenAdmissible(cancel ? USER_CLAIM : BACKGROUND_CLAIM, signal);
 	}
 
 	/**
@@ -14108,17 +14115,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#promptGeneration - this.#turnStopAborts;
 	}
 
-	#stopPassConsulting(): boolean {
-		for (const hold of this.#stopPassHolds) if (hold.consulting) return true;
-		return false;
-	}
-
-	#notifyStopPassChanged(): void {
-		const changed = this.#stopPassChanged;
-		this.#stopPassChanged = Promise.withResolvers<void>();
-		changed.resolve();
-	}
-
 	/**
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
 	 * or {@link holdForStopPass} hold, behind a running idle compaction, or queued
@@ -14127,10 +14123,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	get ircWakesPending(): boolean {
 		return (
-			this.#ircWakeHolds > 0 ||
-			this.#stopPassHolds.size > 0 ||
-			this.#ircWakesAwaitingCompaction > 0 ||
-			this.#irc.hasPending()
+			this.#ircWakeHolds > 0 || this.#turnGate.held || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending()
 		);
 	}
 

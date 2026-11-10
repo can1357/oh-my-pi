@@ -33,6 +33,7 @@ function createGuard(
 		emitNotice() {},
 		schedulePostPromptTask() {},
 		discardAssistantTurn() {},
+		startRecoveryTurn: () => undefined,
 	});
 	return { guard, aborts };
 }
