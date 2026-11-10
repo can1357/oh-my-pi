@@ -82,15 +82,21 @@ describe("browser prelude", () => {
 		]);
 	});
 
-	it("names the call that opens a tab when a helper runs on one that is not open", async () => {
+	it("names the JavaScript and Python calls that open a tab when a helper runs on one that is not open", async () => {
 		const session = makeSession();
 		const name = `missing-${crypto.randomUUID()}`;
-		await expect(
-			createBrowserPrelude(session).invoke(
+		const message = await createBrowserPrelude(session)
+			.invoke(
 				{ action: "call", name, chain: [{ method: "title", args: [] }] },
 				{ session, toolCallId: "browser-call-missing" },
-			),
-		).rejects.toThrow(`Tab "${name}" is not alive. Open it first with browser.open({ name: "${name}" }).`);
+			)
+			.then(
+				() => "",
+				(error: Error) => error.message,
+			);
+		expect(message).toContain(`browser.open({ name: "${name}" })`);
+		expect(message).toContain(`browser.open(name="${name}")`);
+		expect(message).not.toContain("action:");
 	});
 
 	it("gives a direct wait helper the budget its explicit timeout needs (#17617)", async () => {
