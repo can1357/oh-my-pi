@@ -16,13 +16,8 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	cfgClaudeResetsAutoRedeem5h,
-	cfgClaudeResetsAutoRedeemWeekly,
-	cfgCodexResetsAutoRedeem5h,
-	cfgCodexResetsAutoRedeemWeekly,
-} from "@oh-my-pi/pi-coding-agent/session/settings";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { cfgCodexResetsAutoRedeem5h, cfgCodexResetsAutoRedeemWeekly } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
@@ -36,12 +31,7 @@ const CODEX_USAGE_LIMIT_ERROR =
 interface CodexAccount {
 	accountId: string;
 	credentialId: number;
-	/** Account identity; the shared fixture email otherwise. */
-	email?: string;
-	fiveHourUsed?: number;
 	weeklyUsed: number;
-	/** How far the weekly wall is from rolling over; three days when omitted. */
-	weeklyResetsInMs?: number;
 	limitReached: boolean;
 	creditExpiresInMs: number;
 }
@@ -58,17 +48,17 @@ function codexReport(account: CodexAccount): UsageReport {
 				label: "5 Hour",
 				scope,
 				window: { id: "5h", label: "5 Hour", resetsAt: now + 2 * HOUR },
-				amount: { usedFraction: account.fiveHourUsed ?? 0.1, unit: "percent" },
+				amount: { usedFraction: 0.1, unit: "percent" },
 			},
 			{
 				id: "openai-codex:secondary",
 				label: "Weekly",
 				scope,
-				window: { id: "7d", label: "Weekly", resetsAt: now + (account.weeklyResetsInMs ?? 3 * 24 * HOUR) },
+				window: { id: "7d", label: "Weekly", resetsAt: now + 3 * 24 * HOUR },
 				amount: { usedFraction: account.weeklyUsed, unit: "percent" },
 			},
 		],
-		metadata: { accountId: account.accountId, email: account.email ?? EMAIL, limitReached: account.limitReached },
+		metadata: { accountId: account.accountId, email: EMAIL, limitReached: account.limitReached },
 	};
 }
 
@@ -77,7 +67,7 @@ function liveCreditStatus(account: CodexAccount, active: boolean): ResetCreditAc
 		provider: "openai-codex",
 		credentialId: account.credentialId,
 		accountId: account.accountId,
-		email: account.email ?? EMAIL,
+		email: EMAIL,
 		active,
 		availableCount: 1,
 		credits: [
@@ -129,15 +119,8 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		streamErrorFirst?: boolean;
 		/** Builds the session the way ACP does for a client with or without form elicitation. */
 		acpForm?: boolean;
-		/** Initial per-window consent; both windows start unset when omitted. */
-		codexAutoRedeem5h?: "unset" | "yes" | "no";
-		codexAutoRedeemWeekly?: "unset" | "yes" | "no";
-		/** How far the provider's own 429 hint pushes the block; three days when omitted. */
-		blockRetryAfterMs?: number;
 		/** Answers the auto-redeem consent prompt; implies a prompt UI. */
 		consent?: () => Promise<string | undefined>;
-		/** Shares another session's coordinator, as sessions of one process do. */
-		coordinator?: CodexAutoRedeemCoordinator;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
@@ -159,17 +142,13 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		});
 
 		const mock = createMockModel();
-		const usageLimitError =
-			options.blockRetryAfterMs === undefined
-				? CODEX_USAGE_LIMIT_ERROR
-				: CODEX_USAGE_LIMIT_ERROR.replace(/retry-after-ms=\d+/, `retry-after-ms=${options.blockRetryAfterMs}`);
 		let calls = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
-				if (options.streamErrorFirst && calls === 1) mock.push({ throw: usageLimitError });
+				if (options.streamErrorFirst && calls === 1) mock.push({ throw: CODEX_USAGE_LIMIT_ERROR });
 				else mock.push({ content: ["recovered after reset redemption"], stopReason: "stop" });
 				return mock.stream(requestedModel, context, streamOptions);
 			},
@@ -179,17 +158,14 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
 			"retry.maxRetries": 1,
+			"claudeResets.autoRedeem5h": "no",
+			"claudeResets.autoRedeemWeekly": "no",
 		});
-		// Set through the handles so a consented answer can overwrite them (override-layer values win over set()).
-		cfgClaudeResetsAutoRedeem5h.set(settings, "no");
-		cfgClaudeResetsAutoRedeemWeekly.set(settings, "no");
-		if (options.codexAutoRedeem5h) cfgCodexResetsAutoRedeem5h.set(settings, options.codexAutoRedeem5h);
-		if (options.codexAutoRedeemWeekly) cfgCodexResetsAutoRedeemWeekly.set(settings, options.codexAutoRedeemWeekly);
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
-		const coordinator = options.coordinator ?? createCodexAutoRedeemCoordinator();
-		coordinator.resetLockPath ??= `${tempDir.path()}/agent.db`;
+		const coordinator = createCodexAutoRedeemCoordinator();
+		coordinator.resetLockPath = `${tempDir.path()}/agent.db`;
 		const interactivePrompts = options.consent !== undefined ? true : options.acpForm;
 		let extensionRunner: ExtensionRunner | undefined;
 		if (options.acpForm !== undefined || options.consent !== undefined) {
@@ -307,255 +283,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(elicitations).toEqual([expect.stringContaining("Spend a saved Codex rate-limit reset?")]);
 		expect(targets).toEqual([]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-	});
-
-	it("remembers a consented weekly restore only on the weekly setting", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 6 * HOUR,
-		};
-		const { session, targets } = buildSession({
-			accounts: [account],
-			streamErrorFirst: true,
-			codexAutoRedeem5h: "no",
-			codexAutoRedeemWeekly: "unset",
-			consent: async () => "Yes",
-		});
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		// The 5h window was explicitly off; only the governing weekly key records the answer.
-		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("no");
-		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
-		// An interactive "yes" spends the credit the plan priced, never a later one.
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-	});
-
-	it("recovers a blocked turn while an unrelated salvage question is still open", async () => {
-		const accounts: CodexAccount[] = [
-			{
-				accountId: "acct-a",
-				credentialId: 1,
-				weeklyUsed: 1,
-				limitReached: true,
-				creditExpiresInMs: 6 * HOUR,
-			},
-			{
-				accountId: "acct-b",
-				credentialId: 2,
-				email: "sibling@example.com",
-				fiveHourUsed: 0.8,
-				weeklyUsed: 0.1,
-				limitReached: false,
-				creditExpiresInMs: 2 * HOUR,
-			},
-		];
-		const prompted = Promise.withResolvers<void>();
-		const answer = Promise.withResolvers<string | undefined>();
-		const consent = vi.fn(() => {
-			prompted.resolve();
-			return answer.promise;
-		});
-		const { session, coordinator, targets } = buildSession({
-			accounts,
-			streamErrorFirst: true,
-			codexAutoRedeem5h: "unset",
-			codexAutoRedeemWeekly: "yes",
-			consent,
-		});
-		mockSchedulerWaitWithClock();
-		const recovering = session
-			.prompt("recover while the sibling salvage awaits consent")
-			.then(() => session.waitForIdle());
-		let later: Promise<void> | undefined;
-		let laterTargets: ResetCreditTarget[] = [];
-
-		try {
-			await withTimeout(prompted.promise, 2_000, "no salvage question was asked");
-			// The weekly-approved restore is spent and the turn continues before the
-			// sibling's unset salvage question is answered.
-			await withTimeout(recovering, 2_000, "blocked turn waited for unrelated salvage consent");
-			expect(targets.map(target => target.credentialId)).toEqual([1]);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-
-			// A usage heartbeat must not start a sweep that asks about the same credit again.
-			await session.fetchUsageReports();
-			expect(consent).toHaveBeenCalledTimes(1);
-			expect(targets.map(target => target.credentialId)).toEqual([1]);
-
-			// Another session's blocked pass in the same process finds the credit already
-			// claimed, so it neither asks twice nor waits for this open question.
-			const peer = buildSession({
-				accounts,
-				streamErrorFirst: true,
-				codexAutoRedeem5h: "unset",
-				codexAutoRedeemWeekly: "yes",
-				consent,
-				coordinator,
-			});
-			laterTargets = peer.targets;
-			later = peer.session
-				.prompt("block again while the salvage question stays open")
-				.then(() => peer.session.waitForIdle());
-			await withTimeout(later, 2_000, "a later blocked pass waited for the pending salvage question");
-			expect(consent).toHaveBeenCalledTimes(1);
-			expect([...targets, ...laterTargets].map(target => target.credentialId)).toEqual([1]);
-
-			answer.resolve("Yes");
-			await coordinator.sweepPromise;
-			expect([...targets, ...laterTargets].map(target => target.credentialId)).toEqual([1, 2]);
-		} finally {
-			answer.resolve("No");
-			await recovering;
-			await later;
-			await coordinator.sweepPromise;
-		}
-	});
-
-	it("recovers through approved active-account salvage while sibling consent stays open", async () => {
-		const prompted = Promise.withResolvers<void>();
-		const answer = Promise.withResolvers<string | undefined>();
-		const { session, coordinator, targets } = buildSession({
-			accounts: [
-				{
-					accountId: "acct-a",
-					credentialId: 1,
-					weeklyUsed: 1,
-					weeklyResetsInMs: 30 * MINUTE,
-					limitReached: true,
-					creditExpiresInMs: 2 * MINUTE,
-				},
-				{
-					accountId: "acct-b",
-					credentialId: 2,
-					email: "sibling@example.com",
-					fiveHourUsed: 0.8,
-					weeklyUsed: 0.1,
-					limitReached: false,
-					creditExpiresInMs: 2 * HOUR,
-				},
-			],
-			streamErrorFirst: true,
-			blockRetryAfterMs: 30 * MINUTE,
-			codexAutoRedeem5h: "unset",
-			codexAutoRedeemWeekly: "yes",
-			consent: () => {
-				prompted.resolve();
-				return answer.promise;
-			},
-		});
-		mockSchedulerWaitWithClock();
-		const recovering = session
-			.prompt("recover through active salvage while the sibling awaits consent")
-			.then(() => session.waitForIdle());
-
-		try {
-			await withTimeout(prompted.promise, 2_000, "no sibling salvage question was asked");
-			// Restore is below the threshold, but the approved last-chance salvage
-			// still resets the active credential without waiting for its sibling.
-			await withTimeout(recovering, 2_000, "active salvage recovery waited for sibling consent");
-			expect(targets).toEqual([
-				{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-			]);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-
-			answer.resolve("Yes");
-			await coordinator.sweepPromise;
-			expect(targets.map(target => target.credentialId)).toEqual([1, 2]);
-		} finally {
-			answer.resolve("No");
-			await recovering;
-			await coordinator.sweepPromise;
-		}
-	});
-
-	it("keeps a blocked turn waiting for its own restore consent", async () => {
-		const prompted = Promise.withResolvers<void>();
-		const answer = Promise.withResolvers<string | undefined>();
-		const consent = vi.fn(() => {
-			prompted.resolve();
-			return answer.promise;
-		});
-		const { session, coordinator, targets } = buildSession({
-			accounts: [
-				{
-					accountId: "acct-a",
-					credentialId: 1,
-					weeklyUsed: 1,
-					limitReached: true,
-					creditExpiresInMs: 6 * HOUR,
-				},
-			],
-			streamErrorFirst: true,
-			codexAutoRedeem5h: "no",
-			codexAutoRedeemWeekly: "unset",
-			consent,
-		});
-		mockSchedulerWaitWithClock();
-		const recovering = session.prompt("wait for the restore decision").then(() => session.waitForIdle());
-		try {
-			await prompted.promise;
-			// A full usage round trip still leaves the pass open: recovery is waiting for
-			// this answer, so nothing is spent and no second question is asked.
-			await session.fetchUsageReports();
-			expect(coordinator.inFlightByAccount.size).toBe(1);
-			expect(consent).toHaveBeenCalledTimes(1);
-			expect(targets).toEqual([]);
-
-			answer.resolve("Yes");
-			await recovering;
-			expect(targets.map(target => target.credentialId)).toEqual([1]);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-		} finally {
-			answer.resolve("No");
-			await recovering;
-		}
-	});
-
-	it("waits for consent to salvage the blocked account's own expiring reset when its restore is too soon", async () => {
-		// The weekly wall clears in half an hour — below the 60-minute restore
-		// threshold — so the only planned spend is the account's last-chance
-		// salvage. That salvage is what can recover the turn, so its question must
-		// hold the turn: answering Yes spends the credit and the turn continues.
-		const account: CodexAccount = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			weeklyResetsInMs: 30 * MINUTE,
-			limitReached: true,
-			creditExpiresInMs: 2 * MINUTE,
-		};
-		const { session, targets } = buildSession({
-			accounts: [account],
-			streamErrorFirst: true,
-			codexAutoRedeem5h: "no",
-			codexAutoRedeemWeekly: "unset",
-			consent: async () => "Yes",
-		});
-		mockSchedulerWaitWithClock();
-
-		await withTimeout(
-			session.prompt("recover through the blocked account's own expiring reset").then(() => session.waitForIdle()),
-			5_000,
-			"the blocked turn never recovered",
-		);
-
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(session.agent.state.messages.at(-1)).toMatchObject({
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: "recovered after reset redemption" }],
-		});
 	});
 
 	it("keeps a one-off imminent salvage from enabling both windows", async () => {

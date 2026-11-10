@@ -15424,26 +15424,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [];
 	}
 
-	/**
-	 * Spend the actions their governing window allows outright, then ask about
-	 * the rest and spend only the confirmed ones. Approved spends never wait on
-	 * an unrelated question: an unanswered prompt must not let them expire.
-	 *
-	 * A blocked pass opts into `detachUnrelatedPrompt`, but only detaches after
-	 * an approved spend of the active credential actually succeeds — a
-	 * blocked-account restore, or the active account's own salvage (which resets
-	 * the credential too). A salvage question can then continue with its
-	 * confirmed spends in the background while turn recovery retries the
-	 * restored account. Otherwise the prompt is still awaited: even a
-	 * sibling-account salvage may be what recovers the turn, and an unrelated
-	 * recovery must not release a question about this account's credit.
-	 */
+	/** Spend what each governing window allows outright first, then ask about the rest. */
 	async #redeemConsentedResets(
 		provider: ResetProvider,
 		modes: Record<string, ResetAutoRedeemMode>,
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-		options: { detachUnrelatedPrompt?: boolean } = {},
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const approved = actions.filter(action => actionConsent(action, modes).mode === "yes");
 		const prompted = actions.filter(
@@ -15452,68 +15438,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				!coordinator.declinedCredits.has(declinedCreditKey(action)),
 		);
 		const spent = await this.#executeResetActions(provider, approved, coordinator);
-		if (prompted.length === 0) return spent;
-		// Only a real prompt can hold a turn; a headless host answers immediately.
-		if (
-			options.detachUnrelatedPrompt &&
-			approved.some(
-				action =>
-					(action.reason === "blocked-account" || action.active) &&
-					spent.restoredCredentialIds.includes(action.target.credentialId),
-			) &&
-			!prompted.some(action => action.reason === "blocked-account") &&
-			this.#extensionRunner?.hasUI() &&
-			this.#interactivePrompts
-		) {
-			this.#askResetConsentInBackground(provider, modes, prompted, coordinator);
-			return spent;
-		}
 		const confirmed = await this.#confirmAutoRedeem(provider, prompted, coordinator, modes);
 		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
 		return {
 			restoredCredentialIds: [...spent.restoredCredentialIds, ...consented.restoredCredentialIds],
 			poolLimited: spent.poolLimited || consented.poolLimited,
 		};
-	}
-
-	/**
-	 * Ask the salvage question without holding the blocked turn. The coordinator
-	 * is process-wide, so both guards live there: the prompted credits' attempt
-	 * keys are claimed while the question is open (no sweep or later blocked pass
-	 * may ask about them again), and the sweep slot stays held until the answer is
-	 * spent (a usage heartbeat must not start a second combined sweep). A sweep
-	 * that was already running is awaited first; its own cleanup clears the guard,
-	 * so it is re-asserted before asking. Errors are logged: a settled turn must
-	 * not fail because a background question did.
-	 */
-	#askResetConsentInBackground(
-		provider: ResetProvider,
-		modes: Record<string, ResetAutoRedeemMode>,
-		actions: (CodexResetAction | ClaudeResetAction)[],
-		coordinator: CodexAutoRedeemCoordinator,
-	): void {
-		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
-		const pendingKeys = actions.map(action => action.attemptKey);
-		for (const key of pendingKeys) coordinator.attemptedKeys.add(key);
-		const previousSweep = coordinator.sweepPromise;
-		coordinator.sweepInFlight = true;
-		coordinator.sweepPromise = (async () => {
-			if (previousSweep) await previousSweep.catch(() => {});
-			coordinator.sweepInFlight = true;
-			let confirmed: readonly (CodexResetAction | ClaudeResetAction)[] = [];
-			try {
-				confirmed = await this.#confirmAutoRedeem(provider, actions, coordinator, modes);
-			} finally {
-				// The claim only covers the open question: an unconfirmed credit becomes
-				// askable again, and the executor re-records the ones it is about to spend.
-				for (const key of pendingKeys) coordinator.attemptedKeys.delete(key);
-			}
-			await this.#executeResetActions(provider, confirmed, coordinator);
-		})()
-			.catch(error => logger.warn(`${source}: background consent failed`, { error: String(error) }))
-			.finally(() => {
-				coordinator.sweepInFlight = false;
-			});
 	}
 
 	#planCodexResets(
@@ -15839,9 +15769,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				return { restored: false, retryAfterMs, poolLimited };
 			}
-			const executed = await this.#redeemConsentedResets(provider, modes, plan.actions, coordinator, {
-				detachUnrelatedPrompt: true,
-			});
+			const executed = await this.#redeemConsentedResets(provider, modes, plan.actions, coordinator);
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,

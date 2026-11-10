@@ -328,6 +328,67 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 	});
 });
 
+describe("planClaudeResetRedemptions: window consent", () => {
+	const fiveHourBlock = { fiveHourUsed: 1, weeklyUsed: 0.5 };
+	const fiveHourCredit = { blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1 } };
+	const fable = { id: "fable-1", clears: ["anthropic:5h", "anthropic:7d:fable"], usedFractions: {} };
+	it.each<{
+		name: string;
+		windows: Record<ClaudeResetWindow, boolean>;
+		usage: ReportOptions;
+		credit: Partial<UsageResetCredit>;
+		expected: ClaudeResetWindow | ClaudeResetSkipReason;
+	}>([
+		{
+			name: "a weekly block is governed by the weekly key",
+			windows: { "5h": true, weekly: false, fable: true },
+			usage: {},
+			credit: {},
+			expected: "window-disabled",
+		},
+		{
+			name: "a 5h-only block is governed by the 5h key",
+			windows: { "5h": false, weekly: true, fable: true },
+			usage: fiveHourBlock,
+			credit: fiveHourCredit,
+			expected: "window-disabled",
+		},
+		{
+			name: "a Fable grant never restores a 5h-only block",
+			windows: WINDOWS_BOTH,
+			usage: { ...fiveHourBlock, fableUsed: 0.6 },
+			credit: { ...fable, ...fiveHourCredit },
+			expected: "fable-only",
+		},
+		{
+			name: "a Fable grant restores a Fable cap block under the Fable key alone",
+			windows: { "5h": false, weekly: false, fable: true },
+			usage: { weeklyUsed: 0.5, fableUsed: 1 },
+			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
+			expected: "fable",
+		},
+		{
+			name: "a Fable grant with no Fable usage is never spent",
+			windows: WINDOWS_BOTH,
+			usage: { weeklyUsed: 0.5, fableUsed: 0 },
+			credit: { ...fable, blocking: [] },
+			expected: "no-fable-usage",
+		},
+	])("$name", ({ windows, usage, credit, expected }) => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				modelId: "claude-fable-5",
+				settings: windowSettings(windows),
+				reports: [report(usage)],
+				statuses: [status({ credit })],
+			}),
+		);
+		const outcome: string | undefined =
+			plan.actions[0]?.window ?? plan.skipped.find(skip => skip.rule !== "expiring-credit")?.reason;
+		expect(outcome).toBe(expected);
+	});
+});
+
 describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({

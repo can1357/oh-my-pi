@@ -37,6 +37,10 @@ import { IMMINENT_RESET_EXPIRY_MS } from "@oh-my-pi/pi-coding-agent/session/rese
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+const BOTH = { "5h": "yes", weekly: "yes" } as const;
+const NEITHER = { "5h": "no", weekly: "no" } as const;
+const ONLY_5H = { "5h": "yes", weekly: "no" } as const;
+const ONLY_WEEKLY = { "5h": "no", weekly: "yes" } as const;
 const ACCOUNT_ID = "acct-123";
 const EMAIL = "user@example.com";
 const CREDENTIAL_ID = 1;
@@ -151,12 +155,7 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		trigger: "blocked",
 		provider: "openai-codex",
 		modelId: "gpt-5.3-codex",
-		settings: {
-			modes: { "5h": "yes", weekly: "yes" },
-			minBlockedMinutes: 60,
-			keepCredits: 0,
-			salvageHorizonMs: 12 * HOUR,
-		},
+		settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 		identity: IDENTITY,
 		reports,
 		attemptedKeys: new Set<string>(),
@@ -234,12 +233,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		];
 		const plan = planCodexResetRedemptions(
 			input([candidate], {
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 12 * HOUR,
-				},
+				settings: { modes: ONLY_WEEKLY, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
 		expect(plan.actions).toMatchObject([
@@ -376,12 +370,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("respects the reserve: 1 credit with keepCredits 1 is held back", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
-				settings: {
-					modes: { "5h": "yes", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 1,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -391,12 +380,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("restores above the reserve: 2 credits with keepCredits 1", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ credits: 2 })], {
-				settings: {
-					modes: { "5h": "yes", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 1,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toMatchObject([{ reason: "blocked-account", availableCount: 2 }]);
@@ -469,16 +453,17 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
+	it("leaves the window unknown when a live wait fits either window", () => {
+		const staleFlag = report({ weeklyUsed: 0.5, primaryUsed: 0.6, limitReached: false });
+		const plan = planCodexResetRedemptions(input([staleFlag], { activeBlockUnblockAtMs: NOW + 2 * HOUR }));
+		expect(plan.actions).toEqual([expect.objectContaining({ window: undefined, blockedWindows: [] })]);
+	});
+
 	it("restores a live-only weekly block when its wait cannot belong to the disabled 5h window", () => {
 		const plan = planCodexResetRedemptions(
 			input([synthesizedActiveReport()], {
 				activeBlockUnblockAtMs: NOW + 2 * DAY,
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: ONLY_WEEKLY, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([
@@ -515,12 +500,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			const plan = planCodexResetRedemptions(
 				input([report({ primaryUsed: 1, primaryResetInMs: HOUR, weeklyUsed: 0.5 })], {
 					activeBlockUnblockAtMs: NOW + remainingMs,
-					settings: {
-						modes: { "5h": "yes", weekly: "no" },
-						minBlockedMinutes: 60,
-						keepCredits: 0,
-						salvageHorizonMs: 0,
-					},
+					settings: { modes: ONLY_5H, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 				}),
 			);
 			expect(plan.actions).toEqual([]);
@@ -536,12 +516,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ primaryUsed: 1, primaryResetInMs: HOUR, weeklyUsed: 0.5 })], {
 				activeBlockUnblockAtMs: NOW + 3 * DAY,
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 120,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: ONLY_WEEKLY, minBlockedMinutes: 120, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([
@@ -559,12 +534,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ primaryUsed: 1, primaryResetInMs: HOUR, weeklyUsed: 0.5 })], {
 				activeBlockUnblockAtMs: NOW + HOUR,
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: ONLY_5H, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([
@@ -633,12 +603,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("skips a 5h-only block when only the weekly window is enabled", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: ONLY_WEEKLY, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -652,12 +617,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 	it("returns nothing when the policy is disabled", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
-				settings: {
-					modes: { "5h": "no", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: NEITHER, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
@@ -884,12 +844,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 5,
-					salvageHorizonMs: 12 * HOUR,
-				},
+				settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
 		expect(plan.actions).toHaveLength(1);
@@ -928,12 +883,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -943,12 +893,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 12 * HOUR,
-				},
+				settings: { modes: ONLY_5H, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -962,12 +907,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 	it("salvages at five minutes inclusively despite a zero horizon", () => {
 		const base = input([], {
 			trigger: "sweep",
-			settings: {
-				modes: { "5h": "yes", weekly: "yes" },
-				minBlockedMinutes: 60,
-				keepCredits: 5,
-				salvageHorizonMs: 0,
-			},
+			settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
 		});
 		for (const expiresInMs of [1, 5 * 60_000, 5 * 60_000 + 1]) {
 			const plan = planCodexResetRedemptions({
@@ -1009,12 +949,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([zero, unknown], {
 				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 5,
-					salvageHorizonMs: 0,
-				},
+				settings: { modes: BOTH, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
 			}),
 		);
 		expect(plan.actions).toMatchObject([
@@ -1038,12 +973,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				trigger: "sweep",
-				settings: {
-					modes: { "5h": "no", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 12 * HOUR,
-				},
+				settings: { modes: NEITHER, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 			}),
 		);
 		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
