@@ -1,6 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Text } from "@oh-my-pi/pi-tui";
+import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createToolCallBlock } from "@oh-my-pi/pi-coding-agent/modes/controllers/tool-call-block";
@@ -324,6 +326,24 @@ describe("settled task card rows follow agents that run again", () => {
 		expect(agentProps(card, ALPHA)).toMatchObject({ status: "aborted", tool: null, stats: { took: 1000 } });
 	});
 
+	it("asks the local registry again once a collab guest leaves, with no registry event", async () => {
+		vi.useFakeTimers();
+		// A local agent keeps running quietly through the collab session.
+		registerRunning(ALPHA);
+		vi.advanceTimersByTime(100);
+		const guest = new CollabGuestLink(mode);
+		mode.setCollabGuest(guest);
+		mode.syncRunningSubagentBadge();
+		// Leaving rebuilds the local transcript while the guest still holds it: the card asks its empty mirror.
+		const card = cancelledTaskCard();
+		expect(agentProps(card, ALPHA).status).toBe("aborted");
+
+		await guest.leave("left");
+		expect(mode.collabGuest).toBeUndefined();
+		vi.advanceTimersByTime(100);
+		expect(agentProps(card, ALPHA)).toMatchObject({ status: "running", tool: null });
+	});
+
 	it("never redraws a terminal card for an agent that runs again", () => {
 		setNativeRendering(false);
 		const card = cancelledTaskCard();
@@ -332,6 +352,39 @@ describe("settled task card rows follow agents that run again", () => {
 		emitProgress(ALPHA, { currentTool: "read", currentToolStartMs: Date.now() });
 		expect(card.refreshLiveTaskAgents()).toBe(false);
 		expect(ansiRow(card, ALPHA)).toContain("aborted");
+	});
+
+	it("never asks the live agents about a task card a shadowing extension draws", () => {
+		const source = vi.spyOn(mode, "liveTaskAgents");
+		const extensionTask: AgentTool = {
+			name: "task",
+			label: "Extension Task",
+			description: "delegates to another runner",
+			parameters: { type: "object", additionalProperties: true },
+			renderResult: () => new Text("Delegated to the extension runner", 0, 0),
+			async execute() {
+				return { content: [{ type: "text", text: "Delegated" }] };
+			},
+		};
+		vi.spyOn(session, "hasBuiltInTool").mockReturnValue(false);
+		const card = createToolCallBlock(mode, {
+			name: "task",
+			args: { job: ALPHA },
+			tool: extensionTask,
+			id: "call-extension-task",
+			cwd: tempDir.path(),
+		}) as ToolExecutionComponent;
+		mode.chatContainer.addChild(card);
+		registerRunning(ALPHA);
+
+		// The extension's details share only the built-in's `results` array name.
+		const details = { results: [{ id: ALPHA }, null] };
+		expect(() =>
+			card.updateResult({ content: [{ type: "text", text: "Delegated" }], details, isError: false }, false),
+		).not.toThrow();
+		expect(card.refreshLiveTaskAgents()).toBe(false);
+		expect(source).not.toHaveBeenCalled();
+		expect(Bun.stripANSI(card.render(160).join("\n"))).toContain("Delegated to the extension runner");
 	});
 
 	it("catches a card up when native rendering resumes while its agent runs again", () => {

@@ -1780,11 +1780,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * A guest's transcript is the host's and draws stock cards. Joining replays the host's next, so
 	 * the local blocks are left as drawn; leaving restored the local transcript while the guest still
-	 * held it, so its blocks are asked again.
+	 * held it, so its blocks are asked again, and its task cards ask the local registry which agents run.
 	 */
 	setCollabGuest(guest: CollabGuestLink | undefined): void {
 		this.#collabGuest = guest;
 		if (this.#applyTranscriptPresenters() && !guest) this.refreshTranscriptPresentation();
+		if (!guest) this.scheduleLiveTaskCardRefresh();
 	}
 	#streamPublisher: StreamPublisher | undefined;
 	#recorder: SessionRecorder | undefined;

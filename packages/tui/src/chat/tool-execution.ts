@@ -241,8 +241,9 @@ export interface ToolExecutionOptions {
 	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
 	transcriptPresenters?: boolean;
 	/**
-	 * The host's live agents: on a native surface, a task card's settled rows
-	 * draw an agent that runs again as running. The host calls
+	 * The host's live agents: on a native surface, a built-in task card's
+	 * settled rows draw an agent that runs again as running. Unused without the
+	 * built-in renderer: a shadowing tool's details are its own. The host calls
 	 * {@link ToolExecutionComponent.refreshLiveTaskAgents} when they change.
 	 */
 	liveTaskAgents?: LiveTaskAgentSource;
@@ -596,7 +597,7 @@ export class ToolExecutionComponent extends Container {
 		this.#presented = options.transcriptPresenters ?? true;
 		this.#tool = tool;
 		this.#liveTaskAgents =
-			toolName === "task" && options.liveTaskAgents
+			toolName === "task" && this.#renderer && options.liveTaskAgents
 				? { source: options.liveTaskAgents, agents: undefined, key: "" }
 				: undefined;
 		this.#ui = ui;
