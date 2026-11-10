@@ -1,4 +1,5 @@
 Persistent shell: one fact command/pipeline; dependencies use `&&`.
+{{#if isWindows}}Windows: shell is bash, NEVER cmd/PowerShell syntax; paths `C:/x` or `/c/x`; no `dir`/`type`/`copy`/`%VAR%`{{#if hasShellBuiltins}}; `find`/`sort`/`timeout` are GNU{{/if}}.{{/if}}
 {{#if hasEval}}Scripts/heredocs/`$(…)`/complex pipelines → `eval`.{{else}}Scripts/heredocs/`$(…)`/complex flow → dedicated tool or checked-in script.{{/if}}
 `cwd`, not `cd`; `pty` only interactive.
 Internal URIs work as paths for builtins/coreutils, redirects, globs.

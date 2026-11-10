@@ -77,6 +77,8 @@ The session filesystem is restored after a run-only override. Provider waits are
 
 Beyond the bash builtins, the session runs the in-process command-line utilities implemented in the `pi-builtins` crate (`crates/pi-builtins`) — in-house ports of uutils coreutils/findutils/sed and jaq built on `uucore` 0.8.0. The set includes `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `ls`, `find`, `grep`, `mkdir`, `rm`, `mv`, `cp`, `ln`, `sed`, `jq`, `fd`, `diff`, the checksum/`tr`/`cut`/`date` families, and more; `pi_builtins::extras::extras()` is the authoritative list.
 
+These utilities are found before `PATH`, so on Windows `find`, `sort`, `timeout` and `whoami` shadow the System32 programs of the same names, whose options are `/X` switches. A command line written in such a program's own syntax goes to `PATH`'s program instead (`Host::defers_to_path`, `crates/pi-shell/src/cmd_dialect.rs`): the first argument is one of that program's switches (as `PROGRAM /?` lists them) and nothing after it is GNU syntax (`-x`, `--x`, or `find`'s `(`, `)`, `!`). So `dir | find /c /v ""`, `sort /r` and `timeout /t 5` run the Windows programs, while `find /c -name x` and `sort -r` stay pi's. When `PATH` has no such program the utility runs after all. `type` still reports the utility.
+
 Three search-related builtins are worth calling out:
 
 - `grep` is implemented on the ripgrep libraries (`grep-regex`/`grep-searcher`), with directory walks and ordered parallel search served by `pi-walker` (`rg`/`grep` output stays in path order).

@@ -619,8 +619,8 @@ fn wide(b: &BStr) -> io::Result<Vec<u16>> {
 	Ok(s.encode_utf16().chain([0]).collect())
 }
 
-/// `%SystemRoot%\System32\cmd.exe`, NUL-terminated.
-fn system_cmd() -> io::Result<Vec<u16>> {
+/// `%SystemRoot%\System32`, without a terminator.
+fn system_dir() -> io::Result<Vec<u16>> {
 	let mut buf = vec![0u16; 260];
 	// SAFETY: `buf` is writable for its length.
 	let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
@@ -628,8 +628,36 @@ fn system_cmd() -> io::Result<Vec<u16>> {
 		return Err(last_error());
 	}
 	buf.truncate(n);
+	Ok(buf)
+}
+
+/// `%SystemRoot%\System32\cmd.exe`, NUL-terminated.
+fn system_cmd() -> io::Result<Vec<u16>> {
+	let mut buf = system_dir()?;
 	buf.extend("\\cmd.exe".encode_utf16().chain([0]));
 	Ok(buf)
+}
+
+/// Whether `path` is System32's `find.exe` (any case, either separator),
+/// which parses its own command line ([`cmdline::find_command_line`]); a
+/// `find.exe` elsewhere (Git's GNU `find`) parses `argv`.
+fn is_system_find(path: &BStr) -> bool {
+	let Ok(mut expected) = system_dir() else {
+		return false;
+	};
+	expected.extend("\\find.exe".encode_utf16());
+	let Ok(path) = path.to_str() else {
+		return false;
+	};
+	let fold = |unit: u16| match char::from_u32(u32::from(unit)) {
+		Some('/') => u16::from(b'\\'),
+		Some(c) if c.is_ascii() => u16::from(c.to_ascii_lowercase() as u8),
+		_ => unit,
+	};
+	path
+		.encode_utf16()
+		.map(fold)
+		.eq(expected.into_iter().map(fold))
 }
 
 /// Application name and mutable command line (both NUL-terminated).
@@ -638,6 +666,8 @@ fn command(path: &BStr, argv: &[BString]) -> io::Result<(Vec<u16>, Vec<u16>)> {
 		cmdline::batch_command_line(path, argv.get(1..).unwrap_or_default())
 	} else if argv.is_empty() {
 		cmdline::command_line(&[path])
+	} else if is_system_find(path) {
+		cmdline::find_command_line(argv)
 	} else {
 		cmdline::command_line(argv)
 	}
