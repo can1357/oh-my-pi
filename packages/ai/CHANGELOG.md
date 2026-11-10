@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
