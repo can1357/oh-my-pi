@@ -2395,3 +2395,21 @@ async fn dev_null_redirects_discard_both_streams_and_exists() {
 	assert_eq!(read_capture(&stdout), "", "redirected stdout must not appear");
 	assert_eq!(read_capture(&stderr), "", "redirected stderr must not appear");
 }
+
+/// Positive control for `dev_null_redirects_discard_both_streams_and_exists`:
+/// the same capture plumbing, run without the redirect, must show `y` on
+/// stderr and nothing on stdout. A capture that never saw stderr bytes could
+/// pass the "nothing on stderr" assertion above without testing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn unredirected_stderr_reaches_the_capture() {
+	let mut session = default_session().await;
+	let stdout = tempfile::tempfile().expect("stdout capture");
+	let stderr = tempfile::tempfile().expect("stderr capture");
+	let result = session
+		.run_test("{ printf y >&2; }", &TestStdio::null().stdout(&stdout).stderr(&stderr))
+		.await
+		.expect("stderr capture");
+	assert_eq!(exit_code(&result), 0);
+	assert_eq!(read_capture(&stdout), "", "nothing may reach stdout");
+	assert_eq!(read_capture(&stderr), "y", "stderr bytes must reach the capture");
+}
