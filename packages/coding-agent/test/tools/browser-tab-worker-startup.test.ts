@@ -23,7 +23,7 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import type { CDPSession } from "puppeteer-core";
+import type { CDPSession, ElementHandle } from "puppeteer-core";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -433,38 +433,101 @@ describe("OMP-owned browser input", () => {
 						10_000,
 					),
 				).toBe("hovered");
-				// A reveal may be delayed after pointer entry, not completed in the mouse event's task.
-				// Real page time is intentional: the reveal must occur after mouse.move has returned.
+				const page = (await browser.browser.pages()).find(page => page.url().startsWith("data:text/html,"));
+				if (!page) throw new Error("Missing hover test page");
+				// Reveal only after the first post-move hit test has found the underlying row.
+				await page.evaluate(`(() => {
+					const row = document.createElement("div");
+					row.style.cssText = "position:absolute;left:200px;top:300px;width:120px;height:30px";
+					row.innerHTML = '<button id="delayed" style="visibility:hidden">Delayed</button>';
+					document.body.append(row);
+				})()`);
+				const delayed = await page.$("#delayed");
+				if (!delayed) throw new Error("Missing delayed target");
+				const hitChecked = Promise.withResolvers<void>();
+				const evaluate = delayed.evaluate.bind(delayed);
+				const evaluateSpy = spyOn(delayed, "evaluate").mockImplementation((...args) => {
+					const result = evaluate(...args);
+					if (
+						typeof args[0] === "function" &&
+						args[0].name === "anonymous" &&
+						typeof args[1] === "object" &&
+						args[1] !== null &&
+						"x" in args[1]
+					) {
+						void result.then(() => hitChecked.resolve(), hitChecked.reject);
+					}
+					return result;
+				});
+				try {
+					const hovering = hoverElement(delayed, "delayed target");
+					await hitChecked.promise;
+					await page.evaluate('document.querySelector("#delayed").style.visibility = "visible"');
+					await hovering;
+				} finally {
+					evaluateSpy.mockRestore();
+					await delayed.dispose();
+				}
 				expect(
 					await message(
 						`await tab.evaluate(() => {
 							const row = document.createElement("div");
-							row.style.cssText = "position:absolute;left:200px;top:300px;width:120px;height:30px";
-							row.innerHTML = '<button id="delayed" style="visibility:hidden">Delayed</button>';
-							row.onmouseenter = () => setTimeout(() => { row.firstElementChild.style.visibility = "visible"; }, 150);
+							row.style.cssText = "position:absolute;left:400px;top:300px;width:120px;height:30px";
+							row.innerHTML = '<button id="moving" style="opacity:0">Moving</button>';
+							row.onmouseenter = () => {
+								row.firstElementChild.style.opacity = "1";
+								row.firstElementChild.style.transform = "translateX(150px)";
+							};
 							document.body.append(row);
 						});
-						await tab.hover("#delayed");
-						if (!(await tab.isVisible("#delayed"))) throw new Error("not revealed");`,
+						await tab.hover("#moving");`,
 						10_000,
 					),
-				).toBe("hovered");
+				).toContain("covered by <div>");
 				// Closed roots still expose their browser hit test through a handle to the target.
-				const page = (await browser.browser.pages()).find(page => page.url().startsWith("data:text/html,"));
-				if (!page) throw new Error("Missing hover test page");
-				const inner = (await page.evaluateHandle(`(() => {
+				const inner = (
+					await page.evaluateHandle(`(() => {
 					const host = document.createElement("div");
 					host.style.cssText = "position:absolute;left:200px;top:350px";
 					document.body.append(host);
 					const root = host.attachShadow({ mode: "closed" });
 					root.innerHTML = "<button>Closed target</button>";
 					return root.firstElementChild;
-				})()`)).asElement();
+				})()`)
+				).asElement();
 				if (!inner) throw new Error("Missing closed-root target");
 				try {
-					await hoverElement(inner, "closed target", AbortSignal.timeout(2_000));
+					await hoverElement(inner as ElementHandle, "closed target");
 				} finally {
 					await inner.dispose();
+				}
+				const vanishing = await page.$("#mobile");
+				if (!vanishing) throw new Error("Missing vanishing target");
+				const boundingBox = vanishing.boundingBox.bind(vanishing);
+				let boxes = 0;
+				const boxSpy = spyOn(vanishing, "boundingBox").mockImplementation(async () => {
+					if (++boxes === 3) {
+						await vanishing.evaluate(el => {
+							el.remove();
+						});
+						return null;
+					}
+					return boundingBox();
+				});
+				const moveSpy = spyOn(page.mouse, "move");
+				try {
+					let error: unknown;
+					try {
+						await hoverElement(vanishing, "vanishing target");
+					} catch (caught) {
+						error = caught;
+					}
+					expect(String(error)).toContain("detached or has no layout box");
+					expect(moveSpy).not.toHaveBeenCalled();
+				} finally {
+					boxSpy.mockRestore();
+					moveSpy.mockRestore();
+					await vanishing.dispose();
 				}
 			} finally {
 				await releaseTab(name, { kill: true });

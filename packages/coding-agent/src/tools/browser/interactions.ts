@@ -495,26 +495,24 @@ export async function clickElement(
 }
 
 /**
- * Page half of {@link hoverElement}, run once the pointer is on `el` at `offset` from its box: `null` when the hit
+ * Page half of {@link hoverElement}, run at the dispatched frame-local pointer coordinate: `null` when the hit
  * there is `el` or inside it (or, for a target that takes no pointer events, an element it sits in), else that hit
  * as `<tag#id.class>`. A label is a cover here: it forwards clicks to its control, not the pointer.
  */
-function checkHoverHit(
-	el: unknown,
-	offset: { x: number; y: number },
-	contains: typeof composedContains,
-): string | null {
+function checkHoverHit(el: unknown, point: { x: number; y: number }, contains: typeof composedContains): string | null {
 	const element = el as unknown as PageElement;
 	const page = globalThis as unknown as PageGlobals;
-	const rect = element.getBoundingClientRect();
-	const x = rect.left + offset.x;
-	const y = rect.top + offset.y;
+	const { x, y } = point;
 	let hit = page.document.elementFromPoint(x, y);
 	for (let depth = 0; hit && depth < 16; depth++) {
 		let root = hit.shadowRoot;
 		// A closed root is not exposed on its host, but the target still exposes its own root.
 		// Keep using the browser's hit test inside it rather than treating every host as a hit.
-		for (let targetRoot = element.getRootNode(); !root && targetRoot.host; targetRoot = targetRoot.host.getRootNode()) {
+		for (
+			let targetRoot = element.getRootNode();
+			!root && targetRoot.host;
+			targetRoot = targetRoot.host.getRootNode()
+		) {
 			if (targetRoot.host === hit) {
 				root = targetRoot as PageRoot & PageShadowRoot;
 				break;
@@ -538,9 +536,9 @@ function checkHoverHit(
 /** {@link checkHoverHit} with {@link composedContains} bound in, as one self-contained page function. */
 const hoverHitInPage = new Function(
 	"el",
-	"offset",
-	`return (${checkHoverHit.toString()})(el, offset, ${composedContains.toString()});`,
-) as (el: unknown, offset: { x: number; y: number }) => string | null;
+	"point",
+	`return (${checkHoverHit.toString()})(el, point, ${composedContains.toString()});`,
+) as (el: unknown, point: { x: number; y: number }) => string | null;
 
 /**
  * Move the pointer onto an element at the point a click would use, once it can take one there: a hidden match
@@ -550,18 +548,27 @@ const hoverHitInPage = new Function(
  */
 export async function hoverElement(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, { hover: true });
-	const revealable = await untilAborted(signal, () =>
-		handle.evaluate(el => {
-			const visibility = (globalThis as unknown as PageGlobals).getComputedStyle(el as unknown as PageElement).visibility;
-			return visibility === "hidden" || visibility === "collapse";
-		}),
-	);
 	const box = await untilAborted(signal, () => handle.boundingBox());
+	if (!box) throw new ToolError(`${label} blocked: the element is detached or has no layout box`);
+	const { revealable, framePoint } = await untilAborted(signal, () =>
+		handle.evaluate(
+			(el, offset) => {
+				const element = el as unknown as PageElement;
+				const visibility = (globalThis as unknown as PageGlobals).getComputedStyle(element).visibility;
+				const rect = element.getBoundingClientRect();
+				return {
+					revealable: visibility === "hidden" || visibility === "collapse",
+					framePoint: { x: rect.left + offset.x, y: rect.top + offset.y },
+				};
+			},
+			{ x: point.x - box.x, y: point.y - box.y },
+		),
+	);
 	await untilAborted(signal, () => handle.frame.page().mouse.move(point.x, point.y));
-	if (!box) return;
-	const offset = { x: point.x - box.x, y: point.y - box.y };
 	for (;;) {
-		const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, offset))) as string | null;
+		const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, framePoint))) as
+			| string
+			| null;
 		if (coveredBy === null) return;
 		if (!revealable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
 		try {
