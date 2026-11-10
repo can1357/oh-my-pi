@@ -760,7 +760,7 @@ impl Vproc {
 		})
 	}
 
-	pub fn has_work(&self) -> bool {
+	pub const fn has_work(&self) -> bool {
 		!self.runs.is_empty() || !self.frames.is_empty()
 	}
 
