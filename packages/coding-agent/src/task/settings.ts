@@ -638,8 +638,11 @@ export const cfgTaskSoftRequestBudgetNotice = register({
 	},
 });
 
-/** A `task.maxEffort`/`task.maxActualEffort` value: a per-model map, or a bare effort meaning `{ "*": effort }`. */
-export type EffortCeilingSetting = string | Readonly<Record<string, string>>;
+/**
+ * A `task.maxEffort`/`task.maxActualEffort` value: a per-model map, or a bare effort meaning
+ * `{ "*": effort }`. `validate` guarantees every value is an {@link Effort}.
+ */
+export type EffortCeilingSetting = string | Readonly<Record<string, Effort>>;
 
 function validateEffortCeilingSetting(id: string): (value: unknown) => void {
 	return value => {
@@ -664,34 +667,34 @@ export function resolveEffortCeilingForModel(
 	value: EffortCeilingSetting,
 	model: Model | undefined,
 ): Effort | undefined {
-	const map: Readonly<Record<string, string>> = typeof value === "string" ? { "*": value } : value;
+	const map: Readonly<Record<string, Effort>> = typeof value === "string" ? { "*": value as Effort } : value;
 	if (model) {
 		const name = `${model.provider}/${model.id}`;
-		if (Object.hasOwn(map, name)) return map[name] as Effort;
+		if (Object.hasOwn(map, name)) return map[name];
 		let best: string | undefined;
 		for (const pattern of Object.keys(map)) {
 			if (pattern === "*" || (best !== undefined && pattern.length <= best.length)) continue;
 			if (new Bun.Glob(pattern).match(name)) best = pattern;
 		}
-		if (best !== undefined) return map[best] as Effort;
+		if (best !== undefined) return map[best];
 	}
-	return Object.hasOwn(map, "*") ? (map["*"] as Effort) : undefined;
+	return Object.hasOwn(map, "*") ? map["*"] : undefined;
 }
 
 // Record settings carry no settings-panel UI; edit them with `omp config set` or config.yml.
 export const cfgTaskMaxEffort = register({
 	id: "task.maxEffort",
 	type: "record",
-	stringShorthand: true,
-	default: {} as Readonly<Record<string, string>>,
+	stringShorthandKey: "*",
+	default: {} as Readonly<Record<string, Effort>>,
 	validate: validateEffortCeilingSetting("task.maxEffort"),
 });
 
 export const cfgTaskMaxActualEffort = register({
 	id: "task.maxActualEffort",
 	type: "record",
-	stringShorthand: true,
-	default: {} as Readonly<Record<string, string>>,
+	stringShorthandKey: "*",
+	default: {} as Readonly<Record<string, Effort>>,
 	validate: validateEffortCeilingSetting("task.maxActualEffort"),
 });
 

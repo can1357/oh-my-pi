@@ -215,6 +215,24 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 }
 
 /**
+ * `layer` with every bare-string value of a shorthand record setting expanded to its record form
+ * (`task.maxEffort: low` → `{ "*": low }`), so layers merge entry by entry. Read-time only: the
+ * layer itself, and the file it came from, stay as written.
+ */
+function expandShorthandRecords(layer: RawSettings): RawSettings {
+	let expanded = layer;
+	for (const setting of allSettings()) {
+		const key = setting.stringShorthandKey;
+		if (key === undefined) continue;
+		const value = getByPath(expanded, setting.segments);
+		if (typeof value !== "string") continue;
+		if (expanded === layer) expanded = structuredClone(layer);
+		setByPath(expanded, setting.segments, { [key]: value });
+	}
+	return expanded;
+}
+
+/**
  * Assign `obj[key]` as an own property. Plain assignment of a parsed
  * `__proto__` key (an agent name, say) would replace the prototype instead,
  * silently dropping that entry.
@@ -4285,9 +4303,12 @@ export class Settings {
 
 	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
-		merged = this.#deepMerge(merged, layers.configOverlay);
-		return this.#deepMerge(merged, layers.overrides);
+		let merged = this.#deepMerge(
+			this.#deepMerge({}, expandShorthandRecords(layers.global)),
+			expandShorthandRecords(projectLayerForMerge(layers.project)),
+		);
+		merged = this.#deepMerge(merged, expandShorthandRecords(layers.configOverlay));
+		return this.#deepMerge(merged, expandShorthandRecords(layers.overrides));
 	}
 
 	/** `own` merged over an overlay parent's current view (itself for a root instance). */

@@ -535,6 +535,34 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
 		});
 
+		it("still ignores effort when a definition level beats actualEffort", async () => {
+			const forwarded = await spawnThinkingLevel(
+				{ effort: "hi", actualEffort: Effort.High, thinkingLevel: ThinkingLevel.Low },
+				Settings.isolated(),
+			);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
+		});
+
+		it("records actualEffort in session_init so cold revival re-applies task.maxActualEffort", async () => {
+			const settings = Settings.isolated();
+			settings.setModelRole("task", `${sol.provider}/${sol.id}`);
+			const session = yieldEmittingSession();
+			const appendSessionInit = vi.spyOn(session.sessionManager, "appendSessionInit");
+			vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+			const result = await runSubprocess({
+				...baseOptions,
+				agent: { ...baseAgent, model: ["@task"] },
+				id: "subagent-actual-effort-init",
+				actualEffort: Effort.Medium,
+				settings,
+				modelRegistry: createModelRegistry(sol),
+			});
+
+			expect(result.exitCode).toBe(0);
+			expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ actualEffort: Effort.Medium }));
+		});
+
 		it("is capped by task.maxActualEffort for the model, not task.maxEffort", async () => {
 			const settings = Settings.isolated({
 				"task.maxEffort": "low",

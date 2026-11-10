@@ -7601,7 +7601,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		// task.maxEffort map: the primary's exact entry is low, the fallback matches a glob at medium.
-		const ceilings = { [`${primaryModel.provider}/${primaryModel.id}`]: "low", "openai-codex/*": "medium" };
+		const ceilings = { [`${primaryModel.provider}/${primaryModel.id}`]: Effort.Low, "openai-codex/*": Effort.Medium };
 
 		session = new AgentSession({
 			agent,
@@ -7616,6 +7616,12 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 		expect(session.model?.id).toBe(fallbackModel.id);
 		// A single spawn-wide ceiling would have held the fallback at the primary's `low`.
+		expect(session.thinkingLevel).toBe(Effort.Medium);
+		// Later effort changes on the fallback are offered and clamped against its own entry too.
+		const selectors = session.getAvailableEffortSelectors();
+		expect(selectors).toContain(Effort.Medium);
+		expect(selectors).not.toContain(Effort.High);
+		session.setThinkingLevel(Effort.Max);
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
 

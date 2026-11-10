@@ -30,7 +30,12 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
-import { cfgTaskDisabledAgents, cfgTaskEnableEffort, cfgTaskStructured } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskDisabledAgents,
+	cfgTaskEnableActualEffort,
+	cfgTaskEnableEffort,
+	cfgTaskStructured,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -159,6 +164,23 @@ describe("task.batch schema gating", () => {
 		cfgTaskEnableEffort.override(batchSession.settings, true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
 		expect(batch.description).toContain("`effort`");
+	});
+
+	it("exposes actualEffort only when task.enableActualEffort is enabled, independent of effort", async () => {
+		mockDiscovery();
+
+		const flatSession = createSession({ settings: { "task.batch": false, "task.enableEffort": true } });
+		const flat = await TaskTool.create(flatSession);
+		expect(getSchemaProperties(flat).actualEffort).toBeUndefined();
+		cfgTaskEnableActualEffort.override(flatSession.settings, true);
+		expect(getSchemaProperties(flat).actualEffort).toBeDefined();
+
+		const batchSession = createSession({ settings: { "task.batch": true } });
+		const batch = await TaskTool.create(batchSession);
+		expect(getBatchItemProperties(batch).actualEffort).toBeUndefined();
+		cfgTaskEnableActualEffort.override(batchSession.settings, true);
+		expect(getBatchItemProperties(batch).actualEffort).toBeDefined();
+		expect(getBatchItemProperties(batch).effort).toBeUndefined();
 	});
 
 	it("keeps isolation boolean-only in the batch item schema", async () => {
@@ -890,6 +912,30 @@ describe("task.batch spawning", () => {
 		await run({ "task.batch": true, "task.enableEffort": true }, batch);
 
 		expect(efforts).toEqual([undefined, undefined, "hi"]);
+	});
+
+	it("forwards a caller-supplied actualEffort to the executor only when task.enableActualEffort is on", async () => {
+		mockDiscovery();
+		const efforts: Array<string | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			efforts.push(options.actualEffort);
+			return makeResult(options.id ?? "?");
+		});
+		const run = async (settings: Record<string, unknown>, params: TaskParams) => {
+			const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, ...settings } }));
+			await tool.execute("tc-actual-effort", params);
+		};
+		const batch = {
+			context: "Shared.",
+			tasks: [{ name: "Solo", task: "Reply OK.", actualEffort: "high" }],
+		} as TaskParams;
+		const flat = { task: "Reply OK.", solutionSpace: "One exact response.", actualEffort: "low" } as TaskParams;
+
+		await run({ "task.batch": true, "task.enableEffort": true }, batch);
+		await run({ "task.batch": true, "task.enableActualEffort": true }, batch);
+		await run({ "task.batch": false, "task.enableActualEffort": true }, flat);
+
+		expect(efforts).toEqual([undefined, "high", "low"]);
 	});
 
 	it("keeps a long result inline when no readable output artifact exists", async () => {

@@ -4,11 +4,16 @@
 
 ### Changed
 
-- `task.maxEffort` is now a per-model map (exact `provider/modelId`, glob, or `"*"` keys) so each model, including retry-fallback models, gets its own cap; an existing `task.maxEffort: medium` still works as the `"*"` entry, and the setting leaves the settings panel
+- `task.maxEffort` is now a per-model map (exact `provider/modelId`, glob, or `"*"` keys) so each model, including retry-fallback models, gets its own cap; an existing `task.maxEffort: medium` still works as the `"*"` entry (also when another config layer sets a map), and the setting leaves the settings panel
+- An invalid `task.maxEffort` or `task.maxActualEffort` value (e.g. `turbo`) now stops startup with an error naming the setting, instead of logging a warning and using the default
 
 ### Added
 
 - The task tool can take an exact per-spawn thinking level with `actualEffort` (`minimal`…`max`), enabled by `task.enableActualEffort` and capped by the new `task.maxActualEffort`; it overrides `effort` but not a level pinned by the model selector or the agent's `thinking-level`
+
+### Breaking Changes
+
+- SDK: `createAgentSession`'s `thinkingLevelCeiling` is now a per-model function `(model) => Effort | undefined` instead of a single `Effort`; pass `() => effort` for a fixed cap
 
 ## [18.20.0] - 2026-11-12
 
