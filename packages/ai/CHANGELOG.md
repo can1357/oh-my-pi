@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Mistral usage reporting: `omp usage` now shows the monthly Vibe Code and API budgets with their reset date.
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
