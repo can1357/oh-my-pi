@@ -375,7 +375,7 @@ export async function fetchDevinModels(
  * silently losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
  * Remove entries if Devin ever wires SWE-1.6 vision up.
  */
-const DEVIN_IMAGE_BLIND_UIDS = new Set(["swe-1-6", "swe-1-6-fast"]);
+const DEVIN_IMAGE_BLIND_UIDS = new Set(["swe-1-6"]);
 
 /** One config as a raw (pre-collapse) spec keyed on its wire uid. */
 function devinModelSpec(
@@ -425,7 +425,7 @@ function devinModelSpec(
 /**
  * Lead chat uid of a Fusion pairing `fusion-<lead>[-fast]-sidekick-<sidekick>`.
  * An exact live lead uid wins, so leads whose own uid ends in `-fast`
- * (`swe-1-6-fast`) route as written. Otherwise `-fast` selects the lead's
+ * (`claude-opus-5-5-high-fast`) route as written. Otherwise `-fast` selects the lead's
  * priority lane when the server lists one, then the standard lane.
  *
  * Returns `undefined` for uids that are not pairings and `null` for pairings
