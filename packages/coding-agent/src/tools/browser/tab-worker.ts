@@ -970,13 +970,15 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						} finally {
 							if (!returned) {
 								const cleanup = value.dispose();
-								if (evalSignal.aborted) void cleanup.catch(() => {});
-								else await cleanup;
+								void cleanup.catch(() => {});
+								await untilAborted(evalSignal, () => cleanup);
 							}
 						}
 					} catch (error) {
 						if (!waitSignal.aborted && evalSignal.aborted) throw timedOut();
 						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;
+						if (Date.now() >= deadline) throw timedOut();
+						continue;
 					}
 					if (inPage ? Date.now() >= deadline : Date.now() + interval > deadline) throw timedOut();
 					if (!inPage) await untilAborted(waitSignal, () => Bun.sleep(interval));
