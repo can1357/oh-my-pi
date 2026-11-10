@@ -2,6 +2,7 @@ mod activity;
 mod capture;
 mod input;
 mod keymap;
+pub(crate) mod listener;
 mod mpx;
 mod toolkit;
 mod uinput;
@@ -95,7 +96,9 @@ impl Backend for X11Backend {
 		_caps: &CaptureCaps,
 		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
-		self.input.watch_user();
+		// Inspection remains available when watching fails; takeover propagates
+		// the retained startup error before activation or input.
+		let _ = self.input.watch_user();
 		self.capture.capture(target, selector)
 	}
 

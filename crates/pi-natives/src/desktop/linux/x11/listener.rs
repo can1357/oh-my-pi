@@ -1,0 +1,208 @@
+//! Shared XI2 raw-input observation for takeover admission and emergency
+//! Escape.
+use std::{
+	os::{fd::AsRawFd, unix::net::UnixStream},
+	sync::Arc,
+	thread::{self, JoinHandle},
+};
+
+use parking_lot::Mutex;
+use x11rb::{
+	connection::Connection,
+	protocol::{
+		Event,
+		xinput::{ConnectionExt as _, Device, DeviceType, EventMask, XIEventMask},
+	},
+	rust_connection::RustConnection,
+};
+
+use crate::desktop::error::{CoreResult, DesktopError};
+
+pub(crate) struct Listener {
+	stop:    Option<UnixStream>,
+	thread:  Option<JoinHandle<()>>,
+	failure: Arc<Mutex<Option<DesktopError>>>,
+	#[cfg(test)]
+	client:  u32,
+}
+
+impl Listener {
+	pub(crate) fn connect(display: Option<&str>) -> CoreResult<RustConnection> {
+		let (conn, screen) = x11rb::connect(display).map_err(failed)?;
+		// XI 2.0 omits raw events while another client grabs a device (menus,
+		// launchers); XI 2.2 observes those presses too.
+		let version = conn
+			.xinput_xi_query_version(2, 2)
+			.map_err(failed)?
+			.reply()
+			.map_err(failed)?;
+		if (version.major_version, version.minor_version) < (2, 2) {
+			return Err(failed("XI 2.2 is required to observe input during grabs"));
+		}
+		conn
+			.xinput_xi_select_events(conn.setup().roots[screen].root, &[
+				EventMask {
+					deviceid: Device::ALL_MASTER.into(),
+					mask:     vec![
+						XIEventMask::RAW_KEY_PRESS
+							| XIEventMask::RAW_KEY_RELEASE
+							| XIEventMask::RAW_BUTTON_PRESS,
+					],
+				},
+				EventMask { deviceid: Device::ALL.into(), mask: vec![XIEventMask::HIERARCHY] },
+			])
+			.map_err(failed)?
+			.check()
+			.map_err(failed)?;
+		conn.flush().map_err(failed)?;
+		Ok(conn)
+	}
+
+	pub(crate) fn start(
+		conn: RustConnection,
+		name: &str,
+		mut event: impl FnMut(&RustConnection, Event) -> CoreResult<()> + Send + 'static,
+		on_failure: impl FnOnce() + Send + 'static,
+	) -> CoreResult<Self> {
+		let (stop, stopped) = UnixStream::pair().map_err(failed)?;
+		let failure = Arc::new(Mutex::new(None));
+		#[cfg(test)]
+		let client = {
+			use x11rb::protocol::xproto::ConnectionExt as _;
+			let resource = conn.generate_id().map_err(failed)?;
+			conn
+				.create_pixmap(1, resource, conn.setup().roots[0].root, 1, 1)
+				.map_err(failed)?
+				.check()
+				.map_err(failed)?;
+			resource
+		};
+		let state = Arc::clone(&failure);
+		let thread = thread::Builder::new()
+			.name(name.into())
+			.spawn(move || {
+				if let Err(error) = run(&conn, &stopped, |next| event(&conn, next)) {
+					*state.lock() = Some(error);
+					on_failure();
+				}
+			})
+			.map_err(failed)?;
+		Ok(Self {
+			stop: Some(stop),
+			thread: Some(thread),
+			failure,
+			#[cfg(test)]
+			client,
+		})
+	}
+
+	pub(crate) fn check(&self) -> CoreResult<()> {
+		if let Some(error) = self.failure.lock().as_ref() {
+			return Err(error.clone());
+		}
+		if self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+			return Err(failed("the input listener stopped"));
+		}
+		Ok(())
+	}
+
+	#[cfg(test)]
+	pub(crate) fn disconnect(&mut self, conn: &RustConnection) {
+		use x11rb::protocol::xproto::ConnectionExt as _;
+		conn
+			.kill_client(self.client)
+			.expect("disconnect listener")
+			.check()
+			.expect("client exists");
+		self
+			.thread
+			.take()
+			.expect("listener running")
+			.join()
+			.expect("listener exits");
+	}
+}
+
+impl Drop for Listener {
+	fn drop(&mut self) {
+		self.stop.take();
+		if let Some(worker) = self.thread.take()
+			&& worker.thread().id() != thread::current().id()
+		{
+			let _ = worker.join();
+		}
+	}
+}
+
+fn run(
+	conn: &RustConnection,
+	stopped: &UnixStream,
+	mut event: impl FnMut(Event) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let mut descriptors =
+		[libc::pollfd { fd: stopped.as_raw_fd(), events: libc::POLLIN, revents: 0 }, libc::pollfd {
+			fd:      conn.stream().as_raw_fd(),
+			events:  libc::POLLIN,
+			revents: 0,
+		}];
+	loop {
+		while let Some(next) = conn.poll_for_event().map_err(failed)? {
+			event(next)?;
+		}
+		// SAFETY: both descriptors are borrowed live for this blocking call.
+		if unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as libc::nfds_t, -1) } < 0
+		{
+			let error = std::io::Error::last_os_error();
+			if error.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(failed(error));
+		}
+		if descriptors[0].revents != 0 {
+			return Ok(());
+		}
+		if descriptors[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+			return Err(failed("the X11 connection closed"));
+		}
+	}
+}
+
+fn failed(error: impl std::fmt::Display) -> DesktopError {
+	DesktopError::input_failed(format!("cannot watch the user's X11 input: {error}"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+	User,
+	/// The core XTEST devices carry both our takeover and remote users' input.
+	Xtest,
+	/// MPX and other masters' XTEST devices do not follow the user's focus.
+	Other,
+}
+
+pub(crate) fn source_of(conn: &RustConnection, device: u16) -> CoreResult<Source> {
+	let reply = conn
+		.xinput_xi_query_device(device)
+		.map_err(failed)?
+		.reply()
+		.map_err(failed)?;
+	let info = reply
+		.infos
+		.first()
+		.ok_or_else(|| failed("the input device disappeared"))?;
+	Ok(classify(info.type_, &info.name))
+}
+
+fn classify(kind: DeviceType, name: &[u8]) -> Source {
+	if !matches!(kind, DeviceType::SLAVE_KEYBOARD | DeviceType::SLAVE_POINTER)
+		|| name.starts_with(super::mpx::DEVICE_PREFIX.as_bytes())
+	{
+		Source::Other
+	} else if name.starts_with(b"Virtual core XTEST ") {
+		Source::Xtest
+	} else if name.windows(5).any(|part| part == b"XTEST") {
+		Source::Other
+	} else {
+		Source::User
+	}
+}

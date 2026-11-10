@@ -8,26 +8,18 @@
 //! those of tools that type for a remote or scripted user (x11vnc, xdotool):
 //! a press there beyond the ones this session sent is someone else's.
 use std::{
-	collections::HashMap,
-	os::{fd::AsRawFd, unix::net::UnixStream},
+	collections::{HashMap, HashSet},
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
 	},
-	thread::{self, JoinHandle},
 	time::{Duration, Instant},
 };
 
 use parking_lot::{Condvar, Mutex};
-use x11rb::{
-	connection::Connection,
-	protocol::{
-		Event,
-		xinput::{ConnectionExt as _, Device, DeviceType, EventMask, XIEventMask},
-	},
-	rust_connection::RustConnection,
-};
+use x11rb::protocol::{Event, xinput::KeyEventFlags};
 
+use super::listener::{Listener, Source, source_of};
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError},
@@ -60,27 +52,37 @@ impl Presses {
 
 /// Session-lived listener for the user's presses.
 pub(super) struct UserActivity {
-	presses: Arc<Presses>,
+	presses:  Arc<Presses>,
 	/// Key and button presses this session sent through XTEST.
-	sent:    Arc<AtomicU64>,
-	stop:    Option<UnixStream>,
-	thread:  Option<JoinHandle<()>>,
+	sent:     Arc<AtomicU64>,
+	listener: Option<Listener>,
+	started:  Instant,
 }
 
 impl UserActivity {
 	pub(super) fn start(display: Option<&str>) -> CoreResult<Self> {
-		let conn = listen(display)?;
-		let (stop, stopped) = UnixStream::pair().map_err(failed)?;
+		let conn = Listener::connect(display)?;
+		let started = Instant::now();
 		let presses = Arc::<Presses>::default();
 		let sent = Arc::new(AtomicU64::new(0));
-		let thread = {
+		let listener = {
 			let (presses, sent) = (Arc::clone(&presses), Arc::clone(&sent));
-			thread::Builder::new()
-				.name("desktop-user-activity".into())
-				.spawn(move || run(&conn, &stopped, &presses, &sent))
-				.map_err(failed)?
+			let mut sources = Sources::default();
+			Listener::start(
+				conn,
+				"desktop-user-activity",
+				move |conn, event| {
+					if sources
+						.step(&event, sent.load(Ordering::Acquire), |device| source_of(conn, device))?
+					{
+						presses.record(Instant::now());
+					}
+					Ok(())
+				},
+				|| {},
+			)?
 		};
-		Ok(Self { presses, sent, stop: Some(stop), thread: Some(thread) })
+		Ok(Self { presses, sent, listener: Some(listener), started })
 	}
 
 	/// Counts one press this session is about to send through XTEST; `undo`
@@ -109,8 +111,9 @@ impl UserActivity {
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 	) -> CoreResult<u64> {
 		loop {
+			self.healthy()?;
 			let count = self.presses.count.load(Ordering::Acquire);
-			let last = *self.presses.last.lock();
+			let last = self.presses.last.lock().unwrap_or(self.started);
 			match admission(last, now(), limit) {
 				Admission::Start => return Ok(count),
 				Admission::Wait(duration) => wait(duration)?,
@@ -127,12 +130,25 @@ impl UserActivity {
 
 	/// Refuses once the user has pressed a key or button since `baseline`.
 	pub(super) fn check(&self, baseline: u64) -> CoreResult<()> {
+		self.healthy()?;
 		check_presses(baseline, self.presses.count.load(Ordering::Acquire))
+	}
+
+	fn healthy(&self) -> CoreResult<()> {
+		if let Some(listener) = &self.listener {
+			listener.check()?;
+		}
+		Ok(())
 	}
 
 	#[cfg(test)]
 	pub(super) fn presses(&self) -> u64 {
 		self.presses.count.load(Ordering::Acquire)
+	}
+
+	#[cfg(test)]
+	pub(super) fn disconnect(&mut self, conn: &x11rb::rust_connection::RustConnection) {
+		self.listener.as_mut().expect("listening").disconnect(conn);
 	}
 
 	/// Waits until the listener has recorded `count` presses.
@@ -144,19 +160,6 @@ impl UserActivity {
 			.recorded
 			.wait_while(&mut last, |_| self.presses() < count);
 	}
-}
-
-impl Drop for UserActivity {
-	fn drop(&mut self) {
-		self.stop.take();
-		if let Some(thread) = self.thread.take() {
-			let _ = thread.join();
-		}
-	}
-}
-
-fn failed(error: impl std::fmt::Display) -> DesktopError {
-	DesktopError::input_failed(format!("cannot watch the user's X11 input: {error}"))
 }
 
 fn admission_limit(now: Instant, deadline: Option<Instant>) -> Instant {
@@ -172,10 +175,7 @@ enum Admission {
 	Refuse(Duration),
 }
 
-fn admission(last: Option<Instant>, now: Instant, limit: Instant) -> Admission {
-	let Some(last) = last else {
-		return Admission::Start;
-	};
+fn admission(last: Instant, now: Instant, limit: Instant) -> Admission {
 	let idle = now.saturating_duration_since(last);
 	if idle >= QUIET {
 		Admission::Start
@@ -196,79 +196,6 @@ fn check_presses(baseline: u64, count: u64) -> CoreResult<()> {
 	)))
 }
 
-fn listen(display: Option<&str>) -> CoreResult<RustConnection> {
-	let (conn, screen) = x11rb::connect(display).map_err(failed)?;
-	// XI 2.0 clients get no raw events while another client grabs the device,
-	// as an open menu or a launcher does.
-	conn
-		.xinput_xi_query_version(2, 2)
-		.map_err(failed)?
-		.reply()
-		.map_err(failed)?;
-	let root = conn.setup().roots[screen].root;
-	conn
-		.xinput_xi_select_events(root, &[
-			EventMask {
-				deviceid: Device::ALL_MASTER.into(),
-				mask:     vec![XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_BUTTON_PRESS],
-			},
-			EventMask { deviceid: Device::ALL.into(), mask: vec![XIEventMask::HIERARCHY] },
-		])
-		.map_err(failed)?
-		.check()
-		.map_err(failed)?;
-	conn.flush().map_err(failed)?;
-	Ok(conn)
-}
-
-/// Records presses until `stopped` closes. A broken connection ends the
-/// listener, leaving the count where it was.
-fn run(conn: &RustConnection, stopped: &UnixStream, presses: &Presses, sent: &AtomicU64) {
-	let mut sources = Sources::default();
-	let mut descriptors =
-		[libc::pollfd { fd: stopped.as_raw_fd(), events: libc::POLLIN, revents: 0 }, libc::pollfd {
-			fd:      conn.stream().as_raw_fd(),
-			events:  libc::POLLIN,
-			revents: 0,
-		}];
-	loop {
-		loop {
-			match conn.poll_for_event() {
-				Ok(Some(event)) => {
-					let sent = sent.load(Ordering::Acquire);
-					if sources.step(&event, sent, |device| source_of(conn, device)) {
-						presses.record(Instant::now());
-					}
-				},
-				Ok(None) => break,
-				Err(_) => return,
-			}
-		}
-		// SAFETY: both descriptors are borrowed live for this blocking call.
-		let polled =
-			unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as libc::nfds_t, -1) };
-		if polled < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-			return;
-		}
-		if descriptors[0].revents != 0
-			|| descriptors[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
-		{
-			return;
-		}
-	}
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
-	/// A device of the user's own.
-	User,
-	/// The core XTEST keyboard or pointer.
-	Xtest,
-	/// OMP's virtual devices and other masters' XTEST devices, whose keys do
-	/// not follow the user's keyboard focus.
-	Other,
-}
-
 #[derive(Default)]
 struct Sources {
 	/// Per source device until the device hierarchy changes, since a removed
@@ -276,55 +203,61 @@ struct Sources {
 	devices: HashMap<u16, Source>,
 	/// Presses from the core XTEST devices taken as this session's own.
 	own:     u64,
+	held:    HashSet<(u16, u32)>,
 }
 
 impl Sources {
 	/// Whether `event` is a press of the user's, given the `sent` presses this
 	/// session has sent through XTEST so far.
-	fn step(&mut self, event: &Event, sent: u64, read: impl FnOnce(u16) -> Source) -> bool {
+	fn step(
+		&mut self,
+		event: &Event,
+		sent: u64,
+		read: impl FnOnce(u16) -> CoreResult<Source>,
+	) -> CoreResult<bool> {
 		let source = match event {
 			Event::XinputRawKeyPress(event) => event.sourceid,
 			Event::XinputRawButtonPress(event) => event.sourceid,
+			Event::XinputRawKeyRelease(event) => {
+				self.held.remove(&(event.sourceid, event.detail));
+				return Ok(false);
+			},
 			Event::XinputHierarchy(_) => {
 				self.devices.clear();
-				return false;
+				self.held.clear();
+				return Ok(false);
 			},
-			_ => return false,
+			_ => return Ok(false),
 		};
-		match *self.devices.entry(source).or_insert_with(|| read(source)) {
+		if let std::collections::hash_map::Entry::Vacant(entry) = self.devices.entry(source) {
+			entry.insert(read(source)?);
+		}
+		let key = match event {
+			Event::XinputRawKeyPress(event) => Some((source, event.detail)),
+			_ => None,
+		};
+		let repeat = matches!(event, Event::XinputRawKeyPress(event)
+			if event.flags.contains(KeyEventFlags::KEY_REPEAT));
+		Ok(match self.devices[&source] {
 			Source::User => true,
 			Source::Other => false,
+			Source::Xtest if repeat => !key.is_some_and(|key| self.held.contains(&key)),
 			// This session counts a press before sending it, so a press there
 			// while some of its own are unseen is one of them.
 			Source::Xtest if self.own < sent => {
+				if let Some(key) = key {
+					self.held.insert(key);
+				}
 				self.own += 1;
 				false
 			},
-			Source::Xtest => true,
-		}
-	}
-}
-
-fn source_of(conn: &RustConnection, device: u16) -> Source {
-	let info = conn
-		.xinput_xi_query_device(device)
-		.ok()
-		.and_then(|cookie| cookie.reply().ok())
-		.and_then(|reply| reply.infos.into_iter().next());
-	let Some(info) = info else {
-		return Source::Other;
-	};
-	let name = String::from_utf8_lossy(&info.name);
-	if !matches!(info.type_, DeviceType::SLAVE_KEYBOARD | DeviceType::SLAVE_POINTER)
-		|| name.starts_with("OMP MPX ")
-	{
-		Source::Other
-	} else if name.starts_with("Virtual core XTEST ") {
-		Source::Xtest
-	} else if name.contains("XTEST") {
-		Source::Other
-	} else {
-		Source::User
+			Source::Xtest => {
+				if let Some(key) = key {
+					self.held.remove(&key);
+				}
+				true
+			},
+		})
 	}
 }
 
@@ -333,7 +266,6 @@ mod tests {
 	use x11rb::protocol::xinput::{HierarchyEvent, RawButtonPressEvent, RawKeyPressEvent};
 
 	use super::*;
-	use crate::desktop::error::ErrorCode;
 
 	fn key(sourceid: u16) -> Event {
 		Event::XinputRawKeyPress(RawKeyPressEvent { sourceid, ..Default::default() })
@@ -343,16 +275,38 @@ mod tests {
 	fn a_takeover_waits_for_the_user_to_pause_and_refuses_at_the_limit() {
 		let start = Instant::now();
 		let limit = start + Duration::from_secs(30);
-		assert_eq!(admission(None, start, limit), Admission::Start);
-		assert_eq!(admission(Some(start), start + QUIET, limit), Admission::Start);
+		let activity = UserActivity {
+			presses:  Arc::default(),
+			sent:     Arc::default(),
+			listener: None,
+			started:  start,
+		};
+		let clock = std::cell::Cell::new(start);
+		let mut waits = Vec::new();
 		assert_eq!(
-			admission(Some(start), start + Duration::from_secs(1), limit),
+			activity
+				.admit_with(
+					limit,
+					|| clock.get(),
+					|duration| {
+						waits.push(duration);
+						clock.set(clock.get() + duration);
+						Ok(())
+					}
+				)
+				.unwrap(),
+			0
+		);
+		assert_eq!(waits, [QUIET], "a fresh listener must observe a full quiet period");
+		assert_eq!(admission(start, start + QUIET, limit), Admission::Start);
+		assert_eq!(
+			admission(start, start + Duration::from_secs(1), limit),
 			Admission::Wait(Duration::from_secs(4)),
 		);
 		// The wait ends at the limit, where a user still pressing refuses it.
 		let near = start + Duration::from_secs(28);
-		assert_eq!(admission(Some(near), near, limit), Admission::Wait(Duration::from_secs(2)));
-		assert_eq!(admission(Some(near), limit, limit), Admission::Refuse(Duration::from_secs(2)));
+		assert_eq!(admission(near, near, limit), Admission::Wait(Duration::from_secs(2)));
+		assert_eq!(admission(near, limit, limit), Admission::Refuse(Duration::from_secs(2)));
 		// Without a run deadline, one quiet period.
 		assert_eq!(admission_limit(start, None), start + QUIET);
 	}
@@ -360,10 +314,10 @@ mod tests {
 	#[test]
 	fn presses_during_the_wait_are_counted_and_extend_it() {
 		let activity = UserActivity {
-			presses: Arc::default(),
-			sent:    Arc::default(),
-			stop:    None,
-			thread:  None,
+			presses:  Arc::default(),
+			sent:     Arc::default(),
+			listener: None,
+			started:  Instant::now(),
 		};
 		let start = Instant::now();
 		activity.presses.record(start);
@@ -391,36 +345,48 @@ mod tests {
 	}
 
 	#[test]
-	fn a_press_during_the_takeover_stops_it_as_user_intervened() {
-		assert!(check_presses(3, 3).is_ok());
-		let error = check_presses(3, 4).expect_err("the user pressed");
-		assert_eq!(error.code, ErrorCode::UserIntervened);
-		assert!(error.message.contains("nothing more was sent"), "{}", error.message);
-	}
-
-	#[test]
 	fn only_the_users_presses_count() {
 		let mut sources = Sources::default();
-		let kinds = |device| match device {
-			9 => Source::User,
-			2 => Source::Xtest,
-			_ => Source::Other,
+		let kinds = |device| {
+			Ok(match device {
+				9 => Source::User,
+				2 => Source::Xtest,
+				_ => Source::Other,
+			})
 		};
-		assert!(sources.step(&key(9), 0, kinds));
-		assert!(!sources.step(&key(4), 0, kinds));
-		assert!(sources.step(
-			&Event::XinputRawButtonPress(RawButtonPressEvent { sourceid: 9, ..Default::default() }),
-			0,
-			|_| unreachable!("cached"),
-		));
+		assert!(sources.step(&key(9), 0, kinds).unwrap());
+		assert!(!sources.step(&key(4), 0, kinds).unwrap());
+		assert!(
+			sources
+				.step(
+					&Event::XinputRawButtonPress(RawButtonPressEvent {
+						sourceid: 9,
+						..Default::default()
+					}),
+					0,
+					|_| unreachable!("cached"),
+				)
+				.unwrap()
+		);
 		// XTEST presses up to the session's own count are its own, and
 		// another client's press there does not make later own ones count.
-		assert!(!sources.step(&key(2), 1, kinds));
-		assert!(!sources.step(&key(2), 2, kinds));
-		assert!(sources.step(&key(2), 2, kinds));
-		assert!(!sources.step(&key(2), 3, kinds));
+		assert!(!sources.step(&key(2), 1, kinds).unwrap());
+		assert!(!sources.step(&key(2), 2, kinds).unwrap());
+		let repeat = Event::XinputRawKeyPress(RawKeyPressEvent {
+			sourceid: 2,
+			flags: KeyEventFlags::KEY_REPEAT,
+			..Default::default()
+		});
+		assert!(!sources.step(&repeat, 2, kinds).unwrap(), "our held key repeats");
+		assert!(sources.step(&key(2), 2, kinds).unwrap());
+		assert!(sources.step(&repeat, 2, kinds).unwrap(), "a remote user's held key repeats");
+		assert!(!sources.step(&key(2), 3, kinds).unwrap());
 		// A new hierarchy may give a removed device's id to another device.
-		assert!(!sources.step(&Event::XinputHierarchy(HierarchyEvent::default()), 0, kinds));
-		assert!(!sources.step(&key(9), 3, |_| Source::Other));
+		assert!(
+			!sources
+				.step(&Event::XinputHierarchy(HierarchyEvent::default()), 0, kinds)
+				.unwrap()
+		);
+		assert!(!sources.step(&key(9), 3, |_| Ok(Source::Other)).unwrap());
 	}
 }
