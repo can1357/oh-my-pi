@@ -1393,12 +1393,6 @@ pub enum Probe {
 	Path { name: BString, path: BString },
 	/// Whole-file read (`source`).
 	Read { path: BString },
-	/// Whole-file read whose answer also carries the kind of the object
-	/// that was opened ([`ProbeResult::BytesKind`]): a reader that refuses
-	/// a regular file's bytes but streams a FIFO's learns both from one
-	/// open, so no replacement of the path between a `stat` and a read can
-	/// make the kind describe one inode and the bytes another.
-	ReadKind { path: BString },
 	/// `cd` target validation.
 	Chdir { path: BString },
 	/// Input from an fd up to a delimiter (`read`): `delim` `None` reads
@@ -1442,6 +1436,12 @@ pub enum Probe {
 	/// ([`super::builtins::history::io`]): [`ProbeResult::Hist`]. `seq`
 	/// numbers the operation's steps.
 	Hist { seq: u32, op: Box<super::builtins::history::io::HistOp> },
+	/// Whole-file read whose answer also carries the kind of the object
+	/// that was opened ([`ProbeResult::BytesKind`]): a reader that refuses
+	/// a regular file's bytes but streams a FIFO's learns both from one
+	/// open, so no replacement of the path between a `stat` and a read can
+	/// make the kind describe one inode and the bytes another.
+	ReadKind { path: BString },
 }
 
 /// The question of a [`Probe::DumpHas`].
@@ -1473,14 +1473,6 @@ pub enum ProbeResult {
 	Path(Option<BString>),
 	/// File contents, or the `strerror` text of the failure.
 	Bytes(Result<BString, BString>),
-	/// Answer of a [`Probe::ReadKind`]: the same contents or `strerror`
-	/// text as [`Self::Bytes`], and what the opened object was. `kind` is
-	/// `None` when nothing was opened (the read failed) or when the object
-	/// cannot say (an engine descriptor behind `/dev/fd/N`).
-	BytesKind {
-		data: Result<BString, BString>,
-		kind: Option<crate::bash::fs::FileKind>,
-	},
 	Input {
 		data:      BString,
 		eof:       bool,
@@ -1497,6 +1489,14 @@ pub enum ProbeResult {
 	Zftp(Box<super::builtins::zsh_mod_zftp::ZftpAns>),
 	/// Answer of a [`Probe::Hist`].
 	Hist(Box<super::builtins::history::io::HistAnswer>),
+	/// Answer of a [`Probe::ReadKind`]: the same contents or `strerror`
+	/// text as [`Self::Bytes`], and what the opened object was. `kind` is
+	/// `None` when nothing was opened (the read failed) or when the object
+	/// cannot say (an engine descriptor behind `/dev/fd/N`).
+	BytesKind {
+		data: Result<BString, BString>,
+		kind: Option<crate::bash::fs::FileKind>,
+	},
 }
 
 /// Serializable progress of an `Exec` (survives externalize/restore).
