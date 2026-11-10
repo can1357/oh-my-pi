@@ -8,6 +8,7 @@
 - Google Antigravity now lists Gemini 4 Carbon once, with selectable low, medium, and high thinking levels, instead of a separate entry per thinking tier; on the Gemini API, Gemini 4 Carbon now offers the same thinking levels instead of none ([#18734](https://github.com/can1357/oh-my-pi/pull/18734) by [@eggpeat](https://github.com/eggpeat))
 - Factory Droid Fable 5.1, GLM 5.2 Fast and Muse Spark Open now show their list prices in the model browser and count toward session cost instead of $0 ([#18768](https://github.com/can1357/oh-my-pi/pull/18768) by [@will-bogusz](https://github.com/will-bogusz))
 - Factory Droid Gemini 4 Argon now shows Factory's 50%-off credit rate (0.8× instead of 1.6×) in the model browser until 2026-12-01 (midnight US Pacific), then 1.6× again ([#18767](https://github.com/can1357/oh-my-pi/pull/18767) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin requests now identify as Devin CLI 3000.12.43, the current stable release, instead of 3000.11.205
 ### Added
 
 - Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
