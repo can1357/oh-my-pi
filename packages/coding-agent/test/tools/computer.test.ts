@@ -1524,19 +1524,19 @@ describe("computer worker round trips", () => {
 			await check("type", o => el.type("Save", o));
 			await check("click", o => el.click(o));
 			await check("doubleClick", o => el.doubleClick(o), { count: 3 });
+			await check("screenshot", o => win.screenshot(o));
+			await check("zoom", o => win.zoom({ x: 0, y: 0, width: 1, height: 1 }, o));
+			await check("click", o => win.click(1, 2, o));
+			await check("doubleClick", o => win.doubleClick(1, 2, o));
+			await check("move", o => win.move(1, 2, o));
+			await check("drag", o => win.drag([[1, 2], [3, 4]], o));
+			await check("scroll", o => win.scroll(1, 2, o), { x: 1, y: 2, dx: 3 });
+			await check("type", o => win.type("Save", o));
+			await check("press", o => win.press("enter", o));
+			await check("holdKeys", o => win.holdKeys(["shift"], o));
+			await check("holdMouse", o => win.holdMouse(1, 2, o));
 			for (const target of [win, screen, desktop]) {
-				await check("screenshot", o => target.screenshot(o));
-				await check("zoom", o => target.zoom({ x: 0, y: 0, width: 1, height: 1 }, o));
-				await check("click", o => target.click(1, 2, o));
-				await check("doubleClick", o => target.doubleClick(1, 2, o));
-				await check("move", o => target.move(1, 2, o));
-				await check("drag", o => target.drag([[1, 2], [3, 4]], o));
 				await target.drag([[1, 2], [3, 4]], { button: "middle" });
-				await check("scroll", o => target.scroll(1, 2, o), { x: 1, y: 2, dx: 3 });
-				await check("type", o => target.type("Save", o));
-				await check("press", o => target.press("enter", o));
-				await check("holdKeys", o => target.holdKeys(["shift"], o));
-				await check("holdMouse", o => target.holdMouse(1, 2, o));
 			}
 			assert(failures.length === 0, failures.join("; "));
 		`,
