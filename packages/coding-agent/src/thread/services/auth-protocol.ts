@@ -119,6 +119,7 @@ export type AuthAvailabilityTable = Record<string, ProviderAuthAvailability>;
 /** `usage.reports` options on the wire. */
 export interface WireUsageReportsOptions {
 	provider?: Provider;
+	exclude?: Provider[];
 	baseUrls?: BaseUrlTable;
 	signal?: AbortSignal;
 }
@@ -248,6 +249,7 @@ export type AuthStorageProtocol = {
 	>;
 	"usage.setProvider": RpcMethod<[provider: Provider, usageProvider: UsageProvider, apiKey?: string], void>;
 	"usage.removeProvider": RpcMethod<[provider: Provider], void>;
+	"usage.replaceDisabledProviders": RpcMethod<[providers: Provider[]], void>;
 
 	"health.model": RpcMethod<[provider: Provider, options: ModelUsageHealthOptions], ModelUsageHealth>;
 	"health.check": RpcMethod<[options?: WireCheckCredentialsOptions], CredentialHealthResult[]>;

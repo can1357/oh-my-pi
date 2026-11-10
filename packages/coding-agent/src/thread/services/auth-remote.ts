@@ -475,11 +475,13 @@ class RemoteUsage implements UsageApi {
 
 	reports(options?: {
 		provider?: Provider;
+		exclude?: ReadonlySet<Provider>;
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<UsageReport[] | null> {
 		return this.#remote.call("usage.reports", {
 			provider: options?.provider,
+			exclude: options?.exclude ? [...options.exclude] : undefined,
 			signal: options?.signal,
 			baseUrls: baseUrlTable(this.#availability, options?.baseUrlResolver, options?.provider),
 		});
@@ -525,6 +527,9 @@ class RemoteUsage implements UsageApi {
 	}
 	removeProvider(provider: Provider): void {
 		this.#remote.notify("usage.removeProvider", provider);
+	}
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void {
+		this.#remote.notify("usage.replaceDisabledProviders", [...providers]);
 	}
 }
 

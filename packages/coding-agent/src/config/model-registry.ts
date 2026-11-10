@@ -1328,6 +1328,10 @@ export class ModelRegistry {
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
+		// Usage never probes a provider the host disabled. A mirror skips this: its
+		// owner already composed the shared `AuthStorage` it reads through.
+		if (!this.#owner)
+			this.authStorage.usage.replaceDisabledProviders(getDisabledProviderIdsFromSettings(this.#settings));
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
 			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
