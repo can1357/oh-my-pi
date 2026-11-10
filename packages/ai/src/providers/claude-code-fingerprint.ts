@@ -52,17 +52,25 @@ function compareSemver(a: string, b: string): number {
  * rejection for the rest of the process, so the pinned fallback going stale costs
  * one rejected request instead of a hard failure.
  *
- * Returns true only when the wire version actually increased — callers retry on
- * true, so a repeated rejection at the same version cannot loop. Always false
- * while `PI_AI_CLAUDE_CODE_VERSION` pins the version explicitly.
+ * `sentVersion` is the Claude Code version the failed request actually sent. The
+ * retry predicate compares against it, not the process-wide adopted version:
+ * concurrent first requests all send the same stale version, and comparing them
+ * against a version another request already adopted would let all but the first
+ * skip the retry. Adoption stays process-wide and never moves backwards.
+ *
+ * Returns true only when the required version is newer than `sentVersion` —
+ * callers retry on true, so a repeated rejection at the same version cannot loop.
+ * Always false while `PI_AI_CLAUDE_CODE_VERSION` pins the version explicitly.
  */
-export function adoptRequiredClaudeCodeVersion(error: unknown): boolean {
+export function adoptRequiredClaudeCodeVersion(error: unknown, sentVersion: string): boolean {
 	if (process.env.PI_AI_CLAUDE_CODE_VERSION) return false;
 	const message = error instanceof Error ? error.message : String(error);
 	if (!message.includes(VERSION_TOO_OLD_CODE)) return false;
 	const required = REQUIRED_VERSION_PATTERN.exec(message)?.[1];
-	if (!required || compareSemver(required, getClaudeCodeVersion()) <= 0) return false;
-	adoptedClaudeCodeVersion = required;
+	if (!required || compareSemver(required, sentVersion) <= 0) return false;
+	if (adoptedClaudeCodeVersion === null || compareSemver(required, adoptedClaudeCodeVersion) > 0) {
+		adoptedClaudeCodeVersion = required;
+	}
 	return true;
 }
 

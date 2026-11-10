@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { setKeybindings, type TerminalFrameProvider } from "@oh-my-pi/pi-tui";
+import { setKeybindings, type TerminalFrameProvider, TUI } from "@oh-my-pi/pi-tui";
 import { defaultFormData, fieldError, formAnswers } from "@oh-my-pi/pi-tui/html-form/data";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -15,6 +15,16 @@ import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } 
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import {
+	getCellDimensions,
+	ImageProtocol,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
+import { VirtualTerminal } from "./virtual-terminal";
 
 const ENTER = "\r";
 const SPACE = " ";
@@ -230,6 +240,154 @@ describe("html form", () => {
 			} finally {
 				form.dispose();
 			}
+		});
+
+		describe("on a Kitty terminal", () => {
+			// 10x200 px: 16 rows at 10 px cells, so two of them cannot share a page of a 30-row terminal.
+			const TALL_PNG =
+				"iVBORw0KGgoAAAANSUhEUgAAAAoAAADICAAAAAD0eS/eAAAAIElEQVR42mNsYIABJoZR5ihzlDnKHGWOMkeZo8wBZAIAC30CEMb50JQAAAAASUVORK5CYII=";
+			const OK = `<label><input type="checkbox" name="ok"> OK</label>`;
+			const TWO_PAGES = `<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
+				<img src="data:image/png;base64,${TALL_PNG}" alt="second">${OK}</form>`;
+			const PAGE_DOWN = "\x1b[6~";
+			const PAGE_UP = "\x1b[5~";
+			const cleanups: (() => void)[] = [];
+
+			afterEach(() => {
+				for (const cleanup of cleanups.splice(0)) cleanup();
+			});
+
+			/**
+			 * A 60x30 Kitty terminal (direct placements, 10 px cells) showing `html` as a form,
+			 * settled once `pictures` of them have landed. `landed()` waits for the next one.
+			 */
+			async function kittyForm(html: string, options: { liveImages?: number; pictures?: number } = {}) {
+				// `id` has no setter; a non-Ghostty id lets the test TUI paint its frames.
+				const terminalId = TERMINAL as unknown as { id: string };
+				const original = {
+					id: terminalId.id,
+					protocol: TERMINAL.imageProtocol,
+					graphics: { ...getKittyGraphics() },
+					cells: { ...getCellDimensions() },
+				};
+				terminalId.id = "xterm";
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				setKittyGraphics({ unicodePlaceholders: false });
+				setCellDimensions({ widthPx: 10, heightPx: 10 });
+				const term = new VirtualTerminal(60, 30);
+				const writes: string[] = [];
+				const realWrite = term.write.bind(term);
+				vi.spyOn(term, "write").mockImplementation((data: string) => {
+					writes.push(data);
+					realWrite(data);
+				});
+				const scheduler = new VirtualRenderScheduler();
+				const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+				if (options.liveImages !== undefined) tui.setMaxInlineImages(options.liveImages);
+				let waiting = options.pictures ?? 1;
+				let next = Promise.withResolvers<void>();
+				const form = new HtmlFormDialog(parseHtmlForm(html), {
+					onSubmit: vi.fn(),
+					onCancel: vi.fn(),
+					tui: {
+						terminal: tui.terminal,
+						imageBudget: tui.imageBudget,
+						requestRender: () => {
+							tui.requestRender();
+							if (--waiting <= 0) next.resolve();
+						},
+					},
+				});
+				let closed = false;
+				cleanups.push(() => {
+					tui.stop();
+					if (!closed) form.dispose();
+					vi.restoreAllMocks();
+					terminalId.id = original.id;
+					setTerminalImageProtocol(original.protocol);
+					setKittyGraphics(original.graphics);
+					setCellDimensions(original.cells);
+				});
+				const frame = async (): Promise<void> => {
+					tui.requestRender();
+					await scheduler.settle(term);
+				};
+				// A drawing rasterizes from a render, and renders run only while the scheduler settles:
+				// render first, then wait for the picture to ask for its frame.
+				const landed = async (): Promise<void> => {
+					await scheduler.settle(term);
+					await next.promise;
+					await scheduler.settle(term);
+				};
+				tui.addChild(form);
+				tui.start();
+				await landed();
+				return {
+					term,
+					form,
+					writes,
+					frame,
+					/** Render a frame, then wait for the next picture to land, e.g. a drawing's redraw. */
+					landed: (): Promise<void> => {
+						waiting = 1;
+						next = Promise.withResolvers<void>();
+						tui.requestRender();
+						return landed();
+					},
+					close: async (): Promise<void> => {
+						closed = true;
+						tui.removeChild(form);
+						form.dispose();
+						await frame();
+					},
+				};
+			}
+
+			it("places a picture under its own id and deletes it when the form closes", async () => {
+				// An id-less `a=T` placement survives the rows that drew it being repainted,
+				// so a closed form would leave its picture painted over whatever comes next.
+				const view = await kittyForm(`<form><img src="data:image/png;base64,${PNG_1PX}" alt="dot">${OK}</form>`);
+				expect(view.writes.join("")).not.toContain("\x1b_Ga=T");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
+
+			it("spends image slots only on the pictures of the page shown", async () => {
+				// One live image: a picture on a later page must not take it from the one shown.
+				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
+				view.form.handleInput(PAGE_UP);
+				await view.frame();
+				expect(view.form.debugState()).toMatchObject({ page: 1, pages: 2 });
+				const screen = view.term.getViewport().join("\n");
+				expect(screen).not.toContain("[Image: first");
+				expect(screen).not.toContain("second");
+			});
+
+			it("deletes a picture the budget evicted and sent again when the form closes", async () => {
+				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
+				// Page 2 takes the one live slot and evicts page 1's picture; back on page 1 it is sent again.
+				for (const key of [PAGE_UP, PAGE_DOWN, PAGE_UP]) {
+					view.form.handleInput(key);
+					await view.frame();
+				}
+				expect(view.form.debugState()).toMatchObject({ page: 1 });
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
+
+			it("deletes every raster of a drawing redrawn while the form is open", async () => {
+				const view = await kittyForm(
+					`<form><svg viewBox="0 0 838 200"><rect width="838" height="200" fill="#f0f"/></svg>${OK}</form>`,
+				);
+				// New cell metrics redraw the drawing under a new image id.
+				setCellDimensions({ widthPx: 10, heightPx: 12 });
+				await view.landed();
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
 		});
 	});
 

@@ -47,7 +47,7 @@ use std::{
 	os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
 	ptr,
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
@@ -619,8 +619,8 @@ fn wide(b: &BStr) -> io::Result<Vec<u16>> {
 	Ok(s.encode_utf16().chain([0]).collect())
 }
 
-/// `%SystemRoot%\System32\cmd.exe`, NUL-terminated.
-fn system_cmd() -> io::Result<Vec<u16>> {
+/// `%SystemRoot%\System32`, without a terminator.
+fn system_dir() -> io::Result<Vec<u16>> {
 	let mut buf = vec![0u16; 260];
 	// SAFETY: `buf` is writable for its length.
 	let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
@@ -628,8 +628,45 @@ fn system_cmd() -> io::Result<Vec<u16>> {
 		return Err(last_error());
 	}
 	buf.truncate(n);
+	Ok(buf)
+}
+
+/// `%SystemRoot%\System32\cmd.exe`, NUL-terminated.
+fn system_cmd() -> io::Result<Vec<u16>> {
+	let mut buf = system_dir()?;
 	buf.extend("\\cmd.exe".encode_utf16().chain([0]));
 	Ok(buf)
+}
+
+/// Whether `path` is System32's `find.exe` (any case, either separator),
+/// which parses its own command line ([`cmdline::find_command_line`]); a
+/// `find.exe` elsewhere (Git's GNU `find`) parses `argv`. Any other file name
+/// is answered without a system call.
+fn is_system_find(path: &BStr) -> bool {
+	/// ASCII case and `/` folded to `\`, the way Windows compares paths here.
+	fn fold(unit: u16) -> u16 {
+		match u8::try_from(unit) {
+			Ok(b'/') => u16::from(b'\\'),
+			Ok(b) if b.is_ascii() => u16::from(b.to_ascii_lowercase()),
+			_ => unit,
+		}
+	}
+	/// System32's `find.exe`, folded; `None` when the system directory is
+	/// unknown.
+	static SYSTEM_FIND: LazyLock<Option<Vec<u16>>> = LazyLock::new(|| {
+		let mut dir = system_dir().ok()?;
+		dir.extend("\\find.exe".encode_utf16());
+		Some(dir.into_iter().map(fold).collect())
+	});
+	let name = path.rfind_byteset(b"\\/").map_or(path, |i| &path[i + 1..]);
+	if !name.eq_ignore_ascii_case(b"find.exe") {
+		return false;
+	}
+	let expected = &*SYSTEM_FIND;
+	let (Some(expected), Ok(path)) = (expected, path.to_str()) else {
+		return false;
+	};
+	path.encode_utf16().map(fold).eq(expected.iter().copied())
 }
 
 /// Application name and mutable command line (both NUL-terminated).
@@ -638,6 +675,8 @@ fn command(path: &BStr, argv: &[BString]) -> io::Result<(Vec<u16>, Vec<u16>)> {
 		cmdline::batch_command_line(path, argv.get(1..).unwrap_or_default())
 	} else if argv.is_empty() {
 		cmdline::command_line(&[path])
+	} else if is_system_find(path) {
+		cmdline::find_command_line(argv)
 	} else {
 		cmdline::command_line(argv)
 	}
