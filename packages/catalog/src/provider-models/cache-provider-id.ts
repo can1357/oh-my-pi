@@ -3,6 +3,7 @@ import { CODEX_BASE_URL, CODEX_CLIENT_VERSION } from "../wire/codex";
 import { CURSOR_DEFAULT_BASE_URL } from "../wire/cursor";
 import { type AccountScope, factoryDroidModelCacheProviderId } from "../wire/factory-droid";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -38,6 +39,9 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	// OpenRouter's keyed roster is the set of models the key's workspace
 	// guardrails allow, and discovery is authoritative.
 	openrouter: true,
+	// A Modal proxy token is workspace-scoped and the roster is the endpoints it
+	// may call, so a shared namespace would serve one workspace's ids to another.
+	modal: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -58,6 +62,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "modal":
+			return normalizeModalBaseUrl(Bun.env.MODAL_BASE_URL);
 		case "otari":
 			return Bun.env.OTARI_BASE_URL?.trim() || "https://api.otari.ai/api/v1";
 		case "opencode-go":
@@ -188,6 +194,13 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = normalizeSingularityApiBaseUrl(options.baseUrl, canonical);
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `${providerId}:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
+		case "modal": {
+			// The roster is the endpoints one proxy token may call on a deployment;
+			// switching either the token or MODAL_BASE_URL must re-run discovery.
+			const baseUrl = normalizeModalBaseUrl(options.baseUrl ?? Bun.env.MODAL_BASE_URL);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `modal:models-v1:${Bun.hash(scope).toString(36)}`;
 		}
 		case "litellm": {
 			const baseUrl = (options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!).trim().replace(/\/+$/, "");
