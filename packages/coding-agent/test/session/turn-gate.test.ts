@@ -50,12 +50,38 @@ describe("TurnGate", () => {
 
 		expect(gate.start({ kind: "background" }, undefined, dispatched(log, "background"))).toBeUndefined();
 		expect(gate.start({ kind: "user" }, undefined, dispatched(log, "user"))).toBeUndefined();
+		gate.release(hold);
 		const fresh = gate.hold();
 		expect(await gate.start({ kind: "holder", hold: fresh }, undefined, dispatched(log, "holder"))).toBe("holder");
 
 		// The user claim cancelled the hold it found, so that hold's own continuation no longer runs.
 		expect(gate.start({ kind: "holder", hold }, undefined, dispatched(log, "cancelled holder"))).toBeUndefined();
 		expect(log).toEqual(["holder"]);
+	});
+
+	it("queues a second hold behind the one in force and hands the session over at its release, parked work still parked", async () => {
+		const gate = new TurnGate(createHost().host);
+		const first = gate.hold();
+		const second = gate.hold();
+		const log: string[] = [];
+		let secondHeld = false;
+		void gate.whenHeld(second).then(() => {
+			secondHeld = true;
+		});
+		gate.tryAdmit({ kind: "background", park: () => log.push("parked") });
+
+		// Only the hold in force runs its continuation: the queued pass neither judges nor continues yet.
+		expect(gate.start({ kind: "holder", hold: second }, undefined, dispatched(log, "second"))).toBeUndefined();
+		await scheduler.yield();
+		expect(secondHeld).toBe(false);
+		gate.release(first);
+		await scheduler.yield();
+
+		expect(secondHeld).toBe(true);
+		expect(gate.held).toBe(true);
+		expect(await gate.start({ kind: "holder", hold: second }, undefined, dispatched(log, "second"))).toBe("second");
+		gate.release(second);
+		expect(log).toEqual(["second", "parked"]);
 	});
 
 	it("refuses a recovery claim only while a hold consults, and replays its park when consulting ends", async () => {
@@ -77,7 +103,7 @@ describe("TurnGate", () => {
 		expect(gate.held).toBe(true);
 	});
 
-	it("cancels every hold's signal once for a refused user claim, and resolves whenAdmissible only after the last release", async () => {
+	it("cancels every hold's signal once for a refused user claim, queued ones included, and admits it once the hold in force releases", async () => {
 		const gate = new TurnGate(createHost().host);
 		const first = gate.hold();
 		const second = gate.hold();
@@ -89,14 +115,15 @@ describe("TurnGate", () => {
 			admitted = true;
 		});
 		expect(gate.start({ kind: "user" }, undefined, () => Promise.resolve())).toBeUndefined();
-		gate.release(first);
 		await scheduler.yield();
+		expect(admitted).toBe(false);
+		// The cancelled queued pass never gets the session: the release of the one in force ends the wait.
+		gate.release(first);
+		await waiting;
 
 		expect(aborts).toBe(2);
-		expect(admitted).toBe(false);
-		gate.release(second);
-		await waiting;
 		expect(admitted).toBe(true);
+		gate.release(second);
 	});
 
 	it("replays parked claims once, in park order, after the last hold releases and admitted submissions settle", async () => {

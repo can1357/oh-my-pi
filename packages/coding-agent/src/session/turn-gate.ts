@@ -10,8 +10,8 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 
 /**
  * What a turn is to the holds, decided where the turn is created:
- * - `holder`: a hold's own continuation; runs once no non-holder claim's reservation is open (holders serialize on
- *   the agent's own busy check instead, so two holds' continuations never wait on each other).
+ * - `holder`: the continuation of the hold in force (one at a time; later holds queue); runs once no non-holder
+ *   claim's reservation is open.
  * - `recovery`: the running work's own follow-through (retries, stream guards, idle deliveries); waits only while a
  *   hold's handlers consult.
  * - `background`: anything else that would start a turn on its own (wakes, asides, queued drains, compaction
@@ -60,7 +60,12 @@ type ParkedClaim = { park: () => void; stamp: number; kind: TurnClaimKind };
 
 export class TurnGate {
 	readonly #host: TurnGateHost;
+	/** Every hold taken and not yet released, with the unlink of its run signal: the one in force and those queued. */
 	readonly #holds = new Map<HoldState, (() => void) | undefined>();
+	/** The one hold in force. Holds never overlap, so no holder's continuation runs under another's pass. */
+	#active: HoldState | undefined;
+	/** Holds taken while another was in force, in order: each gets the session at the release before it. */
+	#queued: HoldState[] = [];
 	readonly #reservations = new Set<{ readonly kind: TurnClaimKind }>();
 	#parked: ParkedClaim[] = [];
 	#changed = Promise.withResolvers<void>();
@@ -72,7 +77,7 @@ export class TurnGate {
 	}
 
 	get held(): boolean {
-		return this.#holds.size > 0;
+		return this.#active !== undefined;
 	}
 
 	/** True only during {@link start}'s synchronous dispatch call: the agent's turn gate admits exactly that call. */
@@ -90,7 +95,10 @@ export class TurnGate {
 		return this.#changed.promise;
 	}
 
-	/** Takes a hold; `runSignal`, the run's own cancellation, cancels it until its release. */
+	/**
+	 * Takes a hold: in force now when no other is, else queued behind the one in force until it releases (see
+	 * {@link whenHeld}). `runSignal`, the run's own cancellation, cancels it until its release.
+	 */
 	hold(runSignal?: AbortSignal): HoldState {
 		const hold: HoldState = { cancel: new AbortController(), consulting: false };
 		let unlink: (() => void) | undefined;
@@ -103,8 +111,21 @@ export class TurnGate {
 			}
 		}
 		this.#holds.set(hold, unlink);
+		if (this.#active) this.#queued.push(hold);
+		else this.#active = hold;
 		this.#notify();
 		return hold;
+	}
+
+	/** Resolves once `hold` is in force, or once it is cancelled or released while still queued. */
+	async whenHeld(hold: HoldState): Promise<void> {
+		while (this.#active !== hold && this.#holds.has(hold) && !hold.cancel.signal.aborted) {
+			try {
+				await untilAborted(hold.cancel.signal, () => this.#changed.promise);
+			} catch {
+				// Cancelled while queued: the loop condition ends the wait.
+			}
+		}
 	}
 
 	consult(hold: HoldState): void {
@@ -119,12 +140,26 @@ export class TurnGate {
 		this.#replay(true);
 	}
 
-	/** Lets other turns run again. The last release replays every parked claim, once submissions admitted by then settle. */
+	/**
+	 * Ends `hold`. The one in force hands the session to the next live queued hold in the same tick, so parked work
+	 * stays parked; the last release replays every parked claim, once submissions admitted by then settle.
+	 */
 	release(hold: HoldState): void {
 		if (!this.#holds.has(hold)) return;
 		this.endConsult(hold);
 		this.#holds.get(hold)?.();
 		this.#holds.delete(hold);
+		if (hold !== this.#active) {
+			this.#queued = this.#queued.filter(queued => queued !== hold);
+			this.#notify();
+			return;
+		}
+		this.#active = undefined;
+		while (!this.#active && this.#queued.length > 0) {
+			const next = this.#queued.shift();
+			// A pass cancelled while queued never judges: its owner releases it unheld.
+			if (next && !next.cancel.signal.aborted) this.#active = next;
+		}
 		this.#notify();
 		if (this.held) return;
 		const settled = this.#host.whenAdmittedSubmissionsSettled();
@@ -147,7 +182,7 @@ export class TurnGate {
 		switch (claim.kind) {
 			case "holder": {
 				const hold = claim.hold;
-				if (!hold || !this.#holds.has(hold) || hold.cancel.signal.aborted) return false;
+				if (!hold || hold !== this.#active || hold.cancel.signal.aborted) return false;
 				for (const reservation of this.#reservations) if (reservation.kind !== "holder") return false;
 				return true;
 			}
@@ -218,8 +253,7 @@ export class TurnGate {
 	}
 
 	#consulting(): boolean {
-		for (const hold of this.#holds.keys()) if (hold.consulting) return true;
-		return false;
+		return this.#active?.consulting === true;
 	}
 
 	#park(park: () => void, kind: TurnClaimKind): void {

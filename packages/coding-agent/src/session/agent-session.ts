@@ -931,8 +931,12 @@ const USER_CLAIM: TurnClaim = { kind: "user" };
 export interface StopPassHold {
 	/** Aborts when an explicit user prompt or the run's own cancellation cancels the pass. */
 	readonly signal: AbortSignal;
-	/** Handlers are about to judge the candidate: hold idle deliveries until the next {@link prompt} or {@link release}. */
-	consult(): void;
+	/**
+	 * Handlers are about to judge the candidate: hold idle deliveries until the next {@link prompt} or
+	 * {@link release}. Resolves once this hold is in force: a pass taken while another holds the session queues
+	 * behind it, so two passes never judge or continue at once. Check {@link signal} after it.
+	 */
+	consult(): Promise<void>;
 	/** Run the holder's own turn (a continuation); any other prompt waits for the release. */
 	prompt(text: string, options?: PromptOptions): Promise<boolean>;
 	/** Let other turns run again. Idempotent. */
@@ -5808,8 +5812,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const coalescedSources = new Set([options.source]);
 				let observation: TurnObservation | undefined;
 				const onStart = (): void => {
-					options.onTurnAdmitted?.();
-					if (this.#ircWakeTurnObserver) observation = this.#startTurnObservation(options.turnRecords ?? []);
+					if (options.onTurnAdmitted) {
+						// A driver owns this turn (a restored follow-up): it supersedes the settling observation and
+						// opens none, so exactly one monitor consumes the turn's yield.
+						const open = this.#openTurnObservation;
+						if (open) void this.#closeTurnObservation(open, true);
+						options.onTurnAdmitted();
+					} else if (this.#ircWakeTurnObserver) {
+						observation = this.#startTurnObservation(options.turnRecords ?? []);
+					}
 				};
 				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
 				const attempt: ActiveAgentContinue = {
@@ -9287,9 +9298,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
 				onTurnAdmitted: () => {
-					options?.onTurnAdmitted?.();
-					if (observed && this.#workPoolYieldItems.length === 0)
+					if (options?.onTurnAdmitted) {
+						// A driver owns this turn (a driven follow-up): it supersedes the settling observation, so
+						// exactly one monitor consumes the turn's yield.
+						const open = this.#openTurnObservation;
+						if (open) void this.#closeTurnObservation(open, true);
+						options.onTurnAdmitted();
+					} else if (observed && this.#workPoolYieldItems.length === 0) {
 						observation = this.#startTurnObservation([message]);
+					}
 				},
 				stopPassHolder: holder,
 				followUpBatch: followUps,
@@ -14132,7 +14149,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * explicit user prompt also aborts {@link StopPassHold.signal}, cancelling the
 	 * pass. The hold spans refusal continuations and their owned async work, so
 	 * the run's cancellation and runtime limit bound it, not the handler timeout:
-	 * `runSignal`, the run's abort signal, cancels the pass as well.
+	 * `runSignal`, the run's abort signal, cancels the pass as well. A pass taken
+	 * while another holds the session queues behind it until that one releases.
 	 */
 	holdForStopPass(runSignal?: AbortSignal): StopPassHold {
 		// The run's own cancellation (caller abort, runtime limit, teardown) cancels the pass too: it aborts the
@@ -14142,7 +14160,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let released = false;
 		return {
 			signal: hold.cancel.signal,
-			consult: () => this.#turnGate.consult(hold),
+			consult: () => {
+				this.#turnGate.consult(hold);
+				return this.#turnGate.whenHeld(hold);
+			},
 			prompt: async (text, options) => {
 				// The handlers' verdict is in: the running work's own recovery, held while they consulted, may run
 				// again, and this continuation waits for it to settle.
