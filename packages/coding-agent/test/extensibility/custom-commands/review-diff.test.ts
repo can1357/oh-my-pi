@@ -152,4 +152,36 @@ describe("parseReviewDiffSnapshot", () => {
 			newPath: "src/café new.ts",
 		});
 	});
+
+	it("strips custom source and destination prefixes from supplied diffs", () => {
+		const snapshot = parseReviewDiffSnapshot(
+			[
+				"diff --git old/src/a.ts new/src/a.ts",
+				"index 1234567..89abcdef 100644",
+				"--- old/src/a.ts",
+				"+++ new/src/a.ts",
+				"@@ -1 +1 @@",
+				"-old",
+				"+new",
+			].join("\n"),
+		);
+
+		expect(snapshot.files).toHaveLength(1);
+		expect(snapshot.files[0]).toMatchObject({
+			path: "src/a.ts",
+			oldPath: "src/a.ts",
+			newPath: "src/a.ts",
+			linesAdded: 1,
+			linesRemoved: 1,
+		});
+	});
+
+	it("normalizes CRLF rename-only sections without similarity metadata", () => {
+		const snapshot = parseReviewDiffSnapshot(
+			["diff --git a/old.ts b/new.ts\r", "rename from old.ts\r", "rename to new.ts\r", ""].join("\n"),
+		);
+
+		expect(snapshot.files).toHaveLength(1);
+		expect(snapshot.files[0]).toMatchObject({ path: "new.ts", oldPath: "old.ts", newPath: "new.ts" });
+	});
 });

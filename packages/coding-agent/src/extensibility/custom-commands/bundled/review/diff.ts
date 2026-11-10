@@ -1,5 +1,5 @@
 import type { ReviewDiffFile, ReviewDiffRow } from "@oh-my-pi/pi-tui/overlays/annotation-types";
-import { hasCrlfDiffLineEndings, parseGitDiffSectionPaths } from "../../../../utils/git-diff-paths";
+import { parseGitDiffSectionPaths } from "../../../../utils/git-diff-paths";
 
 export interface ExcludedReviewFile {
 	path: string;
@@ -56,7 +56,7 @@ function splitFileDiffs(rawDiff: string): string[] {
 	return starts.map((start, index) => {
 		const end = starts[index + 1] ?? rawDiff.length;
 		const fileDiff = rawDiff.slice(start, end);
-		return hasCrlfDiffLineEndings(fileDiff) ? fileDiff.replace(/\r\n$/, "") : fileDiff.replace(/\n$/, "");
+		return fileDiff.replace(/\r?\n$/, "");
 	});
 }
 
@@ -113,10 +113,10 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 
 	for (const rawFileDiff of splitFileDiffs(rawDiff)) {
 		diffIndex++;
-		const { oldPath, newPath } = parseGitDiffSectionPaths(rawFileDiff);
+		const { oldPath, newPath } = parseGitDiffSectionPaths(rawFileDiff, { normalizeCrlf: true });
 		const path = newPath ?? oldPath;
 		if (path === undefined) continue;
-		const lines = hasCrlfDiffLineEndings(rawFileDiff) ? rawFileDiff.split(/\r?\n/) : rawFileDiff.split("\n");
+		const lines = rawFileDiff.split(/\r?\n/);
 		const parsed = parseRows(lines);
 		const exclusionReason = EXCLUDED_PATTERNS.find(entry => entry.pattern.test(path))?.reason;
 		if (exclusionReason !== undefined) {

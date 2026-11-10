@@ -47,7 +47,7 @@ export function decodeGitDiffPath(token: string): string {
 }
 
 function stripDiffSidePrefix(path: string): string {
-	return path.replace(/^[ab]\//, "");
+	return path.replace(/^[^/]+\//, "");
 }
 
 function sidePath(token: string): string | undefined {
@@ -159,7 +159,7 @@ const NON_PATH_METADATA_PREFIX =
  * `@@`, etc.) never end in `\r`, and a `diff --git` header for an unchanged
  * CR-suffixed path carries `\r` on both the `a/` and `b/` sides.
  */
-export function hasCrlfDiffLineEndings(section: string): boolean {
+function hasCrlfDiffLineEndings(section: string): boolean {
 	for (const line of section.split("\n")) {
 		if (NON_PATH_METADATA_PREFIX.test(line)) return line.endsWith("\r");
 	}
@@ -174,9 +174,11 @@ export function hasCrlfDiffLineEndings(section: string): boolean {
  * Parse the old and new paths touched by one `diff --git` section.
  * `rename from`/`rename to` and `---`/`+++` override the header, matching how
  * native patch application resolves headers with spaces or ambiguous ` b/`.
+ * `normalizeCrlf` suits supplied review diffs; native patches use auto-detection
+ * to preserve literal carriage returns in filenames.
  */
-export function parseGitDiffSectionPaths(section: string): GitDiffSectionPaths {
-	const stripCr = hasCrlfDiffLineEndings(section);
+export function parseGitDiffSectionPaths(section: string, options?: { normalizeCrlf?: boolean }): GitDiffSectionPaths {
+	const stripCr = options?.normalizeCrlf === true || hasCrlfDiffLineEndings(section);
 	const rawLines = section.split("\n");
 	const trimLine = (line: string): string => (stripCr && line.endsWith("\r") ? line.slice(0, -1) : line);
 	const header = trimLine(rawLines[0] ?? "");
