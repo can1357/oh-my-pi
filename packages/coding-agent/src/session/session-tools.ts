@@ -31,6 +31,7 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
+import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import type { AgentDefinition } from "../task/types";
 import evalPreludeNoticePrompt from "../prompts/system/eval-prelude-notice.md" with { type: "text" };
 import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md" with { type: "text" };
@@ -365,6 +366,8 @@ interface PromptSurface {
 	sessionAgents: readonly AgentDefinition[];
 	/** Tool names the eval description lists as callable from cells. */
 	evalToolNames: readonly string[];
+	/** Per-call model roles the task/eval descriptions advertise (mid-session role edits). */
+	perCallModelAdvertisement: PerCallModelAdvertisement;
 }
 
 /**
@@ -785,6 +788,13 @@ export class SessionTools {
 	get advertisedSessionAgents(): readonly AgentDefinition[] {
 		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).sessionAgents;
 	}
+	/**
+	 * Per-call model roles the task/eval descriptions advertise (see
+	 * {@link #promptSurface}); the candidate inside a rebuild frame.
+	 */
+	get advertisedPerCallModel(): PerCallModelAdvertisement {
+		return (this.#promptSurfaceScope.getStore() ?? this.#promptSurface).perCallModelAdvertisement;
+	}
 
 	/**
 	 * Tool names the eval description advertises (see {@link #promptSurface});
@@ -802,6 +812,11 @@ export class SessionTools {
 			evalPreludes: this.#host.evalPreludes(),
 			sessionAgents: this.#host.sessionAgents(),
 			evalToolNames: this.getEvalBridgeToolNames(),
+			perCallModelAdvertisement: getPerCallModelAdvertisement(
+				this.#host.settings,
+				this.#host.model(),
+				this.#host.modelRegistry,
+			),
 		};
 	}
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
@@ -1549,8 +1564,8 @@ export class SessionTools {
 					this.#promptSurfaceScope.run(surface, () =>
 						this.#computeAppliedToolSignature(validToolNames, tools, mountedSignatureTools),
 					);
-				// Eval-prelude, eval tool-name and model-mention changes alone never
-				// trigger a rebuild: they ride their hidden notices. The trigger keeps
+				// Eval-prelude, eval tool-name, model-mention and per-call-model advertisement
+				// changes alone never trigger a rebuild: they ride their hidden notices. The trigger keeps
 				// the committed sets; a rebuild caused by anything else absorbs the
 				// live ones.
 				const triggerSignature = computeSignature({
@@ -1558,6 +1573,7 @@ export class SessionTools {
 					evalPreludes: this.#promptSurface.evalPreludes,
 					sessionAgents: this.#promptSurface.sessionAgents,
 					evalToolNames: this.#promptSurface.evalToolNames,
+					perCallModelAdvertisement: this.#promptSurface.perCallModelAdvertisement,
 				});
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
