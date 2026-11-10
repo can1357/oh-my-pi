@@ -194,6 +194,16 @@ export class SessionMemory {
 	restorePromotionSnapshot(prompt: string[] | undefined): void {
 		this.#baseSystemPromptBeforeMemoryPromotion = prompt;
 	}
+
+	/**
+	 * Retains the unretained suffix of the transcript about to be replaced (/new, resume, fork, branch).
+	 * The Mnemosyne OSS state reads the live session manager, so after the swap it would only see the next transcript.
+	 */
+	async retainOutgoingTranscript(): Promise<void> {
+		if (cfgMemoryBackend.get(this.#host.settings) !== "mnemosyne-oss") return;
+		await this.#host.getMnemosyneOssSessionState()?.retainFinal();
+	}
+
 	/** Rekeys every active memory backend to the current provider session. */
 	rekeyForCurrentSessionId(): void {
 		this.#rekeyHindsightMemoryForCurrentSessionId();

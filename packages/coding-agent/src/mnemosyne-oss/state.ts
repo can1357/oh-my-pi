@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import {
 	composeRecallQuery,
 	formatMemories,
@@ -8,6 +8,8 @@ import {
 } from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
 import type { MemoryBackendSaveInput, MemoryPromptPreparation } from "../memory-backend/types";
+import { truncateApproxTokens } from "../mnemopi/config";
+import recallTemplate from "../prompts/memories/mnemosyne-oss-recall.md" with { type: "text" };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
 import type { MnemosyneOssBackendConfig } from "./config";
@@ -27,7 +29,9 @@ interface AgentSessionWithMnemosyneOssState extends AgentSession {
 	[kMnemosyneOssSessionState]?: MnemosyneOssSessionState;
 }
 
-export function getMnemosyneOssSessionState(session: AgentSessionHandle | undefined): MnemosyneOssSessionState | undefined {
+export function getMnemosyneOssSessionState(
+	session: AgentSessionHandle | undefined,
+): MnemosyneOssSessionState | undefined {
 	return session && isLocalAgentSession(session)
 		? (session as AgentSessionWithMnemosyneOssState)[kMnemosyneOssSessionState]
 		: undefined;
@@ -113,12 +117,15 @@ export class MnemosyneOssSessionState {
 	#workerFactory?: MnemosyneOssWorkerFactory;
 	#unsubscribe?: () => void;
 	#retentionQueue: Promise<void> = Promise.resolve();
+	/** Id of the transcript this state was built for; the session manager serves another one after /new, resume, fork, or branch. */
+	readonly #transcriptId: string;
 
 	constructor(options: MnemosyneOssSessionStateOptions) {
 		this.sessionId = options.sessionId;
 		this.config = options.config;
 		this.session = options.session;
-		this.aliasOf = options.aliasOf;
+		// A task spawned by a task passes its own alias; resolve to the state that owns the worker and the recall.
+		this.aliasOf = options.aliasOf?.aliasOf ?? options.aliasOf;
 		if (options.aliasOf) {
 			this.#worker = options.aliasOf.worker;
 		} else {
@@ -153,6 +160,7 @@ export class MnemosyneOssSessionState {
 		}
 		if (!options.aliasOf) this.#worker = options.worker ?? this.#workerFactory!();
 		this.lastRetainedTurn = loadRetentionCursor(options.session, options.sessionId);
+		this.#transcriptId = options.session.sessionManager.getSessionId();
 	}
 
 	get worker(): MnemosyneOssWorkerLike {
@@ -363,6 +371,17 @@ export class MnemosyneOssSessionState {
 		});
 	}
 
+	/**
+	 * Auto-retain's final write for the live transcript, run before it is replaced and when the session ends.
+	 * Honors `autoRetain`; `/memory enqueue` stays the explicit forced path. Never rejects.
+	 */
+	async retainFinal(): Promise<void> {
+		if (!this.config.autoRetain) return;
+		await this.forceRetainCurrentSession().catch(error =>
+			logger.warn("Mnemosyne OSS final retention failed", { error: String(error) }),
+		);
+	}
+
 	async probe(): Promise<void> {
 		if (this.aliasOf) return;
 		await this.worker.request("capabilities");
@@ -385,9 +404,7 @@ export class MnemosyneOssSessionState {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
 		if (this.aliasOf) return;
-		await this.forceRetainCurrentSession().catch(error =>
-			logger.warn("Mnemosyne OSS final retention failed", { error: String(error) }),
-		);
+		await this.retainFinal();
 		await this.worker.shutdown();
 	}
 
@@ -395,12 +412,15 @@ export class MnemosyneOssSessionState {
 		if (this.aliasOf) return this.aliasOf.clearAndRehydrate();
 		const primary = this;
 		await primary.worker.request("clear", {}, { mutation: true });
+		// A recall prepared or in flight before the clear must not land in the next prompt.
+		primary.#recallGeneration++;
 		primary.lastRecallSnippet = undefined;
 		primary.hasRecalledForFirstTurn = false;
-		primary.lastRetainedTurn = 0;
+		// The cleared conversation counts as retained, so disposal or /memory enqueue never writes it back.
+		primary.lastRetainedTurn = countUserTurns(extractMessages(primary.session.sessionManager));
 		await persistRetentionCursor(primary.session, {
 			sessionId: primary.sessionId,
-			retainedThroughUserTurn: 0,
+			retainedThroughUserTurn: primary.lastRetainedTurn,
 			sourceId: `${primary.sessionId}:cleared`,
 		});
 		if (!primary.#workerFactory) return;
@@ -445,13 +465,22 @@ export class MnemosyneOssSessionState {
 	}
 
 	#formatRecallBlock(memories: readonly MnemosyneOssWorkerRecallItem[]): string {
-		const rendered = `<memories>\n${formatMemories(
-			memories.map(item => ({ text: item.content, type: item.source, mentioned_at: item.timestamp })),
-		)}\n</memories>`;
-		return truncateInjection(rendered, this.config.injectionTokenLimit);
+		const rendered = prompt.render(recallTemplate, {
+			memories: formatMemories(
+				memories.map(item => ({ text: item.content, type: item.source, mentioned_at: item.timestamp })),
+			),
+		});
+		return truncateApproxTokens(rendered, this.config.injectionTokenLimit);
 	}
+
 	async #queueRetention(task: () => Promise<void>): Promise<void> {
-		const next = this.#retentionQueue.then(task, task);
+		const guarded = async (): Promise<void> => {
+			// After /new, resume, fork, or branch the session manager serves another transcript: the outgoing one
+			// was flushed before the swap, and the new one belongs to the next state's bank and worker.
+			if (this.session.sessionManager.getSessionId() !== this.#transcriptId) return;
+			await task();
+		};
+		const next = this.#retentionQueue.then(guarded, guarded);
 		this.#retentionQueue = next.catch(() => undefined);
 		await next;
 	}
@@ -513,9 +542,4 @@ function loadRetentionCursor(session: AgentSession, sessionId: string): number {
 async function persistRetentionCursor(session: AgentSession, cursor: RetentionCursor): Promise<void> {
 	session.sessionManager.appendCustomEntry(RETENTION_CURSOR_TYPE, cursor);
 	await session.sessionManager.flush();
-}
-function truncateInjection(text: string, tokenLimit: number): string {
-	const maxChars = Math.max(0, tokenLimit * 4);
-	if (text.length <= maxChars) return text;
-	return `${text.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }

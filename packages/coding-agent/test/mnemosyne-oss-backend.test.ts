@@ -33,6 +33,8 @@ interface FakeSessionData {
 	entries: FakeSessionEntry[];
 	customEntries: Array<{ customType: string; data: unknown }>;
 	refreshes: number;
+	/** Id the session manager reports; changes when /new, resume, fork, or branch swaps the transcript. */
+	transcriptId: string;
 }
 
 interface FakeWorkerData {
@@ -86,11 +88,13 @@ function createSession(sessionId = "session-1", entries: FakeSessionEntry[] = []
 			return `entry-${customEntries.length}`;
 		},
 		flush: async () => undefined,
+		getSessionId: () => data.transcriptId,
 	};
 	const data: FakeSessionData = {
 		entries,
 		customEntries,
 		refreshes: 0,
+		transcriptId: sessionId,
 		session: {
 			sessionId,
 			sessionManager: manager,
@@ -406,5 +410,161 @@ describe("Mnemosyne OSS backend", () => {
 			taskDepth: 0,
 		});
 		expect(getMnemosyneOssSessionState(session.session)).toBeUndefined();
+		const status = await mnemosyneOssBackend.status!({ agentDir: "/tmp", cwd: "/tmp", session: session.session });
+		expect(status.message).toContain("/nonexistent/mnemosyne-oss-python");
+	});
+
+	it("reports why startup left the backend inert", async () => {
+		const session = createSession();
+		await mnemosyneOssBackend.start({
+			session: session.session,
+			settings: Settings.isolated({
+				"memory.backend": "mnemosyne-oss",
+				"mnemosyne-oss.bank": "team/shared",
+			}),
+			modelRegistry: {} as never,
+			agentDir: "/tmp/agent",
+			taskDepth: 0,
+		});
+		const status = await mnemosyneOssBackend.status!({ agentDir: "/tmp", cwd: "/tmp", session: session.session });
+		expect(status.active).toBe(false);
+		expect(status.message).toContain('bank "team/shared" is invalid');
+		expect(await mnemosyneOssBackend.diagnose!("/tmp", "/tmp", session.session)).toContain(
+			'bank "team/shared" is invalid',
+		);
+	});
+
+	it("does not write a cleared conversation back on disposal and still retains later turns", async () => {
+		const session = createSession();
+		for (let index = 1; index <= 3; index++) addTurn(session, index);
+		const fake = createWorker();
+		const state = new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config,
+			session: session.session,
+			worker: fake.worker,
+		});
+		setMnemosyneOssSessionState(session.session, state);
+		await mnemosyneOssBackend.clear("/tmp", "/tmp", session.session);
+		addTurn(session, 4);
+		await state.dispose();
+		const remembers = fake.calls.filter(call => call.method === "remember");
+		expect(remembers).toHaveLength(1);
+		expect(rememberSourceId(remembers[0].params)).toBe("session-1:turns:4-4");
+		expect(String(remembers[0].params.content)).not.toContain("user turn 1");
+	});
+
+	it("discards a recall prepared before /memory clear", async () => {
+		const session = createSession();
+		const fake = createWorker([
+			{ id: "seed", content: "deleted background", source: "seed", score: 1, bank: "project-bank" },
+		]);
+		const state = new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config,
+			session: session.session,
+			worker: fake.worker,
+		});
+		setMnemosyneOssSessionState(session.session, state);
+		const prepared = await mnemosyneOssBackend.beforeAgentStartPrompt!(session.session, "question");
+		expect(prepared?.context).toContain("deleted background");
+		await mnemosyneOssBackend.clear("/tmp", "/tmp", session.session);
+		expect(prepared?.commit()).toBe(false);
+		const instructions = await mnemosyneOssBackend.buildDeveloperInstructions(
+			"/tmp",
+			"/tmp",
+			Settings.isolated({}),
+			session.session,
+		);
+		expect(instructions).not.toContain("deleted background");
+	});
+
+	it("honors autoRetain=false on disposal but not on /memory enqueue", async () => {
+		const optedOut = { ...config, autoRetain: false };
+		const disposed = createSession();
+		for (let index = 1; index <= 2; index++) addTurn(disposed, index);
+		const disposedWorker = createWorker();
+		await new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config: optedOut,
+			session: disposed.session,
+			worker: disposedWorker.worker,
+		}).dispose();
+		expect(disposedWorker.calls.some(call => call.method === "remember")).toBe(false);
+
+		const enqueued = createSession("session-2");
+		for (let index = 1; index <= 2; index++) addTurn(enqueued, index);
+		const enqueuedWorker = createWorker();
+		setMnemosyneOssSessionState(
+			enqueued.session,
+			new MnemosyneOssSessionState({
+				sessionId: "session-2",
+				config: optedOut,
+				session: enqueued.session,
+				worker: enqueuedWorker.worker,
+			}),
+		);
+		await mnemosyneOssBackend.enqueue("/tmp", "/tmp", enqueued.session);
+		expect(enqueuedWorker.calls.filter(call => call.method === "remember")).toHaveLength(1);
+	});
+
+	it("retains the outgoing suffix before a session switch and never writes the incoming transcript", async () => {
+		const session = createSession();
+		for (let index = 1; index <= 2; index++) addTurn(session, index);
+		const fake = createWorker();
+		const state = new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config,
+			session: session.session,
+			worker: fake.worker,
+		});
+		await state.retainFinal();
+		// /new, resume, fork, and branch swap the transcript behind the same session manager.
+		session.entries.length = 0;
+		session.transcriptId = "session-2";
+		for (let index = 1; index <= 3; index++) addTurn(session, index);
+		const cursorsBeforeDispose = session.customEntries.length;
+		await state.dispose();
+		const remembers = fake.calls.filter(call => call.method === "remember");
+		expect(remembers).toHaveLength(1);
+		expect(rememberSourceId(remembers[0].params)).toBe("session-1:turns:1-2");
+		expect(session.customEntries).toHaveLength(cursorsBeforeDispose);
+	});
+
+	it("resolves a nested alias to the root state so a grandchild sees the root's recall", async () => {
+		const rootSession = createSession();
+		const root = new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config,
+			session: rootSession.session,
+			worker: createWorker().worker,
+		});
+		setMnemosyneOssSessionState(rootSession.session, root);
+		root.lastRecallSnippet = "<memories>\nroot recall\n</memories>";
+		const childSession = createSession("child-1");
+		const child = new MnemosyneOssSessionState({
+			sessionId: "child-1",
+			config,
+			session: childSession.session,
+			aliasOf: root,
+		});
+		setMnemosyneOssSessionState(childSession.session, child);
+		const grandchildSession = createSession("grandchild-1");
+		setMnemosyneOssSessionState(
+			grandchildSession.session,
+			new MnemosyneOssSessionState({
+				sessionId: "grandchild-1",
+				config,
+				session: grandchildSession.session,
+				aliasOf: child,
+			}),
+		);
+		const instructions = await mnemosyneOssBackend.buildDeveloperInstructions(
+			"/tmp",
+			"/tmp",
+			Settings.isolated({}),
+			grandchildSession.session,
+		);
+		expect(instructions).toContain("root recall");
 	});
 });

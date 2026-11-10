@@ -15,6 +15,12 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-back
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { loadMnemosyneOssConfig } from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/config";
+import {
+	MnemosyneOssSessionState,
+	type MnemosyneOssWorkerLike,
+	setMnemosyneOssSessionState,
+} from "@oh-my-pi/pi-coding-agent/mnemosyne-oss/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -741,6 +747,48 @@ describe("AgentSession memory backend lifecycle", () => {
 
 		expect(current.getHindsightSessionState()).toBeUndefined();
 		expect(current.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("retains the Mnemosyne OSS transcript a new session replaces", async () => {
+		settings = Settings.isolated({
+			"compaction.enabled": false,
+			"memory.backend": "mnemosyne-oss",
+			"mnemosyne-oss.dataDir": path.join(tempDir.path(), "store"),
+			// The backend restart after /new must stay inert instead of spawning a real worker.
+			"mnemosyne-oss.executable": "/nonexistent/mnemosyne-oss-python",
+		});
+		const current = createSession(async () => []);
+		const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
+		const worker: MnemosyneOssWorkerLike = {
+			request: async <T>(method: string, params?: Record<string, unknown>) => {
+				requests.push({ method, params });
+				return { id: "memory-1" } as T;
+			},
+			shutdown: async () => {},
+		};
+		setMnemosyneOssSessionState(
+			current,
+			new MnemosyneOssSessionState({
+				sessionId: current.sessionId,
+				config: loadMnemosyneOssConfig(settings, tempDir.path()),
+				session: current,
+				worker,
+			}),
+		);
+		current.sessionManager.appendMessage({
+			role: "user",
+			content: "question from the outgoing session",
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		current.sessionManager.appendMessage(memoryReply(current.model!));
+
+		await current.newSession();
+		await current.settleMemoryBackend();
+
+		const remembered = requests.filter(request => request.method === "remember");
+		expect(remembered).toHaveLength(1);
+		expect(String(remembered[0]?.params?.content)).toContain("question from the outgoing session");
 	});
 
 	// A hook-triggered retry may find teardown already done; that no-op must preserve the failure.
