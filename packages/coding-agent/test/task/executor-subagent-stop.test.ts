@@ -699,6 +699,59 @@ describe("runSubprocess subagent_stop", () => {
 				// Folding the refused sections into the replacement would publish payload no handler allowed.
 				expect(JSON.parse(result.output)).toEqual({ findings: "FINDING-C" });
 			});
+
+			it("does not publish sections the run was cancelled on before handlers could judge them", async () => {
+				const id = "SectionsCancelledBeforeStopPass";
+				const controller = new AbortController();
+				const harness = createHarness({
+					hasStopHandlers: true,
+					onPrompt: call => {
+						call.yieldSection("findings", "UNJUDGED-SECTION");
+						controller.abort();
+					},
+					onStop: async () => ({ decision: "block", reason: "not done" }),
+				});
+				mockCreateAgentSession(harness.session);
+				registerRunning(id, harness.session);
+
+				const result = await runSubprocess({ ...baseOptions(id), signal: controller.signal });
+
+				expect(harness.events).toHaveLength(0);
+				expect(result.aborted).toBe(true);
+				expect(result.exitCode).not.toBe(0);
+				expect(result.output).not.toContain("UNJUDGED-SECTION");
+				expect(result.extractedToolData?.yield).toBeUndefined();
+				expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).not.toContain("UNJUDGED-SECTION");
+			});
+
+			it("keeps a resumed worker's accepted artifact when its turn is cancelled on unjudged sections", async () => {
+				const id = "ResumedSectionsCancelled";
+				const controller = new AbortController();
+				const artifact = path.join(tempDir.path(), `${id}.md`);
+				await Bun.write(artifact, "ACCEPTED-ARTIFACT");
+				const harness = createHarness({
+					hasStopHandlers: true,
+					onPrompt: call => {
+						call.yieldSection("findings", "UNJUDGED-SECTION");
+						controller.abort();
+					},
+					onStop: async () => undefined,
+				});
+				registerRunning(id, harness.session);
+
+				const result = await runSubagentFollowUpTurn({
+					id,
+					agent: baseAgent,
+					message: "continue",
+					signal: controller.signal,
+					artifactsDir: tempDir.path(),
+				});
+
+				expect(harness.events).toHaveLength(0);
+				expect(result.aborted).toBe(true);
+				expect(result.exitCode).not.toBe(0);
+				expect(await Bun.file(artifact).text()).toBe("ACCEPTED-ARTIFACT");
+			});
 		});
 	});
 
