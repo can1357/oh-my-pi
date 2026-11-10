@@ -1990,7 +1990,7 @@ describe("persisted subagent revival", () => {
 				// JSON envelope: it must end in the complete 😀 (not its high
 				// surrogate half) and drop everything after the cap.
 				expect(emitted).toBe(`{\n  "report": "${expectedPrefix}`);
-				expect([...emitted ?? ""]).toHaveLength(A2A_ARTIFACT_MAX_CHARS);
+				expect([...(emitted ?? "")]).toHaveLength(A2A_ARTIFACT_MAX_CHARS);
 				expect(emitted).not.toContain("z");
 				// No new unpaired surrogate at the cut (the whole emoji survived).
 				expect(emitted?.endsWith("😀")).toBe(true);
