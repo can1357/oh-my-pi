@@ -23,7 +23,7 @@ All browser host operations request exec-tier approval, including inspection hel
 
 The first successful browser call of a conversation carries a short core of the browser guide (helpers with their signatures, selector forms, the re-observe rule) after its output, once per conversation (`firstCallDocumentation` on the prelude); the Eval description keeps its one-line browser entry, and the full guide stays readable at `xd://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
 
-Each advisor receives the guide in its own conversation, independently of the primary agent. Platform safety guidance, including the Linux X11 focus warning, stays in the pre-call system prompt rather than waiting for the first result.
+Each advisor receives the guide in its own conversation, independently of the primary agent. Platform safety guidance, including the Linux X11 focus warning, stays in the pre-call system prompt rather than waiting for the first result, and follows browser endpoint changes in both primary and advisor requests.
 
 ## JavaScript API
 

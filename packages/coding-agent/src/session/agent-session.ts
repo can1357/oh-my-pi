@@ -2884,6 +2884,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
+			evalPreludeGuidance: () =>
+				this.getEvalPreludes().flatMap(definition => (definition.guidance ? [definition.guidance] : [])),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
