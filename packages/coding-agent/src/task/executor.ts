@@ -9,7 +9,7 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { AgentBusyError, recordHandoff, resolveTelemetry, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Effort, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -498,7 +498,7 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
-	/** Caller-requested exact level; replaces {@link effort}, loses to a definition-pinned level (explicit `:level` or concrete {@link thinkingLevel}). */
+	/** Caller-requested exact level; replaces {@link effort} and, like it, wins over an explicit `:level` and {@link thinkingLevel}. */
 	actualEffort?: Effort;
 	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
 	solutionSpace?: string;
@@ -4891,15 +4891,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
-			// Definition levels — an explicit `:level` on the resolved model pattern, or
-			// the agent's concrete `thinking-level` — win over the caller's exact
-			// `actualEffort`; a present `actualEffort` replaces the coarse `effort` entirely.
-			const definitionLevel =
-				explicitThinkingLevel ||
-				(thinkingLevel !== undefined && thinkingLevel !== AUTO_THINKING && thinkingLevel !== ThinkingLevel.Inherit);
-			const actualEffort = options.actualEffort;
-			const actualEffortApplies = actualEffort !== undefined && !definitionLevel;
-			// Caller-chosen levels respect the operator's per-model ceiling: `actualEffort`
+			// Caller-chosen levels sit above every selector below: an exact `actualEffort`
+			// first (a present one replaces the coarse `effort` entirely), then `effort`.
+			// Each respects the operator's per-model ceiling: `actualEffort`
 			// task.maxActualEffort, `effort` task.maxEffort. Undefined (no effort, or no
 			// controllable effort surface) falls through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
@@ -4907,11 +4901,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// effort back up past it. A per-call `model` is caller-chosen too, so its
 			// `:level` is held to the spawn's ceiling, and a model whose lowest effort is
 			// above it fails the spawn exactly as an effort hint does.
+			const actualEffort = options.actualEffort;
 			const ceilingSetting =
 				actualEffort !== undefined
-					? actualEffortApplies || options.perCallModelGrants
-						? cfgTaskMaxActualEffort
-						: undefined
+					? cfgTaskMaxActualEffort
 					: options.effort !== undefined || options.perCallModelGrants
 						? cfgTaskMaxEffort
 						: undefined;
@@ -4923,11 +4916,12 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const modelEffortCeiling = spawnEffortCeiling?.(model);
 			if (model && modelEffortCeiling)
 				assertModelSupportsEffortCeiling(model, modelEffortCeiling, ceilingSetting?.id);
-			const effortLevel = actualEffortApplies
-				? clampThinkingLevelToCeiling(model, clampThinkingLevelForModel(model, actualEffort), modelEffortCeiling)
-				: actualEffort === undefined && options.effort !== undefined
-					? resolveTaskEffortLevel(model, options.effort, modelEffortCeiling)
-					: undefined;
+			const effortLevel =
+				actualEffort !== undefined
+					? clampThinkingLevelToCeiling(model, clampThinkingLevelForModel(model, actualEffort), modelEffortCeiling)
+					: options.effort !== undefined
+						? resolveTaskEffortLevel(model, options.effort, modelEffortCeiling)
+						: undefined;
 			const explicitLevel =
 				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
 					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, modelEffortCeiling)
@@ -4941,10 +4935,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: definition level (explicit `:level` suffix, concrete agent
-			// `thinking-level`) > caller `actualEffort`; otherwise caller `effort` >
-			// explicit `:level` suffix > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
+			// Precedence: caller `actualEffort` > caller `effort` > explicit `:level`
+			// suffix on the resolved model pattern > agent-definition default (e.g.
+			// task's `auto`) > pattern-derived level.
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();

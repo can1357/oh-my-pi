@@ -87,7 +87,7 @@ Run one agent synchronously.
 - `isolated`: worktree; changes retained, not applied.
 {{/if}}
 {{/if}}
-{{#if actualEffortEnabled}}- `actualEffort`: exact level `minimal`…`max`; overrides `effort` and `auto`, but not a level pinned by the selected model or agent.{{/if}}
+{{#if actualEffortEnabled}}- `actualEffort`: exact level `minimal`…`max`; overrides `effort` and the agent's selector, including an explicit `:level`; a level-tagged mention agent ignores it.{{/if}}
 
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
 Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.

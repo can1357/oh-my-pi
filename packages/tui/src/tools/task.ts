@@ -2272,7 +2272,7 @@ export interface TaskItem {
 	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
-	/** Exact per-spawn thinking level (`task.enableActualEffort`); overrides `effort`, loses to a definition-pinned level. */
+	/** Exact per-spawn thinking level (`task.enableActualEffort`); replaces `effort` and takes its precedence (ignored for a level-tagged mention agent). */
 	actualEffort?: Effort;
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;

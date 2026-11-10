@@ -527,7 +527,10 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 				...options,
 			});
 			expect(result.exitCode).toBe(0);
-			return spy.mock.calls[0]?.[0];
+			const forwarded = spy.mock.calls[0]?.[0];
+			// The progress label shows the level the child actually starts on.
+			if (options.actualEffort !== undefined) expect(result.resolvedThinkingLevel).toBe(forwarded?.thinkingLevel);
+			return forwarded;
 		}
 
 		it("wins over a coarse effort hint", async () => {
@@ -535,9 +538,9 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
 		});
 
-		it("still ignores effort when a definition level beats actualEffort", async () => {
+		it("replaces effort entirely, even over a concrete agent thinking-level", async () => {
 			const forwarded = await spawnThinkingLevel(
-				{ effort: "hi", actualEffort: Effort.High, thinkingLevel: ThinkingLevel.Low },
+				{ effort: "hi", actualEffort: Effort.Low, thinkingLevel: ThinkingLevel.Medium },
 				Settings.isolated(),
 			);
 			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
@@ -573,21 +576,21 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 			expect(forwarded?.thinkingLevelCeiling?.(sol)).toBe(Effort.Medium);
 		});
 
-		it("loses to the agent definition's concrete thinking-level", async () => {
+		it("wins over the agent definition's concrete thinking-level", async () => {
 			const forwarded = await spawnThinkingLevel(
 				{ actualEffort: Effort.High, thinkingLevel: ThinkingLevel.Low },
 				Settings.isolated(),
 			);
-			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
 		});
 
-		it("loses to an explicit :level on the resolved model pattern", async () => {
+		it("wins over an explicit :level on the resolved model pattern", async () => {
 			const forwarded = await spawnThinkingLevel(
 				{ actualEffort: Effort.Low },
 				Settings.isolated(),
 				`${sol.provider}/${sol.id}:high`,
 			);
-			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
 		});
 
 		it("applies over an `auto` agent definition", async () => {

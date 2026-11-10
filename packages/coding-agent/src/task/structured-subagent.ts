@@ -245,7 +245,7 @@ export interface EffectiveSubagentPolicy {
 	enableIrc: boolean;
 	/** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
 	effort?: TaskEffort;
-	/** Caller `actualEffort`; the executor lets a definition-pinned level (including a `^model:level` tag) win over it. */
+	/** Caller `actualEffort` to apply; dropped, like `effort`, when the agent's level comes from the user's `^model:level` tag. */
 	actualEffort?: Effort;
 }
 
@@ -685,7 +685,7 @@ export async function resolveEffectiveSubagentPolicy(
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
 		effort: userTaggedEffort ? undefined : request.effort,
-		actualEffort: request.actualEffort,
+		actualEffort: userTaggedEffort ? undefined : request.actualEffort,
 	};
 }
 
