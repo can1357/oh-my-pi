@@ -156,6 +156,38 @@ describe("AgentSession bash session ownership", () => {
 		);
 	});
 
+	it("finishes killing an aborted foreground command before session disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		const pidFile = path.join(tempDir.path(), "child.pid");
+		const release = path.join(tempDir.path(), "release");
+		const marker = path.join(tempDir.path(), "survived");
+		const command = `trap '' TERM HUP INT; perl -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; while (!-e $ARGV[1]) { select undef, undef, undef, .01 }; open my $o, ">", $ARGV[2] or die $!; print $o "alive"' '${pidFile}' '${release}' '${marker}'`;
+		const running = session.executeBash(command);
+		let pid = 0;
+		try {
+			for (let i = 0; i < 500 && !pid; i++) {
+				if (fs.existsSync(pidFile)) pid = Number(fs.readFileSync(pidFile, "utf8"));
+				if (!pid) await Bun.sleep(10);
+			}
+			expect(pid).toBeGreaterThan(0);
+			session.abortBash();
+			const result = await running;
+			expect(result.cancelled).toBe(true);
+			await session.dispose();
+			fs.writeFileSync(release, "");
+			// Real signal delivery and a surviving subprocess's file write cannot use fake timers.
+			await Bun.sleep(50);
+			expect(fs.existsSync(marker)).toBe(false);
+		} finally {
+			if (pid) {
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+		}
+	});
+
 	it("forwards a hook-injected variable even when process.env already mirrors its value", async () => {
 		// Regression: an extension may both mirror a variable into process.env (so
 		// MCP servers and workers inherit it) and inject it via its spawnHook. The
