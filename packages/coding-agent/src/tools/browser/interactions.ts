@@ -510,8 +510,18 @@ function checkHoverHit(
 	const x = rect.left + offset.x;
 	const y = rect.top + offset.y;
 	let hit = page.document.elementFromPoint(x, y);
-	for (let depth = 0; hit?.shadowRoot && depth < 16; depth++) {
-		const nested = hit.shadowRoot.elementFromPoint(x, y);
+	for (let depth = 0; hit && depth < 16; depth++) {
+		let root = hit.shadowRoot;
+		// A closed root is not exposed on its host, but the target still exposes its own root.
+		// Keep using the browser's hit test inside it rather than treating every host as a hit.
+		for (let targetRoot = element.getRootNode(); !root && targetRoot.host; targetRoot = targetRoot.host.getRootNode()) {
+			if (targetRoot.host === hit) {
+				root = targetRoot as PageRoot & PageShadowRoot;
+				break;
+			}
+		}
+		if (!root) break;
+		const nested = root.elementFromPoint(x, y);
 		if (!nested || nested === hit) break;
 		hit = nested;
 	}
@@ -535,17 +545,32 @@ const hoverHitInPage = new Function(
 /**
  * Move the pointer onto an element at the point a click would use, once it can take one there: a hidden match
  * waits and then fails with the reason, like a click. An `opacity:0`, `visibility:hidden` or `pointer-events:none`
- * element is not refused, since hovering may be what shows it; the hit test runs once the pointer is there, so a
- * covered target, or a control only its label sits over, fails with what the pointer is on.
+ * element is not refused, since hovering may be what shows it; an initially hidden target waits for its reveal
+ * after the pointer arrives. Other covered targets, including controls under labels, fail at once.
  */
 export async function hoverElement(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, { hover: true });
+	const revealable = await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const visibility = (globalThis as unknown as PageGlobals).getComputedStyle(el as unknown as PageElement).visibility;
+			return visibility === "hidden" || visibility === "collapse";
+		}),
+	);
 	const box = await untilAborted(signal, () => handle.boundingBox());
 	await untilAborted(signal, () => handle.frame.page().mouse.move(point.x, point.y));
 	if (!box) return;
 	const offset = { x: point.x - box.x, y: point.y - box.y };
-	const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, offset))) as string | null;
-	if (coveredBy !== null) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
+	for (;;) {
+		const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, offset))) as string | null;
+		if (coveredBy === null) return;
+		if (!revealable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
+		try {
+			await untilAborted(signal, () => Bun.sleep(16));
+		} catch (error) {
+			if (signal?.aborted) throw new ClickRefusedError(`covered by ${coveredBy}`, { cause: signal.reason });
+			throw error;
+		}
+	}
 }
 
 /**

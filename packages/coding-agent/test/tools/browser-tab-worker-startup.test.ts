@@ -5,6 +5,7 @@ declare const devicePixelRatio: number;
 declare const window: { open(url: string, target: string, features: string): unknown };
 
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { hoverElement } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -432,6 +433,38 @@ describe("OMP-owned browser input", () => {
 						10_000,
 					),
 				).toBe("hovered");
+				// A reveal may be delayed after pointer entry, not completed in the mouse event's task.
+				// Real page time is intentional: the reveal must occur after mouse.move has returned.
+				expect(
+					await message(
+						`await tab.evaluate(() => {
+							const row = document.createElement("div");
+							row.style.cssText = "position:absolute;left:200px;top:300px;width:120px;height:30px";
+							row.innerHTML = '<button id="delayed" style="visibility:hidden">Delayed</button>';
+							row.onmouseenter = () => setTimeout(() => { row.firstElementChild.style.visibility = "visible"; }, 150);
+							document.body.append(row);
+						});
+						await tab.hover("#delayed");
+						if (!(await tab.isVisible("#delayed"))) throw new Error("not revealed");`,
+						10_000,
+					),
+				).toBe("hovered");
+				// Closed roots still expose their browser hit test through a handle to the target.
+				const page = (await browser.browser.pages()).find(page => page.url().startsWith("data:text/html,"));
+				if (!page) throw new Error("Missing hover test page");
+				const inner = await page.evaluateHandle(() => {
+					const host = document.createElement("div");
+					host.style.cssText = "position:absolute;left:200px;top:350px";
+					document.body.append(host);
+					const root = host.attachShadow({ mode: "closed" });
+					root.innerHTML = "<button>Closed target</button>";
+					return root.firstElementChild!;
+				});
+				try {
+					await hoverElement(inner, "closed target", AbortSignal.timeout(2_000));
+				} finally {
+					await inner.dispose();
+				}
 			} finally {
 				await releaseTab(name, { kill: true });
 			}
