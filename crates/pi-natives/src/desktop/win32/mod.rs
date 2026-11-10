@@ -9,6 +9,10 @@ mod geometry;
 mod input;
 #[cfg(target_os = "windows")]
 mod menus;
+#[cfg(any(target_os = "windows", test))]
+mod session;
+#[cfg(target_os = "windows")]
+pub(super) use session::screen_state;
 #[cfg(target_os = "windows")]
 mod window;
 
@@ -62,6 +66,7 @@ impl Backend for Win32Backend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
 		let display_count =
 			capture::displays().map_or(0, |displays| displays.len().min(u32::MAX as usize) as u32);
+		let screen = self.screen_state(None);
 		DesktopCapabilities {
 			backend: "win32".to_string(),
 			display_server: Some("win32".to_string()),
@@ -84,9 +89,13 @@ impl Backend for Win32Backend {
 			input_permission: "granted".to_string(),
 			ax_permission: "granted".to_string(),
 			display_count,
-			screen_locked: false,
-			display_asleep: false,
+			screen_locked: screen.locked,
+			display_asleep: screen.display_asleep,
 		}
+	}
+
+	fn screen_state(&mut self, _: Option<&DisplaySelector>) -> super::types::ScreenState {
+		session::screen_state(&self.display)
 	}
 
 	fn displays(&mut self) -> CoreResult<Vec<DesktopDisplay>> {

@@ -87,7 +87,7 @@ export const ESCAPE_REFUSED_MESSAGE = prompt.render(escapeRefusedMessage);
 export const SCREEN_LOCKED_CAPTURE_NOTE = prompt.render(screenLockedCaptureNote);
 
 /**
- * Tells the model a run ended with the macOS screen locked or the session's
+ * Tells the model a run ended with the screen locked or the session's
  * display asleep, so lock-screen pixels and failed captures are not taken
  * for the app's state. Input is never refused because of it.
  */
@@ -96,6 +96,7 @@ export function screenStateNotice(state: DesktopScreenState | undefined): string
 	return prompt.render(screenStateTemplate, {
 		screenLocked: state.screenLocked,
 		displayAsleep: state.displayAsleep,
+		windows: process.platform === "win32",
 	});
 }
 
