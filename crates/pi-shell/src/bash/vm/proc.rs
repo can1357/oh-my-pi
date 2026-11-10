@@ -46,6 +46,12 @@ pub struct Vproc {
 	pub stopped:       bool,
 	/// Exit once its frames are done (subshell vprocs).
 	pub transient:     bool,
+	/// Set when this vproc's EXIT trap has been started. A root vproc keeps
+	/// the same flag per run ([`Run::exit_trap_started`]); a forked subshell
+	/// has no `Run`, and its `own_traps`, `trap_frames` and the frame scans
+	/// all go back to their pre-trap values once the trap's frame is popped,
+	/// so without this the trap could start a second time.
+	pub exit_trap_run: bool,
 	/// Background jobs not yet waited for or reported, current/previous
 	/// job and the `SIGCHLD` trap runs owed.
 	pub jobs:          JobTable,
@@ -641,11 +647,11 @@ impl LastBg {
 /// A background job whose pid is still to be settled, kept by the kernel
 /// ([`super::Kernel::bangs`]) for the vproc that may settle it. The first
 /// command that vproc dispatches decides: the external spawned as the job's
-/// lone command (or `exec`'d) makes the job known by that program's OS pid
-/// ([`Job::os_pid`], `$!`); anything else (a builtin, a native task, a
-/// subshell or pipeline, a non-`exec` external in a compound body, the
-/// vproc's end) leaves its virtual pid. Readers of the pid (`$!`, `jobs
-/// -l`/`-p`/`-x`) wait for the decision.
+/// lone command (or `exec`'d, or a pipeline's last stage's) makes the job
+/// known by that program's OS pid ([`Job::os_pid`], `$!`); anything else
+/// (a builtin, a native task, a subshell, a non-`exec` external in a
+/// compound body, the vproc's end) leaves its virtual pid. Readers of the
+/// pid (`$!`, `jobs -l`/`-p`/`-x`) wait for the decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bang {
 	/// The vproc that decides: the job's own, or the subshell a callout of
@@ -724,6 +730,9 @@ pub enum BangStage {
 	/// `nohup`); unless it does, the alias settles virtual when the host
 	/// steps the shell again.
 	Callout,
+	/// The job's body is a pipeline: its last stage, once started, decides
+	/// as a job body of its own would (`$!` names the last process).
+	Pipeline,
 }
 
 /// A running coprocess: its vproc, the variable naming it and the shell's
@@ -751,7 +760,7 @@ impl Vproc {
 		})
 	}
 
-	pub fn has_work(&self) -> bool {
+	pub const fn has_work(&self) -> bool {
 		!self.runs.is_empty() || !self.frames.is_empty()
 	}
 
@@ -1292,16 +1301,20 @@ pub struct ScratchZsh {
 	/// The `fcntl` lock a history file operation holds (zsh `flock_fd`,
 	/// `histfcntllock`), released with the op (not imaged).
 	pub hist_lock: Option<Box<dyn crate::bash::fs::File>>,
+	/// The results so far of the `StatAll` probe in flight (zsh's `$fpath`
+	/// search).
+	pub stats:     Vec<Option<crate::bash::fs::Stat>>,
 }
 
 impl ScratchZsh {
 	/// Clear for the next op, keeping the vectors' allocations.
 	fn clear(&mut self) {
-		let Self { zglob, multio, more, hist_lock } = self;
+		let Self { zglob, multio, more, hist_lock, stats } = self;
 		*zglob = None;
 		multio.clear();
 		more.clear();
 		*hist_lock = None;
+		stats.clear();
 	}
 }
 
@@ -1361,6 +1374,19 @@ pub struct RedirProgress {
 pub enum Probe {
 	/// `stat(path)` (`follow` = not `lstat`).
 	Stat { path: BString, follow: bool },
+	/// `stat` of each path in turn, following links, up to the first that
+	/// names a file at one of the indices `ends` (zsh's `$fpath` search: a
+	/// definition file ends it, a word code file it passes does not):
+	/// [`ProbeResult::Stats`], as many as were asked. One probe for a
+	/// stretch of the search that would otherwise ask (and restart its
+	/// builtin) once per path; a hit never waits on the directories after
+	/// it.
+	StatAll { paths: Vec<BString>, ends: Vec<u32> },
+	/// Whether a zsh word code digest holds a loadable function
+	/// ([`DumpQuery`]): [`ProbeResult::Ok`]. Read once per digest and
+	/// remembered by the shell ([`super::Kernel::dump_funcs`]): an `$fpath`
+	/// search asks of the same digests for every function.
+	DumpHas(Box<DumpQuery>),
 	/// `access(path, mode bits)`.
 	Access { path: BString, mode: u8 },
 	/// PATH search for a command name over `$PATH` = `path`.
@@ -1375,7 +1401,9 @@ pub enum Probe {
 	/// of one command (continuation lines, `select` re-prompts); `timeout_ns`
 	/// gives up after that long without complete input (`read -t`, `TMOUT`).
 	/// Nothing past the end is consumed: a regular file's read-ahead is given
-	/// back, other fds are read a byte at a time.
+	/// back, other fds are read a byte at a time. `fd`
+	/// [`Probe::TERMINAL_FD`] reads the shell's terminal
+	/// ([`super::jobctl::open_key_terminal`]).
 	Input {
 		fd:         i32,
 		delim:      Option<u8>,
@@ -1410,10 +1438,31 @@ pub enum Probe {
 	Hist { seq: u32, op: Box<super::builtins::history::io::HistOp> },
 }
 
+/// The question of a [`Probe::DumpHas`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DumpQuery {
+	/// The digest.
+	pub path:     BString,
+	/// The function (metafied).
+	pub name:     BString,
+	/// The digest's modification time, as `stat` saw it.
+	pub mtime_ns: i64,
+	/// The digest's size, as `stat` saw it.
+	pub size:     u64,
+}
+
+impl Probe {
+	/// The `fd` of a [`Probe::Input`] or [`Probe::Ready`] that reads the
+	/// shell's terminal (`read -k`), not a descriptor of the fd table.
+	pub const TERMINAL_FD: i32 = i32::MIN;
+}
+
 /// Answer of a [`Probe`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProbeResult {
 	Stat(Option<crate::bash::fs::Stat>),
+	/// The answers of a [`Probe::StatAll`], in its order.
+	Stats(Vec<Option<crate::bash::fs::Stat>>),
 	Ok(bool),
 	Path(Option<BString>),
 	/// File contents, or the `strerror` text of the failure.

@@ -373,6 +373,15 @@ function perCallModelDisabledReason(settings: Settings, invocationKind: "task" |
 }
 
 /**
+ * A blank `model` is absence, not a selector: callers that emit JSON pad optional
+ * fields with `""` or `[]`, and whitespace alone names no model.
+ */
+export function normalizeModelSelector<T>(model: T): T | undefined {
+	if (typeof model === "string") return model.trim() === "" ? undefined : model;
+	return Array.isArray(model) && model.length === 0 ? undefined : model;
+}
+
+/**
  * Why a per-call `model` cannot be used before dispatch: the `task.perCallModel` gate first, so a
  * caller is never told to fix a selector it may not send, then anything but one exact
  * `provider/model-id[:level]` selector. `undefined` when there is no problem.
@@ -382,7 +391,7 @@ export function invalidModelSelectorReason(
 	label: string,
 	gate: { settings: Settings; invocationKind: "task" | "eval" },
 ): string | undefined {
-	if (model === undefined) return undefined;
+	if (normalizeModelSelector(model) === undefined) return undefined;
 	const disabled = perCallModelDisabledReason(gate.settings, gate.invocationKind);
 	if (disabled) return disabled;
 	if (

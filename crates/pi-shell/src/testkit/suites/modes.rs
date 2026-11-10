@@ -191,8 +191,9 @@ fn emulate_local_ends_with_the_function() {
 }
 
 /// bash code writing a variable with zsh-only attributes stores the value
-/// as bash writes it and reports the lossy crossing once per crossing
-/// (`Diag::ModeLossy`), however often it writes.
+/// as bash writes it (bash reads it back so) and reports the lossy
+/// crossing once per crossing (`Diag::ModeLossy`), however often it
+/// writes; zsh shows the stored value in the variable's float style.
 #[test]
 fn bash_writes_to_zsh_attributes_are_lossy_once() {
 	let init = ShellInit { mode: ModeId::Zsh, argv0: "zsh".into(), ..skeleton_init(&[]) };
@@ -202,8 +203,8 @@ fn bash_writes_to_zsh_attributes_are_lossy_once() {
 	assert_eq!(rig.run(Script::command(src.as_bytes().to_vec()), Fault::None), 0);
 	assert_eq!(
 		String::from_utf8_lossy(&rig.host.stdout.bytes()),
-		"3\n3\n",
-		"the value as bash wrote it"
+		"3\n3.000\n",
+		"bash reads the value as it wrote it, zsh as a float"
 	);
 	let lossy = rig
 		.host

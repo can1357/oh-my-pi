@@ -14,6 +14,7 @@ import {
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { isReasoningSourceSignature, MISTRAL_CONTENT_PARTS_SIGNATURE } from "../utils/reasoning-source";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -298,21 +299,12 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
 	return Array.isArray(mirrored) && mirrored.length > 0 ? mirrored : undefined;
 }
 
-/** `thinkingSignature` marking thinking decoded from Mistral typed content parts. */
-const MISTRAL_CONTENT_PARTS_SIGNATURE = "mistral-content-parts";
-
 /**
  * Whether a thinking block's signature is a raw LiteLLM (Anthropic) one, not a
  * reasoning field name or the Mistral content-parts marker.
  */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
-	return (
-		!!signature &&
-		signature !== "reasoning_content" &&
-		signature !== "reasoning" &&
-		signature !== "reasoning_text" &&
-		signature !== MISTRAL_CONTENT_PARTS_SIGNATURE
-	);
+	return !!signature && !isReasoningSourceSignature(signature);
 }
 
 /**

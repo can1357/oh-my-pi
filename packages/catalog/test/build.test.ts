@@ -571,6 +571,19 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("Morph worker affinity", () => {
+	// Morph is reached only through custom providers, so the base URL alone identifies it.
+	it.each([
+		["openai-completions", completionsSpec],
+		["openai-responses", responsesSpec],
+	] as const)("sends x-session-id only to Morph over %s", (_api, spec) => {
+		const morph = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://api.morphllm.com/v1" }));
+		const other = resolveModelPolicy(spec({ provider: "my-morph", baseUrl: "https://llm.example.com/v1" }));
+		expect(morph.compat.promptCacheSessionHeader).toBe("x-session-id");
+		expect(other.compat.promptCacheSessionHeader).toBeUndefined();
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(resolveModelPolicy(completionsSpec({ provider: "firepass" })).compat.wireModelIdMode).toBe("firepass");

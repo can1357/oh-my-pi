@@ -521,6 +521,7 @@ provider "factory-droid" {
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
 		region-upstreams-eu "vertex_anthropic"
 		credit-rates { input 4; output 5; cache-read 0.025 }
+		list-price-from "anthropic" "claude-fable-5-1"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
@@ -954,7 +955,21 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-us
-		credit-rates { input 1.6; output 5; cache-read 0.05 }
+		credit-rates {
+			input 1.6
+			output 5
+			cache-read 0.05
+			effective-rates {
+				promotion {
+					effective-from "2026-10-13T16:00:00Z"
+					input 0.8
+				}
+				standard {
+					effective-from "2026-12-01T08:00:00Z"
+					input 1.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
@@ -1133,6 +1148,7 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.84; output 3.2 }
+		list-price-from "fireworks"
 		policy-aliases "glm-5p2-fast"
 		thinking-efforts "high" "max"
 		thinking-requires-effort #false
@@ -1180,6 +1196,7 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		list-price-from "meta" "muse-spark-1.2"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #true
 		thinking-default-level "high"

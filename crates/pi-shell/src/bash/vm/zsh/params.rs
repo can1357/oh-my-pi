@@ -12,11 +12,13 @@
 //!   array reports [`LossyKind::SparseGaps`] once per crossing.
 //! - An association is a stored [`VarValue::Assoc`] in zsh's iteration order
 //!   ([`super::assoc_order`]).
-//! - Integers and floats are stored as zsh prints them (`16#FF`,
-//!   `1.500000000e+00`) with [`Attrs::INTEGER`] / [`Attrs::ZSH_FLOAT_E`] /
-//!   [`Attrs::ZSH_FLOAT_F`] and the base or precision in the base field;
-//!   padding (`-L -R -Z`) and case (`-l -u`) are applied when a substitution
-//!   reads the value, as zsh's `getstrvalue` does.
+//! - Integers are stored as zsh prints them (`16#FF`), floats as their shortest
+//!   exact text (zsh keeps the `double`) and shown in their style
+//!   (`1.500000000e+00`) when read as a string ([`float_display`]), with
+//!   [`Attrs::INTEGER`] / [`Attrs::ZSH_FLOAT_E`] / [`Attrs::ZSH_FLOAT_F`] and
+//!   the base or precision in the base field; padding (`-L -R -Z`) and case
+//!   (`-l -u`) are applied when a substitution reads the value, as zsh's
+//!   `getstrvalue` does.
 //! - Specials ([`super::specials`]) are views over engine state; a bash
 //!   variable named like one is shadowed ([`LossyKind::Shadowed`]).
 //!
@@ -39,6 +41,7 @@ use super::{
 };
 use crate::bash::{
 	diag::Diag,
+	ids::Platform,
 	pattern::zsh::Pattern,
 	store::{Attrs, Key, KeyBuf, LossyKind, MiscKey, Record, Table, VarValue},
 	syntax::zsh::tok::{
@@ -284,8 +287,15 @@ impl Param {
 		}
 	}
 
-	/// The parameter a computed special shows.
-	pub fn special(name: &[u8], flags: PmFlags, value: PValue, sp: Special) -> Self {
+	/// The parameter a computed special shows, on the shell's `platform`
+	/// (a tie's separator).
+	pub fn special(
+		name: &[u8],
+		flags: PmFlags,
+		value: PValue,
+		sp: Special,
+		platform: Platform,
+	) -> Self {
 		Self {
 			name: BString::from(name),
 			flags,
@@ -294,7 +304,9 @@ impl Param {
 			value,
 			special: Some(sp),
 			scope: None,
-			tied: sp.tie_partner().map(|(p, sep)| (BString::from(p), sep)),
+			tied: sp
+				.tie_partner(platform)
+				.map(|(p, sep)| (BString::from(p), sep)),
 			lazy: false,
 			attrs: flags.to_attrs(0, 0),
 		}
@@ -302,8 +314,8 @@ impl Param {
 
 	/// A keyed special whose value is computed only when needed
 	/// ([`Param::lazy`]).
-	fn lazy_special(name: &[u8], sp: Special) -> Self {
-		let mut p = Self::special(name, sp.flags(), PValue::Hash(Vec::new()), sp);
+	fn lazy_special(name: &[u8], sp: Special, platform: Platform) -> Self {
+		let mut p = Self::special(name, sp.flags(), PValue::Hash(Vec::new()), sp, platform);
 		p.lazy = true;
 		p
 	}
@@ -319,6 +331,10 @@ impl Param {
 		if let Some(sp) = self.special {
 			let value = specials::param(ex, sp, &self.name)?.value;
 			self.value = value;
+		} else if let Some(full) = getparam(ex, &self.name)? {
+			// A stored parameter read without its value (an element
+			// assigned in place).
+			self.value = full.value;
 		}
 		self.lazy = false;
 		Ok(())
@@ -328,6 +344,9 @@ impl Param {
 	/// an array's elements joined with spaces, an association's values.
 	pub fn text(&self) -> BString {
 		match &self.value {
+			PValue::Scalar(s) if self.flags.intersects(PmFlags::EFLOAT.with(PmFlags::FFLOAT)) => {
+				float_display(self, s)
+			},
 			PValue::Scalar(s) => s.clone(),
 			PValue::Array(a) => BString::from(a.join(&b" "[..])),
 			PValue::Hash(h) => {
@@ -515,6 +534,10 @@ pub const SCANPM_DQUOTED: u32 = 1 << 8;
 pub const SCANPM_ARRONLY: u32 = 1 << 9;
 /// `SCANPM_CHECKING`.
 pub const SCANPM_CHECKING: u32 = 1 << 10;
+/// Not zsh's: a reader that only needs the text of one array element
+/// (`paramsubst`) lets [`fetchvalue`] read just that element of a stored
+/// array instead of the whole array ([`window_elem`]).
+pub const SCANPM_WINDOW: u32 = 1 << 11;
 /// `SCANPM_ISVAR_AT`: every bit from 15 up.
 pub const SCANPM_ISVAR_AT: u32 = !0 << 15;
 
@@ -738,7 +761,7 @@ fn param_of(
 /// Report that zsh code used `name`, a special that hides a set bash
 /// variable of the same name.
 fn shadowed(ex: &mut Expander<'_, '_>, name: &[u8]) {
-	let what = format!("bash variable `{}' shadowed by the zsh special", name.as_bstr());
+	let what = format!("value of bash variable `{}' (shadowed by the zsh special)", name.as_bstr());
 	mode::report_lossy(ex.k, ex.cx, ex.vp, ex.line, LossyKind::Shadowed, what);
 }
 
@@ -762,6 +785,23 @@ pub fn getparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 /// [`Stop::Store`] when the store fails.
 pub fn getparam_lazy(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
 	getparam_in(ex, name, Defer::Keyed)
+}
+
+/// The value of key `key` of the ordinary association `name` as stored,
+/// without reading the rest of it; `None` when the key (or the
+/// association) is absent.
+///
+/// # Errors
+/// [`Stop::Store`] when the store fails.
+pub(super) fn stored_elem(
+	ex: &mut Expander<'_, '_>,
+	name: &[u8],
+	key: &[u8],
+) -> X<Option<BString>> {
+	Ok(match read_var(ex, name)?.0.map(|v| &v.value) {
+		Some(VarValue::Assoc(items)) => items.get(key).cloned(),
+		_ => None,
+	})
 }
 
 /// [`getparam`] for its type and flags only (zsh/parameter's
@@ -818,15 +858,22 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 	// uses its backing binding's attributes, never a copy of its value.
 	let hide = !pstate.unhidden && sp.is_some_and(|s| s.flags().contains(PmFlags::HIDE));
 	let hidden = attrs.is_some_and(|a| a.contains(Attrs::ZSH_HIDE) || (hide && scope.is_some()));
+	// A read of one key leaves an ordinary association in the store
+	// ([`stored_elem`] looks the key up there).
+	let mut keyed_stored = false;
 	let stored = if sp.is_none_or(Special::is_plain) || hidden {
 		var.map(|v| {
-			param_of(
+			keyed_stored =
+				defer == Defer::Keyed && sp.is_none() && matches!(v.value, VarValue::Assoc(_));
+			let mut p = param_of(
 				name,
 				v,
 				scope,
 				sp.filter(|s| s.is_plain() && !v.attrs.contains(Attrs::ZSH_HIDE)),
-				matches!(defer, Defer::All | Defer::Stored),
-			)
+				matches!(defer, Defer::All | Defer::Stored) || keyed_stored,
+			);
+			p.lazy = keyed_stored;
+			p
 		})
 	} else {
 		None
@@ -856,11 +903,11 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 					PmFlags::HASHED => PValue::Hash(Vec::new()),
 					_ => PValue::Scalar(BString::default()),
 				};
-				Param::special(name, flags, value, sp)
+				Param::special(name, flags, value, sp, ex.k.engine.config().platform)
 			} else if (defer == Defer::All && sp != Special::Seconds)
 				|| (defer == Defer::Keyed && sp.keyed())
 			{
-				Param::lazy_special(name, sp)
+				Param::lazy_special(name, sp, ex.k.engine.config().platform)
 			} else {
 				specials::param(ex, sp, name)?
 			};
@@ -870,6 +917,14 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 			if local {
 				p.flags = p.flags.with(PmFlags::LOCAL);
 				p.scope = scope;
+			}
+			// `typeset -U path`: the array side of a special tie is unique,
+			// marked on the record of its scalar, which holds its value.
+			if let Special::TiedArray(t) = sp
+				&& state::lookup(&ex.k.root, ex.cx.store, ex.vp, t.scalar().as_bytes())?
+					.is_some_and(|v| v.attrs.contains(Attrs::ZSH_UNIQUE))
+			{
+				p.flags = p.flags.with(PmFlags::UNIQUE);
 			}
 			return Ok(Some(p));
 		}
@@ -883,6 +938,11 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 	};
 	// A local hiding a special (`typeset -h`) is an ordinary parameter.
 	let sp = sp.filter(|_| !p.attrs.contains(Attrs::ZSH_HIDE));
+	// On a special tie's scalar the mark is its array's ([`set_flags`]):
+	// `PATH=…` keeps its words.
+	if matches!(sp, Some(Special::TiedScalar(_))) {
+		p.flags = p.flags.without(PmFlags::UNIQUE);
+	}
 	if p.attrs.contains(Attrs::ZSH_TIED)
 		&& let Some((scalar, array, sep)) = tie_of(ex, name)?
 	{
@@ -894,7 +954,7 @@ fn getparam_in(ex: &mut Expander<'_, '_>, name: &[u8], defer: Defer) -> X<Option
 		p.tied = Some((partner, sep));
 	}
 	if let Some(sp) = sp
-		&& let Some((partner, sep)) = sp.tie_partner()
+		&& let Some((partner, sep)) = sp.tie_partner(ex.k.engine.config().platform)
 	{
 		// zsh/watch's `WATCH` is tied without `PM_TIED`.
 		p.flags = p
@@ -1193,6 +1253,14 @@ impl Value {
 					return Ok(at.and_then(|i| ss.get(i)).cloned().unwrap_or_default());
 				},
 				_ => match &self.pm.value {
+					PValue::Scalar(s)
+						if self
+							.pm
+							.flags
+							.intersects(PmFlags::EFLOAT.with(PmFlags::FFLOAT)) =>
+					{
+						metafy(&float_display(&self.pm, s))
+					},
 					PValue::Scalar(s) => metafy(s),
 					_ => Vec::new(),
 				},
@@ -1519,6 +1587,8 @@ pub fn fetchvalue(
 	bracks: i32,
 	flags: u32,
 ) -> X<Option<Value>> {
+	let window = flags & SCANPM_WINDOW != 0;
+	let flags = flags & !SCANPM_WINDOW;
 	let t = *pos;
 	let mut i = t;
 	let c = s.get(i).copied().unwrap_or(0);
@@ -1574,7 +1644,9 @@ pub fn fetchvalue(
 		// alone; an assignment rewrites the whole value, so it needs it.
 		let keyed =
 			bracks > 0 && flags & SCANPM_ASSIGNING == 0 && matches!(s.get(i), Some(&(b'[' | INBRACK)));
-		let pm = if keyed {
+		let pm = if keyed && window && plain_subscript(s, i) && specials::lookup(lookup).is_none() {
+			getparam_window(ex, lookup)?
+		} else if keyed {
 			getparam_lazy(ex, lookup)?
 		} else {
 			getparam(ex, lookup)?
@@ -1596,6 +1668,9 @@ pub fn fetchvalue(
 		}
 		if bracks > 0 && matches!(s.get(i), Some(&(b'[' | INBRACK))) {
 			subscript::getindex(ex, s, &mut i, &mut v, flags)?;
+			if v.pm.lazy && v.elem.is_none() && v.pm.special.is_none() {
+				window_elem(ex, &mut v)?;
+			}
 			if v.elem.is_none() {
 				v.pm.materialize(ex)?;
 			}
@@ -1621,6 +1696,67 @@ pub fn fetchvalue(
 	Ok(Some(v))
 }
 
+/// Whether the subscript opening at `s[open]` is a plain one (no `(flags)`,
+/// not `*` or `@`): one that resolves to positions, not by searching or
+/// taking the whole value.
+fn plain_subscript(s: &[u8], open: usize) -> bool {
+	!matches!(
+		s.get(open + 1),
+		Some(&(b'(' | crate::bash::syntax::zsh::tok::INPAR | b'*' | b'@' | STAR))
+	)
+}
+
+/// [`getparam_lazy`] for a [`SCANPM_WINDOW`] read through a plain
+/// subscript: an ordinary stored dense array also comes without its value
+/// ([`Param::lazy`]), for [`window_elem`] to load what the subscript
+/// selects.
+fn getparam_window(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Param>> {
+	if let Some(mut pm) = getparam_in(ex, name, Defer::Stored)?
+		&& pm.flags.type_bits() == PmFlags::ARRAY
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.contains(PmFlags::UNSET)
+		&& matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		pm.lazy = true;
+		pm.value = PValue::Array(Vec::new());
+		return Ok(Some(pm));
+	}
+	getparam_lazy(ex, name)
+}
+
+/// Load what the subscripted view `v` of a [`getparam_window`] array
+/// reads. A single element (`$a[i]`) is loaded alone, as a one-element
+/// array `v` starts at; an index outside the array leaves it empty, which
+/// `paramsubst` reads as unset, as it does that index of the whole array.
+/// Any other view loads the whole array.
+///
+/// # Errors
+/// A store failure.
+fn window_elem(ex: &mut Expander<'_, '_>, v: &mut Value) -> X<()> {
+	let single = v.isarr == 0 && v.flags & VALFLAG_INV == 0 && v.end == v.start + 1;
+	if !single {
+		return v.pm.materialize(ex);
+	}
+	let name = v.pm.name.clone();
+	let elem = match read_var(ex, &name)?.0.map(|var| &var.value) {
+		Some(VarValue::Indexed(items)) if dense_from_zero(items) => {
+			let len = i64::try_from(items.len()).unwrap_or(i64::MAX);
+			let at = if v.start < 0 { v.start + len } else { v.start };
+			usize::try_from(at)
+				.ok()
+				.and_then(|at| items.get(at))
+				.map(|(_, e)| e.clone())
+		},
+		_ => return v.pm.materialize(ex),
+	};
+	v.pm.value = PValue::Array(elem.into_iter().collect());
+	v.pm.lazy = false;
+	v.start = 0;
+	v.end = 1;
+	Ok(())
+}
+
 // ---- writers
 // ------------------------------------------------------------------
 
@@ -1642,7 +1778,22 @@ fn store_param_assignment(ex: &mut Expander<'_, '_>, pm: &Param, trace: bool) ->
 	if let Some(sp) = pm.special
 		&& !sp.is_plain()
 	{
-		specials::set(ex, sp, &pm.name, pm.value.clone())?;
+		// `typeset -U` keeps a special array (`fpath`, `path`) and the words
+		// of its tied scalar unique too (zsh `uniqarray` in their setters).
+		let value = match &pm.value {
+			PValue::Array(a) if pm.flags.contains(PmFlags::UNIQUE) => PValue::Array(uniq(a)),
+			PValue::Scalar(s) if pm.flags.contains(PmFlags::UNIQUE) && !s.is_empty() => {
+				match sp.tie_partner(ex.k.engine.config().platform) {
+					Some((_, sep)) => {
+						let words: Vec<BString> = s.split(|&c| c == sep).map(BString::from).collect();
+						PValue::Scalar(BString::from(uniq(&words).join(&[sep][..])))
+					},
+					None => pm.value.clone(),
+				}
+			},
+			value => value.clone(),
+		};
+		specials::set(ex, sp, &pm.name, value)?;
 		if trace {
 			super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, &pm.name, level_for(pm));
 		}
@@ -1653,7 +1804,10 @@ fn store_param_assignment(ex: &mut Expander<'_, '_>, pm: &Param, trace: bool) ->
 	let uniq_pm;
 	let pm = match &pm.value {
 		PValue::Scalar(s) if pm.flags.contains(PmFlags::UNIQUE.with(PmFlags::TIED)) => {
-			let tie = match pm.special.and_then(Special::tie_partner) {
+			let tie = match pm
+				.special
+				.and_then(|sp| sp.tie_partner(ex.k.engine.config().platform))
+			{
 				Some((array, sep)) => Some((pm.name.clone(), BString::from(array), sep)),
 				None => tie_of(ex, &pm.name)?,
 			};
@@ -1828,6 +1982,39 @@ fn float_text(pm: &Param, d: f64) -> BString {
 		FloatKind::Fixed
 	};
 	BString::from(math::convfloat(d, i32::from(pm.base), kind))
+}
+
+/// A float as stored: its shortest exact text, which [`parse_float`] reads
+/// back unchanged (zsh keeps the `double`: arithmetic sees every digit, a
+/// string read the parameter's style, [`float_display`]).
+fn float_store(d: f64) -> BString {
+	BString::from(format!("{d:?}"))
+}
+
+/// The stored float `s` of `pm` as zsh shows it ([`float_text`]); an
+/// empty value stays empty.
+fn float_display(pm: &Param, s: &[u8]) -> BString {
+	if s.is_empty() {
+		return BString::default();
+	}
+	float_text(pm, parse_float(s))
+}
+
+/// [`float_display`] of a stored variable: `s` in the style its `attrs`
+/// give (`-E`/`-F` and the precision in the base field); `None` when it
+/// is no float (its text is shown as stored).
+pub fn stored_float_display(attrs: Attrs, s: &[u8]) -> Option<BString> {
+	let kind = if attrs.contains(Attrs::ZSH_FLOAT_E) {
+		FloatKind::Exponent
+	} else if attrs.contains(Attrs::ZSH_FLOAT_F) {
+		FloatKind::Fixed
+	} else {
+		return None;
+	};
+	if s.is_empty() {
+		return Some(BString::default());
+	}
+	Some(BString::from(math::convfloat(parse_float(s), i32::from(attrs.base()), kind)))
 }
 
 /// zsh `createparam` for an assignment to a name that does not exist (or
@@ -2044,6 +2231,7 @@ impl Value {
 			}
 			// All early-returning special setters are handled above. The
 			// ordinary assignment consumes this snapshot and stores it back.
+			self.pm.materialize(ex)?;
 			let mut h = match &mut self.pm.value {
 				PValue::Hash(h) => ZHash::from_owned(std::mem::take(h), self.pm.attrs),
 				_ => ZHash::new(),
@@ -2130,7 +2318,7 @@ impl Value {
 				} else {
 					arith::matheval(ex, val)?.to_float()
 				};
-				self.pm.value = PValue::Scalar(float_text(&self.pm, d));
+				self.pm.value = PValue::Scalar(float_store(d));
 				if self
 					.pm
 					.flags
@@ -2400,6 +2588,254 @@ pub fn assignsparam(ex: &mut Expander<'_, '_>, name: &[u8], val: &[u8], flags: u
 	assignsparam_meta(ex, &s, val, flags)
 }
 
+/// What [`assign_elem_in_place`] did.
+enum InPlace {
+	/// The element is assigned.
+	Done,
+	/// Not an element it assigns; nothing evaluated.
+	Skipped,
+	/// The subscript resolved to `.0` (its value loaded) for the general
+	/// path to assign: a slice, a gap after the last element.
+	General(Box<Value>),
+}
+
+/// zsh `assignsparam` of `name[sub]=val` (metafied `s`) when `pm` (read
+/// without its value) is an ordinary stored array or association: the
+/// subscript resolves as [`subscript::getindex`] resolves it, and one
+/// element is written in place, without the copy of the whole parameter
+/// the general path makes (`compinit` assigns thousands of keys one by
+/// one; loops fill arrays element by element). A present key or index
+/// takes the value where it is; a new key goes where zsh's hash table
+/// puts it, a new index at the end.
+fn assign_elem_in_place(
+	ex: &mut Expander<'_, '_>,
+	s: &[u8],
+	name: &[u8],
+	pm: Param,
+	val: &[u8],
+) -> X<InPlace> {
+	let kind = pm.flags.type_bits();
+	let plain = (kind == PmFlags::HASHED || kind == PmFlags::ARRAY) && edits_in_place(ex, &pm)?;
+	// A plain subscript: `(flags)`, `*` and `@` read the whole parameter.
+	let body = s.get(name.len() + 1..).unwrap_or_default();
+	let plain_sub = !matches!(
+		body.first(),
+		Some(&(b'(' | crate::bash::syntax::zsh::tok::INPAR | b'*' | b'@' | STAR))
+	);
+	if !plain || !plain_sub {
+		return Ok(InPlace::Skipped);
+	}
+	check_restricted(ex, name)?;
+	// An array's subscript needs only its length (`a[-1]`, `a[$#a+1]`):
+	// empty elements stand in for the values.
+	let len = match read_var(ex, name)?.0.map(|v| &v.value) {
+		Some(VarValue::Indexed(items)) if dense_from_zero(items) => items.len(),
+		Some(VarValue::Assoc(_)) if kind == PmFlags::HASHED => 0,
+		_ => return Ok(InPlace::Skipped),
+	};
+	let mut lazy = pm;
+	lazy.lazy = true;
+	if kind == PmFlags::ARRAY {
+		lazy.value = PValue::Array(vec![BString::default(); len]);
+	}
+	let mut v = Value::of(lazy);
+	v.isarr = SCANPM_ARRONLY;
+	let mut i = name.len();
+	subscript::getindex(ex, s, &mut i, &mut v, 0)?;
+	let value = unmetafy(val);
+	let edit_key;
+	let edit = if let Some(e) = &v.elem {
+		let (var, _) = read_var(ex, name)?;
+		let Some(var) = var else {
+			return Ok(InPlace::Skipped);
+		};
+		let VarValue::Assoc(items) = &var.value else {
+			return Ok(InPlace::Skipped);
+		};
+		edit_key = e.key.clone();
+		if items.get(&edit_key).is_some() {
+			state::VarEdit::Set {
+				elem:   Some(crate::bash::store::Elem::Key(BStr::new(&edit_key))),
+				value:  &value,
+				append: false,
+			}
+		} else if let Some(buckets) = super::assoc_order::insert_buckets(items.len(), var.attrs) {
+			state::VarEdit::Insert { key: &edit_key, value: &value, buckets }
+		} else {
+			// The table grows: zsh re-adds every entry.
+			let mut h = ZHash::from_stored(items, var.attrs);
+			h.insert(edit_key.clone(), BString::from(value.clone()));
+			let (items, attrs) = h.into_stored(var.attrs);
+			state::VarEdit::Replace(Var { value: VarValue::Assoc(items.into()), attrs })
+		}
+	} else {
+		let single = v.flags & VALFLAG_EMPTY == 0 && v.isarr == 0 && v.end == v.start + 1;
+		let start = usize::try_from(v.start)
+			.ok()
+			.filter(|&st| single && st <= len);
+		let Some(start) = start else {
+			v.pm.materialize(ex)?;
+			return Ok(InPlace::General(Box::new(v)));
+		};
+		state::VarEdit::Set {
+			elem:   Some(crate::bash::store::Elem::Index(i64::try_from(start).unwrap_or(i64::MAX))),
+			value:  &value,
+			append: false,
+		}
+	};
+	state::edit_var(&mut ex.k.root, ex.cx.store, ex.vp, name, Level::Dynamic, edit)?;
+	Ok(InPlace::Done)
+}
+
+/// Whether stored indexed elements are a zsh array's: indices `0..len`.
+fn dense_from_zero(items: &[(i64, BString)]) -> bool {
+	items.first().is_none_or(|(i, _)| *i == 0)
+		&& items
+			.last()
+			.is_none_or(|(i, _)| usize::try_from(*i).is_ok_and(|i| i + 1 == items.len()))
+}
+
+/// Whether stored array or association `pm` (read without its value) may
+/// be edited in place ([`assign_elem_in_place`], [`append_in_place`]):
+/// nothing about it rewrites the values (`-U`, case or padding flags, an
+/// indexed array under `KSH_ARRAYS`), it is neither special nor tied, and
+/// it is set, writable and visible.
+fn edits_in_place(ex: &mut Expander<'_, '_>, pm: &Param) -> X<bool> {
+	Ok((pm.flags.type_bits() != PmFlags::ARRAY || !opt(ex, ZshOpt::Ksharrays)?)
+		&& !pm.flags.intersects(
+			PmFlags::UNIQUE
+				.with(PmFlags::LOWER)
+				.with(PmFlags::UPPER)
+				.with(PmFlags::LEFT)
+				.with(PmFlags::RIGHT_B)
+				.with(PmFlags::RIGHT_Z),
+		)
+		&& pm.special.is_none()
+		&& pm.tied.is_none()
+		&& !pm.flags.intersects(PmFlags::UNSET.with(PmFlags::READONLY))
+		&& !pm.attrs.contains(Attrs::INVISIBLE))
+}
+
+/// Whether `name` is a plain ASCII identifier (no digits first: not a
+/// positional parameter), which a direct read or write can name.
+fn plain_ident(name: &[u8]) -> bool {
+	matches!(name.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_')
+		&& name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+}
+
+/// The type of stored variable `v` when a plain-name assignment or
+/// arithmetic may read and write its value directly, as the general path
+/// would leave it: a set scalar, integer or float that nothing rewrites
+/// or redirects (not read-only, tied, hidden or private; no case, padding
+/// or `-U` flags). The caller has checked that no special has its name.
+fn direct_type(v: &Var) -> Option<PmFlags> {
+	const BLOCKING: [Attrs; 13] = [
+		Attrs::INVISIBLE,
+		Attrs::READONLY,
+		Attrs::ZSH_TIED,
+		Attrs::ZSH_HIDE,
+		Attrs::ZSH_PRIVATE,
+		Attrs::LOWER,
+		Attrs::UPPER,
+		Attrs::ZSH_LEFT,
+		Attrs::ZSH_RIGHT_B,
+		Attrs::ZSH_RIGHT_Z,
+		Attrs::ZSH_UNIQUE,
+		Attrs::ASSOC,
+		Attrs::INDEXED,
+	];
+	if !matches!(v.value, VarValue::Str(_)) || BLOCKING.iter().any(|&a| v.attrs.contains(a)) {
+		return None;
+	}
+	let ty = PmFlags::from_var(v).type_bits();
+	matches!(ty, PmFlags::SCALAR | PmFlags::INTEGER | PmFlags::EFLOAT | PmFlags::FFLOAT)
+		.then_some(ty)
+}
+
+/// The direct ([`direct_type`]) variable `name` (raw): its type and its
+/// output base (an integer's `typeset -i N`).
+fn direct_var(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<(PmFlags, u8)>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	Ok(read_var(ex, name)?
+		.0
+		.and_then(|v| direct_type(v).map(|ty| (ty, v.attrs.base()))))
+}
+
+/// The text `$name` substitutes (metafied) when `name` is a direct scalar
+/// or integer ([`direct_var`]: its stored text, as `getstrvalue` gives it
+/// without padding or case flags); `None` for any other parameter.
+///
+/// # Errors
+/// A store failure.
+pub(super) fn direct_text(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<Vec<u8>>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	Ok(match (direct_type(var), &var.value) {
+		(Some(PmFlags::SCALAR | PmFlags::INTEGER), VarValue::Str(s)) => Some(metafy(s)),
+		_ => None,
+	})
+}
+
+/// Store `value` (raw) as the value of the direct variable `name`
+/// ([`direct_var`]), keeping its attributes, with what the general path's
+/// store does for such a variable (a scalar naming a directory updates its
+/// named directory). The caller has just read it as a scalar: the store's
+/// change is chosen without reading it again.
+fn store_direct(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	state::edit_seen(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Set { elem: None, value, append: false },
+		Some(state::Seen::Scalar),
+	)?;
+	if ty == PmFlags::SCALAR {
+		super::nameddir::scalar_assigned(ex, name, value)?;
+	}
+	Ok(())
+}
+
+/// zsh `assignaparam` of `name+=(val)` (metafied elements) when `name` is
+/// an ordinary stored array ([`edits_in_place`]): the elements go after
+/// its last one in place, without the copy of the whole array the general
+/// path reads and writes back (a loop appending one element at a time
+/// would cost the square of the array's length). `false`: not such an
+/// array, nothing done.
+fn append_in_place(ex: &mut Expander<'_, '_>, name: &[u8], val: &[Vec<u8>], flags: u32) -> X<bool> {
+	let Some(pm) = getparam_in(ex, name, Defer::Stored)? else {
+		return Ok(false);
+	};
+	if pm.flags.type_bits() != PmFlags::ARRAY || !edits_in_place(ex, &pm)? {
+		return Ok(false);
+	}
+	if !matches!(read_var(ex, name)?.0.map(|v| &v.value), Some(VarValue::Indexed(items)) if dense_from_zero(items))
+	{
+		return Ok(false);
+	}
+	check_restricted(ex, name)?;
+	if flags & ASSPM_WARN != 0 {
+		check_warn_pm(ex, &pm, "array", false, true)?;
+	}
+	let elems = val.iter().map(|e| BString::from(unmetafy(e))).collect();
+	state::edit_var(
+		&mut ex.k.root,
+		ex.cx.store,
+		ex.vp,
+		name,
+		Level::Dynamic,
+		state::VarEdit::Push(elems),
+	)?;
+	Ok(true)
+}
+
 /// [`assignsparam`] on metafied text.
 pub(super) fn assignsparam_meta(
 	ex: &mut Expander<'_, '_>,
@@ -2415,6 +2851,16 @@ pub(super) fn assignsparam_meta(
 		return Ok(());
 	}
 	let (name, sub) = split_name(s);
+	// An existing ordinary scalar takes the value directly: no parameter
+	// to build, nothing to create, revive, warn about or keep in step.
+	if !sub
+		&& flags & ASSPM_AUGMENT == 0
+		&& direct_var(ex, name)?.map(|(ty, _)| ty) == Some(PmFlags::SCALAR)
+		&& (flags & ASSPM_WARN == 0 || !opt(ex, ZshOpt::Warnnestedvar)?)
+	{
+		check_restricted(ex, name)?;
+		return store_direct(ex, name, PmFlags::SCALAR, &unmetafy(&val));
+	}
 	revive_special(ex, name)?;
 	let mut flags = flags;
 	let mut created = false;
@@ -2435,7 +2881,16 @@ pub(super) fn assignsparam_meta(
 			},
 			Some(pm) if pm.flags.contains(PmFlags::READONLY) => return Err(readonly(name)),
 			// An element of an existing parameter: nothing to warn about.
-			Some(_) => flags &= !ASSPM_WARN,
+			Some(pm) => {
+				if flags & ASSPM_AUGMENT == 0 {
+					match assign_elem_in_place(ex, s, name, pm, &val)? {
+						InPlace::Done => return Ok(()),
+						InPlace::General(v) => revived = Some(*v),
+						InPlace::Skipped => {},
+					}
+				}
+				flags &= !ASSPM_WARN;
+			},
 		}
 	} else {
 		let existing = target(ex, name, 0)?;
@@ -2597,7 +3052,7 @@ fn setnumvalue(
 			store_param_assignment(ex, &v.pm, true)
 		},
 		(false, PmFlags::EFLOAT | PmFlags::FFLOAT) => {
-			v.pm.value = PValue::Scalar(float_text(&v.pm, val.to_float()));
+			v.pm.value = PValue::Scalar(float_store(val.to_float()));
 			v.pm.flags = v.pm.flags.without(PmFlags::UNSET);
 			store_param_assignment(ex, &v.pm, true)
 		},
@@ -2659,6 +3114,13 @@ pub(super) fn assignaparam_meta(
 	}
 	let (name, sub) = split_name(s);
 	revive_special(ex, name)?;
+	if flags & ASSPM_AUGMENT != 0
+		&& flags & ASSPM_KEY_VALUE == 0
+		&& !sub
+		&& append_in_place(ex, name, &val, flags)?
+	{
+		return Ok(());
+	}
 	let mut val = val;
 	let mut created = false;
 	let mut may_warn_nested = true;
@@ -2913,6 +3375,18 @@ pub fn setnparam(
 		return Err(not_ident(&s));
 	}
 	let (name, sub) = split_name(&s);
+	// An existing ordinary number or scalar takes the value directly (see
+	// `assignsparam_meta`); `setnumvalue` reports it as assigned.
+	if !sub
+		&& let Some((ty, base)) = direct_var(ex, name)?
+		&& !opt(ex, ZshOpt::Warnnestedvar)?
+	{
+		let (value, assigned) = match number_text(ex, ty, base, val)? {
+			Some(numeric) => numeric,
+			None => (BString::from(text), Assigned::Other),
+		};
+		return store_number(ex, name, ty, &value).map(|()| assigned);
+	}
 	let mut v = target(ex, &s, 0)?;
 	let was_unset = if let Some(cur) = &v
 		&& cur
@@ -2990,6 +3464,86 @@ pub fn setnparam(
 	};
 	setnumvalue(ex, &mut v, val, Some(text))?;
 	Ok(assigned)
+}
+
+/// [`setnparam`] of a plain name that is a direct integer or float
+/// ([`direct_var`]), stored without the text a scalar target would take
+/// (the evaluator need not format the number first); `None` for any other
+/// target.
+///
+/// # Errors
+/// As [`setnparam`].
+pub fn setnparam_number(
+	ex: &mut Expander<'_, '_>,
+	lval: &[u8],
+	val: Number,
+) -> X<Option<Assigned>> {
+	let Some((ty, base)) = direct_var(ex, lval)? else {
+		return Ok(None);
+	};
+	if opt(ex, ZshOpt::Warnnestedvar)? {
+		return Ok(None);
+	}
+	let Some((value, assigned)) = number_text(ex, ty, base, val)? else {
+		return Ok(None);
+	};
+	store_number(ex, lval, ty, &value)?;
+	Ok(Some(assigned))
+}
+
+/// The stored text of number `val` in a direct variable of type `ty`
+/// (output base `base` for an integer); `None` for a scalar.
+fn number_text(
+	ex: &mut Expander<'_, '_>,
+	ty: PmFlags,
+	base: u8,
+	val: Number,
+) -> X<Option<(BString, Assigned)>> {
+	Ok(Some(match ty {
+		// Decimal needs none of the options `convbase` takes.
+		PmFlags::INTEGER if matches!(base, 0 | 1 | 10) => {
+			(BString::from(val.to_int().to_string()), Assigned::Integer)
+		},
+		PmFlags::INTEGER => {
+			let o = arith::math_options(ex)?;
+			(BString::from(math::convbase(val.to_int(), i32::from(base), o)), Assigned::Integer)
+		},
+		PmFlags::EFLOAT | PmFlags::FFLOAT => (float_store(val.to_float()), Assigned::Float),
+		_ => return Ok(None),
+	}))
+}
+
+/// Store an arithmetic result in direct variable `name` ([`store_direct`])
+/// as `setnumvalue` does: restricted names refused, the assignment
+/// reported.
+fn store_number(ex: &mut Expander<'_, '_>, name: &[u8], ty: PmFlags, value: &[u8]) -> X<()> {
+	check_restricted(ex, name)?;
+	store_direct(ex, name, ty, value)?;
+	super::super::builtins::emit_assignment(ex.k, ex.cx, ex.vp, name, Level::Dynamic);
+	Ok(())
+}
+
+/// [`getmathparam`] of a plain name when it is a direct variable
+/// ([`direct_var`]): its number, or its text for a scalar, read in place.
+/// `None`: not such a variable (the caller takes the general path).
+///
+/// # Errors
+/// A store failure.
+pub fn direct_math_value(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<Option<math::Param>> {
+	if !plain_ident(name) || specials::lookup(name).is_some() {
+		return Ok(None);
+	}
+	let Some(var) = read_var(ex, name)?.0 else {
+		return Ok(None);
+	};
+	let (Some(ty), VarValue::Str(s)) = (direct_type(var), &var.value) else {
+		return Ok(None);
+	};
+	Ok(Some(match ty {
+		PmFlags::INTEGER => math::Param::Int(parse_int(s)),
+		PmFlags::EFLOAT | PmFlags::FFLOAT => math::Param::Float(parse_float(s)),
+		_ => math::Param::Text(s.clone()),
+	}))
 }
 
 /// The value arithmetic reads for `lval` (zsh `getvalue` +
@@ -3103,6 +3657,17 @@ pub fn unsetparam(ex: &mut Expander<'_, '_>, name: &[u8]) -> X<()> {
 			// zsh/mapfile's `unsetpmmapfile` removes the file.
 			return crate::bash::vm::builtins::zsh_mod_mapfile::unset(ex, &e.key);
 		}
+		if v.pm.special.is_none() && v.pm.tied.is_none() {
+			// zsh's tables never shrink: the other entries keep their
+			// order, so the stored table loses the one entry in place.
+			let (var, _) = read_var(ex, &v.pm.name)?;
+			if var.is_some_and(|var| matches!(var.value, VarValue::Assoc(_))) {
+				let edit = state::VarEdit::Remove(crate::bash::store::Elem::Key(BStr::new(&e.key)));
+				state::edit_var(&mut ex.k.root, ex.cx.store, ex.vp, &v.pm.name, Level::Dynamic, edit)?;
+				return Ok(());
+			}
+		}
+		v.pm.materialize(ex)?;
 		let mut h = match &v.pm.value {
 			PValue::Hash(h) => ZHash::from_stored(h, v.pm.attrs),
 			_ => return Ok(()),
@@ -3221,6 +3786,25 @@ pub fn set_flags(
 			specials::set_seconds_type(ex, new_type, base);
 			return Ok(());
 		}
+		// `typeset ±U path`: the array side of a special tie, whose value its
+		// scalar's record holds, marks its uniqueness there (scoped with
+		// it, `local -U path`) and drops repeated entries now.
+		if let Special::TiedArray(t) = sp {
+			let unique = flags.contains(PmFlags::UNIQUE);
+			let scalar = t.scalar().as_bytes();
+			if let Some(mut var) = state::lookup(&ex.k.root, ex.cx.store, ex.vp, scalar)?.cloned() {
+				var.attrs = if unique {
+					var.attrs.with(Attrs::ZSH_UNIQUE)
+				} else {
+					var.attrs.without(Attrs::ZSH_UNIQUE)
+				};
+				state::store_var(&mut ex.k.root, ex.cx.store, ex.vp, scalar, Some(var), Level::Dynamic);
+			}
+			if unique {
+				store_param(ex, &pm)?;
+			}
+			return Ok(());
+		}
 		// `typeset ±h` on a module's `PM_HIDE` special.
 		if sp.module().is_some() && sp.flags().contains(PmFlags::HIDE) {
 			let hide = flags.contains(PmFlags::HIDE);
@@ -3243,7 +3827,7 @@ pub fn set_flags(
 			} else {
 				arith::matheval(ex, &metafy(&text))?.to_float()
 			};
-			pm.value = PValue::Scalar(float_text(&pm, d));
+			pm.value = PValue::Scalar(float_store(d));
 		},
 		PmFlags::ARRAY if old_type != PmFlags::ARRAY => {
 			pm.value = PValue::Array(if text.is_empty() {

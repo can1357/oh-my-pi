@@ -110,13 +110,13 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 	"metadata": {
 		"description": "A collection of plugins",
 		"version": "1.0.0",
-		"pluginRoot": "plugins"
+		"pluginRoot": "./plugins"
 	},
 	"plugins": [
 		{
 			"name": "my-plugin",
 			"description": "What this plugin does",
-			"source": "./my-plugin",
+			"source": "./plugins/my-plugin",
 			"category": "development",
 			"homepage": "https://github.com/you/my-plugin"
 		}
@@ -132,7 +132,7 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 | `owner.name` | Marketplace owner name                                                                                               |
 | `plugins`    | Array of plugin entries                                                                                              |
 
-Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. When `metadata.pluginRoot` is set, it is prepended to relative plugin `source` paths.
+Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. `metadata.pluginRoot` names the directory that bare-name plugin sources (`"my-plugin"`) resolve under; a source that starts with `./` resolves from the marketplace root. Catalogs written for omp's earlier rule, where `pluginRoot` was prefixed to `./` sources, keep installing: a `./` source absent or not a directory at the root is tried under `pluginRoot`. Other filesystem errors stop validation.
 
 Install version resolution tries catalog `version`, `.claude-plugin/plugin.json`, root `plugin.json`, then `package.json`; it then falls back to the source definition's first seven SHA characters or `0.0.0`. Versions used in cache paths must be 1–128 ASCII letters/digits or `._+-` and cannot contain `..`.
 
@@ -161,12 +161,18 @@ Install version resolution tries catalog `version`, `.claude-plugin/plugin.json`
 
 ### Plugin source formats
 
-The `source` field supports these formats. String sources must start with `./` and are resolved inside the marketplace root, after optional `metadata.pluginRoot` is prepended:
+The `source` field supports these formats. String sources must start with `./`, or be a bare name when `metadata.pluginRoot` is set, and are resolved inside the marketplace root:
 
-**Relative path** (within the marketplace repo):
+**Relative path** (within the marketplace repo, from its root):
 
 ```json
-"source": "./my-plugin"
+"source": "./plugins/my-plugin"
+```
+
+**Bare name** (a single directory name under `metadata.pluginRoot`; `"my-plugin"` with `"pluginRoot": "./plugins"` is `./plugins/my-plugin`):
+
+```json
+"source": "my-plugin"
 ```
 
 **Git repository URL**:

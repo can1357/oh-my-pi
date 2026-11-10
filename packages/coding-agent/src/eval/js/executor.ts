@@ -71,13 +71,6 @@ function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "
 	return options.timeoutMs;
 }
 
-function isAbortError(error: unknown): boolean {
-	return (
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
-}
-
 function isTimeoutReason(reason: unknown): boolean {
 	return (
 		(reason instanceof DOMException && reason.name === "TimeoutError") ||
@@ -208,7 +201,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 	} catch (error) {
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
-		if (activeSignal?.aborted || isAbortError(error)) {
+		// Every requested cancellation (the caller's signal, the cell timeout, the
+		// package-install timeout) aborts `activeSignal`. An error that merely has
+		// a cancellation-like name, thrown by the cell's own code, is a failure.
+		if (activeSignal?.aborted) {
 			const timedOut = packageWorkComplete
 				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
 				: isTimeoutReason(packageSignal?.reason);

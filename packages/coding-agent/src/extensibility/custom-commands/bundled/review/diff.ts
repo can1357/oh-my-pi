@@ -1,4 +1,5 @@
 import type { ReviewDiffFile, ReviewDiffRow } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import { parseGitDiffSectionPaths } from "../../../../utils/git-diff-paths";
 
 export interface ExcludedReviewFile {
 	path: string;
@@ -47,92 +48,6 @@ interface ParsedRows {
 	rows: ReviewDiffRow[];
 	linesAdded: number;
 	linesRemoved: number;
-}
-
-function decodeGitPath(token: string): string {
-	if (!(token.startsWith('"') && token.endsWith('"'))) return token;
-	const bytes: number[] = [];
-	const encoder = new TextEncoder();
-	for (let index = 1; index < token.length - 1; index++) {
-		const character = token[index]!;
-		if (character !== "\\") {
-			bytes.push(...encoder.encode(character));
-			continue;
-		}
-		const escaped = token[++index];
-		if (escaped === undefined) break;
-		const escapes: Record<string, string> = {
-			'"': '"',
-			"\\": "\\",
-			a: "\x07",
-			b: "\b",
-			f: "\f",
-			n: "\n",
-			r: "\r",
-			t: "\t",
-			v: "\x0b",
-		};
-		const decoded = escapes[escaped];
-		if (decoded !== undefined) {
-			bytes.push(...encoder.encode(decoded));
-			continue;
-		}
-		if (/[0-7]/.test(escaped)) {
-			let octal = escaped;
-			while (octal.length < 3 && /[0-7]/.test(token[index + 1] ?? "")) octal += token[++index];
-			bytes.push(Number.parseInt(octal, 8));
-			continue;
-		}
-		bytes.push(...encoder.encode(escaped));
-	}
-	return new TextDecoder().decode(Uint8Array.from(bytes));
-}
-
-function readGitToken(input: string, offset: number): { token: string; next: number } | undefined {
-	let index = offset;
-	while (input[index] === " ") index++;
-	if (index >= input.length) return undefined;
-	if (input[index] !== '"') {
-		const end = input.indexOf(" ", index);
-		return end < 0
-			? { token: input.slice(index), next: input.length }
-			: { token: input.slice(index, end), next: end };
-	}
-	const start = index++;
-	let escaped = false;
-	while (index < input.length) {
-		const character = input[index++];
-		if (character === '"' && !escaped) break;
-		if (character === "\\" && !escaped) escaped = true;
-		else escaped = false;
-	}
-	return { token: input.slice(start, index), next: index };
-}
-
-function stripDiffPrefix(path: string): string {
-	return /^[^/]+\//.test(path) ? path.slice(path.indexOf("/") + 1) : path;
-}
-
-function parseHeaderPaths(header: string): { oldPath?: string; newPath?: string } {
-	const payload = header.slice("diff --git ".length);
-	const oldToken = readGitToken(payload, 0);
-	const newToken = oldToken === undefined ? undefined : readGitToken(payload, oldToken.next);
-	return {
-		oldPath: oldToken === undefined ? undefined : stripDiffPrefix(decodeGitPath(oldToken.token)),
-		newPath: newToken === undefined ? undefined : stripDiffPrefix(decodeGitPath(newToken.token)),
-	};
-}
-
-function parseMarkerPath(line: string): string | undefined {
-	const payload = line.slice(4);
-	const tab = payload.indexOf("\t");
-	const token = payload.startsWith('"')
-		? (readGitToken(payload, 0)?.token ?? "")
-		: tab < 0
-			? payload
-			: payload.slice(0, tab);
-	const path = decodeGitPath(token);
-	return path === "/dev/null" ? undefined : stripDiffPrefix(path);
 }
 
 function splitFileDiffs(rawDiff: string): string[] {
@@ -198,17 +113,10 @@ export function parseReviewDiffSnapshot(rawDiff: string): ReviewDiffSnapshot {
 
 	for (const rawFileDiff of splitFileDiffs(rawDiff)) {
 		diffIndex++;
-		const lines = rawFileDiff.split(/\r?\n/);
-		let { oldPath, newPath } = parseHeaderPaths(lines[0] ?? "");
-		for (const line of lines) {
-			if (HUNK_HEADER_PATTERN.test(line)) break;
-			if (line.startsWith("--- ")) oldPath = parseMarkerPath(line);
-			else if (line.startsWith("+++ ")) newPath = parseMarkerPath(line);
-			else if (line.startsWith("rename from ")) oldPath = decodeGitPath(line.slice("rename from ".length));
-			else if (line.startsWith("rename to ")) newPath = decodeGitPath(line.slice("rename to ".length));
-		}
+		const { oldPath, newPath } = parseGitDiffSectionPaths(rawFileDiff, { normalizeCrlf: true });
 		const path = newPath ?? oldPath;
 		if (path === undefined) continue;
+		const lines = rawFileDiff.split(/\r?\n/);
 		const parsed = parseRows(lines);
 		const exclusionReason = EXCLUDED_PATTERNS.find(entry => entry.pattern.test(path))?.reason;
 		if (exclusionReason !== undefined) {

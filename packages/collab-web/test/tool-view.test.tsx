@@ -187,69 +187,56 @@ describe("ToolView xd:// dispatches", () => {
 });
 
 describe("ToolView ask renderer", () => {
-	const questions = [
-		{
-			id: "auth",
-			question: "Which auth method?",
-			options: [{ label: "JWT" }, { label: "OAuth2" }],
-		},
-	];
+	const form = `<form>
+<fieldset><legend>Storage backend</legend>
+<label><input type="radio" name="db" value="sqlite" checked> SQLite</label>
+<label><input type="radio" name="db" value="pg"> Postgres</label>
+</fieldset>
+<fieldset><legend>Notes &amp; caveats</legend><textarea name="notes"></textarea></fieldset>
+</form>`;
 
-	it("renders the user-added note from a single-question answer", () => {
-		const html = renderToStaticMarkup(
-			<ToolView
-				name="ask"
-				defaultOpen
-				args={{ questions }}
-				result={{
-					content: [{ type: "text", text: "OAuth2 User added note: keep the redirect short-lived" }],
-					details: {
-						question: "Which auth method?",
-						options: ["JWT", "OAuth2"],
-						multi: false,
-						selectedOptions: ["OAuth2"],
-						note: "keep the redirect short-lived",
-					},
-				}}
-			/>,
-		);
+	it("outlines a pending form by its legends and named field count", () => {
+		const html = renderToStaticMarkup(<ToolView name="ask" defaultOpen args={{ html: form }} />);
 
-		expect(html).toContain("<span>OAuth2</span>");
-		expect(html).toContain("keep the redirect short-lived");
+		expect(html).toContain("Storage backend");
+		expect(html).toContain("Notes &amp; caveats");
+		expect(html).toContain("2 fields");
 	});
 
-	it("renders per-question notes from results[] answers", () => {
+	it("pairs each question with its answer and flags timed-out submissions", () => {
 		const html = renderToStaticMarkup(
 			<ToolView
 				name="ask"
 				defaultOpen
-				args={{
-					questions: [
-						{ id: "db", question: "Storage backend?", options: [{ label: "SQLite" }, { label: "Postgres" }] },
-						{ id: "cache", question: "Cache?", options: [{ label: "Redis" }, { label: "None" }] },
-					],
-				}}
+				args={{ html: form }}
 				result={{
-					content: [{ type: "text", text: "User answers:" }],
+					content: [{ type: "text", text: 'User answers:\n{"db":"pg","notes":""}' }],
 					details: {
-						results: [
-							{
-								id: "db",
-								question: "Storage backend?",
-								multi: false,
-								selectedOptions: ["Postgres"],
-								note: "managed instance",
-							},
-							{ id: "cache", question: "Cache?", multi: false, selectedOptions: ["Redis"] },
+						answers: [
+							{ name: "db", question: "Storage backend", answer: "Postgres" },
+							{ name: "notes", question: "Notes & caveats", answer: "" },
 						],
+						timedOut: true,
 					},
 				}}
 			/>,
 		);
 
 		expect(html).toContain("<span>Postgres</span>");
-		expect(html).toContain("managed instance");
-		// The cache question answered without a note must not leak the db note.
-		expect(html.match(/managed instance/g)?.length).toBe(1);
+		expect(html).toContain("(no answer)");
+		expect(html).toContain("auto-selected after timeout");
+	});
+
+	it("falls back to the result text when details carry no answers", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="ask"
+				defaultOpen
+				args={{ html: "<form></form>" }}
+				result={{ content: [{ type: "text", text: "The form needs at least one named control." }], isError: true }}
+			/>,
+		);
+
+		expect(html).toContain("at least one named control");
 	});
 });

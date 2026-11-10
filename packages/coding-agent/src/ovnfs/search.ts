@@ -15,7 +15,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { logger, relativePathWithinNormalizedRoot } from "@oh-my-pi/pi-utils";
+import { logger, relativePathWithinNormalizedRoot, untilAborted } from "@oh-my-pi/pi-utils";
 import { callSocket, OvnfsError } from "./client";
 import { forgetDaemon, runningDaemon } from "./daemon";
 
@@ -61,6 +61,14 @@ function onHost(p: string, filesystem: natives.ShellFilesystem | undefined): boo
 	);
 }
 
+/** Clamp `options.timeoutMs` to the budget remaining after an attempted daemon call. */
+function withRemainingTimeout<T extends { timeoutMs?: number }>(options: T, startedAt: number): T {
+	if (!options.timeoutMs || options.timeoutMs <= 0) return options;
+	const remaining = options.timeoutMs - (Date.now() - startedAt);
+	if (remaining <= 0) throw new Error("Aborted: Timeout");
+	return remaining < options.timeoutMs ? { ...options, timeoutMs: remaining } : options;
+}
+
 /**
  * Run `op` on `ovnfs`'s daemon when `root` lies in one of its checkouts.
  * Returns undefined when it does not, or the daemon is absent or failed
@@ -74,16 +82,6 @@ async function callDaemon<T>(
 	signal: unknown,
 	timeoutMs: number | undefined,
 ): Promise<T | undefined> {
-	const daemon = await runningDaemon(ovnfs);
-	if (!daemon) return undefined;
-	let dir: string;
-	try {
-		dir = await fs.realpath(root);
-	} catch {
-		return undefined;
-	}
-	// Strictly below: the daemon searches checkouts, not the folder listing them.
-	if (!relativePathWithinNormalizedRoot(daemon.mount, dir)) return undefined;
 	const controller = new AbortController();
 	const external = signal instanceof AbortSignal ? signal : undefined;
 	const onAbort = () => {
@@ -99,6 +97,17 @@ async function callDaemon<T>(
 			: undefined;
 	try {
 		controller.signal.throwIfAborted();
+		const daemon = await runningDaemon(ovnfs, controller.signal);
+		if (!daemon) return undefined;
+		let dir: string;
+		try {
+			dir = await untilAborted(controller.signal, () => fs.realpath(root));
+		} catch {
+			controller.signal.throwIfAborted();
+			return undefined;
+		}
+		// Strictly below: the daemon searches checkouts, not the folder listing them.
+		if (!relativePathWithinNormalizedRoot(daemon.mount, dir)) return undefined;
 		for (const key in args) {
 			const value = args[key];
 			if (value === undefined || value === false || value === 0) delete args[key];
@@ -124,6 +133,7 @@ export async function grep(
 	if (!ovnfs || !onHost(options.path, options.filesystem) || options.onMatches || options.type) {
 		return natives.grep(options, onMatch);
 	}
+	const startedAt = Date.now();
 	const reply = await callDaemon<DaemonGrepReply>(
 		ovnfs,
 		"grep",
@@ -148,7 +158,7 @@ export async function grep(
 		options.signal,
 		options.timeoutMs,
 	);
-	if (!reply) return natives.grep(options, onMatch);
+	if (!reply) return natives.grep(withRemainingTimeout(options, startedAt), onMatch);
 	const countMode = options.mode === natives.GrepOutputMode.Count;
 	const matches = (reply.matches ?? []).map(m => {
 		const match: natives.GrepMatch = {
@@ -197,6 +207,7 @@ export async function glob(
 	if (!ovnfs || !onHost(options.path, options.filesystem) || options.followLinks) {
 		return natives.glob(options, onMatch);
 	}
+	const startedAt = Date.now();
 	const reply = await callDaemon<DaemonGlobReply>(
 		ovnfs,
 		"glob",
@@ -214,7 +225,7 @@ export async function glob(
 		options.signal,
 		options.timeoutMs,
 	);
-	if (!reply) return natives.glob(options, onMatch);
+	if (!reply) return natives.glob(withRemainingTimeout(options, startedAt), onMatch);
 	const matches = (reply.matches ?? []).map(m => {
 		const match: natives.GlobMatch = { path: m.path, fileType: NATIVE_FILE_TYPE[m.type] };
 		if (m.mtime > 0) match.mtime = Math.floor(m.mtime / 1e6);

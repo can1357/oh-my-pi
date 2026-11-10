@@ -227,12 +227,16 @@ export const grepToolRenderer = {
 
 		if (matchCount === 0) {
 			const header = renderStatusLine(
-				{ icon: "warning", title: "Grep", titleColor: "toolTitle", description, meta: ["0 matches"] },
+				{
+					icon: "warning",
+					title: "Grep",
+					titleColor: "toolTitle",
+					description,
+					meta: [uiTheme.fg("warning", "0 matches")],
+				},
 				uiTheme,
 			);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
-			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text(missingNote ? `${header}\n${missingNote}` : header, 0, 0);
 		}
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";

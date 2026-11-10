@@ -901,6 +901,11 @@ async function acquireTernTab(
 	}
 }
 
+function notAliveMessage(name: string): string {
+	const quoted = JSON.stringify(name);
+	return `Tab ${quoted} is not open (never opened, or closed since). Open it with await browser.open({ name: ${quoted} }) (Python: await browser.open(name=${quoted})), passing the url and app it was opened with.`;
+}
+
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const result = await runInTabWithSnapshot(
 		name,
@@ -956,9 +961,7 @@ async function runInTabWithSnapshot(
 	if (!tab || tab.state === "dead") {
 		const killed = killedTabs.get(name);
 		throw new ToolError(
-			killed
-				? `Tab ${JSON.stringify(name)} was killed: ${killed}. Reopen it.`
-				: `Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`,
+			killed ? `Tab ${JSON.stringify(name)} was killed: ${killed}. Reopen it.` : notAliveMessage(name),
 		);
 	}
 	if (tab.pending.size > 0) {
@@ -1038,7 +1041,7 @@ async function runInTabWithSnapshot(
 		// the closure. `race` — not a bare `await promise` — so a teardown
 		// that never settled the run cannot hang us.
 		tab.pending.delete(id);
-		const notAlive = new ToolError(`Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`);
+		const notAlive = new ToolError(notAliveMessage(name));
 		return await Promise.race([promise, Promise.reject(notAlive)]);
 	}
 	// A worker that exited during the resume already failed this run (its exit handler rejected it) and is being
@@ -1941,6 +1944,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		userDriven,
+		relay: browser.kind.kind === "relay",
 	};
 }
 
@@ -2155,6 +2159,7 @@ async function recycleTimedOutWorkerTab(
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		relay: tab.kindTag === "relay",
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.

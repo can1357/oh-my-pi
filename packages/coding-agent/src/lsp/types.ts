@@ -352,9 +352,11 @@ export interface ServerConfig {
 	capabilities?: ServerCapabilities;
 	/**
 	 * Marks a dedicated linter/formatter server (e.g. Biome, efm-langserver, ruff).
-	 * Excluded from type-intelligence (definition, hover, references), but preferred
-	 * over type-checkers when selecting the `formatOnWrite` formatter, so a configured
-	 * external formatter wins for file types a type-checker also claims.
+	 * Ranked after other matching servers for single-server actions (definition, hover,
+	 * references, …), so it serves them only when no non-linter server claims the file; such
+	 * requests then fail with the server's own error if it does not implement the method.
+	 * Preferred over type-checkers when selecting the `formatOnWrite` formatter, so a
+	 * configured external formatter wins for file types a type-checker also claims.
 	 */
 	isLinter?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
@@ -449,6 +451,10 @@ export interface LspClient {
 	proc: LspTransport;
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/publishDiagnostics` notifications. */
+	publishedDiagnostics: Map<string, PublishedDiagnostics>;
+	/** Diagnostics delivered via `textDocument/diagnostic` pull requests. */
+	pulledDiagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
 	/** Set once a publish echoes a document version, so a wait can identify the report for a reopen. */
 	publishesDocumentVersions?: boolean;

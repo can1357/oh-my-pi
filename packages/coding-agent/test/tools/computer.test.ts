@@ -1,7 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { visibleWidth } from "@oh-my-pi/pi-tui";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
@@ -2076,7 +2074,7 @@ describe("computer worker round trips", () => {
 		expect(text).toContain(JSON.stringify("BV-2291"));
 		expect(text).toContain("accessibility");
 		expect(text).toContain("no mouse input");
-		expect(visibleWidth(text)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+		expect(text).not.toContain("\n");
 		native.dragSelection = null;
 		const posted = await runWorker(
 			transport,
@@ -2085,7 +2083,7 @@ describe("computer worker round trips", () => {
 		);
 		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
 		expect(posted.ok && posted.payload.displays).toEqual([]);
-		// The whole notice fits one line, including JSON escaping; the return value keeps the selection whole.
+		// The notice stays one short line, JSON escaping included; the return value keeps the selection whole.
 		for (const [label, text, full] of [
 			["long", "a".repeat(300), "a".repeat(300)],
 			["wide", "あ".repeat(150), "あ".repeat(150)],
@@ -2102,7 +2100,8 @@ describe("computer worker round trips", () => {
 			const longText = longNotice?.type === "text" ? longNotice.text : "";
 			expect(long.ok).toBe(true);
 			expect(longNotice?.type).toBe("text");
-			expect(visibleWidth(longText)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+			expect(longText).not.toContain("\n");
+			expect(longText.length).toBeLessThan(full.length);
 			expect(longText).toContain(full.slice(0, 4));
 			expect(longText).not.toContain(full);
 		}
@@ -2135,6 +2134,38 @@ describe("computer worker round trips", () => {
 			const result = await runWorker(transport, "numeric-miss", `await desktop.window(${id})`);
 			expect(result.ok).toBe(false);
 			if (!result.ok) expect(result.error.message.split("\n")[0]).toBe(`no window matches ${id}`);
+		});
+	});
+
+	it("prefers exact app names across all windows and keeps substring ambiguity otherwise", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [
+			{ ...windowFixture, app: "Google Chrome", title: "Home" },
+			{ ...windowFixture, id: "7", app: "Google Chrome for Testing", title: "Report" },
+			{ ...windowFixture, id: "8", app: "Google Chrome Canary", title: "Report" },
+		];
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"exact-app",
+			`const listed = await desktop.windows({ app: "gOoGlE cHrOmE" });
+			const selected = await desktop.window({ app: "GOOGLE CHROME", wait: 100 });
+			const titled = await desktop.windows({ app: "Google Chrome", title: "Report" });
+			let miss; try { await desktop.window({ app: "Google Chrome", title: "Report" }); } catch (error) { miss = error.message; }
+			const partial = await desktop.windows({ app: "Chrome" });
+			let ambiguous; try { await desktop.window({ app: "Chrome" }); } catch (error) { ambiguous = error.message; }
+			return { listed: listed.map(w => w.id), selected: selected.id, titled, miss, partial: partial.length, ambiguous };`,
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: ["42"],
+			selected: "42",
+			titled: [],
+			miss: expect.stringContaining("no window matches"),
+			partial: 3,
+			ambiguous: expect.stringContaining("multiple windows match"),
 		});
 	});
 

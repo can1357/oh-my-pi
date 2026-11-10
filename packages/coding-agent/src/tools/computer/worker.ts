@@ -31,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { expandTilde } from "@oh-my-pi/pi-utils/path";
+import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -44,7 +45,6 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
@@ -337,17 +337,6 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter, appPids?: ReadonlySet<number>): boolean {
-	if (!filter) return true;
-	const app = filter.app?.toLocaleLowerCase();
-	const title = filter.title?.toLocaleLowerCase();
-	return (
-		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || matchesWindowApp(window, app, appPids)) &&
-		(!title || window.title.toLocaleLowerCase().includes(title))
-	);
-}
-
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
@@ -370,6 +359,8 @@ const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
 const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
+/** JSON-escaped characters of a drag's selected text its output line quotes; the returned selection keeps it whole. */
+const DRAG_SELECTION_PREVIEW_CHARS = 24;
 
 /**
  * The native action `perform(action)` runs, as the key the refusals check and the name macOS native
@@ -1149,11 +1140,11 @@ class Win {
 			this.pid,
 		);
 		if (!selection) return undefined;
-		// The whole text is in the returned selection; the output line only names it.
-		const notice = `drag selected ${JSON.stringify(selection.text)} through accessibility instead of dragging; no mouse input was sent`;
+		// The returned selection keeps the whole text; the output line quotes its start.
+		const quoted = truncate(JSON.stringify(selection.text).slice(1, -1), DRAG_SELECTION_PREVIEW_CHARS);
 		context.output.push({
 			type: "text",
-			text: truncateToWidth(notice, TRUNCATE_LENGTHS.LINE),
+			text: `drag selected "${quoted}" through accessibility instead of dragging; no mouse input was sent`,
 		});
 		return selection;
 	}
@@ -1743,6 +1734,8 @@ export class ComputerWorkerCore {
 			const windows = await nativeCall(signal, () => session.listWindows());
 			let appPids: Set<number> | undefined;
 			const app = filter?.app?.toLocaleLowerCase();
+			// Decide before title/id filtering, so another app cannot substitute for the named app.
+			const exactApp = !!app && windows.some(window => window.app.toLocaleLowerCase() === app);
 			// An app filter that names no window's app is looked up as an application id or path.
 			if (
 				app &&
@@ -1760,7 +1753,20 @@ export class ComputerWorkerCore {
 					}
 				}
 			}
-			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids)) };
+			const title = filter?.title?.toLocaleLowerCase();
+			return {
+				windows,
+				appPids,
+				matches: windows.filter(window => {
+					if (!filter) return true;
+					return (
+						(filter.id === undefined || window.id === String(filter.id)) &&
+						(!app ||
+							(exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!title || window.title.toLocaleLowerCase().includes(title))
+					);
+				}),
+			};
 		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",

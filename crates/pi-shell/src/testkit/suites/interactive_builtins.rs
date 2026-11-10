@@ -102,10 +102,10 @@ fn run_fs(src: &str, fs: crate::testkit::MemFs) -> (String, String, i32) {
 #[test]
 fn history_files_read_append_and_read_new() {
 	let fs = crate::testkit::MemFs::new();
-	fs.add_file("/h/bn", b"a\nb\nc\n", 0o600);
+	fs.add_file("/home/bn", b"a\nb\nc\n", 0o600);
 	let (out, err, _) = run_fs(
-		"HISTFILE=/h/bn; history -r; echo d >> /h/bn; echo e >> /h/bn; history -n; history; history \
-		 -s f; history -a; while IFS= read -r l; do echo \"<$l>\"; done < /h/bn",
+		"HISTFILE=/home/bn; history -r; echo d >> /home/bn; echo e >> /home/bn; history -n; \
+		 history; history -s f; history -a; while IFS= read -r l; do echo \"<$l>\"; done < /home/bn",
 		fs,
 	);
 	assert_eq!(err, "");

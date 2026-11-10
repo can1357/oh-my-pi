@@ -1,8 +1,9 @@
-// ../coding-agent/src/tools/browser/relay/protocol.ts
+// packages/coding-agent/src/tools/browser/relay/protocol.ts
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
+var DOWNLOADS_PROTOCOL_VERSION = 1;
 
-// extension/debugger-ownership.ts
+// packages/browser-relay/extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
     if (!target.attached || target.tabId === undefined)
@@ -17,7 +18,58 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
-// extension/foreign-frames.ts
+// packages/browser-relay/extension/download-pairing.ts
+var DOWNLOAD_PAIRING_MS = 5000;
+var DOWNLOAD_LOOKUP_MS = 60000;
+
+class DownloadPairing {
+  #now;
+  #pairs = new Map;
+  #reports = [];
+  constructor(now = Date.now) {
+    this.#now = now;
+  }
+  report(guid, url) {
+    if (this.#pairs.has(guid) || this.#reports.some((report) => report.guid === guid))
+      return;
+    this.#dropAgedReports();
+    this.#reports.push({ guid, url, at: this.#now() });
+  }
+  created(id, url) {
+    this.#dropAgedReports();
+    const index = this.#reports.findIndex((report) => report.url === url);
+    if (index < 0)
+      return;
+    this.#pairs.set(this.#reports[index].guid, { id });
+    this.#reports.splice(index, 1);
+  }
+  #dropAgedReports() {
+    const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
+    while (this.#reports.length > 0 && this.#reports[0].at < oldest)
+      this.#reports.shift();
+  }
+  finished(id, state) {
+    const now = this.#now();
+    for (const [guid, pair] of this.#pairs) {
+      if (pair.id === id) {
+        if (state === "interrupted")
+          this.#pairs.delete(guid);
+        else
+          pair.completedAt = now;
+      } else if (pair.completedAt !== undefined && pair.completedAt < now - DOWNLOAD_LOOKUP_MS) {
+        this.#pairs.delete(guid);
+      }
+    }
+  }
+  idFor(guid) {
+    return this.#pairs.get(guid)?.id;
+  }
+  forget(guid) {
+    this.#pairs.delete(guid);
+  }
+}
+
+// packages/browser-relay/extension/foreign-frames.ts
 var RETRY_DELAYS_MS = [50, 100, 200, 400];
 var sweeps = new Map;
 async function pastForeignFrames(tabId, request) {
@@ -79,7 +131,7 @@ async function neutralizeForeignFrames(tabId) {
   }
 }
 
-// extension/background.ts
+// packages/browser-relay/extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
@@ -240,6 +292,7 @@ async function buildHello() {
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
     reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+    downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -287,6 +340,14 @@ async function runRpc(msg, origin) {
     case "ungroup":
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
+    case "findDownload": {
+      const id = downloads.idFor(msg.guid);
+      const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+      if (item && item.state !== "in_progress")
+        downloads.forget(msg.guid);
+      const found = item ? { filename: item.filename, state: item.state } : null;
+      return found;
+    }
   }
 }
 function handleRelayMessage(socket, raw) {
@@ -349,9 +410,19 @@ async function connect() {
     socket.close();
   };
 }
+var downloads = new DownloadPairing;
+chrome.downloads.onCreated.addListener((item) => downloads.created(item.id, item.finalUrl));
+chrome.downloads.onChanged.addListener((delta) => {
+  const state = delta.state?.current;
+  if (state === "complete" || state === "interrupted")
+    downloads.finished(delta.id, state);
+});
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
+  if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+    downloads.report(params.guid, params.url);
+  }
   post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {

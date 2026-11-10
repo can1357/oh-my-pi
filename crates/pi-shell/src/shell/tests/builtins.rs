@@ -15,6 +15,7 @@ async fn cmp_is_registered_as_an_in_process_builtin() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -53,6 +54,7 @@ async fn moreutils_builtins_are_registered_in_process() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -131,6 +133,7 @@ async fn uutils_sort_compress_program_uses_shell_path_and_stderr() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -193,6 +196,7 @@ async fn uutils_mkdir_resolves_cwd_and_displays_operand() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -239,6 +243,7 @@ async fn command_v_iterates_all_operands() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -296,6 +301,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -362,6 +368,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"rm",
 		"rmdir",
 		"rsync",
+		"sd",
 		"sed",
 		"seq",
 		"sg",
@@ -457,6 +464,7 @@ async fn every_process_builtin_is_installed_and_dispatches() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -551,6 +559,7 @@ async fn uutils_mkdir_expands_tilde_for_every_brace_element() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -593,6 +602,7 @@ async fn uutils_mkdir_help_and_bad_flag_do_not_exit_process() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -638,6 +648,7 @@ async fn uutils_head_streams_stdin_and_reads_files() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -690,6 +701,7 @@ async fn uutils_head_help_and_bad_flag_do_not_exit_process() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -734,6 +746,7 @@ async fn uutils_filters_listing_find_grep() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -828,6 +841,7 @@ async fn rg_builtin_uses_ripgrep_defaults() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -901,6 +915,7 @@ async fn fd_builtin_uses_fd_defaults() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1005,6 +1020,7 @@ async fn rg_builtin_defaults_to_cwd_unless_stdin_is_pipeline() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1059,6 +1075,7 @@ async fn grep_quiet_and_line_regexp() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1117,6 +1134,7 @@ async fn uutils_rm_and_mv_operate_on_shell_cwd() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1160,6 +1178,7 @@ async fn uutils_rm_missing_file_prints_single_diagnostic() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1198,6 +1217,7 @@ async fn uutils_find_display_and_actions_split_paths() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1279,6 +1299,7 @@ async fn uutils_sed_substitutes_streams_and_edits_in_place() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1499,6 +1520,7 @@ async fn uutils_xargs_children_feed_pipeline_and_report_failure() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1608,6 +1630,7 @@ async fn uutils_jq_filters_json_and_propagates_exit_status() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 	session
@@ -1651,6 +1674,7 @@ async fn uutils_head_stdin_read_is_cancellable() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	};
 	let mut session = create_session(&config).await.expect("create_session");
 
@@ -1698,6 +1722,7 @@ async fn uutils_builtins_respect_disable_env() {
 			snapshot_path: None,
 			minimizer:     None,
 			filesystem:    Fs::native(),
+			seed:          None,
 		}
 	};
 
@@ -1706,6 +1731,7 @@ async fn uutils_builtins_respect_disable_env() {
 		snapshot_path: None,
 		minimizer:     None,
 		filesystem:    Fs::native(),
+		seed:          None,
 	})
 	.await
 	.expect("create_session");
@@ -1737,4 +1763,29 @@ async fn is_session_builtin(session: &mut ShellSessionCore, name: &str) -> bool 
 		.await
 		.expect("type -t");
 	read_capture(&out) == "builtin\n"
+}
+
+/// On Windows a utility written in the syntax of the System32 program it
+/// shadows runs that program: `find /c /v ""` counts lines with cmd's
+/// `FIND` (pi's GNU `find` read `/c` as drive `C:` and walked it), and its
+/// search string reaches `FIND` quoted, as `FIND` requires, even when it
+/// starts with `/`. GNU syntax keeps pi's `find`.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn windows_switch_syntax_runs_the_shadowed_system_program() {
+	// Varied text: `FIND` guesses UTF-16 (`IsTextUnicode`) for tiny uniform
+	// input such as `a\nb\n`.
+	let input = r"printf 'apple pie\r\nbanana split\r\nGET /api/users\r\n'";
+	let (result, output) = execute_captured(format!(
+		"{input} | find /c /v \"\"; {input} | find /i \"BANANA\"; {input} | find /i \"/API\"; find \
+		 . -maxdepth 0"
+	))
+	.await;
+	assert_eq!(result.exit_code, Some(0), "{output}");
+	let lines: Vec<&str> = output
+		.lines()
+		.map(str::trim_end)
+		.filter(|l| !l.is_empty())
+		.collect();
+	assert_eq!(lines, ["3", "banana split", "GET /api/users", "."]);
 }

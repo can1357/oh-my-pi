@@ -233,7 +233,7 @@ fn timespec(time: FileTime) -> libc::timespec {
 	};
 	// SAFETY: timespec is plain old data; zeroing covers any padding fields.
 	let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-	ts.tv_sec = secs as libc::time_t;
+	ts.tv_sec = secs as _;
 	ts.tv_nsec = nsec as _;
 	ts
 }
@@ -728,7 +728,7 @@ pub(crate) fn set_crtime_at(
 	let mut attrs = crtime_attrlist();
 	// SAFETY: timespec is plain old data.
 	let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-	ts.tv_sec = crtime as libc::time_t;
+	ts.tv_sec = crtime as _;
 	let options = if nofollow { libc::FSOPT_NOFOLLOW } else { 0 };
 	check(retry(|| {
 		// SAFETY: `attrs` and `ts` are live, correctly sized buffers.

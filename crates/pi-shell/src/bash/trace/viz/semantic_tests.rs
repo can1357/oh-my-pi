@@ -7,7 +7,7 @@ use crate::bash::{
 	engine::{Engine, EngineConfig},
 	event::AssignScope,
 	ids::{ModeId, Vpid},
-	syntax::parse_all,
+	syntax::{CompleteCommand, Features, parse_all},
 	trace::{
 		Node,
 		history::{HistoryData, HistoryEvent},
@@ -22,41 +22,72 @@ struct Unit {
 	nodes:  Vec<Node>,
 }
 struct Fixture {
-	script: BString,
-	units:  Vec<Unit>,
-	cache:  Cache,
+	script:    BString,
+	units:     Vec<Unit>,
+	cache:     Cache,
+	announced: Option<usize>,
+}
+/// One announced unit compiled from `command`, whose spans index `bytes`.
+fn unit(engine: &Engine, bytes: &[u8], command: CompleteCommand) -> Unit {
+	let at = command.span.lo;
+	let (lowered, _) = engine.compile(command, bytes, ModeId::Bash, Features::NONE, true);
+	let parents = crate::bash::trace::nodes::parents(&lowered.nodes);
+	let nodes = lowered
+		.nodes
+		.iter()
+		.zip(parents)
+		.map(|(info, parent)| Node::new(info.kind, info.lo, info.hi, parent))
+		.collect();
+	Unit {
+		at,
+		source: lowered.source.clone(),
+		syntax: lowered
+			.trace_syntax
+			.get()
+			.expect("observed native syntax")
+			.as_ref()
+			.clone(),
+		nodes,
+	}
 }
 impl Fixture {
 	fn new(script: &str) -> Self {
-		let mut units = Vec::new();
 		let engine = Engine::new(EngineConfig::default());
-		for command in parse_all(script.as_bytes(), Features::NONE)
+		let units = parse_all(script.as_bytes(), Features::NONE)
 			.expect("canonical parse")
 			.commands
-		{
-			let at = command.span.lo;
-			let (lowered, _) =
-				engine.compile(command, script.as_bytes(), ModeId::Bash, Features::NONE, true);
-			let parents = crate::bash::trace::nodes::parents(&lowered.nodes);
-			let nodes = lowered
-				.nodes
-				.iter()
-				.zip(parents)
-				.map(|(info, parent)| Node::new(info.kind, info.lo, info.hi, parent))
-				.collect();
-			units.push(Unit {
-				at,
-				source: lowered.source.clone(),
-				syntax: lowered
-					.trace_syntax
-					.get()
-					.expect("observed native syntax")
-					.as_ref()
-					.clone(),
-				nodes,
-			});
-		}
-		Self { script: script.into(), units, cache: Cache::default() }
+			.into_iter()
+			.map(|command| unit(&engine, script.as_bytes(), command))
+			.collect::<Vec<_>>();
+		Self { announced: None, script: script.into(), units, cache: Cache::default() }
+	}
+
+	/// A fixture shaped like the segmented minimizer runner: one unit per
+	/// `;`-separated pipeline, announced at its own span, with the separator
+	/// between two of them inside no unit at all.
+	fn segmented(script: &str) -> Self {
+		let crate::minimizer::plan::CommandPlan::Chain { segments } =
+			crate::minimizer::plan::analyze(script)
+		else {
+			panic!("expected a segmented chain")
+		};
+		let engine = Engine::new(EngineConfig::default());
+		let units = segments
+			.iter()
+			.map(|segment| {
+				let bytes = segment.command.as_bytes();
+				let command = parse_all(bytes, Features::NONE)
+					.expect("segment parse")
+					.commands
+					.into_iter()
+					.next()
+					.expect("one command per segment");
+				let mut unit = unit(&engine, bytes, command);
+				unit.at = segment.source_at;
+				unit
+			})
+			.collect::<Vec<_>>();
+		Self { announced: None, script: script.into(), units, cache: Cache::default() }
 	}
 
 	fn root(&self, unit: usize) -> Command<'_> {
@@ -102,12 +133,15 @@ impl VizSource for Fixture {
 
 	fn unit(&self, index: usize) -> Option<super::super::runtime::SourceUnit<'_>> {
 		let unit = self.units.get(index)?;
+		// An unannounced unit is not in the trace yet: it has no start, and
+		// no compiled syntax to draw.
+		let announced = self.announced.is_none_or(|count| index < count);
 		Some(super::super::runtime::SourceUnit {
 			index:      index as u32,
 			source:     BStr::new(&unit.source),
-			at:         Some(unit.at),
+			at:         announced.then_some(unit.at),
 			line:       1,
-			syntax:     Some(&unit.syntax),
+			syntax:     announced.then_some(&unit.syntax),
 			projection: 0,
 			nodes:      &unit.nodes,
 			callout:    false,
@@ -462,4 +496,46 @@ fn live_and_restored_sources_share_the_same_semantic_renderer() {
 	let live = serde_json::to_value(f.present(&[], &Options::default())).unwrap();
 	assert_eq!(restored["rows"], live["rows"]);
 	assert_eq!(restored["original"], live["original"]);
+}
+
+/// Statement and literal rows of a Pseudo presentation: text, indentation and
+/// role.
+fn statements(p: &Presentation) -> Vec<(String, u32, Option<&'static str>)> {
+	p.rows
+		.iter()
+		.filter(|r| r.role == Some("stmt") || r.role == Some("raw"))
+		.map(|r| {
+			(
+				r.segments
+					.iter()
+					.map(|s| s.text.as_str())
+					.collect::<String>(),
+				r.depth,
+				r.role,
+			)
+		})
+		.collect()
+}
+
+#[test]
+fn segmented_statement_chain_never_draws_a_separator_row() {
+	// Regression for #18258: the minimizer runs each `;`-separated pipeline as
+	// its own unit, so the separator sits outside every unit's span. The gap
+	// between two announced units, and the `;` opening the chain still ahead of
+	// the engine, were drawn as literal `;` rows. `;` carries no meaning of its
+	// own in Pseudo — `list()` already drops the one inside a single list.
+	let mut f = Fixture::segmented("echo a; echo b");
+	assert_eq!(f.units.len(), 2, "one unit per statement");
+	assert_eq!(f.units.iter().map(|u| u.at).collect::<Vec<_>>(), [0, 8]);
+	f.announced = Some(0);
+	let pending = statements(&f.present(&[], &Options::default()));
+	f.announced = Some(1);
+	let running = statements(&f.present(&[], &Options::default()));
+	f.announced = Some(2);
+	let finished = statements(&f.present(&[], &Options::default()));
+	let expected =
+		[("print(\"a\")".to_owned(), 0, Some("stmt")), ("print(\"b\")".to_owned(), 0, Some("stmt"))];
+	assert_eq!(pending, expected, "pending");
+	assert_eq!(running, expected, "running");
+	assert_eq!(finished, expected, "finished");
 }
