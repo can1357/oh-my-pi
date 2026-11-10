@@ -156,15 +156,10 @@ describe("AgentSession bash session ownership", () => {
 		);
 	});
 
-	/**
-	 * Aborts a running TERM-ignoring foreground command, disposes the session, then proves the
-	 * process was killed: it writes `survived` only if it is still alive once `release` exists.
-	 */
+	/** Aborts a TERM-ignoring command and verifies disposal killed its process. */
 	async function expectAbortedCommandKilledByDispose(beforeAbort?: () => Promise<void>): Promise<void> {
 		const pidFile = path.join(tempDir.path(), "child.pid");
-		const release = path.join(tempDir.path(), "release");
-		const marker = path.join(tempDir.path(), "survived");
-		const command = `trap '' TERM HUP INT; perl -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; while (!-e $ARGV[1]) { select undef, undef, undef, .01 }; open my $o, ">", $ARGV[2] or die $!; print $o "alive"' '${pidFile}' '${release}' '${marker}'`;
+		const command = `trap '' TERM HUP INT; perl -e 'open my $f, ">", $ARGV[0] or die $!; print $f $$; close $f; sleep 60' '${pidFile}'`;
 		const running = session.executeBash(command);
 		let pid = 0;
 		try {
@@ -178,10 +173,14 @@ describe("AgentSession bash session ownership", () => {
 			const result = await running;
 			expect(result.cancelled).toBe(true);
 			await session.dispose();
-			fs.writeFileSync(release, "");
-			// Real signal delivery and a surviving subprocess's file write cannot use fake timers.
-			await Bun.sleep(50);
-			expect(fs.existsSync(marker)).toBe(false);
+			let alive = true;
+			try {
+				process.kill(pid, 0);
+			} catch (error) {
+				if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+				alive = false;
+			}
+			expect(alive).toBe(false);
 		} finally {
 			if (pid) {
 				try {
