@@ -257,7 +257,16 @@ CONTEXTS = [
 	("exit_trap_posix", "set -o posix; trap '__body' EXIT; exit 7"),
 ]
 
-PREAMBLE = "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n"
+# Variable names the raisers rely on being UNSET.  Every generated script
+# unsets them in its preamble so the measurement cannot depend on the
+# caller's environment — `__miss=x` in the environment would silence
+# `${__miss?BOOM}` and `set -u; : $__miss`, and `__never_set=x` would
+# silence `${__never_set?boom}` and `set -u; : $__never_set`.
+_SENTINEL_NAMES = ("__miss", "__never_set")
+_UNSET_SENTINELS = "unset " + " ".join(_SENTINEL_NAMES) + "\n"
+
+
+PREAMBLE = _UNSET_SENTINELS + "readonly __r=1\ndeclare -i __I\ndeclare -a __A\n"
 
 # bash answers an `ERREXIT` jump with `last_command_exit_value` as it stands
 # at the site.  With a zero prior status that is indistinguishable from the
@@ -429,7 +438,8 @@ def main() -> None:
 	):
 		n += 1
 		code = (
-			CARRIER_CONTEXTS[ctx]
+			"unset " + " ".join(_SENTINEL_NAMES) + "; "
+			+ CARRIER_CONTEXTS[ctx]
 			+ " declare -a __A; declare -i __I; "
 			+ CARRIERS[carrier](CARRIER_RAISERS[raiser]).replace("%N%", str(n))
 			+ "; echo END:$?"
