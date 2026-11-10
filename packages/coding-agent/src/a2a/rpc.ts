@@ -614,8 +614,36 @@ async function abortOwnedRef(deps: A2aDispatchDeps, ref: AgentRef): Promise<void
 		deps.registry.setStatus(ref.id, "aborted", ref);
 	}
 }
+/**
+ * The removal transition shared by the registry `removed` event and a
+ * registration that settles to a ref the registry no longer holds: drop the
+ * pending row — only while it is still this exact ledger record — with its
+ * ownership and context state, then notify the views that served it. A
+ * replacement ref under the same id is never mutated, and a normal removal
+ * stays missing: no new rejected/FAILED tombstone is minted.
+ */
+export function discardPendingSpawn(deps: A2aDispatchDeps, record: PendingSpawnRecord): void {
+	const ledger = deps.pendingSpawns;
+	// An obsolete callback must not discard a newer ledger record for the id.
+	if (ledger?.get(record.task.id) !== record) return;
+	ledger.delete(record.task.id);
+	deps.createdTaskRefs?.delete(record.task.id);
+	deps.createdTaskIds?.delete(record.task.id);
+	deps.contextIds?.delete(record.task.id);
+	ledger.notify(record.task.id);
+}
 
 async function onRegistrationResolved(deps: A2aDispatchDeps, record: PendingSpawnRecord, ref: AgentRef): Promise<void> {
+	// The ref may have registered and been removed — or been replaced under
+	// the id — before this callback ran. The exact-ref check gates every
+	// mutation below: resolving the row into a ref the registry no longer
+	// holds would resurrect a removed agent through GetTask/ListTasks/SSE and
+	// let a pending cancel abort a generation the registry already dropped.
+	// A mismatch is the same transition as the registry's `removed` event.
+	if (deps.registry.get(ref.id) !== ref) {
+		discardPendingSpawn(deps, record);
+		return;
+	}
 	record.outcome = "resolved";
 	record.ref = ref;
 	claimResolvedRef(deps, ref);

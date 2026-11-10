@@ -43,6 +43,7 @@ import {
 	RpcError,
 	TASK_STATE,
 	TERMINAL_TASK_STATES,
+	discardPendingSpawn,
 	dispatchA2aMethod,
 	failedDeliveryTask,
 	sendA2aMessage,
@@ -292,10 +293,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 			// dropped. Evict that record so GetTask, ListTasks, and SSE match a
 			// normal unregistration: missing, absent, and one final FAILED.
 			const record = pendingSpawns.get(event.ref.id);
-			if (record?.ref === event.ref) {
-				pendingSpawns.delete(event.ref.id);
-				pendingSpawns.notify(event.ref.id);
-			}
+			if (record?.ref === event.ref) discardPendingSpawn(dispatchDeps, record);
 			return;
 		}
 		if (event.type !== "registered" || !dispatchDeps.createdTaskRefs?.has(event.ref.id)) return;

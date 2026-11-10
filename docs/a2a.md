@@ -167,8 +167,15 @@ deadline; only recipient removal cleans the queue.
 For remote spawns, task states follow the A2A task model: `SUBMITTED` ->
 `WORKING` -> `COMPLETED`/`FAILED` (via `GetTask` polling or SSE updates).
 If a reserved spawn has not registered yet, it remains `SUBMITTED`; registration
-failure becomes `FAILED`. A cancellation requested while registration is
-pending is applied to that exact agent once it registers. `CancelTask` only
+failure becomes `FAILED`. Registration cannot resurrect a removed agent: the
+pending row resolves only while the registry still holds the registration's
+exact ref, and a ref registered then removed — or replaced under the same id —
+before the promise settles is discarded like a normal unregistration (missing
+from `GetTask`, absent from `ListTasks`, one final `FAILED` on SSE), without a
+new tombstone and without touching the replacement. A cancellation requested
+while registration is pending is applied to that exact agent once it registers
+and dies with the discarded row when that agent never survives to settlement;
+a replacement the bridge did not create is never canceled. `CancelTask` only
 cancels bridge-created tasks; Main and local subagents are not cancelable
 through the bridge, including when Main is addressed by its identity alias.
 

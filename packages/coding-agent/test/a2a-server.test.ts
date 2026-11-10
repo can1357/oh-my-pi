@@ -1565,7 +1565,10 @@ describe("A2A pending spawn lifecycle", () => {
 			const sent = await rpc(handle, sendPending("m-send", "ctx-pending"));
 			expect(taskResult(sent.json).status.state).toBe(TASK_STATE.SUBMITTED);
 
+			// The seam resolves its promise only once the registry holds the
+			// ref, so the legitimate resolution registers before settling.
 			const ref = makeRef({ id, status: "running", createdAt: 1_500, activity: "booting" });
+			registry.insert(ref);
 			registration.resolve(ref);
 			await registration.promise;
 
@@ -1573,8 +1576,6 @@ describe("A2A pending spawn lifecycle", () => {
 			expect(got.status.state).toBe(TASK_STATE.WORKING);
 			expect(got.contextId).toBe("ctx-pending");
 			await sse.until(text => text.includes("TASK_STATE_WORKING"));
-
-			registry.insert(ref);
 			const listed = listResult(
 				(await rpc(handle, { jsonrpc: "2.0", id: 3, method: "ListTasks", params: {} })).json,
 			);
@@ -1704,7 +1705,10 @@ describe("A2A pending spawn lifecycle", () => {
 		replaced.registration.resolve(owned);
 		await replaced.registration.promise;
 		expect(replacementAborts).toBe(0);
-		expect(ownedAborts).toBe(1);
+		// A settlement to a ref the registry no longer holds is the removal
+		// transition: the pending cancel dies with the discarded row and
+		// aborts neither the replacement nor the removed generation.
+		expect(ownedAborts).toBe(0);
 		expect(replaced.registry.get(id)?.status).toBe("running");
 		const live = rpcTask(
 			(await rpc(replaced.handle, { jsonrpc: "2.0", id: 4, method: "GetTask", params: { id } })).json,
@@ -1721,9 +1725,10 @@ describe("A2A pending spawn lifecycle", () => {
 		const sse = (await openSpawnStream(handle, "m-evict", "ctx-pending")).sse;
 		try {
 			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			// The seam resolves its promise only once the registry holds the ref.
+			registry.insert(ref);
 			registration.resolve(ref);
 			await registration.promise;
-			registry.insert(ref);
 			await sse.until(text => text.includes("TASK_STATE_WORKING"));
 
 			expect(registry.unregister(id)).toBe(true);
@@ -1771,6 +1776,105 @@ describe("A2A pending spawn lifecycle", () => {
 		expect(ownedAborts).toBe(1);
 		expect(staleAborts).toBe(0);
 		expect(registry.get(id)?.status).toBe("aborted");
+	});
+
+	it("registration removed in the same turn never reappears through pending snapshot", async () => {
+		const id = "Spawn-late";
+		const { handle, registration, registry } = pendingServer(id, [
+			makeRef({ id: "alpha", createdAt: 1_000, status: "running" }),
+		]);
+		const ref = makeRef({ id, status: "running", createdAt: 1_500, activity: "booting" });
+		const sse = (await openSpawnStream(handle, "m-same-turn", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			const sent = await rpc(handle, sendPending("m-send", "ctx-pending"));
+			expect(taskResult(sent.json).status.state).toBe(TASK_STATE.SUBMITTED);
+
+			// The exact ref registers and is removed before the registration
+			// promise's `.then` callback runs: the ledger must not resolve the
+			// pending row into the removed generation.
+			registry.insert(ref);
+			registration.resolve(ref);
+			expect(registry.unregister(id)).toBe(true);
+			await registration.promise;
+
+			const missing = await rpc(handle, { jsonrpc: "2.0", id: 2, method: "GetTask", params: { id } });
+			expect(errorResult(missing.json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+			const listed = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 3, method: "ListTasks", params: {} })).json,
+			);
+			expect(listed.tasks.map(task => task.id)).toEqual(["alpha"]);
+			await sse.toEnd();
+			expect(
+				sseStatusUpdates(sse.text).filter(update => update.state === TASK_STATE.FAILED && update.final),
+			).toHaveLength(1);
+		} finally {
+			sse.cancel();
+		}
+	});
+
+	it("pending cancel cannot affect replacement registered before promise settlement", async () => {
+		const id = "Spawn-late";
+		let oldAborts = 0;
+		let replacementAborts = 0;
+		const old = makeRef({
+			id,
+			status: "running",
+			createdAt: 1_500,
+			session: { abort: async () => void (oldAborts += 1) } as never,
+		});
+		const replacement = makeRef({
+			id,
+			status: "running",
+			createdAt: 2_000,
+			activity: "replacement work",
+			session: { abort: async () => void (replacementAborts += 1) } as never,
+		});
+		const { handle, registration, registry } = pendingServer(id, []);
+		const sse = (await openSpawnStream(handle, "m-replace-cancel", "ctx-pending")).sse;
+		try {
+			await sse.until(text => text.includes("TASK_STATE_SUBMITTED"));
+			const canceled = rpcTask(
+				(await rpc(handle, { jsonrpc: "2.0", id: 2, method: "CancelTask", params: { id } })).json,
+			);
+			expect(canceled.status.state).toBe(TASK_STATE.SUBMITTED);
+
+			// The registered old generation is removed and a distinct
+			// replacement ref takes the id, all before the promise settles.
+			registry.insert(old);
+			registration.resolve(old);
+			expect(registry.unregister(id)).toBe(true);
+			registry.insert(replacement);
+			await registration.promise;
+
+			expect(oldAborts).toBe(0);
+			expect(replacementAborts).toBe(0);
+			expect(registry.get(id)).toBe(replacement);
+			expect(registry.get(id)?.status).toBe("running");
+
+			const got = rpcTask((await rpc(handle, { jsonrpc: "2.0", id: 3, method: "GetTask", params: { id } })).json);
+			expect(got.status.state).toBe(TASK_STATE.WORKING);
+			expect(got.status.message?.parts[0]?.text).toBe("replacement work");
+			const listed = listResult(
+				(await rpc(handle, { jsonrpc: "2.0", id: 4, method: "ListTasks", params: {} })).json,
+			);
+			expect(listed.tasks.map(task => task.id)).toEqual([id]);
+			expect(listed.tasks[0]?.status.state).toBe(TASK_STATE.WORKING);
+			// A pending cancel that resolved to a removed generation must not
+			// linger and must not transfer: the id left the bridge's ownership
+			// with the discarded row, so a fresh CancelTask refuses instead of
+			// aborting a replacement ref the bridge never created.
+			const refused = await rpc(handle, { jsonrpc: "2.0", id: 5, method: "CancelTask", params: { id } });
+			expect(errorResult(refused.json).code).toBe(RPC_ERRORS.TASK_NOT_CANCELABLE);
+			expect(oldAborts).toBe(0);
+			expect(replacementAborts).toBe(0);
+			expect(registry.get(id)?.status).toBe("running");
+			// The live replacement owns the stream: no removal-style terminal
+			// failure may be minted for it.
+			expect(sse.text).not.toContain('"final":true');
+		} finally {
+			sse.cancel();
+		}
 	});
 });
 
