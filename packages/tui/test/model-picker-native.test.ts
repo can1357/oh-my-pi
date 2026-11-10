@@ -197,7 +197,7 @@ test("a dated Factory Droid credit rate keeps the narrow price column to the rat
 		],
 	};
 	const hub = openHub({ assign: [], cancel: 0 }, [...MODELS, promoted]);
-	const items = props(hub.describe(withPicker)).items ?? [];
+	const items = props(hub.describe(withPicker)!).items ?? [];
 	expect(items.find(entry => entry.id === "factory-droid/gpt-5.6-sol")?.facts?.price).toBe("$3·15 1.6×");
 });
 
