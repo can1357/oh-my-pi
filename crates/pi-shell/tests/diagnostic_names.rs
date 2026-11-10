@@ -685,12 +685,90 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"bash: line 1: ./a\xffb: No such file or directory\n",
 	},
+	// An in-engine nested shell: a mode-755 text file with no `#!`, run as
+	// `./child.sh`, which the kernel reads and runs itself (ENOEXEC, see
+	// `vm::nested`). Its diagnostics name that script, from a function it
+	// defined as much as from its top level.
+	// src-nested-func-not-found (c)
+	Row {
+		id: "src-nested-func-not-found",
+		setup: r#"printf 'f(){ nosuch_xyz; }\nf\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 127,
+		stdout: b"",
+		stderr: b"./child.sh: line 1: nosuch_xyz: command not found\n",
+	},
+	// src-nested-top-not-found (c): the same diagnostic at the nested
+	// script's top level, the control for the row above.
+	Row {
+		id: "src-nested-top-not-found",
+		setup: r#"printf 'nosuch_xyz\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 127,
+		stdout: b"",
+		stderr: b"./child.sh: line 1: nosuch_xyz: command not found\n",
+	},
+	// src-nested-func-badinterp (c)  // 5.2.21 differs: 127 './child.sh: line 1: ./victim: cannot execute: required file not found\n'
+	Row {
+		id: "src-nested-func-badinterp",
+		setup: r#"printf '#!/missing/review/interpreter\n' > victim; chmod 755 victim; printf 'f(){ ./victim; }\nf\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 126,
+		stdout: b"",
+		stderr: b"./child.sh: ./victim: /missing/review/interpreter: bad interpreter: No such file or directory\n",
+	},
+	// src-nested-func-unbound (c)
+	Row {
+		id: "src-nested-func-unbound",
+		setup: r#"printf 'set -u\nf(){ echo "$nosuch_var_xyz"; }\nf\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 1,
+		stdout: b"",
+		stderr: b"./child.sh: line 2: nosuch_var_xyz: unbound variable\n",
+	},
+	// src-nested-two-levels-func (c): the innermost nested script, not the
+	// outermost shell, names the diagnostic two levels down.
+	Row {
+		id: "src-nested-two-levels-func",
+		setup: r#"printf 'f(){ nosuch_xyz; }\nf\n' > grand.sh; chmod 755 grand.sh; printf './grand.sh\n' > mid.sh; chmod 755 mid.sh"#,
+		mode: Mode::Dashc,
+		script: "./mid.sh",
+		status: 127,
+		stdout: b"",
+		stderr: b"./grand.sh: line 1: nosuch_xyz: command not found\n",
+	},
+	// src-nested-bash-source-inside (c): the recorded value behind the
+	// prefix, inside a function the nested script defined.
+	Row {
+		id: "src-nested-bash-source-inside",
+		setup: r#"printf 'g(){ echo "[${BASH_SOURCE[0]}] [$0]"; }\ng\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 0,
+		stdout: b"[./child.sh] [./child.sh]\n",
+		stderr: b"",
+	},
+	// src-nested-bash-source-top (c)
+	Row {
+		id: "src-nested-bash-source-top",
+		setup: r#"printf 'echo "[${BASH_SOURCE[0]}] [$0]"\n' > child.sh; chmod 755 child.sh"#,
+		mode: Mode::Dashc,
+		script: "./child.sh",
+		status: 0,
+		stdout: b"[./child.sh] [./child.sh]\n",
+		stderr: b"",
+	},
 ];
 
 /// Inside a sourced file a noninteractive shell names that file: its
 /// `BASH_SOURCE[0]`, which a function defined there keeps while it runs, and
 /// which an `eval`, a subshell and a nested `.` inherit. Outside one the prefix
-/// is `$0`.
+/// is `$0` -- an in-engine nested shell's own `$0`, not the outermost shell's,
+/// for a function that nested shell defined as much as for its top level.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_diagnostic_inside_a_sourced_file_names_that_file() {
 	assert_rows(&["src-", "ctl-"]).await;
