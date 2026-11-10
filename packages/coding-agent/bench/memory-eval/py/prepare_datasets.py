@@ -3,7 +3,8 @@
 Run with venv-engine's python. Each output gets a `<file>.revision` marker holding the revision it was downloaded at and
 the SHA-256 of the file written; run.ts refuses data whose marker is missing, names another revision, or names other
 bytes. Idempotent: an output whose marker matches the pinned revision and the file is skipped, any other is downloaded
-again. A marker from before the digest was recorded is upgraded in place.
+again, including a marker from before the digest was recorded: it names no digest, so nothing can attest the file
+beside it.
 """
 
 import os
@@ -67,22 +68,20 @@ def marker(out: Path) -> Path:
 def read_current(out: Path, revision: str) -> str | None:
 	"""The cached file's text when its marker records `revision` and the file's own SHA-256; None otherwise.
 
-	The marker is `<revision>\\n<sha256 of the data file>\\n`. A marker from before the digest was recorded names only
-	the revision; it is upgraded in place, attesting the pair as it stands, as the revision-only marker already did.
+	The marker is `<revision>\\n<sha256 of the data file>\\n`. A marker that names only the revision (from before the
+	digest was recorded) is not current: hashing the file beside it could hash a concurrent publisher's other revision
+	and attest it as this one, so the file is downloaded again.
 	The bytes returned are the bytes hashed, and the marker is read again after them: a refresh removes the marker
 	before it replaces the data, so a replacement in between cannot pass as this revision.
 	"""
 	try:
 		lines = marker(out).read_text(encoding="utf-8").split()
-		if not lines or lines[0] != revision:
+		if len(lines) != 2 or lines[0] != revision:
 			return None
 		data = out.read_bytes()
-		sha256 = hashlib.sha256(data).hexdigest()
-		if len(lines) == 1:
-			marker(out).write_text(f"{revision}\n{sha256}\n", encoding="utf-8")
-		elif lines[1] != sha256:
+		if lines[1] != hashlib.sha256(data).hexdigest():
 			return None
-		if marker(out).read_text(encoding="utf-8").split() != [revision, sha256]:
+		if marker(out).read_text(encoding="utf-8").split() != lines:
 			return None
 		return data.decode("utf-8")
 	except FileNotFoundError:
