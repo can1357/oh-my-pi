@@ -14,7 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
 import { activeResourceExclusions } from "../../discovery/omp-extension-roots";
-import { dropExcludedPaths } from "../../discovery/resource-exclusions";
+import { dropExcludedPaths, excludedItemFilter } from "../../discovery/resource-exclusions";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
@@ -279,11 +279,17 @@ export async function discoverCustomToolPaths(
 	};
 
 	// Capability providers also expose metadata and scripts. Filter before deduplication
-	// so those entries cannot shadow executable modules with the same name.
+	// so those entries cannot shadow executable modules with the same name. Hidden copies go
+	// the same way: a same-named tool of the copy they shadowed must still load.
+	const exclusions = activeResourceExclusions();
+	const notExcluded = excludedItemFilter<{ path: string }>(exclusions);
 	const discoveredTools = await loadCapability<CustomTool>(toolCapability.id, {
 		cwd,
 		agentDir,
-		filter: tool => /\.(ts|js|mjs|cjs)$/.test(tool.path) && !tool.path.endsWith(".d.ts"),
+		filter: async tool => {
+			if (!/\.(ts|js|mjs|cjs)$/.test(tool.path) || tool.path.endsWith(".d.ts")) return false;
+			return notExcluded === undefined || (await notExcluded(tool));
+		},
 	});
 	for (const tool of discoveredTools.items) {
 		addPath(tool.path, {
@@ -304,7 +310,7 @@ export async function discoverCustomToolPaths(
 	}
 
 	// Reviewed duplicate packages stay installed but their tools do not load.
-	return dropExcludedPaths(allPathsWithSources, entry => resolvePath(entry.path, cwd), activeResourceExclusions());
+	return dropExcludedPaths(allPathsWithSources, entry => resolvePath(entry.path, cwd), exclusions);
 }
 
 /**

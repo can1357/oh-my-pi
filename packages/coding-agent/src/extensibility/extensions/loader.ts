@@ -24,7 +24,7 @@ import { isServiceTierFamily, isServiceTierForFamily } from "../../config/servic
 import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import { activeResourceExclusions } from "../../discovery/omp-extension-roots";
-import { dropExcludedPaths, type ResourceExclusions } from "../../discovery/resource-exclusions";
+import { dropExcludedPaths, excludedItemFilter, type ResourceExclusions } from "../../discovery/resource-exclusions";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import { getCodingAgentApi } from "../host-api";
@@ -739,6 +739,10 @@ export async function discoverExtensionPaths(
 	const seen = new Set<string>();
 	const disabled = new Set(disabledExtensionIds ?? []);
 	const loadOptions = disabledExtensionIds ? { cwd, disabledExtensions: disabledExtensionIds } : { cwd };
+	const exclusions = options.resourceExclusions ?? activeResourceExclusions();
+	// Capability results are deduplicated by name, so hidden copies must go before that or the copy
+	// they shadowed would not load either.
+	const notExcluded = excludedItemFilter<{ path: string }>(exclusions);
 
 	const isDisabledName = (name: string): boolean => disabled.has(`extension-module:${name}`);
 
@@ -772,6 +776,7 @@ export async function discoverExtensionPaths(
 		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
 			...loadOptions,
 			providers: ["native"],
+			filter: notExcluded,
 		});
 		for (const ext of discovered.items) {
 			await addPath(ext.path);
@@ -784,7 +789,7 @@ export async function discoverExtensionPaths(
 	// settings, installed packages, or process-global CLI injection state.
 	if (ambient) {
 		if (options.includeAmbientHooks !== false) {
-			const hooks = await loadCapability<Hook>(hookCapability.id, loadOptions);
+			const hooks = await loadCapability<Hook>(hookCapability.id, { ...loadOptions, filter: notExcluded });
 			for (const hookPath of hooks.items
 				.map(hook => hook.path)
 				.filter(hookPath => isExtensionFile(path.basename(hookPath)))) {
@@ -806,11 +811,7 @@ export async function discoverExtensionPaths(
 
 	// Explicit paths still honor the user's content-bound decision; selecting a
 	// path is not permission to silently undo that separately confirmed choice.
-	return dropExcludedPaths(
-		allPaths,
-		extPath => resolvePath(extPath, cwd),
-		options.resourceExclusions ?? activeResourceExclusions(),
-	);
+	return dropExcludedPaths(allPaths, extPath => resolvePath(extPath, cwd), exclusions);
 }
 
 /**
