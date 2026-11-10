@@ -42,6 +42,10 @@ from model_digest import model_dir_digest  # noqa: E402
 RANKED_TIERS = ("working", "episodic")
 
 
+# With sqlite-vec, upstream stores a vector in these tables by the rowid of its row instead of in memory_embeddings.
+NATIVE_VECTOR_TABLES = (("working_memory", "vec_working"), ("episodic_memory", "vec_episodes"))
+
+
 class Engine:
 	def __init__(self):
 		self.beam = None
@@ -93,7 +97,17 @@ class Engine:
 		]
 
 	def op_vector_count(self, _params):
-		return self.beam.conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
+		# Rows with a vector: those in memory_embeddings, plus rows whose vector is only in a native table (not twice).
+		conn = self.beam.conn
+		tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+		count = conn.execute("SELECT COUNT(*) FROM memory_embeddings").fetchone()[0]
+		for rows, vectors in NATIVE_VECTOR_TABLES:
+			if rows in tables and vectors in tables:
+				count += conn.execute(
+					f"SELECT COUNT(*) FROM {rows} r WHERE EXISTS (SELECT 1 FROM {vectors} v WHERE v.rowid = r.rowid)"
+					" AND NOT EXISTS (SELECT 1 FROM memory_embeddings m WHERE m.memory_id = r.id)"
+				).fetchone()[0]
+		return count
 
 	def op_vector_coverage(self, params):
 		# Upstream stores a vector in memory_embeddings (JSON) or, with sqlite-vec, in vec_working/vec_episodes by rowid.
@@ -104,7 +118,7 @@ class Engine:
 			if conn.execute("SELECT 1 FROM memory_embeddings WHERE memory_id = ?", (memory_id,)).fetchone():
 				covered += 1
 				continue
-			for rows, vectors in (("working_memory", "vec_working"), ("episodic_memory", "vec_episodes")):
+			for rows, vectors in NATIVE_VECTOR_TABLES:
 				if vectors not in tables:
 					continue
 				row = conn.execute(f"SELECT rowid FROM {rows} WHERE id = ?", (memory_id,)).fetchone()

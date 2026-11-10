@@ -72,9 +72,34 @@ class BeamMemory:
         return ([derived] + rows)[:top_k]
 `;
 
+// Like FAKE_BEAM, but with sqlite-vec's layout: a vector lives in vec_working by the rowid of its working_memory row, and
+// only the first row also has a memory_embeddings entry, so a count must not take that row twice.
+const FAKE_NATIVE_BEAM = `import sqlite3
+
+class BeamMemory:
+    def __init__(self, session_id, db_path):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.execute("CREATE TABLE memory_embeddings (memory_id TEXT)")
+        self.conn.execute("CREATE TABLE working_memory (id TEXT)")
+        self.conn.execute("CREATE TABLE vec_working (embedding TEXT)")
+        self.rows = []
+
+    def remember(self, content, source, importance):
+        memory_id = "r%d" % (len(self.rows) + 1)
+        self.rows.append({"id": memory_id, "tier": "working", "content": content})
+        rowid = self.conn.execute("INSERT INTO working_memory VALUES (?)", (memory_id,)).lastrowid
+        self.conn.execute("INSERT INTO vec_working (rowid, embedding) VALUES (?, '[1.0]')", (rowid,))
+        if len(self.rows) == 1:
+            self.conn.execute("INSERT INTO memory_embeddings VALUES (?)", (memory_id,))
+        return memory_id
+
+    def recall(self, query, top_k):
+        return self.rows[:top_k]
+`;
+
 /** The real engine script, run against a fake Mnemosyne of the given version instead of an installed one. */
-async function realScriptOnFakeMnemosyne(version = "4.0.0b4"): Promise<string> {
-	const fake = path.join(tmp, `fake-mnemosyne-${version}`);
+async function realScriptOnFakeMnemosyne(version = "4.0.0b4", beam = FAKE_BEAM): Promise<string> {
+	const fake = path.join(tmp, `fake-mnemosyne-${version}-${Bun.hash(beam)}`);
 	await Bun.write(
 		path.join(fake, `mnemosyne_memory-${version}.dist-info`, "METADATA"),
 		`Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: ${version}\n`,
@@ -85,9 +110,9 @@ async function realScriptOnFakeMnemosyne(version = "4.0.0b4"): Promise<string> {
 		path.join(fake, "mnemosyne", "core", "embeddings.py"),
 		`_DEFAULT_MODEL = "fake"\ndef available():\n    return True\ndef embed(texts):\n    return [[1.0] for _ in texts]\n`,
 	);
-	await Bun.write(path.join(fake, "mnemosyne", "core", "beam.py"), FAKE_BEAM);
+	await Bun.write(path.join(fake, "mnemosyne", "core", "beam.py"), beam);
 	return stub(
-		`fake-mnemosyne-run-${version}.py`,
+		`fake-mnemosyne-run-${version}-${Bun.hash(beam)}.py`,
 		`import runpy, sys\nsys.path.insert(0, ${JSON.stringify(fake)})\nrunpy.run_path(${JSON.stringify(REAL_SCRIPT)}, run_name="__main__")\n`,
 	);
 }
@@ -231,6 +256,32 @@ for line in sys.stdin:
 		...twoMessageCase,
 		messages: [...twoMessageCase.messages, { messageId: "m3", sessionId: "s", role: "user", content: "eta theta" }],
 	};
+
+	it("counts vectors held only in sqlite-vec's native tables, so a fully embedded store is not refused", async () => {
+		const script = await realScriptOnFakeMnemosyne("4.0.0b4", FAKE_NATIVE_BEAM);
+		const engine = mnemosyneEngine({ python: python(), script });
+		try {
+			await engine.warmup("standard");
+			await engine.open(twoMessageCase, { storeDir: tmp, protocol: "standard" });
+			await engine.remember(
+				twoMessageCase.messages.map(m => ({
+					messageId: m.messageId,
+					content: m.content,
+					source: "eval",
+					importance: 0.5,
+				})),
+			);
+			expect(await engine.vectorCount()).toBe(2);
+		} finally {
+			await engine.dispose();
+		}
+		const second = mnemosyneEngine({ python: python(), script });
+		try {
+			await expect(runCases(second, [twoMessageCase], "standard", 10, tmp)).resolves.toBeDefined();
+		} finally {
+			await second.dispose();
+		}
+	});
 
 	it("widening keeps the native top-k's ranked rows and appends unseen rows from wider calls", async () => {
 		const engine = mnemosyneEngine({ python: python(), script: await realScriptOnFakeMnemosyne() });
