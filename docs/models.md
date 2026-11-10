@@ -561,6 +561,16 @@ After a first response loads a lazy llama.cpp model, OMP re-probes its runtime c
 metadata. Explicit custom-model and `modelOverrides` limits take precedence over that probe.
 The implicit provider is keyless only when no credential source is configured.
 
+When a response arrives, OMP also records the model id the host echoed in the stream
+chunk when it differs from the id that was requested. That tells OMP the OpenAI-compatible
+host served different weights than the id the session selected — a `serve`/llama.cpp
+instance that loaded another checkpoint, for example. An echo may also be the same model
+canonicalised (a snapshot suffix, a gateway prefix, or a checkpoint path such as
+`/models/Qwen2.5-Coder-32B-Instruct`), so the verdict comes from the model identity
+classifier rather than string comparison: genuine substitutions name the served id in the
+chat transcript and the status line; canonicalisations stay silent. No configuration is
+involved.
+
 ### Implicit LM Studio discovery
 
 If `lm-studio` is not explicitly configured, registry adds an implicit discoverable provider:

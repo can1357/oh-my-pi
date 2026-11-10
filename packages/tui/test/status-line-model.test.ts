@@ -173,3 +173,74 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
 });
+
+describe("status line model segment served-model badge", () => {
+	function servedTurn(model: string, served?: string): Record<string, unknown> {
+		return {
+			role: "assistant",
+			content: [],
+			api: "openai-completions",
+			provider: "openrouter",
+			model,
+			...(served ? { upstreamModel: served } : {}),
+		};
+	}
+
+	function createServedContext(selectedId: string, messages: Record<string, unknown>[]): SegmentContext {
+		const ctx = createModelContext(false);
+		const state = ctx.session.state as unknown as { model: { id: string }; messages: unknown[] };
+		state.model.id = selectedId;
+		state.messages = messages;
+		return ctx;
+	}
+
+	it("names the served model when the host provably served different weights", () => {
+		const rendered = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [servedTurn("claude-opus-4-6", "claude-opus-4-7")]),
+		);
+		expect(rendered.content).toContain(theme.fg("warning", `${theme.sep.dot}claude-opus-4-7`));
+	});
+
+	it("stays silent for an echo of the same model, including snapshots and prefixes", () => {
+		const same = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [servedTurn("claude-opus-4-6", "claude-opus-4-6")]),
+		);
+		expect(same.content).not.toContain(theme.sep.dot);
+		const canonical = renderSegment(
+			"model",
+			createServedContext("anthropic/claude-haiku-4.5", [
+				servedTurn("anthropic/claude-haiku-4.5", "claude-haiku-4-5-20251001"),
+			]),
+		);
+		expect(canonical.content).not.toContain(theme.sep.dot);
+	});
+
+	it("decides on the newest turn for the selected model, not an older one", () => {
+		const recovered = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [
+				servedTurn("claude-opus-4-6", "claude-opus-4-7"),
+				servedTurn("claude-opus-4-6"),
+			]),
+		);
+		expect(recovered.content).not.toContain(theme.sep.dot);
+		const swapped = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [
+				servedTurn("claude-opus-4-6"),
+				servedTurn("claude-opus-4-6", "claude-opus-4-7"),
+			]),
+		);
+		expect(swapped.content).toContain(theme.fg("warning", `${theme.sep.dot}claude-opus-4-7`));
+	});
+
+	it("ignores turns produced for other models", () => {
+		const rendered = renderSegment(
+			"model",
+			createServedContext("claude-opus-4-6", [servedTurn("gpt-4o-mini", "gpt-4o")]),
+		);
+		expect(rendered.content).not.toContain(theme.sep.dot);
+	});
+});

@@ -843,6 +843,10 @@ const streamOpenAICompletionsOnce = (
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = createInitialResponsesAssistantMessage(model.api, model.provider, model.id);
+		// The id this request asks the endpoint for — the same value `buildParams`
+		// puts on the wire — so a chunk-level `model` echo can be compared against
+		// what was actually requested rather than against the catalog id.
+		const requestedWireModelId = resolveOpenAICompletionsModelId(model, options);
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		const abortTracker = createAbortSourceTracker(options?.signal);
 		const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(
@@ -1434,6 +1438,19 @@ const streamOpenAICompletionsOnce = (
 					const upstreamProvider = (chunk as ProviderAttributedChatCompletionChunk).provider;
 					output.upstreamProvider =
 						typeof upstreamProvider === "string" && upstreamProvider.length > 0 ? upstreamProvider : undefined;
+				}
+
+				// Local OpenAI-compatible hosts (llama.cpp, LM Studio, VLM `serve`, …) echo
+				// the weights they actually loaded in `ChatCompletionChunk.model`, which can
+				// name a different checkpoint than the id we asked for. Record only a genuine
+				// difference: a host that echoes the requested id stays silent, so the
+				// signed-thinking-block recovery below keeps its more precise source.
+				if (!output.upstreamModel) {
+					const servedModel = chunk.model;
+					output.upstreamModel =
+						typeof servedModel === "string" && servedModel.length > 0 && servedModel !== requestedWireModelId
+							? servedModel
+							: undefined;
 				}
 
 				if (chunk.usage) {
