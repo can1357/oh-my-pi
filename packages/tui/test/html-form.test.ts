@@ -16,7 +16,13 @@ import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import {
+	getCellDimensions,
+	ImageProtocol,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -239,13 +245,14 @@ describe("html form", () => {
 		it("places a Kitty picture under its own id and deletes it when the form closes", async () => {
 			// An id-less `a=T` placement survives the rows that drew it being repainted,
 			// so a closed form would leave its picture painted over whatever comes next.
-			const terminalInfo = TERMINAL as unknown as { id: string; imageProtocol: ImageProtocol | null };
-			const originalProtocol = terminalInfo.imageProtocol;
-			const originalId = terminalInfo.id;
-			terminalInfo.id = "xterm";
+			// `id` has no setter; pin a non-Ghostty id so the test TUI paints its frames.
+			const terminalId = TERMINAL as unknown as { id: string };
+			const originalProtocol = TERMINAL.imageProtocol;
+			const originalId = terminalId.id;
+			terminalId.id = "xterm";
 			const originalGraphics = { ...getKittyGraphics() };
 			const originalCells = { ...getCellDimensions() };
-			terminalInfo.imageProtocol = ImageProtocol.Kitty;
+			setTerminalImageProtocol(ImageProtocol.Kitty);
 			setKittyGraphics({ unicodePlaceholders: false });
 			setCellDimensions({ widthPx: 10, heightPx: 10 });
 			const term = new VirtualTerminal(60, 30);
@@ -293,8 +300,8 @@ describe("html form", () => {
 			} finally {
 				tui.stop();
 				vi.restoreAllMocks();
-				terminalInfo.imageProtocol = originalProtocol;
-				terminalInfo.id = originalId;
+				setTerminalImageProtocol(originalProtocol);
+				terminalId.id = originalId;
 				setKittyGraphics(originalGraphics);
 				setCellDimensions(originalCells);
 			}
