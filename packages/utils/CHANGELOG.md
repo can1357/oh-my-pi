@@ -32,6 +32,12 @@
 
 - Added `stripOmpDotenvEnv`, which removes variables loaded from omp's own `.env` files from an environment map ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
+## [18.18.8] - 2026-11-11
+
+### Removed
+
+- Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

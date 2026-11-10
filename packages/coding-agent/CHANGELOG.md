@@ -272,6 +272,21 @@
 - An instruction file that leaves a code fence open has it closed at its end, so the rest of the system prompt is formatted as usual ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
+### Breaking Changes
+
+- Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- `PI_CONFIG_FILES` (and `OMP_CONFIG_FILES`) set in a project `.env` is now ignored, so a cloned repository cannot load its own files as trusted config overlays; set it in your shell or in omp's own `.env` files ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+
+### Added
+
+- Added an opt-in OS sandbox for agent commands (bash with its builtins and PTY runs, Python/JS eval, extension/hook/custom-tool `exec`): writes limited to the workspace and a private temp dir, secret stores and omp's credentials unreadable, network off, unrestricted, or limited to a host allowlist through an omp egress proxy that asks before reaching unlisted hosts; uses seatbelt on macOS, bubblewrap on Linux and processcontainer on Windows, configured by `sandbox.*` settings that a project config can only tighten (see `docs/sandbox.md`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added `/sandbox` to configure the OS sandbox, plus `/sandbox on`, `/sandbox off` and `/sandbox status`; `PI_SANDBOX=1` enables it for a run ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- MCP stdio servers can run inside the OS sandbox with `sandbox: true`, with their network set by `sandboxNetwork` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- When a sandboxed command needs a path or host it does not have, the agent can ask with the new `sandbox_request` tool: a dialog shows what it is trying to do, the command and the effect, and you allow it for the session, always, deny it, or reply with instructions; the agent cannot grant itself access ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- While the OS sandbox is enabled, file-tool calls on omp's global settings files (`config.yml`, `.env`) ask for approval in every approval mode ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- While the OS sandbox is active, `write`, `edit` (including deletes and moves), `ast_edit`, `read`, the search tools, `lsp` (including server-sent workspace edits) and `ida` in-place databases are held to the sandbox's filesystem policy in every approval mode: a path outside the writable roots (or an unreadable one) is refused until a `sandbox_request` grant covers it ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- RPC clients can read and edit the OS sandbox (`get_sandbox`, `set_sandbox_setting`, `reset_sandbox_setting`, `edit_sandbox_list`, `grant_sandbox_host`, `revoke_sandbox_host`, `grant_sandbox_path`, `revoke_sandbox_path`), receive `sandbox_update` on every change, and opt in to answering host approval requests (`set_sandbox_host_prompts`, `sandbox_host_request`, `respond_sandbox_host`) and the agent's access requests (`set_sandbox_access_prompts`, `sandbox_access_request`, `respond_sandbox_access`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- `omp --smoke-test` now checks that the OS sandbox contains a command where a sandbox backend is available, and prints why it is unavailable otherwise ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ### Removed
 
@@ -313,21 +328,6 @@
 ### Added
 
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
-### Breaking Changes
-
-- Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- `PI_CONFIG_FILES` (and `OMP_CONFIG_FILES`) set in a project `.env` is now ignored, so a cloned repository cannot load its own files as trusted config overlays; set it in your shell or in omp's own `.env` files ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-
-### Added
-
-- Added an opt-in OS sandbox for agent commands (bash with its builtins and PTY runs, Python/JS eval, extension/hook/custom-tool `exec`): writes limited to the workspace and a private temp dir, secret stores and omp's credentials unreadable, network off, unrestricted, or limited to a host allowlist through an omp egress proxy that asks before reaching unlisted hosts; uses seatbelt on macOS, bubblewrap on Linux and processcontainer on Windows, configured by `sandbox.*` settings that a project config can only tighten (see `docs/sandbox.md`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- Added `/sandbox` to configure the OS sandbox, plus `/sandbox on`, `/sandbox off` and `/sandbox status`; `PI_SANDBOX=1` enables it for a run ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- MCP stdio servers can run inside the OS sandbox with `sandbox: true`, with their network set by `sandboxNetwork` ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- When a sandboxed command needs a path or host it does not have, the agent can ask with the new `sandbox_request` tool: a dialog shows what it is trying to do, the command and the effect, and you allow it for the session, always, deny it, or reply with instructions; the agent cannot grant itself access ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- While the OS sandbox is enabled, file-tool calls on omp's global settings files (`config.yml`, `.env`) ask for approval in every approval mode ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- While the OS sandbox is active, `write`, `edit` (including deletes and moves), `ast_edit`, `read`, the search tools, `lsp` (including server-sent workspace edits) and `ida` in-place databases are held to the sandbox's filesystem policy in every approval mode: a path outside the writable roots (or an unreadable one) is refused until a `sandbox_request` grant covers it ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- RPC clients can read and edit the OS sandbox (`get_sandbox`, `set_sandbox_setting`, `reset_sandbox_setting`, `edit_sandbox_list`, `grant_sandbox_host`, `revoke_sandbox_host`, `grant_sandbox_path`, `revoke_sandbox_path`), receive `sandbox_update` on every change, and opt in to answering host approval requests (`set_sandbox_host_prompts`, `sandbox_host_request`, `respond_sandbox_host`) and the agent's access requests (`set_sandbox_access_prompts`, `sandbox_access_request`, `respond_sandbox_access`) ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
-- `omp --smoke-test` now checks that the OS sandbox contains a command where a sandbox backend is available, and prints why it is unavailable otherwise ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
 ### Changed
