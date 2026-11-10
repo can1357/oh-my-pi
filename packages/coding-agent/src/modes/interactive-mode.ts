@@ -2931,7 +2931,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
 			cfgSkillsShowStartupDiagnostics.listen(this.settings, () => {
-				this.#syncConfigWarningHeader();
+				this.#syncHeaderExtras();
 			}),
 		);
 		// Refresh the next launch's status prepaint once startup settles: settings
@@ -2949,7 +2949,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `/move`, manage_skill, MCP prompts) lands here; rebuild the picker from session state.
 				this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 				this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
-				this.#syncConfigWarningHeader();
+				this.#syncHeaderExtras();
 				this.ui.requestRender();
 			}),
 		);
