@@ -1462,6 +1462,69 @@ describe("computer prelude", () => {
 });
 
 describe("computer worker round trips", () => {
+	it("rejects unknown computer options without rejecting valid helper options", async () => {
+		class OptionsSession extends FakeNativeSession {
+			override async captureRegion(target: string, _region: CaptureRegion): Promise<DesktopCapture> {
+				return this.capture(target);
+			}
+		}
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new OptionsSession());
+		const result = await runWorker(transport, "strict-options", `
+			const win = await desktop.window("42");
+			const el = await win.ref("e1");
+			const screen = await desktop.display("active");
+			const failures = [];
+			const check = async (name, call, valid, invalid = { unexpected: true }) => {
+				let error;
+				try { await call(invalid); } catch (caught) { error = caught; }
+				if (!error) {
+					failures.push(name + " accepted " + Object.keys(invalid).join(", "));
+				} else {
+					assert(error.name === "ToolError", name + ": " + error.message);
+					assert(error.message.includes(name) && error.message.includes("Valid names:"), error.message);
+					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
+					if (invalid.depth) assert(error.message.includes("did you mean maxDepth"), error.message);
+				}
+				await call(valid);
+			};
+			await check("ax", o => win.ax(o), { all: true, maxDepth: 3 }, { depth: 3 });
+			await check("observe", o => win.observe(o), { silent: true, all: true, maxDepth: 3 });
+			await check("find", o => win.find(o), { role: "button", title: "Save", value: "", limit: 1 });
+			await check("windows", o => desktop.windows(o), { id: "42", app: "Code", title: "Editor", wait: 0 }, { includeOffscreen: true });
+			await check("window", o => desktop.window(o), { id: "42", app: "Code", title: "Editor", wait: 0 });
+			await check("apps.list", o => desktop.apps.list(o), { query: "Editor", runningOnly: true });
+			await check("apps.open", o => desktop.apps.open("test.editor", o), { activate: false, reveal: false, app: "test.editor" });
+			await check("selectText", o => el.selectText("Save", o), { prefix: "", suffix: "", select: "text" });
+			await check("perform", o => el.perform("press", o), { menu: ["Save"] });
+			await check("press", o => el.press(o), { menu: ["Save"] });
+			await check("press", o => el.press("enter", o), { takeover: false });
+			await check("type", o => el.type("Save", o), { takeover: false });
+			await check("click", o => el.click(o), { button: "left", count: 1, modifiers: [], menu: ["Save"], takeover: false });
+			await check("doubleClick", o => el.doubleClick(o), { button: "left", modifiers: [], menu: ["Save"], takeover: false });
+			for (const target of [win, screen, desktop]) {
+				await check("screenshot", o => target.screenshot(o), { silent: true });
+				await check("zoom", o => target.zoom({ x: 0, y: 0, width: 1, height: 1 }, o), { silent: true });
+				await check("click", o => target.click(1, 2, o), { button: "left", count: 1, modifiers: [], menu: ["Save"], takeover: false });
+				await check("doubleClick", o => target.doubleClick(1, 2, o), { button: "left", modifiers: [], menu: ["Save"], takeover: false });
+				await check("move", o => target.move(1, 2, o), { takeover: false });
+				await check("drag", o => target.drag([[1, 2], [3, 4]], o), { modifiers: [], keys: [], takeover: false });
+				await check("scroll", o => target.scroll(1, 2, o), { dx: 1, dy: 2, takeover: false }, { x: 1, y: 2, dx: 3 });
+				await check("type", o => target.type("Save", o), { takeover: false });
+				await check("press", o => target.press("enter", o), { takeover: false });
+				await check("holdKeys", o => target.holdKeys(["shift"], o), { duration: 0, takeover: false });
+				await check("holdMouse", o => target.holdMouse(1, 2, o), { duration: 0, button: "left", keys: [], takeover: false });
+			}
+			await win.ax(null);
+			await desktop.windows(null);
+			assert(failures.length === 0, failures.join("; "));
+			return true;
+		`);
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.payload.returnValue).toBe(true);
+	});
+
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
 		const native = new FakeNativeSession();
