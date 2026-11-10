@@ -1,11 +1,13 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
+import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
+	KnownApi,
 	Message,
 	Model,
 	ToolCall,
@@ -504,6 +506,24 @@ export function isSurvivingAssistant(msg: AssistantMessage, model?: Model): bool
 	);
 }
 
+/** Whether `msg` carries mid-conversation Anthropic request controls (`clearAt`, `effort`, `toolChanges`). */
+export function hasAnthropicMessageControls(msg: Message): boolean {
+	if (msg.role !== "developer" || msg.providerPayload?.type !== "anthropicMessage") return false;
+	const { clearAt, effort, toolChanges } = msg.providerPayload;
+	return clearAt !== undefined || effort !== undefined || (toolChanges !== undefined && toolChanges.length > 0);
+}
+
+/**
+ * Whether a `user` or `developer` message emits a non-tool-result wire turn
+ * that ends an assistant tool loop instead of being dropped as empty.
+ */
+export function isReplayTurnBoundary(msg: Message): boolean {
+	if (msg.role === "assistant" || msg.role === "toolResult") return false;
+	if (hasAnthropicMessageControls(msg)) return true;
+	if (typeof msg.content === "string") return msg.content.trim().length > 0;
+	return msg.content.some(block => (block.type === "text" && block.text.trim().length > 0) || block.type === "image");
+}
+
 function getLatestSurvivingAssistantIndex(messages: readonly Message[], model: Model): number {
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
 		const msg = messages[index]!;
@@ -527,6 +547,47 @@ export function isSameModelTurn(
 }
 
 /**
+ * Whether an API's encoder runs {@link transformMessages} against the target
+ * model itself, so {@link isSameModelTurn} decides what replays. Agent proxies
+ * encode through an inner model or their own path; extension APIs are not
+ * listed and count as `false`. Exhaustive, so a new API must decide.
+ */
+const DIRECT_REPLAY_APIS: Record<KnownApi, boolean> = {
+	"openai-completions": true,
+	"openai-responses": true,
+	openrouter: true,
+	"openai-codex-responses": true,
+	"azure-openai-responses": true,
+	"anthropic-messages": true,
+	"bedrock-converse-stream": true,
+	"google-generative-ai": true,
+	"google-gemini-cli": true,
+	"google-vertex": true,
+	"ollama-chat": true,
+	"apple-foundation-models": true,
+	"cursor-agent": false,
+	"factory-droid-agent": false,
+	"gitlab-duo-agent": false,
+	"devin-agent": false,
+};
+
+/**
+ * Whether {@link transformMessages} certainly drops `turn`'s opaque reasoning
+ * payload (thinking signatures, redacted thinking) on its way to `model`:
+ * another model's turn on a directly encoded wire keeps neither, except
+ * Anthropic-messages to Anthropic-messages, where deployment and signing
+ * rules may keep them. `false` when the payload may survive.
+ */
+export function dropsForeignReasoningPayload(
+	turn: Pick<AssistantMessage, "provider" | "api" | "model">,
+	model: Pick<Model, "provider" | "api" | "id">,
+): boolean {
+	if ((DIRECT_REPLAY_APIS as Partial<Record<Api, boolean>>)[model.api] !== true) return false;
+	if (model.api === "anthropic-messages" && turn.api === "anthropic-messages") return false;
+	return !isSameModelTurn(turn, model);
+}
+
+/**
  * Targets that have proven they read unsigned foreign thinking when replayed
  * natively. This is a semantic-carry allowlist only: OpenAI-compatible
  * `reasoning_content` schema requirements and llama.cpp cache-prefix replay are
@@ -541,6 +602,31 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	if (!("thinkingFormat" in compat)) return false;
 	if (compat.requiresThinkingAsText) return false;
 	return model.reasoning && compat.thinkingFormat === "zai";
+}
+
+/**
+ * Whether chat completions (`convertMessages`) writes the model's own past
+ * thinking under `compat`: as Mistral content parts, demoted text, or a
+ * reasoning field. Otherwise it drops it.
+ */
+export function completionsSendsOwnThinking(
+	model: { reasoning?: boolean },
+	compat: Pick<
+		ResolvedOpenAICompat,
+		| "mistralReasoningContentParts"
+		| "requiresThinkingAsText"
+		| "requiresReasoningContentForToolCalls"
+		| "thinkingFormat"
+		| "replayReasoningContent"
+	>,
+): boolean {
+	return Boolean(
+		compat.mistralReasoningContentParts ||
+		compat.requiresThinkingAsText ||
+		compat.requiresReasoningContentForToolCalls ||
+		(compat.thinkingFormat === "zai" && model.reasoning) ||
+		compat.replayReasoningContent,
+	);
 }
 
 /**
@@ -565,13 +651,7 @@ function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]):
 	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
 	switch (model.api) {
 		case "openai-completions":
-			return (
-				!compat.requiresThinkingAsText &&
-				(compat.mistralReasoningContentParts === true ||
-					compat.requiresReasoningContentForToolCalls ||
-					compat.thinkingFormat === "zai" ||
-					compat.replayReasoningContent)
-			);
+			return !compat.requiresThinkingAsText && completionsSendsOwnThinking(model, compat);
 		case "openrouter":
 			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
 		case "openai-responses":

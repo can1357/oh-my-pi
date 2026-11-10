@@ -5,7 +5,7 @@
 //! operate on JavaScript code units, while UTF-8 line helpers serve native Rust
 //! callers with the same token and run semantics.
 
-use std::{collections::HashMap, hash::Hash, rc::Rc};
+use std::{collections::HashMap, hash::Hash};
 
 /// UTF-16 code unit for `\n`.
 const LF: u16 = 0x000a;
@@ -21,28 +21,94 @@ pub struct Run {
 	pub removed: bool,
 }
 
-struct Component {
-	count:   usize,
+const NO_COMPONENT: u32 = u32::MAX;
+
+#[derive(Clone, Copy)]
+struct ComponentNode {
+	count:   u32,
+	prev:    u32,
+	refs:    u32,
 	added:   bool,
 	removed: bool,
-	prev:    Option<Rc<Self>>,
+}
+
+/// Arena-allocated component pool with intrusive free-list recycling.
+/// Superseded frontier nodes are returned to `free_head` as soon as their last
+/// active `PathState` drops them, keeping peak memory proportional to live
+/// frontier paths rather than total explored `(edit_length, diagonal)` states.
+struct ComponentArena {
+	nodes:     Vec<ComponentNode>,
+	free_head: u32,
+}
+
+impl ComponentArena {
+	fn with_capacity(capacity: usize) -> Self {
+		Self { nodes: Vec::with_capacity(capacity), free_head: NO_COMPONENT }
+	}
+
+	#[inline]
+	fn alloc(&mut self, count: u32, prev: u32, added: bool, removed: bool) -> u32 {
+		if self.free_head == NO_COMPONENT {
+			let idx = self.nodes.len() as u32;
+			self
+				.nodes
+				.push(ComponentNode { count, prev, refs: 1, added, removed });
+			idx
+		} else {
+			let idx = self.free_head;
+			let slot = &mut self.nodes[idx as usize];
+			self.free_head = slot.prev;
+			*slot = ComponentNode { count, prev, refs: 1, added, removed };
+			idx
+		}
+	}
+
+	#[inline]
+	fn clone_ref(&mut self, idx: u32) -> u32 {
+		if idx != NO_COMPONENT {
+			self.nodes[idx as usize].refs += 1;
+		}
+		idx
+	}
+
+	#[inline]
+	fn release(&mut self, mut idx: u32) {
+		while idx != NO_COMPONENT {
+			let node = &mut self.nodes[idx as usize];
+			node.refs -= 1;
+			if node.refs > 0 {
+				break;
+			}
+			let prev = node.prev;
+			node.prev = self.free_head;
+			self.free_head = idx;
+			idx = prev;
+		}
+	}
 }
 
 /// Frontier state for one diagonal: furthest old-position reached plus the
 /// component chain that got there.
+#[derive(Clone, Copy)]
 struct PathState {
 	old_pos: isize,
-	last:    Option<Rc<Component>>,
+	last:    u32,
 }
 
 /// Extend `path` along its diagonal while tokens match, recording the common
 /// run. Returns the new-token position (mirrors jsdiff `extractCommon`).
-fn extract_common(path: &mut PathState, new: &[u32], old: &[u32], diagonal: isize) -> isize {
+fn extract_common(
+	arena: &mut ComponentArena,
+	path: &mut PathState,
+	new: &[u32],
+	old: &[u32],
+	diagonal: isize,
+) -> isize {
 	let new_len = new.len() as isize;
 	let old_len = old.len() as isize;
 	let mut old_pos = path.old_pos;
 	let mut new_pos = old_pos - diagonal;
-	let mut common = 0usize;
+	let mut common = 0u32;
 	while new_pos + 1 < new_len
 		&& old_pos + 1 < old_len
 		&& old[(old_pos + 1) as usize] == new[(new_pos + 1) as usize]
@@ -52,12 +118,7 @@ fn extract_common(path: &mut PathState, new: &[u32], old: &[u32], diagonal: isiz
 		common += 1;
 	}
 	if common > 0 {
-		path.last = Some(Rc::new(Component {
-			count:   common,
-			added:   false,
-			removed: false,
-			prev:    path.last.take(),
-		}));
+		path.last = arena.alloc(common, path.last, false, false);
 	}
 	path.old_pos = old_pos;
 	new_pos
@@ -65,36 +126,47 @@ fn extract_common(path: &mut PathState, new: &[u32], old: &[u32], diagonal: isiz
 
 /// Branch from `path` with one added or removed token (mirrors jsdiff
 /// `addToPath`, which merges into the previous component when the edit kind
-/// repeats).
-fn add_to_path(path: &PathState, added: bool, removed: bool, old_pos_inc: isize) -> PathState {
-	match &path.last {
-		Some(last) if last.added == added && last.removed == removed => PathState {
-			old_pos: path.old_pos + old_pos_inc,
-			last:    Some(Rc::new(Component {
-				count: last.count + 1,
-				added,
-				removed,
-				prev: last.prev.clone(),
-			})),
-		},
-		_ => PathState {
-			old_pos: path.old_pos + old_pos_inc,
-			last:    Some(Rc::new(Component { count: 1, added, removed, prev: path.last.clone() })),
-		},
-	}
+/// repeats). Consumes ownership of `path`'s component reference.
+fn add_to_path(
+	arena: &mut ComponentArena,
+	path: PathState,
+	added: bool,
+	removed: bool,
+	old_pos_inc: isize,
+) -> PathState {
+	let last_idx = path.last;
+	let new_last = if last_idx == NO_COMPONENT {
+		arena.alloc(1, NO_COMPONENT, added, removed)
+	} else {
+		let last = arena.nodes[last_idx as usize];
+		if last.added == added && last.removed == removed {
+			if last.refs == 1 {
+				arena.nodes[last_idx as usize].count = last.count + 1;
+				last_idx
+			} else {
+				arena.nodes[last_idx as usize].refs -= 1;
+				let prev = arena.clone_ref(last.prev);
+				arena.alloc(last.count + 1, prev, added, removed)
+			}
+		} else {
+			arena.alloc(1, last_idx, added, removed)
+		}
+	};
+	PathState { old_pos: path.old_pos + old_pos_inc, last: new_last }
 }
 
 /// Convert the winning component chain into forward-ordered runs.
-fn build_runs(last: Option<Rc<Component>>) -> Vec<Run> {
+fn build_runs(arena: &ComponentArena, last: u32) -> Vec<Run> {
 	let mut runs = Vec::new();
-	let mut cursor = last.as_deref();
-	while let Some(component) = cursor {
+	let mut cursor = last;
+	while cursor != NO_COMPONENT {
+		let component = arena.nodes[cursor as usize];
 		runs.push(Run {
-			count:   component.count as u32,
+			count:   component.count,
 			added:   component.added,
 			removed: component.removed,
 		});
-		cursor = component.prev.as_deref();
+		cursor = component.prev;
 	}
 	runs.reverse();
 	runs
@@ -108,14 +180,14 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 	let new_len = new.len() as isize;
 	let max_edit = old_len + new_len;
 	let offset = max_edit + 1;
-	let mut best: Vec<Option<PathState>> = Vec::new();
-	best.resize_with((2 * max_edit + 3) as usize, || None);
+	let mut best: Vec<Option<PathState>> = vec![None; (2 * max_edit + 3) as usize];
+	let mut arena = ComponentArena::with_capacity((old.len() + new.len()).clamp(16, 4096));
 
 	// Seed edit length 0: the content may start with common tokens.
-	let mut seed = PathState { old_pos: -1, last: None };
-	let seed_new_pos = extract_common(&mut seed, new, old, 0);
+	let mut seed = PathState { old_pos: -1, last: NO_COMPONENT };
+	let seed_new_pos = extract_common(&mut arena, &mut seed, new, old, 0);
 	if seed.old_pos + 1 >= old_len && seed_new_pos + 1 >= new_len {
-		return build_runs(seed.last);
+		return build_runs(&arena, seed.last);
 	}
 	best[offset as usize] = Some(seed);
 
@@ -127,16 +199,19 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 		while diagonal <= max_diagonal.min(edit_length) {
 			let idx = (diagonal + offset) as usize;
 			let remove_path = best[idx - 1].take();
-			let add_path_old_pos = best[idx + 1].as_ref().map(|path| path.old_pos);
+			let add_path_old_pos = best[idx + 1].map(|path| path.old_pos);
 			let can_add = add_path_old_pos.is_some_and(|old_pos| {
 				let add_new_pos = old_pos - diagonal;
 				add_new_pos >= 0 && add_new_pos < new_len
 			});
-			let can_remove = remove_path
-				.as_ref()
-				.is_some_and(|path| path.old_pos + 1 < old_len);
+			let can_remove = remove_path.is_some_and(|path| path.old_pos + 1 < old_len);
 			if !can_add && !can_remove {
-				best[idx] = None;
+				if let Some(rem) = remove_path {
+					arena.release(rem.last);
+				}
+				if let Some(prev) = best[idx].take() {
+					arena.release(prev.last);
+				}
 				diagonal += 2;
 				continue;
 			}
@@ -145,30 +220,28 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			// along, preferring the insertion path on ties (jsdiff order).
 			let mut base_path = if !can_remove
 				|| (can_add
-					&& remove_path.as_ref().is_some_and(|path| {
+					&& remove_path.is_some_and(|path| {
 						add_path_old_pos.is_some_and(|add_old| path.old_pos < add_old)
 					})) {
-				add_to_path(
-					best[idx + 1]
-						.as_ref()
-						.expect("canAdd implies a live addPath"),
-					true,
-					false,
-					0,
-				)
+				if let Some(rem) = remove_path {
+					arena.release(rem.last);
+				}
+				let add_path = best[idx + 1].expect("canAdd implies a live addPath");
+				let cloned =
+					PathState { old_pos: add_path.old_pos, last: arena.clone_ref(add_path.last) };
+				add_to_path(&mut arena, cloned, true, false, 0)
 			} else {
 				add_to_path(
-					remove_path
-						.as_ref()
-						.expect("canRemove implies a live removePath"),
+					&mut arena,
+					remove_path.expect("canRemove implies a live removePath"),
 					false,
 					true,
 					1,
 				)
 			};
-			let new_pos = extract_common(&mut base_path, new, old, diagonal);
+			let new_pos = extract_common(&mut arena, &mut base_path, new, old, diagonal);
 			if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-				return build_runs(base_path.last);
+				return build_runs(&arena, base_path.last);
 			}
 			if base_path.old_pos + 1 >= old_len {
 				max_diagonal = max_diagonal.min(diagonal - 1);
@@ -176,7 +249,9 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			if new_pos + 1 >= new_len {
 				min_diagonal = min_diagonal.max(diagonal + 1);
 			}
-			best[idx] = Some(base_path);
+			if let Some(prev) = best[idx].replace(base_path) {
+				arena.release(prev.last);
+			}
 			diagonal += 2;
 		}
 		edit_length += 1;
@@ -185,22 +260,14 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 }
 
 /// Intern tokens as dense ids under exact equality.
-pub fn intern<T: Eq + Hash + Copy>(old: &[T], new: &[T]) -> (Vec<u32>, Vec<u32>) {
+pub fn intern<T: Eq + Hash>(old: &[T], new: &[T]) -> (Vec<u32>, Vec<u32>) {
 	fn assign<T: Eq + Hash + Copy>(ids: &mut HashMap<T, u32>, token: T) -> u32 {
 		let next = ids.len() as u32;
 		*ids.entry(token).or_insert(next)
 	}
 	let mut ids = HashMap::with_capacity(old.len() + new.len());
-	let old_ids = old
-		.iter()
-		.copied()
-		.map(|token| assign(&mut ids, token))
-		.collect();
-	let new_ids = new
-		.iter()
-		.copied()
-		.map(|token| assign(&mut ids, token))
-		.collect();
+	let old_ids = old.iter().map(|token| assign(&mut ids, token)).collect();
+	let new_ids = new.iter().map(|token| assign(&mut ids, token)).collect();
 	(old_ids, new_ids)
 }
 
@@ -259,7 +326,7 @@ pub fn line_tokens_str(text: &str) -> Vec<&str> {
 
 /// Myers runs over pre-split line tokens, so callers that also need the token
 /// slices for rendering split each text only once.
-pub fn diff_line_tokens<T: Eq + Hash + Copy>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
+pub fn diff_line_tokens<T: Eq + Hash>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
 	let (old_ids, new_ids) = intern(old_tokens, new_tokens);
 	myers_diff(&old_ids, &new_ids)
 }
@@ -926,6 +993,19 @@ mod tests {
 	}
 
 	#[test]
+	fn line_tokens_accept_owned_normalized_keys() {
+		use std::borrow::Cow;
+
+		let old = [Cow::Owned("é".to_string()), Cow::Borrowed("old")];
+		let new = [Cow::Borrowed("é"), Cow::Owned("new".to_string())];
+		assert_eq!(diff_line_tokens(&old, &new), vec![
+			Run { count: 1, added: false, removed: false },
+			Run { count: 1, added: false, removed: true },
+			Run { count: 1, added: true, removed: false },
+		]);
+	}
+
+	#[test]
 	fn line_diff_replaces_middle_line() {
 		assert_eq!(lines("a\nb\nc\n", "a\nx\nc\n"), vec![
 			("a\n".into(), false, false),
@@ -1058,6 +1138,21 @@ mod tests {
 			(vec![0xd800], false, false),
 			(vec![0xd83d, 0xde80], false, true),
 			(vec![0x78], true, false),
+		]);
+	}
+
+	#[test]
+	fn myers_diff_coalesces_interleaved_insertions_and_deletions_across_diagonals() {
+		let old = [1, 2, 3, 4, 5, 6, 7, 8];
+		let new = [1, 9, 10, 4, 5, 11, 8];
+		assert_eq!(myers_diff(&old, &new), vec![
+			Run { count: 1, added: false, removed: false },
+			Run { count: 2, added: false, removed: true },
+			Run { count: 2, added: true, removed: false },
+			Run { count: 2, added: false, removed: false },
+			Run { count: 2, added: false, removed: true },
+			Run { count: 1, added: true, removed: false },
+			Run { count: 1, added: false, removed: false },
 		]);
 	}
 }

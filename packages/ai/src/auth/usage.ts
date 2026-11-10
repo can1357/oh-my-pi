@@ -3,6 +3,7 @@ import { $pickenv, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "../env-api-key";
 import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
+import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { resolveUsedFraction } from "../usage";
 import type {
@@ -106,6 +107,7 @@ export interface UsageServiceDeps {
 }
 
 type UsageReportsOptions = {
+	provider?: Provider;
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
 };
@@ -141,8 +143,11 @@ export class UsageService implements UsageApi {
 	 * could have fetched usage for but didn't" apart from "a provider with no
 	 * usage concept" (web-search keys, local/keyless servers, inference
 	 * providers without a usage API) — the latter never warrants a usage row.
+	 * A provider paused by its auth rules (`disabled "<reason>"`) has none, so
+	 * no usage collection or probe ever calls it.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
+		if (providerPauseReason(provider) !== undefined) return undefined;
 		return this.#runtimeUsageProviderOverrides.get(provider)?.provider ?? this.#deps.usageProviders(provider);
 	}
 
@@ -231,6 +236,7 @@ export class UsageService implements UsageApi {
 						refreshableCredential,
 						refreshableCredentialId,
 						timeoutSignal,
+						"usage-probe",
 					);
 					const refreshedCredential = mergeRefreshedUsageCredential(request.credential, refreshed);
 					this.persistRefreshedCredential(
@@ -668,6 +674,8 @@ export class UsageService implements UsageApi {
 		credential: AuthCredential,
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
+		// A paused provider is never probed, not even through the broker's per-credential hook.
+		if (providerPauseReason(provider) !== undefined) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
@@ -766,17 +774,22 @@ export class UsageService implements UsageApi {
 			// dispatch + credential selection) coalesce into one upstream call.
 			// Each caller's `signal` only cancels THAT caller's await; the
 			// shared upstream fetch runs to completion so peers aren't punished.
-			const overrideKey = `__override__\0${this.#deps.cache.epoch}`;
+			const scope = options?.provider === undefined ? "*" : `provider:${options.provider}`;
+			const overrideKey = `__override__\0${this.#deps.cache.epoch}\0${scope}`;
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
 				// Don't forward the caller signal into the shared fetch — first caller's
 				// abort would otherwise cancel the upstream for every peer.
-				shared = storeOverride().finally(() => {
+				shared = storeOverride(undefined, options?.provider).finally(() => {
 					this.#usageReportsInFlight.delete(overrideKey);
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
-			const reports = await raceSignal(shared, options?.signal, "usage fetch aborted");
+			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
+			const reports =
+				fetched && options?.provider !== undefined
+					? fetched.filter(report => report.provider === options.provider)
+					: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			if (!reports || this.#runtimeUsageProviderOverrides.size === 0) return reports;
 
@@ -785,13 +798,17 @@ export class UsageService implements UsageApi {
 			const brokerProviders = new Set(reports.map(report => report.provider));
 			const localProviders = new Set<Provider>();
 			for (const provider of this.#runtimeUsageProviderOverrides.keys()) {
+				if (options?.provider !== undefined && provider !== options.provider) continue;
 				if (!brokerProviders.has(provider)) localProviders.add(provider);
 			}
 			if (localProviders.size === 0) return reports;
 			const localReports = await this.#fetchLocalReports(options, localProviders);
 			return localReports?.length ? [...reports, ...localReports] : reports;
 		}
-		return this.#fetchLocalReports(options);
+		return this.#fetchLocalReports(
+			options,
+			options?.provider !== undefined ? new Set([options.provider]) : undefined,
+		);
 	}
 
 	/** Probe only the selected providers locally, preserving per-credential caching and cooldowns. */

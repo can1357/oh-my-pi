@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed `omp stats` re-parsing every unchanged session after a filesystem's device number changes, such as across ZFS remounts ([#14736](https://github.com/can1357/oh-my-pi/issues/14736)) ([#18536](https://github.com/can1357/oh-my-pi/pull/18536) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed the trace dashboard returning HTTP 431 for sessions with many subagents.
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- Frustration no longer counts agent-attributed messages as user messages; history is corrected on next sync ([#18183](https://github.com/can1357/oh-my-pi/issues/18183)).
+- Sessions sync promptly while an `omp stats` dashboard page is open, without repeated page refreshes during full sync.
+
+## [18.16.0] - 2026-11-02
+
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `setStatsCloseHandler`: while a host sets one, the dashboard shows a Close button in its top bar and closes on Esc or Ctrl+C (with no text selected), for hosts that show it in place of their terminal
+
+### Fixed
+
+- Fixed tool error rates counting skipped tool calls that were explicitly marked as not executed ([#17463](https://github.com/can1357/oh-my-pi/pull/17463) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.14.0] - 2026-10-29
+
+### Changed
+
+- Improved `omp stats` session synchronization performance by approximately 2–5× on large histories. The first sync after upgrading may take up to a minute while the stats database is optimized.
+
+### Fixed
+
+- Fixed `/stats` and `omp stats` failing when another dashboard was syncing sessions or the configured port was already in use; busy dashboards are now reused, and a free port is selected when necessary.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed

@@ -42,6 +42,10 @@ export function withoutUnverifiedThinking<T extends { reasoning: boolean; thinki
 /**
  * Clamps a requested thinking level against explicit model metadata.
  *
+ * An unserved level first follows `thinking.effortMap` when the map sends it to
+ * a served tier that reaches the wire unchanged (a gateway answering `medium`
+ * as `high`); otherwise it climbs down to the nearest lower tier.
+ *
  * Non-reasoning models always resolve to `undefined`.
  */
 export function clampThinkingLevelForModel<TApi extends Api>(
@@ -58,6 +62,12 @@ export function clampThinkingLevelForModel<TApi extends Api>(
 	const levels = getSupportedEfforts(model);
 	if (levels.includes(requested)) {
 		return requested;
+	}
+
+	const effortMap = model.thinking?.effortMap;
+	const aliased = effortMap?.[requested] as Effort | undefined;
+	if (aliased !== undefined && levels.includes(aliased) && (effortMap![aliased] ?? aliased) === aliased) {
+		return aliased;
 	}
 
 	const requestedIndex = THINKING_EFFORTS.indexOf(requested);

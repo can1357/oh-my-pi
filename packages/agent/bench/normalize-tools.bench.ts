@@ -16,19 +16,19 @@ const toolSchema = type({
 	nested: type({ inner: type("string").describe("inner value") }).describe("a nested object"),
 });
 
-function makeTool(name: string): AgentTool<typeof toolSchema, { path: string }> {
+function makeTool(name: string, parameters: unknown): AgentTool {
 	return {
 		name,
 		label: name,
 		description: "top-level tool description",
-		parameters: toolSchema,
+		parameters,
 		async execute() {
 			return { content: [{ type: "text", text: "ok" }] };
 		},
 	};
 }
 
-const tools = Array.from({ length: 50 }, (_, i) => makeTool(`tool-${i}`));
+const tools = Array.from({ length: 50 }, (_, i) => makeTool(`tool-${i}`, toolSchema));
 
 normalizeTools(tools, { injectIntent: true }); // warmup: populate schema memos
 
@@ -51,18 +51,13 @@ const patternToolSchema: Record<string, unknown> = {
 	patternProperties: { "^x-": { type: "string" }, "^y-": { type: "string" }, "^z-": { type: "string" } },
 };
 const patternTools = Array.from({ length: 50 }, (_, i) => ({
-	name: `tool-${i}`,
-	label: `tool-${i}`,
+	...makeTool(`tool-${i}`, patternToolSchema),
 	description: `Tool tool-${i} with a description that rides the fingerprint payload`,
-	parameters: patternToolSchema,
-	async execute() {
-		return { content: [{ type: "text", text: "ok" }] };
-	},
 }));
 
-normalizeTools(patternTools as never, { injectIntent: true }); // warmup
+normalizeTools(patternTools, { injectIntent: true }); // warmup
 const patternStart = Bun.nanoseconds();
-for (let i = 0; i < N; i++) normalizeTools(patternTools as never, { injectIntent: true });
+for (let i = 0; i < N; i++) normalizeTools(patternTools, { injectIntent: true });
 const patternMs = (Bun.nanoseconds() - patternStart) / 1e6;
 console.log(
 	`normalizeTools x${N} (50 tools, patternProperties): ${patternMs.toFixed(1)}ms (${((patternMs / N) * 1000).toFixed(1)}us/op)`,
@@ -93,18 +88,13 @@ function realisticSchema(index: number): Record<string, unknown> {
 }
 
 const realisticTools = Array.from({ length: 50 }, (_, i) => ({
-	name: `tool-${i}`,
-	label: `tool-${i}`,
+	...makeTool(`tool-${i}`, realisticSchema(i)),
 	description: `Tool tool-${i} with a description that rides the fingerprint payload`,
-	parameters: realisticSchema(i),
-	async execute() {
-		return { content: [{ type: "text", text: "ok" }] };
-	},
 }));
 
-normalizeTools(realisticTools as never, { injectIntent: true }); // warmup
+normalizeTools(realisticTools, { injectIntent: true }); // warmup
 const realisticStart = Bun.nanoseconds();
-for (let i = 0; i < N; i++) normalizeTools(realisticTools as never, { injectIntent: true });
+for (let i = 0; i < N; i++) normalizeTools(realisticTools, { injectIntent: true });
 const realisticMs = (Bun.nanoseconds() - realisticStart) / 1e6;
 console.log(
 	`normalizeTools x${N} (50 distinct tool schemas): ${realisticMs.toFixed(1)}ms (${((realisticMs / N) * 1000).toFixed(1)}us/op)`,

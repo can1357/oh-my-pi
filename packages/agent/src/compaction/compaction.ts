@@ -27,12 +27,8 @@ import {
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
-import {
-	buildTransformedCodexRequestBody,
-	type OpenAICodexCompactionBody,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import type { OpenAICodexCompactionBody } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
-import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
@@ -90,15 +86,12 @@ import handoffDocumentPrompt from "./prompts/handoff-document.md" with { type: "
 import snapcompactArchiveContextPrompt from "./prompts/snapcompact-archive-context.md" with { type: "text" };
 
 import {
-	computeFileLists,
-	createFileOps,
 	escapeSummaryBoundaryTags,
 	extractFileOpsFromMessage,
-	type FileOperations,
+	incompleteOutputError,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversationForSummary,
 	stripReadSelector,
-	upsertFileOperations,
 } from "./utils";
 
 // ============================================================================
@@ -118,8 +111,8 @@ function extractFileOperations(
 	messages: AgentMessage[],
 	entries: SessionEntry[],
 	prevCompactionIndex: number,
-): FileOperations {
-	const fileOps = createFileOps();
+): snapcompact.FileOperations {
+	const fileOps = snapcompact.createFileOps();
 
 	// Collect from previous compaction's details (if pi-generated)
 	if (prevCompactionIndex >= 0) {
@@ -698,6 +691,8 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
 export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
+	/** Additional summary context fetched only when a compaction request consumes it. */
+	loadExtraContext?: () => Promise<string[] | undefined>;
 	remoteEndpoint?: string;
 	/** Stable system-prompt segments from the live turn, preserved for provider cache reuse. */
 	remoteSystemPrompt?: string[];
@@ -754,12 +749,16 @@ export interface SummaryOptions {
 	providerSessionState?: Map<string, ProviderSessionState>;
 	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
 	preferWebsockets?: boolean;
+	/** Daybreak Blue request on Codex remote compaction; see `StreamOptions.codexAccessPrograms`. */
+	codexAccessPrograms?: boolean;
 	/** Classification shared by every provider request in this logical compaction. */
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/** Inspect or replace a generic remote-compaction payload before it is sent. */
+	onPayload?: SimpleStreamOptions["onPayload"];
 	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
@@ -1043,7 +1042,7 @@ async function summarizeConversationWindow(
 					endpoint,
 					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 					signal,
-					{ fetch: options.fetch, model, apiKey: key },
+					{ fetch: options.fetch, model, apiKey: key, onPayload: options.onPayload },
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
@@ -1076,6 +1075,9 @@ async function summarizeConversationWindow(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Summarization failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Summarization failed"));
 	}
 
 	const textContent = response.content
@@ -1184,6 +1186,9 @@ export async function generateHandoffFromContext(
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Handoff generation failed", response);
 	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Handoff generation failed"));
+	}
 
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
@@ -1268,7 +1273,7 @@ async function generateShortSummary(
 						endpoint,
 						{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 						signal,
-						{ fetch: options?.fetch, model, apiKey: key },
+						{ fetch: options?.fetch, model, apiKey: key, onPayload: options?.onPayload },
 					),
 				{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 			);
@@ -1284,7 +1289,9 @@ async function generateShortSummary(
 					maxTokens,
 					signal,
 					apiKey,
-					reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+					// Display-only summary under a 512-token cap: reasoning would consume the
+					// whole budget. The full summary keeps the session's effort.
+					disableReasoning: true,
 					initiatorOverride: options?.initiatorOverride,
 					metadata: options?.metadata,
 					fetch: options?.fetch,
@@ -1307,8 +1314,10 @@ async function generateShortSummary(
 				case "error":
 					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
 					break;
-				case "stop":
 				case "length":
+					outcome = { kind: "failed", error: incompleteOutputError("Short summary failed") };
+					break;
+				case "stop":
 				case "toolUse":
 					outcome = {
 						kind: "text",
@@ -1377,7 +1386,7 @@ export interface CompactionPreparation {
 	/** Preserved opaque compaction payload from the previous compaction, if any. */
 	previousPreserveData?: Record<string, unknown>;
 	/** File operations extracted from messagesToSummarize */
-	fileOps: FileOperations;
+	fileOps: snapcompact.FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
 }
@@ -1393,6 +1402,19 @@ export function canReplayRemoteCompaction(
 ): boolean {
 	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
 	return !remote || (remote.provider === activeModel.provider && isOpenAiRemoteCompactionApi(activeModel.api));
+}
+
+/**
+ * Whether `reader` can replay the provider-native compaction `compactor` would
+ * write. Only the OpenAI Responses lanes (the model's own API or its
+ * `remoteCompaction.api` override) store a provider-bound payload; the
+ * Anthropic lane and local methods leave a summary any model reads.
+ */
+export function canReplayRemoteCompactionFrom(compactor: Model, reader: Model): boolean {
+	return (
+		!isOpenAiRemoteCompactionApi(compactor.remoteCompaction?.api ?? compactor.api) ||
+		(compactor.provider === reader.provider && isOpenAiRemoteCompactionApi(reader.api))
+	);
 }
 
 /**
@@ -1458,7 +1480,12 @@ export function prepareCompaction(
 ): CompactionPreparation | undefined {
 	const lastEntry = pathEntries[pathEntries.length - 1];
 	// A speculative native record may leave uncovered messages before the record.
-	if (lastEntry?.type === "compaction" && !lastEntry.providerReplayThroughEntryId) {
+	// A trailing boundary this preparation re-expands covers nothing yet.
+	if (
+		lastEntry?.type === "compaction" &&
+		!lastEntry.providerReplayThroughEntryId &&
+		(!activeModel || remotePreserveReusable(lastEntry.preserveData, activeModel, settings))
+	) {
 		return undefined;
 	}
 
@@ -1769,13 +1796,23 @@ export async function compact(
 				: options?.promptCacheKey,
 		providerSessionState: options?.providerSessionState,
 		preferWebsockets: options?.preferWebsockets,
+		codexAccessPrograms: options?.codexAccessPrograms,
 		codexCompaction: options?.codexCompaction,
 		tools: options?.tools,
 		fetch: options?.fetch,
+		onPayload: options?.onPayload,
 		completeImpl: options?.completeImpl,
 		// The caller's opt-out must reach every summarization oneshot, otherwise
 		// an outer retry loop multiplies with the inner one (see SummaryOptions).
 		oneshotRetry: options?.oneshotRetry,
+	};
+	let extraContextLoaded = false;
+	const ensureExtraContext = async (): Promise<void> => {
+		if (extraContextLoaded || !options?.loadExtraContext) return;
+		const context = await options.loadExtraContext();
+		signal?.throwIfAborted();
+		if (context?.length) summaryOptions.extraContext = [...(summaryOptions.extraContext ?? []), ...context];
+		extraContextLoaded = true;
 	};
 
 	// An archive keeps the reasoning policy of the model it was rendered for;
@@ -1890,6 +1927,9 @@ export async function compact(
 			let codexBody: OpenAICodexCompactionBody | undefined;
 			let remoteHistory: Array<Record<string, unknown>>;
 			if (isCodexResponsesModel(model)) {
+				// Load the serializer only when building a Codex compaction request, not session policy setup.
+				const { buildTransformedCodexRequestBody } =
+					await import("@oh-my-pi/pi-ai/providers/openai-codex-responses");
 				const previousCodexInput: CodexInputItem[] = [];
 				for (const item of previousReplacementHistory ?? []) {
 					if (!isCodexInputItem(item)) {
@@ -1950,12 +1990,17 @@ export async function compact(
 					? codexBody.instructions
 					: ""
 				: remoteSystemPrompt.join("\n\n");
+			// Responses serialization is needed only for this native compaction request.
 			const tools = codexBody
 				? Array.isArray(codexBody.tools)
 					? codexBody.tools
 					: undefined
 				: summaryOptions.tools
-					? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
+					? (await import("@oh-my-pi/pi-ai/providers/openai-responses")).convertTools(
+							summaryOptions.tools,
+							model.compat.supportsStrictMode,
+							model,
+						)
 					: undefined;
 			const trimmed = trimRemoteCompactionInputToContextWindow(
 				remoteHistory,
@@ -1996,6 +2041,7 @@ export async function compact(
 						fetch: summaryOptions.fetch,
 						providerSessionState: summaryOptions.providerSessionState,
 						preferWebsockets: summaryOptions.preferWebsockets,
+						codexAccessPrograms: summaryOptions.codexAccessPrograms,
 						codexCompaction: summaryOptions.codexCompaction,
 					}),
 				{ signal },
@@ -2201,6 +2247,7 @@ export async function compact(
 			].filter(files => files.after >= filesDueBefore);
 			if (carried.length > 0) nativeRetainedFiles = carried;
 		}
+		await ensureExtraContext();
 		try {
 			// The live turn's own system prompt, wire tools and transformed
 			// history when the host can build them: kept thinking remains valid
@@ -2261,6 +2308,7 @@ export async function compact(
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
+	if (!usedRemoteCompaction && nativeSummary === undefined) await ensureExtraContext();
 
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
@@ -2319,15 +2367,11 @@ export async function compact(
 
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
-		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
-				...summaryOptions,
-				extraContext: options?.extraContext,
-				thinkingLevel: options?.thinkingLevel,
-			});
+		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, summaryOptions);
 
 	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
+	const { readFiles, modifiedFiles } = snapcompact.computeFileLists(fileOps);
+	summary = snapcompact.upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
 	if (nativeSummary !== undefined) {
 		// The replayed block (summary and any `tool_changes`) stays
 		// byte-identical to the API's output so it matches its signature. The
@@ -2335,7 +2379,7 @@ export async function compact(
 		// summary message with the block and skips its text, so they would
 		// otherwise be invisible to this provider. Every other provider keeps
 		// reading the entry text.
-		const filesText = upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
+		const filesText = snapcompact.upsertFileOperations("", readFiles, modifiedFiles, fileOps.read) || undefined;
 		preserveData = withAnthropicCompactionPreserveData(preserveData, {
 			provider: model.provider,
 			content: nativeSummary,
@@ -2426,6 +2470,9 @@ async function generateTurnPrefixSummary(
 
 	if (response.stopReason === "error") {
 		throw createSummarizationError("Turn prefix summarization failed", response);
+	}
+	if (response.stopReason === "length") {
+		throw new Error(incompleteOutputError("Turn prefix summarization failed"));
 	}
 
 	return response.content

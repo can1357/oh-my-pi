@@ -387,6 +387,16 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
+	// DeepSeek V4.1 Flash 1017: $0.30/$1.20, cache read $0.006, no write fee.
+	// The bare id and every reasoning-effort wire id share one card.
+	models "deepseek-v41-flash-1017*" {
+		cost-patch {
+			input 0.3
+			output 1.2
+			cache-read 0.006
+			cache-write 0
+		}
+	}
 	// Gemini 3 Flash: $0.50/$3.00, cache read $0.05.
 	models "gemini-3-flash" {
 		cost-patch {

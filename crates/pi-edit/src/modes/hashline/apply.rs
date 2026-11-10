@@ -871,8 +871,9 @@ fn repair_boundaries(
 	};
 	// The best repair drops an echo from a body too short for its range. If
 	// `normalize_echoes` recorded a too-short refusal for this patch, returning
-	// no repair hands the edit to it. It records nothing for a group it dropped
-	// an echo from first, so with no recorded refusal the edit is refused here.
+	// no repair hands the edit to it. For a group it dropped an echo from, it
+	// records one only when the copy left behind exposes that shape, so with no
+	// recorded refusal the edit is refused here.
 	if let Some(lossy) = groups
 		.iter()
 		.zip(&combo.choices)
@@ -1302,7 +1303,7 @@ pub fn apply_edits(
 	let baseline = parses_cleanly(options.path, text);
 	let authored_parses = parses_cleanly(options.path, &authored.0);
 	let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
-		if !parses_cleanly(options.path, &result.0) && baseline {
+		if baseline && !parses_cleanly(options.path, &result.0) {
 			warnings.push(edit_broke_parse_warning(result.1));
 		}
 		ApplyResult {
@@ -1387,10 +1388,10 @@ fn lossy_echo_outcome(
 		} else if leading > 0 {
 			range_len > 1
 				|| annotation_echo(lines, path, group.start - leading as u32, group.start - 1)
-		} else if trailing > 0 {
-			range_len > 1 || annotation_echo(lines, path, group.end + 1, group.end + trailing as u32)
 		} else {
-			false
+			trailing > 0
+				&& (range_len > 1
+					|| annotation_echo(lines, path, group.end + 1, group.end + trailing as u32))
 		};
 		if !echo {
 			continue;
@@ -1406,8 +1407,11 @@ fn lossy_echo_outcome(
 		// A repair can keep a source row outside an echo copy, which hides the
 		// copy from the edge check above: also count the neighbour's copies
 		// anywhere in the written rows, beyond those the range already had.
+		// Where every range row is deleted no row is kept, so a copy past the
+		// edges is a line the body adds, not a hidden echo.
+		let keeps_row = (group.start..=group.end).any(|line| !deleted(line));
 		let extra = |line: u32| -> usize {
-			if line == 0 || deleted(line) {
+			if !keeps_row || line == 0 || deleted(line) {
 				return 0;
 			}
 			let Some(text) = lines

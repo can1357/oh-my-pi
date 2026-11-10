@@ -8,7 +8,16 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import type { DelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
-import { $env, getAgentDir, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	getAgentDir,
+	getProjectDir,
+	hasFsCode,
+	isEnoent,
+	isInteractiveHost,
+	logger,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -48,9 +57,10 @@ import {
 	cfgInlineToolDescriptors,
 	cfgPersonality,
 } from "./session/settings";
-import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
+import { cfgOvnfsPath, cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
+	cfgOutEnabled,
 	cfgToolsIntentTracing,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
@@ -73,6 +83,7 @@ export const cfgSystemPromptInputs = combine({
 	xdevDocs: cfgToolsXdevDocs,
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,
+	outEnabled: cfgOutEnabled,
 	renderMermaid: cfgTuiRenderMermaid,
 	renderSvg: cfgTuiRenderSvg,
 	autoGraph: cfgTuiAutoGraph,
@@ -84,6 +95,8 @@ export const cfgSystemPromptInputs = combine({
 	evalAutoBackground: cfgEvalAutoBackgroundEnabled,
 	taskEager: cfgTaskEager,
 	taskBatch: cfgTaskBatch,
+	// Separate-checkout guidance names the ovnfs command.
+	ovnfsPath: cfgOvnfsPath,
 	// Rule bucketing (TTSR registrations, rulebook, always-apply) runs at rebuild time.
 	ttsrEnabled: cfgTtsrEnabled,
 	ttsrBuiltinRules: cfgTtsrBuiltinRules,
@@ -341,6 +354,11 @@ export function dedupeContainedContextFiles(
 	);
 }
 
+/** Drop context files named `AGENTS.md` (any case). Task subagents never receive them. */
+export function withoutAgentsMd<T extends { path: string }>(files: T[]): T[] {
+	return files.filter(file => path.basename(file.path).toLowerCase() !== "agents.md");
+}
+
 /**
  * Load all project context files using the capability API.
  * Returns {path, content, depth} entries for all discovered context files.
@@ -521,6 +539,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Load no context files beyond `contextFiles`: none for additional workspace roots, no nested AGENTS.md list. */
 	noContextFiles?: boolean;
+	/** Drop every context file named `AGENTS.md`, including ones discovered for additional workspace roots. */
+	excludeAgentsMd?: boolean;
 	/** Skills provided directly to system prompt construction. */
 	skills?: readonly Skill[];
 	/** Session-scoped description snapshot; background cache writes apply only to the next session. */
@@ -529,6 +549,8 @@ export interface BuildSystemPromptOptions {
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
 	intentField?: string;
+	/** Guidance line explaining the intent field; `PI_INTENT_PROMPT` overrides it. Unset: the template's default. */
+	intentGuidance?: string;
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
@@ -541,7 +563,7 @@ export interface BuildSystemPromptOptions {
 	taskIrcEnabled?: boolean;
 	/** Whether the read-only `scout` subagent is spawnable (not disabled, allowed by spawn policy). Defaults to true. */
 	scoutAvailable?: boolean;
-	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `eager`. */
+	/** Active model's delegation appetite (catalog `delegation-bias` axis); selects the Delegation section's wording. Default: `balanced`. */
 	delegationBias?: DelegationBias;
 
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
@@ -556,6 +578,8 @@ export interface BuildSystemPromptOptions {
 	securityEnabled?: boolean;
 	/** Whether the user approves `cfg://` writes for this session; gates advertising `cfg://`. */
 	settingsApproval?: boolean;
+	/** Whether `out://` writes reach the user as transcript replies; gates advertising `out://`. */
+	outReplies?: boolean;
 	/**
 	 * Eval preludes advertised by this prompt. Each prelude's `guidance` is
 	 * appended as its own block after the rendered template, so custom templates
@@ -586,6 +610,8 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/** ovnfs command when its binary is found (`ovnfsCommand`); renders the separate-checkout guidance. */
+	ovnfs?: string;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
 	/**
@@ -648,10 +674,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		additionalWorkspaceRoots = [],
 		contextFiles: providedContextFiles,
 		noContextFiles = false,
+		excludeAgentsMd = false,
 		skills: providedSkills,
 		rules,
 		alwaysApplyRules,
 		intentField,
+		intentGuidance,
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
@@ -660,10 +688,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
-		delegationBias = "eager",
+		delegationBias = "balanced",
 		memoryBackend,
 		securityEnabled = false,
 		settingsApproval = false,
+		outReplies = false,
 		evalPreludes = [],
 		model,
 		includeModelInPrompt = true,
@@ -676,6 +705,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevTools = [],
 		xdevDocs = "",
 		autoQaEnabled = false,
+		ovnfs,
 		writeTransportOnly = false,
 		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
@@ -711,7 +741,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt: undefined as string | undefined,
 		resolvedAppendPrompt: undefined as string | undefined,
 		systemPromptCustomization: null as string | null,
-		contextFiles: dedupeContainedContextFiles(providedContextFiles ?? []),
+		contextFiles: dedupeContainedContextFiles(
+			excludeAgentsMd ? withoutAgentsMd(providedContextFiles ?? []) : (providedContextFiles ?? []),
+		),
 		skills: providedSkills ?? ([] as Skill[]),
 		workspaceTree: {
 			rootPath: resolvedCwd,
@@ -767,11 +799,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: await logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
 		// Also discover context files (AGENTS.md, rules, etc.) for each additional workspace root.
 		const additionalRoots = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
-		if (additionalRoots.length === 0 || noContextFiles) return primary;
+		if (additionalRoots.length === 0 || noContextFiles) return excludeAgentsMd ? withoutAgentsMd(primary) : primary;
 		const extra = await Promise.all(
 			additionalRoots.map(root => loadProjectContextFiles({ cwd: root }).catch(() => [])),
 		);
-		return dedupeContainedContextFiles([...primary, ...extra.flat()]);
+		const merged = dedupeContainedContextFiles([...primary, ...extra.flat()]);
+		return excludeAgentsMd ? withoutAgentsMd(merged) : merged;
 	})();
 	const additionalRootsForTree = additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd));
 	const workspaceTreePromise = (async () => {
@@ -860,9 +893,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			timeoutMs: SYSTEM_PROMPT_PREP_TIMEOUT_MS,
 			steps: timedOut,
 		});
-		process.stderr.write(
-			`Warning: system prompt preparation steps timed out after ${SYSTEM_PROMPT_PREP_TIMEOUT_MS}ms (${timedOut.join(", ")}); using minimal fallback for those steps.\n`,
-		);
+		// An interactive host writes nothing ahead of its UI (a Tern surface
+		// would open over the line); the log above has it.
+		if (!isInteractiveHost()) {
+			process.stderr.write(
+				`Warning: system prompt preparation steps timed out after ${SYSTEM_PROMPT_PREP_TIMEOUT_MS}ms (${timedOut.join(", ")}); using minimal fallback for those steps.\n`,
+			);
+		}
 	}
 	if (failed.length > 0) {
 		for (const { name, error } of failed) {
@@ -938,6 +975,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryBackend,
 		securityEnabled,
 		settingsApproval,
+		outReplies,
+		subagent,
 	};
 	const filteredSkills = (options.skillDescriptions ?? new SkillDescriptionCatalog()).render(
 		hasSkillReader ? skills.filter(skill => skill.hide !== true) : [],
@@ -979,14 +1018,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		cwd: promptCwd,
 		additionalWorkspaceRoots: additionalWorkspaceRoots.filter(d => path.resolve(d) !== path.resolve(resolvedCwd)),
 		model: includeModelInPrompt ? (model ?? "") : "",
-		delegationBias,
+		// An explicit eager-tasks mode lifts balanced/restrained wording to eager; gated has its own eager-tasks text.
+		delegationTier: eagerTasks && delegationBias !== "gated" ? "eager" : delegationBias,
 		personality: personalityBlock,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
+		intentGuidance: $env.PI_INTENT_PROMPT || intentGuidance || "",
 		eagerTasks,
 		eagerTasksAlways,
-		// Restrained bias yields to an explicit eager-tasks mode.
-		inlineFirstDelegation: delegationBias === "restrained" && !eagerTasks,
 		taskBatch,
 		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
 		scoutAvailable,
@@ -1003,6 +1042,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
 		autoQaEnabled,
+		ovnfs,
 		writeTransportOnly,
 		subagent,
 	};

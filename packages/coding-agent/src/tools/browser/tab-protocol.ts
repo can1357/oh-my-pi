@@ -43,13 +43,14 @@ export interface SessionSnapshot {
 }
 
 /**
- * The page an attach worker drives. `create`: open a background tab and own it, in the browser of
- * `nearTargetId` (another tab omp drives on the relay) when given. `owned`: a tab omp created, adopted
- * again after a recycle. `borrowed`: a page the user has open; never closed, never focus-emulated.
+ * The page an attach worker drives. `create`: open and own a background tab in a
+ * spawned browser or relay; `nearTargetId` selects the relay browser when given.
+ * `owned`: an omp tab adopted after recycle. `borrowed`: a user's page, never closed,
+ * and focus-emulated only in a browser the user drives (see `userDriven`).
  */
 export type AttachPage = { kind: "create"; nearTargetId?: string } | { kind: "owned" | "borrowed"; targetId: string };
 
-/** omp created the payload's page (headless, or a relay tab of its own): closing the tab closes the page. */
+/** omp created the payload's page: closing the tab closes the page. */
 export function ownsPage(payload: WorkerInitPayload): boolean {
 	return payload.mode === "headless" || payload.page.kind !== "borrowed";
 }
@@ -83,6 +84,7 @@ export type WorkerInitPayload =
 			/** The tab's upload staging folder, which outlives a recycled worker; see `UploadStaging`. */
 			uploadDir: string;
 			page: AttachPage;
+			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			/** Hostname patterns allowed for every page request. */
 			allowedDomains?: string[];
@@ -102,9 +104,14 @@ export type WorkerInitPayload =
 			recover?: boolean;
 			/**
 			 * The user drives this browser (connected, relay): downloads keep its one browser-wide folder and real file
-			 * names, since the user's own downloads land there too. Unset means an OMP-launched browser.
+			 * names, since the user's own downloads land there too. The page, borrowed user tabs included, is also
+			 * focus-emulated so a background tab takes trusted input without being selected; the emulation ends with
+			 * the CDP session (on the relay, with the bridge's last session of the tab). Unset means an OMP-launched
+			 * browser.
 			 */
 			userDriven?: boolean;
+			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
+			relay?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -115,7 +122,8 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
-	| { type: "close" };
+	/** `keepPage` leaves a page omp created open in its browser; only the worker's hold on it goes. */
+	| { type: "close"; keepPage?: boolean };
 
 export interface ReadyInfo {
 	url: string;

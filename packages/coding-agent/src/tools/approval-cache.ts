@@ -46,6 +46,11 @@ export class SessionApprovals implements ApprovalGrantStore {
 		this.#grants.add(key);
 	}
 
+	/** Every key held, in grant order. */
+	keys(): string[] {
+		return [...this.#grants];
+	}
+
 	clear(): void {
 		this.#grants.clear();
 	}
@@ -161,24 +166,6 @@ export function approvalDirectoryKey(directory: string): string {
 	return withTrailingSeparator(approvalCacheKeyForPath(directory));
 }
 
-/**
- * Deepest directory key containing every entry of `directories`; `undefined` when they share no
- * root (two drives). The folder a multi-path call's directory answer would grant.
- */
-export function commonApprovalDirectoryKey(directories: readonly string[]): string | undefined {
-	if (directories.length === 0) return undefined;
-	let common = approvalDirectoryKey(directories[0]!);
-	for (const directory of directories.slice(1)) {
-		const key = approvalDirectoryKey(directory);
-		while (!key.startsWith(common)) {
-			const parent = withTrailingSeparator(path.dirname(common));
-			if (parent === common) return undefined;
-			common = parent;
-		}
-	}
-	return common;
-}
-
 /** Path-resolved agent directory, case-folded on Windows: one store per directory. */
 function agentDirKey(agentDir: string): string {
 	const resolved = path.resolve(agentDir);
@@ -212,6 +199,11 @@ export function getApprovalGrants(agentDir: string = getAgentDir(), sessionId?: 
 		sessions.set(sessionId, session);
 	}
 	return new ApprovalGrants(session, cache);
+}
+
+/** Keys the session tier of conversation `sessionId` holds under an agent directory; never creates the tier. */
+export function sessionApprovalGrantKeys(agentDir: string, sessionId: string): string[] {
+	return sessionsByDir.get(agentDirKey(agentDir))?.get(sessionId)?.keys() ?? [];
 }
 
 /** Forget every remembered approval under an agent directory: the database and every session tier. */

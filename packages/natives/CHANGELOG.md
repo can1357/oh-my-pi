@@ -2,6 +2,211 @@
 
 ## [Unreleased]
 
+## [18.18.6] - 2026-11-09
+
+### Fixed
+
+- Fixed GTK4 apps such as Files (Nautilus) on X11: element clicks and `computer.elementAt()` now find their elements where they are on screen, and `ax()` no longer marks their enabled controls `(disabled)` ([#18643](https://github.com/can1357/oh-my-pi/pull/18643) by [@will-bogusz](https://github.com/will-bogusz))
+- `grep` no longer searches the file its own output is redirected into, nor standard input redirected from that same file: both are refused with `input file is also the output`, as GNU grep does ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added Zig syntax highlighting for fenced Zig code in Markdown.
+- Added `Shell.fork()`, a new shell whose session starts from this one's variables, functions, aliases, options, and working directory as of its last command boundary, without waiting for a command in flight.
+
+### Fixed
+
+- Built-in jq filters now stop reliably when aborted or timed out, even before producing output.
+- Fixed logical directory changes with cd and pwd in native Windows shell sessions, including drive and UNC paths.
+- Fixed closed file descriptors passed to external commands on Unix so writes fail as expected; closed standard streams on Windows now use the null device.
+- Fixed setValue() on Linux reporting success when Firefox or Thunderbird fields, including password fields, were not actually updated; failures now identify the affected field appropriately.
+
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- macOS `ax()` lines show what an element can do: `(selected)`, `(settable)` on dates `setValue` can write, `(readonly)` on web text fields the page locks, `actions=` beyond its press, and names for unlabeled window buttons ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- macOS `ax()` lines show 200 characters of a long label or value instead of 80, keep newlines as `\n`, and end a cut value with the call that reads it whole ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `ax()` dates read in local time with their offset, the form `setValue` takes back, and `axPerform` runs a listed action in any case, with or without its `AX` prefix ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS background left drags across the text of one native text view, such as a TextEdit document, now select that text through accessibility, and `drag` resolves to `{ selection, focusReturn }`; drags on web page text and links still throw `BackgroundUnavailable` ([#16223](https://github.com/can1357/oh-my-pi/pull/16223) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- macOS `ax()` no longer marks every cell of a focused table or sidebar `(focused)`; only the element holding the app's keyboard focus is ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS `axPerform` reports a followed Preview PDF link or an opened Finder item as unconfirmed instead of failed ([#15282](https://github.com/can1357/oh-my-pi/pull/15282) by [@will-bogusz](https://github.com/will-bogusz))
+- The embedded shell's `comm` merges in the same locale order as its `sort`, so `comm` on `sort` output under a UTF-8 locale no longer reports unsorted input and drops common lines
+- An edit whose path is missing on disk no longer stalls the embedded shell and other native calls while it searches for the file, and a cancelled edit stops that search at once ([#18386](https://github.com/can1357/oh-my-pi/pull/18386) by [@sjawhar](https://github.com/sjawhar))
+- macOS spellchecking (typo underlines, autocorrect, `apple` word completion) no longer leaks native memory for the life of the process ([#18285](https://github.com/can1357/oh-my-pi/pull/18285) by [@aleister1102](https://github.com/aleister1102))
+- Fixed large brace expansions running as literal text or silently dropping words: expansions support up to 4,194,304 words and report an error above that limit ([#18092](https://github.com/can1357/oh-my-pi/pull/18092) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
+- `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
+- Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.17.0] - 2026-11-06
+
+### Breaking Changes
+
+- Replaced `parseShell()` with `RunTrace.present()` and `ShellVisualization`.
+
+### Added
+
+- Added `RunTrace`: command states, variable assignments, per-producer output, bounded replay, Raw/Pseudo presentation, and restoring persisted traces.
+- Added `obash --trace=PATH` to write a JSON execution trace at exit; `UnitCompiled` events now include source node tables.
+- `Shell` and `executeShell` now run pi-shell's Bash engine with Bash 5.3 semantics, including aliases containing pipelines, subshells, and separators.
+- Native shell is faster across parsing, functions, expansion, redirections, arithmetic, loops, and external command startup.
+- Sixel image output now uses a built-in encoder.
+- Built-in `ps -o` accepts Apple's `utime` (alias `putime`) for user CPU time, instead of failing with `unknown output format specifier 'utime'`.
+- Shell spawn benchmarks now report median and p99 latency.
+
+### Changed
+
+- Built-in `jq` now reports errors as plain text with `line:column` locations.
+- Work-profile flamegraphs are now static SVGs with hoverable titles.
+- Built-in `grep -r`, `rg`, `find` and `fd` are faster on small and large trees and stream output to pipes in batches.
+
+### Fixed
+
+- Fixed a crash on Linux when a zsh-mode sort or `strftime`/`$langinfo` named a locale that is not installed.
+- Fixed `env -i` in the bash tool passing exported shell functions (`BASH_FUNC_name%%`) and non-environment shell variables to the command.
+- Fixed `$!` in command substitutions, subshells and pipeline stages to name the parent's last background job, as in Bash ([#18107](https://github.com/can1357/oh-my-pi/pull/18107) by [@sjawhar](https://github.com/sjawhar))
+- Fixed built-in local `rsync` output on a busy machine sometimes differing from rsync 3.5.1: `--delete`/info lines from subdirectories could print after the top-level names and the byte totals in `sent … received …`/`--stats` could be off by 4.
+- Fixed Windows `rsync` treating a one-letter daemon host like `h::module` as a drive path ([#18048](https://github.com/can1357/oh-my-pi/pull/18048) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed git, its helpers and commit hooks started by omp reading the terminal, which could swallow keystrokes and leave Tern protocol text like `_tsp;e;{"ev":"ack",…}` in the composer; they no longer inherit the terminal or share its session.
+- Fixed `ssh` started by the built-in `rsync` (and `sort --compress-program`) prompting on the user's terminal, e.g. host-key confirmations appearing after exit; they no longer share omp's terminal or session.
+- Fixed history saves hanging when a stale lock cannot be removed.
+- Fixed native addon startup on glibc 2.17–2.28, which lacks `posix_spawn_file_actions_addchdir_np` ([#18046](https://github.com/can1357/oh-my-pi/pull/18046) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed Windows `rmdir` accepting trailing-dot or trailing-space operands that could remove a different directory ([#18047](https://github.com/can1357/oh-my-pi/pull/18047) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed `timeout`, `nohup`, `git` and similar utilities inside shell functions skipping operands or running the function's arguments ([#18030](https://github.com/can1357/oh-my-pi/pull/18030) by [@sjawhar](https://github.com/sjawhar))
+- Fixed native Windows commands not resolving executables via `PATH`/`PATHEXT`, and absolute paths being prefixed with the cwd ([#18041](https://github.com/can1357/oh-my-pi/pull/18041) by [@jchanghong023](https://github.com/jchanghong023))
+- Fixed minimized `git stash pop` and `git status` counting status lines and "Dropped" notices as untracked files ([#18159](https://github.com/can1357/oh-my-pi/pull/18159) by [@eggpeat](https://github.com/eggpeat))
+- Fixed associative arrays slowing quadratically: 100,000 inserts and lookups drop from ~90 s to ~0.1 s.
+- Fixed GTK3 Open/Save dialogs on Linux: `ax()` and element input work, and Wayland window lists include them ([#18011](https://github.com/can1357/oh-my-pi/pull/18011) by [@will-bogusz](https://github.com/will-bogusz))
+- `capabilities()` now reports `input: false` and `inputPermission: "unavailable"` on Wayland without a RemoteDesktop portal (e.g. sway); input fails immediately ([#18012](https://github.com/can1357/oh-my-pi/pull/18012) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `.bzl` files being treated as Python instead of Starlark in `ast-grep`, `astGrep`, `astEdit`, and code summaries ([#18145](https://github.com/can1357/oh-my-pi/pull/18145) by [@eggpeat](https://github.com/eggpeat))
+- Minimized `rustfmt --check` output now reports how many files need formatting instead of miscounting diff locations ([#18147](https://github.com/can1357/oh-my-pi/pull/18147) by [@will-bogusz](https://github.com/will-bogusz))
+- Minimized `git diff`, `git show` and `diff -r` now list binary files (as `Bin`), pure renames and mode-only changes ([#18148](https://github.com/can1357/oh-my-pi/pull/18148) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland `el.type` and `el.press(keys)` shifting the app's focus before refusing; they now refuse first ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Windows background drags in Tk apps reporting success while doing nothing; they now follow `computer.backgroundFallback` ([#17913](https://github.com/can1357/oh-my-pi/pull/17913) by [@will-bogusz](https://github.com/will-bogusz))
+- Built-in `rsync` now matches rsync 3.5.1 for unopenable `--log-file` errors; empty `--log-file=` logs to syslog ([#17980](https://github.com/can1357/oh-my-pi/pull/17980) by [@sjawhar](https://github.com/sjawhar))
+- Fixed X11 takeover and `raise()` failing on a window previously targeted by background typing, e.g. under Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background keys into Qt 5/6 apps silently doing nothing; they now use takeover, or refuse when `computer.backgroundFallback` is `refuse` ([#17911](https://github.com/can1357/oh-my-pi/pull/17911) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Wayland `doubleClick` and `click` with `count` registering as a single click in KDE Plasma Qt apps ([#17903](https://github.com/can1357/oh-my-pi/pull/17903) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `press()`, `perform()` and `menu.select()` failing on Linux in browsers, VS Code, LibreOffice and non-English locales; `press()` now toggles toggle/radio buttons ([#17936](https://github.com/can1357/oh-my-pi/pull/17936) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer.focusedWindow()`, `ax()` and `observe()` on GNOME/KDE Wayland reading a shell surface instead of the focused app ([#17922](https://github.com/can1357/oh-my-pi/pull/17922) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed takeover keys into iPhone Mirroring and Screen Sharing leaving Fn held, dropping Shift and later letters ([#17909](https://github.com/can1357/oh-my-pi/pull/17909) by [@will-bogusz](https://github.com/will-bogusz))
+- An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise ([#17668](https://github.com/can1357/oh-my-pi/pull/17668) by [@sjawhar](https://github.com/sjawhar))
+- `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it) ([#17628](https://github.com/can1357/oh-my-pi/pull/17628) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `listWorkspace({ pruneExcludedDirs: false })` to stop pruning standard dependency/build directory names; hidden directories such as `.git` also require `hidden: true` ([#17539](https://github.com/can1357/oh-my-pi/issues/17539))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
+- Added `FileLock.isHeld(path)`, which reports whether a lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+### Fixed
+
+- Fixed native search on Windows (the bash tool's `fd`, grep, glob) failing with "The filename, directory name, or volume label syntax is incorrect" or "path not found" for paths with `.`/`..` components or `/` separators, including `fd` run without a search path
+- Fixed glob and find on Windows reporting a symlinked file's own size and mtime instead of its target's, which dropped linked files from listings that skip empty files
+- Fixed the bash tool's built-in `rsync` on Windows ignoring per-directory merge files whose name includes a directory part, such as `--filter=':- ../rules'`
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the `invalidateFsScanCache` API and the associated filesystem scan cache environment variables (`FS_SCAN_CACHE_TTL_MS`, `FS_SCAN_EMPTY_RECHECK_MS`, `FS_SCAN_CACHE_MAX_ENTRIES`, and `FS_SCAN_CACHE_MAX_BYTES`); filesystem listing caches are now managed automatically.
+
+### Added
+
+- Added a built-in `rsync` implementation to the bash tool, compatible with rsync 3.5.1 and protocol versions 29–33 across Linux, macOS, and Windows. It supports local copies, SSH remote shells via `-e`, and `rsync://` daemons without requiring an installed binary; daemon serving is not supported, and `PI_DISABLE_UUTILS_DESTRUCTIVE` continues to use the system `rsync`.
+- Added built-in `ast-grep` (also available as `sg`) support to the bash tool for structural code search and rewriting, including pattern matching, rewrites, context, headings, and JSON output.
+
+### Changed
+
+- Improved native filesystem search performance, including faster globbing and more efficient grep, fuzzy finding, workspace listing, and structural search/edit operations, while preserving deterministic result ordering and streaming behavior.
+- Native search and the bash tool's built-in `rg`, `grep`, `fd`, `find`, and `ast-grep` now stop filesystem work promptly when cancelled or timed out, including searches over JavaScript-provided filesystems and searches interrupted while reading large files.
+- The bash tool's built-in `rg` and recursive `grep` now search files in parallel while retaining path-ordered output; `grep` can also stop promptly after reaching `maxCount`.
+- Enabled safe reuse of unchanged directory listings when `cache: true`, with timestamp validation to prevent stale results.
+
+### Fixed
+
+- Fixed cancelled native directory searches leaving filesystem-provider requests running during startup.
+- Fixed built-in bash commands such as `cat`, `grep`, `head`, `wc`, `read`, and `mapfile` hanging at the end of FIFO input on macOS; `read -t` now returns at EOF.
+- Fixed ANSI text wrapping for styled underlines, background colours, and colon-form RGB colours.
+- Fixed clicking in native audio playback when the queue runs dry mid-waveform by smoothly fading output to silence and back.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added opt-in, cycle-safe descendant-link traversal to native `glob` through `followLinks`, leaving default traversal unchanged ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
+
+### Changed
+
+- Faster native line, word, and structured patch diffs on large edits ([#17015](https://github.com/can1357/oh-my-pi/pull/17015) by [@GTanger](https://github.com/GTanger))
+
+### Fixed
+
+- Fixed the built-in `sort` using many times its `-S` buffer size, or more memory than its container allows or the machine has available, on inputs of short lines, and ignoring `timeout` or a cancel while it sorts ([#17155](https://github.com/can1357/oh-my-pi/pull/17155) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the built-in `sort -m` and `sort -c` splitting lines longer than their read buffer, and `sort` joining a file's unterminated last line to the next file's first line ([#17155](https://github.com/can1357/oh-my-pi/pull/17155) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the built-in `sort -S N%` using the wrong buffer size: `-S 50%` gave 0 bytes and `-S 100%` a thousand times the machine's memory; it is now N percent of physical memory as in GNU sort ([#17155](https://github.com/can1357/oh-my-pi/pull/17155) by [@sjawhar](https://github.com/sjawhar))
+- Exited bash-tool `&` jobs are reaped without another command; `wait` still reports their status, and `$!` works inside pipelines, subshells, and command substitutions ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
+- On macOS, the bash tool's built-in `ps` includes other users' processes and unreaped zombies when selecting a PID ([#17144](https://github.com/can1357/oh-my-pi/issues/17144)).
+- Fixed native `glob` file-type filters discarding target size and modification time for linked files ([#17180](https://github.com/can1357/oh-my-pi/pull/17180) by [@alphastorm](https://github.com/alphastorm))
+- Fixed leading UTF-8 BOMs causing embedded `jq` JSON input parse errors while preserving raw-input bytes ([#17179](https://github.com/can1357/oh-my-pi/pull/17179) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the shell's `timeout` and tool aborts not stopping built-in commands that were still reading (`cat /dev/zero`, huge files, FIFOs with no writer) ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a tool abort leaving a background in-process command, such as `cat /dev/zero > /dev/null &`, running and keeping a core busy after its shell session was gone ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a shell redirect to or from a FIFO whose other end is a background job, such as `echo hi > f & cat < f`, hanging the command; a tool abort now also stops a write redirect to a FIFO that has no reader ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a background external command with a FIFO redirect, such as `/bin/cat < f & echo hi > f`, hanging the shell until the FIFO's other end opened; the command's own process now opens it, as in bash ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `timeout` printing `error: interrupted` when its limit stopped a built-in command; like GNU `timeout`, it now prints nothing of its own and exits 124 ([#17141](https://github.com/can1357/oh-my-pi/pull/17141) by [@sjawhar](https://github.com/sjawhar))
+- Fixed crackling in live voice playback: the assistant's speech now absorbs packet jitter without dropping out, short turns play without waiting for the next response, and lost packets no longer insert extra synthesized audio ([#17114](https://github.com/can1357/oh-my-pi/issues/17114))
+- Fixed the bash tool's `rm -r` and `du` crashing the whole session with a stack overflow on a directory tree thousands of levels deep; `rm -r` also removes such a tree without running out of file descriptors, and reports a directory that is its own ancestor instead of descending into it ([#17021](https://github.com/can1357/oh-my-pi/pull/17021) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's `find` panicking and writing a native panic report to `~/.omp/logs` when the command reading its output exits early, as in `find . -printf '%p\n' | head -1`, or when its stderr is closed; it now stops quietly, and a failed `-fprintf` write is reported instead of `find: internal error` ([#17079](https://github.com/can1357/oh-my-pi/pull/17079) by [@trukhinyuri](https://github.com/trukhinyuri))
+- Fixed the shell's built-in `grep` and `rg` running the whole agent out of memory on a file with no line breaks, such as a large sparse file: a line over 256 MiB is now reported as `not searched` for that file and the search continues, and a `-f` pattern file over 256 MiB is refused with exit status 2 ([#17108](https://github.com/can1357/oh-my-pi/pull/17108) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the embedded shell's globs keeping matches whose literal tail does not exist: `ls -d DIR/*/` now lists only directories instead of passing every file as `file/`, and `*/name` keeps only matches that contain `name`, as in bash ([#17110](https://github.com/can1357/oh-my-pi/pull/17110) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the embedded shell ignoring `shopt -s globstar`: `**` now matches any number of directory levels as in bash (`**/*.rs` finds files at every depth, also in `compgen -G`), and a timeout or interrupt stops a long `**` expansion ([#17111](https://github.com/can1357/oh-my-pi/pull/17111) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.13.0] - 2026-10-26
 
 ### Added

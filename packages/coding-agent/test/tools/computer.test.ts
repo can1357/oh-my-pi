@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -41,6 +42,7 @@ import type {
 	DesktopCapabilities,
 	DesktopCapture,
 	DesktopDisplay,
+	DesktopDragResult,
 	DesktopFocusReturn,
 	DesktopPoint,
 	DesktopScreenState,
@@ -237,7 +239,15 @@ class FakeNativeSession implements NativeDesktopSession {
 	async moveMouse(_target: string, _x: number, _y: number, _opts?: PointerOptions | null): Promise<void> {
 		this.takeovers.push(_opts?.takeover);
 	}
-	async drag(_target: string, _points: DesktopPoint[], _opts?: PointerOptions | null): Promise<void> {}
+	/** The selection a text drag makes, or `null` for a posted drag. */
+	dragSelection: AxTextSelection | null = null;
+	async drag(
+		_target: string,
+		_points: DesktopPoint[],
+		_opts?: PointerOptions | null,
+	): Promise<DesktopDragResult | null | void> {
+		return this.dragSelection ? { selection: this.dragSelection } : null;
+	}
 	async scroll(
 		_target: string,
 		_x: number,
@@ -1907,12 +1917,24 @@ describe("computer worker round trips", () => {
 		}
 
 		it("leads with the requested app's windows when its title filter misses", async () => {
-			const message = await missMessage(desktopWindows, '{ app: "textedit", title: "report" }');
+			const native = new FakeNativeSession();
+			native.listApplications = async () => [
+				{ id: "org.example.editor", name: "TextEdit", path: "/Applications/TextEdit.app", running: true, pid: 10 },
+			];
+			const message = await missMessage(desktopWindows, '{ app: "ORG.EXAMPLE.EDITOR", title: "report" }', {
+				native,
+			});
 			expect(message.split("\n").slice(0, 3)).toEqual([
-				'no window matches {"app":"textedit","title":"report"}',
+				'no window matches {"app":"ORG.EXAMPLE.EDITOR","title":"report"}',
 				'Open windows by app (id "title"):',
 				'- TextEdit: 8 "notes.txt", 9 "draft.txt"',
 			]);
+			native.listApplications = async () => {
+				throw new Error("inventory unavailable");
+			};
+			const byName = await missMessage(desktopWindows, '{ app: "textedit", title: "report" }', { native });
+			expect(byName).not.toContain("No open window belongs");
+			expect(byName.split("\n")[2]).toContain("- TextEdit:");
 		});
 
 		it("says the app has no window and lists every app's windows, untitled ones included", async () => {
@@ -2032,6 +2054,59 @@ describe("computer worker round trips", () => {
 		expect(native.selections).toEqual([]);
 	});
 
+	it("returns and reports a drag the native side made as a text selection", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.dragSelection = { start: 7, length: 7, text: "BV-2291", focused: false };
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"drag-selection",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toEqual(native.dragSelection);
+		expect(result.payload.displays).toHaveLength(1);
+		const [notice] = result.payload.displays;
+		expect(notice?.type).toBe("text");
+		const text = notice?.type === "text" ? notice.text : "";
+		expect(text).toContain(JSON.stringify("BV-2291"));
+		expect(text).toContain("accessibility");
+		expect(text).toContain("no mouse input");
+		expect(text).not.toContain("\n");
+		native.dragSelection = null;
+		const posted = await runWorker(
+			transport,
+			"drag-posted",
+			'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+		);
+		expect(posted.ok && posted.payload.returnValue).toBeUndefined();
+		expect(posted.ok && posted.payload.displays).toEqual([]);
+		// The notice stays one short line, JSON escaping included; the return value keeps the selection whole.
+		for (const [label, text, full] of [
+			["long", "a".repeat(300), "a".repeat(300)],
+			["wide", "あ".repeat(150), "あ".repeat(150)],
+			["escaped", '"\\\n\t'.repeat(70), '\\"\\\\\\n\\t'.repeat(70)],
+		] as const) {
+			native.dragSelection = { start: 0, length: text.length, text, focused: false };
+			const long = await runWorker(
+				transport,
+				`drag-${label}`,
+				'const win = await desktop.window("42"); await win.drag([[1, 2], [30, 2]])',
+			);
+			expect(long.ok && long.payload.returnValue).toEqual(native.dragSelection);
+			const longNotice = long.ok ? long.payload.displays[0] : undefined;
+			const longText = longNotice?.type === "text" ? longNotice.text : "";
+			expect(long.ok).toBe(true);
+			expect(longNotice?.type).toBe("text");
+			expect(longText).not.toContain("\n");
+			expect(longText.length).toBeLessThan(full.length);
+			expect(longText).toContain(full.slice(0, 4));
+			expect(longText).not.toContain(full);
+		}
+	});
+
 	describe("numeric window ids", () => {
 		class TwoWindowSession extends FakeNativeSession {
 			override async listWindows(): Promise<DesktopWindow[]> {
@@ -2062,8 +2137,34 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("keeps an app-filter miss without scanning applications when windows have no process identity", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [{ ...windowFixture, pid: undefined }];
+		native.listApplications = async () => {
+			throw new Error("inventory must not run");
+		};
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"no-window-process",
+			'const listed = await desktop.windows({ app: "org.example.missing" }); let miss; try { await desktop.window({ app: "org.example.missing" }); } catch (error) { miss = error.message; } return { listed, miss };',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: [],
+			miss: expect.stringContaining("no window matches"),
+		});
+	});
+
 	describe("more windows than the listing cap", () => {
 		class CrowdedSession extends FakeNativeSession {
+			applicationListings = 0;
+			override async listApplications() {
+				this.applicationListings++;
+				return [{ id: "org.example.rear", name: "Rear", path: "/Applications/Rear.app", running: true, pid: 999 }];
+			}
 			override async listWindows(): Promise<DesktopWindow[]> {
 				const front = Array.from({ length: 59 }, (_, index) => ({
 					...windowFixture,
@@ -2071,21 +2172,31 @@ describe("computer worker round trips", () => {
 					app: "Front",
 					focused: false,
 				}));
-				return [...front, { ...windowFixture, id: "999", app: "Rear", focused: false }];
+				return [...front, { ...windowFixture, id: "999", app: "Rear", pid: 999, focused: false }];
 			}
 		}
 
 		it("caps the listing after filtering and finds a window behind the cap by id or app", async () => {
 			const transport = new MemoryTransport();
-			new ComputerWorkerCore(transport, () => new CrowdedSession());
+			const native = new CrowdedSession();
+			new ComputerWorkerCore(transport, () => native);
 			const result = await runWorker(
 				transport,
 				"crowded-desktop",
-				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "rear" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "rear" })).id })',
+				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "ORG.EXAMPLE.REAR" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "org.example.rear" })).id, byPath: (await desktop.window({ app: "/applications/rear.app" })).id, byName: (await desktop.window({ app: "rear" })).id, named: (await desktop.windows({ app: "rear" })).map(w => w.id) })',
 			);
 			expect(result.ok).toBe(true);
 			if (result.ok)
-				expect(result.payload.returnValue).toEqual({ listed: 48, filtered: ["999"], byId: "Rear", byApp: "999" });
+				expect(result.payload.returnValue).toEqual({
+					listed: 48,
+					filtered: ["999"],
+					byId: "Rear",
+					byApp: "999",
+					byPath: "999",
+					byName: "999",
+					named: ["999"],
+				});
+			expect(native.applicationListings).toBe(3);
 		});
 
 		it("lists at most 48 candidates for an ambiguous filter", async () => {
@@ -2444,6 +2555,10 @@ function confirmationContext(confirm: NonNullable<AgentToolContext["ui"]>["confi
 	return { hasUI: true, ui: { confirm } } as AgentToolContext;
 }
 
+function policySession(settings: Record<string, unknown>): ToolSession {
+	return { ...toolSession(), settings: Settings.isolated({ "computer.enabled": true, ...settings }) };
+}
+
 describe("expanded computer APIs", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -2538,6 +2653,72 @@ describe("expanded computer APIs", () => {
 			await expect(pending).rejects.toThrow();
 			expect(native.acquireCount).toBe(0);
 			expect(native.controlActive).toBe(false);
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it.each([
+		["allow", "without a UI", { active: true }],
+		["allow", "with a UI", { active: true }],
+		["deny", "without a UI", { active: false, reason: "denied" }],
+		["deny", "with a UI", { active: false, reason: "denied" }],
+	] as const)(
+		'answers control.acquire from a "computer.control" %s policy %s, without asking',
+		async (policy, ui, expected) => {
+			const native = new FakeNativeSession();
+			const session = policySession({ "tools.approval": { "computer.control": policy } });
+			const supervisor = new ComputerSupervisor(
+				session,
+				() => liveWorker(native),
+				undefined,
+				undefined,
+				NO_ESCAPE_STOPS,
+			);
+			const confirm = vi.fn(async () => true);
+			try {
+				const result = await supervisor.run(
+					'return await desktop.control.acquire({ reason: "Policy" })',
+					2_000,
+					snapshot(),
+					undefined,
+					ui === "with a UI"
+						? { ...confirmationContext(confirm), settings: session.settings }
+						: ({ hasUI: false, settings: session.settings } as AgentToolContext),
+				);
+				expect(result.returnValue).toEqual(expected);
+				expect(confirm).not.toHaveBeenCalled();
+				expect(native.controlActive).toBe(policy === "allow");
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
+
+	// Neither the approval mode nor the computer policy grants foreground control.
+	it.each([
+		["yolo mode", false],
+		["--auto-approve", true],
+	])("answers headless control.acquire no-ui under %s with a computer allow", async (_label, autoApprove) => {
+		const native = new FakeNativeSession();
+		const session = policySession({ "tools.approvalMode": "yolo", "tools.approval": { computer: "allow" } });
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(native),
+			undefined,
+			undefined,
+			NO_ESCAPE_STOPS,
+		);
+		try {
+			const result = await supervisor.run(
+				'return await desktop.control.acquire({ reason: "Headless" })',
+				2_000,
+				snapshot(),
+				undefined,
+				{ hasUI: false, autoApprove, settings: session.settings } as AgentToolContext,
+			);
+			expect(result.returnValue).toEqual({ active: false, reason: "no-ui" });
+			expect(native.acquireCount).toBe(0);
 		} finally {
 			await supervisor.close();
 		}
@@ -4059,7 +4240,14 @@ describe("computer background fallback", () => {
 			},
 			{
 				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
+				// Off macOS native is sent the name as given: UIA and AT-SPI match their own names.
 				call: "perform: Raise ",
+				route: "no raise is needed",
+			},
+			{
+				// Native runs any spelling of an element's action, so this one raises too.
+				code: 'await (await desktop.ref("e1")).perform("axraise")',
+				call: "perform:axraise",
 				route: "no raise is needed",
 			},
 			{
@@ -4178,11 +4366,34 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("keeps an exact application ID over a same-named file in the session's folder", async () => {
+		it("opens a path under ~ in the user's home, for the target and the app", async () => {
+			const native = new FileSession();
+			const code = [
+				'await desktop.apps.open("~/Desktop/Bench/Inbox");',
+				'await desktop.apps.open("~/notes.txt", { app: "~/Applications/Editor.app" });',
+				'await desktop.apps.open("~");',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			const home = os.homedir();
+			expect(native.opened).toEqual([
+				{ id: path.join(home, "Desktop/Bench/Inbox"), options: {} },
+				{ id: path.join(home, "notes.txt"), options: { app: path.join(home, "Applications/Editor.app") } },
+				{ id: home, options: {} },
+			]);
+		});
+
+		it("keeps an exact application ID or ~name over a same-named file in the session's folder or home", async () => {
 			class ShadowedSession extends FileSession {
 				override async listApplications() {
 					return [
 						{ id: "computer.test.ts", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 },
+						{
+							id: "~editor.desktop",
+							name: "Tilde Editor",
+							path: "/usr/share/applications/~editor.desktop",
+							running: true,
+							pid: 124,
+						},
 					];
 				}
 			}
@@ -4190,11 +4401,17 @@ describe("computer background fallback", () => {
 			const code = [
 				'await desktop.apps.open("computer.test.ts");',
 				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
+				'await desktop.apps.open("~editor.desktop");',
+				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
+				'await desktop.apps.open("~Editor");',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: "computer.test.ts", options: {} },
 				{ id: "README.md", options: { app: "computer.test.ts" } },
+				{ id: "~editor.desktop", options: {} },
+				{ id: "README.md", options: { app: "~editor.desktop" } },
+				{ id: "~Editor", options: {} },
 			]);
 		});
 
@@ -4226,8 +4443,9 @@ describe("computer background fallback", () => {
 					return { ...super.capabilities, backend: "quartz" };
 				}
 			}
-			// Native `action_name` runs exactly these two as AXOpen.
-			for (const action of ["AXOpen", "Open"]) {
+			// Native runs whichever of the element's actions matches with ASCII case folded, after
+			// trimming Unicode White_Space (U+0085 included), so every spelling of AXOpen is refused.
+			for (const action of ["AXOpen", "Open", "open", " Open ", "axopen", "AxOpen", "\u0085open", "open\u0085"]) {
 				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
 				const mac = new MacSession();
 				const refused = await run(mac, code, "refuse");
@@ -4240,17 +4458,25 @@ describe("computer background fallback", () => {
 				expect(refused.error.message, action).toContain("Use press() on a button that does the same");
 				expect(mac.calls, action).toEqual([]);
 
+				// Native is sent the spelling the refusal checked.
 				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
-				expect(mac.calls, action).toEqual([`perform:${action}`]);
+				expect(mac.calls, action).toEqual(["perform:axopen"]);
 			}
 
-			// Other spellings reach native as other actions ("AXopen", "AX Open ").
+			// Names native runs as other actions still go through ("AX Open" names `AX Open`; U+FEFF is
+			// not White_Space, so native keeps it in the name).
 			const other = new MacSession();
-			const others = ['perform("open")', 'perform(" Open ")'].map(
-				call => `await (await desktop.ref("e1")).${call};`,
+			const otherActions = ["AX Open", "opener", "\ufeffopen", "open\ufeff"];
+			const others = otherActions.map(
+				action => `await (await desktop.ref("e1")).perform(${JSON.stringify(action)});`,
 			);
 			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
-			expect(other.calls).toEqual(["perform:open", "perform: Open "]);
+			expect(other.calls).toEqual([
+				"perform:ax open",
+				"perform:axopener",
+				"perform:ax\ufeffopen",
+				"perform:axopen\ufeff",
+			]);
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
@@ -4281,27 +4507,37 @@ describe("computer background fallback", () => {
 			const menus: Array<{ code: string; call: string; named: string }> = [
 				{
 					code: `${el}.perform("AXShowMenu")`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: 'perform("AXShowMenu") would open a context menu',
 				},
 				{
 					code: `${el}.perform(" showMenu ")`,
-					call: "perform: showMenu ",
+					call: "perform:axshowmenu",
 					named: 'perform(" showMenu ") would open a context menu',
 				},
 				{
 					code: `${el}.perform("show_menu")`,
-					call: "perform:show_menu",
+					call: "perform:axshowmenu",
 					named: 'perform("show_menu") would open a context menu',
 				},
 				{
+					code: `${el}.perform("axshowmenu")`,
+					call: "perform:axshowmenu",
+					named: 'perform("axshowmenu") would open a context menu',
+				},
+				{
+					code: `${el}.perform("AxShowMenu")`,
+					call: "perform:axshowmenu",
+					named: 'perform("AxShowMenu") would open a context menu',
+				},
+				{
 					code: `${el}.perform("AXShowMenu", { menu: ["Copy"] })`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: "would open a context menu",
 				},
 				{
 					code: `${el}.perform("press", { menu: ["New Folder"] })`,
-					call: "perform:press",
+					call: "perform:axpress",
 					named: "perform with menu would open a menu",
 				},
 				{
@@ -4415,7 +4651,7 @@ describe("computer background fallback", () => {
 					"click:42:-",
 					"drag:42:-",
 					"perform:press",
-					"perform:AXIncrement",
+					"perform:axincrement",
 					"axClick:-",
 				]);
 
@@ -4492,14 +4728,20 @@ describe("computer background fallback", () => {
 					{
 						role: "AXPopUpButton",
 						code: `${el}.perform("AXPress")`,
-						call: "perform:AXPress",
+						call: "perform:axpress",
 						named: 'perform("AXPress") on an AXPopUpButton',
 					},
 					{
 						role: "AXMenuButton",
 						code: `${el}.perform(" Press ")`,
-						call: "perform: Press ",
+						call: "perform:axpress",
 						named: 'perform(" Press ") on an AXMenuButton',
+					},
+					{
+						role: "AXPopUpButton",
+						code: `${el}.perform("axpress")`,
+						call: "perform:axpress",
+						named: 'perform("axpress") on an AXPopUpButton',
 					},
 					{
 						role: "AXPopUpButton",
@@ -4549,13 +4791,13 @@ describe("computer background fallback", () => {
 						`${el}.click();`,
 					].join("\n");
 					expect((await run(button, code, "refuse")).ok).toBe(true);
-					expect(button.calls).toEqual(["perform:press", "perform:AXPress", "setValue:x", "axClick:true"]);
+					expect(button.calls).toEqual(["perform:press", "perform:axpress", "setValue:x", "axClick:true"]);
 
 					// A menu button's menu is a pull-down, so setValue and other actions do not open it.
 					const menuButton = new ControlSession("AXMenuButton");
 					const other = [`${el}.setValue("x");`, `${el}.perform("AXShowDefaultUI");`].join("\n");
 					expect((await run(menuButton, other, "refuse")).ok).toBe(true);
-					expect(menuButton.calls).toEqual(["setValue:x", "perform:AXShowDefaultUI"]);
+					expect(menuButton.calls).toEqual(["setValue:x", "perform:axshowdefaultui"]);
 
 					class ElsewhereSession extends ForegroundSession {
 						override async axNode(ref: string): Promise<AxNode> {
@@ -4718,5 +4960,171 @@ describe("computer background fallback", () => {
 		const front = new RefusingSession();
 		front.report = { handedBack: true, previousPid: 300 };
 		expect(notice(await run(front, clickTarget, "takeover"))).toContain("not confirmed");
+	});
+});
+
+describe("window() waiting for a window to appear", () => {
+	class OpeningSession extends FakeNativeSession {
+		listings = 0;
+		constructor(readonly appearsAt: number) {
+			super();
+		}
+		override async listApplications() {
+			if (this.listings < this.appearsAt) return [];
+			return [
+				{
+					id: "org.example.preview",
+					name: "Preview",
+					path: "/Applications/Preview.app",
+					running: true,
+					pid: 4,
+				},
+			];
+		}
+		override async listWindows(): Promise<DesktopWindow[]> {
+			this.listings += 1;
+			return this.listings >= this.appearsAt
+				? [windowFixture, { ...windowFixture, id: "151", app: "Preview", title: "report.pdf", pid: 4 }]
+				: [windowFixture];
+		}
+	}
+
+	async function run(native: NativeDesktopSession, code: string, readOnly = false, timeoutMs = 5_000) {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const id = crypto.randomUUID();
+		transport.inbound({
+			type: "run",
+			id,
+			code,
+			timeoutMs,
+			session: snapshot(readOnly),
+			escape: escapeScope(),
+		});
+		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+		return message;
+	}
+
+	/** One event-loop turn, which fake timers leave alone: every pending promise of the worker runs first. */
+	function turn(): Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		return promise;
+	}
+
+	/**
+	 * Under fake timers, let `native` list `count` times, moving the clock one 100 ms poll interval after each
+	 * listing but the last, once the worker is asleep in that interval.
+	 */
+	async function pollListings(native: OpeningSession, count: number): Promise<void> {
+		for (let listed = 1; ; listed++) {
+			while (native.listings < listed) await turn();
+			if (listed === count) return;
+			await turn();
+			vi.advanceTimersByTime(100);
+		}
+	}
+
+	it("polls a filter with wait until the window appears in a read-only run", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(4);
+			const pending = run(
+				native,
+				'return (await desktop.window({ app: "org.example.preview", title: "report.pdf", wait: 2000 })).id',
+				true,
+			);
+			await pollListings(native, 4);
+			await turn();
+			vi.advanceTimersByTime(2000);
+			const result = await pending;
+			if (!result.ok) throw new Error(result.error.message);
+			expect(result.payload.returnValue).toBe("151");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("stops polling when the run is cancelled by its deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 10000 })', false, 300);
+			// Listings at 0, 100 and 200 ms; the 300 ms deadline cancels the run during the next interval.
+			await pollListings(native, 3);
+			await turn();
+			vi.advanceTimersByTime(100);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toContain("timed out");
+			// A loop that outlived its run would list again in each later interval.
+			for (let interval = 0; interval < 5; interval++) {
+				await turn();
+				vi.advanceTimersByTime(100);
+			}
+			await turn();
+			expect(native.listings).toBe(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("still fails at once without wait", async () => {
+		const native = new OpeningSession(4);
+		const result = await run(native, 'return await desktop.window({ app: "Preview" })');
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toStartWith('no window matches {"app":"Preview"}');
+		expect(native.listings).toBe(1);
+	});
+
+	it("reports the window miss after waiting when nothing appears", async () => {
+		vi.useFakeTimers();
+		try {
+			const native = new OpeningSession(Number.POSITIVE_INFINITY);
+			const pending = run(native, 'return await desktop.window({ app: "Preview", wait: 300 })');
+			// Listings at 0, 100 and 200 ms and the last at the 300 ms deadline.
+			await pollListings(native, 4);
+			const result = await pending;
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.error.message).toStartWith('no window matches {"app":"Preview","wait":300}');
+			expect(result.error.message).toContain("Open windows by app");
+			expect(native.listings).toBe(4);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each(["60000", "NaN", '"soon"'])("refuses an invalid wait of %s", async wait => {
+		const native = new OpeningSession(1);
+		const result = await run(native, `return await desktop.window({ app: "Preview", wait: ${wait} })`);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).toContain("window({ wait }) takes milliseconds from 0 to 10000");
+		expect(native.listings).toBe(0);
+	});
+
+	it("resolves a delayed window through Python keyword filters", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const native = new OpeningSession(3);
+		const prelude = workerPrelude(session, native);
+		definitions = [prelude];
+		const result = await executePython(
+			'win = await computer.window(app="Preview", title="report.pdf", wait=2000)\nprint(win.id)',
+			{
+				cwd: process.cwd(),
+				sessionId: `computer-window-wait-${crypto.randomUUID()}`,
+				toolSession: session,
+				kernelMode: "per-call",
+			},
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim().split("\n").at(-1)).toBe("151");
+		expect(native.listings).toBe(3);
 	});
 });

@@ -109,10 +109,7 @@ impl std::fmt::Display for AbsoluteRangeOp {
 }
 
 fn reg_suffix(register: Option<&str>) -> String {
-	match register {
-		Some(reg) => format!(" @{reg}"),
-		None => String::new(),
-	}
+	register.map_or_default(|reg| format!(" @{reg}"))
 }
 
 fn range_op_single(op: AbsoluteRangeOp, line: u32, register: Option<&str>) -> String {
@@ -641,10 +638,7 @@ pub fn boundary_variant_repair_warning(start_line: u32, kept: u32, dropped: u32)
 /// tree-sitter and surfaced in the same response instead of waiting for a
 /// compiler pass.
 pub fn edit_broke_parse_warning(first_changed_line: Option<u32>) -> String {
-	let at = match first_changed_line {
-		Some(line) => format!(" near line {line}"),
-		None => String::new(),
-	};
+	let at = first_changed_line.map_or_default(|line| format!(" near line {line}"));
 	format!(
 		"This edit introduced a syntax error{at}: the file parsed before the patch and no longer \
 		 does. It was applied exactly as written, so a line number or range endpoint is likely \
@@ -999,6 +993,36 @@ pub fn unseen_lines_message(
 		 you intend to touch, then re-issue the edit with the same \
 		 {HL_FILE_PREFIX}path{HL_FILE_HASH_SEP}tag{HL_FILE_SUFFIX} header — a straight retry now \
 		 succeeds without a re-read. If the content does NOT match, fix your line numbers."
+	)
+}
+
+/// [`unseen_lines_message`]'s fallback for a stale tag.
+///
+/// The inline reveal cannot carry the lines (one is over the column cap, or
+/// there are more than the reveal cap), so they must be read. The file changed
+/// since the tag, so a read at the tag's numbers shows other rows; the read and
+/// the re-issued edit use the lines' current numbers and the file's current
+/// tag.
+pub fn stale_unseen_lines_message(
+	section_path: &str,
+	unseen_lines: &[u32],
+	tag: &str,
+	live_lines: &[u32],
+	live_tag: &str,
+	raw: bool,
+) -> String {
+	let ranges = format_line_ranges(unseen_lines);
+	let live_ranges = format_line_ranges(live_lines);
+	let selector = live_ranges.replace(", ", ",");
+	let raw = if raw { ":raw" } else { "" };
+	let live_header =
+		format!("{HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{live_tag}{HL_FILE_SUFFIX}");
+	format!(
+		"This edit anchors to lines {ranges} of {section_path} that \
+		 {HL_FILE_PREFIX}{section_path}{HL_FILE_HASH_SEP}{tag}{HL_FILE_SUFFIX} never displayed in \
+		 full. The file has changed since that tag: those lines are now lines {live_ranges}, under \
+		 {live_header}. Read `{section_path}:{selector}{raw}` for their full content, then re-issue \
+		 the edit under {live_header} with current line numbers."
 	)
 }
 

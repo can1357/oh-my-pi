@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	Lexer,
@@ -26,6 +27,12 @@ import { isBareMathEnvironment, latexToUnicode } from "../latex-to-unicode";
 import { plainText } from "../native/spans";
 import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
+import {
+	extensionLinkScheme,
+	extensionLinksVersion,
+	formatExtensionLink,
+	stripExtensionLinkMarkers,
+} from "../render/extension-links";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
 import { getSymbolTheme, getThemeEpoch } from "../theme/theme";
@@ -134,6 +141,54 @@ function fenceOpenAt(text: string, end: number): boolean {
 		}
 	}
 	return open !== undefined;
+}
+
+/** Locked column widths: per table (see tableLockKey), per available width. */
+export type TableLocks = Map<string, Map<number, readonly number[]>>;
+
+/**
+ * A table's lock key: where it starts in the source, plus its header and
+ * delimiter lines, so two tables with the same header never share a lock.
+ * Undefined before both lines are complete.
+ */
+function tableLockKey(offset: number, raw: string): string | undefined {
+	const header = raw.indexOf("\n");
+	const delimiter = header < 0 ? -1 : raw.indexOf("\n", header + 1);
+	return delimiter < 0 ? undefined : `${offset}:${raw.slice(0, delimiter)}`;
+}
+
+/**
+ * Whether `text` ends inside a code fence the source never closed. The
+ * renderer still draws such a fence's closing border, so a caller publishing a
+ * settled source prefix must drop that fabricated row: it is not a prefix of
+ * the live block, which reaches the border only once the closer arrives.
+ */
+export function endsInsideOpenFence(text: string): boolean {
+	return fenceOpenAt(text, text.length);
+}
+
+/**
+ * Offset of the settled prefix of the still-open fence that `text` ends in, or
+ * 0 when it holds none.
+ *
+ * An open fence's body only ever appends: nothing a later chunk adds can
+ * change a line that already ended. Those lines are therefore settled, and a
+ * stream may publish them into native scrollback instead of leaving the whole
+ * block in the mutable viewport until the closing fence finally arrives — a
+ * long streamed code block would otherwise lose every row that left the screen
+ * (#9780).
+ *
+ * The cut lands before the last complete line, not after it: a streamed chunk
+ * usually ends on a "\n", and the publisher requires non-blank source past the
+ * prefix it publishes, so cutting at the final "\n" would publish nothing on
+ * exactly those frames. Once the closing fence has arrived, the retained line
+ * is the one in front of it.
+ */
+function settledFenceBodyEnd(text: string): number {
+	const lastBreak = text.lastIndexOf("\n");
+	if (lastBreak <= 0) return 0;
+	const cut = text.lastIndexOf("\n", lastBreak - 1) + 1;
+	return cut > 0 && fenceOpenAt(text, cut) ? cut : 0;
 }
 
 /**
@@ -353,6 +408,58 @@ export function speculativeStreamingSource(text: string): string {
 function replaceLast(raw: string, from: string, to: string): string | undefined {
 	const at = raw.lastIndexOf(from);
 	return at < 0 ? undefined : raw.slice(0, at) + to + raw.slice(at + from.length);
+}
+
+// The lone `-` line a streaming source ends on while a bullet is still being typed.
+const PENDING_BULLET_LINE = /\n[ \t>]*-[ \t]*$/;
+
+/** `text` without its last line (and the newline in front of it). */
+function dropLastLine(text: string): string {
+	return text.slice(0, Math.max(0, text.lastIndexOf("\n")));
+}
+
+/**
+ * A copy of `token`, the last block of a streaming render, without the lone
+ * `-` line the source ends on when that line underlines a paragraph, or
+ * `undefined` when the source does not end that way. Under a paragraph a lone
+ * `-` is a setext H2 underline, but a stream ending on one is almost always
+ * typing a bullet (`- item`), which leaves the paragraph a paragraph: held
+ * back, the paragraph keeps its rows instead of flashing as a heading for a
+ * frame. A `-` line followed by a newline, or a longer underline, is a heading
+ * as written. Follows the last list item or blockquote child; every `raw` on
+ * the way drops the held line, so row caches keyed on it see the source the
+ * copy renders.
+ */
+function holdPendingBullet(token: Token): Token | undefined {
+	if (!PENDING_BULLET_LINE.test(token.raw)) return undefined;
+	const raw = dropLastLine(token.raw);
+	switch (token.type) {
+		case "heading":
+			return { type: "paragraph", raw, text: token.text, tokens: token.tokens ?? [] };
+		case "blockquote": {
+			const children: Token[] = token.tokens ?? [];
+			const inner = children.at(-1);
+			const held = inner && holdPendingBullet(inner);
+			if (!held) return undefined;
+			return { ...token, raw, text: dropLastLine(token.text), tokens: [...children.slice(0, -1), held] };
+		}
+		case "list": {
+			const items: Tokens.ListItem[] = token.items;
+			const item = items.at(-1);
+			const inner = item?.tokens.at(-1);
+			const held = inner && holdPendingBullet(inner);
+			if (!item || !held) return undefined;
+			const grown = {
+				...item,
+				raw: dropLastLine(item.raw),
+				text: dropLastLine(item.text),
+				tokens: [...item.tokens.slice(0, -1), held],
+			};
+			return { ...token, raw, items: [...items.slice(0, -1), grown] };
+		}
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -774,6 +881,9 @@ const MIN_TREE_CONTENT_WIDTH = 8;
 const SGR_SEQUENCE_STICKY = /\x1b\[[0-9;:]*m/y;
 const SGR_SEQUENCE_GLOBAL = /\x1b\[[0-9;:]*m/g;
 
+/** An SGR sequence that only turns styling off: a full reset or attribute/color closes (`22`–`29`, `39`, `49`, `59`). */
+const SGR_CLOSER_SEQUENCE = /^\x1b\[(?:(?:0|2[2-9]|39|49|59)(?:;(?:0|2[2-9]|39|49|59))*)?m$/;
+
 /**
  * Everything before the last full SGR reset is dead state — drop it so the
  * re-played `carry` stays bounded by the paragraph's live style run instead
@@ -787,10 +897,21 @@ function compactSgrCarry(carry: string): string {
 }
 
 interface TreeGuidePrefix {
-	/** Index of the first char past the guide run (start of the node text). */
+	/**
+	 * Index just past the last guide glyph. SGR sequences between that glyph
+	 * and the node text (a `**bold**` opener, a prose-color close) stay with
+	 * the node text, so the slice from here is the styled node text.
+	 */
 	end: number;
-	/** SGR sequences interleaved with the guides, in order (zero visible width). */
+	/** SGR sequences opened before or among the guides, in order (zero visible width). */
 	codes: string;
+	/**
+	 * Closer-only SGR sequences between the last guide glyph and the node text,
+	 * in order: the author ending the guides' styling before the text starts
+	 * (`\x1b[2m├── \x1b[22mtext`). Replayed after each continuation rail so
+	 * the rail wears the guide styling and the text does not.
+	 */
+	closers: string;
 	/** Guide characters with SGR stripped, exactly as they appear on screen. */
 	guides: string;
 }
@@ -804,24 +925,32 @@ interface TreeGuidePrefix {
  */
 function matchTreeGuidePrefix(line: string): TreeGuidePrefix | undefined {
 	let codes = "";
+	let pendingCodes = "";
 	let guides = "";
+	let end = 0;
 	let i = 0;
 	while (i < line.length) {
 		if (line.charCodeAt(i) === 0x1b) {
 			SGR_SEQUENCE_STICKY.lastIndex = i;
 			const match = SGR_SEQUENCE_STICKY.exec(line);
 			if (!match) break;
-			codes += match[0];
+			pendingCodes += match[0];
 			i = SGR_SEQUENCE_STICKY.lastIndex;
 			continue;
 		}
 		const char = line[i]!;
 		if (!(char in TREE_GUIDE_CONTINUATION)) break;
 		guides += char;
-		i++;
+		codes += pendingCodes;
+		pendingCodes = "";
+		end = ++i;
 	}
 	if (i >= line.length || !TREE_BRANCH_CONNECTOR_RE.test(guides)) return undefined;
-	return { end: i, codes, guides };
+	let closers = "";
+	for (const sequence of pendingCodes.match(SGR_SEQUENCE_GLOBAL) ?? []) {
+		if (SGR_CLOSER_SEQUENCE.test(sequence)) closers += sequence;
+	}
+	return { end, codes, closers, guides };
 }
 
 /**
@@ -866,8 +995,12 @@ function hangWrapTreeGuideLines(text: string, width: number): string[] | undefin
 		const hangShortfall = visibleWidth(prefix.guides) - visibleWidth(hang);
 		if (hangShortfall > 0) hang += padding(hangShortfall);
 		out.push(carry + line.slice(0, prefix.end) + rows[0]!.slice(activeCodes.length));
+		// Continuation rails wear what the first row's guides wore (`activeCodes`),
+		// end it the way the first row did (`closers`), and the wrapped row then
+		// restores its own live state.
+		const rail = activeCodes + hang + prefix.closers;
 		for (let i = 1; i < rows.length; i++) {
-			out.push(activeCodes + hang + rows[i]!);
+			out.push(rail + rows[i]!);
 		}
 		carry = compactSgrCarry(carry + (line.match(SGR_SEQUENCE_GLOBAL)?.join("") ?? ""));
 	}
@@ -1354,6 +1487,15 @@ function inlineHasOpen(tokens: readonly Token[]): boolean {
 	return false;
 }
 
+/** True when the inline token stream holds a link whose scheme an extension claimed. */
+function hasExtensionLink(tokens: readonly Token[]): boolean {
+	for (const token of tokens) {
+		if (token.type === "link" && typeof token.href === "string" && extensionLinkScheme(token.href)) return true;
+		if ("tokens" in token && Array.isArray(token.tokens) && hasExtensionLink(token.tokens as Token[])) return true;
+	}
+	return false;
+}
+
 /** Isolated inline lex of a same-line delta. A single-line delta has no block
  * structure, so the isolated inline pass equals the full lex's inline pass
  * (marked's paragraph tokens run the same `inlineTokens` entry point). */
@@ -1713,7 +1855,8 @@ export function getMarkdownLinkUrls(text: string): string[] {
  * Each function takes text and returns styled text with ANSI codes.
  */
 export interface MarkdownTheme {
-	heading: (text: string) => string;
+	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
+	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
@@ -1729,6 +1872,15 @@ export interface MarkdownTheme {
 	italic: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
+	/**
+	 * Style `**strong**` spans, including their weight. Omitted → {@link bold}.
+	 * A theme that colors them owns the span's foreground over a `proseFg` default.
+	 */
+	strong?: (text: string) => string;
+	/** Style `*emphasis*` spans, including their slant. Omitted → {@link italic}; colors win like {@link strong}. */
+	emphasis?: (text: string) => string;
+	/** Style table header cells, including their weight. Omitted → {@link bold}; colors win like {@link strong}. */
+	tableHeader?: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/**
 	 * Create a stateful incremental highlighter for one streaming code fence.
@@ -1947,7 +2099,7 @@ function plainInlineTokens(tokens: Token[]): string {
 	let result = "";
 	for (const token of tokens) {
 		if (isMathToken(token)) {
-			result += renderMathToken(token.text);
+			result += stripVTControlCharacters(renderMathToken(token.text));
 			continue;
 		}
 		switch (token.type) {
@@ -2129,6 +2281,7 @@ interface RenderSignature {
 	defaultTextStyleId: number;
 	imageProtocol: string;
 	hyperlinks: boolean;
+	extensionLinks: number;
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
@@ -2300,6 +2453,8 @@ export class Markdown implements Component {
 	#cachedText?: string;
 	#cachedWidth?: number;
 	#cachedLines?: readonly string[];
+	// Extension-link routing changes how links draw without changing text or width.
+	#cachedExtensionLinks?: number;
 	#transientRenderCache = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
@@ -2322,6 +2477,12 @@ export class Markdown implements Component {
 	// The frozen prefix's leading run in front of the first of those openers:
 	// no append can change its tokens, so getLastRenderStableText publishes it.
 	#streamSettledText?: string;
+	// The complete lines inside a still-open fence, with the fence's opening
+	// line in front of them: an open fence never reaches a "\n\n" boundary, so
+	// #streamSettledText holds nothing for it and a long streamed code block
+	// would stay unretirable until the closing fence arrived. Kept while the
+	// source extends it, so the published prefix never shrinks.
+	#streamFenceSettledText?: string;
 	// The text in front of the newest top-level item of a list that is still
 	// streaming as the last block. Once an item's marker line has ended, no
 	// append can add to the items in front of it, and #renderList draws each
@@ -2329,6 +2490,27 @@ export class Markdown implements Component {
 	// texts extend it, so the published prefix never shrinks when the list
 	// stops being the last block.
 	#streamListSettledText?: string;
+	// The text through the last finished row of a locked table that is still
+	// streaming as the last block. A locked table's column widths no longer
+	// follow its rows, so a finished row renders the same whatever follows it.
+	#streamTableSettledText?: string;
+	// Key of the table streaming as the last block in the latest render, so
+	// lockOpenTable can lock it.
+	#openTableKey?: string;
+	// Source offset of each top-level table token the latest lex produced; a
+	// table's lock is keyed by it.
+	#tableOffsets = new WeakMap<Token, number>();
+	/**
+	 * Column widths of locked tables, per table (see tableLockKey) and per
+	 * available width. The owner gives one map to the Markdown streaming a
+	 * text block and to the ones rendering that block's stable prefix, so both
+	 * lay a locked table out the same; other blocks get their own maps.
+	 */
+	tableLocks?: TableLocks;
+	#openTableTail = false;
+	// While openTableTail is set: the table that is the document's last
+	// top-level block in the render under way, the only one that ends open.
+	#openTailToken?: Token;
 	// The prefix before a rewind that only a closer on the still-growing last
 	// line caused. Once a later text holds no closer line after it, that
 	// prefix is right again, so #lexTokens puts it back.
@@ -2373,6 +2555,9 @@ export class Markdown implements Component {
 	#fastTail?: FastTailRecipe; // undefined = disarmed
 	// B+ capture plumbing: #renderContentLines records the last rendered paragraph row.
 	#lastTailCapture?: { kind: "paragraph"; open: boolean; rowInput: string; rowRaw: string };
+	/** Top-level token index and running count of the extension links drawn in it; see `#renderContentLines`. */
+	#extensionLinkBlock = 0;
+	#extensionLinkOrdinal = 0;
 	#ignoreTight = false;
 	#native?: { text: string; stream: boolean; node: NativeNode };
 	setIgnoreTight(ignore: boolean): this {
@@ -2511,15 +2696,78 @@ export class Markdown implements Component {
 	 * Width-independent source prefix of the last render that no append can
 	 * change: up to a frozen Markdown block boundary, stopping in front of a
 	 * display-math opener whose block an append could still close, or, while a
-	 * list streams as the last block, up to its newest top-level item. Only
-	 * meaningful while streaming (transient render cache on); grows
-	 * monotonically under append-only `setText`.
+	 * list streams as the last block, up to its newest top-level item, or,
+	 * while a locked table streams as the last block, through its last
+	 * finished row. Only meaningful while streaming (transient render cache
+	 * on); grows monotonically under append-only `setText`.
 	 */
 	getLastRenderStableText(): string {
 		if (!this.#transientRenderCache) return "";
-		const settled = this.#streamSettledText ?? "";
+		// An open fence has no "\n\n" boundary, so the block walk above settles
+		// nothing inside it. Its finished lines are settled all the same: no
+		// append can change a line that already ended. Publish them, or a long
+		// streamed code block (SQL, logs) stays unretirable in the mutable
+		// viewport and its top rows are dropped as it outgrows the screen.
+		const source = streamingMarkdownSource(this.#text);
+		let fence = this.#streamFenceSettledText;
+		if (fence !== undefined && !source.startsWith(fence)) {
+			// A non-append edit rewound the text below what was published. Drop
+			// the stored prefix as well: keeping it would fail this check on
+			// every later frame and leave the block unretirable for the rest of
+			// the stream.
+			fence = undefined;
+			this.#streamFenceSettledText = undefined;
+		}
+		const body = settledFenceBodyEnd(source);
+		if (body > (fence?.length ?? 0)) {
+			fence = source.slice(0, body);
+			this.#streamFenceSettledText = fence;
+		}
+		let text = this.#streamSettledText ?? "";
 		const list = this.#streamListSettledText;
-		return list !== undefined && list.length > settled.length ? list : settled;
+		if (list !== undefined && list.length > text.length) text = list;
+		const table = this.#streamTableSettledText;
+		if (table !== undefined && table.length > text.length) text = table;
+		if (fence !== undefined && fence.length > text.length) text = fence;
+		return text;
+	}
+
+	/** Whether {@link getLastRenderStableText} ends inside a locked table that is still streaming. */
+	lastRenderStableTextEndsInOpenTable(): boolean {
+		const table = this.#streamTableSettledText;
+		return table !== undefined && this.getLastRenderStableText() === table;
+	}
+
+	/**
+	 * Lock the column widths of the table streaming as the last block, as they
+	 * stand, so its finished rows stop depending on rows still to come and can
+	 * leave the screen for scrollback. A later cell wraps inside the locked
+	 * widths. The lock holds for the table's final render too. Returns whether
+	 * a table was newly locked, so the owner can request the frame that
+	 * publishes its finished rows.
+	 */
+	lockOpenTable(): boolean {
+		const key = this.#openTableKey;
+		if (key === undefined || this.tableLocks === undefined || this.tableLocks.has(key)) return false;
+		this.tableLocks.set(key, new Map());
+		this.invalidate();
+		return true;
+	}
+
+	/**
+	 * End a table that is the last block with a row separator instead of its
+	 * bottom border: set while rendering a stable prefix cut inside a table
+	 * that keeps streaming, so the prefix's rows are the first rows of every
+	 * later render.
+	 */
+	get openTableTail(): boolean {
+		return this.#openTableTail;
+	}
+
+	set openTableTail(value: boolean) {
+		if (this.#openTableTail === value) return;
+		this.#openTableTail = value;
+		this.invalidate();
 	}
 
 	get transientRenderCache(): boolean {
@@ -2553,6 +2801,7 @@ export class Markdown implements Component {
 			this.#streamingHighlightCache = undefined;
 			this.#streamingListCache = undefined;
 			this.#streamRewound = undefined;
+			this.#streamFenceSettledText = undefined;
 		}
 		this.invalidate();
 	}
@@ -2564,6 +2813,18 @@ export class Markdown implements Component {
 	// raw-span offsets). Every fallback is correctness-preserving — only speed
 	// differs; the render loop sees the identical token list either way.
 	#lexTokens(text: string): Token[] {
+		const tokens = this.#lexTopLevel(text);
+		if (this.tableLocks !== undefined) {
+			let offset = 0;
+			for (const token of tokens) {
+				if (token.type === "table") this.#tableOffsets.set(token, offset);
+				offset += token.raw.length;
+			}
+		}
+		return tokens;
+	}
+
+	#lexTopLevel(text: string): Token[] {
 		// A prefix is frozen only while canStream holds and its lex registered no
 		// definitions, and it ends at a "\n\n" block boundary (stableBlockBoundary),
 		// so the tail starts at a fresh line. The scan below then catches a
@@ -2636,6 +2897,7 @@ export class Markdown implements Component {
 			if (tokens !== undefined) {
 				this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
 				this.#checkpointStreamingList(text, tokens);
+				this.#checkpointStreamingTable(text, tokens);
 				return tokens;
 			}
 		}
@@ -2648,7 +2910,10 @@ export class Markdown implements Component {
 				const tokens = [...prefixTokens, ...tailTokens];
 				if (retainPrefix) this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
 				else this.#dropStreamPrefix();
-				if (retainPrefix) this.#checkpointStreamingList(text, tokens);
+				if (retainPrefix) {
+					this.#checkpointStreamingList(text, tokens);
+					this.#checkpointStreamingTable(text, tokens);
+				}
 				return tokens;
 			}
 		}
@@ -2660,6 +2925,7 @@ export class Markdown implements Component {
 		if (canStream && retainPrefix && !hasReferenceDefinitions) {
 			this.#freezeStablePrefix(text, tokens, { preserveExisting: false });
 			this.#checkpointStreamingList(text, tokens);
+			this.#checkpointStreamingTable(text, tokens);
 		} else {
 			this.#dropStreamPrefix();
 		}
@@ -2749,6 +3015,52 @@ export class Markdown implements Component {
 		}
 	}
 
+	#checkpointStreamingTable(text: string, tokens: Token[]): void {
+		if (this.#streamTableSettledText !== undefined && !text.startsWith(this.#streamTableSettledText)) {
+			this.#streamTableSettledText = undefined;
+		}
+		this.#openTableKey = undefined;
+		let index = tokens.length - 1;
+		while (tokens[index]?.type === "space") index--;
+		const token = tokens[index];
+		if (token?.type !== "table") return;
+		// Runs inside the lex, before #lexTokens records offsets: sum them here.
+		let start = 0;
+		for (let i = 0; i < index; i++) start += tokens[i]!.raw.length;
+		const key = tableLockKey(start, token.raw);
+		if (key === undefined) return;
+		this.#openTableKey = key;
+		if (!this.tableLocks?.has(key)) return;
+		// Like a list, the table must start at the settled boundary: a
+		// display-math opener in front of it could still absorb it. ATX headings
+		// right above it (no blank line between) are finished and cannot hold
+		// such an opener, so the boundary may sit in front of them instead.
+		const prefix = this.#streamPrefixText?.length ?? 0;
+		const settled = this.#streamSettledText?.length ?? 0;
+		let boundary = start;
+		for (let i = index - 1; boundary !== prefix || settled !== boundary; i--) {
+			const before = tokens[i];
+			if (before?.type !== "heading" || !/^ {0,3}#/.test(before.raw) || !before.raw.endsWith("\n")) return;
+			boundary -= before.raw.length;
+		}
+		// The header, the delimiter and every finished row end in a newline;
+		// whatever follows the last one is the row still being written. A later
+		// reference definition can still turn a bracketed label into a link, so
+		// the settled rows also stop in front of the first row holding one.
+		const table = token as TableToken;
+		if (table.header.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) return;
+		let finished = token.raw.indexOf("\n", token.raw.indexOf("\n") + 1) + 1;
+		for (const row of table.rows) {
+			const next = token.raw.indexOf("\n", finished) + 1;
+			if (next === 0) break;
+			if (row.some(cell => REFERENCE_LABEL_RE.test(labelSource(cell.tokens ?? [])))) break;
+			finished = next;
+		}
+		if (token.raw.slice(0, finished).split("\n").length - 1 < 3) return;
+		const end = start + finished;
+		if (end > (this.#streamTableSettledText?.length ?? 0)) this.#streamTableSettledText = text.slice(0, end);
+	}
+
 	/**
 	 * Drop the frozen lex prefix and the transient row caches keyed on it. A
 	 * prefix set aside for #restoreRewoundPrefix checks itself against each
@@ -2760,6 +3072,8 @@ export class Markdown implements Component {
 		this.#streamPrefixOpeners = NO_OPENERS;
 		this.#streamSettledText = undefined;
 		this.#streamListSettledText = undefined;
+		this.#streamTableSettledText = undefined;
+		this.#openTableKey = undefined;
 		this.#streamPrefixLineCache = undefined;
 		this.#tailRowCache = undefined;
 		this.#listItemRowsCache = undefined;
@@ -2914,7 +3228,12 @@ export class Markdown implements Component {
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their
 		// concatenation on reference equality.
-		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+		if (
+			this.#cachedLines &&
+			this.#cachedText === this.#text &&
+			this.#cachedWidth === width &&
+			this.#cachedExtensionLinks === extensionLinksVersion()
+		) {
 			return this.#cachedLines;
 		}
 
@@ -2927,6 +3246,7 @@ export class Markdown implements Component {
 			this.#cachedText = this.#text;
 			this.#cachedWidth = width;
 			this.#cachedLines = EMPTY_RENDER_LINES;
+			this.#cachedExtensionLinks = extensionLinksVersion();
 			return EMPTY_RENDER_LINES;
 		}
 
@@ -3011,6 +3331,8 @@ export class Markdown implements Component {
 					// into a table on a marker-free delta (`| --` + `--- | -`).
 					!FAST_TABLE_DELIM_ROW_RE.test(grownLastLine) &&
 					(!markerDelta || (!this.#lastTailCapture?.open && !pairSeamHazard && !inlineHasOpen(deltaTokens!))) &&
+					// Extension link markers are numbered per block; a delta rendered alone can't continue that.
+					!(deltaTokens && hasExtensionLink(deltaTokens)) &&
 					!FAST_URL_ANYWHERE_RE.test(seamWindow) &&
 					// A link or math span the grown row leaves open renders speculatively closed: re-lex.
 					speculativeInlineClose(grownLastLine) === undefined
@@ -3051,6 +3373,7 @@ export class Markdown implements Component {
 					this.#cachedText = this.#text;
 					this.#cachedWidth = width;
 					this.#cachedLines = fastResult;
+					this.#cachedExtensionLinks = signature.extensionLinks;
 					this.#fastTail = {
 						lines: fastResult,
 						source: this.#text,
@@ -3101,7 +3424,10 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache) {
+		// A locked table or an open table tail lays out differently from the
+		// same text elsewhere, so such renders stay out of the shared cache.
+		const sharedCache = !this.#openTableTail && !this.tableLocks?.size;
+		if (!this.transientRenderCache && sharedCache) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -3113,6 +3439,7 @@ export class Markdown implements Component {
 				this.#cachedText = this.#text;
 				this.#cachedWidth = width;
 				this.#cachedLines = cached;
+				this.#cachedExtensionLinks = signature.extensionLinks;
 				return cached;
 			}
 		}
@@ -3121,8 +3448,15 @@ export class Markdown implements Component {
 		// being written renders its open link or math span as already closed.
 		const lexed = this.#lexTokens(normalizedText);
 		const tail = lexed.at(-1);
-		const speculated = this.transientRenderCache && tail ? speculateStreamingToken(tail) : undefined;
+		const held = this.transientRenderCache && tail ? holdPendingBullet(tail) : undefined;
+		const open = held ?? tail;
+		const speculated = this.transientRenderCache && open ? (speculateStreamingToken(open) ?? held) : undefined;
+		const tailOffset = tail === undefined ? undefined : this.#tableOffsets.get(tail);
+		if (speculated !== undefined && tailOffset !== undefined) this.#tableOffsets.set(speculated, tailOffset);
 		const tokens = speculated ? [...lexed.slice(0, -1), speculated] : lexed;
+		let last = tokens.length - 1;
+		while (tokens[last]?.type === "space") last--;
+		this.#openTailToken = this.#openTableTail && tokens[last]?.type === "table" ? tokens[last] : undefined;
 		let contentLines: string[];
 		this.#activeRenderSignature = signature;
 		try {
@@ -3146,6 +3480,7 @@ export class Markdown implements Component {
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+		this.#cachedExtensionLinks = signature.extensionLinks;
 
 		const fastEligible =
 			this.transientRenderCache &&
@@ -3190,7 +3525,7 @@ export class Markdown implements Component {
 
 	#renderSignature(width: number, paddingX: number): RenderSignature {
 		const bgColorProbe = this.#defaultTextStyle?.bgColor ? this.#defaultTextStyle.bgColor("\x01") : "";
-		const headingProbe = this.#theme.heading("");
+		const headingProbe = this.#theme.heading("", 1);
 		return {
 			width,
 			paddingX,
@@ -3200,6 +3535,7 @@ export class Markdown implements Component {
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
 			hyperlinks: TERMINAL.hyperlinks,
+			extensionLinks: extensionLinksVersion(),
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
@@ -3212,7 +3548,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.extensionLinks}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -3288,6 +3624,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
 		if (cache.hyperlinks !== signature.hyperlinks) return undefined;
+		if (cache.extensionLinks !== signature.extensionLinks) return undefined;
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
@@ -3378,6 +3715,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
 		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.extensionLinks !== signature.extensionLinks) return start;
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
@@ -3412,6 +3750,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenWrappedRowStart = wrappedLines.length;
+			// Extension links are numbered per top-level block, across its nested inline runs, so
+			// identical links on neighbouring rows draw distinct markers that every render repeats.
+			this.#extensionLinkBlock = i;
+			this.#extensionLinkOrdinal = 0;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
@@ -3860,15 +4202,16 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
 				const headingPlainText = plainInlineTokens(token.tokens || []);
-				let styledHeading: string;
-				if (headingLevel === 1 && TERMINAL.textSizing) {
+				// A sized heading draws plain text, which would drop a clickable extension link's marker.
+				if (headingLevel === 1 && TERMINAL.textSizing && stripExtensionLinkMarkers(headingText) === headingText) {
 					const plainWidth = visibleWidth(headingPlainText);
 					if (plainWidth > 0 && 2 * plainWidth <= width) {
 						const sizedHeading = encodeTextSizedHeading(headingPlainText, 2);
-						lines.push(renderedLine(this.#theme.heading(this.#theme.bold(this.#theme.underline(sizedHeading)))));
+						lines.push(
+							renderedLine(this.#theme.heading(this.#theme.bold(this.#theme.underline(sizedHeading)), 1)),
+						);
 						lines.push(renderedLine("")); // reserve the heading's second visual row
 						if (nextTokenType && nextTokenType !== "space") {
 							lines.push(renderedLine("")); // Add spacing after headings (unless space token follows)
@@ -3876,14 +4219,7 @@ export class Markdown implements Component {
 						break;
 					}
 				}
-				if (headingLevel === 1) {
-					styledHeading = this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)));
-				} else if (headingLevel === 2) {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingText));
-				} else {
-					styledHeading = this.#theme.heading(this.#theme.bold(headingPrefix + headingText));
-				}
-				lines.push(renderedLine(styledHeading));
+				lines.push(renderedLine(this.#styleHeading(headingLevel, headingText)));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(renderedLine("")); // Add spacing after headings (unless space token follows)
 				}
@@ -4158,15 +4494,23 @@ export class Markdown implements Component {
 
 				case "strong": {
 					markHtmlItemWhenContent(plainInlineTokens(token.tokens || []));
-					const boldContent = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
-					result += this.#theme.bold(boldContent) + stylePrefix;
+					// A themed role owns the span's color, so prose runs inside drop a `proseFg` default.
+					const context = this.#theme.strong
+						? this.#proseFgExemptContext(resolvedStyleContext)
+						: resolvedStyleContext;
+					const content = this.#renderInlineTokens(token.tokens || [], context);
+					result += (this.#theme.strong ? this.#theme.strong(content) : this.#theme.bold(content)) + stylePrefix;
 					break;
 				}
 
 				case "em": {
-					const italicContent = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					markHtmlItemWhenContent(plainInlineTokens(token.tokens || []));
-					result += this.#theme.italic(italicContent) + stylePrefix;
+					const context = this.#theme.emphasis
+						? this.#proseFgExemptContext(resolvedStyleContext)
+						: resolvedStyleContext;
+					const content = this.#renderInlineTokens(token.tokens || [], context);
+					result +=
+						(this.#theme.emphasis ? this.#theme.emphasis(content) : this.#theme.italic(content)) + stylePrefix;
 					break;
 				}
 
@@ -4183,8 +4527,15 @@ export class Markdown implements Component {
 						token.tokens || [],
 						this.#proseFgExemptContext(resolvedStyleContext),
 					);
-					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
+					// An extension owns this link: no suffix, and no hyperlink the terminal could open.
+					// Its label gets its own (dotted) underline instead of the web-link one.
+					if (href && extensionLinkScheme(href)) {
+						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
+						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						break;
+					}
+					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const target = (href && this.#theme.resolveLink?.(href)) || href;
 					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
@@ -4346,7 +4697,13 @@ export class Markdown implements Component {
 
 			// Process item tokens; nested-list lines arrive structurally tagged and
 			// already carry their own full indent.
-			const itemLines = this.#renderListItem(item.tokens || [], depth, width, styleContext);
+			const itemLines = this.#renderListItem(
+				item.tokens || [],
+				depth,
+				width,
+				Math.max(1, width - visibleWidth(continuationIndent)),
+				styleContext,
+			);
 
 			if (itemLines.length > 0) {
 				const firstLine = itemLines[0]!;
@@ -4398,11 +4755,13 @@ export class Markdown implements Component {
 		tokens: Token[],
 		parentDepth: number,
 		width: number,
+		contentWidth: number,
 		styleContext?: InlineStyleContext,
 	): RenderedListItemLine[] {
 		const lines: RenderedListItemLine[] = [];
 
-		for (const token of tokens) {
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i]!;
 			if (token.type === "list") {
 				// Nested list - render with one additional indent level
 				// These lines carry their own indent, so tag them for pass-through
@@ -4434,6 +4793,11 @@ export class Markdown implements Component {
 				} else {
 					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
 				}
+			} else if (token.type === "heading") {
+				// A heading in a list item (an ATX line, or a paragraph over a setext
+				// underline) keeps its inline formatting and heading style.
+				const headingText = this.#renderInlineTokens(token.tokens || [], this.#proseFgExemptContext(styleContext));
+				lines.push({ text: this.#styleHeading(token.depth, headingText), nested: false });
 			} else if (token.type === "code") {
 				// Code block in list item
 				const codeIndent = padding(this.#codeBlockIndent);
@@ -4442,6 +4806,10 @@ export class Markdown implements Component {
 					lines.push({ ...bodyLine, nested: false });
 				}
 				lines.push({ text: this.#theme.codeBlockBorder("```"), nested: false });
+			} else if (token.type === "table") {
+				for (const row of this.#renderTable(token as TableToken, contentWidth, tokens[i + 1]?.type, styleContext)) {
+					lines.push({ text: row, nested: false });
+				}
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
@@ -4456,6 +4824,13 @@ export class Markdown implements Component {
 		}
 
 		return lines;
+	}
+
+	/** Rendered inline heading text styled for its level, as one (unsized) line. */
+	#styleHeading(depth: number, headingText: string): string {
+		if (depth === 1) return this.#theme.heading(this.#theme.bold(this.#theme.underline(headingText)), 1);
+		if (depth === 2) return this.#theme.heading(this.#theme.bold(headingText), 2);
+		return this.#theme.heading(this.#theme.bold(`${"#".repeat(depth)} ${headingText}`), depth);
 	}
 
 	/**
@@ -4665,6 +5040,15 @@ export class Markdown implements Component {
 			}
 		}
 
+		const offset = this.#tableOffsets.get(token);
+		const key = offset === undefined ? undefined : tableLockKey(offset, token.raw);
+		const lock = key === undefined ? undefined : this.tableLocks?.get(key);
+		if (lock !== undefined) {
+			const pinned = lock.get(availableWidth);
+			if (pinned !== undefined && pinned.length === numCols) columnWidths = [...pinned];
+			else lock.set(availableWidth, columnWidths);
+		}
+
 		const t = this.#symbols.table;
 		const h = t.horizontal;
 		const v = t.vertical;
@@ -4680,8 +5064,9 @@ export class Markdown implements Component {
 		lines.push(`${t.topLeft}${h}${topBorderCells.join(`${h}${t.teeDown}${h}`)}${h}${t.topRight}`);
 
 		// Render header with wrapping
+		const headerStyleContext = this.#theme.tableHeader ? this.#proseFgExemptContext(styleContext) : styleContext;
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
-			const text = this.#renderInlineTokens(cell.tokens || [], styleContext);
+			const text = this.#renderInlineTokens(cell.tokens || [], headerStyleContext);
 			return this.#wrapCellText(text, columnWidths[i]);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map(c => c.length));
@@ -4690,7 +5075,7 @@ export class Markdown implements Component {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
 				const text = cellLines[lineIdx] || "";
 				const padded = this.#alignCellText(text, columnWidths[colIdx], columnAligns[colIdx] ?? null);
-				return this.#theme.bold(padded);
+				return this.#theme.tableHeader ? this.#theme.tableHeader(padded) : this.#theme.bold(padded);
 			});
 			lines.push(`${v} ${rowParts.join(` ${v} `)} ${v}`);
 		}
@@ -4744,6 +5129,12 @@ export class Markdown implements Component {
 			}
 		}
 
+		// A stable prefix cut inside a table that keeps streaming ends where the
+		// next row's separator goes, not with a border no later render has.
+		if (this.#openTableTail && token === this.#openTailToken) {
+			lines.push(separatorLine);
+			return lines;
+		}
 		// Render bottom border
 		const bottomBorderCells = columnWidths.map(w => h.repeat(w));
 		const bottomBorder = `${t.bottomLeft}${h}${bottomBorderCells.join(`${h}${t.teeUp}${h}`)}${h}${t.bottomRight}`;
@@ -4803,12 +5194,16 @@ function renderInlineTokens(tokens: Token[], mdTheme: MarkdownTheme, applyText: 
 					result += applyText(normalizeHtmlEntitiesForTerminal(token.text));
 				}
 				break;
-			case "strong":
-				result += mdTheme.bold(renderInlineTokens(token.tokens || [], mdTheme, applyText)) + styleReset;
+			case "strong": {
+				const content = renderInlineTokens(token.tokens || [], mdTheme, applyText);
+				result += (mdTheme.strong ? mdTheme.strong(content) : mdTheme.bold(content)) + styleReset;
 				break;
-			case "em":
-				result += mdTheme.italic(renderInlineTokens(token.tokens || [], mdTheme, applyText)) + styleReset;
+			}
+			case "em": {
+				const content = renderInlineTokens(token.tokens || [], mdTheme, applyText);
+				result += (mdTheme.emphasis ? mdTheme.emphasis(content) : mdTheme.italic(content)) + styleReset;
 				break;
+			}
 			case "codespan":
 				result += mdTheme.code(token.text) + styleReset;
 				break;

@@ -46,27 +46,44 @@ describe("web_search native view", () => {
 });
 
 describe("ask native view", () => {
-	it("pending call is an inline head naming the question with a waiting line", () => {
-		const view = askToolRenderer.describeCall({ question: "Pick one?\nmore", options: [{ label: "A" }] } as never);
+	it("pending call is an inline head naming the form's first question with a waiting line", () => {
+		const view = askToolRenderer.describeCall({
+			html: '<form><p>Pick one?</p><label><input type="radio" name="pick" value="a"> A</label><label>Why? <input name="why"></label></form>',
+		});
 		expect(view?.inline).toBe(true);
 		expect(view?.tool?.target).toBe("Pick one?");
+		expect(view?.tool?.meta).toEqual(["2 fields"]);
 		expect(nodes(view?.body)).toHaveLength(1);
 	});
 
-	it("answered result marks the chosen option and quotes custom input", () => {
+	it("answered result pairs each question with its answer and marks empty ones", () => {
 		const view = askToolRenderer.describeResult(
 			{
 				content: [],
-				details: { question: "Pick?", options: ["A", "B"], selectedOptions: ["B"], customInput: "own" } as never,
+				details: {
+					answers: [
+						{ name: "db", question: "Database?", answer: "Postgres" },
+						{ name: "notes", question: "Notes", answer: "" },
+					],
+					timedOut: true,
+				},
 			},
 			opts,
 		);
-		const roles = nodes(view?.body)
-			.filter(n => n.k === "row")
-			.map(n => n.p?.role);
-		expect(roles).toEqual(["omp.tool.answer.off", "omp.tool.answer", "omp.tool.answer"]);
-		const custom = nodes(view?.body).at(-1)!;
-		expect(JSON.stringify(custom)).toContain("\u201cown\u201d");
+		const sections = nodes(view?.body).filter(n => n.k === "section");
+		const answers = sections.map(section => nodes(section.c).at(-1)!);
+		expect(answers.map(n => n.p?.role)).toEqual(["omp.tool.answer", "omp.tool.answer.off"]);
+		expect(JSON.stringify(answers[0])).toContain("Postgres");
+		expect(nodes(view?.body).at(-1)?.p).toMatchObject({ role: "omp.tool.notice" });
+	});
+
+	it("falls back to the result text when details carry no answers", () => {
+		const view = askToolRenderer.describeResult(
+			{ content: [{ type: "text", text: "The form needs at least one named control" }] },
+			opts,
+		);
+		expect(view?.tone).toBe("warning");
+		expect(JSON.stringify(view?.body)).toContain("at least one named control");
 	});
 });
 
@@ -76,7 +93,8 @@ describe("generic / MCP native views", () => {
 			label: "custom",
 			args: { a: 1 },
 			result: { output: '{"x":1}', isError: false },
-		} as never);
+			options: opts,
+		});
 		expect(view.tool).toMatchObject({ title: "custom", targetKind: "text" });
 		expect(view.tool?.target).toContain("a");
 		expect(nodes(view.body)[0]?.k).toBe("tree");
@@ -97,5 +115,20 @@ describe("generic / MCP native views", () => {
 		}
 		expect(nodes(res?.body).map(n => n.k)).toEqual(["tree", "section"]);
 		expect(describeMCPCall({}, "srv/tool").body).toBeUndefined();
+	});
+
+	it("MCP sends JSON output and args to a host that draws json as values, less the hidden root keys", () => {
+		const json = { ...opts, json: true };
+		const args = { query: "tokyo", limit: 2, i: "intent" };
+		const text = JSON.stringify({ hits: [{ id: 1 }], __partialJson: "{" });
+		const res = describeMCPResult({ content: [{ type: "text", text }] }, json, args);
+		const [output, section] = nodes(res?.body);
+		expect(output?.k).toBe("json");
+		expect(output?.p).toEqual({ value: { hits: [{ id: 1 }] } });
+		const argsNode = nodes(section?.c)[0];
+		expect(argsNode?.k).toBe("json");
+		expect(argsNode?.p).toEqual({ value: { query: "tokyo", limit: 2 } });
+		const call = describeMCPCall(args, "srv/tool", json);
+		expect(nodes(nodes(call.body)[0]?.c)[0]?.k).toBe("json");
 	});
 });

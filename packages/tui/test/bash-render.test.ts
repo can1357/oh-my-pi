@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -7,6 +7,9 @@ import { bashToolRenderer, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools
 import { previewWindowRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { RunTrace } from "@oh-my-pi/pi-natives";
+import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-tui/tools/shell-viz";
+import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -321,6 +324,28 @@ describe("bashToolRenderer", () => {
 		expect(lines.filter(line => line === sixel)).toHaveLength(1);
 	});
 
+	it("keeps a long embedded argument wrapped inside the pending card under its nesting indent", () => {
+		const command = `pip3 list 2>/dev/null | grep -i -E "onnx|torch|ultralytics|opencv|numpy|espeak|sounddevice|piper|mediapipe|tflite|tf-|tensorflow"; sw_vers`;
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		const component = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const rows = component.render(77).map(row => Bun.stripANSI(row));
+		for (const row of rows) {
+			expect(visibleWidth(row)).toBeLessThanOrEqual(77);
+			expect(row).toMatch(/^[│╭╰].*[│╮╯]$/);
+		}
+		const inner = rows.slice(1, -1).map(row => row.slice(1, -1));
+		expect(inner.filter(row => row.trim().length === 0)).toEqual([]);
+		const indent = (row: string) => row.length - row.trimStart().length;
+		const topLevel = indent(inner.find(row => row.includes("sw_vers"))!);
+		const body = inner.filter(row => /onnx|tensorflow/.test(row));
+		expect(body.join("").replace(/\s/g, "")).toContain("tflite|tf-|tensorflow");
+		for (const row of body) expect(indent(row)).toBeGreaterThan(topLevel);
+	});
+
 	it("highlights every line of a multi-line bash command in renderResult", async () => {
 		setThemeInstance(uiTheme!);
 		const command = 'for f in a b; do\n\techo "$f"\ndone';
@@ -421,5 +446,50 @@ describe("bashToolRenderer", () => {
 		const expandedFinal = render({ expanded: true, isPartial: false });
 		expect(expandedFinal).toContain("echo step_0");
 		expect(expandedFinal).not.toContain("earlier line");
+	});
+
+	it("shows a minimizer filter label as one sanitized, width-bounded footer fact", () => {
+		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
+		const label = `lint unsafe footer ${"界".repeat(10)}…`;
+		const result = {
+			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
+			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
+		};
+		const args = { command: "pnpm lint" };
+		const options = { expanded: false, isPartial: false };
+		const rendered = bashToolRenderer.renderResult(result, options, uiTheme, args).render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[31m");
+		expect(rendered).not.toContain("\x07");
+		const footer = Bun.stripANSI(rendered)
+			.split("\n")
+			.find(line => line.includes("Minimized:"));
+		expect(footer).toContain(`Minimized: ${label} 1.9KB → 27B`);
+		expect(footer).not.toContain("\t");
+		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
+		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
+		expect(view).not.toContain("\\u001b[31m");
+	});
+
+	it("shows a home path in a minimizer filter label as ~", () => {
+		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
+		try {
+			const result = {
+				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				details: {
+					meta: {
+						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
+					},
+				},
+			};
+			const options = { expanded: false, isPartial: false };
+			const rendered = bashToolRenderer
+				.renderResult(result, options, uiTheme, { command: "lint" })
+				.render(200)
+				.join("\n");
+			expect(Bun.stripANSI(rendered)).toContain("Minimized: ~/bin/lint 1.9KB → 27B");
+			expect(rendered).not.toContain("/home/alice");
+		} finally {
+			home.mockRestore();
+		}
 	});
 });

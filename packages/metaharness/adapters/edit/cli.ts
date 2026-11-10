@@ -349,6 +349,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 }
 
 if (import.meta.main) {
+	postmortem.installProcessHandlers();
 	main()
 		.then(async () => {
 			// In-process benchmark runs can leave provider keep-alive sockets and

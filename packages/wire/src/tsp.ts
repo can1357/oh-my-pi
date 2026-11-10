@@ -18,6 +18,8 @@
  * here is optional.
  */
 
+import type { ShellVizPresentation } from "./shell-viz";
+
 /** Protocol version this build speaks. */
 export const TSP_VERSION = 1;
 /** APC identifier: every TSP message body starts with `tsp;`. */
@@ -28,7 +30,7 @@ export const TSP_DEFAULT_APC_LIMIT = 65_536;
 export const TSP_DEFAULT_CREDITS = 2;
 
 /** One-letter message verb. */
-export type TspVerb = "q" | "o" | "f" | "b" | "t" | "x" | "r" | "e";
+export type TspVerb = "q" | "o" | "f" | "b" | "x" | "r" | "e";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vocabulary
@@ -53,6 +55,7 @@ export const TSP_KINDS = [
 	"kv",
 	"table",
 	"tree",
+	"json",
 	"badge",
 	"kbd",
 	"icon",
@@ -66,6 +69,7 @@ export const TSP_KINDS = [
 	"tabs",
 	"editor",
 	"input",
+	"button",
 	"status",
 	"seg",
 	"overlay",
@@ -79,6 +83,7 @@ export const TSP_KINDS = [
 	"chart",
 	"meter",
 	"effort",
+	"shell",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -126,6 +131,23 @@ export type TspText = string | readonly TspSpan[];
  */
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
+/**
+ * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
+ * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
+ * at the row's end).
+ */
+export type TspMenuEntry =
+	| TspAction
+	| { header: string }
+	| {
+			id: TspAction;
+			label?: string;
+			icon?: string;
+			detail?: string;
+			disabled?: boolean | string;
+			danger?: boolean;
+	  };
+
 /** Props every node accepts. */
 export interface TspCommonProps {
 	role?: string;
@@ -137,7 +159,16 @@ export interface TspCommonProps {
 	basis?: "auto" | "content" | number;
 	min?: { w?: TspExtent; h?: TspExtent };
 	max?: { w?: TspExtent; h?: TspExtent };
-	actions?: { click?: TspAction; dblclick?: TspAction; menu?: readonly TspAction[] };
+	/**
+	 * What a pointer does: `menu` lists what a right-click offers; `hold` what a long press on a touch screen
+	 * offers (a phone's hold menu over the lifted node), which a desktop ignores.
+	 */
+	actions?: {
+		click?: TspAction;
+		dblclick?: TspAction;
+		menu?: readonly TspMenuEntry[];
+		hold?: readonly TspMenuEntry[];
+	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
 	aria?: string;
@@ -154,8 +185,10 @@ export interface TspCommonProps {
 	 * right after another tooltip or card), anchored below it (above without
 	 * room) and clamped to the window. It stays open while the pointer is over
 	 * the node or the card, closes on leave (short grace), press, key or scroll,
-	 * and replaces the node's `title` tooltip while open. Terminals that don't
-	 * know it ignore it and keep showing `title`.
+	 * and replaces the node's `title` tooltip while open. A lone `md` card is a
+	 * wide read-only preview the pointer passes through (open only over the
+	 * node). On an `agent` it opens over the row, not the children. Terminals
+	 * that don't know it ignore it and keep showing `title`.
 	 */
 	hovercard?: TspPropNode;
 }
@@ -219,18 +252,66 @@ export interface TspMarkdownProps {
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
 }
+/** One marked line of a {@link TspCodeProps.marks}. */
+export interface TspCodeMark {
+	line: number;
+	tone?: TspTone;
+	heat?: number;
+	/**
+	 * Scores in [0, 1] washing the row on the `heat` ramp in place of `heat`'s wash: one flat, several a gradient across
+	 * the row, an evenly spaced stop per score from left to right. `heat` still sizes the line's overview bar.
+	 */
+	wash?: readonly number[];
+}
+/** A run of lines a {@link TspCodeProps} draws as one row until it is opened. */
+export interface TspCodeFold {
+	/** First and last folded line, in the gutter's numbering. */
+	from: number;
+	to: number;
+	/** The folded row's text, in the code's face (default `… [lines {from}-{to}]`, `… [line {from}]` for one line). */
+	label?: string;
+	/** What the fold hides, after a sparkline of its lines' mark `heat`. */
+	note?: TspText;
+	/** `error` tints the row; any tone colors the note. */
+	tone?: TspTone;
+	/** Drawn open; a click on the folded row (or on an open fold's head) toggles it in place. */
+	open?: boolean;
+	/** A card shown while the pointer rests on the folded row, as the common {@link TspCommonProps.hovercard}. */
+	hovercard?: TspPropNode;
+}
 export interface TspCodeProps {
 	text?: string;
 	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
 	lang?: string;
 	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
 	path?: string;
+	/** The first line's number; later lines count up from it. */
 	start?: number;
+	/**
+	 * Each line's number (one per line of `text`, strictly ascending), for non-contiguous lines: replaces counting from
+	 * `start`, and a `…` gap row is drawn before every line whose number is not the previous one's + 1. Marks' `line` and
+	 * folds' `from`/`to` are in this numbering. Ignored (numbers count from `start`) when its length differs from the
+	 * text's line count or it is not strictly ascending.
+	 */
+	nums?: readonly number[];
 	numbers?: boolean;
-	marks?: readonly { line: number; tone: TspTone }[];
+	/**
+	 * Marked lines (`line` is the drawn line number). `heat` in [0, 1] washes the row in a heat ramp, `wash` runs that
+	 * ramp across it; `tone` draws a bar, and any tone but `accent` also tints an unwashed row. A mark without `heat`
+	 * or `wash` has tone `accent` by default; one with only those draws no bar.
+	 */
+	marks?: readonly TspCodeMark[];
 	wrap?: boolean;
 	/** Clamp to the first `lines` drawn lines under a "N more lines" button; gives way inside an open disclosure. */
 	preview?: TspPreview;
+	/** Runs of lines drawn folded: sorted, not overlapping; marks inside apply once a fold is open. */
+	folds?: readonly TspCodeFold[];
+	/**
+	 * An overview strip above the lines: one bar per line (its height the mark's `heat`, its color the mark's tone),
+	 * a band under it over the lines outside folds, and a bracket over the lines in view. A click or drag on it
+	 * scrolls the code there.
+	 */
+	overview?: boolean;
 }
 export interface TspDiffHunk {
 	oldStart: number;
@@ -313,6 +394,20 @@ export interface TspTreeNode {
 export interface TspTreeProps {
 	nodes: readonly TspTreeNode[];
 }
+/**
+ * A raw JSON value the terminal draws as an interactive tree: small containers
+ * whole on one row, larger ones folded to a preview that expands on click.
+ * Folding is local to the terminal and sends no events.
+ */
+export interface TspJsonProps {
+	/** Any JSON value; absent reads as null. */
+	value: unknown;
+	/**
+	 * Levels of containers expanded below the top-level entries (default 0:
+	 * the root's entries listed, every container among them folded).
+	 */
+	open?: number;
+}
 export interface TspBadgeProps {
 	text: string;
 }
@@ -366,6 +461,29 @@ export interface TspItemProps {
 export interface TspTabsProps {
 	items: readonly { id: string; label: TspText }[];
 	active?: string;
+	/** `underline` (default): an accent underline under the active tab; `segmented`: a well with a raised thumb. */
+	variant?: "underline" | "segmented";
+}
+/**
+ * A push button. A click sends an `action` event with `actions.click` (else
+ * `click`); a disabled or busy button sends nothing. It never takes focus.
+ */
+export interface TspButtonProps {
+	/** Label; empty with an `icon` draws an icon-only button (give it a `title` or `aria`). */
+	text?: string;
+	/** Leading icon name. */
+	icon?: string;
+	/** Keycaps drawn after the label (the key names of `kbd`); display only. */
+	keys?: readonly string[];
+	variant?: "default" | "primary" | "quiet" | "danger";
+	/** `md` 28px (bars, heads, forms), `sm` 22px (inline, rows). */
+	size?: "sm" | "md";
+	/** A pressed toggle. */
+	on?: boolean;
+	/** Dimmed and inert; a string is the reason, shown as the tooltip. */
+	disabled?: boolean | string;
+	/** A spinner in the icon's place; inert. */
+	busy?: boolean;
 }
 export interface TspEditorDecoration {
 	from: number;
@@ -394,6 +512,9 @@ export interface TspEditorProps {
 	 *  Independent of text editability or keyboard focus; absent or false is not ready. */
 	sendable?: boolean;
 	maxLines?: number;
+	/** The program cannot read input yet: while the field has the focus, the terminal keeps
+	 *  what is typed into it, draws it at the caret, and sends it once this clears. */
+	typeahead?: boolean;
 }
 export type TspInputProps = Omit<TspEditorProps, "maxLines">;
 export interface TspStatusProps {
@@ -424,6 +545,10 @@ export interface TspToastProps {
 	text: string;
 	sub?: string;
 	ttl?: number;
+	/** A button after the text (Undo): clicking it takes the toast down and sends this action for the node. */
+	action?: TspAction;
+	/** The button's text; defaults to the action's name labeled (`undo` → Undo). */
+	label?: string;
 }
 export interface TspRowsProps {
 	/** Width the rows were rendered at. */
@@ -844,6 +969,26 @@ export interface TspChartProps {
 	size?: "sm" | "md" | "lg";
 }
 
+/** Engine-produced shell presentation; hosts render rows and forward controls, never syntax or history. */
+export interface TspShellProps {
+	/** Canonical semantic presentation, shared with the ANSI inspector. */
+	presentation: ShellVizPresentation;
+	/** Show replay controls only in the explicitly opened inspector. */
+	inspector?: boolean;
+	/** Changed only by explicit seek/reset/live-mode transitions, clearing native highlight trails. */
+	replayEpoch?: number;
+	/** This mounted call received a real execution-start event, not a settled historical load. */
+	liveOrigin?: boolean;
+	/** Working directory shown ahead of the script when it differs from the project's. */
+	cwd?: string;
+	lang?: "bash" | "zsh";
+	/**
+	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 */
+	preview?: { lines: number };
+}
+
 /** Kind-specific props, indexed by kind. */
 export interface TspPropsByKind {
 	col: TspColProps;
@@ -863,6 +1008,7 @@ export interface TspPropsByKind {
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
+	json: TspJsonProps;
 	badge: TspBadgeProps;
 	kbd: TspKbdProps;
 	icon: TspIconProps;
@@ -876,6 +1022,7 @@ export interface TspPropsByKind {
 	tabs: TspTabsProps;
 	editor: TspEditorProps;
 	input: TspInputProps;
+	button: TspButtonProps;
 	status: TspStatusProps;
 	seg: TspSegProps;
 	overlay: TspOverlayProps;
@@ -889,6 +1036,7 @@ export interface TspPropsByKind {
 	chart: TspChartProps;
 	meter: TspMeterProps;
 	effort: TspEffortProps;
+	shell: TspShellProps;
 }
 
 /**
@@ -967,21 +1115,6 @@ export interface TspClose {
 	id: string;
 	/** Keep `main` in scrollback (true) or remove the surface (false). */
 	keep: boolean;
-}
-
-/**
- * Verb `t`: the program's resolved theme for a surface, sent after `o` and
- * before its first `f`, and again whenever the theme or variant changes.
- * Each variant maps token names to `#rrggbb`; tokens left at the terminal
- * default are omitted. A program with one variant sends only that one.
- */
-export interface TspPalette {
-	/** Surface id. */
-	sf: string;
-	dark?: Readonly<Record<string, string>>;
-	light?: Readonly<Record<string, string>>;
-	/** Theme names behind each variant. */
-	name?: { dark?: string; light?: string };
 }
 
 /** Verb `q`. */

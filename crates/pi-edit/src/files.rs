@@ -7,10 +7,13 @@
 //! `std::fs` directly; the session clears the cache before `apply` so a final
 //! stage always sees fresh bytes.
 //!
-//! [`FileCache`] also owns the host's internal-URL answers: a URL target
-//! missing from that table is recorded (see [`FileCache::take_unresolved`])
-//! and fails with [`EditError::UnresolvedUrl`] until the host
-//! [`FileCache::provide`]s it.
+//! [`FileCache`] also owns the host's answers. A URL target missing from the
+//! URL table is recorded (see [`FileCache::take_unresolved`]) and fails with
+//! [`EditError::UnresolvedUrl`] until the host [`FileCache::provide`]s it. A
+//! must-exist path that is missing on disk is recorded the same way (see
+//! [`FileCache::take_recovery_misses`]) and resolves as not recovered until
+//! the host searches the working tree and [`FileCache::provide_recovery`]s
+//! the answer: the engine itself never walks.
 
 use std::{
 	collections::HashMap,
@@ -24,7 +27,7 @@ use crate::{
 	engine::{FileOp, Resolved},
 	error::{EditError, EditResult, Rejection},
 	notebook,
-	path_policy::{PathPolicy, UrlResolution, canonical_key},
+	path_policy::{PathPolicy, RecoveryGlob, UrlResolution, canonical_key},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
@@ -76,9 +79,10 @@ pub trait FileSource {
 	fn policy(&self) -> &PathPolicy;
 
 	/// Resolve an authored path without reading it. When `must_exist` and
-	/// the resolved file is missing, unique-suffix recovery may substitute a
-	/// different display/absolute pair (never for internal URLs, which fail
-	/// with [`EditError::UnresolvedUrl`] until the host answers them).
+	/// the resolved file is missing, the host's unique-suffix recovery answer
+	/// may substitute a different display/absolute pair (never for internal
+	/// URLs, which fail with [`EditError::UnresolvedUrl`] until the host
+	/// answers them).
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved>;
 
 	/// Whether `absolute` currently exists (file or directory).
@@ -139,14 +143,19 @@ fn stamp(absolute: &Path) -> Option<Stamp> {
 
 /// Default [`FileSource`] backed by `std::fs`.
 pub struct FileCache {
-	policy:      PathPolicy,
-	reads:       HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
+	policy:          PathPolicy,
+	reads:           HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
 	/// Authored path → resolution (so paired hunks share one recovery).
-	resolutions: HashMap<(String, bool), Resolved>,
+	resolutions:     HashMap<(String, bool), Resolved>,
 	/// Host answers keyed by [`PathPolicy::url_target`].
-	urls:        HashMap<String, UrlResolution>,
+	urls:            HashMap<String, UrlResolution>,
 	/// URLs that missed `urls`, deduped in first-seen order.
-	unresolved:  Vec<String>,
+	unresolved:      Vec<String>,
+	/// Host recovery answers keyed by authored path; `None` is "no unique
+	/// match".
+	recovered:       HashMap<String, Option<Resolved>>,
+	/// Authored paths that missed `recovered`, deduped in first-seen order.
+	recovery_misses: Vec<String>,
 }
 
 impl FileCache {
@@ -158,6 +167,8 @@ impl FileCache {
 			resolutions: HashMap::new(),
 			urls: HashMap::new(),
 			unresolved: Vec::new(),
+			recovered: HashMap::new(),
+			recovery_misses: Vec::new(),
 		}
 	}
 
@@ -182,13 +193,32 @@ impl FileCache {
 		std::mem::take(&mut self.unresolved)
 	}
 
-	/// Drop every host URL answer and recorded miss, plus every cached read
-	/// and resolution (some were made from those answers), so URL targets ask
-	/// the host again.
-	pub fn forget_urls(&mut self) {
+	/// Record the host's recovery answer for the missing `authored` path
+	/// (`None`: no unique match), dropping the cached resolution made without
+	/// it.
+	pub fn provide_recovery(&mut self, authored: String, answer: Option<Resolved>) {
+		self
+			.resolutions
+			.retain(|(cached, _), _| *cached != authored);
+		self.recovery_misses.retain(|missed| *missed != authored);
+		self.recovered.insert(authored, answer);
+	}
+
+	/// Drain authored paths that missed the recovery table since the last
+	/// call (deduped, first-seen order).
+	pub fn take_recovery_misses(&mut self) -> Vec<String> {
+		std::mem::take(&mut self.recovery_misses)
+	}
+
+	/// Drop every host answer (URL and recovery) and recorded miss, plus
+	/// every cached read and resolution (some were made from those answers),
+	/// so URL targets and missing paths ask the host again.
+	pub fn forget_answers(&mut self) {
 		self.clear();
 		self.urls.clear();
 		self.unresolved.clear();
+		self.recovered.clear();
+		self.recovery_misses.clear();
 	}
 
 	/// Plan-mode write guard, judging URL targets by their host answers.
@@ -277,12 +307,22 @@ impl FileSource for FileCache {
 			self.unresolved.push(url.clone());
 		}
 		let mut resolved = resolved?;
-		if must_exist
-			&& !self.policy.is_internal_url(authored)
-			&& stamp(&resolved.absolute).is_none()
-			&& let Some(recovered) = self.policy.recover_missing(authored)
+		if must_exist && !self.policy.is_internal_url(authored) && stamp(&resolved.absolute).is_none()
 		{
-			resolved = recovered;
+			match self.recovered.get(authored) {
+				Some(Some(recovered)) => resolved = recovered.clone(),
+				Some(None) => {},
+				None => {
+					// Unanswered: not cached, so the answer takes effect on the
+					// rerun.
+					if RecoveryGlob::new(authored).is_some()
+						&& !self.recovery_misses.iter().any(|missed| missed == authored)
+					{
+						self.recovery_misses.push(authored.to_owned());
+					}
+					return Ok(resolved);
+				},
+			}
 		}
 		self.resolutions.insert(key, resolved.clone());
 		Ok(resolved)
@@ -309,5 +349,82 @@ impl FileSource for FileCache {
 	fn clear(&mut self) {
 		self.reads.clear();
 		self.resolutions.clear();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn cache(root: &Path) -> FileCache {
+		FileCache::new(PathPolicy {
+			cwd:                  root.to_owned(),
+			home_dir:             root.join("home"),
+			url_schemes:          Vec::new(),
+			url_alias_schemes:    Vec::new(),
+			plan_writable_roots:  Vec::new(),
+			plan_active:          false,
+			block_auto_generated: false,
+		})
+	}
+
+	#[test]
+	fn missing_must_exist_path_records_one_miss_until_answered() {
+		let tmp = tempfile::tempdir().unwrap();
+		let mut files = cache(tmp.path());
+		let unrecovered = files.resolve("src/a.ts", true).unwrap();
+		assert_eq!(unrecovered.display, "src/a.ts");
+		assert_eq!(unrecovered.absolute, tmp.path().join("src/a.ts"));
+		files.resolve("src/a.ts", true).unwrap();
+		assert_eq!(files.take_recovery_misses(), ["src/a.ts"]);
+		assert!(files.take_recovery_misses().is_empty());
+	}
+
+	#[test]
+	fn paths_that_need_no_recovery_record_no_miss() {
+		let tmp = tempfile::tempdir().unwrap();
+		std::fs::write(tmp.path().join("here.txt"), "").unwrap();
+		let mut files = cache(tmp.path());
+		files.resolve("here.txt", true).unwrap();
+		files.resolve("new.txt", false).unwrap();
+		files.resolve("./", true).unwrap();
+		assert!(files.take_recovery_misses().is_empty());
+	}
+
+	#[test]
+	fn recovery_answer_replaces_the_unrecovered_resolution() {
+		let tmp = tempfile::tempdir().unwrap();
+		let mut files = cache(tmp.path());
+		files.resolve("src/a.ts", true).unwrap();
+		let recovered = Resolved {
+			absolute: tmp.path().join("deep/src/a.ts"),
+			display:  "deep/src/a.ts".to_owned(),
+		};
+		files.provide_recovery("src/a.ts".to_owned(), Some(recovered.clone()));
+		assert_eq!(files.resolve("src/a.ts", true).unwrap(), recovered);
+		assert!(files.take_recovery_misses().is_empty());
+		files.clear();
+		assert_eq!(files.resolve("src/a.ts", true).unwrap(), recovered, "answers survive clear");
+	}
+
+	#[test]
+	fn declined_recovery_stays_unrecovered_and_is_not_asked_again() {
+		let tmp = tempfile::tempdir().unwrap();
+		let mut files = cache(tmp.path());
+		files.resolve("src/a.ts", true).unwrap();
+		files.provide_recovery("src/a.ts".to_owned(), None);
+		let resolved = files.resolve("src/a.ts", true).unwrap();
+		assert_eq!(resolved.display, "src/a.ts");
+		assert!(files.take_recovery_misses().is_empty());
+	}
+
+	#[test]
+	fn forgetting_answers_asks_the_host_again() {
+		let tmp = tempfile::tempdir().unwrap();
+		let mut files = cache(tmp.path());
+		files.provide_recovery("src/a.ts".to_owned(), None);
+		files.forget_answers();
+		files.resolve("src/a.ts", true).unwrap();
+		assert_eq!(files.take_recovery_misses(), ["src/a.ts"]);
 	}
 }

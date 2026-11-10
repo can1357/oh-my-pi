@@ -4,7 +4,7 @@
  * Extends the base AgentMessage type with coding-agent specific message types,
  * and provides a transformer to convert them to LLM-compatible messages.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isProviderRefusalMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	isUserInterruptAbort,
 	isCustomMessageContent,
@@ -56,7 +56,7 @@ import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
-import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
+import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 
 export {
@@ -89,6 +89,10 @@ const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
 /** Max chars kept from each anchored user request in the replan title context. */
 const REPLAN_TITLE_ANCHOR_CHARS = 400;
+/** Chars of recent conversation the title-drift judge reads; see {@link buildTitleDriftTurns}. */
+const TITLE_DRIFT_CONTEXT_CHARS = 3000;
+/** Max chars kept from one turn, so one long reply cannot fill the drift window alone. */
+const TITLE_DRIFT_TURN_CHARS = 1000;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -188,6 +192,58 @@ export function operatorTitleText(message: AgentMessage): string | undefined {
 	if (message.role === "custom") return titleTextFromSkillPrompt(message);
 	if (message.role !== "user" || message.attribution !== "user") return undefined;
 	return textFromContent(message.content) || undefined;
+}
+
+/** One turn of the recent conversation the title-drift judge compares with the session title. */
+export type TitleDriftTurn = { role: "user" | "assistant"; text: string };
+
+/**
+ * The latest conversation, oldest first, that the title-drift judge compares
+ * with the session title: operator prompts and assistant reply text (never
+ * thinking), newest turns kept until {@link TITLE_DRIFT_CONTEXT_CHARS}. The
+ * latest operator prompt leads when the window holds none, since the notes of a
+ * long tool loop rarely say what was asked; it displaces the oldest turns it
+ * would push past the window.
+ */
+export function buildTitleDriftTurns(messages: readonly AgentMessage[]): TitleDriftTurn[] {
+	const turns: TitleDriftTurn[] = [];
+	let chars = 0;
+	let i = messages.length - 1;
+	for (; i >= 0; i--) {
+		const turn = titleDriftTurn(messages[i]);
+		if (!turn) continue;
+		if (turns.length > 0 && chars + turn.text.length > TITLE_DRIFT_CONTEXT_CHARS) break;
+		turns.push(turn);
+		chars += turn.text.length;
+	}
+	turns.reverse();
+	if (turns.some(turn => turn.role === "user")) return turns;
+	for (; i >= 0; i--) {
+		const anchor = titleDriftTurn(messages[i]);
+		if (anchor?.role !== "user") continue;
+		let start = 0;
+		while (start < turns.length - 1 && chars + anchor.text.length > TITLE_DRIFT_CONTEXT_CHARS) {
+			chars -= turns[start++]!.text.length;
+		}
+		return [anchor, ...turns.slice(start)];
+	}
+	return turns;
+}
+
+function titleDriftTurn(message: AgentMessage | undefined): TitleDriftTurn | undefined {
+	if (!message) return undefined;
+	let role: TitleDriftTurn["role"];
+	let raw: string | undefined;
+	if (message.role === "assistant") {
+		if (message.stopReason === "aborted" || message.stopReason === "error") return undefined;
+		role = "assistant";
+		raw = textFromContent(message.content);
+	} else {
+		role = "user";
+		raw = operatorTitleText(message);
+	}
+	const text = raw ? cleanTinyMessage(raw).slice(0, TITLE_DRIFT_TURN_CHARS) : "";
+	return text ? { role, text } : undefined;
 }
 
 /**
@@ -1191,6 +1247,55 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 	}
 }
 
+/**
+ * Converts `messages[index]` with its neighbor-sensitive state.
+ * {@link convertToLlm} and {@link convertMessagesForContextView} both go
+ * through here so the viewer cannot drift from the per-message conversion that
+ * gets sent; a filter or reorder added outside this helper must be mirrored in
+ * both.
+ */
+function convertMessageAt(
+	messages: AgentMessage[],
+	index: number,
+	convert: (m: AgentMessage, interruptedNext: boolean) => Message[],
+): Message[] {
+	const m = messages[index];
+	return convert(m, m.role === "assistant" && followedByInterruptedThinking(messages, index));
+}
+
+/** A converted viewer message and its position in the source and converted histories. */
+export interface ContextViewMessage {
+	message: Message;
+	sourceIndex: number;
+	convertedIndex: number;
+}
+
+/**
+ * Convert history for inspection without reading or populating the per-message
+ * and array conversion caches. Steering messages show the envelope
+ * {@link wrapSteeringForModel} sends (sharing its wrapper cache); it maps
+ * one-to-one, so source indices hold. Mirrors the {@link convertToLlm} loop
+ * through {@link convertMessageAt}, then drops API-level provider refusals
+ * like the send path's `filterProviderReplayMessages`, since they are never
+ * replayed.
+ *
+ * Kept separate from `convertToLlm` because the viewer needs source indices:
+ * reporting them from `convertToLlm` would add a per-message callback and
+ * disable its cache shortcuts, a cost every request would pay even when
+ * `/context` is never opened.
+ */
+export function convertMessagesForContextView(messages: AgentMessage[]): ContextViewMessage[] {
+	const modelMessages = wrapSteeringForModel(messages);
+	const result: ContextViewMessage[] = [];
+	for (let sourceIndex = 0; sourceIndex < modelMessages.length; sourceIndex++) {
+		for (const message of convertMessageAt(modelMessages, sourceIndex, convertOne)) {
+			if (message.role === "assistant" && isProviderRefusalMessage(message)) continue;
+			result.push({ message, sourceIndex, convertedIndex: result.length });
+		}
+	}
+	return result;
+}
+
 /** Cached per-message conversion. Reuses the stored fragment while identity and
  *  `interruptedNext` neighbor state hold; recomputes on a neighbor flip. */
 function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] {
@@ -1220,6 +1325,10 @@ export function isUserAuthoredMessage(message: AgentMessage): boolean {
  * unchanged re-convert of the same array hands back the same outer `Message[]`.
  * Owner mutations (prune/shake/strip-images) invalidate the affected message
  * through the shared registry before the next pass.
+ *
+ * {@link convertMessagesForContextView} mirrors this loop through
+ * {@link convertMessageAt}; it stays separate so the index mapping `/context`
+ * needs adds no cost here.
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const len = messages.length;
@@ -1263,9 +1372,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 	let prefixOutputLen = 0;
 	for (let i = start; i < len; i++) {
 		if (i === len - 1) prefixOutputLen = out.length;
-		const m = messages[i];
-		const interruptedNext = m.role === "assistant" && followedByInterruptedThinking(messages, i);
-		const fragment = convertOneCached(m, interruptedNext);
+		const fragment = convertMessageAt(messages, i, convertOneCached);
 		for (const msg of fragment) out.push(msg);
 	}
 	if (len === 0) prefixOutputLen = 0;

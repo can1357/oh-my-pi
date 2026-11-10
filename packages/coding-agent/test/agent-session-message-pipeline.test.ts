@@ -130,6 +130,36 @@ describe("AgentSession message pipeline", () => {
 		return session;
 	}
 
+	function capturingAnthropicSideSession(model: Model) {
+		const bodies: Array<{
+			messages: Array<{ role: string; content: string | Array<{ text?: string; cache_control?: unknown }> }>;
+		}> = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "Fix the issue", timestamp: 1 }, createAssistantMessage("Fixed.")],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (target, context, options) =>
+				streamSimple(target, context, {
+					...options,
+					apiKey: "test-key",
+					fetch: async (_url, init) => {
+						bodies.push(JSON.parse(requestBodyText(init) ?? "{}"));
+						return new Response(JSON.stringify({ error: { message: "Request captured" } }), { status: 400 });
+					},
+				}),
+		});
+		sessions.push(session);
+		return { session, bodies };
+	}
+
 	it.each([false, true])("awaits ordered async delivery, final flush=%s", async finalFlush => {
 		const chunks = ["A", finalFlush ? "$" : "B"];
 		const session = sideSession(chunks, finalFlush);
@@ -749,36 +779,6 @@ describe("AgentSession message pipeline", () => {
 		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
 	});
 
-	it("resolves attachment://N to images pasted into a newer ask answer", () => {
-		const userImage: ImageContent = { type: "image", data: "user-image", mimeType: "image/png" };
-		const answerImage: ImageContent = { type: "image", data: "answer-image", mimeType: "image/png" };
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-		});
-		sessions.push(session);
-
-		session.agent.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "inspect this" }, userImage],
-			timestamp: Date.now(),
-		});
-		session.agent.appendMessage({
-			role: "toolResult",
-			toolCallId: "ask-1",
-			toolName: "ask",
-			content: [{ type: "text", text: "User selected: A\nUser added note: see [Image #1]" }, answerImage],
-			timestamp: Date.now(),
-			isError: false,
-		});
-
-		expect(session.getImageAttachments().map(entry => [entry.uri, entry.image])).toEqual([
-			["attachment://1", answerImage],
-		]);
-	});
-
 	it("normalizes historical WebP on the main provider request path", async () => {
 		using tempDir = TempDir.createSync("@pi-stb-main-path-");
 		const api = "test-stb-main-path";
@@ -1098,7 +1098,8 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.promptCacheKey).toBe(promptCacheKey);
 		expect(capturedOptions?.sessionId).toStartWith(`${cacheSessionId}:side:`);
 		expect(capturedOptions?.sessionId).not.toBe(cacheSessionId);
-		expect(capturedOptions?.preferWebsockets).toBe(true);
+		// The Codex-only global opt-in must not leak into an unrelated side-turn provider.
+		expect(capturedOptions?.preferWebsockets).toBeUndefined();
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
@@ -1322,6 +1323,106 @@ describe("AgentSession message pipeline", () => {
 		},
 	);
 
+	it("caches the persisted reply rather than the prediction-only prompt on Anthropic side turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(session.runEphemeralTurn({ promptText: "Predict the next user message." })).rejects.toThrow();
+		expect(bodies).toHaveLength(1);
+		const cached = bodies[0].messages.flatMap((message, index) =>
+			Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+		);
+		// The side-only reminder and prediction prompt are absent from the next real turn.
+		expect(cached.filter(index => index >= 1)).toEqual([1]);
+	});
+
+	it("caches reusable /btw topic history through its latest side question", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		await expect(
+			session.runEphemeralTurn({ promptText: "First question", conversationKey: "btw:topic" }),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Follow-up",
+				conversationKey: "btw:topic",
+				history: [
+					{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 2 },
+					{ ...createAssistantMessage("First answer"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(bodies).toHaveLength(2);
+		expect(
+			bodies.map(body => {
+				const content = body.messages.at(-1)?.content;
+				return Array.isArray(content) && content.some(block => block.cache_control != null);
+			}),
+		).toEqual([true, true]);
+		const [firstWire, nextWire] = [bodies[0].messages, bodies[1].messages.slice(0, bodies[0].messages.length)].map(
+			messages => JSON.stringify(messages, (key, value) => (key === "cache_control" ? undefined : value)),
+		);
+		expect(nextWire).toEqual(firstWire);
+	});
+
+	it("does not cache keyed side history beyond regenerated image descriptions", async () => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValueOnce([{ type: "text", text: "A red square." }])
+			.mockResolvedValueOnce([{ type: "text", text: "A blue square." }]);
+		const model = buildModel({
+			id: "text-only-side-test",
+			name: "Text Only",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 8192,
+		});
+		const { session, bodies } = capturingAnthropicSideSession(model);
+		const image: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		const stableHistory: Message[] = [
+			{ role: "user", content: [{ type: "text", text: "First question" }], timestamp: 1 },
+			{ ...createAssistantMessage("First answer"), model: model.id },
+		];
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "Which color?",
+				promptImages: [image],
+				conversationKey: "btw:topic",
+				history: stableHistory,
+			}),
+		).rejects.toThrow();
+		await expect(
+			session.runEphemeralTurn({
+				promptText: "What next?",
+				conversationKey: "btw:topic",
+				history: [
+					...stableHistory,
+					{ role: "user", content: [{ type: "text", text: "Which color?" }, image], timestamp: 2 },
+					{ ...createAssistantMessage("Red"), model: model.id },
+				],
+			}),
+		).rejects.toThrow();
+
+		expect(describe).toHaveBeenCalledTimes(2);
+		expect(bodies).toHaveLength(2);
+		for (const [index, body] of bodies.entries()) {
+			const description = index === 0 ? "A red square." : "A blue square.";
+			const noticeIndex = body.messages.findIndex(message => JSON.stringify(message.content).includes(description));
+			const cached = body.messages.flatMap((message, index) =>
+				Array.isArray(message.content) && message.content.some(block => block.cache_control != null) ? [index] : [],
+			);
+			expect(noticeIndex).toBeGreaterThan(1);
+			expect(cached).toContain(1);
+			expect(cached.some(index => index > 1 && index < noticeIndex)).toBe(true);
+			expect(cached.every(index => index < noticeIndex)).toBe(true);
+		}
+	});
+
 	it.each([
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
@@ -1526,7 +1627,10 @@ describe("AgentSession message pipeline", () => {
 			const history = (body: Record<string, unknown>) =>
 				(body.messages as { role: string; content: unknown }[]).slice(0, 2).map(({ role, content }) => ({
 					role,
-					content: JSON.stringify(content).replaceAll(',"cache_control":{"type":"ephemeral"}', ""),
+					content: JSON.stringify(
+						typeof content === "string" ? [{ type: "text", text: content }] : content,
+						(key, value) => (key === "cache_control" ? undefined : value),
+					),
 				}));
 			// Cache keys: tools, system, thinking, top-level effort, and the history before the side prompt.
 			for (const key of ["tools", "system", "thinking", "output_config"]) expect(minimized[key]).toEqual(plain[key]);
@@ -2042,6 +2146,7 @@ describe("AgentSession message pipeline", () => {
 				type: "toolcall_delta",
 				contentIndex: 0,
 				delta: "rep",
+				partial: assistantMessage,
 			},
 		} as never);
 

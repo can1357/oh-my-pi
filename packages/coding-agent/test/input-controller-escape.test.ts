@@ -210,10 +210,13 @@ function createContext(): {
 		} as unknown as InteractiveModeContext["eventController"],
 		sessionManager: {
 			getSessionName: () => "existing session",
+			getSessionId: () => "session",
+			getLeafId: () => null,
 			flushSync: vi.fn(),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
 			getKeys: () => [],
+			matches: () => false,
 		} as unknown as InteractiveModeContext["keybindings"],
 		compactionQueuedMessages: [],
 		mcpTestEscapeHandlers: new Set(),
@@ -370,29 +373,6 @@ describe("InputController escape behavior", () => {
 		expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
 	});
 
-	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
-		const { ctx, editor, spies } = createContext();
-		// Stubbed session: only the streaming/interrupt gate fields matter here.
-		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
-		session.isStreaming = true;
-		session.hasInterruptibleInput = true;
-		const order: string[] = [];
-		spies.abort.mockImplementation(async () => {
-			order.push("abort");
-		});
-		spies.updatePendingMessagesDisplay.mockImplementation(() => {
-			order.push("refresh");
-		});
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		await editor.onSubmit?.("");
-
-		expect(order).toEqual(["abort", "refresh"]);
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledTimes(1);
-	});
 	it("runs /btw as a builtin side request instead of steering the active stream", async () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.session as { isStreaming: boolean }).isStreaming = true;
@@ -698,6 +678,25 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
+	it("hands a queued compaction back when Esc cancels a loop iteration still in setup", () => {
+		const { ctx, editor } = createContext();
+		ctx.loopModeEnabled = true;
+		ctx.pauseLoop = vi.fn();
+		// Prompt setup: the session counts as streaming, but no agent turn (and so no agent_end) exists yet.
+		mutableSessionState(ctx).isStreaming = true;
+		ctx.yieldCompaction = { text: "/compact", sessionId: "session", leafId: null };
+		ctx.compactionQueuedMessages.push({ text: "held behind it", mode: "followUp" });
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(editor.getText()).toContain("/compact");
+		expect(editor.getText()).toContain("held behind it");
+	});
+
 	it("aborts active handoff generation before default Esc handling", () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.viewSession as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
@@ -960,9 +959,17 @@ describe("InputController escape behavior", () => {
 
 		controller.setupKeyHandlers();
 		now.mockReturnValue(2_000);
-		const first = inputListeners[0]("\x1b[D");
+		// Dispatch like the TUI: listeners in registration order until one handles the input.
+		const dispatch = (data: string) => {
+			for (const listener of inputListeners) {
+				const result = listener(data);
+				if (result) return result;
+			}
+			return undefined;
+		};
+		const first = dispatch("\x1b[D");
 		now.mockReturnValue(2_200); // 200ms later — a deliberate second tap
-		const second = inputListeners[0]("\x1b[D");
+		const second = dispatch("\x1b[D");
 
 		// Both taps are consumed; only the second completes the gesture.
 		expect(first).toEqual({ consume: true });

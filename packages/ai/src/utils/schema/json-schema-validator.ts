@@ -220,14 +220,11 @@ const kDefinesPropertyCache = Symbol("ai.schemaDefinesPropertyCache");
  * schemas asking about the same name keep separate answers, and one schema
  * asked about two names keeps two answers.
  *
- * The root identity covers the graph because the schema graphs reaching this
- * function are already treated as immutable for the lifetime of their
- * identity: `toolWireSchema` memoizes the wire schema against the tool's
- * parameters, and `stripSchemaDescriptions`, `tryEnforceStrictSchema` and
- * `memoizedInjectIntentIntoSchema` already memoize derived values against
- * that same wire-schema object. A graph mutated in place after production
- * would already hand those three a stale answer; this cache adds no new
- * assumption beyond the ones the schema pipeline already relies on.
+ * The root identity covers the graph because callers must not mutate a schema
+ * after its first query: wire schemas are covered by that same rule (their
+ * derived values memoize against the same identity), and raw MCP
+ * `inputSchema` and eval-tool `parameters` graphs reach this function with no
+ * other stamp on them, so a new identity is what resets the memo for those.
  */
 export function schemaDefinesProperty(schema: unknown, key: string): boolean {
 	if (!isRecord(schema)) return false;

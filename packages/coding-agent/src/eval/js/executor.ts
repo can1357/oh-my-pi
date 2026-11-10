@@ -27,6 +27,8 @@ export interface JsExecutorOptions {
 	idleTimeoutMs?: number;
 	onChunk?: (chunk: string) => Promise<void> | void;
 	onStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	signal?: AbortSignal;
 	sessionId: string;
 	/** Logical owner identifier; scopes retained-worker cleanup. */
@@ -67,13 +69,6 @@ function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "
 		return Math.max(1, options.deadlineMs - Date.now());
 	}
 	return options.timeoutMs;
-}
-
-function isAbortError(error: unknown): boolean {
-	return (
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
 }
 
 function isTimeoutReason(reason: unknown): boolean {
@@ -176,6 +171,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			timeoutMs: runtimeTimeoutMs ?? options.idleTimeoutMs,
 			runState: {
 				signal,
+				onReply: options.onReply,
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
@@ -205,7 +201,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 	} catch (error) {
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
-		if (activeSignal?.aborted || isAbortError(error)) {
+		// Every requested cancellation (the caller's signal, the cell timeout, the
+		// package-install timeout) aborts `activeSignal`. An error that merely has
+		// a cancellation-like name, thrown by the cell's own code, is a failure.
+		if (activeSignal?.aborted) {
 			const timedOut = packageWorkComplete
 				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
 				: isTimeoutReason(packageSignal?.reason);

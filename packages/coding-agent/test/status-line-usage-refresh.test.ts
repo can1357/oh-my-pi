@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
@@ -6,6 +7,8 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTuiCodexResetFireworks } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -392,165 +395,211 @@ describe("StatusLineComponent usage refresh", () => {
 		component.dispose();
 	});
 
-	it("warns once per conversation about another account's reset expiring within 24 hours", async () => {
-		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
-		let fetches = 0;
-		const reports = () => {
-			fetches++;
-			return [
-				...codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt }),
-				...codexUsageReport(
-					{ sevenDayPercent: 60, sevenDayResetAt, savedResets: 1, creditExpiresAt: [Date.now() + 6 * 3_600_000] },
-					"account-2",
-					"codex@example.com",
-					"ws-team",
-				),
-			];
-		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => reports()),
-			statusLineHost,
-		);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+	describe("saved-reset expiry warning", () => {
+		let noticeDir: TempDir | undefined;
 
-		await refreshUsage(component);
-		await refreshUsage(component, 5 * 60_000);
+		afterEach(async () => {
+			AgentStorage.close();
+			await noticeDir?.remove();
+			noticeDir = undefined;
+		});
 
-		expect(fetches).toBe(2);
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("Saved Codex reset on codex@example.com (ws-team) expires in 6h");
-		expect(notices[0]).toContain("/usage");
-		component.dispose();
-	});
+		/** agent.db where the host records which saved resets it has warned about. */
+		function noticeDbPath(): string {
+			noticeDir ??= TempDir.createSync("@omp-reset-notice-");
+			return path.join(noticeDir.path(), "agent.db");
+		}
 
-	it("warns about a banked Claude reset the provider will not spend yet", async () => {
-		const claude = () => ({
-			provider: "anthropic",
-			fetchedAt: Date.now(),
-			metadata: { email: "claude@example.com" },
-			limits: [
-				{
-					id: "anthropic:7d",
-					label: "Claude 7 Day",
-					scope: { provider: "anthropic", windowId: "7d" },
-					window: { id: "7d", label: "7d", resetsAt: Date.now() + 80 * 3_600_000 },
-					amount: { unit: "percent", usedFraction: 0.5 },
-				},
-			],
-			resetCredits: {
-				availableCount: 2,
-				redeemableCount: 0,
-				nextCreditId: "paused",
-				credits: [
+		/** A Codex session whose settings carry `storage`, as an interactive omp session's do. */
+		function noticeSession(
+			fetchUsageReports: () => Promise<unknown>,
+			storage: AgentStorage,
+			getSessionId?: () => string,
+		): AgentSession {
+			const session = makeCodexSession(fetchUsageReports, undefined, getSessionId) as unknown as Record<
+				string,
+				unknown
+			>;
+			session.settings = Settings.isolated({}, { storage });
+			return session as unknown as AgentSession;
+		}
+
+		it("warns about another account's reset in its final 6 hours once, not on every refresh", async () => {
+			const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+			// Half a minute of slack: the clock keeps running while the refresh resolves.
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000 + 30_000];
+			let fetches = 0;
+			const reports = async () => {
+				fetches++;
+				return [
+					...codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt }),
+					...codexUsageReport(
+						{ sevenDayPercent: 60, sevenDayResetAt, savedResets: 1, creditExpiresAt },
+						"account-2",
+						"codex@example.com",
+						"ws-team",
+					),
+				];
+			};
+			const component = new StatusLineComponent(
+				noticeSession(reports, await AgentStorage.open(noticeDbPath())),
+				statusLineHost,
+			);
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+			await refreshUsage(component);
+			await refreshUsage(component, 5 * 60_000);
+
+			expect(fetches).toBe(2);
+			expect(notices).toEqual(["Saved Codex reset on codex@example.com (ws-team) expires in 5h · /usage"]);
+			component.dispose();
+		});
+
+		it("warns about a banked Claude reset the provider will not spend yet", async () => {
+			const claude = () => ({
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				metadata: { email: "claude@example.com" },
+				limits: [
 					{
-						id: "paused",
-						program: "cedar_ember",
-						remainingCount: 2,
-						usable: false,
-						requiresLimit: false,
-						clears: ["anthropic:5h", "anthropic:7d"],
-						blocking: [],
-						usedFractions: {},
-						expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
-						status: "paused",
+						id: "anthropic:7d",
+						label: "Claude 7 Day",
+						scope: { provider: "anthropic", windowId: "7d" },
+						window: { id: "7d", label: "7d", resetsAt: Date.now() + 80 * 3_600_000 },
+						amount: { unit: "percent", usedFraction: 0.5 },
 					},
 				],
-			},
+				resetCredits: {
+					availableCount: 2,
+					redeemableCount: 0,
+					nextCreditId: "paused",
+					credits: [
+						{
+							id: "paused",
+							program: "cedar_ember",
+							remainingCount: 2,
+							usable: false,
+							requiresLimit: false,
+							clears: ["anthropic:5h", "anthropic:7d"],
+							blocking: [],
+							usedFractions: {},
+							expiresAt: new Date(Date.now() + 6 * 3_600_000).toISOString(),
+							status: "paused",
+						},
+					],
+				},
+			});
+			const codex = codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt: Date.now() + 80 * 3_600_000 });
+			const component = new StatusLineComponent(
+				noticeSession(async () => [...codex, claude()], await AgentStorage.open(noticeDbPath())),
+				statusLineHost,
+			);
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+
+			await refreshUsage(component);
+
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain("2 saved Claude resets on claude@example.com expire, soonest in 6h");
+			component.dispose();
 		});
-		const codex = codexUsageReport({ sevenDayPercent: 10, sevenDayResetAt: Date.now() + 80 * 3_600_000 });
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => [...codex, claude()]),
-			statusLineHost,
-		);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
 
-		await refreshUsage(component);
+		it("warns about each saved reset once across conversations and omp processes", async () => {
+			const sevenDayResetAt = Date.now() + 80 * 3_600_000;
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000];
+			const reports = async () =>
+				codexUsageReport({ sevenDayPercent: 60, sevenDayResetAt, savedResets: 1, creditExpiresAt });
+			let conversation = "conversation-1";
+			const notices: string[] = [];
+			const openWindow = (storage: AgentStorage) => {
+				const component = new StatusLineComponent(
+					noticeSession(reports, storage, () => conversation),
+					statusLineHost,
+				);
+				component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+				return component;
+			};
 
-		expect(notices).toHaveLength(1);
-		expect(notices[0]).toContain("2 saved Claude resets on claude@example.com expire, soonest in 6h");
-		component.dispose();
-	});
+			const first = openWindow(await AgentStorage.open(noticeDbPath()));
+			await refreshUsage(first);
+			conversation = "conversation-2"; // /new
+			await refreshUsage(first, 5 * 60_000);
+			const second = openWindow(await AgentStorage.open(noticeDbPath())); // another omp window
+			await refreshUsage(second);
+			first.dispose();
+			second.dispose();
+			AgentStorage.close();
+			const later = openWindow(await AgentStorage.open(noticeDbPath())); // a later omp process
+			await refreshUsage(later);
 
-	it("warns each conversation that /new or /resume opens in place, once", async () => {
-		const sevenDayResetAt = Date.now() + 80 * 3_600_000;
-		let conversation = "conversation-1";
-		const session = makeCodexSession(
-			async () =>
-				codexUsageReport({
+			expect(notices).toHaveLength(1);
+
+			// The warned reset was spent; another one comes due.
+			creditExpiresAt[0] = Date.now() + 5 * 60_000 + 2 * 3_600_000 + 30_000;
+			await refreshUsage(later, 5 * 60_000);
+
+			expect(notices).toHaveLength(2);
+			expect(notices[1]).toBe("Saved Codex reset on codex@example.com expires in 2h · /usage");
+			later.dispose();
+		});
+
+		it("does not warn again when focus moves to a subagent and back", async () => {
+			let fetches = 0;
+			const creditExpiresAt = [Date.now() + 5 * 3_600_000];
+			const reports = async () => {
+				fetches++;
+				return codexUsageReport({
 					sevenDayPercent: 60,
-					sevenDayResetAt,
+					sevenDayResetAt: Date.now() + 80 * 3_600_000,
 					savedResets: 1,
-					creditExpiresAt: [Date.now() + 6 * 3_600_000],
-				}),
-			undefined,
-			() => conversation,
-		);
-		const component = new StatusLineComponent(session, statusLineHost);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+					creditExpiresAt,
+				});
+			};
+			const storage = await AgentStorage.open(noticeDbPath());
+			const main = noticeSession(reports, storage);
+			const subagent = noticeSession(reports, storage, () => "subagent-1");
+			const component = new StatusLineComponent(main, statusLineHost);
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
 
-		await refreshUsage(component);
-		conversation = "conversation-2"; // /new
-		await refreshUsage(component, 5 * 60_000);
-		conversation = "conversation-3"; // /resume of a conversation not warned yet
-		await refreshUsage(component, 5 * 60_000);
-		conversation = "conversation-1"; // /resume of the first one
-		await refreshUsage(component, 5 * 60_000);
+			await refreshUsage(component);
+			component.setSession(subagent, "agent-1");
+			await refreshUsage(component);
+			component.setSession(main);
+			await refreshUsage(component);
 
-		expect(notices).toHaveLength(3);
-		component.dispose();
-	});
+			expect(fetches).toBe(3);
+			expect(notices).toHaveLength(1);
+			component.dispose();
+		});
 
-	it("does not warn again when focus moves to a subagent and back", async () => {
-		let fetches = 0;
-		const reports = async () => {
-			fetches++;
-			return codexUsageReport({
+		it("waits until a reset is 6 hours from expiry", async () => {
+			const state: CodexUsageState = {
 				sevenDayPercent: 60,
 				sevenDayResetAt: Date.now() + 80 * 3_600_000,
 				savedResets: 1,
-				creditExpiresAt: [Date.now() + 6 * 3_600_000],
-			});
-		};
-		const main = makeCodexSession(reports);
-		const subagent = makeCodexSession(reports, undefined, () => "subagent-1");
-		const component = new StatusLineComponent(main, statusLineHost);
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+				creditExpiresAt: [Date.now() + 7 * 3_600_000],
+			};
+			const component = new StatusLineComponent(
+				noticeSession(async () => codexUsageReport(state), await AgentStorage.open(noticeDbPath())),
+				statusLineHost,
+			);
+			component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
+			const notices: string[] = [];
+			component.setResetExpiryNoticeHandler(notice => notices.push(notice));
 
-		await refreshUsage(component);
-		component.setSession(subagent, "agent-1");
-		await refreshUsage(component);
-		component.setSession(main);
-		await refreshUsage(component);
+			await refreshUsage(component);
 
-		expect(fetches).toBe(3);
-		expect(notices).toHaveLength(1);
-		component.dispose();
-	});
+			// The status line keeps flagging it meanwhile.
+			expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 7h");
+			expect(notices).toEqual([]);
 
-	it("does not warn about a reset that expires in more than 24 hours", async () => {
-		const state: CodexUsageState = {
-			sevenDayPercent: 60,
-			sevenDayResetAt: Date.now() + 80 * 3_600_000,
-			savedResets: 1,
-			creditExpiresAt: [Date.now() + 25 * 3_600_000],
-		};
-		const component = new StatusLineComponent(
-			makeCodexSession(async () => codexUsageReport(state)),
-			statusLineHost,
-		);
-		component.updateSettings({ preset: "custom", leftSegments: ["usage"], rightSegments: [] });
-		const notices: string[] = [];
-		component.setResetExpiryNoticeHandler(notice => notices.push(notice));
+			await refreshUsage(component, 61 * 60_000);
 
-		await refreshUsage(component);
-
-		expect(plain(component.getTopBorder(120).content)).toContain("▲ 1 exp 1d 1h");
-		expect(notices).toEqual([]);
-		component.dispose();
+			expect(notices).toHaveLength(1);
+			component.dispose();
+		});
 	});
 
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {

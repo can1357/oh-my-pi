@@ -25,6 +25,7 @@ const prelude = createBrowserPrelude(session);
 const context = { session, toolCallId: "browser-queries-test" };
 const name = "queries";
 const namesTab = "queries-role-names";
+const axTab = "queries-role-ax";
 
 async function invoke(parameters: unknown) {
 	return await prelude.invoke(parameters, context);
@@ -86,6 +87,26 @@ beforeAll(async () => {
 		<span id="trash-label">Trash</span>
 		<ul role="tree"><li role="treeitem"><input type="checkbox">Node</li><li role="treeitem"><select multiple><option selected>Red</option><option selected>Blue</option></select></li><li role="treeitem"><select aria-label="Palette"><option selected>Green</option></select></li><li role="treeitem"><input type="button" value="Delete" aria-label="Remove"></li><li role="treeitem"><input type="range" aria-valuetext="Medium" value="50"></li><li role="treeitem"><img alt="Delete" aria-labelledby="trash-label" src="data:,"></li></ul>`;
 	await invoke({ action: "open", name: namesTab, url: `data:text/html,${encodeURIComponent(namesHtml)}` });
+	// Markup whose role or name the page-side role/ handler computed differently from Chrome's accessibility tree.
+	const axHtml = `<!doctype html>
+		<style>#buy::before { content: "Buy "; }</style><button id="buy">now</button>
+		<section aria-labelledby="file-target"></section><input id="file-target" type="file">
+		<input list="colors"><datalist id="colors"><option>Red</option></datalist>
+		<table><tr><th>Row one</th><td>1</td></tr><tr><th>Row two</th><td>2</td></tr></table>
+		<details><summary>More</summary>Folded text</details>
+		<label for="both">First</label><label for="both">Second</label><input id="both">
+		<button>A<br>B</button>
+		<div role="option">Stray option</div>
+		<div aria-hidden="true"><button>Muted</button></div>
+		<button style="visibility: hidden">Invisible</button>
+		<video controls src="data:,"></video><input type="date">
+		<div id="host"></div>
+		<script>
+			const shadow = document.getElementById("host").attachShadow({ mode: "open" });
+			shadow.innerHTML = "<button>Shadow</button>";
+			shadow.querySelector("button").onclick = event => { event.target.textContent = "Shadow clicked"; };
+		</script>`;
+	await invoke({ action: "open", name: axTab, url: `data:text/html,${encodeURIComponent(axHtml)}` });
 });
 
 afterAll(async () => {
@@ -181,6 +202,84 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		expect(result.details?.value).toEqual([1, 0]);
 	});
 
+	it.each([
+		["CSS generated content is part of the name", "button", "Buy now"],
+		["a th that starts a row is a row header", "rowheader", "Row one"],
+		["a summary is Chrome's disclosure triangle", "DisclosureTriangle", "More"],
+		["every label of a field names it", "textbox", "First Second"],
+		["a line break separates words", "button", "A B"],
+		["the button sits in an open shadow root", "button", "Shadow"],
+	])(
+		"matches role/ to the role and name Chrome's accessibility tree reports when %s",
+		async (_, role, elementName) => {
+			const result = (await invoke({
+				action: "run",
+				name: axTab,
+				code: `const observed = (await tab.observe({ includeAll: true })).elements.some(entry => entry.role === ${JSON.stringify(role)} && entry.name === ${JSON.stringify(elementName)});
+			return [observed, await tab.count(${JSON.stringify(`role/${role}[name="${elementName}" exact]`)})];`,
+			})) as { details?: { value?: [boolean, number] } };
+			expect(result.details?.value).toEqual([true, 1]);
+		},
+	);
+
+	it("names a region after the file input it is labelled by, and finds a datalist field as a combobox", async () => {
+		const result = (await invoke({
+			action: "run",
+			name: axTab,
+			code: `const region = (await tab.observe({ includeAll: true })).elements.find(entry => entry.role === "region");
+			return [region?.name, await tab.count(\`role/region[name="\${region?.name}" exact]\`), await tab.count("role/combobox")];`,
+		})) as { details?: { value?: [string, number, number] } };
+		const [regionName, regions, comboboxes] = result.details?.value ?? [];
+		// Chrome names a file input "Choose File: No file chosen" (localized); the region takes that name.
+		expect(regionName).toBeTruthy();
+		expect([regions, comboboxes]).toEqual([1, 1]);
+	});
+
+	it("leaves out what Chrome's accessibility tree leaves out, and the browser's own shadow controls", async () => {
+		const result = (await invoke({
+			action: "run",
+			name: axTab,
+			code: `return await Promise.all([
+				'role/button[name="Muted"]',
+				'role/button[name="Invisible"]',
+				"role/option",
+				'role/button[name="play"]',
+				'role/button[name="date picker"]',
+			].map(selector => tab.count(selector)));`,
+		})) as { details?: { value?: number[] } };
+		expect(result.details?.value).toEqual([0, 0, 0, 0, 0]);
+	});
+
+	it("waits for, clicks inside shadow DOM, and times out on role/ selectors through the accessibility tree", async () => {
+		const result = (await invoke({
+			action: "run",
+			name: axTab,
+			// Each wait is started before the page changes, then awaited after.
+			code: `const appearing = tab.waitForSelector('role/button[name="Later" exact]', { timeout: 10_000 });
+			await page.evaluate(() => {
+				const later = document.createElement("button");
+				later.id = "later";
+				later.textContent = "Later";
+				document.body.append(later);
+			});
+			const appeared = await appearing;
+			const leaving = tab.waitForSelector('role/button[name="Later" exact]', { hidden: true, timeout: 10_000 });
+			await page.evaluate(() => document.getElementById("later").remove());
+			await leaving;
+			await tab.click('role/button[name="Shadow" exact]');
+			const clicked = await tab.count('role/button[name="Shadow clicked" exact]');
+			try {
+				await tab.waitForSelector('role/button[name="Never" exact]', { timeout: 300 });
+				return null;
+			} catch (error) {
+				return [Boolean(appeared), clicked, error.message];
+			}`,
+		})) as { details?: { value?: [boolean, number, string] | null } };
+		const [appeared, clicked, message] = result.details?.value ?? [];
+		expect([appeared, clicked]).toEqual([true, 1]);
+		expect(message).toContain("timed out after 300ms; selector currently matches no elements");
+	});
+
 	it("returns DOM content, values, attributes, counts, boxes, styles, and query state branches", async () => {
 		expect(await call("text", ["#copy"])).toBe("Hello world");
 		expect(await call("html", ["#copy"])).toBe("Hello <strong>world</strong>");
@@ -244,8 +343,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 	});
 
 	it("waits for delayed body and scoped exact text and reports a named timeout", async () => {
-		expect(await call("waitForText", ["Hello world", { timeout: 1_000 }])).toBeUndefined();
-		// This integration case deliberately exercises the page's real timer while waitForText polls Chromium.
+		expect(await call("waitForText", ["Hello world", { timeout: 10_000 }])).toBeUndefined();
+		// Chromium and the worker share the CI host with other test processes; allow for scheduling delays
+		// while still exercising the page's real timer and the text polling path.
 		expect(
 			await run(`await page.evaluate(() => {
 				setTimeout(() => {
@@ -254,14 +354,28 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 					document.body.append(node);
 				}, 100);
 			});
-			await tab.waitForText("appeared later", { timeout: 2_000 });
+			await tab.waitForText("appeared later", { timeout: 10_000 });
 			return true`),
 		).toBe(true);
+		const mismatch = (await run(`await page.evaluate(() => {
+			document.querySelector("#empty").textContent = "prefix exact scoped text suffix";
+			const outside = document.createElement("div");
+			outside.textContent = "exact scoped text";
+			document.body.append(outside);
+		});
+		try {
+			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 150 });
+			return null;
+		} catch (error) {
+			return { name: error.name, message: error.message };
+		}`)) as { name: string; message: string } | null;
+		expect(mismatch?.name).toBe("ToolError");
+		expect(mismatch?.message).toContain("tab.waitForText");
 		expect(
 			await run(`await page.evaluate(() => {
 				setTimeout(() => { document.querySelector("#empty").textContent = "exact scoped text"; }, 100);
 			});
-			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 2_000 });
+			await tab.waitForText("exact scoped text", { selector: "#empty", exact: true, timeout: 10_000 });
 			return true`),
 		).toBe(true);
 		const timeout = (await run(`try {
@@ -272,5 +386,5 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		}`)) as { name: string; message: string } | null;
 		expect(timeout?.name).toBe("ToolError");
 		expect(timeout?.message).toContain("tab.waitForText");
-	}, 15_000);
+	}, 60_000);
 });

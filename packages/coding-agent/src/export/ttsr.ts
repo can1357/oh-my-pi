@@ -389,6 +389,18 @@ interface ConditionScan {
 const FULL_RESCAN_GROWTH = 0.25;
 /** Buffers and regions up to this length are cheap enough to rescan whole on every check. */
 const FULL_RESCAN_ALWAYS_BELOW = 4096;
+/** Characters of surrounding context and matched text retained in an interrupt excerpt. */
+const EXCERPT_CONTEXT = 60;
+const EXCERPT_MATCH_MAX = 120;
+
+/** One bounded line of text around a regex match, with whitespace runs collapsed. */
+function matchExcerpt(text: string, index: number, length: number): string {
+	const matchEnd = index + Math.min(length, EXCERPT_MATCH_MAX);
+	const start = Math.max(0, index - EXCERPT_CONTEXT);
+	const end = Math.min(text.length, matchEnd + EXCERPT_CONTEXT);
+	const body = text.slice(start, end).replace(/\s+/g, " ").trim();
+	return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
+}
 
 /**
  * One stream's accumulated text and how far each condition has scanned it.
@@ -402,6 +414,7 @@ const FULL_RESCAN_ALWAYS_BELOW = 4096;
  */
 class StreamBuffer {
 	readonly #scans = new Map<RegExp, ConditionScan>();
+	readonly excerpts = new Map<string, string | undefined>();
 	#parts: string[] = [];
 	#joined = "";
 	#length = 0;
@@ -429,6 +442,7 @@ class StreamBuffer {
 			this.#joined = snapshot;
 			return;
 		}
+		this.excerpts.clear();
 		for (const scan of this.#scans.values()) {
 			scan.scannedTo = -1;
 			scan.lineStart = 0;
@@ -469,6 +483,23 @@ class StreamBuffer {
 		scan.fullScannedTo = length;
 		scan.paceFrom = length;
 		return scan.matched;
+	}
+
+	/** Bounded one-line excerpt around the first matching condition. */
+	excerpt(ruleName: string, conditions: readonly RegExp[]): string | undefined {
+		if (this.excerpts.has(ruleName)) return this.excerpts.get(ruleName);
+		const text = this.#text();
+		let excerpt: string | undefined;
+		for (const condition of conditions) {
+			condition.lastIndex = 0;
+			const match = condition.exec(text);
+			if (match && match[0].length > 0) {
+				excerpt = matchExcerpt(text, match.index, match[0].length);
+				break;
+			}
+		}
+		this.excerpts.set(ruleName, excerpt);
+		return excerpt;
 	}
 
 	/** Whether a non-final check should rescan the region from the condition's last line start. */
@@ -1037,10 +1068,12 @@ export class TtsrManager {
 				continue;
 			}
 
+			const excerpt = buffer.excerpt(name, entry.conditions);
 			matches.push(entry.rule);
 			logger.debug("TTSR condition matched", {
 				ruleName: name,
 				conditions: entry.rule.condition,
+				excerpt,
 				source: context.source,
 				toolName: context.toolName,
 				filePaths: context.filePaths,
@@ -1048,6 +1081,17 @@ export class TtsrManager {
 		}
 
 		return matches;
+	}
+
+	/** Text that matched this rule in this stream; AST-only and zero-width matches have no excerpt. */
+	matchExcerpt(ruleName: string, context: TtsrMatchContext): string | undefined {
+		const key = this.#bufferKey(context);
+		for (const [bufferKey, buffer] of this.#buffers) {
+			if (bufferKey !== key && !bufferKey.startsWith(`${key}#`)) continue;
+			const excerpt = buffer.excerpts.get(ruleName);
+			if (excerpt !== undefined) return excerpt;
+		}
+		return undefined;
 	}
 
 	/** Mark rules as injected (won't trigger again until conditions allow). */

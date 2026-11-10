@@ -7,6 +7,7 @@ import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../sr
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -57,6 +58,7 @@ function makeHarness() {
 			terminal: { rows: 40, columns: 120 },
 		},
 		editorContainer,
+		sessionManager: { getCwd: () => process.cwd() },
 		session: {
 			agent,
 			extensionRunner: undefined,
@@ -72,7 +74,11 @@ function makeHarness() {
 		},
 		addAutocompleteProvider,
 		syncComposerShape: vi.fn(),
+		syncExtensionLinks: vi.fn(),
 		showStatus: vi.fn(),
+		closeLinkBrowser: vi.fn(),
+		rerenderInLinkBrowser: vi.fn(),
+		rebuildTranscriptScrollback: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	const controller = new ExtensionUiController(ctx);
@@ -266,6 +272,91 @@ describe("ExtensionUiController Ask dialog input", () => {
 	});
 });
 
+describe("ExtensionUiController form dialog", () => {
+	const html = `<form>
+		<fieldset><legend>Database</legend>
+			<label><input type="radio" name="db" value="sqlite" checked> SQLite</label>
+			<label><input type="radio" name="db" value="postgres"> Postgres</label>
+		</fieldset>
+	</form>`;
+
+	it("mounts the form in the editor slot and resolves the submitted data", async () => {
+		const harness = makeHarness();
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		expect(dialog).toBeInstanceOf(HtmlFormDialog);
+		expect(harness.editorContainer.children).toEqual([dialog!]);
+		dialog!.render(80);
+
+		harness.handleInput("\x1b[B");
+		harness.handleInput(" ");
+		harness.handleInput("\t");
+		harness.handleInput("\r");
+
+		expect(await pending).toEqual({ data: { db: "postgres" } });
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("resolves undefined on Esc and restores the editor", async () => {
+		const harness = makeHarness();
+		const pending = harness.controller.showFormDialog(html);
+		harness.handleInput("\x1b");
+
+		expect(await pending).toBeUndefined();
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("submits the current values when the timeout lapses", async () => {
+		const harness = makeHarness();
+		const onTimeout = vi.fn();
+		const pending = harness.controller.showFormDialog(html, { timeout: 20, onTimeout });
+
+		expect(await pending).toEqual({ data: { db: "sqlite" }, timedOut: true });
+		expect(onTimeout).toHaveBeenCalledTimes(1);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+
+	it("tears the form down when the signal aborts", async () => {
+		const harness = makeHarness();
+		const abort = new AbortController();
+		const pending = harness.controller.showFormDialog(html, { signal: abort.signal });
+		const dialog = harness.getFocused();
+		if (!(dialog instanceof HtmlFormDialog)) throw new Error("Expected the form dialog");
+		const dispose = vi.spyOn(dialog, "dispose");
+
+		abort.abort();
+
+		expect(await pending).toBeUndefined();
+		expect(dispose).toHaveBeenCalledTimes(1);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("lets typing edit a pending draft until up/down hands the keyboard to the form", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed");
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		expect(harness.editorContainer.children).toEqual([dialog!, harness.editor]);
+		dialog!.render(80);
+
+		harness.handleInput("!");
+		expect(harness.editor.getText()).toBe("half typed!");
+
+		harness.handleInput("\x1b[B");
+		harness.handleInput("\x1b[B");
+		harness.handleInput(" ");
+		harness.handleInput("\t");
+		harness.handleInput("\r");
+
+		expect(await pending).toEqual({ data: { db: "postgres" } });
+		expect(harness.editor.getText()).toBe("half typed!");
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+});
+
 describe("ExtensionUiController editor UI", () => {
 	it("requests a render after extension pasteToEditor mutates the prompt", async () => {
 		const harness = makeHarness();
@@ -321,6 +412,35 @@ describe("ExtensionUiController editor UI", () => {
 			],
 		});
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+	});
+
+	it("lets up/down take the ask from a populated prompt and restores the untouched draft", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed prompt");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] },
+		];
+
+		const pending = harness.controller.showAskDialog(questions);
+		const ask = harness.editorContainer.children[0];
+		expect(ask).toBeInstanceOf(AskDialogComponent);
+		ask?.render?.(80);
+		expect(harness.editor.focused).toBe(true);
+
+		// Down hands the keyboard to the ask without touching the draft; the next
+		// Down moves to "No", and typing/Enter now answer instead of editing.
+		ask?.handleInput?.("\x1b[B");
+		const rendered = stripVTControlCharacters(ask?.render?.(80).join("\n") ?? "");
+		expect(rendered).not.toContain("typing edits your prompt");
+		expect(harness.editor.focused).toBe(false);
+		ask?.handleInput?.("\x1b[B");
+		ask?.handleInput?.("\r");
+		expect(harness.editor.getText()).toBe("half typed prompt");
+		const result = await pending;
+		expect(result?.kind === "submit" ? result.results[0]?.selectedOptions : undefined).toEqual(["No"]);
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+		expect(harness.editor.getText()).toBe("half typed prompt");
 	});
 
 	it("does not fire editor-slot shortcuts that would orphan the ask dialog (#6738)", () => {

@@ -78,6 +78,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"perCallModel",
 		"display",
 		"synthetic",
 		"steering",
@@ -205,6 +206,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"role",
 		"titleSource",
 		"thinkingLevel",
+		"perCallThinkingLevel",
 		"configured",
 		"serviceTier",
 		"purpose",
@@ -252,6 +254,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"provider",
 		"model",
 		"resolvedModel",
+		"perCallModelIdentity",
 		"upstreamProvider",
 		"upstreamModel",
 		"advisor",
@@ -263,6 +266,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("id", [
 		"id",
 		"parentId",
+		"continuationOf",
 		"toolCallId",
 		"call_id",
 		"responseId",
@@ -332,7 +336,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	]),
 	...fields("label", ["title", "previousTitle", "label", "injectedRules", "intent", "emoji", "nf"]),
 	...fields("error", ["errorMessage", "explanation", "errorClassificationMessage", "upstreamError"]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",
@@ -342,6 +346,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	content: "content",
 	...fields("struct", [
 		"message",
+		"parentIrc",
 		"usage",
 		"cost",
 		"cttl",
@@ -418,6 +423,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"statusEvents",
 		"options",
 		"selectedOptions",
+		"answers",
 		"phases",
 		"tasks",
 		"completedTasks",
@@ -443,6 +449,7 @@ const TEXT_ARG_KEYS: Record<string, true> = {
 	description: true,
 	old_text: true,
 	new_text: true,
+	html: true,
 };
 
 /** Path/URI keys not covered by {@link PATH_KEY}. */
@@ -616,7 +623,7 @@ const ARG_SCHEMAS: Record<string, ArgSchema> = {
 	todo: argSchema("op items task phase list reason tasks content status phase_note"),
 	wait: argSchema("ids timeout#"),
 	web_search: argSchema("query limit# recency num_search_results# max_tokens# temperature#"),
-	ask: argSchema("questions id question options label description recommended# header preview multi"),
+	ask: argSchema("html"),
 	ast_grep: argSchema("pat path lang skip# limit#"),
 	ast_edit: argSchema("pat out ops paths path lang"),
 	github: argSchema(
@@ -1794,7 +1801,9 @@ export async function anonymizeSessionTranscripts(session: AnonymizeSessionInput
 	let subagentError: string | undefined;
 	try {
 		if (session.sessionFile) {
-			subSessions = await collectSubSessions(session.sessionFile, key => unreadable.push(memberFor(key)));
+			subSessions = await collectSubSessions(session.sessionFile, {
+				onUnreadable: key => unreadable.push(memberFor(key)),
+			});
 		}
 	} catch (error) {
 		subagentError = error instanceof Error ? error.message : String(error);

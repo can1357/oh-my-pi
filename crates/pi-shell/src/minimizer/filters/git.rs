@@ -1,6 +1,6 @@
 //! Git output filters.
 
-use std::fmt::Write as _;
+use std::fmt::{NumBuffer, Write as _};
 
 use crate::minimizer::{MinimizerCtx, MinimizerOutput, engine, primitives};
 
@@ -64,17 +64,13 @@ pub(crate) fn filter_for(
 		{
 			cleaned
 		},
-		Some("diff") => {
-			if exit_code == 0 {
-				if let Some(mode) = diff_listing_mode(ctx.command) {
-					compact_diff_listing(&cleaned, mode)
-				} else {
-					compact_diff_output(&cleaned)
-				}
-			} else {
-				compact_diff_output(&cleaned)
-			}
+		Some("diff")
+			if exit_code == 0
+				&& let Some(mode) = diff_listing_mode(ctx.command) =>
+		{
+			compact_diff_listing(&cleaned, mode)
 		},
+		Some("diff") => compact_diff_output(&cleaned),
 		Some("show") if is_show_custom_format(ctx.command) => cleaned,
 		Some("show") if keeps_patch_whole(ctx, overlay_program, input, &cleaned, exit_code) => {
 			cleaned
@@ -379,18 +375,7 @@ fn condense_status(input: &str) -> String {
 			in_staged = false;
 			continue;
 		}
-		if parse_long_status_line(trimmed, in_staged, in_untracked, &mut summary) {
-			continue;
-		}
-		if !trimmed.starts_with('(')
-			&& !trimmed.ends_with(':')
-			&& !trimmed.starts_with("use ")
-			&& !trimmed.starts_with("no changes added")
-			&& in_untracked
-		{
-			summary.untracked += 1;
-			push_status_path(&mut summary, "??", trimmed);
-		}
+		parse_long_status_line(trimmed, line, in_staged, in_untracked, &mut summary);
 	}
 
 	if status_has_no_signal(&summary) && state.is_none() {
@@ -488,10 +473,21 @@ fn is_short_status(status: &str) -> bool {
 
 fn parse_long_status_line(
 	line: &str,
+	raw: &str,
 	in_staged: bool,
 	in_untracked: bool,
 	summary: &mut StatusSummary,
-) -> bool {
+) {
+	if in_untracked {
+		// Untracked entries are indented and carry no status prefix; git's own
+		// messages in that section (`nothing added to commit…`, a stash pop's
+		// `Dropped …`) are flush left, and its hints are parenthesized.
+		if raw.starts_with([' ', '\t']) && !line.starts_with('(') {
+			summary.untracked += 1;
+			push_status_path(summary, "??", line);
+		}
+		return;
+	}
 	// `modified:`/`deleted:` are staged or unstaged depending on the active
 	// section; `new file:`/`renamed:` only appear staged. The unmerged-path
 	// forms are always conflicts regardless of section.
@@ -517,15 +513,9 @@ fn parse_long_status_line(
 				summary.unstaged += 1;
 			}
 			push_status_path(summary, label, path.trim());
-			return true;
+			return;
 		}
 	}
-	if in_untracked && !line.starts_with('(') && !line.ends_with(':') {
-		summary.untracked += 1;
-		push_status_path(summary, "??", line);
-		return true;
-	}
-	false
 }
 
 fn push_status_path(summary: &mut StatusSummary, label: &str, path: &str) {
@@ -568,14 +558,14 @@ fn format_status_summary(summary: &StatusSummary) -> String {
 		return out;
 	}
 	out.push_str("staged ");
-	out.push_str(&summary.staged.to_string());
+	out.push_str(summary.staged.format_into(&mut NumBuffer::new()));
 	out.push_str(", unstaged ");
-	out.push_str(&summary.unstaged.to_string());
+	out.push_str(summary.unstaged.format_into(&mut NumBuffer::new()));
 	out.push_str(", untracked ");
-	out.push_str(&summary.untracked.to_string());
+	out.push_str(summary.untracked.format_into(&mut NumBuffer::new()));
 	if summary.conflicts > 0 {
 		out.push_str(", conflicts ");
-		out.push_str(&summary.conflicts.to_string());
+		out.push_str(summary.conflicts.format_into(&mut NumBuffer::new()));
 	}
 	out.push('\n');
 	for path in summary.paths.iter().take(40) {
@@ -929,7 +919,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if local.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(local.len() - 24).to_string());
+			out.push_str((local.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -939,7 +929,7 @@ fn condense_branch(input: &str) -> String {
 		.collect::<Vec<_>>();
 	if !remote_only.is_empty() {
 		out.push_str("remote-only (");
-		out.push_str(&remote_only.len().to_string());
+		out.push_str(remote_only.len().format_into(&mut NumBuffer::new()));
 		out.push_str("):");
 		for branch in remote_only.iter().take(24) {
 			out.push(' ');
@@ -947,7 +937,7 @@ fn condense_branch(input: &str) -> String {
 		}
 		if remote_only.len() > 24 {
 			out.push_str(" … +");
-			out.push_str(&(remote_only.len() - 24).to_string());
+			out.push_str((remote_only.len() - 24).format_into(&mut NumBuffer::new()));
 		}
 		out.push('\n');
 	}
@@ -970,6 +960,15 @@ struct DiffFile {
 	added:   usize,
 	removed: usize,
 	hunks:   Vec<DiffHunk>,
+	/// `Binary files … differ`: changed, but without lines to count.
+	binary:  bool,
+}
+
+impl DiffFile {
+	/// Nothing recorded since its header, so a following header names it.
+	const fn is_blank(&self) -> bool {
+		self.added == 0 && self.removed == 0 && self.hunks.is_empty() && !self.binary
+	}
 }
 
 struct DiffHunk {
@@ -991,12 +990,18 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 
 	let mut out = String::new();
 	for file in files.iter().take(20) {
-		let changed = file.added + file.removed;
 		out.push_str(&file.path);
 		out.push_str(" | ");
-		out.push_str(&changed.to_string());
-		out.push(' ');
-		out.push_str(&diff_bar(file.added, file.removed));
+		if file.binary {
+			out.push_str("Bin");
+		} else {
+			let changed = file.added + file.removed;
+			out.push_str(changed.format_into(&mut NumBuffer::new()));
+			if changed > 0 {
+				out.push(' ');
+				out.push_str(&diff_bar(file.added, file.removed));
+			}
+		}
 		out.push('\n');
 	}
 	if files.len() > 20 {
@@ -1004,9 +1009,9 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 	}
 	out.push_str(&format_file_count(files.len()));
 	out.push_str(" changed, ");
-	out.push_str(&total_added.to_string());
+	out.push_str(total_added.format_into(&mut NumBuffer::new()));
 	out.push_str(" insertions(+), ");
-	out.push_str(&total_removed.to_string());
+	out.push_str(total_removed.format_into(&mut NumBuffer::new()));
 	out.push_str(" deletions(-)\n\n--- Changes ---\n");
 
 	for file in files.iter().take(12) {
@@ -1014,6 +1019,9 @@ pub(crate) fn compact_diff_output(input: &str) -> String {
 		out.push_str("File: ");
 		out.push_str(&file.path);
 		out.push('\n');
+		if file.binary {
+			out.push_str("  Binary files differ\n");
+		}
 		for hunk in file.hunks.iter().take(8) {
 			out.push_str("  ");
 			out.push_str(&hunk.header);
@@ -1068,7 +1076,8 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					}
 					continue;
 				},
-				// Context; an empty line is context whose leading space was stripped.
+				// Context; an empty line is context whose leading space was
+				// stripped.
 				Some(b' ') | None => {
 					hunk_old = hunk_old.saturating_sub(1);
 					hunk_new = hunk_new.saturating_sub(1);
@@ -1087,7 +1096,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 			if let Some(file) = current.take() {
 				files.push(file);
 			}
-			current = Some(DiffFile { path, added: 0, removed: 0, hunks: Vec::new() });
+			current = Some(DiffFile { path, added: 0, removed: 0, hunks: Vec::new(), binary: false });
 			pending_old_path = None;
 			continue;
 		}
@@ -1103,9 +1112,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 				path
 			};
 			flush_hunk(&mut current, &mut current_hunk);
-			let update_current_path = current
-				.as_ref()
-				.is_some_and(|file| file.added == 0 && file.removed == 0 && file.hunks.is_empty());
+			let update_current_path = current.as_ref().is_some_and(DiffFile::is_blank);
 			if update_current_path {
 				if let Some(file) = current.as_mut() {
 					file.path = path.to_string();
@@ -1117,6 +1124,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					added:   0,
 					removed: 0,
 					hunks:   Vec::new(),
+					binary:  false,
 				});
 			} else {
 				current = Some(DiffFile {
@@ -1124,6 +1132,7 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 					added:   0,
 					removed: 0,
 					hunks:   Vec::new(),
+					binary:  false,
 				});
 			}
 			pending_old_path = None;
@@ -1136,6 +1145,47 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 			continue;
 		}
 		if line.starts_with("+++") || line.starts_with("---") {
+			continue;
+		}
+		if line == "GIT binary patch" {
+			if let Some(file) = current.as_mut() {
+				file.binary = true;
+			}
+			continue;
+		}
+		if let Some(names) = line
+			.strip_prefix("Binary files ")
+			.and_then(|rest| rest.strip_suffix(" differ"))
+		{
+			flush_hunk(&mut current, &mut current_hunk);
+			// Under `diff --git` the block's header already named the file; a
+			// recursive `diff -r` prints the line alone, after the previous file.
+			match current.as_mut() {
+				Some(file) if file.is_blank() => file.binary = true,
+				_ => {
+					if let Some(file) = current.take() {
+						files.push(file);
+					}
+					current = Some(DiffFile {
+						path:    binary_diff_path(names).to_string(),
+						added:   0,
+						removed: 0,
+						hunks:   Vec::new(),
+						binary:  true,
+					});
+				},
+			}
+			continue;
+		}
+		// A rename's header names two paths that unquoted spaces make ambiguous;
+		// this line names the new one whole.
+		if let Some(path) = line
+			.strip_prefix("rename to ")
+			.or_else(|| line.strip_prefix("copy to "))
+			&& let Some(file) = current.as_mut()
+			&& file.is_blank()
+		{
+			file.path = unquote_path(path).to_string();
 			continue;
 		}
 		let Some(file) = current.as_mut() else {
@@ -1155,17 +1205,54 @@ fn parse_unified_diff(input: &str) -> Vec<DiffFile> {
 		files.push(file);
 	}
 	files
-		.into_iter()
-		.filter(|file| file.added > 0 || file.removed > 0)
-		.collect()
 }
 
+/// The file named by `Binary files <old> and <new> differ`. Either name may
+/// hold ` and ` itself, so the split taken is the one whose sides end in the
+/// same file name (or where one side is `/dev/null`); with none or several,
+/// the whole text names the file rather than a guessed half of it.
+fn binary_diff_path(names: &str) -> &str {
+	let mut splits = names
+		.match_indices(" and ")
+		.map(|(at, sep)| (&names[..at], &names[at + sep.len()..]))
+		.filter(|(old, new)| {
+			*old == "/dev/null"
+				|| *new == "/dev/null"
+				|| old.rsplit('/').next() == new.rsplit('/').next()
+		});
+	match (splits.next(), splits.next()) {
+		(Some((old, "/dev/null")), None) => old.strip_prefix("a/").unwrap_or(old),
+		(Some((_, new)), None) => new.strip_prefix("b/").unwrap_or(new),
+		_ => names,
+	}
+}
+
+/// The new path of a `diff --git a/<old> b/<new>` header. Unquoted paths may
+/// hold spaces, so a header naming one path twice is split at its middle; a
+/// rename falls back to the second word until its `rename to` line.
 fn parse_diff_git_path(line: &str) -> Option<String> {
 	let rest = line.strip_prefix("diff --git ")?;
+	let mid = rest.len() / 2;
+	if rest.as_bytes().get(mid) == Some(&b' ')
+		&& let Some(old) = unquote_path(&rest[..mid]).strip_prefix("a/")
+		&& let Some(new) = unquote_path(&rest[mid + 1..]).strip_prefix("b/")
+		&& old == new
+	{
+		return Some(new.to_string());
+	}
 	let mut parts = rest.split_whitespace();
 	let _old = parts.next()?;
 	let new = parts.next()?;
 	Some(new.strip_prefix("b/").map_or(new, |path| path).to_string())
+}
+
+/// A path git printed in C-style quotes (it holds a tab, quote or non-ASCII
+/// byte), without the quotes; escapes stay as git printed them.
+fn unquote_path(path: &str) -> &str {
+	path
+		.strip_prefix('"')
+		.and_then(|path| path.strip_suffix('"'))
+		.unwrap_or(path)
 }
 
 /// Old and new line counts of a two-way `@@ -a[,b] +c[,d] @@` header; an
@@ -1515,7 +1602,7 @@ fn condense_fetch(input: &str, exit_code: i32) -> String {
 			out.push_str("ok fetched (up-to-date)\n");
 		} else {
 			out.push_str("ok fetched, ");
-			out.push_str(&updates.to_string());
+			out.push_str(updates.format_into(&mut NumBuffer::new()));
 			out.push_str(" update");
 			if updates != 1 {
 				out.push('s');
@@ -1555,12 +1642,7 @@ fn condense_stash(command: &str, input: &str, exit_code: i32) -> String {
 			return "ok stashed\n".to_string();
 		}
 		if sub == "apply" || sub == "pop" || sub == "branch" {
-			let compacted = condense_status(input);
-			return if compacted == input {
-				input.to_string()
-			} else {
-				compacted
-			};
+			return condense_stash_status(input);
 		}
 		if sub == "create" {
 			return input.to_string();
@@ -1573,6 +1655,24 @@ fn condense_stash(command: &str, input: &str, exit_code: i32) -> String {
 	}
 
 	condense_noisy_output(input)
+}
+
+/// `stash apply`/`pop`/`branch` print the restored tree's status; `pop` then
+/// confirms the drop on its own last line, which the summary keeps.
+fn condense_stash_status(input: &str) -> String {
+	let (status, dropped) = match input.trim_end().rsplit_once('\n') {
+		Some((status, last)) if last.starts_with("Dropped ") => (status, Some(last)),
+		_ => (input, None),
+	};
+	let mut out = condense_status(status);
+	if let Some(dropped) = dropped {
+		if !out.is_empty() && !out.ends_with('\n') {
+			out.push('\n');
+		}
+		out.push_str(dropped);
+		out.push('\n');
+	}
+	out
 }
 
 fn condense_stash_list(input: &str) -> String {
@@ -2205,6 +2305,37 @@ mod tests {
 	}
 
 	#[test]
+	fn diff_lists_files_without_counted_lines() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff HEAD", &cfg);
+		// A `--binary` patch, a `binary` .gitattributes file, a pure rename and
+		// one text edit, as git prints them; unquoted paths hold spaces.
+		let input = past_whole_budget(
+			"diff --git a/app icon.png b/app icon.png\nindex bdc955b..8835708 100644\nGIT binary \
+			 patch\nliteral 2\nJcmZQz0ssI600RI3\n\nliteral 2\nJcmZQz1ONa700IC2\n\ndiff --git a/salt \
+			 and pepper.bin b/salt and pepper.bin\nindex bdc955b..8835708 100644\nBinary files \
+			 a/salt and pepper.bin and b/salt and pepper.bin differ\ndiff --git a/old name.txt b/new \
+			 name.txt\nsimilarity index 100%\nrename from old name.txt\nrename to new name.txt\ndiff \
+			 --git a/t.rs b/t.rs\nindex 422c2b7..0f7bc76 100644\n--- a/t.rs\n+++ b/t.rs\n@@ -1,2 \
+			 +1,2 @@\n a\n-b\n+c\n",
+		);
+		let out = filter(&ctx, &input, 0);
+		assert_eq!(out.text.lines().take(5).collect::<Vec<_>>(), [
+			"app icon.png | Bin",
+			"salt and pepper.bin | Bin",
+			"new name.txt | 0",
+			"t.rs | 2 +-",
+			"4 files changed, 1 insertions(+), 1 deletions(-)",
+		]);
+		assert!(
+			out.text
+				.contains("File: salt and pepper.bin\n  Binary files differ\n"),
+			"{}",
+			out.text
+		);
+	}
+
+	#[test]
 	fn word_diffs_are_not_summarized() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		// Color mode puts a line's old and new words on one line, so a changed
@@ -2734,6 +2865,23 @@ hint: See the 'Note about fast-forwards' in 'git push --help' for details.
 		assert!(!out.text.contains("state:"), "{:?}", out.text);
 		assert!(out.text.contains("untracked 1"), "{:?}", out.text);
 		assert!(out.text.contains("?? Next command to do.md"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn stash_pop_keeps_drop_line_and_counts_only_indented_untracked_entries() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("stash"), "git stash pop", &cfg);
+		// Untracked files named like git's own closing lines are still entries.
+		let input = "On branch main\nUntracked files:\n  (use \"git add <file>...\" to include in \
+		             what will be committed)\n\tno changes added.md\n\tDropped stash@{0}\n\nnothing \
+		             added to commit but untracked files present (use \"git add\" to \
+		             track)\nDropped refs/stash@{0} (0123abcd)\n";
+		let out = filter(&ctx, input, 0);
+		assert!(out.text.contains("untracked 2"), "{:?}", out.text);
+		assert!(out.text.contains("?? no changes added.md"), "{:?}", out.text);
+		assert!(out.text.contains("?? Dropped stash@{0}"), "{:?}", out.text);
+		assert!(!out.text.contains("?? nothing added"), "{:?}", out.text);
+		assert!(out.text.ends_with("\nDropped refs/stash@{0} (0123abcd)\n"), "{:?}", out.text);
 	}
 
 	// --- Pull summaries ---

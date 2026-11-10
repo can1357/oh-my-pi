@@ -1,4 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import chillaxNotice from "../prompts/system/chillax-notice.md" with { type: "text" };
 import jevifyNotice from "../prompts/system/jevify-notice.md" with { type: "text" };
 import orchestrateNotice from "../prompts/system/orchestrate-notice.md" with { type: "text" };
 import ultrathinkNotice from "../prompts/system/ultrathink-notice.md" with { type: "text" };
@@ -25,6 +26,14 @@ export interface MagicKeywordContext {
 	scoutAvailable: boolean;
 	/** `eval.tools.enabled`: whether `@tool`-defined kernel tools exist. */
 	evalTools: boolean;
+	/** `eval.py`: whether the Python eval backend is enabled. */
+	py: boolean;
+	/** `eval.js`: whether the JS eval backend is enabled. */
+	js: boolean;
+	/** `eval.workpool.freshAgents`: whether workpools spawn a new agent per item instead of reusing workers. */
+	freshAgents: boolean;
+	/** `task.perCallModel` admits `model` on eval `agent()`/`workpool()` (`eval` or `on`). */
+	perCallModel: boolean;
 }
 
 /** One magic keyword: trigger word, gradient, settings copy, and the notice it injects. */
@@ -35,6 +44,8 @@ export interface MagicKeyword {
 	word: string;
 	/** Editor/bubble gradient as an HSL hue sweep `[from, to]` in degrees; `to` may exceed 360 to wrap. */
 	hue: readonly [number, number];
+	/** HSL lightness sweep `[from, to]` in percent painted alongside `hue`; omitted keeps the default lightness. */
+	lightness?: readonly [number, number];
 	/** Settings panel label. */
 	label: string;
 	/** Settings panel description. */
@@ -47,6 +58,9 @@ export interface MagicKeyword {
 
 /** Hidden notice for "ultrathink": careful multi-step reasoning. */
 export const ULTRATHINK_NOTICE: string = ultrathinkNotice.trim();
+
+/** Hidden notice for "chillax": brief reasoning, direct path. */
+export const CHILLAX_NOTICE: string = chillaxNotice.trim();
 
 /** Hidden notice for "jevify": bulk classification through the eval kernel's `judge()`. */
 export const JEVIFY_NOTICE: string = jevifyNotice.trim();
@@ -61,8 +75,17 @@ export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
 	evalTools,
-}: Pick<MagicKeywordContext, "taskBatch" | "scoutAvailable" | "evalTools">): string {
-	return prompt.render(workflowNotice, { taskBatch, scoutAvailable, evalTools }).trim();
+	py,
+	js,
+	freshAgents,
+	perCallModel,
+}: Pick<
+	MagicKeywordContext,
+	"taskBatch" | "scoutAvailable" | "evalTools" | "py" | "js" | "freshAgents" | "perCallModel"
+>): string {
+	return prompt
+		.render(workflowNotice, { taskBatch, scoutAvailable, evalTools, py, js, freshAgents, perCallModel })
+		.trim();
 }
 
 export const MAGIC_KEYWORDS = [
@@ -74,6 +97,18 @@ export const MAGIC_KEYWORDS = [
 		description: "Let standalone ultrathink request maximum automatic thinking and append its hidden notice",
 		requires: [],
 		notice: () => ULTRATHINK_NOTICE,
+	},
+	{
+		id: "chillax",
+		word: "chillax",
+		// Cyan darkening into deep blue.
+		hue: [180, 235],
+		lightness: [62, 45],
+		label: "Chillax Keyword",
+		description:
+			"Let standalone chillax drop thinking to the model's lowest effort (models with per-message effort, even mid-turn) and append its hidden notice",
+		requires: [],
+		notice: () => CHILLAX_NOTICE,
 	},
 	{
 		id: "orchestrate",

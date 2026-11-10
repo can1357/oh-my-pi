@@ -43,6 +43,13 @@ export interface ResolvedApiKey {
 	/** Durable row id of the credential that supplied this bearer, when known. */
 	credentialId?: number;
 	/**
+	 * The OAuth access token behind this bearer, when the bearer came from a
+	 * stored OAuth credential. A provider whose API key wraps the token in a
+	 * structured document makes the two differ, so a 401 recovery names this
+	 * one as the token the provider rejected.
+	 */
+	oauthAccess?: string;
+	/**
 	 * Resolved after `LimitsApi.rotate` slept out a sibling's short block
 	 * (`afterSiblingWait`): the driver accepts this bearer even if the request
 	 * already sent it before that block.
@@ -72,6 +79,41 @@ export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResoluti
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };
+}
+
+/** Bearers a resolver served recently, each with the OAuth access token behind it. */
+const OAUTH_PROVENANCE_LIMIT = 8;
+
+/**
+ * Remembers which OAuth access token produced each bearer a resolver served,
+ * so a 401 recovery can name the token of the request that actually failed.
+ * A resolver serves many requests, and they fail out of order: the last
+ * resolution is not that request's identity. Used by every resolver that
+ * serves more than one request ({@link KeyCascade.resolver}, the coding
+ * agent's `createApiKeyResolver`, the auth gateway's resolver).
+ */
+export function createOAuthProvenance(): {
+	record: (resolved: ApiKeyResolution) => void;
+	accessFor: (bearer: string | undefined) => string | undefined;
+} {
+	const byBearer = new Map<string, string>();
+	return {
+		record(resolved) {
+			if (typeof resolved !== "object" || resolved === undefined) return;
+			const access = resolved.oauthAccess;
+			if (access === undefined) return;
+			byBearer.delete(resolved.apiKey);
+			byBearer.set(resolved.apiKey, access);
+			while (byBearer.size > OAUTH_PROVENANCE_LIMIT) {
+				const oldest = byBearer.keys().next();
+				if (oldest.done) break;
+				byBearer.delete(oldest.value);
+			}
+		},
+		accessFor(bearer) {
+			return bearer === undefined ? undefined : byBearer.get(bearer);
+		},
+	};
 }
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
@@ -150,6 +192,15 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 	if (isForbidden && !isConcurrencyCapExclusion(status, message) && !isOpencodeFreeTierGateMessage(message))
 		return true;
 	return isUsageLimitOutcome(status, message);
+}
+
+/** Keep a quota reset actionable when a rotated sibling fails authentication. */
+export function preferAuthRetryError(reported: unknown, next: unknown): unknown {
+	const message = reported instanceof Error ? reported.message : typeof reported === "string" ? reported : undefined;
+	return (isUsageLimit(reported) || isUsageLimitOutcome(AIError.status(reported), message)) &&
+		AIError.status(next) === 401
+		? reported
+		: next;
 }
 
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */
@@ -319,11 +370,13 @@ export async function withAuth<T>(
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
+	let reportedError: unknown;
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
+		reportedError = error;
 	}
 
 	while (true) {
@@ -334,10 +387,11 @@ export async function withAuth<T>(
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;
+			reportedError = preferAuthRetryError(reportedError, error);
 		}
 	}
 
-	throw lastError;
+	throw reportedError;
 }
 
 /**
@@ -412,6 +466,7 @@ export async function withOAuthAccess<T>(
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
+	let reportedError: unknown = lastError;
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
@@ -421,7 +476,11 @@ export async function withOAuthAccess<T>(
 			tokenRefreshReplayUsed = true;
 			refreshedCurrent = true;
 			try {
-				next = await storage.oauth.access(provider, sessionId, { forceRefresh: true, signal });
+				next = await storage.oauth.access(provider, sessionId, {
+					forceRefresh: true,
+					rejectedAccessToken: lastAccess.accessToken,
+					signal,
+				});
 			} catch {
 				next = undefined;
 			}
@@ -435,6 +494,7 @@ export async function withOAuthAccess<T>(
 			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
+			reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 			continue;
 		}
 
@@ -446,6 +506,7 @@ export async function withOAuthAccess<T>(
 					next = await storage.oauth.access(provider, sessionId, {
 						forceRefresh: true,
 						refreshReason: AIError.status(lastError) === 401 ? "auth-recovery" : undefined,
+						rejectedAccessToken: lastAccess.accessToken,
 						signal,
 					});
 				} catch {
@@ -462,6 +523,7 @@ export async function withOAuthAccess<T>(
 						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
+						reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 						continue;
 					}
 				}
@@ -500,7 +562,8 @@ export async function withOAuthAccess<T>(
 		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
+		reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 	}
 
-	throw lastError;
+	throw reportedError;
 }

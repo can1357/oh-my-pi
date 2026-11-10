@@ -149,6 +149,35 @@ export function sortDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 	});
 }
 
+function diagnosticFingerprint(d: Diagnostic): string {
+	return `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.source ?? ""}:${d.message}`;
+}
+
+/**
+ * Merge two diagnostic lists, preserving order and deduplicating by range, source and message.
+ */
+export function mergeDiagnosticLists(primary: Diagnostic[], secondary: Diagnostic[]): Diagnostic[] {
+	if (primary.length === 0) return secondary.slice();
+	if (secondary.length === 0) return primary.slice();
+	const seen = new Set<string>();
+	const merged: Diagnostic[] = [];
+	for (const d of primary) {
+		const key = diagnosticFingerprint(d);
+		if (!seen.has(key)) {
+			seen.add(key);
+			merged.push(d);
+		}
+	}
+	for (const d of secondary) {
+		const key = diagnosticFingerprint(d);
+		if (!seen.has(key)) {
+			seen.add(key);
+			merged.push(d);
+		}
+	}
+	return merged;
+}
+
 /**
  * Get icon for diagnostic severity.
  */
@@ -419,7 +448,7 @@ export function symbolKindToName(kind: SymbolKind): string {
 export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string[] {
 	const prefix = "  ".repeat(indent);
 	const icon = symbolKindToIcon(symbol.kind);
-	const line = symbol.range.start.line + 1;
+	const line = symbol.selectionRange.start.line + 1;
 	const detail = symbol.detail ? ` ${symbol.detail}` : "";
 	const results = [`${prefix}${icon} ${symbol.name}${detail} @ line ${line}`];
 
@@ -475,6 +504,21 @@ export function formatCodeAction(action: CodeAction | Command, index: number): s
 	const preferred = "isPreferred" in action && action.isPreferred ? " (preferred)" : "";
 	const disabled = "disabled" in action && action.disabled ? ` (disabled: ${action.disabled.reason})` : "";
 	return `${index}: [${kind}] ${action.title}${preferred}${disabled}`;
+}
+
+/**
+ * Appends the `extra` code actions that do not already appear, identically, in `base`.
+ * `code_actions` merges its unfiltered and `source`-kind requests with this; servers that
+ * ignore `context.only` answer both with the same actions. Same-titled actions that differ
+ * in any field (edit, command, data) stay distinct, as do repeats within one response.
+ */
+export function mergeCodeActions(
+	base: (CodeAction | Command)[] | null,
+	extra: (CodeAction | Command)[] | null,
+): (CodeAction | Command)[] {
+	const merged = base ?? [];
+	const seen = new Set(merged.map(action => JSON.stringify(action)));
+	return [...merged, ...(extra ?? []).filter(action => !seen.has(JSON.stringify(action)))];
 }
 
 export interface CodeActionApplyDependencies {
@@ -684,7 +728,7 @@ export async function readLocationContext(filePath: string, line: number, contex
 		// Context is decoration: a special-file location keeps its header, like a missing file.
 		if (specialFileKind(await fs.stat(filePath))) return [];
 		const fileText = await Bun.file(filePath).text();
-		const lines = fileText.split("\n");
+		const lines = fileText.split(/\r?\n/);
 		if (lines.length === 0) return [];
 
 		const startLine = Math.max(1, targetLine - surrounding);

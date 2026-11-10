@@ -3,6 +3,7 @@ One cell per call; top-level state persists, including across compaction.{{#if s
 {{#if py}}Python: plain Python subprocess, not IPython (no `get_ipython()`, `obj?`, or `%matplotlib`). Magics like `%pip`, `%load`, `%time` and `!cmd` are rewritten to Python. Top-level `await` works; `asyncio.run(…)` fails.{{/if}}
 {{#if js}}JS: Bun (`Bun.file`, `Bun.write`, `Bun.$`); top-level `await`/`return` work.{{/if}}
 On error, retry only the failed step; earlier steps may have taken effect.
+Cell deadline: nonzero `timeout` values clamp to {{timeoutMin}}–{{timeoutMax}} seconds{{#if configuredMaxTimeout}}, with configured `tools.maxTimeout: {{configuredMaxTimeout}}` (effective ceiling {{timeoutCeiling}}s){{/if}}; `0` disables the deadline. A changed supplied deadline is disclosed before execution.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
 <prelude>
@@ -14,6 +15,7 @@ read(path, offset?, limit?)  write(path, content); JS: await read(path, offset?,
 output(*ids, format?, query?, offset?, limit?); JS: await output(...ids, { format?, query?, offset?, limit? }) — Python: sync; JS: async
 wait(handles, timeout?=None, raise_errors?=True); JS: await wait(handles, { timeout?, raiseErrors? }) — Python: sync; JS: async; agent/completion barrier, ordered results; `raise_errors=False` / `raiseErrors: false` retains failures.
 await tool.<name>(args) — async; session tool; `args` is its parameter object
+sh(command, cwd?, timeout?); JS: await sh(command, { cwd?, timeout? }) or await sh`cmd ${arg}` — Python: sync; JS: async; embedded bash engine, runs to completion (never backgrounded); returns stdout+stderr; non-zero exit raises ShellError (`.exit_code`/`.exitCode`, `.output`); JS interpolations are shell-quoted; starts in the session cwd unless `cwd` is given
 ```
 {{else}}
 `await` marks async helpers; the rest are sync.
@@ -24,6 +26,7 @@ print(value, ...)  log(message)  phase(title)  env(key?, value?)
 read(path, offset?, limit?)  write(path, content)  output(*ids, format?, query?, offset?, limit?)
 wait(handles, timeout?=None, raise_errors?=True) — agent/completion barrier, ordered results; `raise_errors=False` retains failures.
 await tool.<name>(args) — session tool; `args` is its parameter object
+sh(command, cwd?, timeout?) — embedded bash engine, runs to completion (never backgrounded); returns stdout+stderr; non-zero exit raises ShellError (`.exit_code`, `.output`); starts in the session cwd unless `cwd` is given
 ```
 {{/if}}
 {{#if js}}
@@ -33,9 +36,11 @@ print(value, ...)  log(message)  phase(title)  env(key?, value?)
 await read(path, offset?, limit?)  await write(path, content)  await output(...ids, { format?, query?, offset?, limit? })
 await wait(handles, { timeout?, raiseErrors? }) — agent/completion barrier, ordered results; `raiseErrors: false` retains failures.
 await tool.<name>(args) — session tool; `args` is its parameter object
+await sh(command, { cwd?, timeout? })  await sh`cmd ${arg}` — embedded bash engine, runs to completion (never backgrounded); resolves to stdout+stderr; non-zero exit throws ShellError (`.exitCode`, `.output`); interpolations are shell-quoted; starts in the session cwd unless `cwd` is given
 ```
 {{/if}}
 {{/ifAll}}
+{{#if toolNames}}Session tool names: {{#each toolNames}}`{{this}}`{{#unless @last}}, {{/unless}}{{/each}}.{{/if}}
 </prelude>
 
 {{#if inlineTopics}}
@@ -52,6 +57,13 @@ More globals; `read` the linked docs before first use:
 - `{{name}}`: {{summary}} → `xd://eval/{{name}}`
 {{/each}}
 </namespaces>
+{{#each inlinePreludes}}
+
+<{{name}}>
+Global `{{name}}`, documented here in full (no `read` needed):
+{{{documentation}}}
+</{{name}}>
+{{/each}}
 {{/if}}
 
 <critical>

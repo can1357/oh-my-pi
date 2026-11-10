@@ -16,10 +16,9 @@ import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { gracefulKillTreeOnce, pickElectronTarget } from "./attach";
-import { CmuxTab } from "./cmux/cmux-tab";
+import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget } from "./attach";
+import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
-import { runInProcessTab } from "./in-process-run";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
 import {
 	closeCdpTarget,
@@ -31,6 +30,7 @@ import {
 } from "./orphan-registry";
 import { stopSharedBrowserIfUnreachable } from "./shared-daemon";
 import {
+	acquireBrowser,
 	type BrowserHandle,
 	type BrowserKindTag,
 	type CmuxBrowserHandle,
@@ -55,7 +55,7 @@ import {
 
 import { cfgBrowserScreenshotDir } from "./settings";
 import { listTernBlocks, noTernBlockError, pickTernBlock } from "./tern/blocks";
-import { TernTab } from "./tern/tern-tab";
+import type * as Tern from "./tern/tern-tab";
 import { newUploadStagingDir, removeUploadStaging, sweepUploadStaging } from "./upload-files";
 
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
@@ -89,6 +89,8 @@ export interface PendingRun {
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
+	/** A direct `tab.waitForDownload()` call: it holds the tab until a download finishes. */
+	waitsForDownload?: boolean;
 }
 
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
@@ -103,16 +105,17 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	allowedDomains?: string[];
 	kindTag: BrowserKindTag;
 	/**
-	 * Session id of the caller that CREATED the tab. Preserved across reuse so
+	 * Owner id (the agent's kernel owner id) of the caller that CREATED the tab. Preserved across reuse so
 	 * that dispose of the creating session can reap browser resources without
 	 * yanking the tab out from under a subagent that only reused it.
 	 * Undefined when the acquirer did not identify itself.
 	 */
 	ownerSessionId?: string;
 	/**
-	 * Opt out of settle-freeze and idle-close reaping. Recorded on the tab
-	 * when created (never on reuse), mirroring `ownerSessionId`: keeping a
-	 * tab live across turns is the creator's explicit decision.
+	 * Opt out of settle-freeze and idle-close reaping, and keep a page omp
+	 * opened in the user's Chrome (relay) open when the session ends. Set at
+	 * creation or explicit reuse by the owning session; another session's
+	 * reuse cannot change the tab's lifetime.
 	 */
 	persist?: boolean;
 	/** Wall-clock (`Date.now()`) last use: create, reuse, or run start. Drives idle-close. */
@@ -148,7 +151,7 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 	backend: "cmux";
-	cmuxTab: CmuxTab;
+	cmuxTab: Cmux.CmuxTab;
 	cmuxOwnsSurface: boolean;
 	cmuxAttachedSurface?: string;
 }
@@ -157,7 +160,7 @@ export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 export interface TernTabSession extends TabSessionBase<TernBrowserHandle> {
 	backend: "tern";
 	/** The PiP's driver. */
-	ternTab: TernTab;
+	ternTab: Tern.TernTab;
 }
 
 export type TabSession = WorkerTabSession | CmuxTabSession | TernTabSession;
@@ -191,15 +194,15 @@ export interface AcquireTabOptions {
 	ignoreHttpsErrors?: boolean;
 	cmuxSurface?: string;
 	/**
-	 * Session id of the acquirer. Recorded on the tab when created (never on
+	 * Owner id (the agent's kernel owner id) of the acquirer. Recorded on the tab when created (never on
 	 * reuse) so `releaseTabsForOwner` can walk the shared tabs map on session
 	 * dispose. Optional — omitting it opts the tab out of session-scoped reap.
 	 */
 	ownerSessionId?: string;
 	/**
-	 * Keep the tab live across turn settle and idle close. Recorded on the
-	 * tab when created (never on reuse) so a later caller cannot silently
-	 * extend another session's tab lifetime.
+	 * Keep the tab live across turn settle and idle close, and open in the
+	 * user's Chrome (relay) after the session ends. Set at creation or explicit
+	 * reuse by the owning session, never by another session's reuse.
 	 */
 	persist?: boolean;
 }
@@ -207,7 +210,7 @@ export interface AcquireTabOptions {
 export interface AcquireTabResult {
 	tab: TabSession;
 	created: boolean;
-	/** What the open recovered from before reusing the tab, for its result. */
+	/** What the open recovered from, for its result. */
 	note?: string;
 }
 
@@ -216,10 +219,14 @@ export interface RunInTabOptions {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session: ToolSession;
+	/** The call is a direct `tab.waitForDownload()`. */
+	waitsForDownload?: boolean;
 }
 
 export interface ReleaseTabOptions {
 	kill?: boolean;
+	/** Leave a page omp opened open in its browser and let go of it, instead of closing it. */
+	keepPage?: boolean;
 	/** Maximum time for each asynchronous cleanup resource before close fails with diagnostics. */
 	timeoutMs?: number;
 }
@@ -230,6 +237,10 @@ const tabs = new Map<string, TabSession>();
 // recorded target instead. A shared browser's other targets must never be
 // touched.
 const workerPageTargets = new WeakMap<WorkerHandle, string>();
+// Tags a worker that exited on its own. A tab keeps its exited worker until the reattach publishes a replacement, and
+// a release meanwhile must not wait out a `closed` reply that worker can no longer send.
+const kWorkerExited = Symbol("tabWorker.exited");
+type ExitTrackedWorker = WorkerHandle & { [kWorkerExited]?: true };
 // Per-name acquisition chain: serializes concurrent `acquireTab` calls for the
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
@@ -279,6 +290,15 @@ class RecoverableWorkerError extends ToolError {}
 class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
+/** The relay detach interrupted a call, but the same page is usable on a replacement worker. */
+class DebuggerReattachedError extends ToolError {
+	constructor(
+		message: string,
+		readonly when: "during" | "before",
+	) {
+		super(message);
+	}
+}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
@@ -469,7 +489,9 @@ async function acquireTabImpl(
 				}
 				const reuseSteps: string[] = [];
 				if (opts.viewport && browser.kind.kind !== "cmux" && browser.kind.kind !== "tern") {
-					const dsf = opts.viewport.deviceScaleFactor;
+					// Only a hidden headless tab has an emulated scale to fall back on; other windows keep their own (0).
+					const ownScale = browser.kind.kind === "headless" && browser.kind.headless ? undefined : 0;
+					const dsf = opts.viewport.deviceScaleFactor ?? ownScale;
 					reuseSteps.push(
 						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)} });`,
 					);
@@ -479,7 +501,7 @@ async function acquireTabImpl(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				const reuse = async (): Promise<void> => {
+				const reuse = async (): Promise<string | undefined> => {
 					if (reuseSteps.length) {
 						await runInTabWithSnapshot(
 							name,
@@ -491,11 +513,11 @@ async function acquireTabImpl(
 							{ cwd: getProjectDir() },
 						);
 					}
-					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
+					if (opts.url) return await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
 				let note: string | undefined;
 				try {
-					await reuse();
+					note = await reuse();
 				} catch (error) {
 					// The tab's renderer had crashed: the failed step reloaded the page on a new worker, so the
 					// open goes on with it once. A tab closed by the crash, or a second crash, fails the open.
@@ -504,7 +526,8 @@ async function acquireTabImpl(
 					)
 						throw error;
 					note = RENDERER_RELOADED_NOTE;
-					await reuse();
+					const navigationNote = await reuse();
+					if (navigationNote) note += `\n${navigationNote}`;
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
 				if (existing.backend === "tern") existing.info = await existing.ternTab.readyInfo();
@@ -556,9 +579,8 @@ async function acquireTabImpl(
 		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
 		// the inline worker here so module-resolution failures don't poison every tab open.
 		await worker.terminate().catch(() => undefined);
-		// A headless worker that died mid-init may have already created its page in the
-		// shared browser — a killed worker can't close it, so close the target the worker
-		// reported (no-op when it never got that far).
+		// A worker that died mid-init may have created a tab in headless Chromium,
+		// the relay, or a spawned Chrome — close exactly the reported target.
 		closeAbandonedWorkerPage(browser, worker);
 		if (worker.mode === "inline" || isReportedInitFailure(error)) {
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
@@ -632,17 +654,17 @@ async function acquireTabImpl(
 	// this process dies abnormally before its own teardown closes the tab.
 	const scope = sharedScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
+	const note = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
+	return { tab, created: true, note };
 }
 
 /**
  * Navigate a tab for an open, within what is left of the open's budget. A
  * page that outlasts it fails with goto's own report while the tab stays on
  * what loaded, instead of losing to the open's bare deadline. A tab this open
- * created (`created`) is kept only for that timeout: a navigation that fails
- * outright, or an open cancelled or past its deadline, closes it again so the
- * failed open leaves nothing behind.
+ * created (`created`) is kept for that timeout or a successfully recovered relay
+ * detach: other navigation failures, or an open cancelled or past its deadline,
+ * close it again so the failed open leaves nothing behind.
  */
 async function navigateOpenedTab(
 	name: string,
@@ -650,7 +672,7 @@ async function navigateOpenedTab(
 	opts: AcquireTabOptions,
 	startedAt: number,
 	created?: WorkerTabSession,
-): Promise<void> {
+): Promise<string | undefined> {
 	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
 	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
 	try {
@@ -665,7 +687,14 @@ async function navigateOpenedTab(
 			{ cwd: getProjectDir() },
 		);
 	} catch (error) {
-		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
+		if (error instanceof DebuggerReattachedError && error.when === "during" && !opts.signal?.aborted) {
+			return error.message;
+		}
+		if (
+			created &&
+			(opts.signal?.aborted ||
+				!(error instanceof NavigationTimeoutError || error instanceof DebuggerReattachedError))
+		) {
 			await rollBackCreatedTab(name, created);
 			throw error;
 		}
@@ -743,6 +772,8 @@ async function acquireCmuxTab(
 			}
 		}
 
+		// Browser-only evaluators stay out of CLI startup and worker-backed tabs.
+		const { CmuxTab } = await import("./cmux/cmux-tab");
 		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl });
 		if (attachedSurface && opts.url) {
 			await cmuxTab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: opts.timeoutMs });
@@ -812,6 +843,8 @@ async function acquireTernTab(
 	browser: TernBrowserHandle,
 	opts: AcquireTabOptions,
 ): Promise<AcquireTabResult> {
+	// Tern's driver stays out of sessions that never open a Tern tab.
+	const { TernTab } = await import("./tern/tern-tab");
 	const settings = {
 		name,
 		url: opts.url,
@@ -825,7 +858,7 @@ async function acquireTernTab(
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 	};
-	let ternTab: TernTab;
+	let ternTab: Tern.TernTab;
 	if (opts.target === undefined) {
 		ternTab = await TernTab.open(browser.tern, {
 			...settings,
@@ -871,7 +904,13 @@ async function acquireTernTab(
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
 	const result = await runInTabWithSnapshot(
 		name,
-		{ code: opts.code, timeoutMs: opts.timeoutMs, signal: opts.signal, session: opts.session },
+		{
+			code: opts.code,
+			timeoutMs: opts.timeoutMs,
+			signal: opts.signal,
+			session: opts.session,
+			waitsForDownload: opts.waitsForDownload,
+		},
 		{
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
@@ -897,6 +936,7 @@ async function runInTabWithSnapshot(
 		session?: ToolSession;
 		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
 		readopted?: boolean;
+		waitsForDownload?: boolean;
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
@@ -922,8 +962,11 @@ async function runInTabWithSnapshot(
 		);
 	}
 	if (tab.pending.size > 0) {
+		const waitingForDownload = [...tab.pending.values()].some(run => run.waitsForDownload);
 		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
+			waitingForDownload
+				? `Tab ${JSON.stringify(name)} is busy: tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`
+				: `Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
 		);
 	}
 	// An already-aborted call never runs: without this early exit the worker
@@ -959,6 +1002,7 @@ async function runInTabWithSnapshot(
 		signal: opts.signal,
 		toolCalls: new Map(),
 		closeAc,
+		waitsForDownload: opts.waitsForDownload,
 	};
 	// Register BEFORE the unfreeze await below. Settle-freeze guards on
 	// `pending` (and undoes a transition already in flight when it observes
@@ -1009,6 +1053,9 @@ async function runInTabWithSnapshot(
 	if (tab.backend === "cmux" || tab.backend === "tern") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;
 		try {
+			// In-process runners stay out of worker-backed tabs. A close during
+			// this import aborts `runSignal` and rejects `promise` first.
+			const { runInProcessTab } = await import("./in-process-run");
 			// `runInProcessTab.then(resolve, reject)` publishes the run's real
 			// outcome to `promise`, but `releaseTab` may have already
 			// rejected it — `Promise.withResolvers` settles on the first
@@ -1097,8 +1144,8 @@ async function runInTabWithSnapshot(
 					error.when === "during" ? "; input this call sent before the detach may already have landed" : "";
 				// Host tool calls the detached run started would otherwise keep running, and reply to the new worker.
 				for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
-				// Both paths below kill an inline worker's tab, and its `terminate()` is a no-op: without the close
-				// handshake its core keeps its relay connection and could claim the tab again once it is re-announced.
+				// Both paths below kill an inline worker's tab. Close its core first: the close finalizes an active
+				// recording, which the kill's `terminate()` (it only drops the relay connection) would leave unfinished.
 				if (tab.worker.mode === "inline" && tabs.get(name) === tab && tab.state === "alive") {
 					const closed = waitForClosed(tab).catch(() => undefined);
 					safeSend(tab, { type: "close" });
@@ -1124,15 +1171,17 @@ async function runInTabWithSnapshot(
 				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
 				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
 				if (remainingMs <= 0) {
-					throw new ToolError(
+					throw new DebuggerReattachedError(
 						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Its pending entry must go first, or the tab reads as busy.
@@ -1207,7 +1256,7 @@ async function recoverWorkerTab(
  * (and the shared browser hold would release twice). Joiners share the
  * first release's outcome.
  */
-const releaseInflight = new WeakMap<TabSession, { promise: Promise<boolean>; opts: ReleaseTabOptions }>();
+const releaseInflight = new WeakMap<TabSession, { promise: Promise<"released" | "kept">; opts: ReleaseTabOptions }>();
 
 export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Promise<boolean> {
 	const tab = tabs.get(name);
@@ -1223,17 +1272,44 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		// as the first release has not finished. (Not directly testable
 		// in-process: observing it needs a real spawned application.)
 		ongoing.opts.kill = ongoing.opts.kill || opts.kill;
+		// A joining close wins over a session end's `keepPage` while the page is still undecided.
+		if (!opts.keepPage) ongoing.opts.keepPage = false;
 		const joined = await ongoing.promise;
+		if (!opts.keepPage && joined === "kept" && tab.backend === "worker") {
+			// The first release already decided to keep the page and may have disconnected.
+			// Reconnect to its browser, not a same-name tab which could now belong to another caller;
+			// a close never starts or replaces the relay that kept the page.
+			const browser = await acquireBrowser(tab.browser.kind, { cwd: getProjectDir(), startRelay: false });
+			holdBrowser(browser);
+			try {
+				const timeoutMs = opts.timeoutMs ?? DEFAULT_TAB_CLOSE_TIMEOUT_MS;
+				if (
+					!("browser" in browser) ||
+					!(await waitForTabCleanup(
+						tab,
+						timeoutMs,
+						`joined CDP target ${JSON.stringify(tab.targetId)} (Page.close)`,
+						closeTargetById(browser, tab.targetId, timeoutMs / 2),
+					))
+				) {
+					throw new ToolError(`Could not confirm closure of tab ${JSON.stringify(name)}`);
+				}
+				await removeUploadStaging(tab.uploadDir);
+			} finally {
+				await releaseBrowser(browser, { kill: false });
+			}
+		}
 		// The upgrade above lands too late when the first release already
 		// passed `releaseBrowser`: verify a still-running spawned app is
 		// terminated rather than trusting the joined outcome.
 		if (opts.kill) await ensureSpawnedKilled(tab.browser);
-		return joined;
+		return true;
 	}
 	const entry = { promise: releaseTabInner(tab, name, opts), opts };
 	releaseInflight.set(tab, entry);
 	try {
-		return await entry.promise;
+		await entry.promise;
+		return true;
 	} finally {
 		releaseInflight.delete(tab);
 	}
@@ -1256,7 +1332,7 @@ export function ensureSpawnedKilledForTest(browser: BrowserHandle): Promise<void
 	return ensureSpawnedKilled(browser);
 }
 
-async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOptions): Promise<boolean> {
+async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOptions): Promise<"released" | "kept"> {
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
@@ -1307,7 +1383,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			tabs.delete(name);
 		}
 		if (closeError) throw closeError;
-		return true;
+		return "released";
 	}
 	if (tab.backend === "cmux") {
 		let closeError: unknown;
@@ -1341,26 +1417,29 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			tabs.delete(name);
 		}
 		if (closeError) throw closeError;
-		return true;
+		return "released";
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
-	if (wasAlive) {
+	if (wasAlive && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
 		try {
-			tab.worker.send({ type: "close" });
+			tab.worker.send({ type: "close", keepPage: opts.keepPage });
 			await waitForClosed(tab);
 		} catch {
 			// The close by id below confirms an owned page is gone either way.
 		}
 	}
 	await tab.worker.terminate().catch(() => undefined);
+	// Decided after the worker is gone, so a close that joined meanwhile still closes the page by id below. A page
+	// kept open stays the user's: its staged uploads wait for the sweep like a borrowed page's.
+	const closesPage = tab.ownsPage && !opts.keepPage;
 	// omp closes the pages it owns, and with them goes the last reader of their staged uploads.
-	if (tab.ownsPage) await removeUploadStaging(tab.uploadDir);
+	if (closesPage) await removeUploadStaging(tab.uploadDir);
 	// Close a live tab's owned page by id as well, which confirms it is gone: a worker's own
 	// close can fail and still report `closed` (its CDP socket broke), and the relay retracts a
 	// target whose debugger the user dismissed, so the worker cannot close it at all. A dead
 	// tab's page was closed by the teardown that killed it.
-	if (tab.ownsPage && wasAlive) {
+	if (closesPage && wasAlive) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -1409,7 +1488,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		}
 	}
 	if (cleanupError) throw cleanupError;
-	return true;
+	return wasAlive && tab.ownsPage && !closesPage ? "kept" : "released";
 }
 
 export async function releaseAllTabs(opts: ReleaseTabOptions = {}): Promise<number> {
@@ -1427,7 +1506,7 @@ export async function dropHeadlessTabs(): Promise<void> {
 }
 
 /**
- * Release every tab created by the given session id. Invoked from
+ * Release every tab created by the given owner id. Invoked from
  * `AgentSession.dispose()` so headless/spawned Chromium and workers the
  * session opened do not leak into the long-lived process — the module-global
  * `tabs`/`browsers` maps that back this tool are not otherwise walked by
@@ -1438,13 +1517,20 @@ export async function dropHeadlessTabs(): Promise<void> {
  * session opened will not yank teardown responsibility away from the
  * creator. Tabs opened with no owner (e.g. from an SDK caller that doesn't
  * identify a session) are skipped and must be released explicitly.
+ *
+ * A `persist` tab omp opened in the user's Chrome through the relay, which
+ * outlives omp, is let go instead of closed: the page stays open for the
+ * user. Tabs in browsers omp launched stay omp's to close, persist or not.
  */
 export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptions = {}): Promise<number> {
 	if (!ownerId) return 0;
 	const names = [...tabs.values()].filter(tab => tab.ownerSessionId === ownerId).map(tab => tab.name);
 	let count = 0;
 	for (const name of names) {
-		if (await releaseTab(name, opts)) count++;
+		// Read right before `releaseTab` looks the name up, so the choice is made for the tab it releases.
+		const tab = tabs.get(name);
+		const keepPage = tab?.persist === true && tab.kindTag === "relay";
+		if (await releaseTab(name, { ...opts, keepPage })) count++;
 	}
 	return count;
 }
@@ -1799,8 +1885,7 @@ function sweepClosedTabUploads(): void {
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
-	const browserWSEndpoint = browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+	const browserWSEndpoint = browser.wsEndpoint;
 	if (browser.kind.kind === "headless") {
 		return {
 			mode: "headless",
@@ -1825,8 +1910,11 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	if (browser.kind.kind === "relay" && !opts.target) {
 		// A relay open without a target gets its own background tab, leaving the user's
 		// selected tab alone, in the browser of the tab omp used last on this relay.
-		// Focus emulation keeps it interactive without raising it.
 		page = { kind: "create", nearTargetId: lastUsedTargetOn(browser) };
+	} else if (browser.kind.kind === "spawned" && !opts.target && isChromiumBrowserExecutable(browser.kind.path)) {
+		// A dedicated Chrome profile can start with no pages; never navigate its
+		// welcome tab (or another user's tab on a reused endpoint).
+		page = { kind: "create" };
 	} else {
 		// A connected browser without a target adopts the tab the user is looking at
 		// rather than whichever CDP lists first; an explicit target is borrowed.
@@ -1840,10 +1928,12 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	}
 	return {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint:
+			page.kind === "create" ? browserWSEndpoint : adoptEndpoint(browserWSEndpoint, browser, page.targetId),
 		safeDir,
 		uploadDir,
 		page,
+		viewport: opts.viewport,
 		dialogs: opts.dialogs,
 		allowedDomains: opts.allowedDomains,
 		initScripts: opts.initScripts,
@@ -1851,7 +1941,20 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		userDriven,
+		relay: browser.kind.kind === "relay",
 	};
+}
+
+/**
+ * `endpoint` of `browser` for a worker adopting `targetId`. Through the omp relay the worker claims the tab as it
+ * connects, before puppeteer sends the tab anything: only in a tab omp drives does the relay's extension empty
+ * another extension's frame (a password manager's inline menu) that makes Chrome refuse the debugger.
+ */
+function adoptEndpoint(endpoint: string, browser: PuppeteerBrowserHandle, targetId: string): string {
+	if (browser.kind.kind !== "relay") return endpoint;
+	const url = new URL(endpoint);
+	url.searchParams.set("claim", targetId);
+	return url.toString();
 }
 
 /** The tab most recently used on `browser`, for a new relay tab to open beside. */
@@ -1975,6 +2078,7 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 		if (!(error instanceof WorkerMessageError)) lastError = error;
 	});
 	worker.onExit(exitCode => {
+		(worker as ExitTrackedWorker)[kWorkerExited] = true;
 		// A release or recycle owns a worker it replaced or is tearing down.
 		if (tabs.get(tab.name) !== tab || tab.worker !== worker || tab.state !== "alive" || releaseInflight.has(tab))
 			return;
@@ -2037,11 +2141,10 @@ async function recycleTimedOutWorkerTab(
 	const startedAt = performance.now();
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
-	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+	const browserWSEndpoint = tab.browser.wsEndpoint;
 	const payload: WorkerInitPayload = {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint: adoptEndpoint(browserWSEndpoint, tab.browser, tab.targetId),
 		safeDir: getPuppeteerDir(),
 		uploadDir: tab.uploadDir,
 		page: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
@@ -2053,6 +2156,7 @@ async function recycleTimedOutWorkerTab(
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		relay: tab.kindTag === "relay",
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
@@ -2116,7 +2220,7 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	// published result is the release contract — the tab is gone either way; a
 	// target that could not be closed stays in the ownership registry instead.
 	const teardown = tab.backend === "worker" ? forceKillTabTeardown(tab) : forceKillSurfaceTab(tab, name);
-	const entry = { promise: teardown.then(() => true), opts: { kill: false } };
+	const entry = { promise: teardown.then((): "released" => "released"), opts: { kill: false } };
 	releaseInflight.set(tab, entry);
 	try {
 		await entry.promise;
@@ -2394,9 +2498,12 @@ function wrapBunWorker(worker: Worker): WorkerHandle {
 async function spawnInlineWorker(): Promise<WorkerHandle> {
 	const hostListeners = new Set<(message: WorkerOutbound) => void>();
 	const workerListeners = new Set<(message: WorkerInbound) => void>();
+	let terminated = false;
 	const workerTransport: Transport = {
 		send: msg =>
 			queueMicrotask(() => {
+				// A terminated worker thread reports nothing more; neither does a terminated core.
+				if (terminated) return;
 				for (const listener of hostListeners) listener(msg as WorkerOutbound);
 			}),
 		onMessage: handler => {
@@ -2407,7 +2514,7 @@ async function spawnInlineWorker(): Promise<WorkerHandle> {
 		close: () => {},
 	};
 	const { WorkerCore } = await import("./tab-worker");
-	new WorkerCore(workerTransport, false);
+	const core = new WorkerCore(workerTransport, false);
 	return {
 		mode: "inline",
 		send: msg =>
@@ -2420,7 +2527,10 @@ async function spawnInlineWorker(): Promise<WorkerHandle> {
 		},
 		onError: () => () => {},
 		onExit: () => () => {},
-		async terminate() {},
+		async terminate() {
+			terminated = true;
+			core.terminate();
+		},
 	};
 }
 

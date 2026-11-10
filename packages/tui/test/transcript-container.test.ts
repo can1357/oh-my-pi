@@ -974,6 +974,31 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
 	});
 
+	/** A settled block, then a streaming one whose stable rows a completeScrollback commit carries along. */
+	function commitCarryingHead() {
+		const transcript = new TranscriptContainer();
+		transcript.completeScrollback = true;
+		transcript.addChild(new Block(["settled"], true));
+		const head = new AppendBlock(["s1", "s2", "s3", "tail"], ["s1", "s2", "s3"]);
+		transcript.addChild(head);
+		const batch = transcript.peekFinalizedBatch(80, 2);
+		expect(batch?.rows).toEqual(["settled", "", "s1", "s2"]);
+		return { transcript, head, batch: batch! };
+	}
+
+	it("keeps a streaming block whose rows ride an offered commit from being removed", () => {
+		const { transcript, head } = commitCarryingHead();
+		expect(transcript.canRemoveBlock(head)).toBe(false);
+	});
+
+	it("drops a commit carrying streaming rows when stable emission resets", () => {
+		const { transcript, batch } = commitCarryingHead();
+		transcript.resetStableEmission();
+		// The reset forgot those rows; acknowledging the stale offer must not bring them back.
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.emittedStableRows()).toEqual([0, 0]);
+	});
+
 	it("removes live blocks behind a settled one without disturbing committed or settled bookkeeping", () => {
 		const transcript = new TranscriptContainer();
 		const committedA = new Block(["committed a"], true);
@@ -1188,6 +1213,33 @@ describe("TranscriptContainer progressive assistant retirement", () => {
 		expect(transcript.emittedStableRows()[0]! - emitted).toBeGreaterThan(1);
 		const live = transcript.renderViewport(narrow, 1000, frame);
 		expect([...emittedRows, ...next, ...live]).toEqual([...trimBlankEdges(component.render(narrow))]);
+	});
+
+	it("retires the finished lines of a still-open fence instead of holding the block live", () => {
+		// A streamed code block (SQL, logs) closes its fence only at the end. It
+		// never reaches a "\n\n" boundary, so the block walk alone publishes
+		// nothing for it and every row past the screen height is dropped from the
+		// live viewport instead of retiring into scrollback (#9780).
+		const transcript = new TranscriptContainer();
+		const component = new AssistantMessageComponent();
+		transcript.addChild(component);
+		const statement = (index: number): string => `SELECT column_${index} FROM orders_${index};\n`;
+		let body = "```sql\n";
+		for (let index = 0; index < 12; index++) {
+			body += statement(index);
+			component.updateContent({ ...finalAnswer, content: [{ type: "text", text: body }] }, { transient: true });
+			transcript.renderViewport(WIDTH, ROOM, frame);
+		}
+		const retired = retire(transcript, WIDTH);
+		const [emitted = 0] = transcript.emittedStableRows();
+		expect(emitted).toBeGreaterThan(1);
+		const retiredText = Bun.stripANSI(retired.join("\n"));
+		expect(retiredText).toContain("SELECT column_0 FROM orders_0;");
+		// The fence has no closer yet, so the renderer's fabricated closing
+		// border must not be retired as if the block had ended.
+		expect(retired.at(-1)!.trim()).not.toBe("```");
+		const live = transcript.renderViewport(WIDTH, 1000, frame);
+		expect([...retired, ...live]).toEqual([...trimBlankEdges(component.render(WIDTH))]);
 	});
 });
 

@@ -40,7 +40,7 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
 	runner.initialize(
 		{
 			sendMessage: () => {},
-			sendUserMessage: () => {},
+			sendUserMessage: async () => {},
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -70,6 +70,9 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
 			input: async () => undefined,
 			notify: () => {},
 			onTerminalInput: () => () => {},
+			rerenderMessage: () => {},
+			refreshTranscript: () => {},
+			getLinkClicksAvailable: () => false,
 			setStatus: () => {},
 			setWorkingMessage: () => {},
 			setWidget: () => {},

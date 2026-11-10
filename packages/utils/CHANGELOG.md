@@ -2,6 +2,102 @@
 
 ## [Unreleased]
 
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added utilities for reading OpenTelemetry configuration from omp-managed `.env` files, including `$otelEnv` and `withOmpOtelEnv`.
+- Added filesystem path utilities for checking paths through symlinked roots, including paths that do not yet exist, and for optionally propagating filesystem errors in directory checks.
+
+### Fixed
+
+- Fixed relaxed JSON parsing so `__proto__` is preserved as a regular own property rather than modifying the parsed object's prototype.
+- Fixed SIGHUP handling so stopped terminal sessions display recovery hints, including the `--resume` command.
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed abort signals leaving command output reads blocked when a descendant keeps stdout or stderr open after the root process exits. ([#18309](https://github.com/can1357/oh-my-pi/pull/18309) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.17.0] - 2026-11-06
+
+### Added
+
+- Added `getUpdateStateDir()`, returning the auto-update state directory (`~/.omp/update`).
+- Added `logger.setLogForwarder()` and `logger.emitForeign()` to forward log records across threads, preserving context and timestamps.
+- Added `expandTilde()` to expand a leading `~` to the home directory.
+
+### Fixed
+
+- Fixed `spawn`/`exec` timeouts never firing when the command's root exited before `spawn()` returned, which let a descendant holding stdout or stderr stall output reads until it exited.
+- `ptree` commands with `subreaper: true` now reliably terminate all descendants on graceful shutdown.
+- `fatal()` in a worker thread now reaches the parent's `error` listeners instead of only exiting with code 1.
+- Fixed the terminal stderr guard leaking a copy of the terminal into processes spawned from native code.
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
+- Added `ensureSqliteLockShim()`, which `openSqliteDatabase`/`openSqliteDatabaseSync` call before opening a store, so on Linux the process's SQLite locks are open-file-description locks that other closes of the file cannot release ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+- Added `assertNotHeldOpen(path)` (`@oh-my-pi/pi-utils/held-file`), which throws `EBUSY` for a SQLite database or `-shm` this process holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+### Changed
+
+- `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added abortable `sleepUntil` for wall-clock deadline waits that include system sleep, with bounded timer slices to recheck deadlines after resume ([#17606](https://github.com/can1357/oh-my-pi/pull/17606) by [@zhiland](https://github.com/zhiland)).
+
+### Fixed
+
+- Importing pi-utils no longer installs process-wide signal and fatal handlers in embedding hosts; exit-time cleanup stays installed ([#17674](https://github.com/can1357/oh-my-pi/issues/17674)).
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- Added `oklabDistance`, the perceptual distance between two hex colors ([#17520](https://github.com/can1357/oh-my-pi/pull/17520))
+
+## [18.14.1] - 2026-10-31
+
+### Added
+
+- Added `isFileLockHeld`, which reports whether a file lock is held without acquiring it ([#17428](https://github.com/can1357/oh-my-pi/pull/17428) by [@andrebrait](https://github.com/andrebrait))
+
+## [18.14.0] - 2026-10-29
+
+### Added
+
+- Added `logger.withContext(fields, fn)` to attach contextual fields to all records produced during a function and its asynchronous work, plus `logger.withoutContext(fn)` for work that should not inherit caller context.
+
+### Fixed
+
+- Fixed `untilAborted` so promises passed to an already-aborted signal are still observed, preventing later rejections from being reported as unhandled.
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Added
+
+- Added `deadlineMs` and `waitMessage` cleanup registration options: shutdown waits longer for that callback, but only while it is still pending, and says so on stderr once nothing else is left to wait for ([#17128](https://github.com/can1357/oh-my-pi/pull/17128) by [@sjawhar](https://github.com/sjawhar))
+- A process stopped by SIGTERM now prints its registered recovery commands after the terminal is handed back, so a stopped omp session shows `omp --resume <id>` instead of leaving its last frame above the shell prompt like a crash ([#17119](https://github.com/can1357/oh-my-pi/pull/17119) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed plain TAR archives requiring a whole-container memory buffer to list entries or read a selected member ([#17175](https://github.com/can1357/oh-my-pi/pull/17175) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.13.1] - 2026-10-27
+
 ### Added
 
 - Added an optional `maxFractionDigits` to `formatNumber()` that caps decimals on values below 1,000 ([#16973](https://github.com/can1357/oh-my-pi/pull/16973) by [@DusKing1](https://github.com/DusKing1))

@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { getOAuthProvider } from "../registry/oauth";
+import { assertProviderEnabled, getOAuthProvider } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
@@ -78,6 +78,7 @@ export class OAuthAccounts implements OAuthApi {
 		if (!def?.login) {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
+		assertProviderEnabled(provider);
 		const result = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
@@ -92,7 +93,8 @@ export class OAuthAccounts implements OAuthApi {
 			if (!result) {
 				return undefined;
 			}
-			await this.#deps.pool.storeLoginApiKey(provider, result);
+			// `store-as` routes API-key logins too, not only OAuth credentials.
+			await this.#deps.pool.storeLoginApiKey(def.storeCredentialsAs ?? provider, result);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant
@@ -185,6 +187,7 @@ export class OAuthAccounts implements OAuthApi {
 				await this.refresh(selection.credentialId, options.signal, {
 					reuseRecentMint: options.refreshReason === "auth-recovery",
 					reason: options.refreshReason,
+					rejectedAccess: options.rejectedAccessToken,
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);

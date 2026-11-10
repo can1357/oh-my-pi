@@ -8,6 +8,7 @@ import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
 import {
+	ADVISOR_SESSION_SCOPES,
 	ADVISOR_SYNC_BACKLOG_MODES,
 	type AdvisorConfig,
 	type AdvisorConfigScope,
@@ -15,9 +16,16 @@ import {
 	type WatchdogConfigDoc,
 } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 
-export { ADVISOR_REVIEW_MODES, ADVISOR_SYNC_BACKLOG_MODES } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-export type { AdvisorReviewMode, AdvisorSyncBacklog } from "@oh-my-pi/pi-tui/overlays/advisor-config";
-
+export {
+	ADVISOR_REVIEW_MODES,
+	ADVISOR_SESSION_SCOPES,
+	ADVISOR_SYNC_BACKLOG_MODES,
+} from "@oh-my-pi/pi-tui/overlays/advisor-config";
+export type {
+	AdvisorReviewMode,
+	AdvisorSessionScope,
+	AdvisorSyncBacklog,
+} from "@oh-my-pi/pi-tui/overlays/advisor-config";
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
  * - `running` — actively processing primary turns
@@ -50,7 +58,7 @@ export interface DiscoveredAdvisors {
 
 const reviewIntervalSchema = type("1 <= number.integer <= 9007199254740991");
 const syncBacklogSchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES);
-/** Unquoted `syncBacklog: 3` parses as a number; accept the numeric thresholds alongside the string enum. */
+const sessionScopeSchema = type.enumerated(...ADVISOR_SESSION_SCOPES);
 const syncBacklogEntrySchema = type.enumerated(...ADVISOR_SYNC_BACKLOG_MODES, 1, 3, 5);
 const SYNC_BACKLOG_NUMERIC_THRESHOLDS = { 1: "1", 3: "3", 5: "5" } as const;
 
@@ -70,6 +78,8 @@ const advisorEntrySchema = type({
 	"instructions?": "string",
 	"enabled?": "boolean",
 	"maxNotesPerUpdate?": "number",
+	"scope?": sessionScopeSchema,
+	"includeReasoning?": "boolean",
 });
 
 type AdvisorYamlEntry = typeof advisorEntrySchema.infer;
@@ -244,6 +254,8 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 						? Math.trunc(entry.maxNotesPerUpdate)
 						: undefined,
 				enabled: entry.enabled,
+				scope: entry.scope,
+				includeReasoning: entry.includeReasoning,
 				instructions: entryInstructions,
 			});
 		}
@@ -332,6 +344,8 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
 			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
 		}
+		if (a.scope !== undefined) advisor.scope = a.scope;
+		if (a.includeReasoning !== undefined) advisor.includeReasoning = a.includeReasoning;
 		return advisor;
 	});
 	const doc: WatchdogConfigDoc = { advisors };
@@ -414,6 +428,13 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 			if (advisor.reviewInterval !== undefined) {
 				reviewIntervalSchema.assert(advisor.reviewInterval);
 				lines.push(`    reviewInterval: ${advisor.reviewInterval}`);
+			}
+			if (advisor.scope !== undefined) {
+				sessionScopeSchema.assert(advisor.scope);
+				lines.push(`    scope: ${YAML.stringify(advisor.scope)}`);
+			}
+			if (advisor.includeReasoning !== undefined) {
+				lines.push(`    includeReasoning: ${advisor.includeReasoning}`);
 			}
 		}
 	}

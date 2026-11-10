@@ -37,7 +37,17 @@ describe("default web chain", () => {
 		const settings = await Settings.init({ inMemory: true });
 		authStorage = createInMemoryAuthStorage();
 		// Paid credentials the chain must never spend unless the session already runs on them.
-		for (const paid of ["openai", "anthropic", "xai", "perplexity", "tavily", "kagi", "brave", "zai"]) {
+		for (const paid of [
+			"openai",
+			"openai-codex",
+			"anthropic",
+			"xai",
+			"perplexity",
+			"tavily",
+			"kagi",
+			"brave",
+			"zai",
+		]) {
 			authStorage.keys.setRuntime(paid, `test-${paid}-key`);
 		}
 		modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
@@ -59,25 +69,34 @@ describe("default web chain", () => {
 		return model;
 	}
 
-	it("searches through the session model in place of web/hosted and never reaches paid engines", async () => {
+	it.each([
+		["anthropic", "claude-sonnet-4-5", "claude-haiku-4-5"],
+		["openai", "gpt-6.1-sol", "gpt-6-luna"],
+		["openai-codex", "gpt-6.1-sol", "gpt-6-luna"],
+	])("keeps hosted search and its fallback on the session's %s provider", async (host, sessionId, searchId) => {
 		await runSearchQuery(
 			{ query: "anything" },
-			{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
+			{ authStorage, modelRegistry, sessionModel: sessionModel(host, sessionId) },
 		);
 
 		// The cheaper same-provider swap runs first; its failure falls back to the session model as-is.
-		expect(attempted.slice(0, 3)).toEqual([
-			"web/parallel",
-			"anthropic/claude-haiku-4-5",
-			"anthropic/claude-sonnet-4-5",
-		]);
+		expect(attempted.slice(0, 3)).toEqual(["web/parallel", `${host}/${searchId}`, `${host}/${sessionId}`]);
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual([
-			"anthropic/claude-haiku-4-5",
-			"anthropic/claude-sonnet-4-5",
+			`${host}/${searchId}`,
+			`${host}/${sessionId}`,
 		]);
 		for (const paid of ["web/perplexity", "web/tavily", "web/kagi", "web/brave", "web/zai"]) {
 			expect(attempted).not.toContain(paid);
 		}
+	});
+
+	it("advances past a failing self-targeted hosted model without retrying its registry instance", async () => {
+		const active = { ...sessionModel("openai-codex", "gpt-6-luna") };
+
+		await runSearchQuery({ query: "anything" }, { authStorage, modelRegistry, sessionModel: active });
+
+		expect(attempted.slice(0, 3)).toEqual(["web/parallel", "openai-codex/gpt-6-luna", "web/exa"]);
+		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual(["openai-codex/gpt-6-luna"]);
 	});
 
 	it("uses the session model as-is when its host does not expose the swap target", async () => {

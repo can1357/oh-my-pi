@@ -303,47 +303,48 @@ function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: st
 	return phases.flatMap(phase => phase.tasks);
 }
 
-/** Phase name for `init` given a flat `items` list with no explicit `phase`. */
+/** Default phase name for flat `init` and `append` to an empty list. */
 const DEFAULT_INIT_PHASE = "Tasks";
 
 function initPhases(entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
 	// Models routinely flatten the single-phase init into `{op:"init", items:[...]}`
 	// (optionally with a bare `phase`) instead of the canonical
 	// `list: [{phase, items}]`. Accept that shape by synthesizing a one-phase list
-	// so a common, recoverable mistake isn't a hard error.
-	const list =
-		entry.list ??
-		(entry.items && entry.items.length > 0
-			? [{ phase: entry.phase ?? DEFAULT_INIT_PHASE, items: entry.items }]
-			: undefined);
+	// so a common, recoverable mistake isn't a hard error. Models also fill unused
+	// params with `[]`, so an empty `list` must not shadow non-empty `items`.
+	const flat = entry.items && entry.items.length > 0 ? [{ phase: entry.phase, items: entry.items }] : undefined;
+	const list = entry.list?.length ? entry.list : (flat ?? entry.list);
 	if (!list) {
 		errors.push("Missing list for init operation");
 		return [];
 	}
+	// An empty phase name cannot be explicitly targeted, so it gets the default.
 	// Duplicate phase names / task contents would be permanently unaddressable
-	// (every targeting op resolves the first match), so reject them up front.
+	// too (every targeting op resolves the first match), so reject them up front.
+	const phases: TodoPhase[] = [];
 	const seenPhases = new Set<string>();
 	const seenTasks = new Set<string>();
 	for (const listEntry of list) {
-		if (seenPhases.has(listEntry.phase)) {
-			errors.push(`Duplicate phase "${listEntry.phase}" in init list`);
+		const name = listEntry.phase || DEFAULT_INIT_PHASE;
+		if (seenPhases.has(name)) {
+			errors.push(`Duplicate phase "${name}" in init list`);
 		}
-		seenPhases.add(listEntry.phase);
+		seenPhases.add(name);
+		const tasks: TodoItem[] = [];
 		for (const content of listEntry.items) {
 			if (seenTasks.has(content)) {
 				errors.push(`Duplicate task "${content}" in init list`);
 			}
 			seenTasks.add(content);
+			tasks.push({ content, status: "pending" });
 		}
+		phases.push({ name, tasks });
 	}
-	return list.map(listEntry => ({
-		name: listEntry.phase,
-		tasks: listEntry.items.map<TodoItem>(content => ({ content, status: "pending" })),
-	}));
+	return phases;
 }
 
 function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
-	if (!entry.phase) {
+	if (entry.phase === "") {
 		errors.push("Missing phase name for append operation");
 		return phases;
 	}
@@ -365,9 +366,14 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	}
 	if (hasDuplicate) return phases;
 
-	let phase = findPhaseByName(phases, entry.phase);
+	const active = entry.phase === undefined ? nextActionableTask(phases) : undefined;
+	const name =
+		entry.phase ??
+		(active ? phases.find(phase => phase.tasks.includes(active))?.name : phases.at(-1)?.name) ??
+		DEFAULT_INIT_PHASE;
+	let phase = findPhaseByName(phases, name);
 	if (!phase) {
-		phase = { name: entry.phase, tasks: [] };
+		phase = { name, tasks: [] };
 		phases.push(phase);
 	}
 

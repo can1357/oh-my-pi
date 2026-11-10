@@ -4,19 +4,24 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	sync::LazyLock,
+	path::{Path, PathBuf},
+	sync::{Arc, LazyLock},
 };
 
 use regex::Regex;
 
-use super::patch::{Operation, PatchEngine, PatchInput, preview_patch, stage_patch};
+use super::patch::{Operation, PatchEngine, PatchInput, stage_patch};
 use crate::{
-	engine::{EditMode, FileOpIntent, Inspection, ModeEngine, PreviewFile, StagedFile},
-	error::EditError,
-	files::FileSource,
+	engine::{
+		EditMode, FileOp, FileOpIntent, Inspection, ModeEngine, PreviewFile, Resolved, StagedFile,
+	},
+	error::{EditError, Rejection},
+	files::{FileRead, FileSource},
+	notebook::{is_notebook_path, notebook_to_editable_text},
+	path_policy::{PathPolicy, canonical_key},
 	store::EditStore,
 	stream_json::{ArgSnapshot, EditEntry},
-	text::js_trim,
+	text::{LineEnding, detect_line_ending, js_trim, normalize_to_lf, strip_bom},
 };
 
 const BEGIN_PATCH_MARKER: &str = "*** Begin Patch";
@@ -157,7 +162,7 @@ fn parse_with_options(
 				index += 1;
 			}
 			if body_start == index {
-				if streaming {
+				if streaming || rename.is_some() {
 					output.push(ApplyPatchEntry {
 						path,
 						op: Operation::Update,
@@ -261,6 +266,121 @@ fn wrap_file_error(path: &str, error: EditError, multiple_files: bool) -> EditEr
 	}
 }
 
+enum VirtualFile {
+	Raw(String),
+	Read(Arc<FileRead>),
+}
+
+/// The ordered envelope's read-through namespace. Disk remains untouched until
+/// every section has staged; tombstones prevent suffix recovery from reviving
+/// a path that an earlier section deleted or moved.
+struct VirtualFiles<'a> {
+	source: &'a mut dyn FileSource,
+	state:  HashMap<PathBuf, Option<VirtualFile>>,
+}
+
+impl VirtualFiles<'_> {
+	fn record(&mut self, file: &StagedFile) {
+		if file.op == FileOp::Delete || file.move_to.is_some() {
+			self.state.insert(canonical_key(&file.absolute), None);
+		}
+		if let Some(raw) = &file.persisted {
+			let target = file
+				.move_to
+				.as_ref()
+				.map_or(&file.absolute, |to| &to.absolute);
+			self
+				.state
+				.insert(canonical_key(target), Some(VirtualFile::Raw(raw.clone())));
+		}
+	}
+}
+
+impl FileSource for VirtualFiles<'_> {
+	fn policy(&self) -> &PathPolicy {
+		self.source.policy()
+	}
+
+	fn resolve(&mut self, authored: &str, must_exist: bool) -> Result<Resolved, EditError> {
+		let resolved = self.source.resolve(authored, false)?;
+		if self.state.contains_key(&canonical_key(&resolved.absolute)) || !must_exist {
+			return Ok(resolved);
+		}
+		self.source.resolve(authored, true)
+	}
+
+	fn exists(&mut self, absolute: &Path) -> bool {
+		self
+			.state
+			.get(&canonical_key(absolute))
+			.map_or_else(|| self.source.exists(absolute), Option::is_some)
+	}
+
+	fn read(&mut self, authored: &str) -> Result<Arc<FileRead>, EditError> {
+		let resolved = self.resolve(authored, true)?;
+		self.try_read(&resolved)?.ok_or_else(|| {
+			EditError::rejected(
+				Rejection::FileNotFound,
+				format!("File not found: {}", resolved.display),
+			)
+		})
+	}
+
+	fn try_read(&mut self, resolved: &Resolved) -> Result<Option<Arc<FileRead>>, EditError> {
+		let key = canonical_key(&resolved.absolute);
+		let Some(state) = self.state.remove(&key) else {
+			return self.source.try_read(resolved);
+		};
+		let read = match state {
+			None => {
+				self.state.insert(key, None);
+				return Ok(None);
+			},
+			Some(VirtualFile::Read(read)) => read,
+			Some(VirtualFile::Raw(raw)) => {
+				if let Some(message) = self
+					.policy()
+					.auto_generated_message(&resolved.display, &raw.as_bytes()[..raw.len().min(1024)])
+				{
+					return Err(EditError::apply(message));
+				}
+				let is_notebook = is_notebook_path(&resolved.absolute);
+				let (bom, body) = strip_bom(&raw);
+				let ending = if is_notebook {
+					LineEnding::Lf
+				} else {
+					detect_line_ending(body)
+				};
+				let (bom, text) = if is_notebook {
+					let text = notebook_to_editable_text(&raw, &resolved.display)
+						.map_err(|error| EditError::apply(error.to_string()))?;
+					("", normalize_to_lf(&text).into_owned())
+				} else {
+					(bom, normalize_to_lf(body).into_owned())
+				};
+				Arc::new(FileRead {
+					resolved: resolved.clone(),
+					canonical: key.clone(),
+					raw,
+					bom,
+					ending,
+					text,
+					is_notebook,
+				})
+			},
+		};
+		self
+			.state
+			.insert(key, Some(VirtualFile::Read(Arc::clone(&read))));
+		Ok(Some(read))
+	}
+
+	fn clear(&mut self) {
+		self.state.clear();
+		self.source.clear();
+	}
+}
+
 fn stage_entries(
 	entries: &[ApplyPatchEntry],
 	files: &mut dyn FileSource,
@@ -271,33 +391,40 @@ fn stage_entries(
 		return Err(EditError::apply("No files were modified."));
 	}
 	let multiple_files = distinct_paths(entries) > 1;
-	let mut order = Vec::<String>::new();
-	let mut groups = HashMap::<String, Vec<&ApplyPatchEntry>>::new();
-	for entry in entries {
-		if !groups.contains_key(&entry.path) {
-			order.push(entry.path.clone());
-		}
-		groups.entry(entry.path.clone()).or_default().push(entry);
-	}
+	let mut files = VirtualFiles { source: files, state: HashMap::new() };
 	let engine = PatchEngine { allow_fuzzy, fuzzy_threshold: threshold, first_match: true };
-	let mut staged = Vec::with_capacity(groups.len());
-	for path in order {
-		let group = &groups[&path];
+	let mut staged = Vec::with_capacity(entries.len());
+	let mut index = 0;
+	while index < entries.len() {
+		let start = index;
+		let path = &entries[start].path;
+		index += 1;
+		// Only adjacent, non-moving sections may coalesce. A move must publish
+		// its source and destination state before any later section is read.
+		if entries[start].rename.is_none() {
+			while index < entries.len()
+				&& entries[index].path == *path
+				&& entries[index].rename.is_none()
+			{
+				index += 1;
+			}
+		}
+		let group = &entries[start..index];
 		let result = if group.len() == 1 {
-			stage_patch(as_patch_input(group[0]), files, allow_fuzzy, threshold, false)
+			stage_patch(as_patch_input(&group[0]), &mut files, allow_fuzzy, threshold, false)
 				.map(|file| vec![file])
 		} else {
 			// Validate the strict Add File contract against the running state. A
 			// preceding delete permits a later add of the same path.
 			let resolved = files
-				.resolve(&path, group[0].op != Operation::Create)
-				.map_err(|error| wrap_file_error(&path, error, multiple_files))?;
+				.resolve(path, group[0].op != Operation::Create)
+				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
 			let mut exists = files.exists(&resolved.absolute);
 			for entry in group {
 				match entry.op {
 					Operation::Create if exists => {
 						return Err(wrap_file_error(
-							&path,
+							path,
 							EditError::apply(format!(
 								"Cannot create {path}: file already exists. Use *** Update File to modify \
 								 it in place."
@@ -312,16 +439,23 @@ fn stage_entries(
 			}
 			let args = ArgSnapshot {
 				path: Some(path.clone()),
-				edits: group.iter().map(|entry| as_edit_entry(entry)).collect(),
+				edits: group.iter().map(as_edit_entry).collect(),
 				has_edits: true,
 				complete: true,
 				..ArgSnapshot::default()
 			};
-			engine.stage(&args, files, &EditStore::new())
+			engine.stage(&args, &mut files, &EditStore::new())
 		};
 		match result {
-			Ok(mut files) => staged.append(&mut files),
-			Err(error) => return Err(wrap_file_error(&path, error, multiple_files)),
+			Ok(mut next) => {
+				if index < entries.len() {
+					for file in &next {
+						files.record(file);
+					}
+				}
+				staged.append(&mut next);
+			},
+			Err(error) => return Err(wrap_file_error(path, error, multiple_files)),
 		}
 	}
 	Ok(staged)
@@ -457,21 +591,22 @@ impl ModeEngine for ApplyPatchEngine {
 		if entries.is_empty() {
 			return Vec::new();
 		}
-		let mut seen = HashSet::new();
-		entries
-			.iter()
-			.filter(|entry| seen.insert(entry.path.clone()))
-			.map(|entry| {
-				preview_patch(
-					as_patch_input(entry),
-					files,
-					self.allow_fuzzy,
-					self.fuzzy_threshold,
-					false,
-					false,
-				)
-			})
-			.collect()
+		match stage_entries(&entries, files, self.allow_fuzzy, self.fuzzy_threshold) {
+			Ok(staged) => staged
+				.into_iter()
+				.map(|file| PreviewFile {
+					display:            file.display,
+					diff:               file.preview_diff.or(Some(file.diff)),
+					first_changed_line: file.first_changed_line,
+					error:              None,
+					op:                 Some(file.op),
+					rename:             file.move_to.map(|destination| destination.display),
+				})
+				.collect(),
+			Err(error) => {
+				vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }]
+			},
+		}
 	}
 
 	fn stage(

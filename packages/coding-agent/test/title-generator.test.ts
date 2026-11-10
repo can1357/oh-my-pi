@@ -6,6 +6,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -378,7 +379,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: no API key",
 			expect.objectContaining({
-				sessionId: "session-1",
+				titleSessionId: "session-1",
 				provider: model.provider,
 				id: model.id,
 				reason: "missing-api-key",
@@ -412,7 +413,7 @@ describe("title generator", () => {
 		expect(warnSpy).toHaveBeenCalledWith(
 			"title-generator: error",
 			expect.objectContaining({
-				sessionId: "session-2",
+				titleSessionId: "session-2",
 				provider: model.provider,
 				id: model.id,
 				reason: "exception",
@@ -1006,7 +1007,7 @@ describe("terminal title runtime", () => {
 			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
 			resetEmitted();
-			vi.advanceTimersByTime(160);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 2);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
 			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);
