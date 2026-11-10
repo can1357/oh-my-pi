@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed a crash when parsing Markdown with very deeply nested lists or block quotes, such as a line of several hundred `- ` markers, which made editing such files kill the process ([#18707](https://github.com/can1357/oh-my-pi/issues/18707))
+- Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
 
 ## [18.18.6] - 2026-11-09
 
