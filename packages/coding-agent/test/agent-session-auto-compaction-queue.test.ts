@@ -492,6 +492,22 @@ describe("AgentSession auto-compaction queue resume", () => {
 			expect(prompted).toHaveLength(1);
 			expect(isResume(prompted[0])).toBe(true);
 		});
+
+		it("drops a continuation parked behind the hold when the session is reset before the release", async () => {
+			const { prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			// The conversation the resume belonged to is gone: nothing may replay into the cleared transcript.
+			expect(await session.resetSessionContext()).toBeDefined();
+			hold.release();
+			await session.waitForIdle();
+			await flushEventLoop();
+
+			expect(prompted).toHaveLength(0);
+			expect(session.messages.some(message => message.role === "developer")).toBe(false);
+		});
 	});
 
 	it("does not start a turn when a manual compaction interrupted nothing", async () => {

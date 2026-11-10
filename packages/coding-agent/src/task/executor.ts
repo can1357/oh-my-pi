@@ -4503,7 +4503,7 @@ async function driveFollowUpTurn(
 		for (;;) {
 			// A wake turn's `subagent_stop` pass holds the session until it publishes. Rechecked after every
 			// idle wait: the turn waited out may take a hold as it ends.
-			await session.waitForStopPasses(signal);
+			await session.whenTurnAdmissible("background", signal);
 			if (!session.isStreaming || ownershipWaits >= 3) break;
 			ownershipWaits++;
 			if (signal) {
