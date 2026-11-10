@@ -2,9 +2,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { codePointLength, sliceCodePoints } from "../../src/commit/conventional/text";
 import { isRememberable } from "./datasets";
 import type { EngineAdapter, EngineName, MnemopiRecall, ProtocolName, RecallHit, RememberItem } from "./engine";
-import { cp, lmeMetrics, messageLevelMetrics } from "./score";
+import { lmeMetrics, messageLevelMetrics } from "./score";
 import type { DatasetName, EvalCase, EvalMessage, ExcludedQuestion } from "./types";
 
 export interface RankedHit {
@@ -233,8 +234,11 @@ export async function runCases(
 		}
 
 		const prefixes = messages
-			.map(m => ({ messageId: m.messageId, prefix: normalize(cp(m.content, FALLBACK_PREFIX_CHARS)) }))
-			.filter(p => Array.from(p.prefix).length >= MIN_FALLBACK_PREFIX_CHARS);
+			.map(m => ({
+				messageId: m.messageId,
+				prefix: normalize(sliceCodePoints(m.content, 0, FALLBACK_PREFIX_CHARS)),
+			}))
+			.filter(p => codePointLength(p.prefix) >= MIN_FALLBACK_PREFIX_CHARS);
 		// LongMemEval's session metrics widen past the turn cutoff until they see enough distinct sessions, and the
 		// official retrieval runner ranks the whole corpus, so LongMemEval asks for that; BEAM scores the top k.
 		const depth = isBeam(evalCase.dataset) ? k : Math.max(k, evalCase.messages.length);
@@ -245,7 +249,7 @@ export async function runCases(
 			const ranked: RankedHit[] = hits.map(hit => ({
 				...mapHit(hit, idMap, prefixes),
 				tier: hit.tier,
-				contentPrefix: cp(hit.content, CONTENT_PREFIX_CHARS),
+				contentPrefix: sliceCodePoints(hit.content, 0, CONTENT_PREFIX_CHARS),
 			}));
 			const gold = new Set(question.goldMessageIds);
 			const dropped: DroppedHit[] = (engine.lastDropped?.() ?? []).map(row => {

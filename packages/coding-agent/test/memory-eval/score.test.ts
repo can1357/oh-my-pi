@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
 	compatRecall,
-	cp,
 	lmeEvaluateRetrieval,
 	lmeEvaluateTurn2Session,
 	lmeMetrics,
@@ -72,7 +71,6 @@ describe("memory-eval score", () => {
 
 	it("compat prefixes slice by code point", () => {
 		const gold = `${"😀".repeat(50)}tail`;
-		expect(cp(gold, 3)).toBe("😀😀😀");
 		expect(compatRecall(["😀".repeat(50)], [gold], 10)).toBe(1);
 		// 30 emoji are 60 UTF-16 units but only 30 code points: not a superset of the 50-code-point prefix.
 		expect(compatRecall(["😀".repeat(30)], [gold], 10)).toBe(0);
