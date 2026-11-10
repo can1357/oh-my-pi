@@ -14,6 +14,7 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorAskQuestionCall,
 	CursorExecFrameContext,
 	CursorMcpCall,
 	CursorMcpResource,
@@ -306,6 +307,7 @@ async function executeTool(
 	toolCallId: string,
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
+	signal?: AbortSignal,
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
@@ -345,7 +347,7 @@ async function executeTool(
 			name: toolName,
 			arguments: toolArgs,
 		});
-		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
+		result = await tool.execute(toolCallId, validatedArgs, signal, onUpdate, bridgeContext.context);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -1161,6 +1163,11 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			isError: error !== null,
 		});
 		return result;
+	}
+
+	/** Cursor's native `AskQuestion`; without an `ask` tool (subagents, headless) the error result becomes a rejection. */
+	async askQuestion(call: CursorAskQuestionCall) {
+		return executeTool(this.options, "ask", call.toolCallId, call.args, undefined, call.signal);
 	}
 
 	async mcp(call: CursorMcpCall) {

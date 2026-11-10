@@ -342,6 +342,9 @@ const EXAMPLE_FORM = `<form>
   <label>Session lifetime (days) <input type="number" name="ttl_days" value="30" min="1"></label>
 </form>`;
 
+/** `ask` details plus the submitted control values (option values, not labels), which answer a Cursor `AskQuestion`. */
+type AskDataDetails = AskToolDetails & { data?: HtmlFormData };
+
 /** Asks the user to fill in one HTML form and returns the submitted form data. */
 export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly name = "ask";
@@ -391,7 +394,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
 		context?: AgentToolContext,
-	): Promise<AgentToolResult<AskToolDetails>> {
+	): Promise<AgentToolResult<AskDataDetails>> {
 		// Headless fallback
 		if (!context?.hasUI || !context.ui) {
 			// A headless fork (`/tan`) keeps `ask` advertised only to share the parent's
@@ -460,7 +463,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!answered) return cancelAsk();
 
 		const json = JSON.stringify(answered.data, null, 2);
-		const details: AskToolDetails = { answers: formAnswers(form, answered.data) };
+		const details: AskDataDetails = { answers: formAnswers(form, answered.data), data: answered.data };
 		if (answered.timedOut) {
 			details.timedOut = true;
 			return {

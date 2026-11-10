@@ -2813,3 +2813,29 @@ describe("CursorExecHandlers passive tool context", () => {
 		}
 	});
 });
+
+describe("CursorExecHandlers.askQuestion", () => {
+	it("runs the session ask tool and closes it with the question's signal", async () => {
+		const opened = Promise.withResolvers<unknown>();
+		const aborted = Promise.withResolvers<void>();
+		const ask = {
+			name: "ask",
+			label: "Ask",
+			description: "fake ask dialog",
+			parameters: type({}),
+			async execute(_id: string, args: unknown, signal?: AbortSignal) {
+				opened.resolve(args);
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				throw new Error("Ask input was cancelled");
+			},
+		} as unknown as Tool;
+		const handlers = new CursorExecHandlers({ cwd: ".", tools: new Map([["ask", ask]]) });
+		const controller = new AbortController();
+		const args = { html: '<form><input name="cursor_q1"></form>' };
+		const result = handlers.askQuestion({ toolCallId: "tool_ask_1", args, signal: controller.signal });
+		expect(await opened.promise).toEqual(args);
+		controller.abort();
+		expect(await result).toMatchObject({ toolCallId: "tool_ask_1", toolName: "ask", isError: true });
+	});
+});

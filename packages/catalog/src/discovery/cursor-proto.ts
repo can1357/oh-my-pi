@@ -610,11 +610,13 @@ export const AskQuestionSuccessSchema: MessageCodec<AskQuestionSuccess> = pb<Ask
 export interface AskQuestionSuccess_Answer extends ProtoMessage {
 	questionId: string;
 	selectedOptionIds: string[];
+	freeformText: string;
 }
 
 export const AskQuestionSuccess_AnswerSchema: MessageCodec<AskQuestionSuccess_Answer> = pb<AskQuestionSuccess_Answer>("agent.v1.AskQuestionSuccess_Answer", [
 	{ no: 1, name: "questionId", kind: "string" },
 	{ no: 2, name: "selectedOptionIds", kind: "string", repeat: true },
+	{ no: 3, name: "freeformText", kind: "string" },
 ]);
 
 /** Cursor agent message agent.v1.AskQuestionToolCall. */

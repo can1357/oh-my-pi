@@ -119,6 +119,7 @@ describe("AskTool form dialog", () => {
 				{ name: "store", question: "Session store", answer: "Redis" },
 				{ name: "ttl", question: "Lifetime (days)", answer: "7" },
 			],
+			data: { store: "redis", ttl: 7 },
 		});
 	});
 
