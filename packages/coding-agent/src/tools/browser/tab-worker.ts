@@ -785,7 +785,6 @@ async function evaluateInRealm(
 }
 type PagePoller = { promise: Promise<unknown>; stop(): void };
 
-
 /**
  * Page-side half of the run page's `waitForFunction` for `"raf"` and `"mutation"` polling: its promise resolves
  * with the first truthy value of `predicate(...args)`, checked at once and then on every animation frame, or DOM
@@ -922,7 +921,11 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						const ms = Number.isFinite(left) ? left : null;
 						const waitArgs = [predicate, options.polling, ms, ...args];
 						poller = (await evaluateInRealm(
-							target, waitInPage as PageFunction, waitArgs, true, evalSignal,
+							target,
+							waitInPage as PageFunction,
+							waitArgs,
+							true,
+							evalSignal,
 						)) as JSHandle<PagePoller>;
 						evalSignal.addEventListener("abort", stop, { once: true });
 						throwIfAborted(evalSignal);
@@ -947,12 +950,22 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						const target = realm();
 						const pending = attempt(target, left, evalSignal);
 						// The protocol evaluation can finish after the host-side deadline or cancellation won.
-						void pending.then(value => {
-							if (evalSignal.aborted) return value.dispose();
-						}).catch(() => {});
+						void pending
+							.then(value => {
+								if (evalSignal.aborted) return value.dispose();
+							})
+							.catch(() => {});
 						const value = await untilAborted(evalSignal, () => pending);
-						if (await target.evaluate(held => Boolean(held), value)) return value;
-						await value.dispose();
+						let returned = false;
+						try {
+							if (await untilAborted(evalSignal, () => target.evaluate(held => Boolean(held), value))) {
+								throwIfAborted(evalSignal);
+								returned = true;
+								return value;
+							}
+						} finally {
+							if (!returned) await value.dispose();
+						}
 					} catch (error) {
 						if (!waitSignal.aborted && evalSignal.aborted) throw timedOut();
 						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;

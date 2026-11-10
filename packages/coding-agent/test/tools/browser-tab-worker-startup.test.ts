@@ -603,6 +603,34 @@ describe("OMP-owned browser evaluation", () => {
 							prototype.dispose = originalDispose;
 							await sample.dispose();
 						}
+						const truthiness = [];
+						for (const cancellation of ["timeout", "signal"]) {
+							const realm = page.mainFrame().mainRealm();
+							const originalEvaluate = realm.evaluate;
+							const controller = new AbortController();
+							realm.evaluate = function(_fn, ...args) {
+								// Delay the real CDP truthiness evaluation, not the predicate evaluation.
+								// Chromium's clock is separate from Bun's fake timers.
+								if (cancellation === "signal") controller.abort();
+								return originalEvaluate.call(this, async held => {
+									const { promise, resolve } = Promise.withResolvers();
+									setTimeout(resolve, 150);
+									await promise;
+									return Boolean(held);
+								}, ...args);
+							};
+							try {
+								truthiness.push(await page.waitForFunction(() => true, {
+									timeout: cancellation === "timeout" ? 50 : 0,
+									signal: controller.signal,
+								}).then(async handle => {
+									await handle.dispose();
+									return "resolved";
+								}, error => error.name));
+							} finally {
+								realm.evaluate = originalEvaluate;
+							}
+						}
 						const seen = {
 							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
 							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
@@ -618,6 +646,7 @@ describe("OMP-owned browser evaluation", () => {
 							cancelled,
 							late,
 							lateDisposals,
+							truthiness,
 							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
 							registry: await page.evaluate(() => String(customElements)),
 							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
@@ -648,9 +677,13 @@ describe("OMP-owned browser evaluation", () => {
 						stalled: "TimeoutError: Waiting failed: 200ms exceeded",
 						mutation: "flash",
 						methods: [47, 47],
-						cancelled: [{ outcome: "AbortError", stopped: true }, { outcome: "AbortError", stopped: true }],
+						cancelled: [
+							{ outcome: "AbortError", stopped: true },
+							{ outcome: "AbortError", stopped: true },
+						],
 						late: "TimeoutError",
 						lateDisposals: 1,
+						truthiness: ["TimeoutError", "AbortError"],
 						chained: 47,
 						registry: "[object CustomElementRegistry]",
 						leaked: [],
