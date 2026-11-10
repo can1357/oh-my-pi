@@ -24,6 +24,14 @@ export interface SupermemoryProfile {
 	dynamic: string[];
 }
 
+/** HTTP failure; `status` lets callers map documented error codes. */
+export class SupermemoryHttpError extends Error {
+	constructor(readonly status: number) {
+		super(`Supermemory request failed with HTTP ${status}.`);
+		this.name = "SupermemoryHttpError";
+	}
+}
+
 export interface SupermemoryDocumentInput {
 	content: string;
 	containerTag: string;
@@ -36,14 +44,6 @@ export interface SupermemoryDocumentInput {
 export interface SupermemoryMemoryRef {
 	id: string;
 	containerTag: string;
-}
-
-/** HTTP failure; `status` lets callers map documented error codes. */
-export class SupermemoryHttpError extends Error {
-	constructor(readonly status: number) {
-		super(`Supermemory request failed with HTTP ${status}.`);
-		this.name = "SupermemoryHttpError";
-	}
 }
 
 export interface SupermemorySearchInput {

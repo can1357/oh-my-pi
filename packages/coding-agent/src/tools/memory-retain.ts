@@ -70,23 +70,14 @@ export class MemoryRetainTool implements AgentTool<MemoryRetainSchema, MemoryRet
 			if (!state) {
 				throw new Error("Supermemory backend is not initialised for this session.");
 			}
-			for (const [index, item] of params.items.entries()) {
-				try {
-					await state.save(item.content, {
-						source: "coding-agent-retain",
-						...(item.context ? { context: item.context } : {}),
-					});
-				} catch (error) {
-					const reason = error instanceof Error ? error.message : String(error);
-					throw new Error(
-						`Supermemory did not store item ${index + 1} of ${params.items.length}: ${reason}. ${index} earlier item(s) were stored.`,
-						{ cause: error },
-					);
-				}
-			}
+			// Acknowledge only once the whole call is on disk; delivery follows from the outbox.
+			await state.enqueueRetain(
+				toolCallId,
+				params.items.map(item => ({ content: item.content, context: item.context, source: "coding-agent-retain" })),
+			);
 			const count = params.items.length;
 			return {
-				content: [{ type: "text", text: `${count} ${count === 1 ? "memory" : "memories"} stored.` }],
+				content: [{ type: "text", text: `${count} ${count === 1 ? "memory" : "memories"} queued.` }],
 				details: { count },
 			};
 		}

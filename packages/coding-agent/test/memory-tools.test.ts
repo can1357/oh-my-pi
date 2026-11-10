@@ -254,22 +254,6 @@ describe("Supermemory tools", () => {
 		}
 	});
 
-	it("retain stops at the first failed item and reports what was stored", async () => {
-		const save = vi
-			.fn()
-			.mockResolvedValueOnce({ id: "d1", status: "queued" })
-			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 500."));
-		const session = supermemorySession();
-		session.getSupermemorySessionState = () => ({ save }) as never;
-		const tool = new MemoryRetainTool(session);
-		await expect(
-			tool.execute("call", { items: [{ content: "first" }, { content: "second" }, { content: "third" }] }),
-		).rejects.toThrow(
-			"Supermemory did not store item 2 of 3: Supermemory request failed with HTTP 500.. 1 earlier item(s) were stored.",
-		);
-		expect(save).toHaveBeenCalledTimes(2);
-	});
-
 	it("factories offer recall/retain/memory_edit but never reflect, and only once configured", () => {
 		const configured = supermemorySession();
 		expect(MemoryRetainTool.createIf(configured)).toBeInstanceOf(MemoryRetainTool);

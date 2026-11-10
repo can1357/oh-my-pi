@@ -275,10 +275,9 @@ async function installPrimaryState(
 
 	// Cleanup any stale state for this session (defensive — prevents leaks
 	// when a session is reused without going through dispose). Flush the
-	// previous state's retain queue BEFORE clearing it, otherwise
-	// `HindsightRetainQueue.#doFlush` sees `session.getHindsightSessionState()
-	// !== state` and drops the batch. Re-read after the await so a concurrent
-	// owner cannot leave the actual current state undisposed.
+	// previous state's retain queue BEFORE clearing it, so its events land in
+	// the bank selected when they were enqueued. Re-read after the await so a
+	// concurrent owner cannot leave the actual current state undisposed.
 	let previous = session.getHindsightSessionState();
 	if (previous) {
 		await previous.flushRetainQueue();

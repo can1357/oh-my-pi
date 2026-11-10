@@ -363,6 +363,34 @@ describe("supermemoryBackend", () => {
 		expect(window?.customId).toBe(tail?.customId);
 	});
 
+	it("retries a window that failed before exit on resume, without re-sending completed ones", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		create.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 503."));
+		session.addTurn("two");
+		await session.endTurn();
+		await session.getSupermemorySessionState()?.dispose();
+		const failed = create.mock.calls[1]?.[0];
+		create.mockClear();
+
+		// A resumed process starts a fresh state on the persisted transcript.
+		await start(session);
+		session.addTurn("three");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[0]);
+		expect(docs.map(doc => doc?.metadata)).toMatchObject([
+			{ turnStart: 1, turnEnd: 2 },
+			{ turnStart: 2, turnEnd: 3 },
+		]);
+		expect(docs[0]?.customId).toBe(failed?.customId);
+		expect(docs[0]?.content).toContain("two");
+	});
+
 	it("redacts the API key and recognizable secrets in stored content and search queries", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")

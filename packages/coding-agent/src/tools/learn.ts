@@ -125,15 +125,11 @@ export class LearnTool implements AgentTool<LearnSchema> {
 			if (!state) {
 				throw new Error("Supermemory backend is not initialised for this session.");
 			}
-			try {
-				await state.save(params.memory, {
-					source: "coding-agent-learn",
-					...(params.context ? { context: params.context } : {}),
-				});
-			} catch (error) {
-				const reason = error instanceof Error ? error.message : String(error);
-				throw new Error(`Supermemory did not store the lesson: ${reason}`, { cause: error });
-			}
+			// Throws before queueing when the outbox cannot persist the lesson, so no skill is written either.
+			await state.enqueueRetain(toolCallId, [
+				{ content: params.memory, context: params.context, source: "coding-agent-learn" },
+			]);
+			memoryMessage = "Lesson queued for retention";
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(
 				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.cwd },

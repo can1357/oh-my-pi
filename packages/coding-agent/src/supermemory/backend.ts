@@ -39,9 +39,12 @@ export const supermemoryBackend: MemoryBackend = {
 				config,
 				containerTag: resolveSupermemoryContainerTag(session.sessionManager.getCwd(), config.scoping),
 				automatic: options.taskDepth === 0,
+				agentDir: options.agentDir,
 			});
 			await session.setSupermemorySessionState(state)?.dispose();
 			state.attachSessionListeners();
+			// Deliver what earlier processes left in this destination's outbox.
+			if (state.automatic) void state.drainOutbox();
 		} catch (error) {
 			logger.warn("Supermemory: backend startup failed; memory backend inert.", { error: String(error) });
 		}

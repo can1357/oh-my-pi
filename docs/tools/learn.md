@@ -59,8 +59,8 @@
 
 ### Supermemory
 
-- The lesson is stored immediately as one `POST /v3/documents` in the session container (secret-redacted, `source: "coding-agent-learn"`); `scope: "global"` is never offered.
-- Errors: `Supermemory backend is not initialised for this session.` without state; `Supermemory did not store the lesson: <reason>` on a failed write, before any skill is written.
+- The lesson is queued through the [durable outbox](./retain.md) under `<agent-dir>/supermemory-outbox/` (secret-redacted, `source: "coding-agent-learn"`) and reported as `Lesson queued for retention`; delivery is a `POST /v3/documents` upsert keyed by the event id. `scope: "global"` is never offered.
+- Errors: `Supermemory backend is not initialised for this session.` without state; `Supermemory outbox full (...)` / `Supermemory outbox write failed; memory NOT queued.` before any skill is written.
 - See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
 ## Side Effects
