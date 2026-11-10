@@ -127,6 +127,7 @@ describe("AskTool form dialog", () => {
 				{ name: "store", question: "Session store", answer: "Redis" },
 				{ name: "ttl", question: "Lifetime (days)", answer: "7" },
 			],
+			data: { store: "redis", ttl: 7 },
 		});
 	});
 	it("passes selected option notes separately from form data", async () => {
@@ -149,6 +150,7 @@ describe("AskTool form dialog", () => {
 				{ name: "store", question: "Session store", answer: "Redis" },
 				{ name: "ttl", question: "Lifetime (days)", answer: "" },
 			],
+			data: { store: "redis" },
 			notes,
 		});
 	});

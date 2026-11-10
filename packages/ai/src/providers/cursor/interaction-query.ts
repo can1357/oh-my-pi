@@ -1,8 +1,13 @@
 import {
 	AgentClientMessageSchema,
+	type AskQuestionArgs,
+	type AskQuestionInteractionQuery,
 	AskQuestionInteractionResponseSchema,
 	AskQuestionRejectedSchema,
+	type AskQuestionResult,
 	AskQuestionResultSchema,
+	AskQuestionSuccess_AnswerSchema,
+	AskQuestionSuccessSchema,
 	CreatePlanErrorSchema,
 	CreatePlanRequestResponseSchema,
 	CreatePlanResultSchema,
@@ -21,7 +26,7 @@ import {
 	WebSearchRequestResponseSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, escapeXmlAttribute, escapeXmlText, logger } from "@oh-my-pi/pi-utils";
 import { frameConnectMessage } from "../connect-frame";
 
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
@@ -92,6 +97,61 @@ function sendUnknownApprovedInteractionResponse(
 	log("interactionResponse", "unknownApproved", { id: queryId, field: fieldNo });
 }
 
+export function askQuestionRejected(reason: string): AskQuestionResult {
+	return create(AskQuestionResultSchema, {
+		result: { case: "rejected", value: create(AskQuestionRejectedSchema, { reason }) },
+	});
+}
+
+/** Control name of a question; positional, since Cursor allows empty and duplicate question ids. */
+const askFieldName = (index: number): string => `cursor_q${index + 1}`;
+
+/** Local `ask` kwargs for a Cursor `AskQuestion`: one HTML form whose radios or checkboxes carry the option ids as values. */
+export function cursorAskToolArgs(args: AskQuestionArgs | undefined): { html: string } {
+	const questions = args?.questions ?? [];
+	const title = args?.title ? `<p>${escapeXmlText(args.title)}</p>` : "";
+	const fields = questions.map((question, index) => {
+		const name = askFieldName(index);
+		if (question.options.length === 0) {
+			// The prompt is the control's own label; a legend alone leaves the field named after its control.
+			return `<fieldset><label>${escapeXmlText(question.prompt)} <input type="text" name="${name}"></label></fieldset>`;
+		}
+		const legend = `<legend>${escapeXmlText(question.prompt)}</legend>`;
+		const type = question.allowMultiple ? "checkbox" : "radio";
+		const options = question.options.map(
+			option =>
+				`<label><input type="${type}" name="${name}" value="${escapeXmlAttribute(option.id)}"> ${escapeXmlText(option.label)}</label>`,
+		);
+		return `<fieldset>${legend}${options.join("")}</fieldset>`;
+	});
+	return { html: `<form>${title}${fields.join("")}</form>` };
+}
+
+/** Cursor's answers from the submitted form: values that are option ids are selections, any other value is typed text. */
+export function askQuestionSuccess(
+	args: AskQuestionArgs | undefined,
+	data: Record<string, string | number | string[]>,
+): AskQuestionResult {
+	const questions = args?.questions ?? [];
+	return create(AskQuestionResultSchema, {
+		result: {
+			case: "success",
+			value: create(AskQuestionSuccessSchema, {
+				answers: questions.map((question, index) => {
+					const raw = data[askFieldName(index)] ?? [];
+					const values = Array.isArray(raw) ? raw : [String(raw)];
+					const optionIds = new Set(question.options.map(option => option.id));
+					return create(AskQuestionSuccess_AnswerSchema, {
+						questionId: question.id,
+						selectedOptionIds: values.filter(value => optionIds.has(value)),
+						freeformText: values.filter(value => !optionIds.has(value)).join("\n\n"),
+					});
+				}),
+			}),
+		},
+	});
+}
+
 /**
  * Answer a Cursor `interaction_query` so the Run RPC can continue.
  *
@@ -104,7 +164,11 @@ function sendUnknownApprovedInteractionResponse(
  * Unsupported interactive queries are rejected so the server is not stranded.
  * VM setup is left unanswered rather than reporting a fake success.
  */
-export function handleInteractionQuery(query: InteractionQuery, h2Request: CursorInteractionWriter): void {
+export async function handleInteractionQuery(
+	query: InteractionQuery,
+	h2Request: CursorInteractionWriter,
+	askQuestion?: (query: AskQuestionInteractionQuery) => Promise<AskQuestionResult>,
+): Promise<void> {
 	const queryCase = query.query.case;
 	log("interactionQuery", queryCase, query.query.value);
 	if (!queryCase) {
@@ -153,21 +217,23 @@ export function handleInteractionQuery(query: InteractionQuery, h2Request: Curso
 				}),
 			});
 			return;
-		case "askQuestionInteractionQuery":
+		case "askQuestionInteractionQuery": {
+			const ask = query.query.value;
+			let result: AskQuestionResult;
+			if (!askQuestion) {
+				result = askQuestionRejected(`Interactive questions are ${NOT_IMPLEMENTED_SUFFIX}`);
+			} else if (ask.args?.runAsync || ask.args?.asyncOriginalToolCallId) {
+				// `asyncOriginalToolCallId` marks the synthetic completion of an earlier async question.
+				result = askQuestionRejected(`Async questions are ${NOT_IMPLEMENTED_SUFFIX}`);
+			} else {
+				result = await askQuestion(ask);
+			}
 			sendInteractionResponse(h2Request, query.id, {
 				case: "askQuestionInteractionResponse",
-				value: create(AskQuestionInteractionResponseSchema, {
-					result: create(AskQuestionResultSchema, {
-						result: {
-							case: "rejected",
-							value: create(AskQuestionRejectedSchema, {
-								reason: `Interactive questions are ${NOT_IMPLEMENTED_SUFFIX}`,
-							}),
-						},
-					}),
-				}),
+				value: create(AskQuestionInteractionResponseSchema, { result }),
 			});
 			return;
+		}
 		case "switchModeRequestQuery":
 			sendInteractionResponse(h2Request, query.id, {
 				case: "switchModeRequestResponse",

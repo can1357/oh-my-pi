@@ -353,6 +353,9 @@ async function askFieldByField(
 // Tool Class
 // =============================================================================
 
+/** `ask` details plus the submitted control values (option values, not labels), which answer a Cursor `AskQuestion`. */
+type AskDataDetails = AskToolDetails & { data?: HtmlFormData };
+
 /** Asks the user to fill in one HTML form and returns the submitted form data. */
 export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	readonly name = "ask";
@@ -439,7 +442,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
 		context?: AgentToolContext,
-	): Promise<AgentToolResult<AskToolDetails>> {
+	): Promise<AgentToolResult<AskDataDetails>> {
 		// Headless fallback
 		if (!context?.hasUI || !context.ui) {
 			// A headless fork (`/tan`) keeps `ask` advertised only to share the parent's
@@ -515,8 +518,9 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			resultNotes.push({ ...note, text: shiftImageMarkers(note.text, answerImages.length, images?.length ?? 0) });
 			if (images) answerImages.push(...images);
 		}
-		const details: AskToolDetails = {
+		const details: AskDataDetails = {
 			answers: formAnswers(form, answered.data),
+			data: answered.data,
 			...(notes ? { notes: resultNotes } : {}),
 			...(answered.timedOut ? { timedOut: true } : {}),
 		};

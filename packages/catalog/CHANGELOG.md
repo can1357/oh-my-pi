@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `freeformText` to the generated Cursor `AskQuestionSuccess_Answer`, carrying typed answers to a native `AskQuestion` ([#18696](https://github.com/can1357/oh-my-pi/pull/18696) by [@morali](https://github.com/morali))
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
