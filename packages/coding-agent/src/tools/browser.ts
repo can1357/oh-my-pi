@@ -704,10 +704,12 @@ async function openOnKind(
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
+		// One line: the tab and its browser, where it landed unless that is the URL the call asked for, and its title.
+		let opened = `${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`;
+		if (!isRequestedUrl(params.url, url)) opened += `, at ${url}`;
+		if (title) opened += `, titled ${JSON.stringify(title)}`;
 		const lines = [
-			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(tab)}`,
-			`URL: ${url}`,
-			title ? `Title: ${title}` : null,
+			opened,
 			...(tab.backend === "tern" ? ternNotes(tab) : []),
 			...notes,
 			result.note,
@@ -721,6 +723,16 @@ async function openOnKind(
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
 		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms while ${stage}`);
 		throw error;
+	}
+}
+
+/** Whether the page an open landed on is the URL the call asked for, so repeating it tells the model nothing. */
+function isRequestedUrl(requested: string | undefined, landed: string): boolean {
+	if (!requested) return false;
+	try {
+		return new URL(requested).href === new URL(landed).href;
+	} catch {
+		return requested === landed;
 	}
 }
 

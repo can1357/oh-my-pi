@@ -433,8 +433,6 @@ export async function captureFrameScreenshot(
 		type: "text",
 		text: formatScreenshot({
 			saveFullRes,
-			savedMimeType,
-			savedByteLength: savedBuffer.length,
 			dest,
 			resized,
 			capture: { area: "element", scale: captureScale },
