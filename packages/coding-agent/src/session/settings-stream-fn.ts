@@ -25,6 +25,7 @@ import {
 	cfgProvidersAnthropicSlowMode,
 	cfgProvidersAntigravityEndpoint,
 	cfgProvidersCacheRetention,
+	cfgProvidersCursorLiveSteering,
 	cfgProvidersMaxInFlightRequests,
 	cfgProvidersMuseCodeStoreResponses,
 	cfgProvidersOpenaiCodexDaybreak,
@@ -186,7 +187,13 @@ export function createSettingsAwareStreamFn(
 			},
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? cfgOmitThinking.get(settings),
 			// An off switch, not a default: the agent loop always offers its queue.
-			liveSteering: cfgProvidersOpenaiLiveSteering.get(settings) ? streamOptions?.liveSteering : undefined,
+			liveSteering: (
+				model.api === "cursor-agent"
+					? cfgProvidersCursorLiveSteering.get(settings)
+					: cfgProvidersOpenaiLiveSteering.get(settings)
+			)
+				? streamOptions?.liveSteering
+				: undefined,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 			...(storeResponses !== undefined ? { storeResponses } : {}),
 			// A per-call worker never switches models: no fallback chain, including a

@@ -2,12 +2,13 @@
  * Agent side of provider live steering ({@link LiveSteering}).
  *
  * A provider that can put user input into the response it is streaming (OpenAI
- * Responses `response.steer`) pulls queued steering through a
- * {@link LiveSteeringChannel}. The loop records what the provider accepted right
- * after that response, so the transcript matches what the model saw; anything
- * it declined is injected at the next boundary like ordinary steering.
+ * Responses `response.steer`, a Cursor run's `conversation_action`) pulls queued
+ * steering through a {@link LiveSteeringChannel}. The loop records what the
+ * provider accepted right after that response, so the transcript matches what
+ * the model saw; anything it declined is injected at the next boundary like
+ * ordinary steering.
  */
-import type { LiveSteerClaim, LiveSteering, UserMessage } from "@oh-my-pi/pi-ai";
+import type { LiveSteerClaim, LiveSteerClaimOptions, LiveSteering, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "./types";
 
@@ -17,19 +18,30 @@ export interface LiveSteeringQueue {
 	wait(signal: AbortSignal): Promise<void>;
 	/** Dequeues the next steering batch. */
 	take(signal: AbortSignal): Promise<AgentMessage[]>;
+	/** Dequeues the queued non-interrupting asides (background-job completions). */
+	takeAsides(): Promise<AgentMessage[]>;
 	/**
 	 * Provider view of `messages` appended to the in-flight call's context, or
-	 * `undefined` when that view is not purely user messages.
+	 * `undefined` when that view is not purely user messages. With `asides`,
+	 * developer messages count as user messages.
 	 */
-	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
+	toProvider(
+		messages: AgentMessage[],
+		signal: AbortSignal,
+		options?: { asides?: boolean },
+	): Promise<UserMessage[] | undefined>;
 }
 
 /** One provider call's {@link LiveSteering} source. */
 export class LiveSteeringChannel implements LiveSteering {
 	/** Steering the provider delivered into the in-flight response, in queue order. */
 	readonly accepted: AgentMessage[] = [];
+	/** Input the model received and answered inside the in-flight response, in queue order. */
+	readonly answered: AgentMessage[] = [];
 	/** Steering taken from the queue but not delivered; always queued after {@link accepted}. */
 	readonly deferred: AgentMessage[] = [];
+	/** Asides taken from the queue; they settle through their own commit/discard hooks. */
+	readonly asides: AgentMessage[] = [];
 	readonly #queue: LiveSteeringQueue;
 
 	constructor(queue: LiveSteeringQueue) {
@@ -46,7 +58,7 @@ export class LiveSteeringChannel implements LiveSteering {
 		return promise;
 	}
 
-	async claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined> {
+	async claim(signal: AbortSignal, options?: LiveSteerClaimOptions): Promise<LiveSteerClaim | undefined> {
 		if (this.deferred.length > 0 || signal.aborted) return undefined;
 		let messages: AgentMessage[];
 		try {
@@ -58,10 +70,21 @@ export class LiveSteeringChannel implements LiveSteering {
 			});
 			return undefined;
 		}
+		if (options?.asides && !signal.aborted) {
+			try {
+				const asides = await this.#queue.takeAsides();
+				this.asides.push(...asides);
+				messages = [...messages, ...asides];
+			} catch (error) {
+				logger.debug("Live aside dequeue failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 		if (messages.length === 0) return undefined;
 		let providerMessages: UserMessage[] | undefined;
 		try {
-			providerMessages = await this.#queue.toProvider(messages, signal);
+			providerMessages = await this.#queue.toProvider(messages, signal, { asides: options?.asides });
 		} catch (error) {
 			logger.debug("Live steering conversion failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -78,6 +101,11 @@ export class LiveSteeringChannel implements LiveSteering {
 				if (settled) return;
 				settled = true;
 				this.accepted.push(...messages);
+			},
+			acceptAnswered: () => {
+				if (settled) return;
+				settled = true;
+				this.answered.push(...messages);
 			},
 			reject: () => {
 				if (settled) return;

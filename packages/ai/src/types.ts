@@ -644,7 +644,8 @@ export interface StreamOptions {
 	minimizeEffort?: boolean;
 	/**
 	 * Source of user steering a provider may deliver into the response it is
-	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket).
+	 * streaming (OpenAI Responses `response.steer` over the Codex WebSocket, a
+	 * Cursor `conversation_action` user message between exec frames).
 	 * Providers without mid-response input ignore it; unclaimed steering stays
 	 * with the caller for its next request.
 	 */
@@ -776,7 +777,17 @@ export interface LiveSteering {
 	/** Resolves once steering may be claimable, or when `signal` aborts. Never consumes input. */
 	wait(signal: AbortSignal): Promise<void>;
 	/** Takes the queued steering as provider messages; `undefined` when none is deliverable now. */
-	claim(signal: AbortSignal): Promise<LiveSteerClaim | undefined>;
+	claim(signal: AbortSignal, options?: LiveSteerClaimOptions): Promise<LiveSteerClaim | undefined>;
+}
+
+/** Options for {@link LiveSteering.claim}. */
+export interface LiveSteerClaimOptions {
+	/**
+	 * Also take queued non-interrupting asides (background-job completions), as
+	 * user messages. For providers that run tools inside one response and so
+	 * never reach the step boundary where the loop injects them.
+	 */
+	asides?: boolean;
 }
 
 /**
@@ -787,6 +798,12 @@ export interface LiveSteerClaim {
 	readonly messages: readonly UserMessage[];
 	/** The server owns the input: the caller records it right after the current response. */
 	accept(): void;
+	/**
+	 * The model received the input inside the current response and answered it
+	 * there: the caller records it right after that response and continues from
+	 * nothing. Absent on sources that cannot record input that way.
+	 */
+	acceptAnswered?(): void;
 	/** Not delivered: the caller sends the input with its next request. */
 	reject(): void;
 }

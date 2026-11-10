@@ -2,14 +2,16 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
-import type {
-	AgentContext,
-	AgentEvent,
-	AgentLoopConfig,
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	StreamFn,
+import {
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	type AgentContext,
+	type AgentEvent,
+	type AgentLoopConfig,
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolContext,
+	type StreamFn,
 } from "@oh-my-pi/pi-agent-core/types";
 import type { LiveSteering, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -45,6 +47,8 @@ interface SteeredRunOptions {
 	first?: MockResponse;
 	tools?: AgentTool[];
 	getToolContext?: AgentLoopConfig["getToolContext"];
+	/** Queued non-interrupting asides (background-job completions). */
+	asides?: AgentMessage[];
 }
 
 /**
@@ -75,6 +79,7 @@ async function runSteered(
 		convertToLlm,
 		getSteeringMessages: async () => queue.splice(0),
 		waitForSteeringMessages: async () => {},
+		getAsideMessages: async () => (setup.asides ?? []).splice(0),
 		getToolContext: setup.getToolContext,
 	};
 	const context: AgentContext = { systemPrompt: [""], messages: [], tools: setup.tools ?? [] };
@@ -165,6 +170,80 @@ describe("agent loop live steering", () => {
 		expect(contexts[1]).toEqual(["<user>start</user>", "first", "<user>use tabs</user>", "<user>also lint</user>"]);
 		expect(contexts).toHaveLength(2);
 		expect(liveSteeredTexts(transcript)).toEqual([]);
+	});
+
+	it("records input the model answered inside the response right after it, without another model call", async () => {
+		const { contexts, transcript } = await runSteered(async (live, queue) => {
+			queue.push(createUserMessage("use tabs"));
+			(await live.claim(new AbortController().signal))?.acceptAnswered?.();
+		});
+
+		expect(contexts).toHaveLength(1);
+		expect(transcript.map(message => (message.role === "assistant" ? textOf(message) : userText(message)))).toEqual([
+			"start",
+			"first",
+			"use tabs",
+		]);
+		expect(liveSteeredTexts(transcript)).toEqual(["use tabs"]);
+	});
+
+	it("takes queued asides as user input only when asked, and commits them once recorded", async () => {
+		let committed = false;
+		const aside: AgentMessage = {
+			role: "custom",
+			customType: "async-result",
+			content: "job done",
+			display: false,
+			timestamp: Date.now(),
+		};
+		Object.defineProperty(aside, ASIDE_MESSAGE_COMMIT, {
+			value: () => {
+				committed = true;
+			},
+		});
+		let plainClaim: unknown = "unset";
+		let claimedView: string[] | undefined;
+		const { contexts, transcript } = await runSteered(
+			async live => {
+				const signal = new AbortController().signal;
+				plainClaim = await live.claim(signal);
+				const claim = await live.claim(signal, { asides: true });
+				claimedView = claim?.messages.map(textOf);
+				claim?.acceptAnswered?.();
+			},
+			{ asides: [aside] },
+		);
+
+		expect(plainClaim).toBeUndefined();
+		expect(claimedView).toEqual(["job done"]);
+		expect(contexts).toHaveLength(1);
+		expect(transcript.at(-1)).toBe(aside);
+		expect(committed).toBe(true);
+	});
+
+	it("returns live-taken asides to their producer when the response fails", async () => {
+		let discarded = false;
+		const aside: AgentMessage = {
+			role: "custom",
+			customType: "async-result",
+			content: "job done",
+			display: false,
+			timestamp: Date.now(),
+		};
+		Object.defineProperty(aside, ASIDE_MESSAGE_DISCARD, {
+			value: () => {
+				discarded = true;
+			},
+		});
+		const { transcript } = await runSteered(
+			async live => {
+				(await live.claim(new AbortController().signal, { asides: true }))?.acceptAnswered?.();
+			},
+			{ asides: [aside], first: { stopReason: "error", errorMessage: "boom" } },
+		);
+
+		expect(discarded).toBe(true);
+		expect(transcript).not.toContain(aside);
 	});
 
 	it("keeps steering whose provider view is not a user message out of the live response", async () => {

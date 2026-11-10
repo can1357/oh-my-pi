@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Live steering carries asides and answered input: a provider claiming with `{ asides: true }` also takes queued asides (background-job completions, sent as user input), and input it accepts with `acceptAnswered` is recorded right after the response without another model call. Live-taken asides go back to their producer when the response aborts or fails
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

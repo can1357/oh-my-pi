@@ -9,7 +9,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Context, type LiveSteering, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -149,6 +149,21 @@ describe("createSettingsAwareStreamFn", () => {
 		wrapped(stubModel, stubContext, undefined);
 
 		expect(calls[0]?.options?.hideThinkingSummary).toBe(true);
+	});
+
+	it("offers live steering to Cursor under its own switch and to every other API under the OpenAI one", () => {
+		const liveSteering: LiveSteering = { wait: async () => {}, claim: async () => undefined };
+		const cursorModel = { api: "cursor-agent" } as unknown as Model;
+		const offered = (switches: Record<string, boolean>, model: Model): boolean => {
+			const { fn: base, calls } = captureBase();
+			createSettingsAwareStreamFn(Settings.isolated(switches), base)(model, stubContext, { liveSteering });
+			return calls[0]?.options?.liveSteering === liveSteering;
+		};
+
+		expect(offered({ "providers.cursorLiveSteering": true }, cursorModel)).toBe(true);
+		expect(offered({ "providers.openaiLiveSteering": true }, cursorModel)).toBe(false);
+		expect(offered({ "providers.openaiLiveSteering": true }, stubCodexModel)).toBe(true);
+		expect(offered({ "providers.cursorLiveSteering": true }, stubCodexModel)).toBe(false);
 	});
 
 	it("sends low text verbosity to Codex and Responses unless the setting or caller overrides it", () => {

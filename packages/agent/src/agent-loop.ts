@@ -11,6 +11,7 @@ import {
 	type Context,
 	EventStream,
 	isApiKeyResolver,
+	type Message,
 	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
@@ -1262,9 +1263,13 @@ async function runLoopBody(
 
 	let pendingMessages: AgentMessage[] = [];
 	// Steering the provider took from the queue during the last response:
-	// `liveAccepted` reached the model inside it, `liveDeferred` did not.
+	// `liveAccepted` reached the model inside it, `liveDeferred` did not, and
+	// `liveAnswered` reached it and was answered there. `liveAsides` are the
+	// asides among them, which settle through their own commit/discard hooks.
 	let liveAccepted: AgentMessage[] = [];
 	let liveDeferred: AgentMessage[] = [];
+	let liveAnswered: AgentMessage[] = [];
+	let liveAsides: AgentMessage[] = [];
 	const endAbortedBeforeModel = async (messages: AgentMessage[], turnOpen: boolean): Promise<boolean> => {
 		if (!signal?.aborted || !config.isUndeliveredQueuedMessage) return false;
 		const undelivered = new Set(messages.filter(message => config.isUndeliveredQueuedMessage?.(message)));
@@ -1582,6 +1587,8 @@ async function runLoopBody(
 					if (channel) {
 						liveAccepted.push(...channel.accepted);
 						liveDeferred.push(...channel.deferred);
+						liveAnswered.push(...channel.answered);
+						liveAsides.push(...channel.asides);
 					}
 				}
 				if (recovered) {
@@ -1647,6 +1654,9 @@ async function runLoopBody(
 					}
 					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
 					turnOpen = false;
+					// Live-taken steering is not recorded here, so the agent requeues it;
+					// asides go back to their producer instead.
+					discardAsides(liveAsides, new Error("Live-taken aside dropped by a failed response"));
 
 					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 					stream.end(newMessages);
@@ -1829,6 +1839,23 @@ async function runLoopBody(
 				});
 				turnOpen = false;
 
+				if (signal?.aborted) {
+					// Live-taken asides do not return to the steering queue with the rest.
+					discardAsides(liveAsides, new Error("Live-taken aside dropped by an aborted response"));
+				} else if (liveAnswered.length > 0) {
+					// The model answered this input inside the response that just ended:
+					// record it after that response and continue from nothing.
+					for (const message of liveAnswered) {
+						if (message.role === "user") message.liveSteered = true;
+						currentContext.messages.push(message);
+						newMessages.push(message);
+						(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+					}
+					emitInputMessages(stream, liveAnswered);
+				}
+				liveAnswered = [];
+				liveAsides = [];
+
 				if (isDeadlineExceeded(config.deadline)) {
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
@@ -1985,13 +2012,19 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
-		toProvider: async (messages, signal) => {
+		takeAsides: async () => resolveAsides(await config.getAsideMessages?.("work")),
+		toProvider: async (messages, signal, options) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))
 				: messages;
 			const converted = normalizeMessagesForProvider(await config.convertToLlm(transformed), prepared.model);
 			const userMessages: UserMessage[] = [];
-			for (const message of converted) {
+			for (const entry of converted) {
+				// Asides convert to developer messages; a provider taking them sends them as user input.
+				const message: Message =
+					options?.asides && entry.role === "developer"
+						? { role: "user", content: entry.content, attribution: entry.attribution, timestamp: entry.timestamp }
+						: entry;
 				if (message.role !== "user") return undefined;
 				if (typeof message.content !== "string" && message.content.some(part => part.type === "image")) {
 					return undefined;

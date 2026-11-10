@@ -1,7 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
 import { type CursorOptions, buildGrpcRequest, streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { AssistantMessage, Context, Message, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	LiveSteering,
+	Message,
+	Model,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	type AgentClientMessage,
@@ -27,6 +35,7 @@ import {
 	ToolCallSchema,
 	ToolCallStartedUpdateSchema,
 	TurnEndedUpdateSchema,
+	UserMessageAppendedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
@@ -662,6 +671,77 @@ describe("Cursor server records", () => {
 		});
 
 		expect(assistant.stopReason).toBe("stop");
+		expect(assistant.providerPayload).toBeUndefined();
+	});
+
+	it("rebuilds a turn that live steering joined after its tool call", async () => {
+		const sent: string[] = [];
+		const appendSteering: FixtureStream = (stream, headers, received) => {
+			if (received.length === 1 && received[0].message.case === "runRequest") {
+				stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+				stream.write(Buffer.concat([thinkingFrame("Read the file."), execReadFrame()]));
+				return;
+			}
+			const action = received.find(message => message.message.case === "conversationAction")?.message;
+			if (action?.case !== "conversationAction" || action.value.action.case !== "userMessageAction") return;
+			const { userMessage } = action.value.action.value;
+			sent.push(userMessage?.text ?? "");
+			const user = userRecord(String(headers["x-request-id"]));
+			stream.end(
+				Buffer.concat([
+					interaction({
+						case: "userMessageAppended",
+						value: create(UserMessageAppendedUpdateSchema, { userMessage }),
+					}),
+					setBlobFrame(2, user),
+					...SPAN.map((record, index) => setBlobFrame(3 + index, record)),
+					textFrame("7919 is prime — the 1000th prime."),
+					checkpointFrame([
+						SERVER_SYSTEM_ID,
+						...[user, ...SPAN].map(record => Buffer.from(blobId(record), "hex")),
+					]),
+					turnEndedFrame(),
+					stepCompletedFrame(),
+				]),
+			);
+		};
+		const outcomes: string[] = [];
+		let queued: UserMessage[] | undefined = [{ role: "user", content: "Also say whether it is odd.", timestamp: 2 }];
+		const liveSteering: LiveSteering = {
+			wait: async () => {},
+			claim: async () => {
+				const messages = queued;
+				queued = undefined;
+				if (!messages) return undefined;
+				return {
+					messages,
+					accept: () => outcomes.push("accepted"),
+					acceptAnswered: () => outcomes.push("answered"),
+					reject: () => outcomes.push("rejected"),
+				};
+			},
+		};
+
+		const assistant = await streamOnce(appendSteering, "kimi-k3", {
+			liveSteering,
+			execHandlers: {
+				async read() {
+					return {
+						role: "toolResult",
+						toolCallId: "call-read",
+						toolName: "read",
+						content: [{ type: "text", text: "1|7919" }],
+						isError: false,
+						timestamp: 2,
+					};
+				},
+			},
+		});
+
+		expect(sent).toEqual(["Also say whether it is odd."]);
+		expect(outcomes).toEqual(["answered"]);
+		expect(assistant.stopReason).toBe("stop");
+		// The records hold the steering inside the turn; the transcript records it after the turn's message.
 		expect(assistant.providerPayload).toBeUndefined();
 	});
 

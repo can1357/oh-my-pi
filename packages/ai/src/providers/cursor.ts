@@ -268,6 +268,7 @@ import {
 } from "./cursor/exec-modern";
 import { CursorExecOrder } from "./cursor/exec-order";
 import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import { CursorSteerInjector } from "./cursor/live-steering";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -494,6 +495,12 @@ interface CursorTurnRecordState {
 	 * stand for all of them: none may be replayed from them.
 	 */
 	relayed: boolean;
+	/**
+	 * Live steering joined the run (`CursorSteerInjector`): its records hold
+	 * that input inside the turn, while the transcript records it after the
+	 * turn's message, so none may be replayed from them.
+	 */
+	steered: boolean;
 }
 
 /** An external executor's MCP call whose exec frame waits for the client's result. */
@@ -1286,6 +1293,9 @@ function streamCursorWithWireMode(
 		// and pair the blocks it left open, and `state` itself is scoped to the
 		// try below.
 		let openBlockState: BlockState | undefined;
+		// Reachable from the catch: input it sent unconfirmed must go back to the
+		// caller before a retry or the error response.
+		let steer: CursorSteerInjector | undefined;
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			h2Settled = true;
@@ -1357,6 +1367,7 @@ function streamCursorWithWireMode(
 			stored: new Map(),
 			given: new Map(),
 			relayed: false,
+			steered: false,
 		};
 		const hostOnToolResult = options?.onToolResult;
 		const onToolResult: CursorToolResultHandler | undefined = hostOnToolResult
@@ -1607,6 +1618,29 @@ function streamCursorWithWireMode(
 				},
 			};
 
+			// A relayed run hands its step to the client between responses, where the
+			// loop already injects queued input.
+			steer =
+				options?.liveSteering && !relay && CursorSteerInjector.available(baseUrl)
+					? new CursorSteerInjector(options.liveSteering, baseUrl, text => {
+							if (sawTurnEnded || h2Settled || resultTransport.closed) throw new Error("Cursor run ended");
+							const userMessage = createCursorUserMessage(text, text);
+							const action = create(ConversationActionSchema, {
+								action: {
+									case: "userMessageAction",
+									value: create(UserMessageActionSchema, { userMessage, sendToInteractionListener: true }),
+								},
+							});
+							const clientMessage = create(AgentClientMessageSchema, {
+								message: { case: "conversationAction", value: action },
+							});
+							resultWriter.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+							log("conversationAction", "userMessageAction", { messageId: userMessage.messageId });
+							return userMessage.messageId;
+						})
+					: undefined;
+			const runSteer = steer;
+
 			runTransport.onResponse(headers => {
 				const protocol = transportMode === "http2" ? "HTTP/2" : "HTTP/1.1";
 				debugResponseLogPromise = debugSession?.openResponseLog(
@@ -1659,9 +1693,20 @@ function streamCursorWithWireMode(
 					requestContextRules,
 					onConversationCheckpoint,
 					options?.externalToolExecutor,
-				).catch(error => {
-					log("error", "handleServerMessage", { error: String(error) });
-				});
+				)
+					.then(() => {
+						// An answered tool call is the run's step boundary: queued input joins here.
+						if (
+							runSteer &&
+							serverMessage.message.case === "execServerMessage" &&
+							serverMessage.message.value.message.case !== "requestContextArgs"
+						) {
+							return runSteer.afterExec();
+						}
+					})
+					.catch(error => {
+						log("error", "handleServerMessage", { error: String(error) });
+					});
 				inFlightDispatches.add(dispatch);
 				void dispatch.finally(() => inFlightDispatches.delete(dispatch));
 			};
@@ -1725,6 +1770,10 @@ function streamCursorWithWireMode(
 							interactionCase !== "turnEnded"
 						) {
 							checkpointCoversTurn = false;
+						}
+						if (interaction?.message.case === "userMessageAppended" && steer) {
+							steer.onAppended(interaction.message.value.userMessage);
+							if (steer.delivered) turnRecords.steered = true;
 						}
 						const isTurnEnded = interactionCase === "turnEnded";
 						// A parked run's response has ended: what Cursor sends meanwhile
@@ -1964,6 +2013,8 @@ function streamCursorWithWireMode(
 			// Results that flush and server-owned tools reported are still settling
 			// through the host; the digest must see them as the host stored them.
 			await drainInFlightDispatches();
+			// The loop reads what live steering delivered when this response ends.
+			await steer?.finish(false);
 			// A call handed to an external executor is still owed its result, which
 			// comes with the next request. The turn stops for the client to run it,
 			// however Cursor's model wound up its side after the handoff.
@@ -1982,7 +2033,8 @@ function streamCursorWithWireMode(
 			let keptAsSent =
 				hashCursorUserMessage(userMessage) === turnRecords.userHash &&
 				!turnRecords.mixedRoutes &&
-				!turnRecords.relayed;
+				!turnRecords.relayed &&
+				!turnRecords.steered;
 			for (const [callId, stored] of turnRecords.stored) {
 				if (hashCursorToolResult(stored) !== turnRecords.given.get(callId)) keptAsSent = false;
 			}
@@ -2015,6 +2067,7 @@ function streamCursorWithWireMode(
 			stream.end();
 		} catch (caughtError) {
 			if (relay) clearTimeout(relay.quietTimer);
+			await steer?.finish(!options?.signal?.aborted);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
 			if (h2Unavailable && isHttp2AlpnRejected(error)) http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);

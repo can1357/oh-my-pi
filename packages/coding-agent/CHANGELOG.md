@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `providers.cursorLiveSteering` (off by default): messages typed while a Cursor turn runs, and background-job results, join that turn after its next tool call instead of waiting for the turn to end
+
 ## [18.18.7] - 2026-11-10
 
 ### Added

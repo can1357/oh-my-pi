@@ -1193,6 +1193,19 @@ export const cfgProvidersOpenaiLiveSteering = register({
 	},
 });
 
+export const cfgProvidersCursorLiveSteering = register({
+	id: "providers.cursorLiveSteering",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Cursor Live Steering",
+		description:
+			"Deliver typed messages and background-job results into a running Cursor turn after each tool call, instead of when the turn ends",
+	},
+});
+
 export const cfgProvidersMuseCodeStoreResponses = register({
 	id: "providers.muse-code.storeResponses",
 	type: "boolean",
