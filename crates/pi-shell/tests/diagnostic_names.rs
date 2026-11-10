@@ -494,10 +494,11 @@ const ROWS: &[Row] = &[
 		stdout: b"",
 		stderr: b"bash: line 1: ./adir\xff: Is a directory\n",
 	},
-	// byt-binary-name (c)
+	// byt-binary-name (c)  // the NUL branch of the executable fallback, with
+	// a byte-preserved name; byt-elf-magic-name covers the ELF-magic branch
 	Row {
 		id: "byt-binary-name",
-		setup: r#"printf '\177ELF not really\n' > "$(printf 'bin\377')"; chmod 755 "$(printf 'bin\377')""#,
+		setup: r#"printf ':                                                                              \000\ncd ./missing\n' > "$(printf 'bin\377')"; chmod 755 "$(printf 'bin\377')""#,
 		mode: Mode::Dashc,
 		script: r#"./"$(printf 'bin\377')""#,
 		status: 126,
