@@ -24,6 +24,13 @@
 ### Removed
 
 - Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
+### Breaking Changes
+
+- `PI_CONFIG_FILES` and `OMP_CONFIG_FILES` from a project directory's `.env` are no longer loaded into the process environment
+
+### Added
+
+- Added `stripOmpDotenvEnv`, which removes variables loaded from omp's own `.env` files from an environment map
 
 ## [18.18.2] - 2026-11-08
 

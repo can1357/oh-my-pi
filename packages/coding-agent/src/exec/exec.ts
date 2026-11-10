@@ -2,7 +2,7 @@
  * Shared command execution utilities for hooks and custom tools.
  */
 import { ptree } from "@oh-my-pi/pi-utils";
-import { definedEnv } from "../sandbox/env";
+import { containedEnv } from "../sandbox/env";
 import { SandboxRuntime } from "../sandbox/runtime";
 
 /**
@@ -42,8 +42,8 @@ export async function execCommand(
 	options?: ExecOptions,
 	workspace: string = cwd,
 ): Promise<ExecResult> {
-	const runtime = await SandboxRuntime.for(workspace);
-	if (runtime.applies("exec")) return await execContained(runtime, [command, ...args], cwd, options);
+	const runtime = await SandboxRuntime.forScope(workspace, "exec");
+	if (runtime) return await execContained(runtime, [command, ...args], cwd, options);
 
 	const result = await ptree.exec([command, ...args], {
 		cwd,
@@ -73,7 +73,7 @@ async function execContained(
 	cwd: string,
 	options: ExecOptions | undefined,
 ): Promise<ExecResult> {
-	const child = await runtime.spawn({ argv, cwd, env: definedEnv(Bun.env) });
+	const child = await runtime.spawn({ argv, cwd, env: containedEnv(Bun.env) });
 	child.stdin.end();
 	let killed = false;
 	let running = true;

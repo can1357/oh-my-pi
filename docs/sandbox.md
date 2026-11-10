@@ -30,7 +30,7 @@ Contained `bash` commands and eval cells can also write the session's `local://`
 
 Environment of contained commands:
 
-- They receive omp's full process environment, including API keys omp loaded from the agent directory's `.env` (the file itself is unreadable).
+- They receive omp's process environment without the variables omp loaded from its own `.env` files (the agent directory's, the config root's, and `~/.env`): API keys kept there stay out of the sandbox. Variables your shell exported, project `.env` variables, and values set for the child itself (an MCP server's `env`, a bash call's `env`) are passed.
 - Contained bash commands do not load direnv/devenv environments (`.envrc`): the load would run files the contained agent can write, on the host, outside the sandbox.
 - Contained bash shells (including PTY runs) do not inherit your `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or `NO_PROXY`. In `allowlist` mode MXC points the proxy variables at omp's egress proxy, which cannot chain to an upstream proxy: on a network that requires a corporate HTTP proxy, `allowlist` mode cannot reach the internet.
 
@@ -111,7 +111,7 @@ Setting `sandbox.filesystem.denyRead` replaces this list; include the defaults y
 
 | Mode              | Writable                                                                                     |
 | ----------------- | -------------------------------------------------------------------------------------------- |
-| `workspace-write` | The workspace, the private temp directory, `allowWrite`, and, in a linked git worktree, the repository's common git directory (commits write there) |
+| `workspace-write` | The workspace, the private temp directory, `allowWrite`, and the git directory commits write to when it lies outside the workspace: the repository's common git directory in a linked worktree, and the enclosing repository's `.git` when omp starts in a subdirectory of a checkout |
 | `read-only`       | The private temp directory only                                                              |
 
 Each sandbox runtime gets its own private temp directory, exposed to contained processes as `TMPDIR`, `TMP` and `TEMP`. The system temp directory is not writable for them: it holds files omp later runs on the host and other programs' control sockets (editor, tmux, ssh-agent).
@@ -214,7 +214,7 @@ Refused without asking (the agent gets the reason):
 - the sandbox off or unavailable, an empty intent, or a target with control characters;
 - no one to ask: print mode, subagents running on worker threads, or an RPC client that has not opted in with `set_sandbox_access_prompts` (see [RPC: Access requests](./rpc.md#access-requests)). Subagents running on the main thread share the dialog: their requests are shown to you.
 
-One request is shown at a time; identical concurrent requests share one dialog. Session grants (paths and hosts) belong to the omp process thread, not to a workspace or session: every session and main-thread subagent in that thread shares them, and worker-thread subagents do not see them.
+One request is shown at a time; identical concurrent requests share one dialog. Session grants (paths and hosts) belong to the omp process, not to a workspace or session: every session and subagent shares them. Subagents on worker threads follow the grants and revocations you make, but cannot ask for access themselves.
 
 ## Project config may only tighten
 
@@ -232,7 +232,7 @@ A cloned repository's `.omp/config.yml` (and a repository `.env`) must not be ab
 
 A project `null` cannot reset a value to its default either. `PI_SANDBOX` can only enable, so a repository `.env` cannot disable the sandbox through it.
 
-Ignored values are reported by `/sandbox status` (`Ignored project value <id>: <reason>`) and on the panel's **Overview** page under **Ignored project values**. `/settings` hides the list editors for `scope`, `allowWrite`, `allowRead`, `denyRead` and `allowedHosts` while the project layer sets them, so a project list is never promoted to your global config.
+Ignored values are reported by `/sandbox status` (`Ignored project value <id>: <reason>`) and on the panel's **Overview** page under **Ignored project values**. In `/settings`, the `enabled`, `mode`, `fallback`, `readScope` and `network.mode` rows show the effective value, so an ignored project value never shows as set. `/settings` hides the list editors for `scope`, `allowWrite`, `allowRead`, `denyRead` and `allowedHosts` while the project layer sets them, so a project list is never promoted to your global config.
 
 While the sandbox is enabled, omp's global settings files are protected from the in-process file tools: `config.yml` / `config.yaml` and `.env` in the agent directory, and `.env` in omp's config root (normally `~/.omp/.env`) are treated like `tools.restrictedFolders` entries. Every `read`, `write`, `edit` or search call that targets them asks Approve/Deny in every approval mode (see [approval mode](./approval-mode.md#restricted-folders)) and is refused without a UI. Contained commands cannot write them anyway.
 
@@ -264,7 +264,7 @@ When the sandbox is enabled but no backend can contain processes on this host:
 - While the sandbox is active, the system prompt gains a block naming what runs contained, the backend, the writable and unreadable paths, and the network mode. It tells the model that denials are expected and never to retry or work around them; when `sandbox_request` is available, to ask with it (narrowest target, clear intent), otherwise to tell you the path or host it needs.
 - When a contained `bash` result looks like a filesystem denial (a non-zero exit with `Operation not permitted`, `Permission denied`, `Read-only file system`, `EPERM`, `EACCES` or `EROFS` in the output) or the proxy refused a host during the call, a sandbox notice is appended to the result, pointing at `sandbox_request` when it is available.
 - A `sandbox_request` call shows as a tool card with the kind, target and intent, and, once answered, the decision (with your instructions or the refusal reason).
-- Contained `bash` and eval results carry a `sandboxed` badge on their tool card (its tooltip names backend, mode and network), plus a warning note: `blocked by sandbox: host …` or `possible sandbox denial`.
+- Contained `bash` and eval results carry a `sandboxed` badge on their tool card (its tooltip names backend, mode and network), plus a warning note: `blocked by sandbox: host …` or `possible sandbox denial`. A `bash` card shows the badge from the moment the command starts; an eval card when the cell finishes.
 
 Contained processes see `OMP_SANDBOX=1` in their environment.
 
@@ -295,22 +295,21 @@ MXC can emit telemetry. omp builds `mxc-sdk` with `MXC_TELEMETRY_COMPONENT_PATH`
 - **The proxy has no authentication.** While it runs, any local process on the machine can use it to reach allowed hosts.
 - **No TLS interception.** The proxy sees only the name on the `CONNECT` line; an allowed name on shared hosting or a CDN can front for other tenants.
 - **Listed and approved names can point at private addresses.** An exact `allowedHosts` entry may resolve to any address, loopback included; a host approved once or for the session may resolve to private ranges. A name whose DNS an attacker controls could therefore be re-pointed at internal or host-local services (DNS rebinding). Answering **always** at the prompt (or **Allow** in the panel) is a persistent, unrestricted grant: give it only to names you trust.
-- **Session grants stay in one thread.** Host approvals "for this session" and the blocked-host list are not shared with subagents running on worker threads; only `allowedHosts` entries (written to settings) reach them.
+- **Worker-thread subagents cannot ask.** They follow your session grants and their refused hosts appear under **Blocked this session**, but a host or path nobody granted is refused there without a prompt.
 - **Blocked hosts are attributed by time.** A refusal is reported on whichever contained results were running when it happened, so concurrent jobs can show each other's blocked hosts.
 - **Filesystem denials are reported heuristically and after the fact.** There is no live "allow this path?" prompt; the kernel answers synchronously. The denial notice is a match on the output of a failed command and can miss or misattribute.
-- **The workspace is a trust root.** It is writable, so files a contained command writes there take effect uncontained later: project extensions, hooks, custom tools and commands (loaded into omp at the next start), `.mcp.json` / `.omp/mcp.json` server commands, `.git/hooks` (run by git on the host), and a project `.env` (see the `PI_CONFIG_FILES` item below). Review the workspace diff, including `.omp/`, `.mcp.json`, `.env` and git hooks, before restarting omp or running project tooling outside the sandbox.
+- **The workspace is a trust root.** It is writable, so files a contained command writes there take effect uncontained later: project extensions, hooks, custom tools and commands (loaded into omp at the next start), `.mcp.json` / `.omp/mcp.json` server commands, and `.git/hooks` (run by git on the host). Review the workspace diff, including `.omp/`, `.mcp.json`, `.env` and git hooks, before restarting omp or running project tooling outside the sandbox. A project `.env` cannot set `PI_CONFIG_FILES` (omp ignores it there), so it cannot load a config overlay that turns the sandbox off.
 - **`.git/config` is writable** too in `workspace-write` mode, as part of the workspace.
-- **Sessions started in a repository subdirectory cannot write the repository's `.git`**, so contained `git add`/`commit` fail there; add the repository's `.git` to `sandbox.filesystem.allowWrite`. Linked worktrees are handled: their common git directory is writable.
+- **A repository rooted at your home directory (or above it) never gets its `.git` granted.** A session started in a subdirectory of such a repository (a dotfiles repository at `~`) cannot `git add`/`commit` contained; add that `.git` to `sandbox.filesystem.allowWrite` if you want it.
 - **Denied paths that do not exist when a process starts are not protected** for that process.
 - **Pinned roots leave a short window.** omp checks that a writable root is still the directory it pinned just before starting a contained process; a swap between that check and the backend applying the policy is not caught.
 - **In-process file tools are not OS-contained** (see [What is contained](#what-is-contained)).
-- **`PI_CONFIG_FILES` from a project `.env`.** A project `.env` can set `PI_CONFIG_FILES`, which loads its files as trusted `--config` overlays; those count as your own layers and can turn the sandbox off at the next start. A contained command can create that `.env` in any workspace, trusted or not, so this is covered by the review above. This predates the sandbox.
-- **Contained processes get omp's full environment**, including API keys loaded from the agent directory's `.env`. That matches unsandboxed bash, but with allowlisted hosts it remains a way to send keys out.
+- **Exported secrets still reach contained processes.** Only variables from omp's own `.env` files are withheld. An API key exported by your shell or its rc files is in the contained environment, and with allowlisted hosts that remains a way to send it out. A variable from omp's `.env` can also reach contained bash when a function in your shell rc references it, unless its name looks like a secret (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*PRIVATE_KEY*`, `*ACCESS_KEY*`, `*CREDENTIAL*`, `*SESSION_KEY*`).
 - **Linux: the environment is visible on the host.** bubblewrap receives the environment as arguments of the host-side `bwrap` process, so other local users can read it (API keys included) from `/proc/<pid>/cmdline` while a contained process runs.
 - **Linux: no host loopback.** Contained processes cannot reach services on the host's `127.0.0.1`, even in `allow` mode.
 - **Contained JS eval and stdin.** Child processes a JS eval cell starts inherit the evaluator's protocol stdin; a child that reads stdin can stall the cell.
 - **Windows: Python eval tool helpers need network.** Their bridge to omp uses TCP on Windows, so they fail in `deny` mode.
-- **The `sandboxed` badge appears when a command finishes**, not while it runs.
+- **The `sandboxed` badge of an eval cell appears when it finishes**, not while it runs.
 - **PTY on macOS:** a contained PTY works, but `tty` prints `not a tty`; programs that only check `isatty()` are unaffected.
 - **Linux and Windows** are compile-checked and exercised only by the CI smoke probe; the runtime behaviour described here was exercised on macOS.
 

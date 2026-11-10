@@ -6,6 +6,7 @@ import { loadXtermTerminal } from "@oh-my-pi/pi-tui/tools/terminal-output";
 import { Settings } from "../config/settings";
 import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveBashSandbox } from "../exec/bash-executor";
+import { containedEnv } from "../sandbox/env";
 import { SandboxedPtySession, sandboxProcessEnv } from "../sandbox/shell-client";
 import type { SandboxResultMeta } from "../sandbox/types";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -138,11 +139,10 @@ export async function runInteractiveBashPty(
 							// terminal; direnv's values win over everything. Contained: the
 							// container's temp dir and (allowlist) proxy apply over all of it.
 							env: sandbox
-								? sandboxProcessEnv(sandbox.runtime, {
-										...interactiveShellEnv,
-										TERM: "xterm-256color",
-										...options.env,
-									})
+								? sandboxProcessEnv(
+										sandbox.runtime,
+										containedEnv(interactiveShellEnv, { TERM: "xterm-256color", ...options.env }),
+									)
 								: { ...interactiveShellEnv, TERM: "xterm-256color", ...options.env },
 							signal: options.signal,
 							cols,

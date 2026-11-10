@@ -29,6 +29,7 @@ import {
 	resolveOutputSinkArtifactMaxBytes,
 	resolveOutputSinkHeadBytes,
 } from "../tools/output-meta";
+import { containedEnv } from "../sandbox/env";
 import { readSandboxConfig } from "../sandbox/policy";
 import { SandboxRuntime } from "../sandbox/runtime";
 import { releaseSandboxHosts, sandboxShellFactory, sandboxProcessEnv } from "../sandbox/shell-client";
@@ -229,10 +230,8 @@ export async function resolveBashSandbox(
 	scope: SandboxScope = "bash",
 ): Promise<BashSandbox | undefined> {
 	if (workspace === undefined) return undefined;
-	// The config read is pure; a disabled sandbox never touches the runtime (or its native probes).
-	if (!readSandboxConfig(await Settings.init()).enabled) return undefined;
-	const runtime = await SandboxRuntime.for(workspace);
-	return runtime.applies(scope) ? { runtime, workspace } : undefined;
+	const runtime = await SandboxRuntime.forScope(workspace, scope);
+	return runtime ? { runtime, workspace } : undefined;
 }
 
 /** `BashResult.sandbox` of a contained run; `output` only for a non-zero exit (denial heuristic). */
@@ -954,7 +953,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	// The embedded shell reads its builtin switches from the session env; a
 	// different env also keys a separate persistent session.
-	const baseSessionEnv = sandbox ? sandboxProcessEnv(sandbox.runtime, shellEnv) : shellEnv;
+	const baseSessionEnv = sandbox ? sandboxProcessEnv(sandbox.runtime, containedEnv(shellEnv)) : shellEnv;
 	const sessionEnv = options?.gitGuard
 		? { ...baseSessionEnv, PI_GIT_GUARD: "1", PI_GIT_GUARD_OVNFS: options.ovnfs ?? "" }
 		: baseSessionEnv;

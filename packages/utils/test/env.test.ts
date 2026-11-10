@@ -658,3 +658,104 @@ describe("OTEL_* from omp's own .env files", () => {
 		});
 	});
 });
+
+describe("PI_CONFIG_FILES provenance", () => {
+	interface ConfigFilesProbe {
+		pi: string | null;
+		omp: string | null;
+	}
+
+	// The loader runs at module load, so each case is a fresh process with temp HOME, agent dir and
+	// project. `autoload` keeps Bun's own dotenv autoload of the project `.env` on (the real launch
+	// path); without it only omp's loader reads the file.
+	async function runProbe(options: {
+		project: string;
+		agent?: string;
+		launch?: Record<string, string>;
+		autoload: boolean;
+	}): Promise<ConfigFilesProbe> {
+		const home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-utils-config-files-"));
+		tempDirs.push(home);
+		const agentDir = path.join(home, "agent");
+		const cwd = path.join(home, "project");
+		await Bun.write(path.join(cwd, ".env"), options.project);
+		await Bun.write(path.join(agentDir, ".env"), options.agent ?? "");
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import ${JSON.stringify(envModulePath)};`,
+			"process.stdout.write(JSON.stringify({",
+			"  pi: process.env.PI_CONFIG_FILES ?? null,",
+			"  omp: process.env.OMP_CONFIG_FILES ?? null,",
+			"}));",
+		].join("\n");
+		const flags = options.autoload ? [] : ["--no-env-file"];
+		const proc = Bun.spawn([process.execPath, "--no-install", ...flags, "--eval", script], {
+			cwd,
+			env: {
+				...process.env,
+				HOME: home,
+				USERPROFILE: home,
+				PI_CODING_AGENT_DIR: agentDir,
+				...DIR_RESOLUTION_ENV_RESET,
+				NODE_ENV: undefined,
+				PI_CONFIG_FILES: undefined,
+				OMP_CONFIG_FILES: undefined,
+				...options.launch,
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		return JSON.parse(stdout);
+	}
+
+	for (const autoload of [false, true]) {
+		const mode = autoload ? "with Bun's dotenv autoload" : "without Bun's dotenv autoload";
+
+		it.skipIf(process.platform === "win32")(
+			`never takes the value from the project .env (${mode})`,
+			async () => {
+				expect(await runProbe({ project: "PI_CONFIG_FILES=evil.yml\n", autoload })).toEqual({
+					pi: null,
+					omp: null,
+				});
+				expect(await runProbe({ project: "OMP_CONFIG_FILES=evil.yml\n", autoload })).toEqual({
+					pi: null,
+					omp: null,
+				});
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`keeps a launch-environment value over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "PI_CONFIG_FILES=evil.yml\n",
+					launch: { PI_CONFIG_FILES: "operator.yml" },
+					autoload,
+				});
+				expect(result.pi).toBe("operator.yml");
+			},
+			20_000,
+		);
+
+		it.skipIf(process.platform === "win32")(
+			`takes the agent-dir .env value over the project .env (${mode})`,
+			async () => {
+				const result = await runProbe({
+					project: "PI_CONFIG_FILES=evil.yml\n",
+					agent: "PI_CONFIG_FILES=agent.yml\n",
+					autoload,
+				});
+				expect(result.pi).toBe("agent.yml");
+			},
+			20_000,
+		);
+	}
+});

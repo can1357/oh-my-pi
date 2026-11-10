@@ -118,6 +118,36 @@ describe("bash results run in the sandbox", () => {
 		expect(warnings(view.body)).toEqual([]);
 		expect(bashLines(undefined).join("\n")).not.toContain("sandbox");
 	});
+
+	describe("while the command still runs", () => {
+		const running: RenderResultOptions = { expanded: false, isPartial: true };
+		const live = { backend: "seatbelt", mode: "workspace-write", network: "deny" } satisfies ToolSandboxMeta;
+		const partial = (sandbox: ToolSandboxMeta | undefined) => ({
+			content: [{ type: "text", text: "building…" }],
+			details: { sandbox } satisfies BashToolDetails,
+		});
+
+		it("show the same sandboxed badge natively and in a plain terminal", () => {
+			const view = bashToolRenderer.describeResult(partial(live), running, { command: "make" });
+			expect(view.tool?.badges).toEqual([
+				{ text: "sandboxed", tone: "info", title: "seatbelt · workspace-write · network deny" },
+			]);
+			expect(warnings(view.body)).toEqual([]);
+			const lines = bashToolRenderer
+				.renderResult(partial(live), running, uiTheme, { command: "make" })
+				.render(100) as string[];
+			expect(Bun.stripANSI(lines[0])).toContain("sandboxed");
+		});
+
+		it("stay unmarked for an uncontained run", () => {
+			const view = bashToolRenderer.describeResult(partial(undefined), running, { command: "make" });
+			expect(view.tool?.badges).toBeUndefined();
+			const lines = bashToolRenderer
+				.renderResult(partial(undefined), running, uiTheme, { command: "make" })
+				.render(100) as string[];
+			expect(lines.join("\n")).not.toContain("sandbox");
+		});
+	});
 });
 
 describe("eval results run in the sandbox", () => {

@@ -179,8 +179,9 @@ function networkDegradedWarning(mode: SandboxNetworkMode, backend: string): stri
 }
 
 // ── Per-realm state ──────────────────────────────────────────────────────────
-// Module state lives per JS realm: subagents on worker threads have their own copies, so session
-// grants and blocked hosts are not shared with them (`always` grants reach them through settings).
+// Module state lives per JS realm. Subagents on worker threads replicate the main thread's session
+// grants and report their proxy refusals to it through the sandbox thread service
+// (`thread/services/sandbox.ts`, via the seam below); `always` grants reach them through settings.
 
 let supportProbe: SandboxSupport | undefined;
 let warningSink: SandboxWarningSink | undefined;
@@ -251,6 +252,69 @@ function notifyAll(): void {
 	for (const runtime of liveRuntimes) runtime.notify();
 }
 
+/** Session host and path grants of a realm, as a worker realm replicates them. @internal */
+export interface SandboxSessionGrants {
+	readonly hosts: readonly string[];
+	readonly write: readonly string[];
+	readonly read: readonly string[];
+}
+
+/** Observers of this realm's session grant set (the sandbox thread service). */
+const grantListeners = new Set<() => void>();
+/** Observers of this realm's proxy refusals (the sandbox thread service). */
+const blockedListeners = new Set<(host: string, at: number) => void>();
+
+/** After any change to {@link sessionGrants} or {@link sessionPathGrants}. */
+function grantsChanged(): void {
+	notifyAll();
+	for (const listener of Array.from(grantListeners)) listener();
+}
+
+/** This realm's session grants. @internal */
+export function sandboxSessionGrants(): SandboxSessionGrants {
+	return { hosts: [...sessionGrants], write: [...sessionPathGrants.write], read: [...sessionPathGrants.read] };
+}
+
+/** Runs `listener` after every change to this realm's session grants; returns its unsubscribe. @internal */
+export function onSandboxSessionGrantsChange(listener: () => void): () => void {
+	grantListeners.add(listener);
+	return () => {
+		grantListeners.delete(listener);
+	};
+}
+
+/** Replaces this realm's session grants with `grants` (a worker realm's replica of main's). @internal */
+export function replicateSandboxSessionGrants(grants: SandboxSessionGrants): void {
+	sessionGrants.clear();
+	for (const host of grants.hosts) {
+		sessionGrants.add(host);
+		blockedLog.delete(host);
+	}
+	for (const kind of ["write", "read"] as const) {
+		sessionPathGrants[kind].clear();
+		for (const grant of grants[kind]) sessionPathGrants[kind].add(grant);
+	}
+	// Like a local path grant: invalidates every runtime's cached config and fingerprint.
+	pathGrantRevision++;
+	grantsChanged();
+}
+
+/** Records a proxy refusal of `host` at `at` (this realm's own, or one a worker realm reported). @internal */
+export function recordBlockedHost(host: string, at: number = Date.now()): void {
+	blockedLog.delete(host);
+	blockedLog.set(host, at);
+	notifyAll();
+	for (const listener of Array.from(blockedListeners)) listener(host, at);
+}
+
+/** Runs `listener` after every refusal recorded in this realm; returns its unsubscribe. @internal */
+export function onSandboxHostBlocked(listener: (host: string, at: number) => void): () => void {
+	blockedListeners.add(listener);
+	return () => {
+		blockedListeners.delete(listener);
+	};
+}
+
 /** Allows `host` for this realm; `always` also appends it to the global `sandbox.network.allowedHosts`. */
 function grantHostIn(settings: Settings, host: string, scope: "session" | "always"): void {
 	sessionGrants.add(host);
@@ -261,7 +325,7 @@ function grantHostIn(settings: Settings, host: string, scope: "session" | "alway
 		const current = cfgSandboxAllowedHosts.get(settings.grantAuthority());
 		if (!current.includes(host)) cfgSandboxAllowedHosts.set(settings, [...current, host]);
 	}
-	notifyAll();
+	grantsChanged();
 }
 
 async function decideHost(host: string, port: number): Promise<boolean> {
@@ -278,6 +342,7 @@ async function decideHost(host: string, port: number): Promise<boolean> {
 			else {
 				sessionGrants.add(host);
 				blockedLog.delete(host);
+				grantsChanged();
 			}
 			return true;
 		case "deny":
@@ -291,11 +356,7 @@ function ensureProxy(settings: Settings): Promise<EgressProxy> {
 		const start = EgressProxy.start({
 			allowedHosts: proxyAllowedHosts,
 			decide: decideHost,
-			onBlocked: host => {
-				blockedLog.delete(host);
-				blockedLog.set(host, Date.now());
-				notifyAll();
-			},
+			onBlocked: host => recordBlockedHost(host),
 		});
 		proxyStart = start;
 		cancelProxyCleanup = postmortem.register("sandbox-egress-proxy", closeProxy);
@@ -433,36 +494,53 @@ function nativeAddonDir(): string | undefined {
 }
 
 /**
- * Git common dir of a linked worktree (commits write there); `undefined` for ordinary checkouts.
- * The workspace's `.git` metadata is writable by contained processes, so the common dir is
- * accepted only when it has the real linked-worktree shape: the git dir is
+ * Git directory contained git must write to commit, when it lies outside the workspace; `undefined`
+ * otherwise. Covers a linked worktree rooted at the workspace (its common dir) and a workspace that
+ * is a strict subdirectory of a checkout: an ordinary one (its `.git` directory) or a linked
+ * worktree (the common dir, which holds `worktrees/<name>`). Never granted for a repository rooted
+ * at the filesystem root, the home directory or an ancestor of it (a dotfiles repo at `~`).
+ *
+ * The workspace's `.git` metadata is writable by contained processes, so a linked worktree's common
+ * dir is accepted only when it has the real linked-worktree shape: the git dir is
  * `<commonDir>/worktrees/<name>` outside the workspace, and its `gitdir` back-pointer (written by
- * git, outside the workspace) names this workspace's `.git` entry.
+ * git, outside the workspace) names the worktree's `.git` entry.
  */
-function linkedWorktreeCommonDir(workspace: string, platform: NodeJS.Platform): string | undefined {
+function writableGitDir(workspace: string, home: string, platform: NodeJS.Platform): string | undefined {
 	try {
 		const info = vcs.gitInfo(workspace);
 		if (!info) return undefined;
+		// A symlinked entry would let a contained process point the comparison at another worktree.
+		const entryStat = fs.lstatSync(info.gitEntryPath);
+		if (entryStat.isSymbolicLink()) return undefined;
+		const entry = realpathIfExists(info.gitEntryPath);
+		if (!entry) return undefined;
+		const repoRoot = path.dirname(entry);
+		if (repoRoot === path.dirname(repoRoot) || isWithin(home, repoRoot, platform)) return undefined;
+		const atWorkspace = isWithin(workspace, repoRoot, platform) && isWithin(repoRoot, workspace, platform);
+		if (!atWorkspace && !isWithin(workspace, repoRoot, platform)) return undefined;
 		const gitDir = realpathIfExists(info.gitDir);
 		const commonDir = realpathIfExists(info.commonDir);
-		if (!gitDir || !commonDir || gitDir === commonDir) return undefined;
+		if (!gitDir || !commonDir) return undefined;
+		if (entryStat.isDirectory()) {
+			// Ordinary checkout: at the workspace root its `.git` is already writable.
+			if (atWorkspace || gitDir !== entry || commonDir !== entry) return undefined;
+			return entry;
+		}
+		if (gitDir === commonDir) return undefined;
 		const worktrees = path.dirname(gitDir);
 		if (path.basename(worktrees) !== "worktrees" || path.dirname(worktrees) !== commonDir) return undefined;
 		if (isWithin(gitDir, workspace, platform)) return undefined;
 		const backPointer = fs.readFileSync(path.join(gitDir, "gitdir"), "utf8").trim();
-		// A symlinked entry would let a contained process point the comparison at another worktree.
-		if (fs.lstatSync(info.gitEntryPath).isSymbolicLink()) return undefined;
-		const entry = realpathIfExists(info.gitEntryPath);
-		if (!entry || realpathIfExists(path.resolve(gitDir, backPointer)) !== entry) return undefined;
+		if (realpathIfExists(path.resolve(gitDir, backPointer)) !== entry) return undefined;
 		return commonDir;
 	} catch (error) {
-		logger.debug("sandbox: linked worktree lookup failed", { workspace, error: String(error) });
+		logger.debug("sandbox: git dir lookup failed", { workspace, error: String(error) });
 		return undefined;
 	}
 }
 
 /** Everything in {@link SandboxPolicyContext} except the per-request extras. */
-type BaseContext = Omit<SandboxPolicyContext, "extraRead" | "extraWrite"> & { gitCommonDir?: string };
+type BaseContext = Omit<SandboxPolicyContext, "extraRead" | "extraWrite"> & { gitWriteDir?: string };
 
 /**
  * Synchronous (~10 ms, once per runtime) so {@link SandboxRuntime.effectivePolicy} can stay
@@ -487,7 +565,7 @@ function gatherContext(workspace: string, tmpdir: string): BaseContext {
 		rootEntries,
 		discovered,
 		runtimePaths,
-		gitCommonDir: linkedWorktreeCommonDir(workspace, platform),
+		gitWriteDir: writableGitDir(workspace, home, platform),
 	};
 }
 
@@ -599,6 +677,25 @@ export class SandboxRuntime {
 			liveRuntimes.add(runtime);
 		}
 		return runtime;
+	}
+
+	/**
+	 * The runtime `scope` runs contained under in `workspace`, or `undefined` when it runs
+	 * unsandboxed. A disabled sandbox never creates a runtime (or touches native probes). Throws
+	 * `SandboxUnavailableError` when the sandbox is required but no backend can provide it.
+	 */
+	static async forScope(workspace: string, scope: SandboxScope | "mcp"): Promise<SandboxRuntime | undefined> {
+		if (!readSandboxConfig(await Settings.init()).enabled) return undefined;
+		const runtime = await SandboxRuntime.for(workspace);
+		return runtime.applies(scope) ? runtime : undefined;
+	}
+
+	/**
+	 * Test seam: number of live (undisposed) runtimes in this realm.
+	 * @internal
+	 */
+	static liveCountForTest(): number {
+		return liveRuntimes.size;
 	}
 
 	/** Interactive mode, and RPC mode after `set_sandbox_host_prompts`, install this; without it unknown hosts are refused. */
@@ -782,7 +879,7 @@ export class SandboxRuntime {
 
 	/** Drops the session grant of `host` (a persisted allowlist entry stays); notifies listeners when one existed. */
 	revokeHost(host: string): void {
-		if (sessionGrants.delete(host)) notifyAll();
+		if (sessionGrants.delete(host)) grantsChanged();
 	}
 
 	/** Interactive mode and RPC mode (after `set_sandbox_access_prompts`) install this; without it access requests are refused. */
@@ -897,11 +994,12 @@ export class SandboxRuntime {
 		}
 		if (scope === "always") {
 			list.setMember(this.#settings, resolved, { member: true });
+			notifyAll();
 		} else {
 			sessionPathGrants[kind].add(resolved);
 			pathGrantRevision++;
+			grantsChanged();
 		}
-		notifyAll();
 	}
 
 	/** Drops a session path grant (persisted entries stay); notifies listeners when one existed. */
@@ -910,7 +1008,7 @@ export class SandboxRuntime {
 		const resolved = realpathThroughAncestors(path.resolve(this.#workspace, expandTilde(target.trim())));
 		if (!grants.delete(resolved) && !grants.delete(target)) return;
 		pathGrantRevision++;
-		notifyAll();
+		grantsChanged();
 	}
 
 	/** Paths this realm granted for the session, by kind. */
@@ -1060,18 +1158,18 @@ export class SandboxRuntime {
 	#policy(config: SandboxConfig, extraWrite?: readonly string[], extraRead?: readonly string[]): ResolvedFsPolicy {
 		const tempDir = this.tempDir();
 		if (this.#context?.tmpdir !== tempDir) this.#context = gatherContext(this.#workspace, tempDir);
-		const { gitCommonDir, ...context } = this.#context;
+		const { gitWriteDir, ...context } = this.#context;
 		const platform = context.platform;
 		// Writable roots are pinned to the canonical path they had when first admitted: a contained
 		// process can replace a writable root with a symlink, which must never be followed.
 		const sessionWrites = this.#intactSessionWrites();
 		const pin = (entries: readonly string[]) => entries.flatMap(entry => this.#pinnedWrite(entry, context));
 		const allowWrite = pin(config.allowWrite);
-		const pinnedExtra = pin([...(gitCommonDir ? [gitCommonDir] : []), ...(extraWrite ?? [])]);
+		const pinnedExtra = pin([...(gitWriteDir ? [gitWriteDir] : []), ...(extraWrite ?? [])]);
 		const write = [...sessionWrites, ...pinnedExtra];
 		// Readable too: read-only mode drops `extraWrite`, and `readScope: workspace` would hide it.
 		const read = [
-			...(gitCommonDir ? [gitCommonDir] : []),
+			...(gitWriteDir ? [gitWriteDir] : []),
 			...sessionWrites,
 			...sessionPathGrants.read,
 			...(extraRead ?? []),
@@ -1110,7 +1208,7 @@ export class SandboxRuntime {
 		}
 		if (dropped) {
 			pathGrantRevision++;
-			notifyAll();
+			grantsChanged();
 		}
 		return [...sessionPathGrants.write];
 	}

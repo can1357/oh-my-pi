@@ -316,6 +316,7 @@
 ### Breaking Changes
 
 - Rust SDK: `SessionState` and `BashResult` struct literals need `sandbox: None`
+- `PI_CONFIG_FILES` (and `OMP_CONFIG_FILES`) set in a project `.env` is now ignored, so a cloned repository cannot load its own files as trusted config overlays; set it in your shell or in omp's own `.env` files
 
 ### Added
 

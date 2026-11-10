@@ -27,6 +27,7 @@ import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesyst
 import { PipeTextSources, TextTap } from "../job-widgets";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import sandboxDenialNotice from "../prompts/tools/sandbox-denial.md" with { type: "text" };
+import type { SandboxResultMeta } from "../sandbox/types";
 import type {
 	ClientBridgeTerminalExitStatus,
 	ClientBridgeTerminalHandle,
@@ -986,12 +987,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			notices?: readonly string[];
 			replies?: readonly string[];
 			trace?: ShellTrace;
+			/** The sandbox the job runs in; absent when it runs uncontained. */
+			sandbox?: SandboxResultMeta;
 		} = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
 		if (options.trace) details.trace = options.trace;
+		if (options.sandbox) details.sandbox = options.sandbox;
 		if (options.replies?.length) details.replies = [...options.replies];
 		if (timeoutSec === undefined) {
 			details.timeoutDisabled = true;
@@ -1043,6 +1047,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		toolCallId: string;
 		/** Host directories a contained run may also write. */
 		sandboxExtraWrite?: readonly string[];
+		/** The sandbox the run is contained by (no per-call notes); every live frame carries it. */
+		sandbox?: SandboxResultMeta;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -1068,10 +1074,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let liveTrace: ShellTrace | undefined;
 		// While the call waits on the run, every frame of its card carries the replies so far and the
 		// transcript draws the new ones. A backgrounded job's frames carry none: the call's result already did.
-		// Every frame of a live run carries its latest trace.
+		// Every frame of a live run carries its latest trace, and the sandbox it runs in until the result names it.
 		const withReplies = (details: BashProgressDetails): BashProgressDetails => {
-			const withTrace = liveTrace && details.trace === undefined ? { ...details, trace: liveTrace } : details;
-			return !backgrounded && replies.length > 0 ? { ...withTrace, replies: [...replies] } : withTrace;
+			let framed = liveTrace && details.trace === undefined ? { ...details, trace: liveTrace } : details;
+			if (options.sandbox && framed.sandbox === undefined) framed = { ...framed, sandbox: options.sandbox };
+			return !backgrounded && replies.length > 0 ? { ...framed, replies: [...replies] } : framed;
 		};
 		// Replies reach the user only while the call waits on the run: once it returns, nothing draws them.
 		const onReply = (text: string): void => {
@@ -1381,8 +1388,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 		}
 
-		// Whether agent commands run in the OS sandbox here; throws when it is required but unavailable.
-		const sandboxed = (await resolveBashSandbox(this.session.cwd)) !== undefined;
+		// The OS sandbox agent commands run in here (undefined when uncontained); throws when it is required but unavailable.
+		const bashSandbox = await resolveBashSandbox(this.session.cwd);
+		const sandboxed = bashSandbox !== undefined;
+		// What the card shows while a contained run is live; the result replaces it with the per-call notes.
+		const liveSandbox = bashSandbox?.runtime.resultMeta();
 		// The session's `local://` root (and any other sandbox-scope URL root) stays writable when contained.
 		const sandboxExtraWrite = sandboxed ? sessionSandboxWritableRoots(this.session) : undefined;
 
@@ -1478,13 +1488,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
 				sandboxExtraWrite,
+				sandbox: liveSandbox,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 				trace: job.getLatestTrace(),
+				sandbox: liveSandbox,
 			});
 		}
+
+		// A contained run is marked on its card from the start, before it streams any output.
+		if (liveSandbox) onUpdate?.({ content: [], details: { sandbox: liveSandbox } });
 
 		// The client-bridge terminal provides a live terminal card in the editor;
 		// when available it wins over auto-backgrounding (both are opt-in, and
@@ -1530,12 +1545,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
 				sandboxExtraWrite,
+				sandbox: liveSandbox,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 					trace: job.getLatestTrace(),
+					sandbox: liveSandbox,
 				});
 			}
 			// The job was registered as foreground-backed: hidden from listings and
@@ -1574,6 +1591,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				notices,
 				replies: job.replies,
 				trace: job.getLatestTrace(),
+				sandbox: liveSandbox,
 			});
 		}
 
@@ -1902,6 +1920,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						details: {
 							...(replies.length > 0 ? { replies: [...replies] } : {}),
 							...(trace ? { trace } : {}),
+							...(liveSandbox ? { sandbox: liveSandbox } : {}),
 						},
 					})
 			: undefined;

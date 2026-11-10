@@ -29,7 +29,7 @@ import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 import { isThenable } from "../../utils/ipc";
-import { definedEnv } from "../../sandbox/env";
+import { containedEnv } from "../../sandbox/env";
 import { SandboxRuntime } from "../../sandbox/runtime";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
@@ -676,7 +676,7 @@ export class StdioTransport implements MCPTransport {
 			this.#process = await sandbox.spawn({
 				argv,
 				cwd,
-				env: definedEnv(env),
+				env: containedEnv(Bun.env, this.config.env),
 				extraRead: await commandReadRoots(argv[0], cwd, env),
 				network: this.config.sandboxNetwork ?? "allow",
 			});

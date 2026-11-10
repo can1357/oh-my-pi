@@ -353,6 +353,56 @@ describe("SandboxRuntime", () => {
 			expect(policy.readonlyPaths).not.toContain(commonDir);
 		},
 	);
+
+	/** Ordinary checkout at `<outside>/repo` with a `pkg` subdirectory; returns both. */
+	function repoWithPackage(): { repo: string; pkg: string } {
+		const repo = path.join(outside, "repo");
+		const pkg = path.join(repo, "pkg");
+		fs.mkdirSync(pkg, { recursive: true });
+		git(repo, "init", "-q");
+		return { repo, pkg };
+	}
+
+	it.skipIf(!Bun.which("git"))("grants the enclosing repository's .git to a workspace in a subdirectory", async () => {
+		const { repo, pkg } = repoWithPackage();
+		expect((await runtime(pkg)).effectivePolicy().readwritePaths).toContain(path.join(repo, ".git"));
+	});
+
+	it.skipIf(!Bun.which("git"))("never grants the .git of a repository rooted at the home directory", async () => {
+		const { repo, pkg } = repoWithPackage();
+		const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(repo);
+		try {
+			const policy = (await runtime(pkg)).effectivePolicy();
+			expect(policy.readwritePaths).not.toContain(path.join(repo, ".git"));
+		} finally {
+			homeSpy.mockRestore();
+		}
+	});
+
+	it.skipIf(!Bun.which("git"))(
+		"grants the common dir to a workspace in a linked worktree's subdirectory",
+		async () => {
+			const { commonDir, worktree } = linkedWorktree();
+			const pkg = path.join(worktree, "pkg");
+			fs.mkdirSync(pkg);
+			expect((await runtime(pkg)).effectivePolicy().readwritePaths).toContain(commonDir);
+		},
+	);
+
+	it("resolves no runtime for a scope while disabled, without creating one", async () => {
+		const live = SandboxRuntime.liveCountForTest();
+		expect(await SandboxRuntime.forScope(path.join(outside, "fresh"), "bash")).toBeUndefined();
+		expect(SandboxRuntime.liveCountForTest()).toBe(live);
+	});
+
+	it("resolves the runtime only for an enabled scope", async () => {
+		SandboxRuntime.resetForTest({ ...UNAVAILABLE, supported: true, backend: "seatbelt", proxy: true });
+		cfgSandboxEnabled.set(settings, true);
+		cfgSandboxScope.set(settings, ["eval"]);
+		const instance = await runtime();
+		expect(await SandboxRuntime.forScope(workspace, "eval")).toBe(instance);
+		expect(await SandboxRuntime.forScope(workspace, "bash")).toBeUndefined();
+	});
 });
 
 describe("SandboxRuntime always grant with a project-layer allowlist", () => {

@@ -35,6 +35,7 @@ import {
 	readHostLines,
 	SANDBOX_HOST_PROTOCOL_VERSION,
 } from "./host-protocol";
+import { containedEnv } from "./env";
 import { isWithin } from "./platform";
 import { type SandboxChild, SandboxRuntime } from "./runtime";
 import type { SandboxNetworkMode } from "./types";
@@ -419,7 +420,7 @@ export async function startSandboxHost(
 	const child = await runtime.spawn({
 		argv: sandboxHostArgv(),
 		cwd: options.cwd,
-		env: sandboxProcessEnv(runtime, workerEnvFromParent(), options.network),
+		env: sandboxProcessEnv(runtime, containedEnv(workerEnvFromParent()), options.network),
 		extraRead: options.extraRead,
 		extraWrite: options.extraWrite,
 		network: options.network,

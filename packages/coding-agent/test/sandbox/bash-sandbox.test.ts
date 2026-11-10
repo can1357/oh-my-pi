@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as direnv from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import {
@@ -153,6 +154,14 @@ afterEach(async () => {
 });
 
 describe("agent bash when the sandbox does not contain it", () => {
+	it("leaves the bash tool's streaming updates unmarked", async () => {
+		const updates: { details?: { sandbox?: unknown } }[] = [];
+		await new BashTool(toolSession()).execute("call-plain", { command: "echo plain" }, undefined, update =>
+			updates.push(update),
+		);
+		for (const update of updates) expect(update.details?.sandbox).toBeUndefined();
+	});
+
 	it("starts no sandbox host and carries no sandbox meta", async () => {
 		const result = await bash("echo plain");
 		expect(result.exitCode).toBe(0);
@@ -331,6 +340,51 @@ describe.skipIf(!supported)("agent bash in the sandbox", () => {
 		expect(clean.details?.sandbox).toBeDefined();
 		expect(clean.details?.sandbox?.denied).toBeUndefined();
 		expect(toolText(clean)).not.toContain("[OS sandbox:");
+	});
+
+	it("marks the bash tool's streaming updates with the sandbox before the call settles", async () => {
+		const updates: { details?: { sandbox?: unknown } }[] = [];
+		const result = await new BashTool(toolSession()).execute(
+			"call-live",
+			{ command: "echo one; sleep 0.2; echo two" },
+			undefined,
+			update => updates.push(update),
+		);
+		const meta = {
+			backend: natives.sandboxSupport().backend ?? "unknown",
+			mode: "workspace-write",
+			network: "deny",
+		} as const;
+		expect(updates.length).toBeGreaterThan(0);
+		expect(updates[0].details?.sandbox).toEqual(meta);
+		for (const update of updates) expect(update.details?.sandbox).toEqual(meta);
+		expect(result.details?.sandbox).toEqual(meta);
+	});
+
+	it("marks a contained async job's start result and its frames with the sandbox", async () => {
+		const manager = new AsyncJobManager({});
+		try {
+			const updates: { details?: { sandbox?: unknown } }[] = [];
+			const tool = new BashTool(toolSession({ asyncJobManager: manager }, { "async.enabled": true }));
+			const started = await tool.execute(
+				"call-async",
+				{ command: "echo one; sleep 0.2; echo two", async: true },
+				undefined,
+				update => updates.push(update),
+			);
+			const meta = {
+				backend: natives.sandboxSupport().backend ?? "unknown",
+				mode: "workspace-write",
+				network: "deny",
+			} as const;
+			expect(started.details?.async?.state).toBe("running");
+			expect(started.details?.sandbox).toEqual(meta);
+			await manager.waitForAll();
+			expect(updates.length).toBeGreaterThan(0);
+			for (const update of updates) expect(update.details?.sandbox).toEqual(meta);
+		} finally {
+			await manager.dispose();
+		}
 	});
 
 	it.skipIf(!proxySupported)("names a refused host to the model only when the command failed", async () => {

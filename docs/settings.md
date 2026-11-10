@@ -157,7 +157,7 @@ Environment variables are never written back to `config.yml`. Variables declared
 | `SEARXNG_BASIC_USERNAME` / `SEARXNG_BASIC_PASSWORD` | `searxng.basicUsername` / `searxng.basicPassword` | Fallbacks only when absent or null; configured empty strings remain valid credentials.            |
 | `MNEMOPI_EMBEDDING_MODEL`                           | `mnemopi.embeddingModel`                          | Fallback when absent, null, or blank.                                                             |
 | `PI_SANDBOX`                                        | `sandbox.enabled`                                 | A truthy value enables the OS sandbox; any other value is ignored (it can never disable it).      |
-| `PI_CONFIG_FILES`                                   | CLI config overlays                               | Platform path-list (`:` on Unix, `;` on Windows); files load in order before `--config` overlays. |
+| `PI_CONFIG_FILES`                                   | CLI config overlays                               | Platform path-list (`:` on Unix, `;` on Windows); files load in order before `--config` overlays. Ignored when set in a project `.env`. |
 
 Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, environment, and `.env` files); see [Providers](./providers.md) and the full [Environment variables](./environment-variables.md) reference.
 

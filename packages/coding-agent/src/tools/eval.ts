@@ -846,8 +846,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			session.assertEvalExecutionAllowed?.();
 
 			// Every cell runs contained when the sandbox applies to `eval`; the card reports it.
-			const sandboxRuntime = await SandboxRuntime.for(session.cwd);
-			const evalSandbox = sandboxRuntime.applies("eval") ? sandboxRuntime : undefined;
+			const evalSandbox = await SandboxRuntime.forScope(session.cwd, "eval");
 			const evalStartedAt = Date.now();
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];

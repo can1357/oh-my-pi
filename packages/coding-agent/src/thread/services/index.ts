@@ -15,6 +15,7 @@ import { lspThreadService } from "./lsp";
 import { memoryThreadService } from "./memory";
 import { runtimeThreadService } from "./runtime";
 import { runtimeIdentityThreadService } from "./runtime-identity";
+import { sandboxThreadService } from "./sandbox";
 import { settingsThreadService } from "./settings";
 import { telemetryThreadService } from "./telemetry";
 
@@ -31,6 +32,7 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	memoryThreadService,
 	integrationsThreadService,
 	runtimeThreadService,
+	sandboxThreadService,
 	asyncJobsThreadService,
 	// Last: its entry points run subagents against every service above.
 	executorThreadService,

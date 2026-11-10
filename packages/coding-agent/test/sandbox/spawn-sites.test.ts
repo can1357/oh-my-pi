@@ -95,7 +95,7 @@ describe("execCommand sandbox workspace", () => {
 	it("confines to the session workspace, not the per-call cwd", async () => {
 		const sub = path.join(workspace.path(), "sub");
 		fs.mkdirSync(sub);
-		const spy = vi.spyOn(SandboxRuntime, "for");
+		const spy = vi.spyOn(SandboxRuntime, "forScope");
 		cfgSandboxEnabled.set(settings, false);
 		await execCommand("/bin/sh", ["-c", "true"], sub, undefined, workspace.path());
 		expect(spy.mock.calls.map(([dir]) => dir)).toEqual([workspace.path()]);

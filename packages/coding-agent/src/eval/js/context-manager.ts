@@ -4,6 +4,7 @@ import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:wor
 import { sandboxSupport } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { JS_EVAL_STDIO_WORKER_ARG } from "../../cli/worker-selectors";
+import { containedEnv } from "../../sandbox/env";
 import { type SandboxChild, SandboxRuntime } from "../../sandbox/runtime";
 import type { SandboxNetworkMode } from "../../sandbox/types";
 import {
@@ -668,8 +669,7 @@ async function acquireSession(
 	// The in-process Worker cannot be contained, so while the sandbox applies the evaluator runs
 	// only as a contained subprocess, and a retained worker started under another policy (or
 	// uncontained) is retired so the change takes effect on this cell.
-	const sandboxRuntime = await SandboxRuntime.for(snapshot.cwd);
-	const sandbox = sandboxRuntime.applies("eval") ? sandboxRuntime : undefined;
+	const sandbox = await SandboxRuntime.forScope(snapshot.cwd, "eval");
 	const sandboxFingerprint = sandbox?.fingerprint();
 	const retained = sessions.get(sessionKey);
 	if (retained && retained.state === "alive" && retained.sandbox !== sandboxFingerprint) {
@@ -1163,8 +1163,7 @@ async function settleWithin(promise: Promise<unknown>, timeoutMs: number): Promi
 
 /** True when `session`'s worker was started under the sandbox policy that applies to `cwd` now. */
 async function retainedSandboxCurrent(session: JsSession, cwd: string): Promise<boolean> {
-	const runtime = await SandboxRuntime.for(cwd);
-	const fingerprint = runtime.applies("eval") ? runtime.fingerprint() : undefined;
+	const fingerprint = (await SandboxRuntime.forScope(cwd, "eval"))?.fingerprint();
 	return session.state === "alive" && session.sandbox === fingerprint;
 }
 
@@ -1184,7 +1183,7 @@ async function spawnContainedJsProcess(
 	const child: SandboxChild = await sandbox.spawn({
 		argv: containedEntryOverride ?? [...resolveCliEntryCmd(), JS_EVAL_STDIO_WORKER_ARG],
 		cwd: options.cwd,
-		env: workerEnvFromParent(),
+		env: containedEnv(workerEnvFromParent()),
 		extraRead: options.packageRoot ? [options.packageRoot] : undefined,
 		extraWrite: options.extraWrite,
 		network: options.network,

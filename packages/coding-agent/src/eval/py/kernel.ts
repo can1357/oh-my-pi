@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $env, $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
-import { definedEnv } from "../../sandbox/env";
+import { containedEnv, definedEnv } from "../../sandbox/env";
 import { readSandboxConfig } from "../../sandbox/policy";
 import { SandboxRuntime, type SandboxSpawnRequest } from "../../sandbox/runtime";
 import {
@@ -366,15 +366,12 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 				? resolveExplicitPythonRuntime(options.interpreter, options.cwd, filterEnv(shellEnv))
 				: resolvePythonRuntime(options.cwd, filterEnv(shellEnv));
 		}
-		const spawnEnv: Record<string, string> = {};
-		for (const [key, value] of Object.entries(runtime.env)) {
-			if (typeof value === "string") spawnEnv[key] = value;
-		}
-		for (const [key, value] of Object.entries(options.env ?? {})) {
-			if (typeof value === "string") spawnEnv[key] = value;
-		}
-		spawnEnv.PYTHONUNBUFFERED = "1";
-		spawnEnv.PYTHONIOENCODING = "utf-8";
+		const kernelEnv: Record<string, string> = {
+			...definedEnv(options.env ?? {}),
+			PYTHONUNBUFFERED: "1",
+			PYTHONIOENCODING: "utf-8",
+		};
+		const spawnEnv: Record<string, string> = { ...definedEnv(runtime.env), ...kernelEnv };
 
 		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
 		// No sandbox lookup at all when the configuration rules containment out.
@@ -392,7 +389,7 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 				await spawnContainedKernel(sandbox, {
 					argv,
 					cwd: options.cwd,
-					env: spawnEnv,
+					env: containedEnv(runtime.env, kernelEnv),
 					extraRead: await pythonReadRoots(runtime, scriptPath),
 					extraWrite: options.sandboxExtraWrite,
 				}),
@@ -532,7 +529,7 @@ async function containedProbeRunner(
 		const child = await sandbox.spawn({
 			argv: command,
 			cwd,
-			env: definedEnv(env),
+			env: containedEnv(env),
 			extraRead: runtime ? await pythonReadRoots(runtime) : undefined,
 			network: "deny",
 		});
