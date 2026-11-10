@@ -136,7 +136,7 @@ export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 					"Session summaries",
 					Array.from(byLabel, ([label, summary]) => ({
 						label,
-						preview: replaceTabs(summary.text),
+						preview: summary.text,
 					})),
 				);
 				if (!shouldContinue()) return;
@@ -156,8 +156,7 @@ export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 				onAction: () => {
 					if (!shouldContinue() || ctx.focusedAgentId || ctx.collabGuest || session.isSessionTransitioning) return;
 					if (!ctx.editor.getExpandedText().includes(reference.trim())) {
-						ctx.editor.moveToMessageStart();
-						ctx.editor.insertText(reference);
+						ctx.editor.insertText(reference, { at: "start" });
 						ctx.editor.moveToMessageEnd();
 					}
 					ctx.ui.requestRender();

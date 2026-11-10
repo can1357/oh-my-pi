@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -13,6 +14,7 @@ import {
 	type SessionSummary,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/summary";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { createSessionStub } from "../helpers/interactive-mode-context";
 
 type SummaryManager = Pick<SessionManager, "getEntries" | "getSessionFile" | "getSessionId">;
 let tempDir = "";
@@ -50,10 +52,6 @@ function textAnswer(
 	} as unknown as SessionMessageEntry;
 }
 
-function entryAt(entry: SessionEntry, ordinal: number, id = `entry-${ordinal}`): SessionEntry {
-	return { ...entry, id } as SessionEntry;
-}
-
 function rootManager(entries: SessionEntry[], sessionFile: string | undefined, sessionId = "root"): SummaryManager {
 	return {
 		getEntries: () => entries,
@@ -63,7 +61,6 @@ function rootManager(entries: SessionEntry[], sessionFile: string | undefined, s
 }
 
 async function writeTranscript(file: string, id: string, messages: SessionEntry[] = []): Promise<void> {
-	await fs.mkdir(path.dirname(file), { recursive: true });
 	const records = [
 		{ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd: path.dirname(file) },
 		{
@@ -76,7 +73,7 @@ async function writeTranscript(file: string, id: string, messages: SessionEntry[
 		},
 		...messages,
 	];
-	await fs.writeFile(file, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
+	await Bun.write(file, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
 }
 
 function summaryEntries(items: SessionSummary[]) {
@@ -99,23 +96,20 @@ describe("/summary collector", () => {
 		const outsideFile = path.join(dir, "other-root", "collision.jsonl");
 		const tie = Date.parse("2026-05-01T00:00:00.000Z");
 		const rootEntries = [
-			entryAt(textAnswer("root old", tie - 100), 0),
-			entryAt(textAnswer("root tie first", tie), 1),
-			entryAt(textAnswer("root tie later", tie), 2),
-			entryAt(textAnswer("same words", tie - 50), 3),
-			entryAt(textAnswer("same words", tie - 40), 4),
+			textAnswer("root old", tie - 100),
+			textAnswer("root tie first", tie),
+			textAnswer("root tie later", tie),
+			textAnswer("same words", tie - 50),
+			textAnswer("same words", tie - 40),
 		];
 		await writeTranscript(rootFile, "root", rootEntries);
-		await writeTranscript(childFile, "child", [
-			entryAt(textAnswer("child tie", tie), 2),
-			entryAt(textAnswer("child newer", tie + 10), 3),
-		]);
-		await writeTranscript(nestedFile, "nested", [entryAt(textAnswer("nested newest", tie + 20), 2)]);
-		await writeTranscript(siblingFile, "sibling", [entryAt(textAnswer("sibling branch", tie - 5), 2)]);
+		await writeTranscript(childFile, "child", [textAnswer("child tie", tie), textAnswer("child newer", tie + 10)]);
+		await writeTranscript(nestedFile, "nested", [textAnswer("nested newest", tie + 20)]);
+		await writeTranscript(siblingFile, "sibling", [textAnswer("sibling branch", tie - 5)]);
 		await writeTranscript(path.join(dir, "root", "__advisor.review.jsonl"), "advisor", [
-			entryAt(textAnswer("private review", tie + 100), 2),
+			textAnswer("private review", tie + 100),
 		]);
-		await writeTranscript(outsideFile, "child", [entryAt(textAnswer("outside root", tie + 200), 2)]);
+		await writeTranscript(outsideFile, "child", [textAnswer("outside root", tie + 200)]);
 
 		const registry = new AgentRegistry();
 		registry.register({
@@ -143,6 +137,36 @@ describe("/summary collector", () => {
 		expect(entries.some(item => item.text === "outside root" || item.text === "private review")).toBe(false);
 	});
 
+	it("reads unsaved local child replies from memory without changing the roster or transcript", async () => {
+		const dir = await fixtureDir();
+		const rootFile = path.join(dir, "root.jsonl");
+		const childFile = path.join(dir, "root", "live.jsonl");
+		await writeTranscript(rootFile, "root");
+		await writeTranscript(childFile, "live", [textAnswer("superseded disk reply", 1)]);
+		const manager = SessionManager.inMemory();
+		openManagers.push(manager);
+		manager.appendMessage(textAnswer("unsaved child reply", 2).message as AssistantMessage);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "live",
+			displayName: "Live worker",
+			kind: "sub",
+			session: createSessionStub(manager, Settings.isolated()),
+			sessionFile: childFile,
+			status: "idle",
+		});
+		const beforeBytes = await Bun.file(childFile).text();
+		const beforeEntries = structuredClone(manager.getEntries());
+		const beforeRefs = structuredClone(registry.list().map(ref => ({ ...ref, session: null })));
+		const result = await listSessionSummaries(rootManager([], rootFile), registry);
+		expect(result.map(item => ({ agent: item.agentName, text: item.text }))).toEqual([
+			{ agent: "Live worker", text: "unsaved child reply" },
+		]);
+		expect(await Bun.file(childFile).text()).toBe(beforeBytes);
+		expect(manager.getEntries()).toEqual(beforeEntries);
+		expect(registry.list().map(ref => ({ ...ref, session: null }))).toEqual(beforeRefs);
+	});
+
 	it("includes only terminal visible text, tolerates legacy ids, and uses timestamp fallbacks", async () => {
 		const now = Date.parse("2026-06-01T00:00:00.000Z");
 		const eligible = [
@@ -167,7 +191,7 @@ describe("/summary collector", () => {
 				content: [{ type: "toolResult", toolName: "yield", content: [{ type: "text", text: "structured" }] }],
 			}),
 		];
-		const entries = eligible.map((entry, i) => entryAt(entry, i));
+		const entries: SessionEntry[] = [...eligible];
 		const legacy = textAnswer("legacy", Number.NaN);
 		const legacyRecord = legacy as unknown as { id?: string; message: { timestamp?: number }; timestamp: string };
 		delete legacyRecord.id;
@@ -178,7 +202,7 @@ describe("/summary collector", () => {
 		const fallbackRecord = fallback as unknown as { message: { timestamp?: number }; timestamp: string };
 		delete fallbackRecord.message.timestamp;
 		fallbackRecord.timestamp = new Date(now + 1).toISOString();
-		entries.push(entryAt(fallback, entries.length));
+		entries.push(fallback);
 
 		const result = await listSessionSummaries(rootManager(entries, undefined), new AgentRegistry());
 		expect(result.map(item => item.text)).toEqual(["entry timestamp", "Visible fallback", "Visible one", "legacy"]);
@@ -203,9 +227,8 @@ describe("/summary collector", () => {
 		const malformedChild = path.join(dir, "root", "malformed.jsonl");
 		const missingChild = path.join(dir, "root", "vanished.jsonl");
 		await writeTranscript(rootFile, "root", []);
-		await writeTranscript(validChild, "valid", [entryAt(textAnswer("kept despite malformed sibling", 200), 2)]);
-		await fs.mkdir(path.dirname(malformedChild), { recursive: true });
-		await fs.writeFile(malformedChild, "not-json\n");
+		await writeTranscript(validChild, "valid", [textAnswer("kept despite malformed sibling", 200)]);
+		await Bun.write(malformedChild, "not-json\n");
 		const registry = new AgentRegistry();
 		registry.register({
 			id: "malformed",
@@ -296,16 +319,15 @@ describe("/summary command", () => {
 		if (!rootFile) throw new Error("Expected real root transcript");
 		const childFile = path.join(rootFile.slice(0, -".jsonl".length), "same-preview.jsonl");
 		await writeTranscript(childFile, "same-preview", [
-			entryAt(textAnswer(`same preview ${"x".repeat(180)} CHILD EARLIER BODY`, 100), 2),
-			entryAt(textAnswer(`same preview ${"x".repeat(180)} CHILD NEWEST BODY`, 300), 3),
+			textAnswer(`same preview ${"x".repeat(180)} CHILD EARLIER BODY`, 100),
+			textAnswer(`same preview ${"x".repeat(180)} CHILD NEWEST BODY`, 300),
 		]);
 		const registry = new AgentRegistry();
 		vi.spyOn(AgentRegistry, "global").mockReturnValue(registry);
 		const beforeBytes = await fs.readFile(rootFile);
 		const beforeChildBytes = await fs.readFile(childFile);
-		const beforeEntries = manager.getEntries().slice();
+		const beforeEntries = structuredClone(manager.getEntries());
 		const beforeLeaf = manager.getLeafId();
-		const beforeRefs = registry.list().slice();
 		const beforeSessionId = manager.getSessionId();
 		const last = commandHarness(manager);
 		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed("last"), last.runtime);
@@ -327,7 +349,6 @@ describe("/summary command", () => {
 		expect(await fs.readFile(childFile)).toEqual(beforeChildBytes);
 		expect(manager.getEntries()).toEqual(beforeEntries);
 		expect(manager.getLeafId()).toBe(beforeLeaf);
-		expect(registry.list()).toEqual(beforeRefs);
 		expect(manager.getSessionId()).toBe(beforeSessionId);
 	});
 

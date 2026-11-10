@@ -133,7 +133,7 @@ describe("text-mode command reports on a real terminal core", () => {
 		term.sendInput("\x1b[A");
 		await term.waitForRender(() => screen(term).some(row => row.includes("const answer")));
 		term.sendInput("Child summary heading");
-		await term.waitForRender(() => screen(term).some(row => row.includes("SummaryWorker")));
+		await term.waitForRender(() => !screen(term).some(row => /\d\..*main/.test(row)));
 		term.sendInput("\r");
 		await term.waitForRender(() => screen(term).some(row => row.includes("Child summary heading")));
 		expect(screen(term).some(row => row.includes("CHILD_SUMMARY_END_MARKER"))).toBe(false);
@@ -206,6 +206,22 @@ describe("text-mode command reports on a real terminal core", () => {
 			expect(mode.editor.getExpandedText()).toBe(draft);
 		},
 	);
+
+	it("prepends a reference to a recalled prompt and restores that prompt on undo", async () => {
+		await mountTranscript(5);
+		await writeSummaryReply(session.sessionManager, "Quoted reference", Date.now());
+		await runCommand("/summary last", "Inject");
+		const question = "Previously sent question";
+		mode.editor.addToHistory(question);
+		term.sendInput("\x1b[A");
+		await term.waitForRender(() => mode.editor.getExpandedText() === question);
+		term.sendInput("\x1b\x12");
+		await term.waitForRender(() => mode.editor.getExpandedText().includes("> Quoted reference"));
+		expect(mode.editor.getExpandedText().endsWith(`> Quoted reference\n\n${question}`)).toBe(true);
+		term.sendInput("\x1f");
+		await term.waitForRender(() => mode.editor.getExpandedText() === question);
+		expect(session.messages).toEqual([]);
+	});
 
 	it("does not steal f or literal carets from normal draft typing", async () => {
 		await mountTranscript(5);
