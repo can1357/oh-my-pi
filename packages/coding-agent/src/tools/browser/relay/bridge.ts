@@ -1215,8 +1215,13 @@ export class RelayBridge {
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
+			const response = (result as Record<string, unknown> | undefined) ?? {};
+			// An explicit attach grants ownership even when this connection did not arm auto-attach.
+			if (msg.method === "Target.attachToTarget" && msg.sessionId && typeof response.sessionId === "string") {
+				conn.childParents.set(response.sessionId, msg.sessionId);
+			}
 			beforeReply?.();
-			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
+			this.#reply(conn, msg, response);
 			return true;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

@@ -492,6 +492,50 @@ describe("RelayBridge child targets", () => {
 		["Target.detachedFromTarget", sessionId],
 	];
 
+	it("owns an explicitly attached child without arming auto-attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const page = await attachPage(bridge, ext, cdp, conn, 1);
+		const otherCdp = new FakeCdpSocket();
+		const other = bridge.cdpConnected(otherCdp);
+		await attachPage(bridge, ext, otherCdp, other, 1);
+		const attachId = ++msgSeq;
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: attachId,
+				sessionId: page,
+				method: "Target.attachToTarget",
+				params: { targetId: "FRAME1", flatten: true },
+			}),
+		);
+		emit(bridge, ext, ATTACH);
+		ack(bridge, ext, "send", { sessionId: "CHILD1" });
+		await flush();
+		expect(cdp.sessionFor(attachId)).toBe("CHILD1");
+		const evaluateId = ++msgSeq;
+		const evaluate = { id: evaluateId, sessionId: "CHILD1", method: "Runtime.evaluate", params: { expression: "1" } };
+		bridge.cdpMessage(conn, JSON.stringify(evaluate));
+		bridge.cdpMessage(other, JSON.stringify(evaluate));
+		ack(bridge, ext, "send", { result: { type: "number", value: 1 } });
+		await flush();
+		expect(cdp.messages.find(message => message.id === evaluateId)).toMatchObject({
+			result: { result: { type: "number", value: 1 } },
+		});
+		expect(otherCdp.messages.find(message => message.id === evaluateId)).toMatchObject({
+			error: { message: "Unknown session id CHILD1" },
+		});
+		emit(bridge, ext, NAVIGATE, DETACH);
+		expect(childTraffic(cdp).filter(([method]) => method !== undefined)).toEqual([
+			["Page.frameNavigated", "CHILD1"],
+			["Target.detachedFromTarget", page],
+		]);
+		expect(childTraffic(otherCdp).filter(([method]) => method !== undefined)).toEqual([]);
+	});
+
 	it("announces a real child target only to the page session that armed auto-attach", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
