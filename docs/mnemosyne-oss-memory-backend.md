@@ -15,7 +15,7 @@ python -m pip install --pre mnemosyne-memory                 # lexical recall on
 
 Without `--pre`, pip installs the latest stable 3.x, which this backend rejects on purpose: before 4.0 a heuristic-only sleep (no LLM) invalidated memories it flagged as conflicting ([mnemosyne-oss/mnemosyne#917](https://github.com/mnemosyne-oss/mnemosyne/pull/917)). OMP runs that sleep on `/memory enqueue`, and on a store shared with other clients it would silently retire their memories.
 
-OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
+OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert. `/memory status` and diagnostics then report why it failed to start so you can fix it; tools report that the backend is not initialised. OMP does not pretend the worker is live.
 
 ## Configuration
 
@@ -81,7 +81,7 @@ The root session owns one worker. Subagents alias the root worker and may perfor
 - Automatic retention writes only the completed root-session suffix. It stores a deterministic source ID and no extraction flags, so assistant prose cannot be converted into instructions.
 - OMP persists a hidden `mnemosyne-oss-retention-cursor` custom session entry only after the worker acknowledges a write. Resumed sessions continue after that cursor.
 - Pre-compaction recall uses the same fail-open behavior.
-- `/memory enqueue` force-retains, then requests Mnemosyne sleep for the retain bank only. Sleep does not consolidate every session in a shared store. Normal disposal retains the final suffix but does not run sleep.
+- `/memory enqueue` force-retains, then requests Mnemosyne sleep for the retain bank only. Sleep does not consolidate every session in a shared store. When `autoRetain` is on, disposal and a session switch (`/new`, resume, fork, branch) first retain the outgoing transcript's final suffix; neither runs sleep. `/memory clear` marks the current conversation as retained, so ending the session never writes it back.
 
 `recall`, `retain`, `reflect`, `memory_edit`, and `learn` call the root session's worker. `read memory://<id>` fetches a full exact record. If an ID exists in more than one recall bank, OMP reports ambiguity rather than choosing a bank. Edits use SDK authorization; OMP does not write SQLite tables directly.
 

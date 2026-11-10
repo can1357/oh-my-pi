@@ -40,14 +40,14 @@ describe("loadMnemosyneOssConfig", () => {
 		expect(config.consolidationMode).toBe("heuristic");
 	});
 
-	it("defaults scoping to per-project", () => {
-		const config = loadMnemosyneOssConfig(
-			Settings.isolated({
-				"memory.backend": "mnemosyne-oss",
-			}),
-			"/tmp/agent",
-		);
-		expect(config.scoping).toBe("per-project");
+	it("keeps projects in separate banks and recalls only the project's own when scoping is unset", async () => {
+		const base = Settings.isolated({ "memory.backend": "mnemosyne-oss" });
+		const first = loadMnemosyneOssConfig(await base.cloneForCwd("/tmp/mnemosyne-oss-project-a"), "/tmp/agent");
+		const second = loadMnemosyneOssConfig(await base.cloneForCwd("/tmp/mnemosyne-oss-project-b"), "/tmp/agent");
+
+		expect(first.retainBank).not.toBe(second.retainBank);
+		expect(first.recallBanks).toEqual([first.retainBank]);
+		expect(second.recallBanks).toEqual([second.retainBank]);
 	});
 
 	it("keeps heuristic consolidation when localConsolidation is on without a local LLM path", () => {

@@ -24,17 +24,26 @@ const INSTRUCTIONS = instructionsTemplate.trim();
 const SHARED_CLEAR_REFUSAL =
 	"Mnemosyne OSS clear refused: the active bank is shared; configure a non-default bank with mnemosyne-oss.ownership=omp before clearing.";
 
+/** Why start() left a session inert; `/memory status` and diagnostics report it so the user can fix the setup. */
+const startupFailures = new WeakMap<object, string>();
+
+function markInert(session: object, diagnostic: string): void {
+	startupFailures.set(session, `Mnemosyne OSS backend is inactive: ${diagnostic}`);
+	logger.warn("Mnemosyne OSS backend inert", { diagnostic });
+}
+
 export const mnemosyneOssBackend: MemoryBackend = {
 	id: "mnemosyne-oss",
 
 	async start(options: MemoryBackendStartOptions): Promise<void> {
 		const { session, settings, agentDir } = options;
+		startupFailures.delete(session);
 		if (!session.sessionId) return;
 		const parent = options.parentMnemosyneOssSessionState;
 		if (options.taskDepth > 0 && !parent) return;
 		const config = parent?.config ?? loadMnemosyneOssConfig(settings, agentDir);
 		if (config.diagnostic) {
-			logger.warn("Mnemosyne OSS backend inert", { diagnostic: config.diagnostic });
+			markInert(session, config.diagnostic);
 			return;
 		}
 		const state = new MnemosyneOssSessionState({
@@ -51,7 +60,7 @@ export const mnemosyneOssBackend: MemoryBackend = {
 			} catch (error) {
 				setMnemosyneOssSessionState(session, undefined);
 				await state.worker.shutdown();
-				logger.warn("Mnemosyne OSS backend inert", { diagnostic: String(error) });
+				markInert(session, String(error));
 				return;
 			}
 		}
@@ -112,7 +121,9 @@ export const mnemosyneOssBackend: MemoryBackend = {
 				active: false,
 				writable: false,
 				searchable: false,
-				message: "Mnemosyne OSS backend is not initialised for this session.",
+				message:
+					(session && startupFailures.get(session)) ??
+					"Mnemosyne OSS backend is not initialised for this session.",
 			};
 		}
 		try {
@@ -203,7 +214,7 @@ export const mnemosyneOssBackend: MemoryBackend = {
 
 	async diagnose(_agentDir, _cwd, session): Promise<string | undefined> {
 		const owner = getMnemosyneOssOwner(session);
-		if (!owner) return undefined;
+		if (!owner) return session && startupFailures.get(session);
 		try {
 			const status = await owner.status();
 			return [

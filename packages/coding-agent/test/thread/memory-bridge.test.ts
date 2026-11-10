@@ -14,7 +14,7 @@ import type { MnemopiBackendConfig } from "../../src/mnemopi/config";
 import { loadMnemopi, loadMnemopiCore, MnemopiSessionState } from "../../src/mnemopi/state";
 import { loadMnemosyneOssConfig } from "../../src/mnemosyne-oss/config";
 import { MnemosyneOssSessionState, type MnemosyneOssWorkerLike } from "../../src/mnemosyne-oss/state";
-import type { MnemosyneOssWorkerRecord } from "../../src/mnemosyne-oss/worker-protocol";
+import type { MnemosyneOssWorkerMethod, MnemosyneOssWorkerRecord } from "../../src/mnemosyne-oss/worker-protocol";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import type { MainThreadLink } from "../../src/thread/protocol";
@@ -113,10 +113,10 @@ describe("memory thread service", () => {
 		const memories = new Map<string, MnemosyneOssWorkerRecord>();
 		let shutdowns = 0;
 		const pythonWorker: MnemosyneOssWorkerLike = {
-			async request<T>(method, params = {}) {
+			async request<T>(method: MnemosyneOssWorkerMethod, params: Record<string, unknown> = {}) {
 				if (method === "remember") {
 					const record: MnemosyneOssWorkerRecord = {
-						id: "worker-memory", bank: "bridge-bank", content: String(params.content),
+						id: "worker-memory", bank: "bridge-bank", content: String(params.content), editable: true,
 					};
 					memories.set(record.id, record);
 					return { id: record.id } as T;

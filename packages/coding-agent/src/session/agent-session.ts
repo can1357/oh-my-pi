@@ -12538,6 +12538,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let sessionTransitioned = false;
 		try {
 			advisorRecordersDetached = true;
+			// A deleted session must not leak into long-term memory.
+			if (options?.drop !== true) await this.#memory.retainOutgoingTranscript();
 			await this.#advisors.drainAndDetachRecorders();
 			try {
 				this.#releaseQueuedTtsrReservations();
@@ -12708,6 +12710,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let advisorRecordersDetached = false;
 		try {
 			advisorRecordersDetached = true;
+			await this.#memory.retainOutgoingTranscript();
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
@@ -14374,6 +14377,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let cwdChangeTarget: string | undefined;
 		try {
 			if (switchingToDifferentSession) {
+				await this.#memory.retainOutgoingTranscript();
 				// Stop and settle in-flight advisors while the old-session feeds can
 				// still observe message_end, then mute before swapping files.
 				await this.#advisors.drainAndDetachRecorders();
@@ -14801,6 +14805,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let advisorRecordersDetached = false;
 		try {
 			advisorRecordersDetached = true;
+			await this.#memory.retainOutgoingTranscript();
 			await this.#advisors.drainAndDetachRecorders();
 			try {
 				// A prompt admitted during the drain awaits above belongs to the history
@@ -14931,6 +14936,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let advisorRecordersDetached = false;
 		try {
 			advisorRecordersDetached = true;
+			await this.#memory.retainOutgoingTranscript();
 			await this.#advisors.drainAndDetachRecorders();
 			try {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {

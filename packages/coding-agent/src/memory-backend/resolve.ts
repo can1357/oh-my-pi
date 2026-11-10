@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import { mnemosyneOssBackend } from "../mnemosyne-oss/backend";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
 import type { MemoryBackend } from "./types";
@@ -24,7 +25,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	const id = cfgMemoryBackend.get(settings);
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
-	if (id === "mnemosyne-oss") return (await import("../mnemosyne-oss/backend")).mnemosyneOssBackend;
+	if (id === "mnemosyne-oss") return mnemosyneOssBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
