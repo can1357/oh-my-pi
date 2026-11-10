@@ -805,13 +805,9 @@ function waitInPage(
 		clearTimeout(id: number): void;
 		MutationObserver: new (callback: () => void) => Observer;
 	};
-	// Page-owned Promise shims may implement only the constructor, not the newer static withResolvers.
-	let resolve!: (value: unknown) => void;
-	let reject!: (reason: unknown) => void;
-	const promise = new Promise<unknown>((fulfill, fail) => {
-		resolve = fulfill;
-		reject = fail;
-	});
+	// Async functions use the realm's intrinsic Promise even when the page replaces the global constructor.
+	const IntrinsicPromise = (async () => {})().constructor as PromiseConstructor;
+	const { promise, resolve, reject } = IntrinsicPromise.withResolvers<unknown>();
 	// The host attaches to this promise in its next protocol call, after the page's rejection checkpoint.
 	void promise.catch(() => {});
 	let settled = false;

@@ -562,17 +562,17 @@ describe("OMP-owned browser evaluation", () => {
 							await page.waitForFunction(() => globalThis.__ompAbortChecks > 0);
 							controller.abort();
 							const outcome = await waiting;
-							// Real Chromium RAF/mutation delivery is outside Bun's fake clock.
+							// Wait for browser frames, not a guessed wall-clock delay.
 							await page.evaluate(() => {
 								const { promise, resolve } = Promise.withResolvers();
-								setTimeout(resolve, 100);
+								requestAnimationFrame(resolve);
 								return promise;
 							});
 							const before = await page.evaluate(() => globalThis.__ompAbortChecks);
 							await page.evaluate(() => { document.body.append(document.createElement("b")); });
 							await page.evaluate(() => {
 								const { promise, resolve } = Promise.withResolvers();
-								setTimeout(resolve, 100);
+								requestAnimationFrame(resolve);
 								return promise;
 							});
 							cancelled.push({ outcome, stopped: before === await page.evaluate(() => globalThis.__ompAbortChecks) });
@@ -582,23 +582,24 @@ describe("OMP-owned browser evaluation", () => {
 						const prototype = Object.getPrototypeOf(sample);
 						const originalDispose = prototype.dispose;
 						let lateDisposals = 0;
-						prototype.dispose = function() { lateDisposals++; return originalDispose.call(this); };
+						const lateDisposed = Promise.withResolvers();
+						prototype.dispose = function() {
+							lateDisposals++;
+							lateDisposed.resolve();
+							return originalDispose.call(this);
+						};
 						let late;
 						try {
 							late = await page.waitForFunction(
 								() => {
 									const { promise, resolve } = Promise.withResolvers();
-									setTimeout(() => resolve({ late: true }), 200);
+									globalThis.__ompLateResolve = resolve;
 									return promise;
 								},
 								{ timeout: 50 },
 							).then(() => "resolved", error => error.name);
-							// Exercise a real protocol result arriving after the real wait deadline.
-							await page.evaluate(() => {
-								const { promise, resolve } = Promise.withResolvers();
-								setTimeout(resolve, 400);
-								return promise;
-							});
+							await page.evaluate(() => globalThis.__ompLateResolve({ late: true }));
+							await lateDisposed.promise;
 						} finally {
 							prototype.dispose = originalDispose;
 							await sample.dispose();
@@ -614,13 +615,12 @@ describe("OMP-owned browser evaluation", () => {
 							};
 							realm.evaluate = function(_fn, ...args) {
 								// Delay the real CDP truthiness evaluation, not the predicate evaluation.
-								// Chromium's clock is separate from Bun's fake timers.
+								// The page-side promise is released explicitly after cancellation is observed.
 								if (cancellation === "signal") controller.abort();
-								return originalEvaluate.call(this, async held => {
+								return originalEvaluate.call(this, held => {
 									const { promise, resolve } = Promise.withResolvers();
-									setTimeout(resolve, 150);
-									await promise;
-									return Boolean(held);
+									globalThis.__ompTruthinessRelease = () => resolve(!!held);
+									return promise;
 								}, ...args);
 							};
 							try {
@@ -634,6 +634,7 @@ describe("OMP-owned browser evaluation", () => {
 							} finally {
 								realm.evaluate = originalEvaluate;
 								prototype.dispose = originalDispose;
+								await originalEvaluate.call(realm, () => globalThis.__ompTruthinessRelease?.());
 							}
 						}
 						await page.evaluate(() => {
