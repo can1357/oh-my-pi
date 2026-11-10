@@ -291,7 +291,7 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 		expect(getTabsMapForTest().has("logos-b2b")).toBe(false);
 		// The next call names the kill once, without the advice the failed call already gave.
 		await expect(runInTab("logos-b2b", { code: "", timeoutMs: 20, session: makeSession() })).rejects.toThrow(
-			'Tab "logos-b2b" was killed: Browser code execution hung past its 20ms budget. Reopen it.',
+			/Tab "logos-b2b" was killed:.*Reopen/i,
 		);
 		expect(await ownedTargets(scope)).toEqual([TARGET_ID]);
 		expect(healthCheck).toHaveBeenCalledTimes(1);

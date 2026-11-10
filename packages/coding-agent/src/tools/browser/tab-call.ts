@@ -252,14 +252,15 @@ export function tabCallBudgetSeconds(
 	chain: readonly TabCallStep[] | undefined,
 	cellTimeoutMs?: number,
 ): number | undefined {
-	const budgets: number[] = [];
-	if (cellTimeoutMs === 0) budgets.push(TOOL_TIMEOUTS.browser.max);
-	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budgets.push(Math.ceil(cellTimeoutMs / 1000));
+	let budget: number | undefined;
+	if (cellTimeoutMs === 0) budget = TOOL_TIMEOUTS.browser.max;
+	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budget = Math.ceil(cellTimeoutMs / 1000);
 	const options = chain?.at(-1)?.args.at(-1);
 	const timeout = isRecord(options) ? options.timeout : undefined;
-	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) budgets.push(TOOL_TIMEOUTS.browser.max);
-	else if (typeof timeout === "number" && Number.isFinite(timeout) && timeout >= 0) {
-		budgets.push(Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
+	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) {
+		budget = Math.max(budget ?? 0, TOOL_TIMEOUTS.browser.max);
+	} else if (typeof timeout === "number" && Number.isFinite(timeout) && timeout >= 0) {
+		budget = Math.max(budget ?? 0, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
 	}
-	return budgets.length > 0 ? Math.max(TOOL_TIMEOUTS.browser.default, ...budgets) : undefined;
+	return budget === undefined ? undefined : Math.max(TOOL_TIMEOUTS.browser.default, budget);
 }
