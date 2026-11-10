@@ -39,6 +39,12 @@ const ROUTE_KINDS: Record<string, ModelKind> = {
 };
 
 /**
+ * Catalog kinds the gateway has a route for. Other kinds (tiny, search) have no
+ * wire, so `/v1/models` never advertises them.
+ */
+export const GATEWAY_MODEL_KINDS: readonly ModelKind[] = ["chat", ...new Set(Object.values(ROUTE_KINDS))];
+
+/**
  * The models a request naming `selector` may run on, in order: the model
  * `--model` would pick among models of `kind` (the first entry of a comma
  * list that resolves), then that model's configured `retry.fallbackChains`
@@ -72,6 +78,18 @@ export function selectorCandidates(
 	return [];
 }
 
+/**
+ * The gateway router's model lookup: the model this process picked for the
+ * request, or for a video poll or download (a bodiless GET whose stateless job
+ * id names the model) the available video model it names.
+ */
+export function stdioModelResolver(
+	routed: ReadonlyMap<string, Model<Api>>,
+	registry: Pick<ModelRegistry, "getAvailable">,
+): (id: string) => Model<Api> | undefined {
+	return id => routed.get(id) ?? registry.getAvailable("video").find(model => `${model.provider}/${model.id}` === id);
+}
+
 /** Serves the gateway on stdin/stdout until stdin ends, then exits. */
 export async function runAuthGatewayStdio(): Promise<void> {
 	// Claimed before extension discovery so no in-process module can read the protocol's input.
@@ -88,8 +106,8 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const routed = new Map<string, Model<Api>>();
 	const router = createAuthGatewayRouter({
 		storage,
-		resolveModel: id => routed.get(id),
-		listModels: () => registry.getAvailable("all"),
+		resolveModel: stdioModelResolver(routed, registry),
+		listModels: () => GATEWAY_MODEL_KINDS.flatMap(kind => registry.getAvailable(kind)),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
