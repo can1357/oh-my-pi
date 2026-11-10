@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2019,6 +2019,55 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	test("re-resolves a selector replaced between the click probe and delivery watcher without sending stale input", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent('<button id="target">Click</button>');
+			await page.evaluate(`(() => {
+				document.body.dataset.clicks = "";
+				window.addEventListener("click", event => {
+					document.body.dataset.clicks += event.target.id + " ";
+				});
+			})()`);
+			let lookups = 0;
+			const signal = new AbortController().signal;
+			await withLiveElement(
+				async () => {
+					lookups++;
+					const handle = await page.locator("#target").waitHandle();
+					if (lookups === 1) {
+						const evaluateHandle = handle.evaluateHandle.bind(handle);
+						spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
+							await page.evaluate(`(() => {
+								const target = document.querySelector("#target");
+								const next = target.cloneNode(true);
+								next.style.marginLeft = "200px";
+								target.replaceWith(next);
+							})()`);
+							return evaluateHandle(...args);
+						});
+					}
+					return handle;
+				},
+				async handle => {
+					try {
+						await clickElement(handle, "tab.click", signal);
+					} finally {
+						await handle.dispose();
+					}
+				},
+				signal,
+			);
+			expect(lookups).toBe(2);
+			expect(await page.evaluate("document.body.dataset.clicks")).toBe("target ");
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
 
 	test("looks replaced checkboxes up before returning their state and replaced radios up before unchecking", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });

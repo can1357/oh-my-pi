@@ -423,11 +423,13 @@ export async function clickElement(
 			const page = globalThis as unknown as { addEventListener: Listen; removeEventListener: Listen };
 			const pointerDowns: InputEvent[] = [];
 			const state = {
+				detached: !(el as unknown as PageElement).isConnected,
 				reached: false,
 				// Read after the click: the page's handlers have run by then.
 				delivered: () => state.reached || pointerDowns.some(event => event.defaultPrevented),
 				stop: () => {},
 			};
+			if (state.detached) return state;
 			const record = (event: InputEvent) => {
 				if (event.type === "pointerdown") pointerDowns.push(event);
 				else state.reached = true;
@@ -451,6 +453,10 @@ export async function clickElement(
 			return state;
 		}),
 	);
+	if (await untilAborted(signal, () => watch.evaluate(state => state.detached))) {
+		await watch.dispose().catch(() => undefined);
+		throw new ElementDetachedError(label);
+	}
 	try {
 		await clickPoint(handle.frame.page(), point.x, point.y, options, signal);
 	} catch (error) {
