@@ -79,6 +79,8 @@ function createMockSession(
 			};
 		},
 		prompt: async (text: string, options?: PromptOptions) => {
+			// An idle session admits the prompt before its turn starts; a follow-up's monitor attaches here.
+			options?.onPromptAdmitted?.();
 			promptIndex += 1;
 			await onPrompt({ text, options, promptIndex, emit, state });
 			return true;
