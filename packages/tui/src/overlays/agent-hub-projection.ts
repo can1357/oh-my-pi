@@ -1,6 +1,7 @@
 import type { AgentMetricsSummary, AgentRecordLike, AgentStatus } from "./agent-hub-types";
 import { MAIN_AGENT_ID } from "./agent-hub-types";
 import type { ObservableSession } from "./session-observer-registry";
+import { usageThroughput } from "./usage-row";
 
 export type AgentMetrics = AgentMetricsSummary;
 
@@ -163,19 +164,24 @@ function readSessionMetrics(
 		const stats = session.getSessionStats();
 		const messages = session.agent?.state?.messages;
 		let tokensPerSecond: number | undefined;
-		if (session.isStreaming && session.tokenRate) {
-			const rate = session.tokenRate.rate();
-			if (rate !== null && Number.isFinite(rate)) tokensPerSecond = rate;
-		}
-		if (tokensPerSecond === undefined && Array.isArray(messages)) {
+		if (Array.isArray(messages)) {
 			for (let i = messages.length - 1; i >= 0; i--) {
-				const m = messages[i] as { role?: string; duration?: number; usage?: { output?: number } } | undefined;
-				if (m?.role === "assistant" && typeof m.duration === "number" && m.duration > 100) {
-					const output = m.usage?.output ?? 0;
-					if (output > 0) {
-						tokensPerSecond = (output / m.duration) * 1000;
-						break;
-					}
+				const m = messages[i];
+				if (
+					m &&
+					typeof m === "object" &&
+					"role" in m &&
+					m.role === "assistant" &&
+					"duration" in m &&
+					typeof m.duration === "number" &&
+					"usage" in m &&
+					m.usage &&
+					typeof m.usage === "object" &&
+					"output" in m.usage &&
+					typeof m.usage.output === "number"
+				) {
+					tokensPerSecond = usageThroughput({ output: m.usage.output }, m.duration);
+					if (tokensPerSecond !== undefined) break;
 				}
 			}
 		}
@@ -252,8 +258,24 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 		: (ref.history?.metrics ?? (!hasLiveSession ? retained : undefined) ?? live);
 	if (!metrics) return undefined;
 	const liveMetrics = live && "tokensPerSecond" in live ? (live as AgentMetrics) : undefined;
+	const retainedMetrics = retained && "tokensPerSecond" in retained ? (retained as AgentMetrics) : undefined;
 	const rawTps = "tokensPerSecond" in metrics ? (metrics as AgentMetrics).tokensPerSecond : undefined;
-	const tokensPerSecond = rawTps ?? liveMetrics?.tokensPerSecond;
+
+	const activeSession = ref.session;
+	let liveRate: number | undefined;
+	if (activeSession?.isStreaming && activeSession.tokenRate) {
+		const rate = activeSession.tokenRate.rate();
+		if (rate !== null && Number.isFinite(rate)) {
+			liveRate = rate;
+		}
+	}
+
+	const tokensPerSecond =
+		liveRate ??
+		rawTps ??
+		liveMetrics?.tokensPerSecond ??
+		retainedMetrics?.tokensPerSecond ??
+		ref.history?.metrics?.tokensPerSecond;
 	const result: AgentMetrics = { ...(metrics as AgentMetrics) };
 	if (cost !== undefined) result.cost = cost;
 	if (tokensPerSecond !== undefined) result.tokensPerSecond = tokensPerSecond;

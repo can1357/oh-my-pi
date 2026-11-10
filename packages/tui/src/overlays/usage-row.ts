@@ -105,7 +105,7 @@ export function formatTurnUsage(summary: TurnUsageSummary): { text: string; titl
 }
 
 /** Output tokens per second over the whole request; undefined when the duration is too short to mean anything. */
-function usageThroughput(usage: Usage, durationMs: number | undefined): number | undefined {
+export function usageThroughput(usage: { output: number }, durationMs: number | undefined): number | undefined {
 	if (!durationMs || durationMs <= MIN_DURATION_MS || usage.output <= 0) return undefined;
 	// TPS over the total request duration — the post-TTFT window undercounts
 	// generation time when reasoning tokens are hidden before the first

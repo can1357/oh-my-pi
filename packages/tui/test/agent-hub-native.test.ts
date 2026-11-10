@@ -3,6 +3,8 @@ import * as fs from "node:fs";
 import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { AgentHubOverlayComponent } from "../src/overlays/agent-hub";
+import { formatMetrics, metricsText } from "../src/overlays/agent-hub-renderer";
+import type { AgentMetrics } from "../src/overlays/agent-hub-projection";
 import type { AgentRecordLike } from "../src/overlays/agent-hub-types";
 import {
 	type EventBusLike,
@@ -256,4 +258,12 @@ test("shows Tok/s column and facts when showTokenRate is enabled", () => {
 		hubEnabled.dispose();
 		hubDisabled.dispose();
 	}
+});
+
+test("formatMetrics and metricsText only append tok/s when showTokenRate is true", () => {
+	const metrics: AgentMetrics = { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 60.0 };
+	expect(metricsText(metrics, false)).not.toContain("tok/s");
+	expect(metricsText(metrics, true)).toContain("60.0 tok/s");
+	expect(formatMetrics(metrics, false)).not.toContain("tok/s");
+	expect(formatMetrics(metrics, true)).toContain("60.0 tok/s");
 });

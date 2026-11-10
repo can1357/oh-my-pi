@@ -327,4 +327,36 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBeUndefined();
 	});
+
+	it("resamples live rate dynamically on hubRowMetrics even without aggregate re-read", () => {
+		let rate = 50.0;
+		const session = {
+			isStreaming: true,
+			tokenRate: { rate: () => rate },
+			getSessionStats: () => ({ tokens: { input: 10, output: 100, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		};
+		const ref = { id: "worker", session } as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		aggregateMetrics({
+			rows: [ref],
+			observedById: new Map(),
+			metricsFor: (row, observed) => hubRowMetrics(row, observed, sessionMetrics),
+			fallbackStatsSession: hubFallbackStatsSession,
+			sessionMetrics,
+			refreshFallback: true,
+		});
+		expect(hubRowMetrics(ref, undefined, sessionMetrics)?.tokensPerSecond).toBe(50.0);
+		rate = 92.4;
+		expect(hubRowMetrics(ref, undefined, sessionMetrics)?.tokensPerSecond).toBe(92.4);
+	});
+
+	it("preserves retained completed tokensPerSecond when session is parked", () => {
+		const ref = { id: "worker", session: null } as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		sessionMetrics.set(ref, {
+			metrics: { tokens: 150, requests: 1, tools: 0, cost: 0.01, durationMs: 2000, tokensPerSecond: 75.0 },
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(75.0);
+	});
 });

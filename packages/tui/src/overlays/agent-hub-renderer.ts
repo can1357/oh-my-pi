@@ -265,7 +265,7 @@ export function formatCost(cost: number): string {
 	return `$${amount.toFixed(2)}`;
 }
 
-export function formatMetrics(metrics: AgentMetrics): string {
+export function formatMetrics(metrics: AgentMetrics, showTokenRate = false): string {
 	const items = [
 		{ value: formatCost(metrics.cost) },
 		{ value: formatMetricDuration(metrics) ?? "time —" },
@@ -273,14 +273,14 @@ export function formatMetrics(metrics: AgentMetrics): string {
 		{ value: `${formatNumber(metrics.tools)} tools` },
 		{ value: `${formatNumber(metrics.tokens)} tok` },
 	];
-	if (metrics.tokensPerSecond !== undefined) {
+	if (showTokenRate && metrics.tokensPerSecond !== undefined) {
 		items.push({ value: `${metrics.tokensPerSecond.toFixed(1)} tok/s` });
 	}
 	return formatMetricRow(items, { separator: theme.sep.dot });
 }
 
 /** Plain-text {@link formatMetrics} for native spans. */
-export function metricsText(metrics: AgentMetrics): string {
+export function metricsText(metrics: AgentMetrics, showTokenRate = false): string {
 	const parts = [
 		formatCost(metrics.cost),
 		formatMetricDuration(metrics) ?? "time —",
@@ -288,7 +288,7 @@ export function metricsText(metrics: AgentMetrics): string {
 		`${formatNumber(metrics.tools)} tools`,
 		`${formatNumber(metrics.tokens)} tok`,
 	];
-	if (metrics.tokensPerSecond !== undefined) {
+	if (showTokenRate && metrics.tokensPerSecond !== undefined) {
 		parts.push(`${metrics.tokensPerSecond.toFixed(1)} tok/s`);
 	}
 	return parts.join(theme.sep.dot);
