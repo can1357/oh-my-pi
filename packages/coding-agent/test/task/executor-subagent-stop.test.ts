@@ -583,6 +583,35 @@ describe("runSubprocess subagent_stop", () => {
 			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
 		});
 
+		it("keeps the refusal in force when its continuation only records sections and never yields", async () => {
+			const id = "FallbackRefusedThenSectionsOnly";
+			const refused = "REFUSED-PROSE-MUST-NOT-BE-PUBLISHED";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				onPrompt: call => {
+					if (call.promptIndex === 1) call.report(refused);
+					// The refusal's continuation records an incremental section but no terminal yield, through every reminder.
+					else if (call.text === "not done") call.yieldSection("findings", "UNJUDGED-SECTION");
+					else call.reply("no terminal yield");
+				},
+				onStop: async (_event, callIndex) =>
+					callIndex === 1 ? { decision: "block", reason: "not done" } : undefined,
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess(baseOptions(id));
+
+			// The unjudged section is dropped, but the refusal of the report still stands: it is neither
+			// published nor laundered into a failure that carries it.
+			expect(harness.events).toHaveLength(1);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.error).toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
+			expect(result.output).not.toContain(refused);
+			expect(result.output).not.toContain("UNJUDGED-SECTION");
+			expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+		});
+
 		it("publishes the yield that answers a refused fallback result", async () => {
 			const id = "FallbackRefusedThenYield";
 			const harness = createHarness({
