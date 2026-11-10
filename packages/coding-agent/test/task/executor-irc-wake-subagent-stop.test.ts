@@ -1920,6 +1920,21 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.mock.calls).toHaveLength(2);
 	});
 
+	it("wakes for a peer message parked behind a hold once the hold an interrupt cancelled releases", async () => {
+		const run = await setup({ driven: true, responses: [{ content: ["peer reply"] }], onStop: () => undefined });
+		const hold = run.session.holdForStopPass();
+		await deliverWake(run.session, "m1");
+		expect(run.mock.calls).toHaveLength(0);
+
+		await run.session.abort();
+		hold.release();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The interrupt cancelled the pass, not the peer's message: it still gets its turn.
+		expect(run.mock.calls).toHaveLength(1);
+	});
+
 	describe("a turn that would change a held candidate under the verdict", () => {
 		it("refuses an un-gated agent.continue() while a stop pass holds the session", async () => {
 			const run = await setup({ driven: true, responses: [{ content: ["UNGATED"] }], onStop: () => undefined });

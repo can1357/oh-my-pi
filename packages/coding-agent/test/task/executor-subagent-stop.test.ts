@@ -272,7 +272,7 @@ function createHarness(args: {
 				},
 			};
 		},
-		waitForStopPasses: async () => {},
+		whenTurnAdmissible: async () => {},
 		abort: async () => {},
 		isAdvisorActive: () => false,
 	};
