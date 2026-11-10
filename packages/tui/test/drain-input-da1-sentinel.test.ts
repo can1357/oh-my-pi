@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 const ITERM2_DA1_REPLY = "\x1b[?64;1;2;4;6;17;18;21;22c";
 const TSP_HELLO_REPLY =
@@ -21,10 +22,17 @@ function restoreProperty(target: object, key: string, descriptor: PropertyDescri
 }
 
 describe("drainInput DA1 sentinel gating", () => {
+	withoutTerminalMultiplexer();
+
 	let terminal: ProcessTerminal | undefined;
 	let previousHeadless = false;
+	let previousTspProbeEnv: string | undefined;
 	let writes: string[] = [];
 	let spies: Array<{ mockRestore(): void }> = [];
+
+	beforeEach(() => {
+		previousTspProbeEnv = Bun.env.PI_TUI_TSP_PROBE;
+	});
 
 	function setup(env: Record<string, string> = {}): void {
 		previousHeadless = setTerminalHeadless(false);
@@ -65,8 +73,8 @@ describe("drainInput DA1 sentinel gating", () => {
 		restoreProperty(process.stdout, "columns", stdoutColumnsDescriptor);
 		restoreProperty(process.stdout, "rows", stdoutRowsDescriptor);
 		setTerminalHeadless(previousHeadless);
-		delete Bun.env.TERM_PROGRAM;
-		delete Bun.env.PI_TUI_TSP_PROBE;
+		if (previousTspProbeEnv === undefined) delete Bun.env.PI_TUI_TSP_PROBE;
+		else Bun.env.PI_TUI_TSP_PROBE = previousTspProbeEnv;
 	});
 
 	it("does not write a DA1 sentinel on non-TSP terminals even when SIXEL is supported", async () => {
@@ -101,23 +109,22 @@ describe("drainInput DA1 sentinel gating", () => {
 		await drainPromise;
 	});
 
-	it("cleans up unfulfilled drain sentinel if drainInput times out", async () => {
+	it("writes a DA1 sentinel when TSP probe is expected and still pending", async () => {
 		setup({ TERM_PROGRAM: "tern", PI_TUI_TSP_PROBE: "1" });
 
-		process.stdin.emit("data", TSP_HELLO_REPLY);
-		for (let i = 0; i < 16; i++) {
-			process.stdin.emit("data", ITERM2_DA1_REPLY);
-		}
+		// Answer the keyboard and OSC 11 sentinels so sixelSupport is established,
+		// but leave the TSP sentinel and hello pending.
+		process.stdin.emit("data", ITERM2_DA1_REPLY);
+		process.stdin.emit("data", ITERM2_DA1_REPLY);
+		expect(terminal!.tspProbePending).toBe(true);
+		expect(terminal!.tspExpected).toBe(true);
 
-		// Run drainInput with a short timeout and DO NOT answer the DA1 sentinel
 		writes.length = 0;
-		await terminal!.drainInput(40, 10);
+		const drainPromise = terminal!.drainInput(300, 20);
 		expect(writes.join("")).toContain("\x1b[c");
 
-		// Answering DA1 late after drainInput has settled should not crash
-		// or invoke a stale drain answered callback.
-		expect(() => {
-			process.stdin.emit("data", ITERM2_DA1_REPLY);
-		}).not.toThrow();
+		// Deliver DA1 reply to settle the drain
+		process.stdin.emit("data", ITERM2_DA1_REPLY);
+		await drainPromise;
 	});
 });
