@@ -5,6 +5,7 @@
 ### Added
 
 - Added the Gemini Decision 1 judge (`google/gemini-decision-1`) for the `judge` role, and `models.yml` accepts the `google-decisions` API ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
+- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452), [#18659](https://github.com/can1357/oh-my-pi/pull/18659) by [@AustinM731](https://github.com/AustinM731))
 
 ### Fixed
 
@@ -264,6 +265,9 @@
 - Fixed `grep` and `glob` treating a `;` list that starts with an internal URL and includes a local path, such as `artifact://1;notes.txt`, as one address; each listed target is now searched ([#18714](https://github.com/can1357/oh-my-pi/pull/18714) by [@eggpeat](https://github.com/eggpeat))
 - Isolated tasks that edit a file whose name contains spaces now commit that file, including in a nested git repository, instead of leaving it unstaged or committing a different file that shares part of the name ([#18715](https://github.com/can1357/oh-my-pi/pull/18715) by [@eggpeat](https://github.com/eggpeat))
 - A disposed or switched session now releases every persistent shell it owns, including the ones a surface keeps under a name of its own (`/loop` conditions), instead of holding one native shell per surface for the life of the process ([#18717](https://github.com/can1357/oh-my-pi/pull/18717) by [@eggpeat](https://github.com/eggpeat))
+### Added
+
+- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452), [#18659](https://github.com/can1357/oh-my-pi/pull/18659) by [@AustinM731](https://github.com/AustinM731))
 
 ## [18.18.7] - 2026-11-10
 
@@ -288,9 +292,6 @@
 - On Windows, cmd-style command lines such as `dir | find /c /v ""`, `sort /r`, `timeout /t 5` and `whoami /all` in the bash tool run the Windows programs they were written for, instead of pi's GNU-style `find`/`sort`/`timeout`/`whoami` (which read `/c` as drive C: and could walk the whole drive)
 - Changing or unsetting `PATH` in the bash tool's shell now forgets remembered command locations, as bash does, so a command no longer runs from a directory that has left `PATH`
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
-### Added
-
-- RPC: hosts that render their own composer can request the composer's next-message predictions, including `composer.predictionAlternatives`, with `predict_next_message`, receive them as `next_message_prediction` frames that say when a prediction settles and when it stops applying, and report shown and accepted alternatives with `predict_next_message_feedback`. Nothing is requested until the host asks ([#18452](https://github.com/can1357/oh-my-pi/issues/18452), [#18659](https://github.com/can1357/oh-my-pi/pull/18659) by [@AustinM731](https://github.com/AustinM731))
 
 ## [18.18.6] - 2026-11-09
 
