@@ -94,6 +94,14 @@ function recorderDefinition(session: ToolSession, calls: unknown[]): EvalPrelude
 	};
 }
 
+function withoutFirstCallGuide<T extends { output: string }>(result: T): T {
+	const documentation = createBrowserPrelude(makeSession()).firstCallDocumentation?.trim();
+	const guide = `browser guide (sent once per conversation; full reference at \`xd://eval/browser\`):\n${documentation}`;
+	const parts = result.output.split(guide);
+	expect(parts).toHaveLength(2);
+	return { ...result, output: `${parts[0].trimEnd()}\n${parts[1].trimStart()}` };
+}
+
 function recordingFacade() {
 	const calls: unknown[] = [];
 	const context = createContext({
@@ -297,7 +305,7 @@ describe("browser facade in real Eval runtimes", () => {
 				"print(JSON.stringify(await tab.console()));",
 			].join("\n"),
 			{ cwd: process.cwd(), sessionId: `browser-facade-js-${crypto.randomUUID()}`, session },
-		);
+		).then(withoutFirstCallGuide);
 
 		expect(result.exitCode).toBe(0);
 		const output = result.output.trim().split("\n");
@@ -307,9 +315,14 @@ describe("browser facade in real Eval runtimes", () => {
 			nextSeq: 2,
 			dropped: 0,
 		});
-		expect(result.output).toContain("opened display text");
-		expect(result.output).toContain('page title\n{"elements":[{"id":5,"role":"button","name":"Save"}]}\ntrue\n9\n8');
-		expect(result.output.match(/^browser guide \(/gm)).toHaveLength(1);
+		expect(output).toEqual([
+			"opened display text",
+			"page title",
+			'{"elements":[{"id":5,"role":"button","name":"Save"}]}',
+			"true",
+			"9",
+			"8",
+		]);
 		expect(calls).toContainEqual({
 			action: "call",
 			name: "real-js",
@@ -520,12 +533,17 @@ describe("browser facade in real Eval runtimes", () => {
 				toolSession: session,
 				kernelMode: "per-call",
 			},
-		);
+		).then(withoutFirstCallGuide);
 
 		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain("opened display text");
-		expect(result.output).toContain("page title\nbutton\nTrue\n9\n{'ok': True}");
-		expect(result.output.match(/^browser guide \(/gm)).toHaveLength(1);
+		expect(result.output.trim().split("\n")).toEqual([
+			"opened display text",
+			"page title",
+			"button",
+			"True",
+			"9",
+			"{'ok': True}",
+		]);
 		expect(calls).toContainEqual({
 			action: "call",
 			name: "real-py",
