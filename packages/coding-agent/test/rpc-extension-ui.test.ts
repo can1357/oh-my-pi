@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame";
 import {
 	type PendingExtensionRequest,
 	type RpcExtensionUIResponse,
@@ -595,11 +596,14 @@ const DEPLOY_FORM = `<form>
   <input type="hidden" name="release" value="r7">
 </form>`;
 
+/** The protocol v1 limit `RpcFrameEncoder.maxResponseBytes` reports. */
+const FRAME_LIMIT = MAX_RPC_FRAME_BYTES - 1;
+
 describe("RPC form dialog", () => {
 	it("sends the form in one frame and returns the submitted data checked against it", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM, { timeout: 60_000 });
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM, { timeout: 60_000 });
 		const request = requireRequest(output.mock.calls[0]?.[0]);
 
 		expect(output).toHaveBeenCalledWith({
@@ -633,7 +637,7 @@ describe("RPC form dialog", () => {
 	])("rejects %s", async (_case, response) => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, response);
 
@@ -644,11 +648,21 @@ describe("RPC form dialog", () => {
 	it("gives an omitted checkbox group an empty array", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { target: "prod", replicas: 2 } });
 
 		expect(await result).toEqual({ data: { release: "r7", target: "prod", checks: [], replicas: 2, owner: "" } });
+	});
+
+	it("fails a form too large for one frame without sending a truncated copy", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form><img src="data:image/png;base64,${"A".repeat(FRAME_LIMIT)}"><input type="text" name="owner" required></form>`;
+
+		await expect(requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html)).rejects.toThrow("too large");
+		expect(output).not.toHaveBeenCalled();
+		expect(pendingRequests.size).toBe(0);
 	});
 
 	it("checks a shared name against every field that carries it", async () => {
@@ -658,7 +672,7 @@ describe("RPC form dialog", () => {
   <label>Name <input type="text" name="name" required></label>
   <label>Nickname <input type="text" name="name"></label>
 </form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, html);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
 		// The optional second field must not hide the required first one.
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: {} });
@@ -673,7 +687,7 @@ describe("RPC form dialog", () => {
   <label>Constructor <input type="text" name="constructor"></label>
   <label>Target <input type="text" name="target"></label>
 </form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, html);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { target: "prod" } });
 
@@ -688,7 +702,7 @@ describe("RPC form dialog", () => {
   <label><input type="radio" name="tier" value="basic"> Basic</label>
   <label><input type="radio" name="tier" value="pro"> Pro</label>
 </form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, html);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { tier: "basic" } });
 
@@ -702,7 +716,7 @@ describe("RPC form dialog", () => {
   <label>Proto <input type="text" name="__proto__"></label>
   <label>Target <input type="text" name="target"></label>
 </form>`;
-		const result = requestRpcFormDialog(pendingRequests, output, html);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, {
 			data: JSON.parse('{"__proto__":"x","target":"prod"}'),
@@ -719,7 +733,7 @@ describe("RPC form dialog", () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
 		const onTimeout = vi.fn();
-		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM, { timeout, onTimeout });
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM, { timeout, onTimeout });
 		if (response) respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, response);
 
 		expect(await result).toEqual({
@@ -732,7 +746,7 @@ describe("RPC form dialog", () => {
 	it("resolves a plain host cancel as a cancelled form", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM);
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM);
 
 		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { cancelled: true });
 

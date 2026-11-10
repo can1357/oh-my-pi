@@ -339,8 +339,8 @@ export class RpcFrameEncoder {
 	}
 
 	/**
-	 * Largest UTF-8 JSON size (excluding the newline) of a `response` frame delivered intact under the
-	 * negotiated protocol. A larger response is replaced by a transport-limit error.
+	 * Largest UTF-8 JSON size (excluding the newline) of a frame delivered intact under the negotiated
+	 * protocol. A larger response is replaced by a transport-limit error; other frames are shrunk.
 	 */
 	get maxResponseBytes(): number {
 		return this.#protocolVersion === 2 ? MAX_RPC_REASSEMBLED_BYTES : MAX_RPC_FRAME_BYTES - 1;

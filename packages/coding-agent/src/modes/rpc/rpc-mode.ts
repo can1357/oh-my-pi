@@ -1280,13 +1280,26 @@ function parseFormDialogResponse(
 	return { data };
 }
 
-/** Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults. */
+/**
+ * Sends an `ask` tool's HTML form as one RPC `form` dialog; a timeout submits the form's defaults.
+ * Fails without sending when the frame exceeds `maxFrameBytes`, the largest frame the negotiated protocol delivers intact.
+ */
 export async function requestRpcFormDialog(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
+	maxFrameBytes: number,
 	html: string,
 	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<ExtensionFormDialogResult | undefined> {
+	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
+	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
+	if (bytes > maxFrameBytes) {
+		throw new Error(
+			`Form is too large for the RPC host (${bytes} bytes, limit ${maxFrameBytes}); use fewer or smaller images, or split the form`,
+		);
+	}
+
 	const form = parseHtmlForm(html);
 	let timedOut = false;
 	const opts: ExtensionUIDialogOptions = {
@@ -1296,13 +1309,8 @@ export async function requestRpcFormDialog(
 			dialogOptions?.onTimeout?.();
 		},
 	};
-	const result = await requestRpcDialog(
-		pendingRequests,
-		output,
-		opts,
-		undefined,
-		{ method: "form", html, timeout: dialogOptions?.timeout },
-		response => parseFormDialogResponse(response, form, opts),
+	const result = await requestRpcDialog(pendingRequests, output, opts, undefined, request, response =>
+		parseFormDialogResponse(response, form, opts),
 	);
 	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
 }
@@ -1650,7 +1658,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 		get formDialog(): ExtensionUIContext["formDialog"] {
 			if (!this.formDialogEnabled) return undefined;
-			return (html, dialogOptions) => requestRpcFormDialog(this.pendingRequests, this.output, html, dialogOptions);
+			return (html, dialogOptions) =>
+				requestRpcFormDialog(this.pendingRequests, this.output, frameEncoder.maxResponseBytes, html, dialogOptions);
 		}
 
 		select(

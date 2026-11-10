@@ -1415,7 +1415,9 @@ option gives that one value like a lone checkbox; a text field gives its text, o
 takes one extra string that is not an option value as its "Other" answer. Hidden inputs keep the form's own values.
 Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
 `minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
-(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults.
+(omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
+exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
+call without being sent, instead of reaching the host truncated.
 
 ```json
 {
