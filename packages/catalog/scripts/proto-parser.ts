@@ -1341,9 +1341,15 @@ export function generateProtoTs(
 			const match =
 				allMessages.find(m => m.fullName === spec) ||
 				allMessages.find(m => ctx.getEmittedName(m) === spec || m.name === spec);
-			if (!match) throw new Error(`Requested protobuf message '${spec}' was not found`);
-			neededMsgFullNames.add(match.fullName);
-			queue.push(match);
+			if (match) {
+				neededMsgFullNames.add(match.fullName);
+				queue.push(match);
+				continue;
+			}
+			// Source imports enums by value too (e.g. `SubagentBackgroundReason.USER_REQUEST`).
+			const enumMatch = allEnums.find(e => e.fullName === spec || e.name === spec);
+			if (!enumMatch) throw new Error(`Requested protobuf message '${spec}' was not found`);
+			neededEnumFullNames.add(enumMatch.fullName);
 		}
 
 		if (options.includeDependencies ?? true) {

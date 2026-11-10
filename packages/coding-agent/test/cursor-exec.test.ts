@@ -26,6 +26,7 @@ import {
 	WriteArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import type { AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
@@ -2811,5 +2812,75 @@ describe("CursorExecHandlers passive tool context", () => {
 			// The carrier is symbol-keyed and never reaches serialized history.
 			expect(JSON.stringify(result)).not.toContain("tool context");
 		}
+	});
+});
+
+describe("CursorExecHandlers native Task", () => {
+	const fakeTask = (run: (args: unknown) => { text: string; details?: unknown }, received: unknown[] = []): Tool =>
+		({
+			name: "task",
+			label: "Task",
+			description: "fake task tool",
+			parameters: type({}),
+			async execute(_id: string, args: unknown) {
+				received.push(args);
+				const { text, details } = run(args);
+				return { content: [{ type: "text", text }], details };
+			},
+		}) as unknown as Tool;
+
+	it("runs the session's task tool, explore as scout, and reports its answer", async () => {
+		const received: unknown[] = [];
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["task", fakeTask(() => ({ text: "found it in src/a.ts" }), received)]]),
+		});
+
+		const explore = await handlers.subagent({ toolCallId: "t1", subagentType: "explore", prompt: "find a" });
+		const general = await handlers.subagent({ toolCallId: "t2", subagentType: "generalPurpose", prompt: "fix b" });
+
+		expect(received).toEqual([{ agent: "scout", task: "find a" }, { task: "fix b" }]);
+		expect(explore).toMatchObject({ finalMessage: "found it in src/a.ts", background: false });
+		expect(explore.toolResult).toMatchObject({ toolCallId: "t1", toolName: "task", isError: false });
+		expect(general.finalMessage).toBe("found it in src/a.ts");
+	});
+
+	it("waits for a Task the session backgrounded and returns its report once", async () => {
+		const job = {
+			id: "job-1",
+			type: "task",
+			status: "running" as "running" | "completed",
+			resultText: undefined as string | undefined,
+			promise: Promise.resolve(),
+		};
+		const { promise, resolve } = Promise.withResolvers<void>();
+		job.promise = promise;
+		const consumed: string[] = [];
+		const asyncJobManager = {
+			getJob: (id: string) => (id === job.id ? job : undefined),
+			consumeJobResults: (ids: string[]) => consumed.push(...ids),
+		} as unknown as AsyncJobManagerApi;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			asyncJobManager,
+			tools: new Map([
+				[
+					"task",
+					fakeTask(() => {
+						queueMicrotask(() => {
+							job.status = "completed";
+							job.resultText = "background report";
+							resolve();
+						});
+						return { text: "Started job-1", details: { async: { jobId: job.id } } };
+					}),
+				],
+			]),
+		});
+
+		const outcome = await handlers.subagent({ toolCallId: "t3", subagentType: "explore", prompt: "survey" });
+
+		expect(outcome).toMatchObject({ agentId: "job-1", finalMessage: "background report", background: false });
+		expect(consumed).toEqual(["job-1"]);
 	});
 });

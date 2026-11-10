@@ -145,10 +145,18 @@ import {
 	ShellSuccessSchema,
 	SmartModeClassifierErrorSchema,
 	SmartModeClassifierResultSchema,
+	type SubagentArgs,
+	SubagentAwaitCompleteSchema,
+	SubagentAwaitErrorSchema,
 	SubagentAwaitNotFoundSchema,
+	type SubagentAwaitResult,
 	SubagentAwaitResultSchema,
+	SubagentAwaitStillRunningSchema,
+	SubagentBackgroundReason,
 	SubagentErrorSchema,
+	type SubagentResult,
 	SubagentResultSchema,
+	SubagentSuccessSchema,
 	ThinkingMessageSchema,
 	ToolCallSchema,
 	type TurnEndedUpdate,
@@ -196,6 +204,8 @@ import type {
 	CursorHistoryPayload,
 	CursorMcpCall,
 	CursorShellStreamCallbacks,
+	CursorSubagentAwaitOutcome,
+	CursorSubagentOutcome,
 	CursorTodoSnapshot,
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
@@ -1226,6 +1236,13 @@ function streamCursorWithWireMode(
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
+		// Handlers that run a subagent would otherwise hold the drain until it
+		// finishes, and once the transport is done its report has nowhere to go.
+		// Aborted on both exits, before their first drain.
+		const transportDone = new AbortController();
+		const dispatchSignal = options?.signal
+			? AbortSignal.any([options.signal, transportDone.signal])
+			: transportDone.signal;
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already
 		// swallows its own rejection, so this only waits.
@@ -1659,6 +1676,7 @@ function streamCursorWithWireMode(
 					requestContextRules,
 					onConversationCheckpoint,
 					options?.externalToolExecutor,
+					dispatchSignal,
 				).catch(error => {
 					log("error", "handleServerMessage", { error: String(error) });
 				});
@@ -1932,6 +1950,7 @@ function streamCursorWithWireMode(
 				clearTimeout(relay.quietTimer);
 			}
 			await h2Completion.promise;
+			transportDone.abort(new Error("the Cursor stream ended"));
 			state.execOrder?.close();
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
@@ -2014,6 +2033,7 @@ function streamCursorWithWireMode(
 			});
 			stream.end();
 		} catch (caughtError) {
+			transportDone.abort(caughtError);
 			if (relay) clearTimeout(relay.quietTimer);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
@@ -2464,6 +2484,8 @@ export async function handleServerMessage(
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 	externalToolExecutor = false,
+	/** Aborted when the request is aborted or the Cursor stream ends; handlers stop waiting then. */
+	signal?: AbortSignal,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -2490,6 +2512,7 @@ export async function handleServerMessage(
 				stream,
 				state,
 				externalToolExecutor,
+				signal,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -2951,6 +2974,7 @@ async function handleExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+	signal?: AbortSignal,
 ): Promise<void> {
 	const order = state.execOrder;
 	const execCase = execMsg.message.case;
@@ -2968,6 +2992,7 @@ async function handleExecServerMessage(
 			stream,
 			state,
 			externalToolExecutor,
+			signal,
 			mcp.call,
 		);
 	if (!gated) return run();
@@ -2994,6 +3019,7 @@ async function runExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+	signal?: AbortSignal,
 	predecodedMcpCall?: CursorMcpCall,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
@@ -3813,26 +3839,37 @@ async function runExecServerMessage(
 		}
 		case "subagentArgs": {
 			const args = execMsg.message.value;
-			const execResult = create(SubagentResultSchema, {
-				result: {
-					case: "error",
-					value: create(SubagentErrorSchema, { error: `Subagents are ${NOT_IMPLEMENTED_SUFFIX}` }),
-				},
-			});
-			log("exec", "subagentRejected", { subagentType: args.subagentType });
+			const subagent = execHandlers?.subagent?.bind(execHandlers);
+			if (!subagent) {
+				log("exec", "subagentRejected", { subagentType: args.subagentType });
+				sendExecClientMessage(
+					runTransport,
+					execMsg,
+					"subagentResult",
+					buildSubagentErrorResult(`Subagents are ${NOT_IMPLEMENTED_SUFFIX}`),
+				);
+				return;
+			}
+			const execResult = await answerSubagent(args, subagent, onToolResult, output, stream, state, signal);
 			sendExecClientMessage(runTransport, execMsg, "subagentResult", execResult);
 			return;
 		}
 		case "subagentAwaitArgs": {
-			// No subagent was ever spawned, so every awaited id is genuinely unknown.
 			const args = execMsg.message.value;
-			const execResult = create(SubagentAwaitResultSchema, {
-				result: {
-					case: "notFound",
-					value: create(SubagentAwaitNotFoundSchema, { agentId: args.agentId }),
-				},
-			});
-			sendExecClientMessage(runTransport, execMsg, "subagentAwaitResult", execResult);
+			const subagentAwait = execHandlers?.subagentAwait?.bind(execHandlers);
+			// Without a handler no subagent was ever spawned, so every id is unknown.
+			const outcome: CursorSubagentAwaitOutcome = subagentAwait
+				? await subagentAwait({ agentId: args.agentId, timeoutMs: args.timeoutMs, signal }).catch(error => ({
+						status: "error" as const,
+						error: error instanceof Error ? error.message : String(error),
+					}))
+				: { status: "notFound" };
+			sendExecClientMessage(
+				runTransport,
+				execMsg,
+				"subagentAwaitResult",
+				buildSubagentAwaitResult(args.agentId, outcome),
+			);
 			return;
 		}
 		case "forceBackgroundShellArgs": {
@@ -5786,7 +5823,7 @@ async function pairSynthesizedExecResult(
 	toolName: string,
 	text: string,
 	isError = true,
-): Promise<void> {
+): Promise<ToolResultMessage> {
 	const synthesized: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId,
@@ -5795,9 +5832,108 @@ async function pairSynthesizedExecResult(
 		isError,
 		timestamp: Date.now(),
 	};
-	const sink = onToolResult ?? state.onToolResult;
-	if (!sink) return;
-	await sink(synthesized);
+	return (await applyToolResultHandler(synthesized, onToolResult ?? state.onToolResult)) ?? synthesized;
+}
+
+const SUBAGENT_CANCELLED = "Subagent was cancelled";
+
+function buildSubagentErrorResult(error: string, agentId?: string): SubagentResult {
+	return create(SubagentResultSchema, {
+		result: { case: "error", value: create(SubagentErrorSchema, { agentId, error }) },
+	});
+}
+
+/**
+ * Run Cursor's native `Task` on the host's subagents and file it in the
+ * transcript as a `task` call.
+ *
+ * An abort lets the Agent finalize the turn without waiting for the handler,
+ * and the synthesized block is already resolved, so nothing else pairs it. The
+ * cancellation result is therefore reported inside the abort event, before the
+ * Agent drains its Cursor result buffer; the handler's late result is dropped.
+ */
+async function answerSubagent(
+	args: SubagentArgs,
+	handler: NonNullable<CursorExecHandlers["subagent"]>,
+	onToolResult: CursorToolResultHandler | undefined,
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	signal: AbortSignal | undefined,
+): Promise<SubagentResult> {
+	if (signal?.aborted) return buildSubagentErrorResult(SUBAGENT_CANCELLED);
+	const toolCallId = args.toolCallId || crypto.randomUUID();
+	synthesizeCursorExecToolCall(output, stream, state, toolCallId, "task", {
+		agent: args.subagentType || undefined,
+		task: args.prompt,
+	});
+	let cancellation: Promise<ToolResultMessage> | undefined;
+	const onAbort = (): void => {
+		cancellation = pairSynthesizedExecResult(state, onToolResult, toolCallId, "task", SUBAGENT_CANCELLED);
+	};
+	signal?.addEventListener("abort", onAbort, { once: true });
+	let outcome: CursorSubagentOutcome | undefined;
+	let failure = "";
+	try {
+		outcome = await handler({ toolCallId, subagentType: args.subagentType, prompt: args.prompt, signal });
+	} catch (error) {
+		failure = error instanceof Error ? error.message : String(error);
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+	if (cancellation) return buildSubagentErrorResult(toolResultToText(await cancellation) || SUBAGENT_CANCELLED);
+	if (!outcome) {
+		const recorded = await pairSynthesizedExecResult(state, onToolResult, toolCallId, "task", failure);
+		return buildSubagentErrorResult(toolResultToText(recorded) || failure);
+	}
+	const toolResult =
+		(await applyToolResultHandler(outcome.toolResult, onToolResult ?? state.onToolResult)) ?? outcome.toolResult;
+	if (toolResult.isError) {
+		return buildSubagentErrorResult(toolResultToText(toolResult) || "Subagent failed", outcome.agentId);
+	}
+	return create(SubagentResultSchema, {
+		result: {
+			case: "success",
+			value: create(SubagentSuccessSchema, {
+				agentId: outcome.agentId ?? toolCallId,
+				// A host rewrite replaces the report Cursor reads.
+				finalMessage: toolResult === outcome.toolResult ? outcome.finalMessage : toolResultToText(toolResult),
+				toolCallCount: 0,
+				// The host's async setting backgrounded it, not the model.
+				backgroundReason: outcome.background
+					? SubagentBackgroundReason.USER_REQUEST
+					: SubagentBackgroundReason.UNSPECIFIED,
+			}),
+		},
+	});
+}
+
+function buildSubagentAwaitResult(agentId: string, outcome: CursorSubagentAwaitOutcome): SubagentAwaitResult {
+	switch (outcome.status) {
+		case "complete":
+			return create(SubagentAwaitResultSchema, {
+				result: {
+					case: "complete",
+					value: create(SubagentAwaitCompleteSchema, {
+						agentId,
+						toolCallCount: 0,
+						finalMessage: outcome.finalMessage,
+					}),
+				},
+			});
+		case "running":
+			return create(SubagentAwaitResultSchema, {
+				result: { case: "stillRunning", value: create(SubagentAwaitStillRunningSchema, { agentId }) },
+			});
+		case "notFound":
+			return create(SubagentAwaitResultSchema, {
+				result: { case: "notFound", value: create(SubagentAwaitNotFoundSchema, { agentId }) },
+			});
+		case "error":
+			return create(SubagentAwaitResultSchema, {
+				result: { case: "error", value: create(SubagentAwaitErrorSchema, { agentId, error: outcome.error }) },
+			});
+	}
 }
 
 /** Exported for tests: drives one Cursor interaction update through the streaming state machine. */

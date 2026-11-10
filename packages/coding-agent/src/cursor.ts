@@ -19,6 +19,10 @@ import type {
 	CursorMcpResource,
 	CursorMcpResourceContent,
 	CursorShellStreamCallbacks,
+	CursorSubagentAwaitCall,
+	CursorSubagentAwaitOutcome,
+	CursorSubagentCall,
+	CursorSubagentOutcome,
 	CursorTodoSnapshot,
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
@@ -55,6 +59,8 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
+import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { AsyncJobManagerApi } from "./async/job-manager";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
@@ -101,6 +107,8 @@ interface CursorExecBridgeOptions {
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
+	/** Jobs a backgrounded native `Task` runs as; without it `subagentAwait` finds none. */
+	asyncJobManager?: AsyncJobManagerApi;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
 	 * may do so: the native `delete` frame, and a `read_mcp_resource` carrying
@@ -306,6 +314,7 @@ async function executeTool(
 	toolCallId: string,
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
+	signal?: AbortSignal,
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
 	if (!tool) {
@@ -345,7 +354,7 @@ async function executeTool(
 			name: toolName,
 			arguments: toolArgs,
 		});
-		result = await tool.execute(toolCallId, validatedArgs, undefined, onUpdate, bridgeContext.context);
+		result = await tool.execute(toolCallId, validatedArgs, signal, onUpdate, bridgeContext.context);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		result = buildToolErrorResult(message);
@@ -1161,6 +1170,83 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			isError: error !== null,
 		});
 		return result;
+	}
+
+	/**
+	 * Cursor's native `Task`, run on the session's `task` tool. Cursor's
+	 * `explore` maps to the read-only `scout`; every other type runs the
+	 * session's default agent.
+	 *
+	 * Cursor models treat `Task` as blocking and end the turn when it returns
+	 * without a report, so a spawn `async.enabled` backgrounded is awaited here.
+	 * Concurrent `Task` frames still run in parallel. A spawn still running when
+	 * the call is aborted stays a background job that {@link subagentAwait} reads.
+	 */
+	async subagent(call: CursorSubagentCall): Promise<CursorSubagentOutcome> {
+		const toolResult = await executeTool(
+			this.options,
+			"task",
+			call.toolCallId,
+			{ agent: call.subagentType === "explore" ? "scout" : undefined, task: call.prompt },
+			undefined,
+			call.signal,
+		);
+		const jobId = (toolResult.details as TaskToolDetails | undefined)?.async?.jobId;
+		if (jobId !== undefined) {
+			const outcome = await this.subagentAwait({
+				agentId: jobId,
+				timeoutMs: Number.POSITIVE_INFINITY,
+				signal: call.signal,
+			});
+			switch (outcome.status) {
+				case "complete":
+					return {
+						toolResult: { ...toolResult, content: [{ type: "text", text: outcome.finalMessage ?? "" }] },
+						agentId: jobId,
+						finalMessage: outcome.finalMessage,
+						background: false,
+					};
+				case "running":
+					return { toolResult, agentId: jobId, background: true };
+				case "error":
+					return {
+						toolResult: { ...toolResult, content: [{ type: "text", text: outcome.error }], isError: true },
+						agentId: jobId,
+						background: false,
+					};
+			}
+		}
+		const text = toolResult.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		return { toolResult, finalMessage: toolResult.isError ? undefined : text, background: false };
+	}
+
+	async subagentAwait({ agentId, timeoutMs, signal }: CursorSubagentAwaitCall): Promise<CursorSubagentAwaitOutcome> {
+		const manager = this.options.asyncJobManager;
+		const job = manager?.getJob(agentId);
+		if (!manager || !job || job.type !== "task") return { status: "notFound" };
+		if (job.status === "running" && timeoutMs > 0) {
+			const { promise: stop, resolve } = Promise.withResolvers<void>();
+			// Timers fire at once past 2^31-1 ms; anything that long waits for the job.
+			const timer = timeoutMs < 2 ** 31 ? setTimeout(resolve, timeoutMs) : undefined;
+			signal?.addEventListener("abort", () => resolve(), { once: true });
+			try {
+				await Promise.race([job.promise, stop]);
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+		switch (job.status) {
+			case "running":
+				return { status: "running" };
+			case "completed":
+				// Cursor now holds the report; a second delivery as a follow-up turn would repeat it.
+				manager.consumeJobResults([agentId]);
+				return { status: "complete", finalMessage: job.resultText };
+			case "failed":
+				manager.consumeJobResults([agentId]);
+				return { status: "error", error: job.errorText ?? "Subagent failed" };
+		}
+		return { status: "error", error: "Subagent was cancelled" };
 	}
 
 	async mcp(call: CursorMcpCall) {

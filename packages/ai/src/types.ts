@@ -1463,6 +1463,39 @@ export interface CursorMcpCall {
 	approvalOnly?: boolean;
 }
 
+/** A native Cursor `Task` spawn. */
+export interface CursorSubagentCall {
+	toolCallId: string;
+	/** Cursor's subagent type, e.g. `explore` or `generalPurpose`. */
+	subagentType: string;
+	prompt: string;
+	signal?: AbortSignal;
+}
+
+export interface CursorSubagentOutcome {
+	toolResult: ToolResultMessage;
+	/** Id `subagentAwait` accepts; absent when nothing was spawned. */
+	agentId?: string;
+	/** The subagent's final report; absent while it runs in the background or after a failure. */
+	finalMessage?: string;
+	/** The subagent keeps running after this call returned. */
+	background: boolean;
+}
+
+/** Cursor waiting on a subagent an earlier `Task` call left running. */
+export interface CursorSubagentAwaitCall {
+	agentId: string;
+	/** Longest wait before answering `running`; `0` checks without waiting. */
+	timeoutMs: number;
+	signal?: AbortSignal;
+}
+
+export type CursorSubagentAwaitOutcome =
+	| { status: "complete"; finalMessage?: string }
+	| { status: "running" }
+	| { status: "notFound" }
+	| { status: "error"; error: string };
+
 export interface CursorTodoSnapshotItem {
 	content: string;
 	status: "pending" | "in_progress" | "completed" | "abandoned";
@@ -1640,6 +1673,12 @@ export interface CursorExecHandlers {
 		 */
 		downloadPath?: string;
 	}) => Promise<CursorMcpResourceContent | null>;
+	/**
+	 * Cursor's native `Task`. Without a handler the spawn is refused. A
+	 * subagent left running answers later through {@link subagentAwait}.
+	 */
+	subagent?: (call: CursorSubagentCall) => Promise<CursorSubagentOutcome>;
+	subagentAwait?: (call: CursorSubagentAwaitCall) => Promise<CursorSubagentAwaitOutcome>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	/**

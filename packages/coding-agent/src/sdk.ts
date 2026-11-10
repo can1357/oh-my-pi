@@ -4156,6 +4156,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this session did not start on Cursor.
 			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
+			asyncJobManager: scopedAsyncJobManager,
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),

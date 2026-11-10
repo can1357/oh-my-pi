@@ -88,6 +88,9 @@ async function dispatchExec(
 		/** Continue an assistant message an earlier frame already wrote to. */
 		output?: AssistantMessage;
 		state?: BlockState;
+		signal?: AbortSignal;
+		/** Receives every paired result as it is recorded. */
+		results?: ToolResultMessage[];
 	} = {},
 ): Promise<{ frames: AgentClientMessage[]; output: AssistantMessage; results: ToolResultMessage[] }> {
 	const output = options.output ?? cursorAssistantMessage();
@@ -100,7 +103,7 @@ async function dispatchExec(
 			return true;
 		},
 	} as unknown as Parameters<typeof handleServerMessage>[5];
-	const results: ToolResultMessage[] = [];
+	const results = options.results ?? [];
 
 	await handleServerMessage(
 		create(AgentServerMessageSchema, { message: { case: "execServerMessage", value: message } }),
@@ -119,6 +122,7 @@ async function dispatchExec(
 		options.requestContextRules,
 		undefined,
 		options.externalToolExecutor,
+		options.signal,
 	);
 
 	return { frames: written.map(decodeClientFrame), output, results };
@@ -609,6 +613,109 @@ describe("Cursor modern exec frames: no answer carries an unset oneof", () => {
 		if (answer.case !== "subagentAwaitResult") throw new Error(`got ${answer.case}`);
 		if (answer.value.result.case !== "notFound") throw new Error("expected notFound");
 		expect(answer.value.result.value.agentId).toBe("agent-42");
+	});
+});
+
+describe("Cursor native Task runs on the host's subagents", () => {
+	const taskResult = (text: string, isError = false): ToolResultMessage => ({
+		role: "toolResult",
+		toolCallId: "c1",
+		toolName: "task",
+		content: [{ type: "text", text }],
+		isError,
+		timestamp: 0,
+	});
+	const subagentFrame = buildExecMessage({
+		case: "subagentArgs",
+		value: create(SubagentArgsSchema, { toolCallId: "c1", subagentType: "explore", prompt: "find the word" }),
+	});
+
+	it("answers with the subagent's report and pairs a task call in the transcript", async () => {
+		const calls: { subagentType: string; prompt: string }[] = [];
+		const { frames, output, results } = await dispatchExec(subagentFrame, {
+			execHandlers: {
+				subagent: async call => {
+					calls.push({ subagentType: call.subagentType, prompt: call.prompt });
+					return {
+						toolResult: taskResult("PAPAYA"),
+						agentId: "Scout1",
+						finalMessage: "PAPAYA",
+						background: false,
+					};
+				},
+			},
+		});
+		expect(calls).toEqual([{ subagentType: "explore", prompt: "find the word" }]);
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "success") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.agentId).toBe("Scout1");
+		expect(answer.value.result.value.finalMessage).toBe("PAPAYA");
+		const block = output.content.find(item => item.type === "toolCall");
+		expect(block?.type === "toolCall" && block.name).toBe("task");
+		expect(results.map(result => result.toolCallId)).toEqual(["c1"]);
+	});
+
+	it("reports a failed subagent as an error, not a success without a report", async () => {
+		const { frames } = await dispatchExec(subagentFrame, {
+			execHandlers: {
+				subagent: async () => ({ toolResult: taskResult("agent crashed", true), background: false }),
+			},
+		});
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentResult") throw new Error(`got ${answer.case}`);
+		if (answer.value.result.case !== "error") throw new Error(`got ${answer.value.result.case}`);
+		expect(answer.value.result.value.error).toContain("agent crashed");
+	});
+
+	it("pairs an aborted Task as cancelled inside the abort and drops the late report", async () => {
+		// The Agent finalizes an aborted turn without waiting for the provider, so
+		// the resolved `task` block must be paired by then or it is stripped.
+		const controller = new AbortController();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const results: ToolResultMessage[] = [];
+		const dispatched = dispatchExec(subagentFrame, {
+			signal: controller.signal,
+			results,
+			execHandlers: {
+				subagent: async () => {
+					started.resolve();
+					await release.promise;
+					return { toolResult: taskResult("late report"), finalMessage: "late report", background: false };
+				},
+			},
+		});
+		await started.promise;
+		controller.abort();
+		expect(results).toMatchObject([
+			{ toolCallId: "c1", toolName: "task", isError: true, content: [{ text: "Subagent was cancelled" }] },
+		]);
+
+		release.resolve();
+		const { frames } = await dispatched;
+		expect(results).toHaveLength(1);
+		const answer = soleResult(frames);
+		if (answer.case !== "subagentResult" || answer.value.result.case !== "error") throw new Error("expected error");
+		expect(answer.value.result.value.error).toBe("Subagent was cancelled");
+	});
+
+	it("maps each await outcome onto Cursor's await result", async () => {
+		const awaitFrame = buildExecMessage({
+			case: "subagentAwaitArgs",
+			value: create(SubagentAwaitArgsSchema, { agentId: "Scout1", timeoutMs: 1000 }),
+		});
+		const answerFor = async (outcome: Awaited<ReturnType<NonNullable<CursorExecHandlers["subagentAwait"]>>>) => {
+			const { frames } = await dispatchExec(awaitFrame, { execHandlers: { subagentAwait: async () => outcome } });
+			const answer = soleResult(frames);
+			if (answer.case !== "subagentAwaitResult") throw new Error(`got ${answer.case}`);
+			return answer.value.result;
+		};
+		const complete = await answerFor({ status: "complete", finalMessage: "done" });
+		expect(complete.case === "complete" && complete.value.finalMessage).toBe("done");
+		expect((await answerFor({ status: "running" })).case).toBe("stillRunning");
+		const failed = await answerFor({ status: "error", error: "boom" });
+		expect(failed.case === "error" && failed.value.error).toBe("boom");
 	});
 });
 

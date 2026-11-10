@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CursorExecHandlers.subagent` and `subagentAwait`: Cursor's native `Task` runs on the host's subagents and returns their report instead of being rejected. Hosts without the handlers still reject it
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
