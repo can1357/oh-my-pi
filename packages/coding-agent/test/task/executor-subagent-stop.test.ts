@@ -215,6 +215,8 @@ function createHarness(args: {
 			};
 		},
 		prompt: async (text: string, options?: PromptOptions) => {
+			// An idle session admits the prompt before its turn starts; a follow-up's monitor attaches here.
+			options?.onPromptAdmitted?.();
 			const call: PromptCall = {
 				promptIndex: prompts.length + 1,
 				text,
