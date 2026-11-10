@@ -983,9 +983,7 @@ function formatConsoleArg(arg: unknown): ConsolePiece {
 			};
 		}
 	}
-	// No array cut: inspect's default drops items past 100 with only a count, and nothing in the cell can
-	// fetch them back. The output sink's byte cap still applies and says where the full output went.
-	const text = util.inspect(arg, { depth: 6, colors: false, breakLength: 120, maxArrayLength: Infinity });
+	const text = util.inspect(arg, { depth: 6, colors: false, breakLength: 120 });
 	if (
 		arg !== null &&
 		typeof arg === "object" &&

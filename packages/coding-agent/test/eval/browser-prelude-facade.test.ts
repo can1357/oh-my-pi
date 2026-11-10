@@ -314,6 +314,7 @@ describe("browser facade in real Eval runtimes", () => {
 			states: ["focused", "required"],
 		};
 		elements[2] = { ...elements[2], value: 0 };
+		elements[3] = { ...elements[3], role: "menu item" };
 		const observation = {
 			url: "https://example.test/list",
 			title: "List",
@@ -351,7 +352,8 @@ describe("browser facade in real Eval runtimes", () => {
 			'[1] button "Item 1"',
 			'[2] textbox "Two\\nlines \\"quoted\\"" value="Ada" description="Full name" keyshortcuts="Alt+N" focused required',
 			'[3] button "Item 3" value=0',
-			...elements.slice(3).map(element => `[${element.id}] button "${element.name}"`),
+			'[4] "menu item" "Item 4"',
+			...elements.slice(4).map(element => `[${element.id}] button "${element.name}"`),
 		];
 		expect((await run("print(await tab.observe());")).split("\n")).toEqual(lines);
 		expect((await run("await tab.observe()")).split("\n")).toEqual(lines);
@@ -369,9 +371,12 @@ describe("browser facade in real Eval runtimes", () => {
 			element: ["id", "role", "name", "value", "description", "keyshortcuts", "states"],
 			length: 150,
 		});
-		const filtered = await run('print((await tab.observe()).elements.filter(e => e.role === "button"));');
-		expect(filtered).toContain("name: 'Item 150'");
-		expect(filtered).not.toContain("more items");
+		const nested = await run("print({ o: await tab.observe() });");
+		expect(nested).toContain("elements: [");
+		expect(nested).not.toContain("o: url:");
+		expect(await run("const p = await tab.observe(); delete p.elements; print(p);")).toContain(
+			"url: 'https://example.test/list'",
+		);
 	});
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {

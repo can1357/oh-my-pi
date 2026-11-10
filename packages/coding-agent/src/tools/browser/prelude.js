@@ -32,8 +32,9 @@
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
-	// A printed or returned `observe()` result shows every element, one line each, through util.inspect's
-	// custom hook; the object, `.elements` and every field stay as they are for code.
+	// A printed `tab.observe()` result, or one left as a cell's last value, shows every element, one line each,
+	// through util.inspect's custom hook; the object, `.elements` and every field stay as they are for code.
+	// Nested in another value (a smaller `depth` than the top level's), it prints as inspect always did.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
 	const showField = value =>
@@ -42,7 +43,9 @@
 			: (JSON.stringify(value) ?? String(value));
 	const elementLine = element => {
 		if (element === null || typeof element !== "object") return showField(element);
-		let line = `[${element.id}] ${element.role}`;
+		const role =
+			typeof element.role === "string" && /^\S+$/.test(element.role) ? element.role : showField(element.role);
+		let line = `[${element.id}] ${role}`;
 		if (element.name !== undefined) line += ` ${showField(element.name)}`;
 		for (const key of ["value", "description", "keyshortcuts"]) {
 			if (element[key] !== undefined) line += ` ${key}=${showField(element[key])}`;
@@ -57,18 +60,20 @@
 		if (observation === null || typeof observation !== "object" || !Array.isArray(observation.elements)) {
 			return observation;
 		}
-		const elementLines = () => observation.elements.map(elementLine).join("\n");
-		Object.defineProperty(observation.elements, inspectCustom, {
-			value: () => (observation.elements.length > 0 ? elementLines() : "[]"),
+		const elements = observation.elements;
+		Object.defineProperty(elements, inspectCustom, {
+			value: (depth, options) =>
+				depth < options.depth ? elements : elements.length > 0 ? elements.map(elementLine).join("\n") : "[]",
 		});
 		Object.defineProperty(observation, inspectCustom, {
-			value: () => {
+			value: (depth, options) => {
+				if (depth < options.depth || !Array.isArray(observation.elements)) return observation;
 				const lines = [];
 				for (const [key, value] of Object.entries(observation)) {
 					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value)}`);
 				}
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
-				if (observation.elements.length > 0) lines.push(elementLines());
+				for (const element of observation.elements) lines.push(elementLine(element));
 				return lines.join("\n");
 			},
 		});
@@ -76,7 +81,7 @@
 	};
 	const callValue = async (name, chain) => {
 		const details = await invoke("call", { name, chain });
-		return chain.length === 1 && chain[0].method === "observe" ? withPrintForm(details.value) : details.value;
+		return details.value;
 	};
 	const directMethods = [
 		"url",
@@ -90,7 +95,6 @@
 		"dialog",
 		"handleDialog",
 		"setDialogs",
-		"observe",
 		"ariaSnapshot",
 		"a11y",
 		"webmcpList",
@@ -262,6 +266,8 @@
 		tab.id = id => makeElement(name, "id", encodeArgs("tab helper argument", [id]));
 		tab.ref = id => makeElement(name, "ref", encodeArgs("tab helper argument", [id]));
 		tab.frame = selector => makeFrame(name, selector);
+		tab.observe = (...args) =>
+			callValue(name, [{ method: "observe", args: encodeArgs("tab helper argument", args) }]).then(withPrintForm);
 		tab.run = async (fnOrCode, options) => {
 			if (typeof fnOrCode !== "function" && typeof fnOrCode !== "string") {
 				throw new TypeError("tab.run() expects a function or code string");
