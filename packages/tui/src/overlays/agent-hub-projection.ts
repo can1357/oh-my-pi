@@ -1,7 +1,7 @@
 import type { AgentMetricsSummary, AgentRecordLike, AgentStatus } from "./agent-hub-types";
 import { MAIN_AGENT_ID } from "./agent-hub-types";
 import type { ObservableSession } from "./session-observer-registry";
-import { lastAssistantThroughput, usageThroughput } from "./usage-row";
+import { lastAssistantThroughput, sessionThroughput, usageThroughput } from "./usage-row";
 
 export type AgentMetrics = AgentMetricsSummary;
 
@@ -236,26 +236,17 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 		? progressMetrics(observed)
 		: (ref.history?.metrics ?? (!hasLiveSession ? retained : undefined) ?? live);
 	if (!metrics) return undefined;
+	const liveRate = sessionThroughput(ref.session);
 	const liveMetrics = live && "tokensPerSecond" in live ? (live as AgentMetrics) : undefined;
 	const retainedMetrics = retained && "tokensPerSecond" in retained ? (retained as AgentMetrics) : undefined;
-	const rawTps = "tokensPerSecond" in metrics ? (metrics as AgentMetrics).tokensPerSecond : undefined;
-
-	const activeSession = ref.session;
-	let liveRate: number | undefined;
-	if (activeSession?.isStreaming && activeSession.tokenRate) {
-		const rate = activeSession.tokenRate.rate();
-		if (rate !== null && Number.isFinite(rate)) {
-			liveRate = rate;
-		}
-	}
+	const observedTps = observed?.progress ? progressMetrics(observed)?.tokensPerSecond : undefined;
 
 	const tokensPerSecond =
 		liveRate ??
 		(hasLiveSession ? liveMetrics?.tokensPerSecond : undefined) ??
-		ref.history?.tokensPerSecond ??
-		rawTps ??
-		liveMetrics?.tokensPerSecond ??
+		observedTps ??
 		retainedMetrics?.tokensPerSecond ??
+		ref.history?.tokensPerSecond ??
 		ref.history?.metrics?.tokensPerSecond;
 	const result: AgentMetrics = { ...(metrics as AgentMetrics) };
 	if (cost !== undefined) result.cost = cost;

@@ -138,6 +138,23 @@ export function lastAssistantThroughput(messages: readonly unknown[] | undefined
 	return undefined;
 }
 
+/**
+ * Resolves current throughput for a session: live streaming rate when the meter has
+ * accumulated enough evidence, falling back to the latest completed assistant turn.
+ */
+export function sessionThroughput(session: {
+	isStreaming?: boolean;
+	tokenRate?: { rate: () => number | null };
+	agent?: { state?: { messages?: readonly unknown[] } };
+} | null | undefined): number | undefined {
+	if (!session) return undefined;
+	if (session.isStreaming && session.tokenRate) {
+		const rate = session.tokenRate.rate();
+		if (rate !== null && Number.isFinite(rate)) return rate;
+	}
+	return lastAssistantThroughput(session.agent?.state?.messages);
+}
+
 /** Every metric except throughput, which the native row declares as a `rate`. */
 function usageRowBaseSpecs(usage: Usage, ttftMs?: number, timestamp?: number, turnElapsedMs?: number): MetricSpec[] {
 	const totalInput = usage.input + usage.cacheWrite;

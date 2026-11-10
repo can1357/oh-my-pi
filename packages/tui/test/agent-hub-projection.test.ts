@@ -6,6 +6,7 @@ import {
 	hubFallbackStatsSession,
 	hubRowMetrics,
 } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { sessionThroughput } from "../src/overlays/usage-row";
 import type { ObservableSession } from "../src/overlays/session-observer-registry";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 
@@ -410,5 +411,37 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
 		const metrics = hubRowMetrics(ref, observed, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(100.0);
+	});
+
+	it("preserves newer retained throughput when a resumed worker is killed", () => {
+		const ref = {
+			id: "worker",
+			session: null,
+			history: {
+				tokensPerSecond: 75.0,
+				metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 75.0 },
+			},
+		} as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		sessionMetrics.set(ref, {
+			metrics: { tokens: 250, requests: 2, tools: 1, cost: 0.02, durationMs: 2000, tokensPerSecond: 150.0 },
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(150.0);
+	});
+});
+
+describe("sessionThroughput", () => {
+	it("returns live rate when stream meter has evidence", () => {
+		const session = { isStreaming: true, tokenRate: { rate: () => 120.0 } };
+		expect(sessionThroughput(session)).toBe(120.0);
+	});
+
+	it("falls back to completed turn throughput when live meter is null", () => {
+		const messages = [
+			{ role: "assistant", duration: 1000, content: [], usage: { input: 10, output: 80, cacheWrite: 0, cost: { total: 0.01 } } },
+		];
+		const session = { isStreaming: true, tokenRate: { rate: () => null }, agent: { state: { messages } } };
+		expect(sessionThroughput(session)).toBe(80.0);
 	});
 });

@@ -100,7 +100,7 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { lastAssistantThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { lastAssistantThroughput, sessionThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import {
 	AUTO_THINKING,
 	assertModelSupportsEffortCeiling,
@@ -1696,17 +1696,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
-		if (activeSession?.isStreaming && activeSession.tokenRate) {
-			const liveRate = activeSession.tokenRate.rate();
-			if (liveRate !== null && Number.isFinite(liveRate)) {
-				progress.tokensPerSecond = liveRate;
-			}
-		} else if (activeSession) {
-			const completedRate = lastAssistantThroughput(activeSession.agent?.state?.messages);
-			if (completedRate !== undefined) {
-				progress.tokensPerSecond = completedRate;
-			}
-		}
+		progress.tokensPerSecond = sessionThroughput(activeSession);
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
