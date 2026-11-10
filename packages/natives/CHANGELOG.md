@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Computer input no longer fails with `InputBusy` the moment another omp session's call holds the desktop, such as an `apps.open` waiting for its window: it waits up to 5 seconds for that call to finish, on macOS, Linux and Windows
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed

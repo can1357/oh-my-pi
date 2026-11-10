@@ -19,7 +19,7 @@ use std::{
 use parking_lot::{Condvar, Mutex};
 
 use super::{
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	types::DesktopFocusReturn,
 };
 
@@ -36,6 +36,10 @@ pub(crate) use macos::{
 	MONITORED_TYPES, POINTER_PRESS_TYPES, SYNTHETIC_EVENT_TAG, add_live_tap, invalidate_live_tap,
 	is_pointer_press, monitor_seen, uptime_ns,
 };
+
+/// Time left before the run's deadline for a refusal to reach the caller.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct CancellationState {
@@ -698,18 +702,53 @@ pub(crate) struct InputLease {
 	_thread: PhantomData<Rc<()>>,
 }
 
+/// How long input waits for another session's operation to release control
+/// before it fails `InputBusy`. The longest routine holder is a macOS
+/// `apps.open`, which keeps control through the launch and up to three seconds
+/// of waiting for the app's first window.
+const LEASE_WAIT: Duration = Duration::from_secs(5);
+/// How often input waiting for control tries again.
+const LEASE_POLL: Duration = Duration::from_millis(50);
+
 impl InputLease {
 	/// `takeover` arms the physical-Escape stop for this operation; held control
-	/// keeps the stop it armed when it was granted.
+	/// keeps the stop it armed when it was granted. Control another session
+	/// owns is waited for up to [`LEASE_WAIT`], ending shortly before the
+	/// operation's deadline; cancelling the operation ends the wait.
 	pub(crate) fn acquire(token: &OperationToken, takeover: bool) -> CoreResult<Self> {
+		Self::acquire_within(token, takeover, Instant::now, |duration| token.wait(duration))
+	}
+
+	fn acquire_within(
+		token: &OperationToken,
+		takeover: bool,
+		now: impl Fn() -> Instant,
+		mut wait: impl FnMut(Duration) -> CoreResult<()>,
+	) -> CoreResult<Self> {
 		token.check()?;
-		let owner = {
-			let state = token.source.0.state.lock();
-			token.check()?;
-			match state.as_ref() {
-				Some(owner) => owner.clone(),
-				None => Arc::new(ControlLease::acquire(&token.source, takeover)?),
+		let limit = now() + LEASE_WAIT;
+		#[cfg(any(target_os = "macos", target_os = "linux"))]
+		let limit = token.deadline().map_or(limit, |deadline| {
+			limit.min(deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
+		});
+		let owner = loop {
+			let refused = {
+				let state = token.source.0.state.lock();
+				token.check()?;
+				match state.as_ref() {
+					Some(owner) => break owner.clone(),
+					None => match ControlLease::acquire(&token.source, takeover) {
+						Ok(owner) => break Arc::new(owner),
+						Err(error) if error.code == ErrorCode::InputBusy => error,
+						Err(error) => return Err(error),
+					},
+				}
+			};
+			let left = limit.saturating_duration_since(now());
+			if left.is_zero() {
+				return Err(refused);
 			}
+			wait(left.min(LEASE_POLL))?;
 		};
 		owner
 			.running
@@ -971,6 +1010,30 @@ mod tests {
 		let _ = std::fs::remove_file(KernelLease::path());
 	}
 
+	/// [`InputLease::acquire_within`] on a clock that starts at `start` and
+	/// moves only while it waits; `during(n)` runs in the `n`th wait. Returns
+	/// the outcome and the time waited.
+	fn acquire_on_test_clock(
+		token: &OperationToken,
+		start: Instant,
+		mut during: impl FnMut(u32),
+	) -> (CoreResult<InputLease>, Duration) {
+		let clock = Cell::new(start);
+		let mut waits = 0;
+		let lease = InputLease::acquire_within(
+			token,
+			false,
+			|| clock.get(),
+			|duration| {
+				waits += 1;
+				during(waits);
+				clock.set(clock.get() + duration);
+				Ok(())
+			},
+		);
+		(lease, clock.get() - start)
+	}
+
 	#[test]
 	fn task_lease_survives_retirement_but_abort_and_release_revoke_it() {
 		let _serial = OWNERSHIP_TEST.lock();
@@ -983,7 +1046,8 @@ mod tests {
 		{
 			let _operation = InputLease::acquire(&old, false).expect("reuse task ownership");
 			assert!(InputLease::acquire(&source.token(), false).is_err());
-			assert!(InputLease::acquire(&CancellationSource::default().token(), false).is_err());
+			let other = CancellationSource::default().token();
+			assert!(acquire_on_test_clock(&other, Instant::now(), |_| {}).0.is_err());
 		}
 		source.retire();
 		assert!(source.control_active());
@@ -1070,6 +1134,62 @@ mod tests {
 		assert!(token.check().is_err(), "the host interrupt still cancels background input");
 		drop(lease);
 		drop(KernelOwner::acquire().expect("background input releases kernel ownership"));
+		remove_test_lock();
+	}
+
+	#[test]
+	fn input_waits_for_another_hosts_control_up_to_its_bound() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		// Another host's lock, released during the second wait.
+		let mut other = Some(KernelLease::acquire().expect("another host's lease"));
+		let (lease, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |wait| {
+			if wait == 2 {
+				drop(other.take());
+			}
+		});
+		drop(lease.expect("input once the other host releases control"));
+		assert_eq!(waited, 2 * LEASE_POLL);
+
+		let other = KernelLease::acquire().expect("another host's lease");
+		let (refused, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited, LEASE_WAIT);
+		// A run ending sooner ends the wait shortly before its deadline.
+		#[cfg(any(target_os = "macos", target_os = "linux"))]
+		{
+			let start = Instant::now();
+			source.set_deadline(Some(start + Duration::from_secs(2)));
+			let (refused, waited) = acquire_on_test_clock(&source.token(), start, |_| {});
+			assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+			assert_eq!(waited, Duration::from_secs(2) - DEADLINE_MARGIN);
+		}
+		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn cancelling_input_that_waits_for_control_ends_the_wait() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let other = KernelLease::acquire().expect("another host's lease");
+		let token = source.token();
+		// The clock never moves: only the cancel can end the wait.
+		let start = Instant::now();
+		let mut waits = 0;
+		let cancelled = InputLease::acquire_within(
+			&token,
+			false,
+			|| start,
+			|duration| {
+				waits += 1;
+				source.cancel();
+				token.wait(duration)
+			},
+		);
+		assert_eq!(cancelled.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!(waits, 1);
+		drop(other);
 		remove_test_lock();
 	}
 
