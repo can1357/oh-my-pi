@@ -259,10 +259,10 @@ export function formatMetricDuration(metrics: AgentMetrics): string | undefined 
 }
 
 export function formatCost(cost: number): string {
-	const amount = metricNumber(cost);
-	if (amount < 0.01) return `$${amount.toFixed(4)}`;
-	if (amount < 1) return `$${amount.toFixed(3)}`;
-	return `$${amount.toFixed(2)}`;
+	if (!Number.isFinite(cost)) return "$—";
+	if (cost < 0.01) return `$${cost.toFixed(4)}`;
+	if (cost < 1) return `$${cost.toFixed(3)}`;
+	return `$${cost.toFixed(2)}`;
 }
 
 export function formatMetrics(metrics: AgentMetrics, showTokenRate = false): string {

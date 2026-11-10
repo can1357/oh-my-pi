@@ -378,4 +378,18 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(150.0);
 	});
+
+	it("prefers fresh park-time throughput over older historical metrics when session parks", () => {
+		const ref = {
+			id: "worker",
+			session: null,
+			history: {
+				tokensPerSecond: 150.0,
+				metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 50.0 },
+			},
+		} as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(150.0);
+	});
 });

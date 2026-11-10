@@ -113,6 +113,31 @@ export function usageThroughput(usage: { output: number }, durationMs: number | 
 	return (usage.output / durationMs) * 1000;
 }
 
+/** Find the newest assistant message with valid generation duration and compute its throughput. */
+export function lastAssistantThroughput(messages: readonly unknown[] | undefined): number | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i];
+		if (
+			m &&
+			typeof m === "object" &&
+			"role" in m &&
+			m.role === "assistant" &&
+			"duration" in m &&
+			typeof m.duration === "number" &&
+			"usage" in m &&
+			m.usage &&
+			typeof m.usage === "object" &&
+			"output" in m.usage &&
+			typeof m.usage.output === "number"
+		) {
+			const tps = usageThroughput({ output: m.usage.output }, m.duration);
+			if (tps !== undefined) return tps;
+		}
+	}
+	return undefined;
+}
+
 /** Every metric except throughput, which the native row declares as a `rate`. */
 function usageRowBaseSpecs(usage: Usage, ttftMs?: number, timestamp?: number, turnElapsedMs?: number): MetricSpec[] {
 	const totalInput = usage.input + usage.cacheWrite;

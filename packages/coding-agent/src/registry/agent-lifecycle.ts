@@ -24,7 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
-import { usageThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
+import { lastAssistantThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -425,29 +425,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				try {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
-					let tokensPerSecond: number | undefined;
-					const messages = session.agent?.state?.messages;
-					if (Array.isArray(messages)) {
-						for (let i = messages.length - 1; i >= 0; i--) {
-							const m = messages[i];
-							if (
-								m &&
-								typeof m === "object" &&
-								"role" in m &&
-								m.role === "assistant" &&
-								"duration" in m &&
-								typeof m.duration === "number" &&
-								"usage" in m &&
-								m.usage &&
-								typeof m.usage === "object" &&
-								"output" in m.usage &&
-								typeof m.usage.output === "number"
-							) {
-								tokensPerSecond = usageThroughput({ output: m.usage.output }, m.duration);
-								if (tokensPerSecond !== undefined) break;
-							}
-						}
-					}
+					const tokensPerSecond = lastAssistantThroughput(session.agent?.state?.messages);
 					const historyPatch: { directCost?: number; tokensPerSecond?: number } = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
 						historyPatch.directCost = directCost;
