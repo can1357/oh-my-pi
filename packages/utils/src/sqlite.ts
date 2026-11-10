@@ -373,6 +373,24 @@ export function checkpointWal(db: Database): void {
 	db.run("PRAGMA wal_checkpoint(PASSIVE)");
 }
 
+// These probes scope statements with `using`: an unfinalized statement keeps the
+// connection (and its db/-wal/-shm files) open after close() until GC, and
+// Windows refuses to delete or replace a file that is still open.
+
+/** Whether `table` exists as a table or view; lets cleanup tolerate stores an older release created. */
+export function tableExists(db: Database, table: string): boolean {
+	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
+	const row = stmt.get(table) as { present?: number } | null;
+	return row?.present === 1;
+}
+
+/** Whether `table` has `column`; false when the table is missing. */
+export function tableHasColumn(db: Database, table: string, column: string): boolean {
+	using stmt = db.prepare(`PRAGMA table_info(${table})`);
+	const rows = stmt.all() as Array<{ name?: string | null }>;
+	return rows.some(row => row.name === column);
+}
+
 /** Damaged regions one {@link readSalvageableRows} scan skips before abandoning the rest of the table. */
 const SALVAGE_MAX_DAMAGED_REGIONS = 1000;
 

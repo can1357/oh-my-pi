@@ -218,13 +218,19 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
-		await Promise.all([
-			import("@oh-my-pi/pi-tui/apps/session-picker"),
-			import("./session/history-storage"),
-			import("./session/session-pins"),
-			import("./session/session-storage"),
-		]);
+	const [
+		{ selectSession },
+		{ HistoryStorage },
+		{ loadPinnedSessionIds, setSessionPinned },
+		{ deleteSession },
+		{ FileSessionStorage },
+	] = await Promise.all([
+		import("@oh-my-pi/pi-tui/apps/session-picker"),
+		import("./session/history-storage"),
+		import("./session/session-pins"),
+		import("./session/session-purge"),
+		import("./session/session-storage"),
+	]);
 	return (sessions, options) => {
 		const storage = new FileSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
@@ -236,7 +242,7 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 				return query => history.matchingSessionIds(query);
 			},
 			deleteSession: async session => {
-				await storage.deleteSessionWithArtifacts(session.path);
+				await deleteSession(storage, session);
 				return true;
 			},
 			// Foreign import pickers list source-owned sessions, so rename and

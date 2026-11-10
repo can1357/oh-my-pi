@@ -22,6 +22,8 @@ import {
 	isPidAlive,
 	normalizePathForComparison,
 	readLines,
+	tableExists,
+	tableHasColumn,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -31,6 +33,7 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
+import { purgeSessionHistory } from "../session/session-purge";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
@@ -1135,44 +1138,6 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 // Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
 // connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
 // to delete or replace a file that is still open.
-function tableExists(db: Database, table: string): boolean {
-	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
-	const row = stmt.get(table) as { present?: number } | null;
-	return row?.present === 1;
-}
-
-function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
-	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
-		const hasRecaps = tableExists(db, "session_recaps");
-		const hasTitles = tableExists(db, "session_titles");
-		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = hasHistory && tableExists(db, "history_fts");
-		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps and titles are session-scoped side output with no life beyond their session.
-		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
-		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
-		let deleted = 0;
-		const tx = db.transaction((ids: string[]) => {
-			for (const id of ids) {
-				deleteRecapsStmt?.run(id);
-				deleteTitlesStmt?.run(id);
-				if (!deleteStmt) continue;
-				const result = deleteStmt.run(id) as SqliteRunResult;
-				deleted += sqliteNumber(result.changes);
-			}
-			if (deleted > 0 && hasFts) db.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
-		});
-		tx(sessionIds);
-		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
-	} finally {
-		db.close();
-	}
-}
-
 async function collectArchivedSessionIds(archiveRoot: string, track: ProgressTracker): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const file of track.each("Scanning archive for history ids", await collectCompressedJsonlFiles(archiveRoot))) {
@@ -1199,7 +1164,7 @@ async function cleanupHistoryRowsForArchivedSessions(
 	}
 
 	try {
-		const cleanup = deleteHistoryRowsForSessions(dbPath, [...cleanupIds]);
+		const cleanup = purgeSessionHistory(dbPath, [...cleanupIds]);
 		result.historyRowsDeleted = cleanup.deleted;
 		result.ftsRebuilt = cleanup.ftsRebuilt;
 	} catch (error) {
@@ -1272,12 +1237,6 @@ function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentit
 		for (const identity of identities[table]) keys.add(statsIdentityKey(table, identity));
 	}
 	return keys;
-}
-
-function tableHasColumn(db: Database, table: string, column: string): boolean {
-	using stmt = db.prepare(`PRAGMA table_info(${table})`);
-	const rows = stmt.all() as Array<{ name?: string | null }>;
-	return rows.some(row => row.name === column);
 }
 
 function collectStoredStatsSessionPaths(db: Database): string[] {

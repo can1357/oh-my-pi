@@ -1,10 +1,12 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getAgentDbPath, getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getStatsDbPath, isEnoent, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
 	applySessionParseResults,
 	completeSessionSync,
+	deleteSessionFileRows,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	type FileOffset,
@@ -78,6 +80,31 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
 	return await withFileLock(`${dbPath}.sync`, fn, {
 		retryDelayMs: STATS_SYNC_LOCK_RETRY_MS,
 		retries: Math.ceil(STATS_SYNC_LOCK_WAIT_MS / STATS_SYNC_LOCK_RETRY_MS),
+	});
+}
+
+/**
+ * Drop every stats row ingested from a deleted transcript and from the nested
+ * subagent transcripts under its artifacts directory; the next full sync lets
+ * surviving forks re-own entries the transcript owned. A store that was never
+ * created is left uncreated. Returns the number of rows deleted.
+ */
+export async function purgeSessionStats(sessionFile: string, dbPath = getStatsDbPath()): Promise<number> {
+	try {
+		await fs.promises.stat(dbPath);
+	} catch (error) {
+		if (isEnoent(error)) return 0;
+		throw error;
+	}
+	const nestedPrefix = `${sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : sessionFile}${path.sep}`;
+	return await withStatsSyncLock(dbPath, async () => {
+		const database = new Database(dbPath);
+		try {
+			database.run("PRAGMA busy_timeout = 5000");
+			return deleteSessionFileRows(database, sessionFile, nestedPrefix);
+		} finally {
+			database.close();
+		}
 	});
 }
 

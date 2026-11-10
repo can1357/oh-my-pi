@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `purgeSessionStats` to drop a deleted session's stats rows, including its subagents', so the next sync lets surviving forks re-own the turns they copied ([#18674](https://github.com/can1357/oh-my-pi/issues/18674))
+
 ## [18.18.4] - 2026-11-09
 
 ### Fixed
