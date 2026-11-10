@@ -781,6 +781,9 @@ const SUBAGENT_STOP_PASS_CANCELLED =
 /** Why a wake turn's candidate was dropped: a newer turn took the session before handlers could judge it. */
 const WAKE_SUPERSEDED_UNJUDGED =
 	"a newer turn took the session before the subagent_stop handlers judged this turn's result, so it was not published";
+/** Why a run's yield was dropped or failed: results delivered after it superseded it and no refreshed yield covered them. */
+const SUBAGENT_YIELD_STALE_AFTER_ASYNC =
+	"Background job results arrived after the subagent's last yield; it did not submit a refreshed yield covering them.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -3159,8 +3162,7 @@ async function driveSessionToResult(
 		// output preserved as salvage).
 		if (monitor.yieldInvalidatedByAsync() && !abortSignal.aborted) {
 			exitCode = 1;
-			error ??=
-				"Background job results arrived after the subagent's last yield; it did not submit a refreshed yield covering them.";
+			error ??= SUBAGENT_YIELD_STALE_AFTER_ASYNC;
 		}
 	} catch (err) {
 		if (err instanceof StopPassCancelledError && !abortSignal.aborted) {
@@ -4012,6 +4014,16 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					cancelReason = SUBAGENT_STOP_PASS_CANCELLED;
 				}
 			}
+			// Async results superseded the turn's yield and no fresh one landed: handlers
+			// never judged it and cannot now, so it is dropped like a refused payload
+			// instead of being published past them.
+			const staleAfterAsync =
+				structured &&
+				session.extensionRunner?.hasHandlers("subagent_stop") === true &&
+				!turnMonitor.yieldCalled() &&
+				turnMonitor.yieldInvalidatedByAsync() &&
+				(turnMonitor.progress.extractedToolData?.yield?.length ?? 0) > 0;
+			if (staleAfterAsync) turnMonitor.rejectCandidate("cancelled");
 			const activeSession = turnMonitor.takeActiveSession();
 			if (activeSession) turnMonitor.captureSalvage(activeSession);
 			const lastAssistant = session.getLastAssistantMessage();
@@ -4022,6 +4034,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// last assistant turn is not an abort of the turn's work. A pass
 			// cancelled before its verdict cancels the turn instead.
 			const unresolvedRefusal = turnMonitor.yieldInvalidatedByStop() && !yielded;
+			const unpublished = unresolvedRefusal
+				? subagentStopRefusalUnresolved(structured)
+				: staleAfterAsync
+					? SUBAGENT_YIELD_STALE_AFTER_ASYNC
+					: undefined;
 			const aborted =
 				runtimeLimitExceeded ||
 				budgetExceeded ||
@@ -4043,11 +4060,11 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					: thrown === undefined
 						? undefined
 						: String(thrown)) ??
-				(unresolvedRefusal ? subagentStopRefusalUnresolved(structured) : undefined);
+				unpublished;
 			const errorForPeer =
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown)) ??
-				(unresolvedRefusal ? subagentStopRefusalUnresolved(structured) : undefined);
+				unpublished;
 			turnMonitor.finish();
 			if (yielded) {
 				// Acceptance boundary for an autonomous wake turn (#11079): the
