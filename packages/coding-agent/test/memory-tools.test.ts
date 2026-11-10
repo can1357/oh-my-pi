@@ -270,15 +270,16 @@ describe("Supermemory tools", () => {
 		expect(save).toHaveBeenCalledTimes(2);
 	});
 
-	it("factories offer recall/retain but never reflect or memory_edit, and only once configured", () => {
+	it("factories offer recall/retain/memory_edit but never reflect, and only once configured", () => {
 		const configured = supermemorySession();
 		expect(MemoryRetainTool.createIf(configured)).toBeInstanceOf(MemoryRetainTool);
 		expect(MemoryRecallTool.createIf(configured)).toBeInstanceOf(MemoryRecallTool);
+		expect(MemoryEditTool.createIf(configured)).toBeInstanceOf(MemoryEditTool);
 		expect(MemoryReflectTool.createIf(configured)).toBeNull();
-		expect(MemoryEditTool.createIf(configured)).toBeNull();
 
 		Bun.env.SUPERMEMORY_BASE_URL = "http://sm.test";
 		expect(MemoryRecallTool.createIf(supermemorySession())).toBeNull();
+		expect(MemoryEditTool.createIf(supermemorySession())).toBeNull();
 	});
 });
 

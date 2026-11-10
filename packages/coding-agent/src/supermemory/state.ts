@@ -125,6 +125,14 @@ export class SupermemorySessionState {
 		);
 	}
 
+	/** `memory_edit update`: new version of memory `id` in this state's container (redacted). */
+	updateMemory(id: string, content: string, signal?: AbortSignal): Promise<string | undefined> {
+		return this.client.updateMemory(
+			{ id, containerTag: this.containerTag, newContent: this.#redact(content) },
+			signal,
+		);
+	}
+
 	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		const resultLimit = Math.max(1, Math.min(limit ?? this.config.recallLimit, this.config.recallLimit));
 		const results = await this.client.search(

@@ -746,7 +746,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
-		if (cfgMemoryBackend.get(session.settings) === "mnemopi" && !requestedTools.includes("memory_edit")) {
+		if (["mnemopi", "supermemory"].includes(memoryBackend) && !requestedTools.includes("memory_edit")) {
 			requestedTools.push("memory_edit");
 		}
 		if (externalThinkingActive && !requestedTools.includes("think")) {
@@ -817,7 +817,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 			return ["hindsight", "mnemopi", "supermemory"].includes(cfgMemoryBackend.get(session.settings));
 		}
 		if (name === "reflect") return ["hindsight", "mnemopi"].includes(cfgMemoryBackend.get(session.settings));
-		if (name === "memory_edit") return cfgMemoryBackend.get(session.settings) === "mnemopi";
+		if (name === "memory_edit") return ["mnemopi", "supermemory"].includes(cfgMemoryBackend.get(session.settings));
 		if (name === "manage_skill")
 			return (
 				cfgAutolearnEnabled.get(session.settings) &&

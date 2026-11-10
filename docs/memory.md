@@ -180,7 +180,8 @@ supermemory:
 - **Retain**: with `supermemory.autoRetain` (default on), every `supermemory.retainEveryNTurns` (default 3) user turns the window is stored as one document with a stable `customId`, so retries update the window and later windows never overwrite earlier ones. Windows over 60,000 characters keep their newest part and record the truncation in metadata. `/memory enqueue` stores every turn not yet retained as one document right away; a resumed process restarts at the last complete-window boundary, so its next window may upsert over that document. Windows that failed, or that the 2 s shutdown flush cut off, are not retried. `retain` and `learn` store items directly. Subagents can use the tools but never auto-recall or auto-retain.
 - **Base URL**: must be a plain `https:` origin, or `http:` on `localhost`, `127.0.0.1` or `[::1]`, with no credentials, query or fragment; redirects are refused. Anything else leaves the backend inert.
 - **Clear**: `/memory clear` waits for pending writes and drops the cached recall; the backend stays active. Server-side memories are untouched; delete them from the Supermemory console.
-- `reflect` and `memory_edit` are not available with this backend.
+- **Edit**: `memory_edit` edits memories by the `(id: …)` that `recall` shows, in the session container. `update` creates a new memory version (`PATCH /v4/memories`, content redacted; `importance` is unsupported). `invalidate` and `forget` both soft-forget (`DELETE /v4/memories`): the memory leaves search but stays on the server. `invalidate` records `superseded by <replacement_id>` as the reason; unlike Mnemopi, `forget` is not a hard delete. Document-chunk results have no editable id.
+- `reflect` is not available with this backend.
 
 ## Sharpshooter backend
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { SupermemoryClient } from "@oh-my-pi/pi-coding-agent/supermemory/client";
+import { SupermemoryClient, SupermemoryHttpError } from "@oh-my-pi/pi-coding-agent/supermemory/client";
 
 const KEY = "sm-synthetic-key";
 
@@ -70,9 +70,9 @@ describe("SupermemoryClient", () => {
 			limit: 5,
 			threshold: 0.5,
 		});
-		expect(results.map(r => [r.id, r.content])).toEqual([
-			["a", "memory text"],
-			["b", "chunk only"],
+		expect(results.map(r => [r.id, r.kind, r.content])).toEqual([
+			["a", "memory", "memory text"],
+			["b", "chunk", "chunk only"],
 		]);
 	});
 
@@ -80,7 +80,8 @@ describe("SupermemoryClient", () => {
 		serve(() => new Response(`denied for ${KEY}`, { status: 401 }));
 		const client = new SupermemoryClient("http://127.0.0.1:1", KEY);
 		const httpError = await client.profile("omp-global").catch((error: Error) => error);
-		expect(httpError).toBeInstanceOf(Error);
+		expect(httpError).toBeInstanceOf(SupermemoryHttpError);
+		expect((httpError as SupermemoryHttpError).status).toBe(401);
 		expect((httpError as Error).message).toBe("Supermemory request failed with HTTP 401.");
 
 		vi.restoreAllMocks();

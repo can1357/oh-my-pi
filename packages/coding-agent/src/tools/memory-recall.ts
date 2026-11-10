@@ -23,6 +23,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	get description(): string {
 		return prompt.render(recallDescription, {
 			toolRefs: sessionMemoryToolRefs(this.session),
+			supermemory: cfgMemoryBackend.get(this.session.settings) === "supermemory",
 		});
 	}
 	readonly parameters = memoryRecallSchema;
@@ -56,7 +57,14 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 						useless: true,
 					};
 				}
-				const formatted = formatMemories(results.map(item => ({ text: item.content })));
+				// Memory ids feed `memory_edit`; chunk ids address documents and are not editable.
+				const formatted = formatMemories(
+					results.map(item =>
+						item.kind === "memory"
+							? { text: `${item.content} (id: ${item.id})` }
+							: { text: item.content, type: "document chunk" },
+					),
+				);
 				return {
 					content: [
 						{

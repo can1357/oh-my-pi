@@ -5,6 +5,8 @@ import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/sessio
 import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
 import { SupermemoryClient } from "@oh-my-pi/pi-coding-agent/supermemory/client";
 import type { SupermemorySessionState } from "@oh-my-pi/pi-coding-agent/supermemory/state";
+import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
+import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 
 const CONFIGURED = { "memory.backend": "supermemory" };
 
@@ -88,12 +90,40 @@ function spyRecall() {
 		.mockResolvedValue({ static: ["prefers <tabs>"], dynamic: [] });
 	const search = vi
 		.spyOn(SupermemoryClient.prototype, "search")
-		.mockResolvedValue([{ id: "m1", content: "uses bun" }]);
+		.mockResolvedValue([{ id: "m1", kind: "memory", content: "uses bun" }]);
 	return { profile, search };
 }
 
 const ENV = ["SUPERMEMORY_API_KEY", "SUPERMEMORY_BASE_URL"] as const;
 const savedEnv = new Map(ENV.map(name => [name, Bun.env[name]]));
+
+/** Answers every request with `status`/`body` and records method, URL and JSON body. */
+function serve(status: number, body: unknown) {
+	const requests: Array<{ url: string; method?: string; body: unknown }> = [];
+	const fetchMock: typeof globalThis.fetch = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit | BunFetchRequestInit): Promise<Response> => {
+			requests.push({ url: String(input), method: init?.method, body: JSON.parse(String(init?.body ?? "null")) });
+			return Response.json(body, { status });
+		},
+		{ preconnect: globalThis.fetch.preconnect },
+	);
+	vi.spyOn(globalThis, "fetch").mockImplementation(fetchMock);
+	return requests;
+}
+
+async function startedTools() {
+	const session = makeSession();
+	await start(session);
+	const edit = MemoryEditTool.createIf(session as never);
+	const recall = MemoryRecallTool.createIf(session as never);
+	const tag = session.getSupermemorySessionState()?.containerTag;
+	if (!edit || !recall || !tag) throw new Error("Supermemory tools unavailable");
+	return { edit, recall, tag };
+}
+
+function text(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content.map(part => part.text ?? "").join("");
+}
 
 /** Any request a test did not script is a bug: fail it instead of reaching the network. */
 function denyNetwork() {
@@ -170,7 +200,9 @@ describe("supermemoryBackend", () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),
 		);
-		const search = vi.spyOn(SupermemoryClient.prototype, "search").mockResolvedValue([{ id: "m", content: "kept" }]);
+		const search = vi
+			.spyOn(SupermemoryClient.prototype, "search")
+			.mockResolvedValue([{ id: "m", kind: "memory", content: "kept" }]);
 		const session = makeSession();
 		await start(session);
 		const partial = await supermemoryBackend.beforeAgentStartPrompt!(session as never, "q", undefined);
@@ -346,5 +378,79 @@ describe("supermemoryBackend", () => {
 		expect(sent).not.toContain(secret);
 		expect(sent).not.toContain("sm-synthetic-key");
 		expect(sent).toContain("[REDACTED]");
+	});
+
+	it("recall lists editable memory ids and marks document chunks", async () => {
+		serve(200, {
+			results: [
+				{ id: "m1", memory: "uses bun" },
+				{ id: "c1", chunk: "doc text" },
+			],
+		});
+		const { recall } = await startedTools();
+		const output = text(await recall.execute("call", { query: "bun" }));
+		expect(output).toContain("- uses bun (id: m1)");
+		expect(output).toContain("- doc text [document chunk]");
+		expect(output).not.toContain("c1");
+	});
+
+	it("memory_edit update PATCHes a redacted new version in the session container", async () => {
+		const requests = serve(200, { id: "m2", memory: "new", version: 2 });
+		const { edit, tag } = await startedTools();
+		const output = text(
+			await edit.execute("call", {
+				op: "update",
+				id: "m1",
+				content: "uses bun; key sm-synthetic-key",
+				importance: 1,
+			}),
+		);
+		expect(requests).toEqual([
+			{
+				url: "http://127.0.0.1:1/v4/memories",
+				method: "PATCH",
+				body: { id: "m1", containerTag: tag, newContent: "uses bun; key [REDACTED]" },
+			},
+		]);
+		expect(output).toContain("new version id m2");
+		expect(output).toContain("no importance; it was ignored");
+	});
+
+	it("memory_edit forget and invalidate soft-forget with DELETE", async () => {
+		const requests = serve(200, { id: "m1", forgotten: true });
+		const { edit, tag } = await startedTools();
+		await edit.execute("call", { op: "forget", id: "m1" });
+		await edit.execute("call", { op: "invalidate", id: "m1", replacement_id: "m2" });
+		await edit.execute("call", { op: "invalidate", id: "m3" });
+		expect(requests.map(request => [request.method, request.url, request.body])).toEqual([
+			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m1", containerTag: tag }],
+			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m1", containerTag: tag, reason: "superseded by m2" }],
+			["DELETE", "http://127.0.0.1:1/v4/memories", { id: "m3", containerTag: tag, reason: "invalidated" }],
+		]);
+	});
+
+	it("memory_edit maps 404 and 409 to clear errors", async () => {
+		const { edit, tag } = await startedTools();
+		serve(404, { error: "not found" });
+		await expect(edit.execute("call", { op: "update", id: "m1", content: "x" })).rejects.toThrow(
+			`Memory m1 was not found in container ${tag}.`,
+		);
+		vi.restoreAllMocks();
+		serve(409, { error: "already forgotten" });
+		await expect(edit.execute("call", { op: "forget", id: "m1" })).rejects.toThrow(
+			`Memory m1 is already forgotten in container ${tag}.`,
+		);
+	});
+
+	it("memory_edit rejects update without content before any request", async () => {
+		const { edit } = await startedTools();
+		const fetchSpy = denyNetwork();
+		await expect(edit.execute("call", { op: "update", id: "m1" })).rejects.toThrow(
+			"memory_edit update requires content.",
+		);
+		await expect(edit.execute("call", { op: "update", id: "m1", importance: 0.5 })).rejects.toThrow(
+			"Supermemory memories have no importance",
+		);
+		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 });

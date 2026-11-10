@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `supermemory` memory backend: first-turn recall and periodic retention against Supermemory, scoped per repository through an opaque container tag, with `recall`, `retain`, and `learn` support
+- Added the `supermemory` memory backend: first-turn recall and periodic retention against Supermemory, scoped per repository through an opaque container tag, with `recall`, `retain`, `learn`, and `memory_edit` support (`update` creates a new memory version; `forget`/`invalidate` soft-forget)
 
 ## [18.18.3] - 2026-11-09
 

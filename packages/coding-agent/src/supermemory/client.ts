@@ -1,5 +1,5 @@
 /**
- * Thin client for the documented Supermemory v3 documents and v4 search/profile
+ * Thin client for the documented Supermemory v3 documents and v4 search/profile/memories
  * endpoints. Redirects are refused so the bearer token never follows one. Error messages carry only the endpoint outcome (HTTP status, timeout,
  * cancellation) — never the API key, request body, or response body.
  */
@@ -12,6 +12,8 @@ export interface SupermemoryDocument {
 
 export interface SupermemorySearchItem {
 	id: string;
+	/** `memory` ids are accepted by `/v4/memories`; `chunk` ids address document chunks and are not editable. */
+	kind: "memory" | "chunk";
 	content: string;
 	similarity?: number;
 	updatedAt?: string;
@@ -28,6 +30,20 @@ export interface SupermemoryDocumentInput {
 	/** Upsert key: a later write with the same id replaces the document. */
 	customId?: string;
 	metadata?: Record<string, string | number | boolean>;
+}
+
+/** One memory in one container, by id. */
+export interface SupermemoryMemoryRef {
+	id: string;
+	containerTag: string;
+}
+
+/** HTTP failure; `status` lets callers map documented error codes. */
+export class SupermemoryHttpError extends Error {
+	constructor(readonly status: number) {
+		super(`Supermemory request failed with HTTP ${status}.`);
+		this.name = "SupermemoryHttpError";
+	}
 }
 
 export interface SupermemorySearchInput {
@@ -62,7 +78,7 @@ export class SupermemoryClient {
 	}
 
 	async createDocument(input: SupermemoryDocumentInput, signal?: AbortSignal): Promise<SupermemoryDocument> {
-		const object = asRecord(await this.#post("/v3/documents", input, signal));
+		const object = asRecord(await this.#request("POST", "/v3/documents", input, signal));
 		if (!object || typeof object.id !== "string" || typeof object.status !== "string") {
 			throw new Error("Supermemory returned an invalid document response.");
 		}
@@ -70,17 +86,18 @@ export class SupermemoryClient {
 	}
 
 	async search(input: SupermemorySearchInput, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
-		const rawResults = asRecord(await this.#post("/v4/search", input, signal))?.results;
+		const rawResults = asRecord(await this.#request("POST", "/v4/search", input, signal))?.results;
 		if (!Array.isArray(rawResults)) throw new Error("Supermemory returned an invalid search response.");
 		const results: SupermemorySearchItem[] = [];
 		for (const raw of rawResults) {
 			const item = asRecord(raw);
 			if (!item || typeof item.id !== "string") continue;
-			const content =
-				typeof item.memory === "string" ? item.memory : typeof item.chunk === "string" ? item.chunk : undefined;
-			if (!content) continue;
+			const kind = typeof item.memory === "string" ? "memory" : "chunk";
+			const content = kind === "memory" ? item.memory : item.chunk;
+			if (typeof content !== "string" || !content) continue;
 			results.push({
 				id: item.id,
+				kind,
 				content,
 				similarity: typeof item.similarity === "number" ? item.similarity : undefined,
 				updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : undefined,
@@ -90,19 +107,33 @@ export class SupermemoryClient {
 	}
 
 	async profile(containerTag: string, signal?: AbortSignal): Promise<SupermemoryProfile> {
-		const profile = asRecord(asRecord(await this.#post("/v4/profile", { containerTag }, signal))?.profile);
+		const profile = asRecord(asRecord(await this.#request("POST", "/v4/profile", { containerTag }, signal))?.profile);
 		if (!profile) throw new Error("Supermemory returned an invalid profile response.");
 		return { static: asStringArray(profile.static), dynamic: asStringArray(profile.dynamic) };
 	}
 
-	async #post(pathname: string, body: unknown, callerSignal?: AbortSignal): Promise<unknown> {
+	/** Replaces a memory's content by creating a new version; resolves the new version's id when the server returns one. */
+	async updateMemory(
+		input: SupermemoryMemoryRef & { newContent: string },
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		const id = asRecord(await this.#request("PATCH", "/v4/memories", input, signal))?.id;
+		return typeof id === "string" ? id : undefined;
+	}
+
+	/** Soft-forgets a memory: excluded from search, preserved server-side. */
+	async forgetMemory(input: SupermemoryMemoryRef & { reason?: string }, signal?: AbortSignal): Promise<void> {
+		await this.#request("DELETE", "/v4/memories", input, signal);
+	}
+
+	async #request(method: string, pathname: string, body: unknown, callerSignal?: AbortSignal): Promise<unknown> {
 		if (callerSignal?.aborted) throw new Error("Supermemory request cancelled.");
 		const timeoutSignal = AbortSignal.timeout(this.#timeoutMs);
 		const signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
 		let response: Response;
 		try {
 			response = await fetch(`${this.#baseUrl}${pathname}`, {
-				method: "POST",
+				method,
 				headers: { Authorization: `Bearer ${this.#apiKey}`, "Content-Type": "application/json" },
 				body: JSON.stringify(body),
 				redirect: "error",
@@ -113,7 +144,7 @@ export class SupermemoryClient {
 			if (timeoutSignal.aborted) throw new Error("Supermemory request timed out.");
 			throw new Error("Supermemory request failed.");
 		}
-		if (!response.ok) throw new Error(`Supermemory request failed with HTTP ${response.status}.`);
+		if (!response.ok) throw new SupermemoryHttpError(response.status);
 		try {
 			return await response.json();
 		} catch {

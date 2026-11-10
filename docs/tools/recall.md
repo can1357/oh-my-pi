@@ -93,7 +93,7 @@ When no matches exist:
 
 - Reads `session.getSupermemorySessionState()`; throws `Supermemory backend is not initialised for this session.` when it is missing.
 - `POST /v4/search` on the session container with `supermemory.searchMode`, `supermemory.threshold` and `supermemory.recallLimit` (the request asks for at least 2 and trims locally). The query is secret-redacted first.
-- Results render through `formatMemories(...)` like Hindsight; empty results return `No relevant memories found.` with `useless: true`.
+- Results render through `formatMemories(...)` like Hindsight; empty results return `No relevant memories found.` with `useless: true`. Memory results carry `(id: <id>)`, the memory id `memory_edit` accepts; document-chunk results (`supermemory.searchMode: hybrid`) are marked `[document chunk]` and show no id, because chunk ids are not memory ids. Content is shown in full, not clipped.
 - HTTP, timeout (15 s) and invalid-JSON failures throw messages that never include the API key or response body.
 - Subagents get their own state on the same container. See [Supermemory remote backend](../memory.md#supermemory-remote-backend).
 
