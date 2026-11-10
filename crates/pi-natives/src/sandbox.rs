@@ -21,7 +21,7 @@ use std::{
 use mxc_sdk::v1::{
 	self, BackendCapability, ContainerRequest, Containment, FilesystemPolicy, MxcProcess,
 	NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, NetworkRuntimeConfig,
-	ProxyEnforcement, SpawnOptions, WaitResult,
+	ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, WaitResult,
 	policy::filesystem::{
 		FilesystemPolicyResult, ToolsPolicyOptions, available_tools_policy, temporary_files_policy,
 		user_profile_policy,
@@ -39,6 +39,12 @@ use crate::{
 	shell::{BRIDGE_QUEUE_CHUNKS, FORWARD_STALL_TIMEOUT},
 	task,
 };
+
+/// MXC telemetry, opted out explicitly. On Windows MXC can emit ETW events
+/// (routed to Microsoft only in builds with a provider group GUID, and only
+/// with persisted user consent); omission is also off in mxc-sdk 1.0.1, but
+/// stating it keeps every invocation off whatever a later SDK defaults to.
+const TELEMETRY_OFF: Option<TelemetryConfig> = Some(TelemetryConfig { enabled: Some(false) });
 
 // ---------------------------------------------------------------------------
 // Host support
@@ -239,7 +245,7 @@ fn probe_bubblewrap() -> std::result::Result<(), String> {
 		timeout_ms: Some(15_000),
 		..ContainerRequest::new("exit 0")
 	};
-	let detail = match v1::run(request, Default::default()) {
+	let detail = match v1::run(request, RunOptions { telemetry: TELEMETRY_OFF }) {
 		Ok(output) => match output.outcome {
 			WaitResult::Exited(0) => return Ok(()),
 			outcome => {
@@ -617,11 +623,12 @@ impl SandboxProcess {
 		});
 		task::future(env, "sandbox.spawn", async move {
 			let request = request.map_err(Error::from_reason)?;
-			let process =
-				tokio::task::spawn_blocking(move || v1::spawn(request, SpawnOptions::default()))
-					.await
-					.map_err(|err| Error::from_reason(format!("sandbox spawn task failed: {err}")))?
-					.map_err(|err| mxc_error(&err))?;
+			let process = tokio::task::spawn_blocking(move || {
+				v1::spawn(request, SpawnOptions { telemetry: TELEMETRY_OFF })
+			})
+			.await
+			.map_err(|err| Error::from_reason(format!("sandbox spawn task failed: {err}")))?
+			.map_err(|err| mxc_error(&err))?;
 			Ok(Self::start(process, on_stdout, on_stderr))
 		})
 	}
