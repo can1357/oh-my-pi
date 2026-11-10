@@ -1471,12 +1471,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const btw = new RpcBtwController(session, output);
 	// Frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
 	const nextMessagePredictor = new RpcNextMessagePredictor(session, output, {
-		// Admission, host `bash` and session changes run on background tasks the serial queue no longer waits for.
-		isHostBusy: () => orderedInputsInFlight > 0 || hostBashInFlight > 0 || sessionChangesInProgress > 0,
+		// Retiring host input counts from the moment it is read from stdin, so a long serial command it
+		// waits behind (a `login`) cannot reopen the gap; admission outlives an `abort_and_prompt` answer.
+		isHostBusy: () => retiringInputsInFlight.size > 0 || orderedInputsInFlight > 0 || sessionChangesInProgress > 0,
 	});
-	// Counted from handler entry through the recorded result: an extension `user_bash` hook runs before
-	// the session reports the shell as running, and the result lands without a session event.
-	let hostBashInFlight = 0;
+	// Host input that retires predictions (see `PREDICTION_RETIRING_COMMANDS`), from the moment it is read
+	// until its handler settles. That spans a host `bash` result too: an extension `user_bash` hook runs
+	// before the session reports the shell as running, and the result lands without a session event.
+	const retiringInputsInFlight = new Set<RpcCommand>();
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
@@ -2060,10 +2062,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Handle a single command
 	const handleCommandImpl = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
-		// The user acted from the composer, and these can rewrite the conversation without a session
-		// event (a contextual bash result, a handoff, a builtin): retire the prediction before any of it.
-		if (Object.hasOwn(PREDICTION_RETIRING_COMMANDS, command.type)) nextMessagePredictor.close();
-
 		switch (command.type) {
 			case "negotiate_protocol": {
 				if (command.protocolVersion !== 2)
@@ -2686,15 +2684,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
 					return error(id, "bash", "excludeFromContext must be a boolean");
 				}
-				hostBashInFlight++;
-				try {
-					const result = await session.executeBash(command.command, undefined, {
-						excludeFromContext: command.excludeFromContext,
-					});
-					return success(id, "bash", result);
-				} finally {
-					hostBashInFlight--;
-				}
+				const result = await session.executeBash(command.command, undefined, {
+					excludeFromContext: command.excludeFromContext,
+				});
+				return success(id, "bash", result);
 			}
 
 			case "abort_bash": {
@@ -2987,8 +2980,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	};
 
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
-		if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return handleCommandImpl(command);
-		return withSessionChange(() => handleCommandImpl(command));
+		try {
+			if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return await handleCommandImpl(command);
+			return await withSessionChange(() => handleCommandImpl(command));
+		} finally {
+			retiringInputsInFlight.delete(command);
+		}
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
@@ -3021,7 +3018,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
-		acceptInput: command => inputGate.accept(command),
+		acceptInput: command => {
+			inputGate.accept(command);
+			// The user acted from the composer, and these can rewrite the conversation without a session event
+			// (a contextual bash result, a handoff, a builtin): retire the prediction as soon as the input is
+			// read, not when the serial queue reaches it, and refuse new ones until its handler settles.
+			if (!Object.hasOwn(PREDICTION_RETIRING_COMMANDS, command.type)) return;
+			retiringInputsInFlight.add(command);
+			nextMessagePredictor.close();
+		},
 	});
 
 	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.

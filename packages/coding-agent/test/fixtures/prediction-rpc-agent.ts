@@ -46,4 +46,10 @@ session.executeBash = async (command, onChunk, options) => {
 	if (command.startsWith(": slow-hook")) await Bun.sleep(1000);
 	return executeBash(command, onChunk, options);
 };
+// `export_html` stands in for a long serial command (a `login` waiting on the browser): it holds the
+// RPC serial queue for a second and writes nothing.
+session.exportToHtml = async () => {
+	await Bun.sleep(1000);
+	return "export.html";
+};
 await runRpcMode(session);

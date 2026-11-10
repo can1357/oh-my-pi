@@ -399,4 +399,23 @@ describe("RPC next-message prediction and host input", () => {
 		},
 		30_000,
 	);
+
+	it("retires the offer as soon as input arrives behind a long serial command", async () => {
+		const id = await offer();
+		let exportSettled = false;
+		const exported = client.exportHtml().finally(() => {
+			exportSettled = true;
+		});
+		const { promise: retired, resolve } = Promise.withResolvers<void>();
+		const stop = client.onNextMessagePrediction(frame => {
+			if (frame.predictionId === id && frame.status === "retired") resolve();
+		});
+		const steer = client.steer("deploy it");
+		await retired;
+		stop();
+		// The steer still waits behind the export, but the server has read it.
+		expect(exportSettled).toBe(false);
+		await Promise.all([exported, steer]);
+		expect(frames).toHaveLength(2);
+	}, 30_000);
 });

@@ -1257,9 +1257,11 @@ prediction is wanted, typically after a `prompt_result` with
 `status: "completed"` while the host's own draft is empty (the server cannot
 see it). It answers `predictionId: null` without a request when
 `composer.predictions` is off, no model is set, or the session is streaming,
-compacting, generating a handoff, running a host `bash` command, still
-admitting or holding queued `prompt`/`steer`/`follow_up` input, or changing
-sessions (including an extension's `newSession`, `switchSession` or `branch`):
+compacting, generating a handoff, or changing sessions (including an
+extension's `newSession`, `switchSession` or `branch`), or while a `prompt`,
+`steer`, `follow_up`, `abort_and_prompt`, `bash` or `handoff` the server has
+read is still unfinished (queued behind another command, admitting, or queued
+in the session):
 the conversation would move under the prediction without a session event to
 retire it. A new request supersedes the previous one.
 
@@ -1287,11 +1289,14 @@ An `offered` prediction is later followed by exactly one `retired` frame, after
 which the host must stop showing it and must not accept it. It retires when
 the host cancels it or requests another, when the host sends `prompt` (builtins
 such as `/handoff` included), `steer`, `follow_up`, `abort_and_prompt`, `bash` (excluded or not) or
-`handoff`, before that command runs, when a new message lands, when user input
+`handoff`, as soon as the server reads that command (even while it waits behind
+an earlier one), when a new message lands, when user input
 is queued (an extension's `steer` or `followUp` included), when a run or
 a compaction (manual or automatic) starts, and on `new_session`, `switch_session`, `branch`,
 `fork`, `navigate_tree`, `open_session`, extension-initiated session changes,
-and shutdown. A pending prediction is cancelled at the same points. Turning `composer.predictions` off while the process runs (a
+and shutdown. A pending prediction is cancelled at the same points except one:
+when a new message lands without a run starting (an extension's display-only
+message, say), its side turn runs on and settles `stale`. Turning `composer.predictions` off while the process runs (a
 settings write or reload) cancels a pending prediction and retires an offered
 one; turning `composer.predictionAlternatives` off does the same for a pending
 prediction and for an offered one with more than one choice. These frames
