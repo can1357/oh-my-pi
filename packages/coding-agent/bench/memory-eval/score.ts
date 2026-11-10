@@ -1,4 +1,5 @@
 /** Scorers: message-level recall/MRR, the official LongMemEval retrieval metrics, and upstream Mnemosyne's substring hit test. */
+import { sliceCodePoints } from "../../src/commit/conventional/text";
 
 export interface MessageMetrics {
 	"recall@1": number;
@@ -116,15 +117,11 @@ export function lmeMetrics(
 	return out;
 }
 
-/** First `n` code points (Python slices by code point; JS `.slice` slices by UTF-16 unit). */
-export function cp(s: string, n: number): string {
-	return Array.from(s).slice(0, n).join("");
-}
-
 /** Replica of upstream `benchmark_mnemosyne`: one hit per memory on the first gold whose `[:100][:50]` prefix is a substring. */
 export function compatRecall(rankedContents: readonly string[], goldContents: readonly string[], k: number): number {
 	if (goldContents.length === 0) return 0;
-	const prefixes = goldContents.map(g => cp(cp(g, 100), 50));
+	// Upstream slices by code point (`[:100][:50]`); JS `.slice` would slice by UTF-16 unit.
+	const prefixes = goldContents.map(g => sliceCodePoints(sliceCodePoints(g, 0, 100), 0, 50));
 	let hits = 0;
 	for (const content of rankedContents.slice(0, k)) {
 		if (prefixes.some(p => p !== "" && content.includes(p))) hits++;

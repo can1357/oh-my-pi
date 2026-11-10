@@ -1,12 +1,13 @@
 /** Run B of the upstream calibration: replays upstream Mnemosyne's `benchmark_mnemosyne` through the engine adapter. */
 import * as fs from "node:fs/promises";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { sliceCodePoints } from "../../src/commit/conventional/text";
 import type { EngineAdapter, RememberItem } from "./engine";
 import type { UpstreamCompatOps } from "./engines/mnemosyne";
 import type { QuestionResult, ResultFile } from "./runner";
-import { compatRecall, cp } from "./score";
+import { compatRecall } from "./score";
 import type { UpstreamCompatConversation } from "./types";
 
 const TOP_K = 10;
@@ -68,11 +69,12 @@ export async function runUpstreamCompat(
 
 		const rows = await engine.oldestWorking(CONSOLIDATE_ROWS);
 		if (rows.length > 0) {
-			const summary = cp(
+			const summary = sliceCodePoints(
 				rows
 					.slice(0, SUMMARY_ROWS)
-					.map(r => cp(r.content, SUMMARY_ROW_CHARS))
+					.map(r => sliceCodePoints(r.content, 0, SUMMARY_ROW_CHARS))
 					.join(" | "),
+				0,
 				SUMMARY_CHARS,
 			);
 			const summaryId = await engine.consolidate(
@@ -178,7 +180,7 @@ export function compareCalibration(
 		const qb = b.questions[i];
 		if (!qb) break;
 		if (!qb.compat) throw new Error(`B question ${qb.questionId} has no compat data: not an upstream-compat result`);
-		const label = `[${i}] conversation ${qa.conversation} "${cp(qa.question, 60)}"`;
+		const label = `[${i}] conversation ${qa.conversation} "${sliceCodePoints(qa.question, 0, 60)}"`;
 		if (!qb.questionId.startsWith(`${qa.conversation}:`)) {
 			mismatches.push(`${label}: conversation, A ${qa.conversation}, B questionId ${qb.questionId}`);
 		}
@@ -196,7 +198,8 @@ export function compareCalibration(
 			r => rankedA[r] !== rankedB[r],
 		);
 		if (rank !== undefined) {
-			const show = (s: string | undefined): string => (s === undefined ? "<none>" : JSON.stringify(cp(s, 80)));
+			const show = (s: string | undefined): string =>
+				s === undefined ? "<none>" : JSON.stringify(sliceCodePoints(s, 0, 80));
 			mismatches.push(
 				`${label}: rankedContents (A ${rankedA.length}, B ${rankedB.length}) first differ at rank ${rank}: A ${show(rankedA[rank])} B ${show(rankedB[rank])}`,
 			);
