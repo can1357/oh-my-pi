@@ -72,8 +72,7 @@ pub struct X11Input {
 	keymap:           Keymap,
 	takeover_target:  Option<Window>,
 	takeover_pointer: Cell<Option<(i16, i16)>>,
-	/// The session's hold on a virtual master pair, taken on first background
-	/// use; the pair itself outlives the session.
+	/// Session-lived virtual master pair, created on first background use.
 	mpx:              Option<Mpx>,
 	/// Why the XI2-MPX route is unusable. Set once, so a host that cannot
 	/// hot-plug devices is not re-probed (and its hierarchy not churned) on
@@ -184,7 +183,7 @@ impl X11Input {
 						let result = pointer_mpx(wm, mpx, window, &event);
 						if control::check().is_err() {
 							// Retire cancelled devices, never replay uncertain queued
-							// input. A later explicit operation takes the pair again
+							// input. A later explicit operation takes a pair again
 							// with fresh slaves.
 							self.mpx = None;
 						}

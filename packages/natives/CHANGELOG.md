@@ -17,6 +17,10 @@
 - Fixed Linux computer reads crashing the app being read (Qt 5 and Qt 6 before 6.9.2 apps anywhere; GTK 3 and Firefox apps on distributions with at-spi2-core before 2.45, such as Ubuntu 22.04), and reading no text from the text fields of newer Qt apps ([#18823](https://github.com/can1357/oh-my-pi/pull/18823) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background left clicks crashing the page in Electron apps, and in Chrome when the click changes the URL in place (`history.pushState`, as single-page apps do) ([#18824](https://github.com/can1357/oh-my-pi/pull/18824) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed your running Qt 6.5+ apps crashing on Linux X11 when a `computer` session that used background window input ended or was cancelled, or after an omp process using it was killed
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
@@ -30,10 +34,6 @@
 - Fixed the shell's `git` builtin on Windows with `bash.gitGuard` (or smart git) on failing every allowed command with exit 127 (`…\Git\cmd\git: No such file or directory`); it now runs `git.exe` ([#18722](https://github.com/can1357/oh-my-pi/issues/18722))
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input and takeover refusing every call, with nothing sent, while Finder is in front with its focus on the desktop and a Finder window open; Finder gets its front status back with its focus left on the desktop ([#18680](https://github.com/can1357/oh-my-pi/pull/18680) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed your running Qt 6.5+ apps crashing on Linux X11 whenever a `computer` session that used background window input ended, was cancelled, or was cleaned up by the next omp process
 
 ## [18.18.6] - 2026-11-09
 
