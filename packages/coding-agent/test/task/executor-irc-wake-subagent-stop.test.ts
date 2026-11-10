@@ -497,6 +497,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			onStop: () => ({ decision: "block", reason: "keep going" }),
 		});
 
+		// A bare resume needs an earlier user turn to pick back up.
+		run.session.agent.appendMessage({ role: "user", content: "earlier user turn", timestamp: Date.now() });
 		await deliverWake(run.session, "m1");
 		await continuationStarted.promise;
 		await run.session.resume();
