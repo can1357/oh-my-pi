@@ -5,9 +5,12 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -19,6 +22,11 @@ describe("AgentSession run state", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
+	let reports: { state: string; streaming: boolean }[];
+	/** Run state when the aborted run's settle reached extensions. */
+	let atFirstSettle: { lastReport: string | undefined; streaming: boolean } | undefined;
+	let providerCalls: number;
+	let gate: PromiseWithResolvers<void>;
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-run-state-");
@@ -26,30 +34,56 @@ describe("AgentSession run state", () => {
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		reports = [];
+		atFirstSettle = undefined;
+		providerCalls = 0;
+		gate = Promise.withResolvers<void>();
 		const mock = createMockModel({
 			provider: "anthropic",
-			responses: [
-				// Abort lands during the first call's latency; the second keeps the
-				// recovery run streaming while the aborted run's maintenance settles.
-				{ content: ["editing"], delayMs: 1_000 },
-				{ content: ["recovered"], delayMs: 100 },
-			],
+			// The abort lands before the aborted run reaches the provider, so the
+			// recovery run makes the only call. Holding it keeps the recovery run
+			// streaming until the aborted run has settled.
+			handler: async (_context, options) => {
+				providerCalls++;
+				const aborted = Promise.withResolvers<void>();
+				options?.signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await Promise.race([gate.promise, aborted.promise]);
+				return { content: ["recovered"] };
+			},
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: mock.stream,
 		});
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const modelRegistry = new ModelRegistry(authStorage);
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_end", () => {
+					if (atFirstSettle) return;
+					atFirstSettle = { lastReport: reports.at(-1)?.state, streaming: session.agent.state.isStreaming };
+					gate.resolve();
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			runtime,
+			"run-state-settle-probe",
+		);
 		session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false, "edit.streamingAbort": true }),
-			modelRegistry: new ModelRegistry(authStorage),
+			modelRegistry,
+			extensionRunner: new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry),
 		});
 	});
 
 	afterEach(async () => {
 		try {
+			gate.resolve();
 			await session?.dispose();
 		} finally {
 			authStorage?.close();
@@ -58,7 +92,6 @@ describe("AgentSession run state", () => {
 	});
 
 	it("reports the streaming-edit recovery run as running, not idle", async () => {
-		const reports: { state: string; streaming: boolean }[] = [];
 		const unsubscribe = session.subscribeRunState(state =>
 			reports.push({ state, streaming: session.agent.state.isStreaming }),
 		);
@@ -78,7 +111,9 @@ describe("AgentSession run state", () => {
 			await session.prompt("Edit the file.");
 			await session.waitForIdle();
 
-			expect(reports.filter(report => report.state === "running")).toHaveLength(2);
+			expect(providerCalls).toBe(1);
+			// The aborted run settled while the recovery run was still streaming.
+			expect(atFirstSettle).toEqual({ lastReport: "running", streaming: true });
 			expect(reports.filter(report => report.state === "idle" && report.streaming)).toEqual([]);
 			expect(reports.at(-1)).toEqual({ state: "idle", streaming: false });
 		} finally {
