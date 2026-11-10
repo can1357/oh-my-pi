@@ -5,7 +5,11 @@ describe("agentIdentity", () => {
 	it("gives Main blue and every other agent a stable colour from the other six", () => {
 		expect(agentIdentity("Main")).toEqual({ id: "Main", label: "Main", color: "blue" });
 		// FNV-1a of the full id pins these, so another surface hashing the same id draws the same colour.
-		expect(agentIdentity("CursorChecks.Scout")).toEqual({ id: "CursorChecks.Scout", label: "Scout", color: "purple" });
+		expect(agentIdentity("CursorChecks.Scout")).toEqual({
+			id: "CursorChecks.Scout",
+			label: "Scout",
+			color: "purple",
+		});
 		expect(agentIdentity("Scout")).toEqual({ id: "Scout", label: "Scout", color: "teal" });
 
 		const colors = new Set<string>();
