@@ -87,8 +87,6 @@ describe("auth-gateway stdio model selectors", () => {
 		expect(selectorCandidates("@commit", Settings.isolated({}), registry)).toEqual([]);
 	});
 
-	// `/v1/systemone` resolved selectors among chat models only: a judge id answered
-	// 404 and `@judge` landed on a chat model the route then refused.
 	describe("on a judge route", () => {
 		const jev = getBundledModel("typesafe", "jev-1.14.0")!;
 		const catalog = [...models, jev];

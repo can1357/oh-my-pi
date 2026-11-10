@@ -24,12 +24,7 @@ import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 /** Names the caller in the gateway's logs. */
 const STDIO_PEER = "stdio";
 
-/**
- * The model kind each body-carrying route serves. A selector resolves only
- * among models of its route's kind, so `typesafe/jev-latest` or `@judge` on
- * `/v1/systemone` finds the judge runner instead of nothing, or a chat model
- * the route then rejects. Paths not listed are chat routes.
- */
+/** Model kind each non-chat route serves; other paths are chat routes. */
 const ROUTE_KINDS: Record<string, ModelKind> = {
 	"/v1/systemone": "judge",
 	"/alpha/decisions": "judge",
@@ -94,7 +89,6 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const router = createAuthGatewayRouter({
 		storage,
 		resolveModel: id => routed.get(id),
-		// Every kind, so judge, image and other runner models are listed beside chat ones.
 		listModels: () => registry.getAvailable("all"),
 	});
 	const route = async (req: Request): Promise<Response> => {
@@ -129,10 +123,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 		return response;
 	};
 
-	// `process.stdout.write` into a pipe returns before the bytes leave, and nothing it offers
-	// (callback, `drain`) waits for all of them, so quitting cut long responses off at 128 KiB.
-	// A sink can be flushed: each line is sent as soon as it is answered, and the last flush
-	// is awaited before quitting.
+	// Flushable, unlike `process.stdout`: quitting before a pipe drains truncates responses.
 	const stdout = Bun.stdout.writer();
 	try {
 		await serveAuthGatewayStdio({
