@@ -150,6 +150,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** Config, client and outbox of a primary state; an alias has none. */
 	readonly #own: SupermemoryOwnResources | undefined;
 	#retention: Promise<void> = Promise.resolve();
+	/** Set once {@link dispose} returns; retention queued behind a slow upload must not run against the session's next transcript. */
+	#disposed = false;
 	#recallGeneration = 0;
 	/** Bumped when the transcript changes identity; stale retention never advances {@link lastRetainedTurn}. */
 	#transcriptGeneration = 0;
@@ -259,7 +261,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!this.automatic) return;
 		this.#unsubscribe = this.session.subscribe(event => {
 			if (event.type !== "agent_end") return;
-			if (this.#config.autoRetain) void this.#enqueueRetention(() => this.#retainDue());
+			// A non-terminal settle is followed by the agent's own continuation; closing the window now
+			// would leave that continuation's answer out of every window.
+			if (this.#config.autoRetain && event.isTerminal !== false) {
+				void this.#enqueueRetention(() => this.#retainDue());
+			}
 			void this.drainOutbox();
 		});
 	}
@@ -436,6 +442,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/** Every complete `retainEveryNTurns` window not stored yet, oldest first. */
 	async #retainDue(): Promise<void> {
+		if (this.#disposed) return;
 		const every = this.#config.retainEveryNTurns;
 		if (countUserTurns(this.session.sessionManager) - this.lastRetainedTurn < every) return;
 		const messages = extractMessages(this.session.sessionManager);
@@ -491,7 +498,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				);
 			}
 		}
-		if (generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) return false;
+		if (this.#disposed || generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) {
+			return false;
+		}
 		this.lastRetainedTurn = endTurn;
 		// A `/memory enqueue` tail is an open window: a resume re-sends it complete under the same customId.
 		if (endTurn - startTurn === this.#config.retainEveryNTurns) this.#appendCursor(endTurn);
@@ -558,6 +567,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			await Promise.race([this.flush(), promise]);
 		} finally {
 			clearTimeout(timer);
+			this.#disposed = true;
 			own.outbox.dispose();
 		}
 	}

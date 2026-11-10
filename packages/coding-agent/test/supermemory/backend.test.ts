@@ -71,9 +71,13 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 				message: { role: "assistant", content: [{ type: "text", text: `reply to ${text}` }], timestamp: 0 },
 			} as never);
 		},
-		async endTurn() {
+		/** Dispatches `agent_end` without waiting for the retention it starts. */
+		emitEnd(isTerminal?: boolean) {
 			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
-			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [] } as never);
+			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [], isTerminal } as never);
+		},
+		async endTurn() {
+			session.emitEnd();
 			await state?.flush();
 		},
 		listenerCount: () => listeners.size,
@@ -523,6 +527,61 @@ describe("supermemoryBackend", () => {
 		reply.resolve({ id: "d", status: "queued" });
 		await ended;
 		expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
+	});
+
+	it("retention queued behind a slow upload does not run after dispose times out", async () => {
+		vi.useFakeTimers();
+		try {
+			const reply = Promise.withResolvers<{ id: string; status: string }>();
+			const sent = Promise.withResolvers<void>();
+			const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+				sent.resolve();
+				return reply.promise;
+			});
+			const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+			await start(session);
+			const state = session.getSupermemorySessionState();
+			session.addTurn("one");
+			session.emitEnd();
+			await sent.promise;
+			session.addTurn("two");
+			session.emitEnd();
+			const disposing = state?.dispose();
+			vi.advanceTimersByTime(2_000);
+			await disposing;
+			// Memory switched off, then `/new`: the session manager now holds another transcript.
+			session.transcriptId = "t2";
+			session.addTurn("three");
+			reply.resolve({ id: "d", status: "queued" });
+			await state?.flush();
+			expect(create).toHaveBeenCalledTimes(1);
+			expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps a window open across a non-terminal settle so the continuation's answer is retained", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitEnd(false);
+		await session.getSupermemorySessionState()?.flush();
+		expect(create).not.toHaveBeenCalled();
+		// The continuation adds its answer, then the terminal settle closes the window.
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "cont",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "assistant", content: [{ type: "text", text: "continuation answer" }], timestamp: 0 },
+		} as never);
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(create.mock.calls[0]?.[0]?.content).toContain("continuation answer");
 	});
 
 	it("recall lists editable memory ids and marks document chunks", async () => {
