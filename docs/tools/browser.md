@@ -7,6 +7,7 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 - Host facade: `packages/coding-agent/src/tools/browser.ts`
 - JavaScript/Python facades: `packages/coding-agent/src/tools/browser/prelude.{js,py}`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/browser.md`
+- Model-facing core, sent with the first browser call's output: `packages/coding-agent/src/prompts/tools/browser-core.md`
 - Tab lifecycle: `packages/coding-agent/src/tools/browser/tab-supervisor.ts`
 - Browser worker and inner tab API: `packages/coding-agent/src/tools/browser/tab-worker.ts`
 - Browser registry and launch modes: `packages/coding-agent/src/tools/browser/{registry,launch,attach}.ts`
@@ -19,6 +20,8 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 
 The prelude exists only while Eval and `browser.enabled` are enabled (`browser.enabled` defaults to `true`). It is not an AgentTool.
 All browser host operations request exec-tier approval, including inspection helpers.
+
+The first successful browser call of a conversation carries a short core of the browser guide (helpers with their signatures, selector forms, the re-observe rule) after its output, once per conversation (`firstCallDocumentation` on the prelude); the Eval description keeps its one-line browser entry, and the full guide stays readable at `xd://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
 
 ## JavaScript API
 

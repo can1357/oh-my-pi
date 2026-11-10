@@ -24,6 +24,10 @@
 
 - Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Added
+
+- Added `Agent.messagesRevision`, which changes whenever messages are replaced or removed (compaction, prune, rewind, load, clear) and not when one is appended
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

@@ -1,4 +1,4 @@
-Drive real browser tabs.
+Drive real browser tabs; start with `const tab = await browser.open({ name, url })`.
 
 <instruction>
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.

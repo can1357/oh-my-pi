@@ -44,6 +44,14 @@ export interface EvalPreludeDefinition {
 	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
 	 */
 	inlineDocumentation?: boolean;
+	/**
+	 * Short guide appended to the printed output of this prelude's first call
+	 * in a conversation that returns one (a thrown call or a bare-string result
+	 * leaves it for the next), so the model can start without reading the
+	 * `xd://eval/<name>` topic (which keeps `documentation`) while the always-on
+	 * tool description keeps one line. Delivered once per conversation.
+	 */
+	firstCallDocumentation?: string;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
 	javascript: string;
 	/** Python source installed into a Python eval kernel. */
@@ -163,5 +171,64 @@ export async function invokeEvalPrelude(
 			throw new Error(`Eval prelude "${name}" changed while authorizing the call.`);
 		}
 	}
-	return definition.invoke(parameters, context);
+	const result = await definition.invoke(parameters, context);
+	// The bridge hands a result with no details or images to the VM as a bare string, which the facades
+	// return rather than print, so the guide waits for a call whose text reaches the cell output.
+	const bareString = result.details === undefined && !result.isError && !result.content.some(p => p.type === "image");
+	if (bareString) return result;
+	const guide = takeFirstCallGuide(definition, context.session);
+	if (!guide) return result;
+	const lead = result.content.some(part => part.type === "text" && part.text.length > 0) ? "\n\n" : "";
+	return { ...result, content: [...result.content, { type: "text", text: `${lead}${guide}\n` }] };
+}
+
+/** Prelude names whose first-call guide each tool session has delivered, for its current conversation and context. */
+const firstCallDeliveries = new WeakMap<
+	ToolSession,
+	{ conversation: string | null; revision: number; preludes: Set<string> }
+>();
+
+/** Heads every first-call guide, after the prelude's name; read back to find the guides still in context. */
+const FIRST_CALL_GUIDE_HEADER = " guide (sent once per conversation; ";
+const FIRST_CALL_GUIDE_PATTERN = new RegExp(
+	`(?:^|\\n)([\\w-]+)${FIRST_CALL_GUIDE_HEADER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+	"g",
+);
+
+/**
+ * The prelude's first-call guide, headed, if this is its first call in the
+ * session's conversation; marks it delivered. The guide rides the call's
+ * output, so the cached prompt prefix is never edited. Sessions without
+ * `read` already carry every topic in full in the eval description.
+ * What counts as delivered is re-read from the context on the first call and
+ * whenever the context lost or replaced messages since, so a compaction or
+ * rewind that drops the guide sends it again and a resumed session whose
+ * history holds it does not.
+ */
+function takeFirstCallGuide(definition: EvalPreludeDefinition, session: ToolSession): string | undefined {
+	const guide = definition.firstCallDocumentation?.trim();
+	if (!guide || session.isToolActive?.("read") === false) return undefined;
+	const conversation = session.getSessionId?.() ?? null;
+	const revision = session.getContextRevision?.() ?? 0;
+	let delivered = firstCallDeliveries.get(session);
+	if (!delivered || delivered.conversation !== conversation || delivered.revision !== revision) {
+		delivered = { conversation, revision, preludes: guidesInContext(session) };
+		firstCallDeliveries.set(session, delivered);
+	}
+	if (delivered.preludes.has(definition.name)) return undefined;
+	delivered.preludes.add(definition.name);
+	return `${definition.name}${FIRST_CALL_GUIDE_HEADER}full reference at \`xd://eval/${definition.name}\`):\n${guide}`;
+}
+
+/** Names of the preludes whose first-call guide a tool result in the session's context still carries. */
+function guidesInContext(session: ToolSession): Set<string> {
+	const names = new Set<string>();
+	for (const message of session.getContextMessages?.() ?? []) {
+		if (message.role !== "toolResult") continue;
+		for (const part of message.content) {
+			if (part.type !== "text") continue;
+			for (const [, name] of part.text.matchAll(FIRST_CALL_GUIDE_PATTERN)) names.add(name);
+		}
+	}
+	return names;
 }
