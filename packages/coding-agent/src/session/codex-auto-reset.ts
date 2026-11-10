@@ -33,13 +33,19 @@
  *   client consumes one for a 5h-only block while the weekly window still has
  *   ~80% headroom (openai/codex#28525). The natural unblock is the LATEST
  *   reset among the exhausted windows (the account stays blocked until every
- *   one rolls over) and must be far enough away to justify the spend, with
- *   credits above the reserve, on an account the session may use (its account
- *   pool). One candidate is redeemed — an approved consent first, then the
- *   active account, then the account whose credit dies soonest — and the redeem
- *   clears its credential blocks so the retry's re-rank picks it up.
+ *   one rolls over), extended to the live 429 deadline when the provider named
+ *   a later one — a deadline past the reported 5h reset also proves the weekly
+ *   window is blocking even though the pre-block report still showed headroom,
+ *   so the weekly key governs that spend. It must be far enough away to
+ *   justify the spend, with credits above the reserve, on an account the
+ *   session may use (its account pool). One candidate is redeemed — an
+ *   approved consent first, then the active account, then the account whose
+ *   credit dies soonest — and the redeem clears its credential blocks so the
+ *   retry's re-rank picks it up.
  * Each action follows its governing window's policy: restores clearing any
  * weekly exhaustion use weekly, otherwise 5h; salvages use the fullest window.
+ * A live 429 hint alone cannot distinguish the windows within one 5h span, so
+ * such a restore is planned only when both windows consent identically.
  * Imminent credits may spend when either restorable window permits evaluation.
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
@@ -89,6 +95,13 @@ export const WINDOW_EXHAUSTED_MIN_FRACTION = 0.999;
 export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
+/**
+ * Slack between a live 429 deadline and a reported reset before the live one
+ * counts as evidence of a LATER window: the usage snapshot and the 429 are
+ * taken seconds apart and `reset_after_seconds` is rounded, so a hint that
+ * merely echoes the reported 5h reset must not be read as a weekly block.
+ */
+const LIVE_HINT_TOLERANCE_MS = 5 * 60_000;
 /** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */
 export const SALVAGE_MIN_USED_FRACTION = 0.25;
 /** Retry spacing after a non-terminal consume outcome, except during imminent-expiry salvage. */
@@ -129,6 +142,7 @@ export type CodexResetTrigger = "blocked" | "sweep";
 export type CodexResetSkipReason =
 	| "disabled"
 	| "window-disabled"
+	| "window-unknown"
 	| "wrong-provider"
 	| "spark-model"
 	| "no-identity"
@@ -193,7 +207,10 @@ export interface CodexResetAction {
 	weeklyUsedFraction?: number;
 	/** `blocked-account`: ms until the natural unblock (latest exhausted-window reset). */
 	remainingMs?: number;
-	/** `blocked-account`: the exhausted chat windows a redeem would clear. */
+	/**
+	 * `blocked-account`: the exhausted chat windows a redeem would clear. Empty
+	 * when only the live 429 hint is known and it fits either window.
+	 */
 	blockedWindows?: ResetWindow[];
 	/** `expiring-credit`: the fuller chat window a redeem restores (for messaging). */
 	salvageWindow?: ResetWindow;
@@ -457,6 +474,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			let unblockAtMs: number;
 			let blockedWindows: ResetWindow[];
+			// Set when the unblock time comes only from the live hint and fits
+			// either chat window, so the blocked window is genuinely unknown.
+			let windowUnknown = false;
 			if (exhausted.length > 0) {
 				// Blocked until EVERY exhausted window rolls over — the unblock is
 				// the latest reset among them. A missing or implausible reset on any
@@ -480,26 +500,77 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				}
 				unblockAtMs = latest;
 				blockedWindows = exhausted.map(e => e.window);
+				// The 429 can outlast every exhausted window: a report fetched
+				// before the block still shows weekly headroom while the provider
+				// has already blocked on it. Only the active account carries a live
+				// hint, and one beyond the weekly window's maximum span is junk
+				// rather than evidence — the report already names an unblock, so
+				// fall back to it (the live-only branch below has no such fallback
+				// and must skip instead).
+				if (liveUnblockAtMs !== undefined && liveUnblockAtMs - nowMs <= MAX_PLAUSIBLE_WEEKLY_REMAINING_MS) {
+					if (
+						!blockedWindows.includes("weekly") &&
+						(liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ||
+							liveUnblockAtMs - latest > LIVE_HINT_TOLERANCE_MS)
+					) {
+						// A wait a 5h window cannot span, or one running past the
+						// reported 5h reset, means weekly is blocking too — the report
+						// merely predates it. Naming it keeps the weekly key (which
+						// may be `no`) in charge of a credit that clears it.
+						blockedWindows.push("weekly");
+					}
+					// Blocked until the later of the two: the provider's own deadline
+					// is authoritative when it runs past the reported resets.
+					if (liveUnblockAtMs > latest) unblockAtMs = liveUnblockAtMs;
+				}
 			} else if (liveUnblockAtMs !== undefined) {
 				// The report's windows look healthy but the live 429 says otherwise:
 				// the snapshot predates the block. Trust the provider's own hint for
-				// the unblock horizon, classifying the window by its scale.
+				// the unblock horizon.
 				if (liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_WEEKLY_REMAINING_MS) {
 					skip("reset-implausible");
 					continue;
 				}
 				unblockAtMs = liveUnblockAtMs;
-				blockedWindows = [liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ? "weekly" : "5h"];
+				// The hint says WHEN, not WHICH window: a wait longer than a 5h
+				// window can span can only be weekly, but a shorter one fits either —
+				// a weekly block minutes from rolling over looks exactly like a 5h
+				// one. Guessing `5h` here spent credits on blocks whose weekly policy
+				// said no, so leave the window unknown and let consent decide below.
+				windowUnknown = liveUnblockAtMs - nowMs <= MAX_PLAUSIBLE_PRIMARY_REMAINING_MS;
+				blockedWindows = windowUnknown ? [] : ["weekly"];
 			} else {
 				skip("no-exhausted-window");
 				continue;
 			}
-			const window = blockedWindows.includes("weekly") ? "weekly" : "5h";
+			// An unknown window falls back to `5h` only as the governing stand-in;
+			// both windows are proven to consent identically just below, so
+			// re-deriving consent from the emitted action reproduces that mode.
+			const window: ResetWindow = blockedWindows.includes("weekly") ? "weekly" : "5h";
 			const expiresInMs = snapshot.creditExpiresAtMs === undefined ? undefined : snapshot.creditExpiresAtMs - nowMs;
 			const consent = actionConsent(
 				{ target: snapshot.target, window, restorableWindows: snapshot.restorableWindows, expiresInMs },
 				settings.modes,
 			);
+			if (
+				windowUnknown &&
+				actionConsent(
+					{
+						target: snapshot.target,
+						window: "weekly",
+						restorableWindows: snapshot.restorableWindows,
+						expiresInMs,
+					},
+					settings.modes,
+				).mode !== consent.mode
+			) {
+				// Redeeming could clear a window the user turned off; only a spend
+				// both possible windows permit identically is safe to plan. (For an
+				// imminent credit both consents widen to `restorableWindows`, so they
+				// agree and the last-chance salvage still runs.)
+				skip("window-unknown");
+				continue;
+			}
 			if (consent.mode === "no") {
 				skip("window-disabled");
 				continue;
