@@ -1,3 +1,4 @@
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	buildHashBase,
 	buildKeyedReplacementRun,
@@ -91,43 +92,20 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
 /**
- * How long a {@link TextCache} entry survives unused. There is deliberately no
+ * How long a redaction cache entry survives unused. There is deliberately no
  * size cap: provider context is re-redacted on every request and walks the
  * whole history in order, so any cap below the live context evicts every entry
- * before its next use. Text in the live context is touched every turn and never
- * evicted; only text that left it (compacted history, superseded prompts) ages out.
+ * before its next use. Text in the live context is read every turn and never
+ * expires; only text that left it (compacted history, superseded prompts) ages out.
  */
 const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
 
-/** Minimum time between idle sweeps of one {@link TextCache}. */
-const TEXT_CACHE_SWEEP_INTERVAL_MS = 60 * 1000;
+/** Minimum time between purges of expired redaction cache entries. */
+const TEXT_CACHE_PURGE_INTERVAL_MS = 60 * 1000;
 
-/** Text-keyed cache whose entries expire only after {@link TEXT_CACHE_IDLE_MS} unused. */
-class TextCache<V> {
-	/** Least recently used first, so a sweep stops at the first live entry. */
-	readonly #map = new Map<string, { value: V; usedAt: number }>();
-	#sweptAt = 0;
-
-	get(text: string): V | undefined {
-		const entry = this.#map.get(text);
-		if (entry === undefined) return undefined;
-		entry.usedAt = Date.now();
-		this.#map.delete(text);
-		this.#map.set(text, entry);
-		return entry.value;
-	}
-
-	set(text: string, value: V): void {
-		const now = Date.now();
-		this.#map.delete(text);
-		this.#map.set(text, { value, usedAt: now });
-		if (now - this.#sweptAt < TEXT_CACHE_SWEEP_INTERVAL_MS) return;
-		this.#sweptAt = now;
-		for (const [key, entry] of this.#map) {
-			if (now - entry.usedAt < TEXT_CACHE_IDLE_MS) break;
-			this.#map.delete(key);
-		}
-	}
+/** Text-keyed redaction cache; see {@link TEXT_CACHE_IDLE_MS}. */
+function createTextCache<V>(): LRUCache<string, V> {
+	return new LRUCache<string, V>({ ttl: TEXT_CACHE_IDLE_MS, updateAgeOnGet: true });
 }
 
 /** Per-string scan results, reused across calls while the registry revision holds. */
@@ -265,13 +243,16 @@ export class SecretObfuscator {
 	#asciiFoldedProbeDetector: RegExp | undefined;
 
 	/** Per-string scan results; an entry from an older registry revision is recomputed. */
-	readonly #textScans = new TextCache<TextScan>();
+	readonly #textScans = createTextCache<TextScan>();
 
 	/** Text → regex values found in it. Regex entries never change, so this outlives registry revisions. */
-	readonly #regexValueMemo = new TextCache<readonly string[]>();
+	readonly #regexValueMemo = createTextCache<readonly string[]>();
 
 	/** Top-level {@link obfuscate} results; see {@link ObfuscateMemo}. */
-	readonly #obfuscateMemo = new TextCache<ObfuscateMemo>();
+	readonly #obfuscateMemo = createTextCache<ObfuscateMemo>();
+
+	/** When the text caches were last purged of expired entries. */
+	#cachesPurgedAt = 0;
 
 	/** Content keys of the shared value sets passed to {@link obfuscate}. */
 	readonly #sharedValuesKeys = new WeakMap<ReadonlySet<string>, SharedValuesKey>();
@@ -609,6 +590,7 @@ export class SecretObfuscator {
 		const sharedValues = sharedRegexSecretValues ?? EMPTY_SECRET_VALUES;
 		const topLevel = this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
 		if (!topLevel) return this.#obfuscateUncached(text, sharedValues);
+		this.#purgeStaleCaches();
 		const revision = this.#revision.value;
 		const sharedKey = this.#sharedValuesKey(sharedValues);
 		const memo = this.#obfuscateMemo.get(text);
@@ -616,6 +598,16 @@ export class SecretObfuscator {
 		const result = this.#obfuscateUncached(text, sharedValues);
 		if (this.#revision.value === revision) this.#obfuscateMemo.set(text, { revision, sharedKey, result });
 		return result;
+	}
+
+	/** Drops expired text cache entries (text that left the context), at most once per interval. */
+	#purgeStaleCaches(): void {
+		const now = performance.now();
+		if (now - this.#cachesPurgedAt < TEXT_CACHE_PURGE_INTERVAL_MS) return;
+		this.#cachesPurgedAt = now;
+		this.#textScans.purgeStale();
+		this.#regexValueMemo.purgeStale();
+		this.#obfuscateMemo.purgeStale();
 	}
 
 	/**

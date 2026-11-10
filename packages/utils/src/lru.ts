@@ -147,6 +147,18 @@ export class LRUCache<K, V> {
 		this.#calculatedSize = 0;
 	}
 
+	/** Removes every stale entry, returning whether any was removed. */
+	purgeStale(): boolean {
+		if (this.#ttl === 0) return false;
+		let removed = false;
+		for (const [key, entry] of this.#entries) {
+			if (!this.#isStale(entry)) continue;
+			this.#remove(key, entry, "expire");
+			removed = true;
+		}
+		return removed;
+	}
+
 	/** Iterates fresh keys from most to least recently used. */
 	*keys(): Generator<K, void, unknown> {
 		const entries = [...this.#entries.entries()];
