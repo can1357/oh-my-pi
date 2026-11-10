@@ -9,6 +9,7 @@ import { getSubprocessToolRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { FEED_MODEL_BADGE_WIDTH } from "@oh-my-pi/pi-tui/render/render-utils";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { agentColored } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 
 function runningProgress(overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -616,10 +617,33 @@ describe("task progress rendering", () => {
 		const stripped = Bun.stripANSI(row);
 		expect(stripped).toContain(`${theme.status.success} DonePkg: List workspace packages`);
 		expect(stripped).not.toContain(theme.symbol("tool.task"));
-		// Completion swaps the glyph and settles the label from accent to the plain foreground color.
-		const titlePart = `${theme.bold("DonePkg")}: List workspace packages`;
-		expect(row).toContain(theme.fg("text", titlePart));
-		expect(row).not.toContain(theme.fg("accent", titlePart));
+		// Completion swaps the glyph and settles the description from accent to the plain foreground color;
+		// the name keeps the agent's identity colour.
+		expect(row).toContain(
+			`${agentColored("DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ":")} ${theme.fg("text", "List workspace packages")}`,
+		);
+		expect(row).not.toContain(theme.fg("accent", "List workspace packages"));
+	});
+
+	it("keeps a frozen snapshot of a live row dim instead of its identity colour", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const options: RenderResultOptions & { renderContext: { frozen: boolean } } = {
+			expanded: false,
+			isPartial: true,
+			spinnerFrame: 0,
+			renderContext: { frozen: true },
+		};
+		const row = findRow(
+			taskToolRenderer.renderResult(
+				{ content: [{ type: "text", text: "" }], details: detailsFor(runningProgress()) },
+				options,
+				theme,
+			),
+			"KeySettingsHotPaths",
+		);
+
+		expect(row).toContain(theme.fg("dim", "KeySettingsHotPaths"));
+		expect(row).not.toContain(agentColored("KeySettingsHotPaths", "KeySettingsHotPaths"));
 	});
 
 	it("shows the dispatch glyph in the header while agents run, not a spinner", async () => {

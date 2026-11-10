@@ -1,4 +1,5 @@
 import { formatContextUsage } from "../chrome/context-thresholds";
+import { agentColored } from "../overlays/agent-identity";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
@@ -49,6 +50,8 @@ export interface AgentTreeRowOptions {
 	presentation: "task" | "eval";
 	prefix: string;
 	id: string;
+	/** Registry id of the agent; when set, its name takes the agent's identity colour. */
+	agentId?: string;
 	width: number;
 	model?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -116,11 +119,16 @@ export function renderAgentTreeRow(
 	const descriptionShown = Boolean(
 		description && visibleWidth(`${lead}${modelLead}${id}: ${description}${badges}`) <= width,
 	);
-	let title = descriptionShown ? `${theme.bold(id)}: ${description}` : task ? id : theme.bold(id);
-	if (task && live && descriptionShown) {
+	// A frozen snapshot of a live row stays dim, so it stops reading as in flight.
+	const identity = task && live && options.frozen ? undefined : options.agentId;
+	let title: string;
+	if (identity !== undefined) {
+		const name = agentColored(identity, descriptionShown || !task ? theme.bold(id) : id);
+		title = descriptionShown ? `${name}${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description!)}` : name;
+	} else if (task && live && descriptionShown) {
 		title = `${theme.fg(nameColor, theme.bold(id))}${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description!)}`;
 	} else {
-		title = theme.fg(nameColor, title);
+		title = theme.fg(nameColor, descriptionShown ? `${theme.bold(id)}: ${description}` : task ? id : theme.bold(id));
 	}
 	let line = `${lead}${modelLead}${title}${badges}`;
 	if (options.preview) line += options.preview;
