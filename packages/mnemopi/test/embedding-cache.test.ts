@@ -322,9 +322,9 @@ describe("embedding cache", () => {
 			// Insert order, id order and argument order all differ, and the ids span three 500-id chunks.
 			const ids = Array.from({ length: 1300 }, (_, index) => `m${(index * 7919) % 1300}`);
 			const insert = db.prepare(
-				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', 't')",
+				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)",
 			);
-			for (const id of ids) insert.run(id);
+			for (const id of ids) insert.run(id, currentEmbeddingModel());
 			const memoryIds = [...Array.from({ length: 1300 }, (_, index) => `m${(index * 104_729) % 1300}`), "missing"];
 			const preCache: string[] = [];
 			for (let offset = 0; offset < memoryIds.length; offset += 500) {
