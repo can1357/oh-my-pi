@@ -560,8 +560,12 @@ export class RpcUserInputGate {
 	#validFrom = 0;
 	#acceptedAt = new WeakMap<object, number>();
 
-	/** Call from {@link RpcInputDispatcher.dispatch} before the handler is queued. */
-	accept(command: RpcCommand): void {
+	/**
+	 * Call from {@link RpcInputDispatcher.dispatch} before the handler is queued. An abort whose
+	 * validity is only known once its handler runs passes `deferAbort` and invalidates earlier
+	 * input through {@link commitInvalidation} after it validates, so a rejected abort cancels nothing.
+	 */
+	accept(command: RpcCommand, deferAbort = false): void {
 		const isAbort =
 			command.type === "abort" || command.type === "abort_and_prompt" || command.type === "abort_and_restore_queue";
 		if (
@@ -573,11 +577,11 @@ export class RpcUserInputGate {
 		}
 		const sequence = ++this.#sequence;
 		this.#acceptedAt.set(command, sequence);
-		if (isAbort) this.#validFrom = sequence;
+		if (isAbort && !deferAbort) this.#validFrom = sequence;
 	}
 
-	/** A session change succeeded: invalidate input accepted before its frame. */
-	commitSessionChange(command: RpcCommand): void {
+	/** A session change succeeded, or a deferred abort validated: invalidate input accepted before its frame. */
+	commitInvalidation(command: RpcCommand): void {
 		const sequence = this.#acceptedAt.get(command);
 		if (sequence !== undefined && sequence > this.#validFrom) this.#validFrom = sequence;
 	}
@@ -1968,7 +1972,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		if (!clientMessageAdmissions.has(command)) acceptClientMessageId(command);
 		const admission = clientMessageAdmissions.get(command)!;
 		if (admission instanceof Error) throw admission;
-		if (admission.checkedSessionId !== session.sessionId) assertClientMessageAvailableInSession(admission.id);
+		if (admission.checkedSessionId !== session.sessionId) {
+			assertClientMessageAvailableInSession(admission.id);
+			// Accepted with its check deferred, an abort invalidates earlier input only now that it validated.
+			if (admission.checkedSessionId === undefined && command.type === "abort_and_prompt") {
+				inputGate.commitInvalidation(command);
+			}
+		}
 		admission.sessionKey = sessionClientMessageKey(admission.id);
 		clientMessageIdsInFlight.add(admission.sessionKey);
 	};
@@ -2255,7 +2265,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					await goalController.settled();
 				}
 				if (!result.data.cancelled) {
-					inputGate.commitSessionChange(command);
+					inputGate.commitInvalidation(command);
 					// `branch` leaves a live run streaming to its normal yield; new/switch detach it.
 					if (command.type !== "branch" && command.type !== "fork") promptResults.abortOpen();
 					// The detached run publishes no terminal agent_end to settle on.
@@ -2343,7 +2353,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					await goalController.settled();
 				}
 				if (!result.cancelled) {
-					inputGate.commitSessionChange(command);
+					inputGate.commitInvalidation(command);
 					// Opening the session that is already open switches nothing and leaves a live run
 					// going. Any real open (switch or new) changes the file, even when an aliased path
 					// reopens a transcript with the same id.
@@ -3064,7 +3074,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
 		acceptInput: command => {
 			// A rejected correlation is reported by its handler and must not invalidate prior submissions.
-			if (acceptClientMessageId(command)) inputGate.accept(command);
+			if (!acceptClientMessageId(command)) return;
+			const admission = clientMessageAdmissions.get(command);
+			const deferredCheck =
+				admission !== undefined && !(admission instanceof Error) && admission.checkedSessionId === undefined;
+			// An abort whose ID check waits for a pending session change must not cancel anything before it passes.
+			inputGate.accept(command, deferredCheck);
 		},
 	});
 

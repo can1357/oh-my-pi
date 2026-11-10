@@ -2283,6 +2283,8 @@ type ClientMessageStatus struct {
 	ResolvedClientMessageIds   []string                  `json:"resolvedClientMessageIds"`
 	PersistedClientMessageIds  []string                  `json:"persistedClientMessageIds"`
 	UnresolvedClientMessageIds []string                  `json:"unresolvedClientMessageIds"`
+	// Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned.
+	QueueTextsOmitted *bool `json:"queueTextsOmitted,omitempty"`
 }
 
 func (v *ClientMessageStatus) UnmarshalJSON(data []byte) error {
@@ -2297,6 +2299,7 @@ func (v *ClientMessageStatus) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("resolvedClientMessageIds", &out.ResolvedClientMessageIds)
 	d.required("persistedClientMessageIds", &out.PersistedClientMessageIds)
 	d.required("unresolvedClientMessageIds", &out.UnresolvedClientMessageIds)
+	d.optional("queueTextsOmitted", &out.QueueTextsOmitted)
 	if d.err != nil {
 		return d.err
 	}

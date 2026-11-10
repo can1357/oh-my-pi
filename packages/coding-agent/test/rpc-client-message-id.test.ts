@@ -316,4 +316,49 @@ describe("RPC client message identity", () => {
 		const found = data(await rpc.command("get_client_message_status", { clientMessageIds: ["intent-per-session"] }));
 		expect(found.messages).toMatchObject([{ message: { content: [{ type: "text", text: "new session" }] } }]);
 	});
+
+	test("a pipelined abort_and_prompt rejected in the target session cancels no earlier input", async () => {
+		const rpc = await start();
+		await rpc.command("prompt", { message: "kept by the branch", clientMessageId: "intent-branched" });
+		await rpc.next(frame => frame.type === "agent_end");
+		await rpc.command("prompt", { message: "branch here" });
+		await rpc.next(() => rpc.frames.filter(frame => frame.type === "agent_end").length === 2);
+		const branchPoints = data(await rpc.command("get_branch_messages")).messages as {
+			entryId: string;
+			text: string;
+		}[];
+		const entryId = branchPoints.find(point => point.text === "branch here")?.entryId;
+		// The branch keeps the earlier entry, so the abort's ID is already used in the session it targets.
+		const [branched, valid, duplicate] = await rpc.pipeline(
+			["branch", { entryId }],
+			["prompt", { message: "valid after branch", clientMessageId: "intent-fresh" }],
+			["abort_and_prompt", { message: "duplicate", clientMessageId: "intent-branched" }],
+		);
+		expect(branched).toMatchObject({ success: true, data: { cancelled: false } });
+		expect(valid).toMatchObject({ success: true });
+		expect(duplicate).toMatchObject({ success: false, command: "abort_and_prompt" });
+		await rpc.next(frame => frame.type === "message_end" && frame.clientMessageId === "intent-fresh");
+	});
+
+	test("blanks queue texts that would overflow the v1 response limit, keeping slots and IDs aligned", async () => {
+		const rpc = await start("hold");
+		await rpc.command("prompt", { message: "keep streaming", clientMessageId: "intent-running" });
+		await rpc.next(frame => frame.type === "message_end" && frame.clientMessageId === "intent-running");
+		const first = `${"a".repeat(700 * 1024)}first`;
+		await rpc.command("follow_up", { message: first, clientMessageId: "intent-queued-a" });
+		await rpc.command("follow_up", {
+			message: `${"b".repeat(700 * 1024)}second`,
+			clientMessageId: "intent-queued-b",
+		});
+		const response = await rpc.command("get_client_message_status", { clientMessageIds: ["intent-queued-b"] });
+		expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThan(1024 * 1024);
+		expect(data(response)).toMatchObject({
+			queuedMessages: {
+				followUp: [first, ""],
+				clientMessageIds: { followUp: ["intent-queued-a", "intent-queued-b"] },
+			},
+			queueTextsOmitted: true,
+			unresolvedClientMessageIds: [],
+		});
+	});
 });

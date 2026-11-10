@@ -593,6 +593,8 @@ class ClientMessageStatus:
     resolved_client_message_ids: tuple[str, ...]
     persisted_client_message_ids: tuple[str, ...]
     unresolved_client_message_ids: tuple[str, ...]
+    queue_texts_omitted: bool | None = None
+    """Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2024,6 +2026,7 @@ def parse_client_message_status(value: object, path: str = "ClientMessageStatus"
         resolved_client_message_ids=required(payload, "resolvedClientMessageIds", array(decode_str), path),
         persisted_client_message_ids=required(payload, "persistedClientMessageIds", array(decode_str), path),
         unresolved_client_message_ids=required(payload, "unresolvedClientMessageIds", array(decode_str), path),
+        queue_texts_omitted=optional(payload, "queueTextsOmitted", decode_bool, path),
     )
 
 

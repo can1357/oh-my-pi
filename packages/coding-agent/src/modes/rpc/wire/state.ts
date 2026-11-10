@@ -46,6 +46,10 @@ export const stateDefs = {
 		resolvedClientMessageIds: "string[]",
 		persistedClientMessageIds: "string[]",
 		unresolvedClientMessageIds: "string[]",
+		"queueTextsOmitted?": doc(
+			"boolean",
+			'Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned.',
+		),
 	},
 	QueuedMessagesState: doc(
 		{

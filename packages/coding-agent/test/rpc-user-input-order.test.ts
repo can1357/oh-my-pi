@@ -169,7 +169,7 @@ test("a session change invalidates earlier input only once it commits, never inp
 	expect(gate.isCurrent(before)).toBe(true);
 	expect(gate.isCurrent(after)).toBe(true);
 
-	gate.commitSessionChange(change);
+	gate.commitInvalidation(change);
 	expect(gate.isCurrent(before)).toBe(false);
 	expect(gate.isCurrent(after)).toBe(true);
 });
@@ -181,7 +181,7 @@ test("a committed fork invalidates input accepted before it", () => {
 	gate.accept(before);
 	gate.accept(fork);
 
-	gate.commitSessionChange(fork);
+	gate.commitInvalidation(fork);
 	expect(gate.isCurrent(before)).toBe(false);
 });
 
@@ -195,7 +195,7 @@ test("an abort accepted after a session change keeps its own boundary when the c
 	const after = { id: "after", type: "prompt", message: "after" } as const;
 	gate.accept(after);
 
-	gate.commitSessionChange(change);
+	gate.commitInvalidation(change);
 	expect(gate.isCurrent(between)).toBe(false);
 	expect(gate.isCurrent(after)).toBe(true);
 });

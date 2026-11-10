@@ -2978,6 +2978,9 @@ pub struct ClientMessageStatus {
 	pub persisted_client_message_ids: Vec<String>,
 	#[serde(rename = "unresolvedClientMessageIds")]
 	pub unresolved_client_message_ids: Vec<String>,
+	/// Only ever `true`: the queue texts exceeded the response limit, so some chip texts are `""`; every slot and its ID stay aligned.
+	#[serde(rename = "queueTextsOmitted", default, skip_serializing_if = "Option::is_none")]
+	pub queue_texts_omitted: Option<bool>,
 }
 
 /// Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.

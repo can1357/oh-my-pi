@@ -129,7 +129,10 @@ on `prompt`, `steer`, `follow_up`, and `abort_and_prompt`. IDs are nonempty
 strings of at most 128 characters, distinct from per-request `id`. Reusing an ID
 already submitted, persisted, or explicitly resolved in the session is rejected;
 this is correlation, not automatic retry or idempotent command execution.
-Omitting the field preserves legacy behavior.
+Omitting the field preserves legacy behavior. IDs are checked against the
+session the input targets: input pipelined behind a session change is checked
+once that change completes, and an `abort_and_prompt` checked that way cancels
+earlier input only after its ID is accepted, so a rejected one cancels nothing.
 
 `message_start` and `message_end` project the ID at the top level, separate from
 their native `message`. `queuedMessages` and `queue_update` optionally include
@@ -150,6 +153,7 @@ It starts no turn and does not wait for the active turn to end. Success data:
   resolvedClientMessageIds: string[];
   persistedClientMessageIds: string[];
   unresolvedClientMessageIds: string[];
+  queueTextsOmitted?: true;
 }
 ```
 
@@ -170,7 +174,10 @@ The response fits the negotiated response limit (1 MiB per frame on v1, 64 MiB
 reassembled on v2). Native representations that would exceed it are omitted,
 never truncated: use their successfully flushed persisted IDs and transcript
 catch-up, or leave them unresolved when no durable entry or queued
-representation exists.
+representation exists. If the queue chip texts alone would exceed the limit,
+they are fitted after the native messages: texts that do not fit become `""`
+and `queueTextsOmitted: true` is set, while every slot and its
+`clientMessageIds` entry stays aligned. Texts are never truncated.
 
 ## Command Schema (canonical)
 

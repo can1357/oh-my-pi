@@ -11375,29 +11375,58 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		const persisted = ids.filter(id => this.sessionManager.hasClientMessageEntry(id));
 		const resolved = ids.filter(id => this.sessionManager.isClientMessageResolved(id));
-		const build = (messages: ClientMessageStatus["messages"]): ClientMessageStatus => {
+		const build = (
+			messages: ClientMessageStatus["messages"],
+			queue: ClientMessageQueueSnapshot = queuedMessages,
+		): ClientMessageStatus => {
 			const represented = new Set(queued);
 			for (const { clientMessageId } of messages) represented.add(clientMessageId);
 			return {
 				messages,
-				queuedMessages,
+				queuedMessages: queue,
 				resolvedClientMessageIds: resolved,
 				persistedClientMessageIds: persisted,
 				unresolvedClientMessageIds: ids.filter(
 					id => !represented.has(id) && !persisted.includes(id) && !resolved.includes(id),
 				),
+				...(queue === queuedMessages ? {} : { queueTextsOmitted: true as const }),
 			};
 		};
+		const bytesOf = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+		const fill = (remaining: number): ClientMessageStatus["messages"] => {
+			const messages: ClientMessageStatus["messages"] = [];
+			for (const envelope of candidates) {
+				const bytes = bytesOf(envelope) + (messages.length === 0 ? 0 : 1);
+				if (bytes > remaining) continue;
+				remaining -= bytes;
+				messages.push(envelope);
+			}
+			return messages;
+		};
 		// Measured with no messages, the unresolved list is at its longest; each message added only shortens it.
-		let remaining = maxBytes - Buffer.byteLength(JSON.stringify(build([])), "utf8");
-		const messages: ClientMessageStatus["messages"] = [];
-		for (const envelope of candidates) {
-			const bytes = Buffer.byteLength(JSON.stringify(envelope), "utf8") + (messages.length === 0 ? 0 : 1);
-			if (bytes > remaining) continue;
-			remaining -= bytes;
-			messages.push(envelope);
+		const full = maxBytes - bytesOf(build([]));
+		if (full >= 0) return build(fill(full));
+		// The queue texts alone overflow: blank them (keeping every slot and ID aligned), fit native
+		// messages first, then restore whichever texts still fit, oldest first.
+		const queue: ClientMessageQueueSnapshot = {
+			...queuedMessages,
+			steering: queuedMessages.steering.map(() => ""),
+			followUp: queuedMessages.followUp.map(() => ""),
+		};
+		const messages = fill(maxBytes - bytesOf(build([], queue)));
+		let remaining = maxBytes - bytesOf(build(messages, queue));
+		for (const lane of ["steering", "followUp"] as const) {
+			const texts = queuedMessages[lane];
+			const restored = [...queue[lane]];
+			for (let index = 0; index < texts.length; index++) {
+				const bytes = bytesOf(texts[index]) - bytesOf("");
+				if (bytes > remaining) continue;
+				remaining -= bytes;
+				restored[index] = texts[index];
+			}
+			queue[lane] = restored;
 		}
-		return build(messages);
+		return build(messages, queue);
 	}
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response

@@ -447,6 +447,8 @@ export interface ClientMessageStatus {
 	resolvedClientMessageIds: string[];
 	persistedClientMessageIds: string[];
 	unresolvedClientMessageIds: string[];
+	/** Only ever `true`: the queue texts exceeded the response limit, so some are `""`; slots and IDs stay aligned. */
+	queueTextsOmitted?: true;
 }
 
 /** Options for AgentSession.prompt(). */
