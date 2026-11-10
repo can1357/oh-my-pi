@@ -1738,3 +1738,33 @@ async fn is_session_builtin(session: &mut ShellSessionCore, name: &str) -> bool 
 		.expect("type -t");
 	read_capture(&out) == "builtin\n"
 }
+
+/// Windows `/dev/null` for the builtins that read operands: `cat` and
+/// `head` print nothing and exit 0 (POSIX null-device semantics), and `ls`
+/// prints the operand as spelled, `/dev/null`, and exits 0. A regression
+/// maps the path onto a drive directory (`C:\dev\null`) and fails the
+/// opens, or leaves `ls` reporting a missing file.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn builtins_read_the_null_device_from_dev_null() {
+	let mut session = default_session().await;
+	let out = tempfile::tempfile().expect("stdout capture");
+	let script = concat!(
+		"cat /dev/null; echo \"cat=$?\" > status\n",
+		"head -n 1 /dev/null; echo \"head=$?\" >> status\n",
+		"ls /dev/null; echo \"ls=$?\" >> status\n",
+	);
+	let result = session
+		.run_test(script, &TestStdio::null().stdout(&out))
+		.await
+		.expect("dev/null builtins");
+	assert_eq!(exit_code(&result), 0);
+	// cat/head print nothing; ls prints the operand as spelled.
+	assert_eq!(read_capture(&out), "/dev/null\n");
+	let status = tempfile::tempfile().expect("status capture");
+	session
+		.run_test("cat status", &TestStdio::null().stdout(&status))
+		.await
+		.expect("status readout");
+	assert_eq!(read_capture(&status), "cat=0\nhead=0\nls=0\n");
+}

@@ -257,6 +257,22 @@ fn drive_relative_paths_resolve_against_the_shell_cwd_not_the_process_cwd() {
 	assert_eq!(absolute_path(cwd, p(r"D:\x")), p(r"D:\x"));
 }
 
+/// The null-device predicate is an exact byte match: only the precise
+/// spelling `/dev/null` names the device, so a child, a longer name, or a
+/// relative `dev/null` stays a plain path, and off Windows nothing matches.
+#[test]
+fn windows_null_device_matches_only_the_exact_spelling() {
+	assert_eq!(windows_null_device(b"/dev/null"), cfg!(windows));
+	assert!(!windows_null_device(b"/dev/null/child"));
+	assert!(!windows_null_device(b"/dev/nullx"));
+	assert!(!windows_null_device(b"dev/null"));
+	assert!(!windows_null_device(b"/dev/nul"));
+	assert!(!windows_null_device(b"NUL"));
+	assert!(!windows_null_device(b""));
+	assert!(!windows_null_device(b"/dev/null/"));
+	assert!(!windows_null_device(b"/DEV/NULL"));
+}
+
 #[test]
 fn native_backend_never_resolves_urls_against_the_process_cwd() {
 	let fs = BlockingFs::native();

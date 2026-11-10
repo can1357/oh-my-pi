@@ -548,7 +548,6 @@ impl<'a> StyleManager<'a> {
 		}
 	}
 
-	#[cfg(unix)]
 	fn indicator_for_special_file(&self, file_type: FileType) -> Option<Indicator> {
 		if file_type.is_fifo() && self.has_indicator_style(Indicator::FIFO) {
 			return Some(Indicator::FIFO);
@@ -562,11 +561,6 @@ impl<'a> StyleManager<'a> {
 		if file_type.is_char_device() && self.has_indicator_style(Indicator::CharacterDevice) {
 			return Some(Indicator::CharacterDevice);
 		}
-		None
-	}
-
-	#[cfg(not(unix))]
-	fn indicator_for_special_file(&self, _file_type: FileType) -> Option<Indicator> {
 		None
 	}
 
@@ -768,7 +762,6 @@ fn dir_indicator<'m>(
 	Indicator::Directory
 }
 
-#[cfg(unix)]
 fn special_indicator(file_type: FileType) -> Indicator {
 	if file_type.is_fifo() {
 		Indicator::FIFO
@@ -782,11 +775,6 @@ fn special_indicator(file_type: FileType) -> Indicator {
 		// Files of unknown type are treated as errors.
 		Indicator::MissingFile
 	}
-}
-
-#[cfg(not(unix))]
-fn special_indicator(_file_type: FileType) -> Indicator {
-	Indicator::MissingFile
 }
 
 #[derive(Debug)]
@@ -3520,7 +3508,11 @@ fn display_item_long(
 		#[cfg(not(unix))]
 		let leading_char = {
 			if let Some(ft) = item.file_type() {
-				if ft.is_symlink() {
+				if ft.is_char_device() {
+					'c'
+				} else if ft.is_block_device() {
+					'b'
+				} else if ft.is_symlink() {
 					'l'
 				} else if ft.is_dir() {
 					'd'

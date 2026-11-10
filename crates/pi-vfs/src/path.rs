@@ -309,6 +309,18 @@ fn join_drive_relative(base: &Path, rel: &Path) -> Option<PathBuf> {
 	Some(out)
 }
 
+/// Whether `path` is spelled exactly `/dev/null`, the null device on
+/// Windows (`NUL` after translation).
+///
+/// The match is exact byte equality: `/dev/null/child`, `/dev/nullx`, a
+/// relative `dev/null`, and any other spelling stay plain paths, so an
+/// aliasing translation (MSYS-style `/c/...`) never collides with it. Off
+/// Windows this is always `false`: the engine spelling `/dev/null` names
+/// the real device and must reach the host unchanged.
+pub fn windows_null_device(path: &[u8]) -> bool {
+	cfg!(windows) && path == b"/dev/null"
+}
+
 /// Path of the directory entry named `name` (raw) inside `dir`: host
 /// directories use [`Path::join`]; URL directories append one
 /// percent-encoded segment. [`crate::DirEntry::file_name`] keeps the raw name.

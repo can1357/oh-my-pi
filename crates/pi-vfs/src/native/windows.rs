@@ -29,7 +29,7 @@ use windows_sys::Win32::{
 use crate::{
 	error::{permission_denied, unsupported},
 	metadata::Metadata,
-	types::{FileId, FileTime, NodeKind, Permissions, StatFs, SymlinkKind},
+	types::{FileId, FileKind, FileType, FileTime, NodeKind, Permissions, StatFs, SymlinkKind},
 };
 
 /// Identity fields std does not expose for a Windows path stat.
@@ -175,8 +175,22 @@ static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// Windows has no `access(2)`: readability/writability are probed by opening
 /// (honouring ACLs and the read-only attribute) and executability follows
 /// `PATHEXT`, matching the shell's historical Windows test operators.
+///
+/// The null device is readable and writable even though `GetFileAttributes`
+/// cannot stat it (`test -r` / `test -w`); it is not executable.
 pub(crate) fn access(path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
-	let meta = fs::metadata(path)?;
+	let meta = match fs::metadata(path) {
+		Ok(meta) => meta,
+		Err(_) if is_null_device(path) => {
+			// `GetFileAttributes` does not see the null device. A failed
+			// lookup of `NUL` is still readable and writable.
+			if execute {
+				return Err(permission_denied());
+			}
+			return Ok(());
+		},
+		Err(err) => return Err(err),
+	};
 	if meta.is_dir() {
 		if write && meta.permissions().readonly() {
 			return Err(permission_denied());
@@ -240,6 +254,18 @@ pub(crate) fn file_metadata(file: &fs::File) -> io::Result<Metadata> {
 	})
 }
 
+/// Whether `path` spells the Windows null device: `NUL` or `\\.\NUL`
+/// (case-insensitive, optional trailing separators). Consumers that get
+/// `NUL` from [`crate::windows_null_device`] translations pass it through.
+fn is_null_device(path: &Path) -> bool {
+	let Some(text) = path.to_str() else {
+		return false;
+	};
+	let stripped = text.strip_prefix(r"\\.\").unwrap_or(text);
+	let trimmed = stripped.trim_end_matches(['/', '\\']);
+	matches!(trimmed.to_ascii_uppercase().as_str(), "NUL" | r"\NUL")
+}
+
 /// Path metadata with handle identity.
 ///
 /// A Windows path stat cannot carry the volume serial and file index that
@@ -278,6 +304,31 @@ pub(crate) fn path_metadata(path: &Path, follow: bool) -> io::Result<Metadata> {
 	} else {
 		fs::symlink_metadata(path).map(Metadata::from)
 	}
+	.or_else(|err| match null_device_metadata(path) {
+		Ok(meta) => Ok(meta),
+		Err(_) => Err(err),
+	})
+}
+
+/// Metadata of the Windows null device, which no attribute query can stat.
+///
+/// `GetFileAttributes`/`CreateFileW` with backup semantics do not see `NUL`
+/// (or its `\\.\NUL` spelling), so a failed lookup of the device is the
+/// device itself: present, empty, a character device. This mirrors the
+/// `access` handling of the same boundary in the shell
+/// (`crates/pi-shell/src/sys/fs.rs`).
+fn null_device_metadata(path: &Path) -> io::Result<Metadata> {
+	if !is_null_device(path) {
+		return Err(io::Error::from(io::ErrorKind::NotFound));
+	}
+	Ok(Metadata::new(
+		FileType::from_kind(FileKind::CharDevice),
+		0,
+		Permissions::from_mode(0o666),
+	)
+	.with_blocks(0, 4096)
+	.with_nlink(1)
+	.with_rdev(0))
 }
 
 pub(crate) fn file_is_locked(_file: &fs::File) -> io::Result<bool> {

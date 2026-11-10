@@ -543,6 +543,15 @@ impl ShellPaths {
 		if pi_vfs::is_virtual_path(path) {
 			return path.to_path_buf();
 		}
+		let bytes = path.as_os_str().as_encoded_bytes();
+		// The exact spelling `/dev/null` is the null device on Windows: hand
+		// the fs layer `NUL` directly, since joining the shell cwd first
+		// would produce `C:\dev\null` (and joining the shell cwd onto `NUL`
+		// replaces it, the way `Path::join` treats a bare drive device name
+		// as rooted).
+		if pi_vfs::windows_null_device(bytes) {
+			return PathBuf::from("NUL");
+		}
 		let normalized_path = normalize_shell_path(path);
 		absolute_path(&self.cwd, normalized_path.as_ref())
 	}

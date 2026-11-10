@@ -142,7 +142,6 @@ enum InputType {
 	SymLink,
 	#[cfg(unix)]
 	BlockDevice,
-	#[cfg(unix)]
 	CharacterDevice,
 	#[cfg(unix)]
 	Fifo,
@@ -399,8 +398,7 @@ fn get_input_type(fs: &BlockingFs, path: &OsString, resolved: &Path) -> CatResul
 	match file_type {
 		#[cfg(unix)]
 		file_type if file_type.is_block_device() => Ok(InputType::BlockDevice),
-		#[cfg(unix)]
-		file_type if file_type.is_char_device() => Ok(InputType::CharacterDevice),
+	file_type if file_type.is_char_device() => Ok(InputType::CharacterDevice),
 		#[cfg(unix)]
 		file_type if file_type.is_fifo() => Ok(InputType::Fifo),
 		#[cfg(unix)]

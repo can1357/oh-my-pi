@@ -426,13 +426,14 @@ impl File for StdFile {
 /// Engine path → host path (UTF-8 required on Windows). A URL path
 /// ([`crate::bash::fs::url_root_len`]) names no host file: `NotFound`, rather
 /// than a lookup relative to the process's working directory. On Windows the
-/// exact path `/dev/null` is the null device `NUL`; a longer name is not.
+/// null device [`pi_vfs::windows_null_device`] decides the exact spelling
+/// `/dev/null` maps to `NUL`; a longer name does not.
 pub fn host_path(p: &[u8]) -> io::Result<&Path> {
 	if crate::bash::fs::url_root_len(p).is_some() {
 		return Err(io::Error::from(io::ErrorKind::NotFound));
 	}
 	#[cfg(windows)]
-	if p == b"/dev/null" {
+	if pi_vfs::windows_null_device(p) {
 		return Ok(Path::new("NUL"));
 	}
 	p.to_path()
