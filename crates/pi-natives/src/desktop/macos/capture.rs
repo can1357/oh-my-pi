@@ -340,6 +340,11 @@ impl MacCapture {
 	}
 }
 
+/// Every window on screen, front to back, as `windows()` lists them.
+pub(in crate::desktop) fn onscreen_windows() -> CoreResult<Vec<DesktopWindow>> {
+	window_snapshot(None, None)
+}
+
 /// The windows `pid` has on screen at the normal window layer, front to back,
 /// as `windows()` lists them; its status items and other system-layer
 /// surfaces are left out.
