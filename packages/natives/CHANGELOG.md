@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles.
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed

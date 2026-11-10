@@ -948,6 +948,19 @@ const FIND_MAX_NODES: u32 = 5_000;
 /// recursion, deep enough for the levels Electron nests its content in.
 const FIND_MAX_DEPTH: u32 = 64;
 
+fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
+	let printed = props.role.to_lowercase();
+	printed.contains(query)
+		|| printed.contains(compact)
+		|| props
+			.native_role
+			.chars()
+			.filter(|c| !matches!(c, ' ' | '_' | '-'))
+			.flat_map(char::to_lowercase)
+			.eq(compact.chars())
+		|| matches!((compact, printed.as_str()), ("radiobutton", "radio") | ("radio", "radiobutton"))
+}
+
 pub fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -963,6 +976,7 @@ pub fn query(
 	};
 	let identities = ReadIdentities::new(&root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
+	let compact_role = role.as_deref().map(|role| role.replace([' ', '_', '-'], ""));
 	let title = query.title.as_deref().map(str::to_lowercase);
 	let value = query.value.as_deref().map(str::to_lowercase);
 	let limit = query.limit.unwrap_or(100).min(5_000) as usize;
@@ -975,7 +989,9 @@ pub fn query(
 			expected
 				.is_none_or(|needle| actual.is_some_and(|text| text.to_lowercase().contains(needle)))
 		};
-		if contains(Some(&node.props.role), role.as_ref())
+		if role.as_deref().is_none_or(|role| {
+			matches_role(&node.props, role, compact_role.as_deref().unwrap_or(role))
+		})
 			&& contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
