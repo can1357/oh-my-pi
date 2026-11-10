@@ -1472,12 +1472,18 @@ describe("computer prelude", () => {
 describe("computer worker round trips", () => {
 	it("rejects unknown computer options without rejecting valid helper options", async () => {
 		class OptionsSession extends FakeNativeSession {
+			readonly draggedButtons: Array<string | undefined> = [];
+			override async drag(target: string, points: DesktopPoint[], options?: PointerOptions | null) {
+				this.draggedButtons.push(options?.button);
+				return super.drag(target, points, options);
+			}
 			override async captureRegion(target: string, _region: CaptureRegion): Promise<DesktopCapture> {
 				return this.capture(target);
 			}
 		}
 		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => new OptionsSession());
+		const native = new OptionsSession();
+		new ComputerWorkerCore(transport, () => native);
 		const result = await runWorker(
 			transport,
 			"strict-options",
@@ -1524,7 +1530,7 @@ describe("computer worker round trips", () => {
 				await check("click", o => target.click(1, 2, o), { button: "left", count: 1, modifiers: [], menu: ["Save"], takeover: false });
 				await check("doubleClick", o => target.doubleClick(1, 2, o), { button: "left", modifiers: [], menu: ["Save"], takeover: false });
 				await check("move", o => target.move(1, 2, o), { takeover: false });
-				await check("drag", o => target.drag([[1, 2], [3, 4]], o), { modifiers: [], keys: [], takeover: false });
+				await check("drag", o => target.drag([[1, 2], [3, 4]], o), { button: "middle", modifiers: [], keys: [], takeover: false });
 				await check("scroll", o => target.scroll(1, 2, o), { dx: 1, dy: 2, takeover: false }, { x: 1, y: 2, dx: 3 });
 				await check("type", o => target.type("Save", o), { takeover: false });
 				await check("press", o => target.press("enter", o), { takeover: false });
@@ -1539,6 +1545,7 @@ describe("computer worker round trips", () => {
 		);
 		if (!result.ok) throw new Error(result.error.message);
 		expect(result.payload.returnValue).toBe(true);
+		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
 	});
 
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {

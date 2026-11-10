@@ -107,7 +107,7 @@ Both a selected window and `desktop` expose:
 - `click(x, y, { button?, count?, modifiers?, menu?, takeover? })`
 - `doubleClick(x, y, { button?, modifiers?, takeover? })`
 - `move(x, y, { takeover? })`
-- `drag([[x, y], ...], { modifiers?, takeover? }) -> { start, length, text, focused } | undefined`: the selection when a macOS background drag was made as one (below), otherwise `undefined`
+- `drag([[x, y], ...], { button?, keys?, modifiers?, takeover? }) -> { start, length, text, focused } | undefined`: the selection when a macOS background drag was made as one (below), otherwise `undefined`
 - `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })`
 - `press(chord | string[], { takeover? })`

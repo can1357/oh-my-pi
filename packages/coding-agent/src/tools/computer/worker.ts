@@ -151,7 +151,7 @@ type ScreenshotResult = Pick<
 >;
 type MenuOptions = { menu?: string[] };
 type ClickOptions = InputOptions & MenuOptions & { button?: string; count?: number; modifiers?: string[] };
-type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
+type DragOptions = InputOptions & { button?: string; modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
@@ -167,7 +167,7 @@ const clickOptionsKeys: Record<keyof ClickOptions, true> = {
 	count: true,
 	modifiers: true,
 };
-const dragOptionsKeys: Record<keyof DragOptions, true> = { takeover: true, modifiers: true, keys: true };
+const dragOptionsKeys: Record<keyof DragOptions, true> = { takeover: true, button: true, modifiers: true, keys: true };
 const scrollOptionsKeys: Record<keyof ScrollOptions, true> = { takeover: true, dx: true, dy: true };
 const axOptionsKeys: Record<keyof AxOptions, true> = { all: true, maxDepth: true };
 const holdOptionsKeys: Record<keyof HoldOptions, true> = { duration: true, takeover: true };
