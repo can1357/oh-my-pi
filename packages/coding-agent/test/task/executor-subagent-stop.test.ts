@@ -513,6 +513,39 @@ describe("runSubprocess subagent_stop", () => {
 		expect(harness.holds[0]?.released).toBe(true);
 	});
 
+	it("never publishes a refused result's prose when the pass is cancelled while its continuation runs", async () => {
+		const id = "RefusedProseThenUserCancelled";
+		const refused = "REFUSED-PROSE-MUST-NOT-BE-PUBLISHED";
+		let continuationRunning = false;
+		let waitHung = false;
+		const harness: StopHarness = createHarness({
+			hasStopHandlers: true,
+			// The model answers in prose and never yields: that output is the candidate the handler refuses.
+			onPrompt: call => {
+				if (call.text === "not done") continuationRunning = true;
+				else call.report(refused);
+			},
+			onStop: async () => ({ decision: "block", reason: "not done" }),
+			onWaitForIdle: async () => {
+				if (!continuationRunning || waitHung) return;
+				waitHung = true;
+				harness.holds[0]?.cancel.abort();
+				await Promise.withResolvers<void>().promise;
+			},
+		});
+		mockCreateAgentSession(harness.session);
+		registerRunning(id, harness.session);
+
+		const result = await runSubprocess(baseOptions(id));
+
+		// Cancelled, not failed on the refusal; but the refused prose is still never published.
+		expect(harness.events).toHaveLength(1);
+		expect(result.aborted).toBe(true);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.output).not.toContain(refused);
+		expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).exists()).toBe(false);
+	});
+
 	it("reports a pass a user prompt cancelled as cancelled, never as a refusal", async () => {
 		const id = "UserCancelledPass";
 		const harness: StopHarness = createHarness({
