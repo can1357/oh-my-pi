@@ -115,9 +115,15 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 
 	const tier = remainingMs <= IMMINENT_MS ? "imminent" : "soon";
 	const horizonMs = tier === "imminent" ? IMMINENT_MS : SOON_MS;
+	const windowOf = (credit: UsageResetCreditDetail, limit: UsageLimit): ResetWindow | undefined =>
+		provider === "openai-codex" ? codexWindow?.window : claudeResetWindow(credit, [limit.id]);
+	const window = windowOf(warned.credit, fullest.limit);
+	// Count only resets the warned one's setting decides, so the count and the verdict agree.
 	let count = 0;
 	for (const { credit, expiresAtMs } of credits) {
-		if (expiresAtMs - nowMs <= horizonMs && worth(credit)) count += credit.remainingCount ?? 1;
+		if (expiresAtMs - nowMs > horizonMs) continue;
+		const worthy = worth(credit);
+		if (worthy && windowOf(credit, worthy.limit) === window) count += credit.remainingCount ?? 1;
 	}
 	return {
 		provider,
@@ -126,7 +132,7 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		expiresAtMs: warned.expiresAtMs,
 		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
 		...fullest,
-		window: provider === "openai-codex" ? codexWindow?.window : claudeResetWindow(warned.credit, [fullest.limit.id]),
+		window,
 	};
 }
 

@@ -646,6 +646,26 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(plan.actions).toHaveLength(1);
 	});
 
+	it("governs a salvage by the weekly key when both chat windows are equally full", () => {
+		const plan = planCodexResetRedemptions(
+			input([report({ primaryUsed: 1, weeklyUsed: 1, limitReached: false, creditExpiries: [2 * HOUR] })], {
+				trigger: "sweep",
+				settings: {
+					modes: { "5h": "yes", weekly: "no" },
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+				},
+			}),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "expiring-credit",
+			reason: "window-disabled",
+		});
+	});
+
 	it("leaves credits outside the horizon alone", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [13 * HOUR] })], { trigger: "sweep" }),
@@ -838,7 +858,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			{
 				reason: "expiring-credit",
 				accountKey: "openai-codex|-|3",
-				salvageWindow: "5h",
+				salvageWindow: "weekly",
 				salvageUsedFraction: 0,
 			},
 		]);

@@ -1485,6 +1485,23 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
 	});
 
+	it("counts only expiring resets that the warned reset's setting decides", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const fable = cedarGrant(now, "fable", 12 * HOUR, { clears: ["anthropic:5h", "anthropic:7d:fable"] });
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8, "anthropic:7d:fable": 0.6 }, [
+			cedarGrant(now, "cedar", 6 * HOUR),
+			fable,
+		]);
+		const options = resetExpiryOptions({
+			"claudeResets.autoRedeemWeekly": "no",
+			"claudeResets.autoRedeemFable": "yes",
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		// The Fable reset follows its own key, so the weekly verdict covers the Cedar reset alone.
+		expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
+	});
+
 	it.each([
 		{
 			name: "an unavailable grant behind the selected one",

@@ -230,7 +230,11 @@ export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: Usage
 	return limits.filter(limit => clears.has(limit.id) && (only === undefined || limit.id === only));
 }
 
-/** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
+/**
+ * The fullest covered limit by the report's or the grant's own used fraction: what a
+ * salvage spend restores. A tie with the 5h window goes to the other limit, so a
+ * spend that restores a weekly limit is governed by the weekly key.
+ */
 export function fullestClaudeLimit(
 	covered: readonly UsageLimit[],
 	credit: UsageResetCreditDetail,
@@ -241,7 +245,9 @@ export function fullestClaudeLimit(
 		const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
 		const server = credit.usedFractions?.[limit.id];
 		const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
-		if (!fullest || used > fullest.used) fullest = { limit, used };
+		if (!fullest || used > fullest.used || (used === fullest.used && fullest.limit.id === FIVE_HOUR_LIMIT_ID)) {
+			fullest = { limit, used };
+		}
 	}
 	return fullest;
 }

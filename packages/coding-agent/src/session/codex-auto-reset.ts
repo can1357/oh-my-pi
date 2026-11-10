@@ -303,15 +303,16 @@ function codexChatWindows(report: UsageReport): CodexChatWindowSnapshot[] {
 	return windows;
 }
 
-/** The fullest chat window with known usage: the one a salvage redeem restores. */
+/**
+ * The fullest chat window with known usage: the one a salvage redeem restores. A tie
+ * goes to weekly, so a spend that restores the weekly window is governed by its key.
+ */
 function fullestChatWindow(windows: readonly CodexChatWindowSnapshot[]): CodexChatWindowSnapshot | undefined {
 	let fullest: CodexChatWindowSnapshot | undefined;
 	for (const window of windows) {
-		if (
-			window.usedFraction !== undefined &&
-			window.usedFraction >= 0 &&
-			(!fullest || window.usedFraction > (fullest.usedFraction ?? 0))
-		) {
+		if (window.usedFraction === undefined || window.usedFraction < 0) continue;
+		const top = fullest?.usedFraction ?? 0;
+		if (!fullest || window.usedFraction > top || (window.usedFraction === top && window.window === "weekly")) {
 			fullest = window;
 		}
 	}

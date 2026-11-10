@@ -378,6 +378,14 @@ describe("planClaudeResetRedemptions: window consent", () => {
 			credit: { ...fable, ...expiring },
 			expected: "window-mostly-free",
 		},
+		{
+			name: "a salvage restoring 5h and weekly equally is governed by the weekly key",
+			trigger: "sweep",
+			modes: { "5h": "yes", weekly: "no" },
+			usage: { fiveHourUsed: 0.8, weeklyUsed: 0.8 },
+			credit: { ...expiring, usedFractions: {} },
+			expected: "window-disabled",
+		},
 	])("$name", ({ trigger, modes, usage, credit, expected }) => {
 		const plan = planClaudeResetRedemptions(
 			input({
