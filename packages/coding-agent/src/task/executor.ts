@@ -3049,8 +3049,14 @@ async function driveSessionToResult(
 					// exhausted the ladder still publishes (see resolveUnyieldedResult). A
 					// refusal of the latter is answerable only by a fresh yield, so a ladder
 					// that again ends without one fails closed rather than re-offering it, and
-					// the sections it recorded are dropped with the refusal. A
-					// budget stop or a terminal model error ends the run without a candidate.
+					// the sections it recorded are dropped with the refusal. A terminal model
+					// error ends the run without a candidate, and so does a budget stop for a
+					// structured run: only the forced yield can answer it, and a ladder that
+					// ends without one fails as a budget abort (its sections dropped unjudged).
+					// A message-result run's budget wrap-up is its result like any other
+					// report, so it is offered too: an always-refusing handler then burns the
+					// stop's grace window, which ends the run as a budget abort that publishes
+					// nothing, exactly as for a `yield` run's forced yield.
 					const finalTurn = session.getLastAssistantMessage();
 					const recordedYields = monitor.progress.extractedToolData?.yield?.length ?? 0;
 					const settledResult = structured
@@ -3059,7 +3065,7 @@ async function driveSessionToResult(
 						: monitor.lastReportTurnText() !== undefined;
 					if (
 						settledResult &&
-						!monitor.budgetStopRequested() &&
+						(!structured || !monitor.budgetStopRequested()) &&
 						finalTurn !== undefined &&
 						finalTurn.stopReason !== "error" &&
 						finalTurn.stopReason !== "aborted" &&
