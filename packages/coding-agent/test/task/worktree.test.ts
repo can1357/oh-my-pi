@@ -1241,6 +1241,32 @@ describe("applyNestedPatches", () => {
 		expect(status).toBe("");
 		expect(sourceStat).toBe("gone");
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"commits a nested edit of a pathname ending with a carriage return",
+		async () => {
+			const crSpaced = "my notes.txt\r";
+			await fs.writeFile(path.join(nestedDir, crSpaced), "v1\n");
+			await fs.writeFile(path.join(nestedDir, "my notes.txt"), "unrelated\n");
+			await runGit(nestedDir, ["add", "--", crSpaced, "my notes.txt"]);
+			await runGit(nestedDir, ["commit", "-q", "-m", "add cr pathname"]);
+
+			await fs.writeFile(path.join(nestedDir, crSpaced), "v2\n");
+			const patch = await vcs.requireGit(nestedDir).diffText({});
+			await runGit(nestedDir, ["checkout", "--", crSpaced]);
+
+			await applyNestedPatches(parentRepo, [{ relativePath: nestedRel, patch }]);
+
+			const [crAtHead, plainAtHead, status] = await Promise.all([
+				runGit(nestedDir, ["show", `HEAD:${crSpaced}`]),
+				runGit(nestedDir, ["show", "HEAD:my notes.txt"]),
+				runGit(nestedDir, ["status", "--porcelain=v1"]),
+			]);
+			expect(crAtHead).toBe("v2");
+			expect(plainAtHead).toBe("unrelated");
+			expect(status).toBe("");
+		},
+	);
 });
 
 describe("commitToBranch preserves agent commits", () => {

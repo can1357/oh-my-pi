@@ -9,6 +9,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
+import { patchSectionPaths, splitPatchSections } from "../utils/git-diff-paths";
 import { withRepoLock } from "../utils/repo-lock";
 import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -358,119 +359,6 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	]);
 
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
-}
-
-function unquoteGitDiffPath(rawPath: string): string {
-	let value = rawPath;
-	if (value.startsWith('"') && value.endsWith('"')) {
-		try {
-			value = JSON.parse(value) as string;
-		} catch {
-			value = value.slice(1, -1);
-		}
-	}
-	return value.replace(/^[ab]\//, "");
-}
-
-function sidePath(token: string): string | undefined {
-	const path = unquoteGitDiffPath(token);
-	return path && path !== "/dev/null" ? path : undefined;
-}
-
-/**
- * Split an unquoted `diff --git` payload into its `a/` and `b/` tokens.
- * The native renderer writes names verbatim, including spaces, so splitting on
- * whitespace turns `my file.txt` into `my` and `file.txt`. Prefer the split
- * whose sides name the same path; a rename has one ` b/` separator.
- */
-function splitUnquotedDiffPaths(rest: string): [string, string] | undefined {
-	const candidates: Array<[string, string]> = [];
-	if (rest.startsWith("a/")) {
-		let from = 0;
-		while (from < rest.length) {
-			const index = rest.indexOf(" b/", from);
-			if (index < 0) break;
-			const right = rest.slice(index + 1);
-			if (right.length > "b/".length) candidates.push([rest.slice(0, index), right]);
-			from = index + 1;
-		}
-	}
-	const equal = candidates.find(([left, right]) => left.slice("a/".length) === right.slice("b/".length));
-	if (equal) return equal;
-	if (candidates.length === 1) return candidates[0];
-	if (rest.startsWith("/dev/null ")) return ["/dev/null", rest.slice("/dev/null ".length)];
-	if (rest.endsWith(" /dev/null")) return [rest.slice(0, -" /dev/null".length), "/dev/null"];
-	const space = rest.indexOf(" ");
-	if (space <= 0 || space >= rest.length - 1) return undefined;
-	return [rest.slice(0, space), rest.slice(space + 1)];
-}
-
-function parseDiffGitHeader(line: string): { oldPath?: string; newPath?: string } {
-	if (!line.startsWith("diff --git ")) return {};
-	const rest = line.slice("diff --git ".length);
-	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const split = quoted?.[1] && quoted[2] ? ([quoted[1], quoted[2]] as const) : splitUnquotedDiffPaths(rest);
-	if (!split) return {};
-	return { oldPath: sidePath(split[0]), newPath: sidePath(split[1]) };
-}
-
-function unquoteRenamePath(raw: string): string | undefined {
-	if (!raw) return undefined;
-	if (raw.startsWith('"') && raw.endsWith('"')) {
-		try {
-			const parsed = JSON.parse(raw) as string;
-			return parsed || undefined;
-		} catch {
-			const sliced = raw.slice(1, -1);
-			return sliced || undefined;
-		}
-	}
-	return raw;
-}
-
-/** Drop git's tab terminator and optional timestamp from an unquoted marker path. */
-function stripDiffTimestamp(path: string): string {
-	const tab = path.lastIndexOf("\t");
-	if (tab < 0) return path;
-	const after = path.slice(tab + 1);
-	if (after === "" || /^\d{4}-\d{2}-\d{2} /.test(after)) return path.slice(0, tab);
-	return path;
-}
-
-function parseMarkerPath(payload: string): string | undefined {
-	if (payload.startsWith('"')) {
-		const token = payload.match(/^"(?:\\.|[^"])*"/)?.[0];
-		return token ? sidePath(token) : undefined;
-	}
-	return sidePath(stripDiffTimestamp(payload));
-}
-
-/**
- * Paths one `diff --git` section touches. `rename from`/`rename to` and
- * `---`/`+++` override the header, which is how native patch application
- * recovers a name the header cannot split unambiguously.
- */
-function patchSectionPaths(section: string): string[] {
-	const headerEnd = section.indexOf("\n");
-	const header = (headerEnd < 0 ? section : section.slice(0, headerEnd)).replace(/\r$/, "");
-	if (!header.startsWith("diff --git ")) return [];
-	let { oldPath, newPath } = parseDiffGitHeader(header);
-	const body = headerEnd < 0 ? "" : section.slice(headerEnd + 1);
-	for (const rawLine of body.split("\n")) {
-		const line = rawLine.replace(/\r$/, "");
-		if (line.startsWith("@@") || line === "GIT binary patch" || line.startsWith("diff --git ")) break;
-		if (line.startsWith("new file mode ")) oldPath = undefined;
-		else if (line.startsWith("deleted file mode ")) newPath = undefined;
-		else if (line.startsWith("rename from ")) oldPath = unquoteRenamePath(line.slice("rename from ".length));
-		else if (line.startsWith("rename to ")) newPath = unquoteRenamePath(line.slice("rename to ".length));
-		else if (line.startsWith("--- ")) oldPath = parseMarkerPath(line.slice("--- ".length));
-		else if (line.startsWith("+++ ")) newPath = parseMarkerPath(line.slice("+++ ".length));
-	}
-	return [...new Set([oldPath, newPath].filter((path): path is string => !!path))];
-}
-
-function splitPatchSections(patch: string): string[] {
-	return patch.split(/^(?=diff --git )/m);
 }
 
 function patchTouchedFiles(patch: string): string[] {
