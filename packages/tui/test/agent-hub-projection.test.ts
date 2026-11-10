@@ -392,4 +392,23 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(150.0);
 	});
+
+	it("extracts tokensPerSecond from observer progress for observer-only / collab-guest clients", () => {
+		const ref = { id: "collab-worker", session: null } as unknown as AgentRecordLike;
+		const observed: ObservableSession = {
+			progress: {
+				tokens: 80,
+				requests: 4,
+				toolCount: 3,
+				cost: 0.05,
+				durationMs: 800,
+				contextTokens: 64,
+				contextWindow: 2048,
+				tokensPerSecond: 100.0,
+			},
+		} as unknown as ObservableSession;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		const metrics = hubRowMetrics(ref, observed, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(100.0);
+	});
 });

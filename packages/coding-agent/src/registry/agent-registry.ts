@@ -296,6 +296,9 @@ export class AgentRegistry implements AgentRegistryApi {
 		) {
 			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
 		}
+		if (expectedSessionFile !== undefined && ref.history?.tokensPerSecond !== undefined) {
+			delete definedHistory.tokensPerSecond;
+		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });
 		return true;
