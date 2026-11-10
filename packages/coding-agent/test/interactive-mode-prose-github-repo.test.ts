@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -76,6 +77,45 @@ describe("InteractiveMode prose GitHub repo", () => {
 		expect(mode.proseGithubRepo(writtenInBeta)()).toBe("owner/beta");
 		// The live (streaming) component has no message yet and follows the current cwd.
 		expect(mode.proseGithubRepo()()).toBe("owner/beta");
+	});
+
+	it("binds a focused agent's replies to the agent's own repo, not the main session's", async () => {
+		const { lookups } = stubSession("/work/alpha");
+		mode.proseGithubRepo();
+		const agentDir = TempDir.createSync("@pi-prose-github-repo-agent-");
+		const model = session.model!;
+		const focused = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(agentDir.path(), agentDir.path()),
+			settings: Settings.isolated({}),
+			modelRegistry,
+		});
+		// An isolated subagent runs in its own worktree, in another repo than the main session.
+		vi.spyOn(focused.sessionManager, "getCwd").mockReturnValue("/work/beta");
+		const registry = AgentRegistry.global();
+		const agentId = "ProseGithubRepoAgent";
+		const ref = registry.register({
+			id: agentId,
+			displayName: agentId,
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: focused,
+			status: "idle",
+		});
+		try {
+			await mode.focusAgentSession(agentId);
+			const inFocusedView = mode.proseGithubRepo();
+			await Promise.all(lookups);
+			expect(inFocusedView()).toBe("owner/beta");
+
+			await mode.unfocusSession();
+			expect(mode.proseGithubRepo()()).toBe("owner/alpha");
+		} finally {
+			if (mode.focusedAgentId) await mode.unfocusSession();
+			registry.unregister(agentId, ref);
+			await focused.dispose();
+			agentDir.removeSync();
+		}
 	});
 
 	it("binds a resumed session's older replies to that session's repo", async () => {
