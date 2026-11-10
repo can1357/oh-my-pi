@@ -77,6 +77,10 @@
 
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Added
+
+- Agent names in Task tool rows and the agent hub take a colour of their own in the terminal UI (Tern's native view keeps its styling): Main is blue and every subagent keeps the same one of six other colours wherever it appears
+
 ### Changed
 
 - Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))

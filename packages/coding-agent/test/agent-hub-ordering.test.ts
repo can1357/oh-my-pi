@@ -8,6 +8,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { agentColored } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -1134,6 +1135,22 @@ describe("Agent hub row ordering", () => {
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("├── ⟳ First");
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120))).toContain("│   └── ⟳ Grandchild");
 			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("└── ⟳ Last");
+		} finally {
+			hub.dispose();
+		}
+	});
+	it("draws each unselected agent's id in its identity colour and the selected one in accent", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Scout", displayName: "Scout", kind: "sub", session: null });
+		agents.register({ id: "Scout.Probe", displayName: "Probe", kind: "sub", parentId: "Scout", session: null });
+		const hub = makeHub(agents);
+
+		try {
+			const selected = selectedAgentId(hub)!;
+			const other = selected === "Scout" ? "Scout.Probe" : "Scout";
+			expect(renderedRosterHeaderLineRaw(hub, selected, 120)).toContain(theme.bold(theme.fg("accent", selected)));
+			expect(renderedRosterHeaderLineRaw(hub, other, 120)).toContain(theme.bold(agentColored(other, other)));
 		} finally {
 			hub.dispose();
 		}

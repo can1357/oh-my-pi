@@ -761,6 +761,7 @@ function renderAgentProgress(
 			status: progress.status,
 			prefix,
 			id: formatTaskId(progress.id),
+			agentId: progress.id,
 			width: maxWidth,
 			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
 			thinkingLevel: progress.resolvedThinkingLevel,
