@@ -1,11 +1,11 @@
 /** Mnemosyne adapter: upstream Mnemosyne 4.0.0b4 in a Python child process, driven over JSON lines. */
 import * as fs from "node:fs/promises";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import * as os from "node:os";
 import * as path from "node:path";
+import { normalizeEnvKey, removeWithRetries } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
-import { envName, PythonProcess } from "./python-process";
+import { PythonProcess } from "./python-process";
 import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
@@ -70,7 +70,7 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "mnemosyne-data-"));
 		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings;
 		// PythonProcess drops PYTHON* import overrides itself.
-		const inherited = Object.entries(Bun.env).filter(([key]) => !envName(key).startsWith("MNEMOSYNE_"));
+		const inherited = Object.entries(Bun.env).filter(([key]) => !normalizeEnvKey(key).startsWith("MNEMOSYNE_"));
 		proc = new PythonProcess("mnemosyne engine", python, script, {
 			...Object.fromEntries(inherited),
 			MNEMOSYNE_DATA_DIR: dataDir,
