@@ -176,9 +176,39 @@ fn the_hosts_sweep_bound_comes_from_the_number_its_kernel_publishes() {
 /// must follow the descriptors, not the ceiling.
 #[test]
 fn closing_the_hosts_descriptors_costs_no_call_per_possible_number() {
+	let live = open_descriptor_count();
 	let (calls, bound) = closer_call_count();
 	assert!(bound >= 600, "the bound under test is {bound}");
-	assert!(calls <= 16, "{calls} descriptor-closing calls for a bound of {bound}");
+	// The cost follows the descriptors this process holds, not the
+	// ceiling: an arm that lists them makes one call each, and the
+	// slack covers the pipe `closer_call_count` opens and anything the
+	// harness opened beside it.
+	assert!(
+		calls <= live + 8,
+		"{calls} descriptor-closing calls for {live} open descriptors and a bound of {bound}"
+	);
+}
+
+/// How many descriptors this process holds, counted without the code
+/// under test: the entries `/proc/self/fd` lists on a Linux kernel.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_descriptor_count() -> u32 {
+	let listed = std::fs::read_dir("/proc/self/fd").expect("the kernel lists this process's fds");
+	// The listing's own descriptor is one of them and closes with it.
+	u32::try_from(listed.count()).unwrap_or(u32::MAX)
+}
+
+/// [`open_descriptor_count`] where the kernel lists nothing: the
+/// numbers below 1,024 that answer `F_GETFD`. A test process holds
+/// none above that.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_descriptor_count() -> u32 {
+	// SAFETY: a plain descriptor query; it writes nothing.
+	(0..1024)
+		.filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0)
+		.count()
+		.try_into()
+		.unwrap_or(u32::MAX)
 }
 
 /// In a forked child: close the host's descriptors through

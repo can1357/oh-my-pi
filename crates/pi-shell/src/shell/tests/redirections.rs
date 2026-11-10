@@ -175,10 +175,21 @@ async fn a_closed_descriptor_stays_closed_in_an_external_command() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_background_command_cannot_duplicate_a_descriptor_only_the_host_holds() {
 	let null = std::fs::File::open("/dev/null").expect("open /dev/null");
+	// A number far above the ones the shell hands out, but still below
+	// this process's own soft open-file limit: `F_DUPFD` with a minimum
+	// at or above that limit answers `EMFILE`, and a test environment
+	// with a low limit would never reach the behaviour under test.
+	let soft = crate::sys::rlimit::get(crate::bash::Rlimit::Nofile)
+		.ok()
+		.and_then(|(soft, _)| soft)
+		.unwrap_or(u64::MAX);
+	let least = i32::try_from(soft.saturating_sub(8))
+		.unwrap_or(i32::MAX)
+		.clamp(3, 300);
 	// SAFETY: F_DUPFD on an open descriptor returns a new one without
 	// close-on-exec; it is closed below.
-	let host = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&null), libc::F_DUPFD, 300) };
-	assert!(host >= 300, "dup host descriptor");
+	let host = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&null), libc::F_DUPFD, least) };
+	assert!(host >= least, "dup host descriptor at or above {least}");
 	let script: &'static str = Box::leak(
 		format!(
 			"/bin/cat f >/dev/null & /bin/sh -c 'echo x' >f 1>&{host} 2>err & wait $!; echo s=$?; \
