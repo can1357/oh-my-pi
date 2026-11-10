@@ -90,6 +90,14 @@ impl Backend for X11Backend {
 		self.capture.windows()
 	}
 
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		self.input.admit_takeover()
+	}
+
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		self.input.takeover_admitted()
+	}
+
 	fn capture(
 		&mut self,
 		target: &Target,

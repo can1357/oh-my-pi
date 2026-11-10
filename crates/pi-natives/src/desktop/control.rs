@@ -733,6 +733,16 @@ const LEASE_WAIT: Duration = Duration::from_secs(5);
 /// How often input waiting for control tries again.
 const LEASE_POLL: Duration = Duration::from_millis(50);
 
+/// A step of a takeover's admission ([`InputLease::acquire_admitted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admit {
+	/// Wait, without the lease, until the backend lets the takeover start (on
+	/// X11, once the user has paused); the answer is not read.
+	Wait,
+	/// With the lease held: whether that admission still holds.
+	Recheck,
+}
+
 impl InputLease {
 	/// `takeover` arms the physical-Escape stop for this operation; held control
 	/// keeps the stop it armed when it was granted. Control another session
@@ -746,11 +756,53 @@ impl InputLease {
 			Instant::now,
 			|duration| token.wait(duration),
 			|| ControlLease::escape_monitor(&token.source),
+			None,
 		)
 	}
 
+	/// [`Self::acquire`] for a takeover its backend admits first. `admit`
+	/// waits ([`Admit::Wait`]) without the lease, so other sessions' input
+	/// is not kept out meanwhile, while the physical-Escape stop is armed;
+	/// once the lease is held it rechecks ([`Admit::Recheck`]), and when the
+	/// admission no longer holds it lets the lease go and waits again.
+	pub(crate) fn acquire_admitted(
+		token: &OperationToken,
+		admit: impl FnMut(Admit) -> CoreResult<bool>,
+	) -> CoreResult<Self> {
+		Self::admit_within(token, admit, || ControlLease::escape_monitor(&token.source), |armed| {
+			Self::acquire_within(
+				token,
+				true,
+				Instant::now,
+				|duration| token.wait(duration),
+				|| ControlLease::escape_monitor(&token.source),
+				armed,
+			)
+		})
+	}
+
+	/// [`Self::acquire_admitted`], arming the stop with `arm` and taking the
+	/// lease with `acquire`.
+	fn admit_within(
+		token: &OperationToken,
+		mut admit: impl FnMut(Admit) -> CoreResult<bool>,
+		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
+		mut acquire: impl FnMut(Option<Option<EscapeMonitor>>) -> CoreResult<Self>,
+	) -> CoreResult<Self> {
+		loop {
+			// Held control armed its stop when it was granted.
+			let stop = if token.source.control_active() { None } else { Some(arm()?) };
+			admit(Admit::Wait)?;
+			let lease = acquire(stop)?;
+			if admit(Admit::Recheck)? {
+				return Ok(lease);
+			}
+		}
+	}
+
 	/// [`Self::acquire`] on the clock `now`, sleeping through `wait`; a takeover
-	/// operation transfers the stop armed while waiting into its acquired lease.
+	/// operation transfers the stop armed while waiting, or the one `armed`
+	/// before it asked, into its acquired lease.
 	#[expect(clippy::used_underscore_binding, reason = "transfer the RAII monitor into the lease")]
 	fn acquire_within(
 		token: &OperationToken,
@@ -758,13 +810,14 @@ impl InputLease {
 		now: impl Fn() -> Instant,
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
+		armed: Option<Option<EscapeMonitor>>,
 	) -> CoreResult<Self> {
 		token.check()?;
 		let limit = now() + LEASE_WAIT;
 		let limit = token.deadline().map_or(limit, |deadline| {
 			limit.min(deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
 		});
-		let mut waiting_stop = None;
+		let mut waiting_stop = armed;
 		let mut last_refusal = None;
 		let owner = loop {
 			token.check()?;
@@ -1085,6 +1138,7 @@ mod tests {
 				Ok(())
 			},
 			|| panic!("background input arms no Escape stop"),
+			None,
 		);
 		(lease, clock.get() - start)
 	}
@@ -1267,6 +1321,7 @@ mod tests {
 				// Like a Linux backend with no physical Escape monitor available.
 				Ok(None)
 			},
+			None,
 		)
 		.expect("retry reuses the waiting monitor instead of starting another");
 		assert_eq!(arms, 1);
@@ -1293,6 +1348,7 @@ mod tests {
 				token.wait(duration)
 			},
 			|| panic!("background input arms no Escape stop"),
+			None,
 		);
 		assert_eq!(cancelled.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
 		assert_eq!(waits, 1);
@@ -1328,10 +1384,77 @@ mod tests {
 					.push(EmergencyStop(Arc::downgrade(&source.0)));
 				Ok(None)
 			},
+			None,
 		);
 		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
 		assert_eq!((waits, armed.borrow().len(), source.escape_stops()), (1, 1, 1));
 		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn a_takeover_waits_for_its_admission_without_the_lease_and_escape_stops_it() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let armed = RefCell::new(Vec::new());
+		let mut steps = Vec::new();
+		let stopped = InputLease::admit_within(
+			&token,
+			|step| {
+				steps.push(step);
+				// Another session's input gets the lease while this one waits.
+				drop(KernelLease::acquire().expect("the lease is free during the wait"));
+				// The user presses Escape in their own app.
+				for stop in armed.borrow().iter() {
+					EmergencyStop::escape(stop);
+				}
+				token.check().map(|()| true)
+			},
+			|| {
+				armed
+					.borrow_mut()
+					.push(EmergencyStop(Arc::downgrade(&source.0)));
+				Ok(None)
+			},
+			|_| panic!("a stopped takeover never takes the lease"),
+		);
+		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!(steps, [Admit::Wait]);
+		assert_eq!((armed.borrow().len(), source.escape_stops()), (1, 1));
+		remove_test_lock();
+	}
+
+	#[test]
+	fn a_takeover_interrupted_while_it_took_the_lease_lets_it_go_and_waits_again() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let mut steps = Vec::new();
+		let mut arms = 0;
+		let lease = InputLease::admit_within(
+			&token,
+			|step| {
+				steps.push(step);
+				if step == Admit::Wait {
+					drop(KernelLease::acquire().expect("no lease is held while waiting"));
+				}
+				// The user pressed a key while the first admission took the lease.
+				Ok(step == Admit::Wait || steps.len() > 2)
+			},
+			|| {
+				arms += 1;
+				Ok(None)
+			},
+			|armed| {
+				assert!(armed.is_some(), "the stop armed for the wait goes into the lease");
+				InputLease::acquire(&token, false)
+			},
+		)
+		.expect("admitted on the second try");
+		assert_eq!(steps, [Admit::Wait, Admit::Recheck, Admit::Wait, Admit::Recheck]);
+		assert_eq!(arms, 2);
+		drop(lease);
 		remove_test_lock();
 	}
 

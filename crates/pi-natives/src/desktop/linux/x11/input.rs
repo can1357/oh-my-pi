@@ -75,6 +75,9 @@ pub struct X11Input {
 	takeover_pointer: Cell<Option<(i16, i16)>>,
 	/// The user's press count a takeover in progress started from.
 	takeover_presses: Option<u64>,
+	/// The press count [`Self::admit_takeover`] let the request's takeover
+	/// start from, before the worker took the input lease.
+	admitted:         Option<u64>,
 	/// The user's own presses, watched from the session's first capture or
 	/// takeover ([`Self::watch_user`]).
 	activity:         Option<UserActivity>,
@@ -146,6 +149,7 @@ impl X11Input {
 			takeover_target: None,
 			takeover_pointer: Cell::new(None),
 			takeover_presses: None,
+			admitted: None,
 			activity: None,
 			display,
 			activity_failed: None,
@@ -303,6 +307,26 @@ impl X11Input {
 		Ok(self.activity.as_ref().expect("listener started"))
 	}
 
+	/// Waits until the user has paused ([`UserActivity::admit`]), before the
+	/// worker takes the input lease for a window or element takeover.
+	pub(crate) fn admit_takeover(&mut self) -> CoreResult<()> {
+		self.admitted = None;
+		self.admitted = Some(self.watch_user()?.admit()?);
+		Ok(())
+	}
+
+	/// Whether the user has pressed nothing since [`Self::admit_takeover`].
+	pub(crate) fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		let Some(baseline) = self.admitted else {
+			return Ok(false);
+		};
+		match self.watch_user()?.check(baseline) {
+			Ok(()) => Ok(true),
+			Err(error) if error.code == ErrorCode::UserIntervened => Ok(false),
+			Err(error) => Err(error),
+		}
+	}
+
 	fn wm(&self) -> Wm<'_> {
 		Wm { conn: &self.conn, root: self.root, atoms: &self.atoms }
 	}
@@ -400,7 +424,9 @@ impl X11Input {
 		self.send_key_steps(window, &steps, keys.duration())
 	}
 
-	/// Waits for the user to pause ([`UserActivity::admit`]), activates
+	/// Starts from the worker's admission ([`Self::admit_takeover`]), failing
+	/// if the user pressed a key or button since (without one, as when tests
+	/// drive this directly, waits for the user to pause here), activates
 	/// `window`, confirms the WM made it the active window holding the core
 	/// focus, runs `body` until the user presses a key or button, then restores
 	/// the user's pointer position and previously active window. Fails without
@@ -411,7 +437,13 @@ impl X11Input {
 		budget: Duration,
 		body: impl FnOnce(&mut Self) -> CoreResult<T>,
 	) -> CoreResult<T> {
-		let presses = self.watch_user()?.admit()?;
+		let presses = match self.admitted {
+			Some(baseline) => {
+				self.watch_user()?.check(baseline)?;
+				baseline
+			},
+			None => self.watch_user()?.admit()?,
+		};
 		// The activation's core `FocusIn` reaches the target and its window
 		// manager only when no other keyboard focuses it.
 		if let Some(mpx) = &self.mpx {

@@ -35,7 +35,7 @@ use backend::{
 	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
 	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
 };
-use control::{CancellationSource, InputLease, OperationToken};
+use control::{Admit, CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
 use keys::{parse_keys, parse_modifiers};
@@ -482,6 +482,18 @@ impl Request {
 		};
 		target.is_some_and(|target| !matches!(target, Target::Window(_)))
 			|| takeover.mode() != DeliveryMode::Background
+	}
+
+	/// A takeover of a window or an element, which activates it and hands it
+	/// the user's keyboard; the backend admits it before the input lease is
+	/// taken ([`Backend::admit_takeover`]).
+	fn takes_over_a_window(&self) -> bool {
+		self.takes_over()
+			&& !matches!(
+				self,
+				Self::RaiseWindow { .. } | Self::OpenApplication { .. } | Self::AxPerform { .. }
+			)
+			&& self.target().is_none_or(|target| matches!(target, Target::Window(_)))
 	}
 
 	const fn frame_target(&self) -> Option<&Target> {
@@ -1066,10 +1078,21 @@ impl Worker {
 				},
 			}
 		};
-		let lease = request
-			.is_mutation()
-			.then(|| InputLease::acquire(token, request.takes_over()))
-			.transpose()?;
+		let lease = if !request.is_mutation() {
+			None
+		} else if request.takes_over_a_window() {
+			// The admission waits without the lease, so another session's input
+			// is not kept out while the user types.
+			Some(InputLease::acquire_admitted(token, |step| {
+				let backend = self.backend()?;
+				match step {
+					Admit::Wait => backend.admit_takeover().map(|()| true),
+					Admit::Recheck => backend.takeover_admitted(),
+				}
+			})?)
+		} else {
+			Some(InputLease::acquire(token, request.takes_over())?)
+		};
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
 		// original generation. Keep the previous frame by move, not by
@@ -5256,6 +5279,36 @@ mod capture_tests {
 			let token = source.token();
 			assert_eq!(control::press_escape_for_test(), 1, "takeover input arms the Escape stop");
 			assert!(token.check().is_err(), "physical Escape stops takeover input");
+		}
+	}
+
+	/// Only these wait for the backend's admission without the input lease
+	/// ([`InputLease::acquire_admitted`]).
+	#[test]
+	fn window_and_element_takeovers_are_admitted_before_the_input_lease() {
+		let window = Target::Window("42".to_string());
+		let reply = || flume::unbounded().0;
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target:   target.clone(),
+			text:     "abc".to_string(),
+			takeover: Takeover::new(takeover, None),
+			reply:    reply(),
+		};
+		let element = |takeover| Request::AxInput {
+			reference: "e1".to_string(),
+			input: ElementInput::Text("hi".to_string()),
+			takeover: Takeover::new(takeover, None),
+			reply: reply(),
+		};
+		assert!(typing(&window, Some(true)).takes_over_a_window());
+		assert!(element(Some(true)).takes_over_a_window());
+		for other in [
+			typing(&window, None),
+			element(None),
+			typing(&Target::parse("display:screen-1"), None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+		] {
+			assert!(!other.takes_over_a_window());
 		}
 	}
 
