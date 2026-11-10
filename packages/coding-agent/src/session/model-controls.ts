@@ -39,6 +39,7 @@ import {
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
+	type ThinkingLevelCeiling,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditModeSetting } from "../edit/settings";
@@ -172,8 +173,8 @@ export class ModelControls {
 	readonly #host: ModelControlsHost;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	#thinkingLevel: ThinkingLevel | undefined;
-	/** Hard per-session effort ceiling (e.g. a task spawn's `task.maxEffort` cap); recovery paths re-clamp to it. */
-	readonly #thinkingLevelCeiling: Effort | undefined;
+	/** Hard per-model effort ceiling (e.g. a task spawn's `task.maxEffort` entries); recovery paths re-clamp to it. */
+	readonly #thinkingLevelCeiling: ThinkingLevelCeiling | undefined;
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
@@ -183,7 +184,7 @@ export class ModelControls {
 		options: {
 			scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 			thinkingLevel?: ConfiguredThinkingLevel;
-			thinkingLevelCeiling?: Effort;
+			thinkingLevelCeiling?: ThinkingLevelCeiling;
 			serviceTierByFamily?: ServiceTierByFamily;
 		},
 	) {
@@ -197,14 +198,10 @@ export class ModelControls {
 			this.#thinkingLevel = clampThinkingLevelToCeiling(
 				this.#model,
 				resolveProvisionalAutoLevel(this.#model),
-				this.#thinkingLevelCeiling,
+				this.#ceiling,
 			);
 		} else {
-			this.#thinkingLevel = clampThinkingLevelToCeiling(
-				this.#model,
-				options.thinkingLevel,
-				this.#thinkingLevelCeiling,
-			);
+			this.#thinkingLevel = clampThinkingLevelToCeiling(this.#model, options.thinkingLevel, this.#ceiling);
 		}
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
@@ -213,13 +210,18 @@ export class ModelControls {
 		return this.#host.model();
 	}
 
+	/** The ceiling for the active model. */
+	get #ceiling(): Effort | undefined {
+		return this.#thinkingLevelCeiling?.(this.#model);
+	}
+
 	/** Effective metadata-clamped thinking level applied to the agent. */
 	get thinkingLevel(): ThinkingLevel | undefined {
 		return this.#thinkingLevel;
 	}
 
-	/** Hard per-session effort ceiling every thinking-level change is clamped to. */
-	get thinkingLevelCeiling(): Effort | undefined {
+	/** Hard per-model effort ceiling every thinking-level change is clamped to. */
+	get thinkingLevelCeiling(): ThinkingLevelCeiling | undefined {
 		return this.#thinkingLevelCeiling;
 	}
 
@@ -266,15 +268,8 @@ export class ModelControls {
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
 			level === AUTO_THINKING
-				? clampThinkingLevelToCeiling(
-						this.#model,
-						resolveProvisionalAutoLevel(this.#model),
-						this.#thinkingLevelCeiling,
-					)
-				: resolveThinkingLevelForModel(
-						this.#model,
-						clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
-					);
+				? clampThinkingLevelToCeiling(this.#model, resolveProvisionalAutoLevel(this.#model), this.#ceiling)
+				: resolveThinkingLevelForModel(this.#model, clampThinkingLevelToCeiling(this.#model, level, this.#ceiling));
 		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 	}
 
@@ -561,7 +556,7 @@ export class ModelControls {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
 				resolveProvisionalAutoLevel(this.#model),
-				this.#thinkingLevelCeiling,
+				this.#ceiling,
 			);
 			const wasAuto = this.#autoThinking;
 			const previousLevel = this.#thinkingLevel;
@@ -588,7 +583,7 @@ export class ModelControls {
 		this.#autoResolvedLevel = undefined;
 		const effectiveLevel = resolveThinkingLevelForModel(
 			this.#model,
-			clampThinkingLevelToCeiling(this.#model, level, this.#thinkingLevelCeiling),
+			clampThinkingLevelToCeiling(this.#model, level, this.#ceiling),
 		);
 		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
 		// auto resolved to medium, then the user pins medium): otherwise the latest
@@ -625,7 +620,7 @@ export class ModelControls {
 	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
 		if (!this.#model?.reasoning) return [];
 		const efforts = this.getAvailableThinkingLevels();
-		const ceiling = this.#thinkingLevelCeiling;
+		const ceiling = this.#ceiling;
 		const selectable =
 			ceiling === undefined
 				? efforts
@@ -717,7 +712,7 @@ export class ModelControls {
 		const effort = clampThinkingLevelToCeiling(
 			model,
 			resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model),
-			this.#thinkingLevelCeiling,
+			this.#ceiling,
 		);
 		if (effort === undefined) return;
 		this.#resolveAutoThinkingLevel(effort);

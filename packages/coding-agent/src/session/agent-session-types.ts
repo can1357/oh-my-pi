@@ -10,7 +10,6 @@ import type {
 import type {
 	AssistantMessage,
 	Context,
-	Effort,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -44,7 +43,7 @@ import type { SkillDescriptionCatalog } from "../extensibility/skill-description
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel, ThinkingLevelCeiling } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ToolSession } from "../tools";
@@ -213,8 +212,8 @@ export interface AgentSessionConfig {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
-	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
-	thinkingLevelCeiling?: Effort;
+	/** Hard per-model ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort` entry); every later change, including retry-fallback recovery, is re-clamped to the active model's ceiling. */
+	thinkingLevelCeiling?: ThinkingLevelCeiling;
 	/**
 	 * Disable retry fallback, context promotion and usage-aware fallback: the turn retries on, or fails
 	 * with, its own model instead. Startup model selection, and the return to the primary after a

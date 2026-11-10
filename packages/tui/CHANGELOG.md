@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Task tool params accept `actualEffort`, and the session effort ceiling is a per-model `ThinkingLevelCeiling` resolver instead of a single effort
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

@@ -9,8 +9,9 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { AgentBusyError, recordHandoff, resolveTelemetry, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Api, Effort, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
 	isRecord,
@@ -108,6 +109,7 @@ import {
 	prewalkWouldBeNoop,
 	resolveTaskEffortLevel,
 	type TaskEffort,
+	type ThinkingLevelCeiling,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -162,7 +164,9 @@ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly"
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
+	cfgTaskMaxActualEffort,
 	cfgTaskMaxEffort,
+	resolveEffortCeilingForModel,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
 	cfgTaskAgentSoftRequestBudget,
@@ -494,6 +498,8 @@ export interface ExecutorOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
+	/** Caller-requested exact level; replaces {@link effort}, loses to a definition-pinned level (explicit `:level` or concrete {@link thinkingLevel}). */
+	actualEffort?: Effort;
 	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
 	solutionSpace?: string;
 	/**
@@ -4885,25 +4891,46 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
-			// Caller-requested coarse effort maps onto the resolved model's
-			// supported range, then respects the operator-configured ceiling.
-			// Undefined (no effort, or no controllable effort surface) falls
-			// through to the normal selectors below.
+			// Definition levels — an explicit `:level` on the resolved model pattern, or
+			// the agent's concrete `thinking-level` — win over the caller's exact
+			// `actualEffort`; a present `actualEffort` replaces the coarse `effort` entirely.
+			const definitionLevel =
+				explicitThinkingLevel ||
+				(thinkingLevel !== undefined && thinkingLevel !== AUTO_THINKING && thinkingLevel !== ThinkingLevel.Inherit);
+			const actualEffort = options.actualEffort;
+			const actualEffortApplies = actualEffort !== undefined && !definitionLevel;
+			// Caller-chosen levels respect the operator's per-model ceiling: `actualEffort`
+			// task.maxActualEffort, `effort` task.maxEffort. Undefined (no effort, or no
+			// controllable effort surface) falls through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
-			// retry-fallback recovery can never clamp effort back up past it.
-			// A per-call `model` is caller-chosen too, so its `:level` is held to the same
-			// ceiling, and a model whose lowest effort is above it fails the spawn
-			// exactly as an `effort` hint does.
-			const spawnEffortCeiling =
-				options.effort !== undefined || options.perCallModelGrants ? cfgTaskMaxEffort.get(settings) : undefined;
-			if (model && spawnEffortCeiling) assertModelSupportsEffortCeiling(model, spawnEffortCeiling);
-			const effortLevel =
-				options.effort !== undefined
-					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
+			// retry-fallback recovery re-resolves it for each model and never clamps
+			// effort back up past it. A per-call `model` is caller-chosen too, so its
+			// `:level` is held to the spawn's ceiling, and a model whose lowest effort is
+			// above it fails the spawn exactly as an effort hint does.
+			const ceilingSetting =
+				actualEffort !== undefined
+					? actualEffortApplies || options.perCallModelGrants
+						? cfgTaskMaxActualEffort
+						: undefined
+					: options.effort !== undefined || options.perCallModelGrants
+						? cfgTaskMaxEffort
+						: undefined;
+			const ceilingValue = ceilingSetting?.get(settings);
+			const spawnEffortCeiling: ThinkingLevelCeiling | undefined =
+				ceilingValue === undefined
+					? undefined
+					: ceilingModel => resolveEffortCeilingForModel(ceilingValue, ceilingModel);
+			const modelEffortCeiling = spawnEffortCeiling?.(model);
+			if (model && modelEffortCeiling)
+				assertModelSupportsEffortCeiling(model, modelEffortCeiling, ceilingSetting?.id);
+			const effortLevel = actualEffortApplies
+				? clampThinkingLevelToCeiling(model, clampThinkingLevelForModel(model, actualEffort), modelEffortCeiling)
+				: actualEffort === undefined && options.effort !== undefined
+					? resolveTaskEffortLevel(model, options.effort, modelEffortCeiling)
 					: undefined;
 			const explicitLevel =
 				explicitThinkingLevel && resolvedThinkingLevel !== AUTO_THINKING
-					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, spawnEffortCeiling)
+					? clampThinkingLevelToCeiling(model, resolvedThinkingLevel, modelEffortCeiling)
 					: resolvedThinkingLevel;
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? explicitLevel : undefined);
@@ -4914,8 +4941,9 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// Precedence: definition level (explicit `:level` suffix, concrete agent
+			// `thinking-level`) > caller `actualEffort`; otherwise caller `effort` >
+			// explicit `:level` suffix > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
@@ -5049,7 +5077,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 								// Every request stays on an approved model that can run at or below the spawn's effort ceiling.
 								assertDispatchModel: (dispatchModel: Model) => {
 									assertPerCallModelApproved(dispatchModel, perCallModelGrants, modelRegistry);
-									if (spawnEffortCeiling) assertModelSupportsEffortCeiling(dispatchModel, spawnEffortCeiling);
+									const dispatchCeiling = spawnEffortCeiling?.(dispatchModel);
+									if (dispatchCeiling) {
+										assertModelSupportsEffortCeiling(dispatchModel, dispatchCeiling, ceilingSetting?.id);
+									}
 								},
 								disableModelFallback: true,
 								disableServerSideFallback: true,
@@ -5304,6 +5335,8 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				// Cold revival re-applies the ceiling setting this spawn used (task.maxActualEffort).
+				actualEffort: options.actualEffort,
 				// Isolated runs are never revivable (worktree merged + cleaned):
 				// stamp the contract so cold revival leaves them transcript-only
 				// even when the workspace was retained for recovery.

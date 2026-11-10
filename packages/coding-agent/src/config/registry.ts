@@ -166,6 +166,11 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
 	ui?: UiBase;
+	/**
+	 * Also accept a bare string as the whole value — a scalar shorthand the consumer interprets
+	 * (e.g. `task.maxEffort: medium` for `{ "*": medium }`). Loads, writes and `parse` keep it as-is.
+	 */
+	stringShorthand?: true;
 }
 
 /** Any setting definition accepted by {@link register}. */
@@ -194,9 +199,11 @@ export type DefinitionValue<D> = D extends { type: "boolean"; default: undefined
 						? V extends readonly string[]
 							? V[number]
 							: never
-						: D extends { type: "array" | "record"; default: infer V }
-							? V
-							: never;
+						: D extends { type: "record"; stringShorthand: true; default: infer V }
+							? V | string
+							: D extends { type: "array" | "record"; default: infer V }
+								? V
+								: never;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Scopes
@@ -586,6 +593,8 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 				try {
 					parsed = JSON.parse(trimmed);
 				} catch {
+					// Bare text that is not JSON (`medium`) is the record's string shorthand.
+					if (this.definition.type === "record" && this.definition.stringShorthand) return trimmed as T;
 					throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
 				}
 				if (!this.accepts(parsed)) throw new Error(`Invalid ${this.definition.type} JSON: ${text}`);
@@ -625,7 +634,10 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			case "array":
 				return Array.isArray(value);
 			case "record":
-				return typeof value === "object" && value !== null && !Array.isArray(value);
+				return (
+					(typeof value === "object" && value !== null && !Array.isArray(value)) ||
+					(this.definition.stringShorthand === true && typeof value === "string")
+				);
 		}
 	}
 

@@ -50,6 +50,7 @@ import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { resolveEffortCeilingForModel } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -7569,7 +7570,7 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: Effort.Low,
 			// Per-spawn cap (task.maxEffort resolved at spawn time): no recovery
 			// path may raise effective effort above it.
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 
 		await session.prompt("First prompt triggers fallback with an above-ceiling selector");
@@ -7582,6 +7583,40 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		// Without the ceiling the fallback's `:high` would apply verbatim.
 		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
+	it("re-resolves the per-model effort ceiling for the fallback model", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels);
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}:high`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		// task.maxEffort map: the primary's exact entry is low, the fallback matches a glob at medium.
+		const ceilings = { [`${primaryModel.provider}/${primaryModel.id}`]: "low", "openai-codex/*": "medium" };
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.Low,
+			thinkingLevelCeiling: model => resolveEffortCeilingForModel(ceilings, model),
+		});
+
+		await session.prompt("Fallback runs under its own model's ceiling");
+		await session.waitForIdle();
+		expect(session.model?.id).toBe(fallbackModel.id);
+		// A single spawn-wide ceiling would have held the fallback at the primary's `low`.
+		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
 
 	it("skips usage fallbacks whose effort floor exceeds the session ceiling", async () => {
@@ -7621,7 +7656,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			thinkingLevel: Effort.Low,
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 
 		await session.prompt("Use an effort-compatible fallback");
@@ -9389,7 +9424,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 			thinkingLevel: Effort.Low,
-			thinkingLevelCeiling: Effort.Low,
+			thinkingLevelCeiling: () => Effort.Low,
 		});
 		mockSchedulerWaitWithClock();
 

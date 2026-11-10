@@ -36,6 +36,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { AUTO_THINKING, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
@@ -169,6 +170,8 @@ export interface StructuredSubagentRequest {
 	structured?: boolean;
 	/** Per-spawn thinking effort mapped onto the resolved model's supported range; overrides the agent's default selector. */
 	effort?: TaskEffort;
+	/** Exact per-spawn thinking level; replaces `effort`, loses to a definition-pinned level. */
+	actualEffort?: Effort;
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
@@ -242,6 +245,8 @@ export interface EffectiveSubagentPolicy {
 	enableIrc: boolean;
 	/** Caller `effort` hint to apply; dropped when the agent's level comes from the user's `^model:level` tag. */
 	effort?: TaskEffort;
+	/** Caller `actualEffort`; the executor lets a definition-pinned level (including a `^model:level` tag) win over it. */
+	actualEffort?: Effort;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -680,6 +685,7 @@ export async function resolveEffectiveSubagentPolicy(
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
 		effort: userTaggedEffort ? undefined : request.effort,
+		actualEffort: request.actualEffort,
 	};
 }
 
@@ -824,6 +830,7 @@ function buildExecutorOptions(
 		perCallModelGrants: policy.perCallModelGrants,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: policy.effort,
+		actualEffort: policy.actualEffort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
 		structured: policy.structured,
 		...(policy.schema.source === "none"

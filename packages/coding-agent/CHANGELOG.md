@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `task.maxEffort` is now a per-model map (exact `provider/modelId`, glob, or `"*"` keys) so each model, including retry-fallback models, gets its own cap; an existing `task.maxEffort: medium` still works as the `"*"` entry, and the setting leaves the settings panel
+
+### Added
+
+- The task tool can take an exact per-spawn thinking level with `actualEffort` (`minimal`…`max`), enabled by `task.enableActualEffort` and capped by the new `task.maxActualEffort`; it overrides `effort` but not a level pinned by the model selector or the agent's `thinking-level`
+
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes

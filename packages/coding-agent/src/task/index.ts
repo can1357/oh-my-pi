@@ -36,6 +36,8 @@ import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" 
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
 import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import type { Effort } from "@oh-my-pi/pi-ai";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
 import { isIrcEnabled } from "../irc/messaging";
@@ -77,6 +79,7 @@ import { cfgAsyncEnabled } from "../tools/settings";
 import {
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
+	cfgTaskEnableActualEffort,
 	cfgTaskEnableEffort,
 	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
@@ -153,6 +156,7 @@ interface TaskDescriptionOptions {
 	disabledAgents: string[];
 	batchEnabled: boolean;
 	effortEnabled: boolean;
+	actualEffortEnabled: boolean;
 	perCallModelEnabled: boolean;
 	perCallModelAdvertisement?: PerCallModelAdvertisement;
 	evalToolsEnabled: boolean;
@@ -206,6 +210,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		actualEffortEnabled: options.actualEffortEnabled,
 		perCallModelEnabled: options.perCallModelEnabled,
 		perCallModelAdvertisement: options.perCallModelAdvertisement,
 		evalToolsEnabled: options.evalToolsEnabled,
@@ -266,6 +271,12 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
+/** Reject an out-of-range `actualEffort` level on internal/stale-transcript calls that bypass the wire schema. */
+function validateActualEffort(effort: Effort | undefined, label: string): string | undefined {
+	if (effort === undefined || THINKING_EFFORTS.includes(effort)) return undefined;
+	return `${label} has an invalid \`actualEffort\` value ${JSON.stringify(effort)}. Use one of: ${THINKING_EFFORTS.join(", ")}.`;
+}
+
 /**
  * Check a spawn's work: a non-empty `task`, or non-empty `steps`. The wire schema
  * advertises only the one `task.steps` selects, which names the missing field;
@@ -318,6 +329,8 @@ function validateSpawnParams(
 			if (inputError) return inputError;
 			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const actualEffortError = validateActualEffort(item.actualEffort, label);
+			if (actualEffortError) return actualEffortError;
 			const modelError = validateModel(item, label, defaultAgent, settings);
 			if (modelError) return modelError;
 		}
@@ -343,6 +356,7 @@ function validateSpawnParams(
 	return (
 		validateTaskInput(params, "The call", stepsEnabled) ??
 		validateEffort(params.effort, "The call") ??
+		validateActualEffort(params.actualEffort, "The call") ??
 		validateModel(params, "The call", defaultAgent, settings)
 	);
 }
@@ -386,6 +400,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("actualEffort" in params) item.actualEffort = params.actualEffort;
 	if ("isolated" in params) item.isolated = params.isolated;
 	if ("sourceSession" in params) item.sourceSession = params.sourceSession;
 	if ("model" in params) item.model = params.model;
@@ -412,6 +427,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("actualEffort" in item) spawn.actualEffort = item.actualEffort;
 	if ("sourceSession" in item) spawn.sourceSession = item.sourceSession;
 	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
@@ -845,6 +861,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			actualEffortEnabled: cfgTaskEnableActualEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			structured: this.#isStructured(),
 			steps: cfgTaskSteps.get(this.session.settings),
@@ -894,6 +911,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
+			actualEffortEnabled: cfgTaskEnableActualEffort.get(this.session.settings),
 			perCallModelEnabled: perCallModel,
 			perCallModelAdvertisement,
 			evalToolsEnabled: evalToolsEnabled(this.session),
@@ -937,14 +955,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	/**
-	 * Thinking override for a spawn. `task.enableEffort` gates the caller's
-	 * `effort` at runtime, not only in the advertised schema: stale transcripts
+	 * Thinking overrides for a spawn. `task.enableEffort` / `task.enableActualEffort` gate the caller's
+	 * `effort` / `actualEffort` at runtime, not only in the advertised schema: stale transcripts
 	 * and lenient argument fallbacks still deliver the field, and honoring it
 	 * would override the agent's configured thinking selector.
 	 */
-	#effortParams(params: TaskParams): Pick<StructuredSubagentRequest, "effort"> {
-		if (params.effort === undefined || !cfgTaskEnableEffort.get(this.session.settings)) return {};
-		return { effort: params.effort };
+	#effortParams(params: TaskParams): Pick<StructuredSubagentRequest, "effort" | "actualEffort"> {
+		return {
+			...(params.effort !== undefined && cfgTaskEnableEffort.get(this.session.settings)
+				? { effort: params.effort }
+				: {}),
+			...(params.actualEffort !== undefined && cfgTaskEnableActualEffort.get(this.session.settings)
+				? { actualEffort: params.actualEffort }
+				: {}),
+		};
 	}
 
 	#seanceSchemaFields() {

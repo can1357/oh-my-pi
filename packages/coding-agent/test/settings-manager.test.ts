@@ -7,7 +7,7 @@ import { Effort } from "@oh-my-pi/pi-ai";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import {
 	__physicalTargetSegmentsForTesting,
 	resetSettingsForTest,
@@ -68,6 +68,9 @@ import {
 	cfgTaskMaxConcurrency,
 	cfgTaskEnableEffort,
 	cfgTaskAgentModelOverrides,
+	cfgTaskMaxActualEffort,
+	cfgTaskMaxEffort,
+	resolveEffortCeilingForModel,
 } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgMnemopiDbPath, cfgMnemopiScoping } from "@oh-my-pi/pi-coding-agent/mnemopi/settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
@@ -263,6 +266,65 @@ describe("Settings", () => {
 				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
 				['Settings: unknown status line segment "modle"', { setting: "statusLine.rightSegments" }],
 			]);
+		});
+	});
+
+	describe("task effort ceilings", () => {
+		const opus = { provider: "anthropic", id: "claude-opus-4-5" } as Model;
+		const gpt = { provider: "openai", id: "gpt-5" } as Model;
+		const invalidWarnings = (warn: { mock: { calls: unknown[][] } }) =>
+			warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: ignoring invalid value"));
+
+		it("loads a bare effort string without a warning as the default `*` entry", async () => {
+			await writeSettings({ task: { maxEffort: "medium" } });
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(invalidWarnings(warn)).toEqual([]);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), opus)).toBe(Effort.Medium);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Medium);
+		});
+
+		it("loads a per-model record without a warning", async () => {
+			await writeSettings({ task: { maxActualEffort: { "anthropic/*": "low" } } });
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(invalidWarnings(warn)).toEqual([]);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), opus)).toBe(Effort.Low);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBeUndefined();
+		});
+
+		it("writes both the string and the record form, and rejects a non-effort value", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			cfgTaskMaxEffort.set(settings, cfgTaskMaxEffort.parse("high"));
+			await settings.flush();
+			expect((await readSettings()).task).toEqual({ maxEffort: "high" });
+
+			cfgTaskMaxEffort.set(settings, cfgTaskMaxEffort.parse('{"anthropic/claude-opus-*":"low"}'));
+			await settings.flush();
+			expect((await readSettings()).task).toEqual({ maxEffort: { "anthropic/claude-opus-*": "low" } });
+
+			expect(() => cfgTaskMaxEffort.set(settings, cfgTaskMaxEffort.parse("turbo"))).toThrow(
+				/Invalid effort for task\.maxEffort/,
+			);
+		});
+
+		it("resolves exact keys before the longest matching glob before `*`, else uncapped", () => {
+			const map = {
+				"*": "xhigh",
+				"anthropic/*": "high",
+				"anthropic/claude-opus-*": "medium",
+				"anthropic/claude-opus-4-5": "low",
+			};
+			expect(resolveEffortCeilingForModel(map, opus)).toBe(Effort.Low);
+			const { "anthropic/claude-opus-4-5": _exact, ...globs } = map;
+			expect(resolveEffortCeilingForModel(globs, opus)).toBe(Effort.Medium);
+			expect(resolveEffortCeilingForModel(globs, gpt)).toBe(Effort.XHigh);
+			expect(resolveEffortCeilingForModel({ "anthropic/*": "high" }, gpt)).toBeUndefined();
 		});
 	});
 

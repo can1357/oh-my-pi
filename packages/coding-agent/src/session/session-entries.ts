@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+	Effort,
 	ImageContent,
 	MessageAttribution,
 	ServiceTierByFamily,
@@ -296,6 +297,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	perCallModelIdentity?: string;
 	/** Configured thinking selector, or null when unset; required for per-call revival. */
 	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+	/** The spawn's caller `actualEffort`; cold revival then re-applies `task.maxActualEffort` instead of `task.maxEffort`. */
+	actualEffort?: Effort;
 	/** Subagent's `subagent:<id>` retry fallback role as installed at spawn; cold revival reinstalls it. Absent when none was installed or on older files. */
 	retryFallback?: RetryFallbackRole;
 	/** Whether the agent definition is read-only, allowing an exact zero-LoC attribution. */

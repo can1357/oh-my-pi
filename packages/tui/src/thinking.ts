@@ -383,6 +383,9 @@ export function clampThinkingLevelToCeiling(
 	return supported.findLast(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex) ?? level;
 }
 
+/** Per-session effort ceiling resolved for the model being clamped; `undefined` = uncapped. */
+export type ThinkingLevelCeiling = (model: Model | undefined) => Effort | undefined;
+
 /**
  * True when `model` can honor a thinking-effort ceiling: it either has no
  * controllable effort surface (nothing to cap) or supports at least one effort
@@ -396,11 +399,11 @@ export function modelSupportsEffortCeiling(model: Model, ceiling: Effort): boole
 	return supported.some(candidate => THINKING_EFFORTS.indexOf(candidate) <= maxIndex);
 }
 
-/** Throws when `model` has no supported effort at or below `task.maxEffort`, so a capped spawn fails instead of running at its floor. */
-export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort): void {
+/** Throws when `model` has no supported effort at or below the `setting` ceiling, so a capped spawn fails instead of running at its floor. */
+export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort, setting = "task.maxEffort"): void {
 	if (modelSupportsEffortCeiling(model, maxEffort)) return;
 	throw new RangeError(
-		`${model.provider}/${model.id} has no supported thinking effort at or below task.maxEffort=${maxEffort}`,
+		`${model.provider}/${model.id} has no supported thinking effort at or below ${setting}=${maxEffort}`,
 	);
 }
 

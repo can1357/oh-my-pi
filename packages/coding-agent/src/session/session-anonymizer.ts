@@ -227,6 +227,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"phase",
 		"clearAt",
 		"effort",
+		"actualEffort",
 		"topLevel",
 		"tail",
 		"disabledFeatures",

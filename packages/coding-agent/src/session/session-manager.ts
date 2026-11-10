@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
+	Effort,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -3713,6 +3714,7 @@ export class SessionManager {
 		perCallModel?: boolean;
 		perCallModelIdentity?: string;
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+		actualEffort?: Effort;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
@@ -4784,6 +4786,7 @@ export interface PersistedSessionInit {
 	perCallModel?: boolean;
 	perCallModelIdentity?: string;
 	perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+	actualEffort?: Effort;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
@@ -4816,6 +4819,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			...(entry.perCallModel ? { perCallModel: true } : undefined),
 			perCallModelIdentity: entry.perCallModelIdentity,
 			perCallThinkingLevel: entry.perCallThinkingLevel,
+			actualEffort: entry.actualEffort,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,

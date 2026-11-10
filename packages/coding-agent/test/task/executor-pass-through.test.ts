@@ -25,7 +25,7 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { type ExecutorOptions, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSessionDefaults } from "../helpers/session-defaults";
@@ -450,9 +450,9 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
-		// The ceiling itself rides into the session so retry-fallback recovery
-		// can re-clamp to it after model swaps.
-		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
+		// The per-model ceiling rides into the session so retry-fallback recovery
+		// can re-clamp to each model's entry after model swaps.
+		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling?.(model)).toBe(Effort.Low);
 	});
 
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
@@ -503,6 +503,72 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevel).toBe(ThinkingLevel.Max);
+	});
+
+	describe("actualEffort", () => {
+		const sol = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!sol) throw new Error("Expected gpt-5.6-sol model to exist");
+
+		async function spawnThinkingLevel(
+			options: Partial<ExecutorOptions>,
+			settings: Settings,
+			rolePattern = `${sol.provider}/${sol.id}`,
+		) {
+			settings.setModelRole("task", rolePattern);
+			const spy = vi
+				.spyOn(sdkModule, "createAgentSession")
+				.mockResolvedValue(createSessionResult(yieldEmittingSession()));
+			const result = await runSubprocess({
+				...baseOptions,
+				agent: { ...baseAgent, model: ["@task"] },
+				id: "subagent-actual-effort",
+				settings,
+				modelRegistry: createModelRegistry(sol),
+				...options,
+			});
+			expect(result.exitCode).toBe(0);
+			return spy.mock.calls[0]?.[0];
+		}
+
+		it("wins over a coarse effort hint", async () => {
+			const forwarded = await spawnThinkingLevel({ effort: "lo", actualEffort: Effort.High }, Settings.isolated());
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
+		});
+
+		it("is capped by task.maxActualEffort for the model, not task.maxEffort", async () => {
+			const settings = Settings.isolated({
+				"task.maxEffort": "low",
+				"task.maxActualEffort": { "openai-codex/gpt-5.6-sol": "medium", "*": "high" },
+			});
+			const forwarded = await spawnThinkingLevel({ actualEffort: Effort.XHigh }, settings);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Medium);
+			expect(forwarded?.thinkingLevelCeiling?.(sol)).toBe(Effort.Medium);
+		});
+
+		it("loses to the agent definition's concrete thinking-level", async () => {
+			const forwarded = await spawnThinkingLevel(
+				{ actualEffort: Effort.High, thinkingLevel: ThinkingLevel.Low },
+				Settings.isolated(),
+			);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Low);
+		});
+
+		it("loses to an explicit :level on the resolved model pattern", async () => {
+			const forwarded = await spawnThinkingLevel(
+				{ actualEffort: Effort.Low },
+				Settings.isolated(),
+				`${sol.provider}/${sol.id}:high`,
+			);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.High);
+		});
+
+		it("applies over an `auto` agent definition", async () => {
+			const forwarded = await spawnThinkingLevel(
+				{ actualEffort: Effort.Medium, thinkingLevel: "auto" },
+				Settings.isolated(),
+			);
+			expect(forwarded?.thinkingLevel).toBe(ThinkingLevel.Medium);
+		});
 	});
 
 	it("resolves an explicit task-role effort suffix over the agent-definition default", async () => {
