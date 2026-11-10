@@ -1507,11 +1507,14 @@ const streamOpenAIResponsesOnce = (
 				chainState.lastResponseId = undefined;
 				chainState.lastResponseItems = undefined;
 			}
-			// activeParams tracks the attempt that succeeded: the compat policy, the
-			// stable-effort plan, and any reasoning-effort fallback retry already mutated it.
+			// `chained.params` is the body that went on the wire: `onPayload` may
+			// have replaced it, and a fallback retry mutated it in place. Reading
+			// `activeParams` here would record the pre-hook selector.
 			const sentEffort =
-				activeParams.reasoning && "effort" in activeParams.reasoning ? activeParams.reasoning.effort : undefined;
-			if (sentEffort != null) output.effort = sentEffort as Effort | "none";
+				chained.params.reasoning && "effort" in chained.params.reasoning
+					? chained.params.reasoning.effort
+					: undefined;
+			if (sentEffort != null) output.effort = sentEffort;
 		} catch (error) {
 			if (chainState) resetOpenAIResponsesChainState(chainState);
 			const failure = abortTracker.getLocalAbortReason() ?? error;

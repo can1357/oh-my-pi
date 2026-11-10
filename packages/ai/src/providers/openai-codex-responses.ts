@@ -1,7 +1,6 @@
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	applyCodexResidencyHeader,
@@ -1813,10 +1812,10 @@ async function openCodexWebSocketTransport(
 		}
 		recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 		const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
-		// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options` or
-		// change `service_tier`); recorded state must reflect what was actually
-		// sent — the sequential-cutoff summary decoder and the served-tier
-		// fallback key off it.
+		// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`,
+		// change `service_tier`, or replace `reasoning`); recorded state must
+		// reflect what was actually sent — the sequential-cutoff summary decoder,
+		// the served-tier fallback, and the terminal effort record key off it.
 		if (websocketRequest.stream_options === undefined) {
 			delete requestBodyForState.stream_options;
 		} else {
@@ -1826,6 +1825,11 @@ async function openCodexWebSocketTransport(
 			delete requestBodyForState.service_tier;
 		} else {
 			requestBodyForState.service_tier = websocketRequest.service_tier;
+		}
+		if (websocketRequest.reasoning === undefined) {
+			delete requestBodyForState.reasoning;
+		} else {
+			requestBodyForState.reasoning = { ...websocketRequest.reasoning };
 		}
 		requestContext.rawRequestDump.body = websocketRequest;
 		CODEX_DEBUG &&
@@ -1928,11 +1932,13 @@ async function openCodexSseTransport(
 	}
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
 	// SSE turns never chain, so later reads need only the per-turn knobs (summary
-	// delivery, service tier); copying the whole transcript would be wasted work.
+	// delivery, service tier, reasoning effort); copying the whole transcript
+	// would be wasted work.
 	const requestBodyForState: RequestBody = {
 		model: wireBody.model,
 		stream_options: wireBody.stream_options ? { ...wireBody.stream_options } : undefined,
 		service_tier: wireBody.service_tier,
+		reasoning: wireBody.reasoning ? { ...wireBody.reasoning } : undefined,
 	};
 	return { eventStream: await open(wireBody), requestBodyForState, transport: "sse" };
 }
@@ -3173,9 +3179,8 @@ class CodexStreamProcessor {
 			this.model.provider,
 			this.runtime.finalizeNativeOutputItems(),
 		);
-		// Read the encoded body, not `runtime.requestBodyForState` — the SSE state copy drops `reasoning`.
-		const sentEffort = this.requestContext.transformedBody.reasoning?.effort;
-		if (sentEffort != null) output.effort = sentEffort as Effort | "none";
+		const sentEffort = this.runtime.requestBodyForState.reasoning?.effort;
+		if (sentEffort != null) output.effort = sentEffort;
 		output.duration = performance.now() - this.startTime;
 		if (completion.firstTokenTime) {
 			output.ttft = completion.firstTokenTime - this.startTime;

@@ -11,7 +11,7 @@ import {
 	streamOpenAICodexResponses,
 	type OpenAICodexResponsesOptions,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -129,10 +129,38 @@ function rejectedReasoningEffortResponse(value: string): Response {
 	);
 }
 
+/** `onPayload` hook that rewrites the outgoing body's `reasoning.effort`. */
+function rewriteWireEffort(payload: unknown, effort: string): unknown {
+	if (!piUtils.isRecord(payload)) return payload;
+	const reasoning = piUtils.isRecord(payload.reasoning) ? payload.reasoning : {};
+	return { ...payload, reasoning: { ...reasoning, effort } };
+}
+
+/** `reasoning.effort` off a captured request body, when it carries one. */
+function sentEffortOf(body: Record<string, unknown>): string | undefined {
+	const reasoning = body.reasoning;
+	return piUtils.isRecord(reasoning) && typeof reasoning.effort === "string" ? reasoning.effort : undefined;
+}
+
+/** Codex SSE fetch that records each decoded request body. */
+function captureCodexFetch(bodies: Record<string, unknown>[]): FetchImpl {
+	return (async (_input: string | URL | Request, init?: RequestInit) => {
+		const body = init?.body;
+		const text =
+			typeof body === "string"
+				? body
+				: body instanceof Uint8Array
+					? new TextDecoder().decode(Bun.zstdDecompressSync(body))
+					: "{}";
+		bodies.push(JSON.parse(text) as Record<string, unknown>);
+		return new Response(COMPLETED_CODEX_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+	}) as unknown as FetchImpl;
+}
+
 /** Codex turn over SSE with the model spec and effort knobs the case needs. */
 function runCodex(
 	spec: Partial<ModelSpec<"openai-codex-responses">>,
-	options: Pick<OpenAICodexResponsesOptions, "reasoning" | "forceReasoningOff">,
+	options: Pick<OpenAICodexResponsesOptions, "reasoning" | "forceReasoningOff" | "onPayload" | "fetch">,
 ) {
 	return streamOpenAICodexResponses(buildModel<"openai-codex-responses">({ ...CODEX_SPEC, ...spec }), testContext, {
 		apiKey: createCodexTestToken(),
@@ -142,7 +170,12 @@ function runCodex(
 }
 
 /** Plain Responses turn, optionally over a retrying fetch for the fallback case. */
-function runResponses(options: { reasoning?: Effort; forceReasoningOff?: boolean; fetch?: FetchImpl }) {
+function runResponses(options: {
+	reasoning?: Effort;
+	forceReasoningOff?: boolean;
+	fetch?: FetchImpl;
+	onPayload?: OpenAIResponsesOptions["onPayload"];
+}) {
 	return streamOpenAIResponses(buildModel<"openai-responses">(RESPONSES_SPEC), testContext, {
 		apiKey: "test-key",
 		...options,
@@ -190,6 +223,22 @@ describe("AssistantMessage.effort records the sent effort", () => {
 			expect(result.stopReason).toBe("stop");
 			expect(result.effort).toBeUndefined();
 		});
+		it("records the effort an onPayload hook rewrote the body to", async () => {
+			const bodies: Record<string, unknown>[] = [];
+			const result = await runCodex(
+				{},
+				{
+					reasoning: "low",
+					onPayload: payload => rewriteWireEffort(payload, "high"),
+					fetch: captureCodexFetch(bodies),
+				},
+			);
+
+			expect(result.stopReason).toBe("stop");
+			// The hook rewrote the body; the record must follow the wire, not the selector.
+			expect(bodies.map(sentEffortOf)).toEqual(["high"]);
+			expect(result.effort).toBe("high");
+		});
 	});
 
 	describe("openai-responses", () => {
@@ -225,6 +274,24 @@ describe("AssistantMessage.effort records the sent effort", () => {
 			]);
 			// The recorded tier is the one the successful attempt sent, not the rejected selector.
 			expect(result.effort).toBe(Effort.Max);
+		});
+		it("records the effort an onPayload hook rewrote the body to", async () => {
+			const bodies: Record<string, unknown>[] = [];
+			const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+				bodies.push(JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>);
+				return new Response(RESPONSES_SSE, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}) as unknown as FetchImpl;
+
+			const result = await runResponses({
+				reasoning: Effort.Low,
+				fetch: fetchMock,
+				onPayload: payload => rewriteWireEffort(payload, "high"),
+			});
+
+			expect(result.stopReason).toBe("stop");
+			// The hook rewrote the body; the record must follow the wire, not the selector.
+			expect(bodies.map(sentEffortOf)).toEqual(["high"]);
+			expect(result.effort).toBe("high");
 		});
 	});
 });

@@ -1388,11 +1388,14 @@ export interface AssistantMessage {
 	 */
 	requestControls?: AnthropicRequestControls;
 	/**
-	 * Reasoning effort the request carried on the wire after the model's effort
-	 * ladder clamped the selector; absent when no effort was sent. Provider-neutral
-	 * counterpart to `requestControls.effort`, which only Anthropic routes replay.
+	 * Reasoning effort value the request actually carried on the wire, after the
+	 * model's effort ladder clamped the selector and any `onPayload` hook rewrote
+	 * the body; absent when no effort was sent. This is the provider's wire value,
+	 * not a catalog `Effort`: models remap tiers (`effortMap`) and hooks can write
+	 * any string. Provider-neutral counterpart to `requestControls.effort`, which
+	 * only Anthropic routes replay.
 	 */
-	effort?: Effort | "none";
+	effort?: string;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
