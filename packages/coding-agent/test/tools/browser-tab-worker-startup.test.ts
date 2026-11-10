@@ -357,7 +357,14 @@ describe("OMP-owned browser input", () => {
 			} as unknown as ToolSession;
 			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's actions show only on hover.
 			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }
-				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }</style>
+				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }
+				#over-row { position: absolute; left: 0; top: 300px; width: 120px; height: 30px }
+				#over-row .act { position: absolute; left: 0; top: 0; width: 60px; height: 30px; visibility: hidden }
+				#over-row:hover .act { visibility: visible }
+				#wrap { position: absolute; left: 0; top: 340px; display: block; width: 40px; height: 40px }
+				#wrap::after { content: ""; position: absolute; inset: 0; z-index: 1 }</style>
+				<div id="over-row"><span id="under">Name</span><button class="act">Act</button></div>
+				<label id="wrap"><input id="nested" type="checkbox" style="margin:0"></label>
 				<a class="menu" href="#" style="display:none">Menu</a>
 				<a class="menu" id="mobile" href="#" onmouseover="this.dataset.hovered = 'yes'">Menu</a>
 				<div class="row">Row <button class="del" onmouseover="this.dataset.hovered = 'yes'">Delete</button></div>
@@ -415,8 +422,16 @@ describe("OMP-owned browser input", () => {
 						10_000,
 					),
 				).toBe("hovered");
-				// A label forwards a click to its control, not the pointer.
+				// A label forwards a click to its control, not the pointer: an overlaid or wrapping label is a cover.
 				expect(await message(`await tab.hover("#box");`, 10_000)).toContain("covered by <label>");
+				expect(await message(`await tab.hover("#nested");`, 10_000)).toContain("covered by <label#wrap>");
+				// An action placed over another child of its row shows once the row is hovered.
+				expect(
+					await message(
+						`await tab.hover("#over-row .act"); if (!(await tab.isVisible("#over-row .act"))) throw new Error("not revealed");`,
+						10_000,
+					),
+				).toBe("hovered");
 			} finally {
 				await releaseTab(name, { kill: true });
 			}

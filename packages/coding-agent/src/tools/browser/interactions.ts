@@ -248,8 +248,8 @@ interface ClickFlags {
 	viaLabel: boolean;
 	/**
 	 * Checking a hover target: an `opacity:0`, `visibility:hidden` or `pointer-events:none` element may be one only
-	 * hovering reveals (a row's actions). The pointer lands on its box, which the hit test below accepts when it hits
-	 * the element or an ancestor.
+	 * hovering reveals (a row's actions), so only what keeps the pointer off its box is refused here, and the hit
+	 * test runs after the pointer arrives ({@link hoverElement}).
 	 */
 	hover: boolean;
 }
@@ -306,6 +306,7 @@ function checkClickActionable(
 	if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
 	const x = Math.floor((left + right) / 2);
 	const y = Math.floor((top + bottom) / 2);
+	if (hover) return { ok: true as const, x: x - rect.left, y: y - rect.top };
 	let topElement = page.document.elementFromPoint(x, y);
 	for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
 		const nested = topElement.shadowRoot.elementFromPoint(x, y);
@@ -357,9 +358,7 @@ export async function isClickActionable(
 	signal?: AbortSignal,
 	options: Pick<ClickAtOptions, "button"> & { hover?: boolean } = {},
 ): Promise<ActionabilityResult> {
-	const hover = options.hover === true;
-	// A label forwards clicks, not the pointer: a hover on the label does not hover its control.
-	const flags: ClickFlags = { viaLabel: !hover && (options.button ?? "left") === "left", hover };
+	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left", hover: options.hover === true };
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
@@ -495,13 +494,57 @@ export async function clickElement(
 }
 
 /**
+ * Page half of {@link hoverElement}, run once the pointer is on `el` at `offset` from its box: `null` when the hit
+ * there is `el` or inside it (or, for a target that takes no pointer events, an element it sits in), else that hit
+ * as `<tag#id.class>`. A label is a cover here: it forwards clicks to its control, not the pointer.
+ */
+function checkHoverHit(
+	el: unknown,
+	offset: { x: number; y: number },
+	contains: typeof composedContains,
+): string | null {
+	const element = el as unknown as PageElement;
+	const page = globalThis as unknown as PageGlobals;
+	const rect = element.getBoundingClientRect();
+	const x = rect.left + offset.x;
+	const y = rect.top + offset.y;
+	let hit = page.document.elementFromPoint(x, y);
+	for (let depth = 0; hit?.shadowRoot && depth < 16; depth++) {
+		const nested = hit.shadowRoot.elementFromPoint(x, y);
+		if (!nested || nested === hit) break;
+		hit = nested;
+	}
+	if (!hit) return "nothing";
+	if (contains(element, hit)) return null;
+	if (page.getComputedStyle(element).pointerEvents === "none" && contains(hit, element)) return null;
+	const classes = Array.from(hit.classList)
+		.slice(0, 2)
+		.map(name => `.${name}`)
+		.join("");
+	return `<${hit.tagName.toLowerCase()}${hit.id ? `#${hit.id}` : ""}${classes}>`;
+}
+
+/** {@link checkHoverHit} with {@link composedContains} bound in, as one self-contained page function. */
+const hoverHitInPage = new Function(
+	"el",
+	"offset",
+	`return (${checkHoverHit.toString()})(el, offset, ${composedContains.toString()});`,
+) as (el: unknown, offset: { x: number; y: number }) => string | null;
+
+/**
  * Move the pointer onto an element at the point a click would use, once it can take one there: a hidden match
- * waits and then fails with the reason, like a click, and a covered one fails at once. An `opacity:0`,
- * `visibility:hidden` or `pointer-events:none` element is hovered, since hovering may be what shows it.
+ * waits and then fails with the reason, like a click. An `opacity:0`, `visibility:hidden` or `pointer-events:none`
+ * element is not refused, since hovering may be what shows it; the hit test runs once the pointer is there, so a
+ * covered target, or a control only its label sits over, fails with what the pointer is on.
  */
 export async function hoverElement(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
 	const point = await actionableClickPoint(handle, label, signal, { hover: true });
+	const box = await untilAborted(signal, () => handle.boundingBox());
 	await untilAborted(signal, () => handle.frame.page().mouse.move(point.x, point.y));
+	if (!box) return;
+	const offset = { x: point.x - box.x, y: point.y - box.y };
+	const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, offset))) as string | null;
+	if (coveredBy !== null) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
 }
 
 /**
