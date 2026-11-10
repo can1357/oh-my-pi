@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { prepareRetentionTranscript } from "@oh-my-pi/pi-coding-agent/hindsight/content";
+import { extractMessages } from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -419,6 +421,54 @@ describe("supermemoryBackend", () => {
 		expect(docs).toHaveLength(2);
 		expect(docs[1]?.customId).toBe(docs[0]?.customId);
 		expect(docs[1]?.content).toContain("continued");
+	});
+
+	it("redacts a long window before cutting it, so a cut after a secret's prefix leaks no suffix", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const suffix = "abcdefghijklmnopqrstuvwxyz0123";
+		const secret = `ghp_${suffix}`;
+		// Size the trailing filler so the 60,000-character cut lands right after `ghp_`.
+		const build = async (filler: number, started: boolean) => {
+			const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+			if (started) await start(session);
+			const at = new Date(0).toISOString();
+			const content = `${"a".repeat(1_000)} ${secret} ${"b".repeat(filler)}`;
+			session.sessionManager.getEntries().push(
+				{
+					type: "message",
+					id: "u1",
+					parentId: null,
+					timestamp: at,
+					message: { role: "user", content, timestamp: 0 },
+				} as never,
+				{
+					type: "message",
+					id: "a1",
+					parentId: null,
+					timestamp: at,
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "ok" }],
+						stopReason: "stop",
+						timestamp: 0,
+					},
+				} as never,
+			);
+			const { transcript } = prepareRetentionTranscript(extractMessages(session.sessionManager), true, {
+				includeTimestamps: true,
+			});
+			return { session, transcript: transcript ?? "" };
+		};
+		const probe = (await build(59_000, false)).transcript;
+		const filler = 59_000 + probe.indexOf(secret) + "ghp_".length - (probe.length - 60_000);
+		const { session, transcript } = await build(filler, true);
+		expect(transcript.slice(transcript.length - 60_000).startsWith(suffix)).toBe(true);
+
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(create.mock.calls[0]?.[0]?.content).not.toContain(suffix);
 	});
 
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {

@@ -585,7 +585,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			return false;
 		}
 		const window = messages.slice(userStarts[startTurn], userStarts[endTurn] ?? messages.length);
-		const { transcript } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
+		const { transcript: raw } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
+		// Redact the whole window before cutting it: a cut right after a secret's prefix (`ghp_`) would
+		// leave a suffix the redactor no longer recognizes.
+		const transcript = raw ? this.#redact(raw) : raw;
 		if (transcript) {
 			// Before this transcript's first send, record where retention starts: without it, a
 			// resume after a failed or cut-off first window would read the transcript as pre-cursor
