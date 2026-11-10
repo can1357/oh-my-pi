@@ -11,7 +11,7 @@ import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
-import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-control";
+import { buildJobResult, settledJobIds, snapshotJobs, undeliveredJobs } from "../async/job-control";
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
@@ -180,7 +180,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
+		// Stamped once at entry, before any await: a job already settled here
+		// was not handed over by this call (#16052).
+		const callStartedAt = Date.now();
 		const manager = this.session.asyncJobManager;
+		const settledAtEntry = manager ? settledJobIds(manager, senderId) : undefined;
 
 		if (messaging) {
 			const queued = takeQueuedMessages(messaging);
@@ -208,7 +212,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// wait watched it) is exactly what this wait is for: return it now.
 		const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
 		if (manager && undelivered.length > 0) {
-			return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
+			return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], [], [], {
+				startedAtMs: callStartedAt,
+				settledAtEntry,
+			});
 		}
 		const serviceRunning = hasLiveOwnedService(this.session);
 		if (jobs.length === 0 && !serviceRunning) {
@@ -226,7 +233,17 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				};
 			}
 		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, idle, signal, onUpdate });
+		return this.#blockUntilWake({
+			jobs,
+			manager,
+			messaging,
+			serviceRunning,
+			idle,
+			signal,
+			onUpdate,
+			startedAtMs: callStartedAt,
+			settledAtEntry,
+		});
 	}
 
 	/**
@@ -241,8 +258,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		idle: IdleStreak | undefined;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
+		/** Epoch ms when the enclosing `wait` call started; see {@link JobResultOptions.startedAtMs}. */
+		startedAtMs: number;
+		/** Jobs already settled when this call started; see {@link JobResultOptions.settledAtEntry}. */
+		settledAtEntry: ReadonlySet<string> | undefined;
 	}): Promise<AgentToolResult<CoordinationDetails>> {
-		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
 		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
 		const watchedIds = jobs.map(job => job.id);
@@ -370,7 +391,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				throwIfAborted(signal);
 			}
 			if (manager && jobs.length > 0) {
-				const result = buildJobResult(this.session, manager, "wait", jobs, []);
+				const result = buildJobResult(this.session, manager, "wait", jobs, [], [], {
+					startedAtMs,
+					settledAtEntry,
+				});
 				if (wake === "timeout") {
 					// The report is one text block (`buildJobResult`); the timeout line joins it.
 					const report = result.content.find(block => block.type === "text")?.text ?? "";

@@ -5,6 +5,7 @@
 ### Added
 
 - Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
+- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
 
 ### Fixed
 
@@ -21,6 +22,13 @@
 - Fixed the OpenZoo `auto` router hiding reasoning and image input when the live roster advertises them.
 - Fixed OpenZoo sessions sending native tool calls to models whose live roster lists parameters and omits tools.
 - Fixed OpenZoo models staying tool-disabled after a refresh when the live roster starts advertising tools.
+- Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.18.6] - 2026-11-09
+
+### Fixed
+
+- LiteLLM lists only the models the configured key can call (its authenticated `/v1/models`), keeping the proxy's metadata for them; a proxy whose `/v1/models` fails now lists no models instead of every model it serves ([#18601](https://github.com/can1357/oh-my-pi/issues/18601))
 
 ## [18.18.5] - 2026-11-09
 

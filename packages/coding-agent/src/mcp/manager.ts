@@ -9,7 +9,7 @@ import * as url from "node:url";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
-import { resolveConfigValue } from "../config/resolve-config-value";
+import { invalidateCommandConfig, isCommandConfigValue, resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
@@ -77,6 +77,39 @@ interface AuthRefreshableMCPTransport extends MCPTransport {
 function isAuthRefreshableMCPTransport(transport: MCPTransport): transport is AuthRefreshableMCPTransport {
 	return "onAuthError" in transport;
 }
+
+/**
+ * The `!command` values {@link MCPManager} executes when it resolves `config`:
+ * remote `headers` or stdio `env`, minus the entries a literal policy keeps verbatim.
+ */
+function commandValues(config: MCPServerConfig): string[] {
+	const values: string[] = [];
+	if (config.type === "http" || config.type === "sse") {
+		if (!config.headers || config.headerPolicy === "origin-locked") return values;
+		for (const key in config.headers) {
+			const value = config.headers[key];
+			if (isCommandConfigValue(value)) values.push(value);
+		}
+		return values;
+	}
+	if (!config.env || config.envPolicy === "literal") return values;
+	const literalKeys = new Set(config.envLiteralKeys);
+	for (const key in config.env) {
+		const value = config.env[key];
+		if (!literalKeys.has(key) && isCommandConfigValue(value)) values.push(value);
+	}
+	return values;
+}
+
+/**
+ * Drop the process-cached results of `config`'s `!command` values so the next
+ * resolution runs them again — a command that mints a short-lived token
+ * (e.g. an OAuth2 `client_credentials` grant) must not resend an expired one.
+ */
+function invalidateCommandValues(config: MCPServerConfig): void {
+	for (const value of commandValues(config)) invalidateCommandConfig(value);
+}
+
 type TrackedPromise<T> = {
 	promise: Promise<T>;
 	status: "pending" | "fulfilled" | "rejected";
@@ -981,22 +1014,7 @@ export class MCPManager implements MCPManagerApi {
 					this.#connections.set(name, connection);
 					this.#serverConfigs.set(name, config);
 
-					// Wire auth refresh for HTTP-like transports so 401s trigger token refresh.
-					// Gate on a resolvable managed credential, not on the auth block:
-					// definition-only configs (url-keyed fallback) get Bearer injection
-					// too and need the same mid-session refresh hook.
-					if (
-						isAuthRefreshableMCPTransport(connection.transport) &&
-						lookupMcpOAuthCredential(this.#authStorage, config)
-					) {
-						connection.transport.onAuthError = async () => {
-							const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-							if (refreshed.type === "http" || refreshed.type === "sse") {
-								return refreshed.headers ?? null;
-							}
-							return null;
-						};
-					}
+					this.#wireAuthRefresh(connection, config);
 
 					// Re-establish connection if the transport closes (server restart,
 					// network interruption).
@@ -1640,6 +1658,8 @@ export class MCPManager implements MCPManagerApi {
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();
+		// The next connect (`/mcp reload` rediscovery) runs every `!command` again.
+		for (const config of this.#serverConfigs.values()) invalidateCommandValues(config);
 		this.#serverConfigs.clear();
 		this.#callProvokedToolRefreshes.clear();
 		this.#scopedTools.clear();
@@ -1811,6 +1831,9 @@ export class MCPManager implements MCPManagerApi {
 		}
 
 		logger.debug("MCP reconnecting", { path: `mcp:${name}` });
+		// A reconnect follows a lost or rejected connection; a cached `!command`
+		// token may be what the server rejected, so mint fresh values once.
+		invalidateCommandValues(config);
 
 		// Close the old transport without removing tools or notifying consumers.
 		// Tools stay available (stale) while we establish the new connection.
@@ -1916,17 +1939,7 @@ export class MCPManager implements MCPManagerApi {
 
 		this.#connections.set(name, connection);
 
-		// Wire auth refresh for HTTP-like transports, and reconnect for any transport.
-		// Same gate as connectServers: any resolvable managed credential.
-		if (isAuthRefreshableMCPTransport(connection.transport) && lookupMcpOAuthCredential(this.#authStorage, config)) {
-			connection.transport.onAuthError = async () => {
-				const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
-				if (refreshed.type === "http" || refreshed.type === "sse") {
-					return refreshed.headers ?? null;
-				}
-				return null;
-			};
-		}
+		this.#wireAuthRefresh(connection, config);
 		connection.transport.onClose = () => {
 			logger.debug("MCP transport lost, triggering reconnect", { path: `mcp:${name}` });
 			this.#emitConnectionStatus({ type: "reconnecting", serverName: name });
@@ -2249,6 +2262,22 @@ export class MCPManager implements MCPManagerApi {
 		return {
 			enabled: this.#notificationsEnabled,
 			subscriptions: this.#subscribedResources as Map<string, ReadonlySet<string>>,
+		};
+	}
+
+	/**
+	 * Retry an HTTP/SSE 401/403 once with re-resolved credentials: a managed
+	 * OAuth credential is force-refreshed and `!command` headers run again.
+	 * Servers with neither keep the transport's plain auth error.
+	 */
+	#wireAuthRefresh(connection: MCPServerConnection, config: MCPServerConfig): void {
+		const transport = connection.transport;
+		if (!isAuthRefreshableMCPTransport(transport)) return;
+		if (commandValues(config).length === 0 && !lookupMcpOAuthCredential(this.#authStorage, config)) return;
+		transport.onAuthError = async () => {
+			invalidateCommandValues(config);
+			const refreshed = await this.#resolveAuthConfig(config, { forceRefresh: true });
+			return refreshed.type === "http" || refreshed.type === "sse" ? (refreshed.headers ?? null) : null;
 		};
 	}
 
