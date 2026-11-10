@@ -313,12 +313,12 @@ describe("Settings", () => {
 			);
 		});
 
-		it("merges the string and record forms entry by entry across layers", async () => {
+		it("merges a higher-layer record over a lower string; a higher-layer string replaces the value", async () => {
 			const projectConfigPath = path.join(getProjectAgentDir(projectDir), "config.yml");
-			await writeSettings({ task: { maxEffort: "low", maxActualEffort: { "anthropic/*": "high" } } });
+			await writeSettings({ task: { maxEffort: "low", maxActualEffort: { "openai/*": "xhigh" } } });
 			await Bun.write(
 				projectConfigPath,
-				YAML.stringify({ task: { maxEffort: { "anthropic/*": "high" }, maxActualEffort: "medium" } }, null, 2),
+				YAML.stringify({ task: { maxEffort: { "anthropic/*": "high" }, maxActualEffort: "low" } }, null, 2),
 			);
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -326,33 +326,93 @@ describe("Settings", () => {
 			// Global string + project record: the global `*` cap still covers models the project map misses.
 			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), opus)).toBe(Effort.High);
 			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Low);
-			// Global record + project string: the record's entries survive beside the project's `*`.
-			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), opus)).toBe(Effort.High);
-			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBe(Effort.Medium);
+			// Global record + project string: the string caps every model, the global entries included.
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), opus)).toBe(Effort.Low);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBe(Effort.Low);
 			// Expansion is read-time only: the global file keeps its string.
 			expect((await readSettings()).task).toEqual({
 				maxEffort: "low",
-				maxActualEffort: { "anthropic/*": "high" },
+				maxActualEffort: { "openai/*": "xhigh" },
 			});
 		});
 
-		it("resolves exact keys before the longest matching glob before `*`, else uncapped", () => {
-			// The longest glob comes first and is longer than the exact key: neither key order nor
-			// pattern length may beat an exact match, and the longest glob must win over later ones.
-			const globs = {
+		it("applies the same layering across multiple --config overlays", async () => {
+			const first = tempDir.join("first-overlay.yml");
+			const second = tempDir.join("second-overlay.yml");
+			await Bun.write(
+				first,
+				YAML.stringify({ task: { maxEffort: "low", maxActualEffort: { "openai/*": "xhigh" } } }),
+			);
+			await Bun.write(
+				second,
+				YAML.stringify({ task: { maxEffort: { "anthropic/*": "high" }, maxActualEffort: "medium" } }),
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [first, second] });
+
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), opus)).toBe(Effort.High);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Low);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBe(Effort.Medium);
+		});
+
+		it("applies the same layering across multiple project sources", async () => {
+			// `.claude/settings.json` merges over `.omp/config.yml`.
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ task: { maxEffort: "low", maxActualEffort: { "openai/*": "xhigh" } } }),
+			);
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				JSON.stringify({ task: { maxEffort: { "anthropic/*": "high" }, maxActualEffort: "medium" } }),
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), opus)).toBe(Effort.High);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Low);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBe(Effort.Medium);
+		});
+
+		it("adds an entry to a string shorthand without dropping it as the `*` default", async () => {
+			await writeSettings({ task: { maxEffort: "low" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			cfgTaskMaxEffort.setEntry(settings, "anthropic/*", Effort.High);
+			await settings.flush();
+
+			expect((await readSettings()).task).toEqual({ maxEffort: { "*": "low", "anthropic/*": "high" } });
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), opus)).toBe(Effort.High);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Low);
+		});
+
+		it.each([
+			[{ maxEffort: ["low"] }, /Invalid task\.maxEffort: expected .*, got an array/],
+			[{ maxActualEffort: 3 }, /Invalid task\.maxActualEffort: expected .*, got a number/],
+			[{ maxEffort: true }, /Invalid task\.maxEffort: expected .*, got a boolean/],
+			[{ maxEffort: { "claude-opus-*": "low" } }, /Invalid task\.maxEffort key "claude-opus-\*"/],
+			[{ maxEffort: { "anthropic/*-opus": "low" } }, /Invalid task\.maxEffort key "anthropic\/\*-opus"/],
+		])("rejects %j at startup", async (task, error) => {
+			await writeSettings({ task });
+			await expect(Settings.init({ cwd: projectDir, agentDir })).rejects.toThrow(error);
+		});
+
+		it("resolves exact keys before the longest matching `*` prefix before `*`, else uncapped", () => {
+			// The longest prefix comes first and is longer than the exact key: neither key order nor
+			// key length may beat an exact match, and the longest prefix must win over later ones.
+			const prefixes = {
 				"anthropic/claude-opus-4-5*": Effort.Minimal,
 				"anthropic/claude-opus-*": Effort.Medium,
 				"anthropic/*": Effort.High,
 				"*": Effort.XHigh,
 			};
-			expect(resolveEffortCeilingForModel({ ...globs, "anthropic/claude-opus-4-5": Effort.Low }, opus)).toBe(
+			expect(resolveEffortCeilingForModel({ ...prefixes, "anthropic/claude-opus-4-5": Effort.Low }, opus)).toBe(
 				Effort.Low,
 			);
-			expect(resolveEffortCeilingForModel(globs, opus)).toBe(Effort.Minimal);
-			const { "anthropic/claude-opus-4-5*": _longest, ...shorter } = globs;
+			expect(resolveEffortCeilingForModel(prefixes, opus)).toBe(Effort.Minimal);
+			const { "anthropic/claude-opus-4-5*": _longest, ...shorter } = prefixes;
 			expect(resolveEffortCeilingForModel(shorter, opus)).toBe(Effort.Medium);
 			expect(resolveEffortCeilingForModel(shorter, gpt)).toBe(Effort.XHigh);
-			// Shorter glob first: the first match must not win either.
+			// Shorter prefix first: the first match must not win either.
 			expect(
 				resolveEffortCeilingForModel(
 					{ "anthropic/*": Effort.High, "anthropic/claude-opus-*": Effort.Medium },

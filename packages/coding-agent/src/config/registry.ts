@@ -169,7 +169,8 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	/**
 	 * Also accept a bare string as the whole value, meaning `{ [stringShorthandKey]: value }`
 	 * (e.g. `task.maxEffort: medium` for `{ "*": medium }`). Writes and `parse` keep the string as
-	 * written; each settings layer expands it before layers merge, so reads see the record.
+	 * written. A string in a higher layer replaces lower layers' value; a record merges over a lower
+	 * string as that key's entry. Reads see the record.
 	 */
 	stringShorthandKey?: string;
 }

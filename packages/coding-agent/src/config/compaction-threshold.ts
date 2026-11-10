@@ -82,7 +82,8 @@ export function validateAgentCompactionThresholdOverrides(value: unknown): Recor
 	return validateThresholdMap("task.agentCompactionThresholdOverrides", "agent name", value, { allowFixed: false });
 }
 
-function checkModelThresholdKey(key: string): string | undefined {
+/** Why `key` is not a model selector (an exact `provider/model-id` or a `*`-terminated prefix of one), or `undefined`. */
+export function checkModelThresholdKey(key: string): string | undefined {
 	const star = key.indexOf("*");
 	if (star !== -1 && star !== key.length - 1) return "`*` is only allowed as the last character";
 	const slash = key.indexOf("/");
@@ -121,6 +122,21 @@ function modelThresholdsOf(raw: unknown): Record<string, CompactionThresholdPair
 }
 
 /**
+ * The key of `map` governing `model`: an exact `provider/model-id` key wins, else the
+ * longest `*`-terminated prefix matching it (a bare `*` matches every model, last).
+ */
+export function matchModelSelectorKey(map: object, model: { provider: string; id: string }): string | undefined {
+	const selector = `${model.provider}/${model.id}`;
+	if (Object.hasOwn(map, selector)) return selector;
+	let best: string | undefined;
+	for (const key in map) {
+		if (!key.endsWith("*") || !selector.startsWith(key.slice(0, -1))) continue;
+		if (best === undefined || key.length > best.length) best = key;
+	}
+	return best;
+}
+
+/**
  * The `compaction.modelThresholds` entry for `model`: an exact `provider/model-id`
  * key wins, else the longest `*`-terminated prefix matching it.
  */
@@ -129,14 +145,8 @@ export function matchModelCompactionThreshold(
 	model: { provider: string; id: string },
 ): ModelCompactionThresholdMatch | undefined {
 	const thresholds = modelThresholdsOf(raw);
-	const selector = `${model.provider}/${model.id}`;
-	if (Object.hasOwn(thresholds, selector)) return { key: selector, threshold: thresholds[selector] };
-	let best: ModelCompactionThresholdMatch | undefined;
-	for (const key in thresholds) {
-		if (!key.endsWith("*") || !selector.startsWith(key.slice(0, -1))) continue;
-		if (!best || key.length > best.key.length) best = { key, threshold: thresholds[key] };
-	}
-	return best;
+	const key = matchModelSelectorKey(thresholds, model);
+	return key === undefined ? undefined : { key, threshold: thresholds[key] };
 }
 
 const appliedThresholds = new WeakMap<object, Map<string, { threshold: CompactionThresholdPair; applied: object }>>();

@@ -216,8 +216,8 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 
 /**
  * `layer` with every bare-string value of a shorthand record setting expanded to its record form
- * (`task.maxEffort: low` → `{ "*": low }`), so layers merge entry by entry. Read-time only: the
- * layer itself, and the file it came from, stay as written.
+ * (`task.maxEffort: low` → `{ "*": low }`). Read-time only: the layer itself, and the file it came
+ * from, stay as written.
  */
 function expandShorthandRecords(layer: RawSettings): RawSettings {
 	let expanded = layer;
@@ -880,7 +880,7 @@ export class Settings {
 	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
 	#operatorLayers(): RawSettings {
 		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
-		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
+		return this.#parent ? this.#mergeLayer(this.#parent.#operatorLayers(), own) : own;
 	}
 
 	/**
@@ -1199,9 +1199,15 @@ export class Settings {
 		const prev = setting.get(this);
 		this.#releaseSoftPin(setting);
 		if (staged) {
-			// Replace rather than mutate the record: the merged view and cached reads may share it.
-			if (isRecord(record)) setByPath(this.#global, setting.segments, { ...record });
-			this.#stageGlobal([...setting.segments, key], value);
+			const shorthandKey = setting.stringShorthandKey;
+			if (typeof record === "string" && shorthandKey !== undefined) {
+				// The string shorthand becomes its `*` entry, so adding an entry keeps that default.
+				this.#stageGlobal(setting.segments, { [shorthandKey]: record, [key]: value });
+			} else {
+				// Replace rather than mutate the record: the merged view and cached reads may share it.
+				if (isRecord(record)) setByPath(this.#global, setting.segments, { ...record });
+				this.#stageGlobal([...setting.segments, key], value);
+			}
 		}
 		this.#rebuildMerged();
 		if (staged) this.#queueSave();
@@ -2823,7 +2829,7 @@ export class Settings {
 		const sourcePaths: string[] = [];
 		let shellPathSource: string | undefined;
 		for (const item of items) {
-			settings = this.#deepMerge(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path));
+			settings = this.#mergeLayer(settings, dropSettingsGroupShadows(item.data as RawSettings, item.path));
 			sourcePaths.push(item.path);
 			if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
 		}
@@ -2860,7 +2866,7 @@ export class Settings {
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
-			settings = this.#deepMerge(settings, overlay);
+			settings = this.#mergeLayer(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
 		return { settings, shellPathSource };
@@ -4301,19 +4307,27 @@ export class Settings {
 		};
 	}
 
-	/** `layers` (global, project, `--config` overlay, runtime) merged in precedence order. */
+	/**
+	 * `layers` (global, project, `--config` overlay, runtime) merged in precedence order. A shorthand
+	 * record's top-layer string stays unexpanded; {@link mergeOverParent} expands it.
+	 */
 	#mergeOwnLayers(layers: OwnLayers): RawSettings {
-		let merged = this.#deepMerge(
-			this.#deepMerge({}, expandShorthandRecords(layers.global)),
-			expandShorthandRecords(projectLayerForMerge(layers.project)),
-		);
-		merged = this.#deepMerge(merged, expandShorthandRecords(layers.configOverlay));
-		return this.#deepMerge(merged, expandShorthandRecords(layers.overrides));
+		let merged = this.#mergeLayer(this.#deepMerge({}, layers.global), projectLayerForMerge(layers.project));
+		merged = this.#mergeLayer(merged, layers.configOverlay);
+		return this.#mergeLayer(merged, layers.overrides);
 	}
 
-	/** `own` merged over an overlay parent's current view (itself for a root instance). */
+	/** `own` merged over an overlay parent's current view (itself for a root instance), shorthand records expanded. */
 	#mergeOverParent(own: RawSettings): RawSettings {
-		return this.#parent ? this.#deepMerge(this.#parent.#mergedView(), own) : own;
+		return expandShorthandRecords(this.#parent ? this.#mergeLayer(this.#parent.#mergedView(), own) : own);
+	}
+
+	/**
+	 * `layer` deep-merged over `base`. A shorthand record's bare string in `layer` replaces the value
+	 * below it whole; a record in `layer` merges entry by entry, over a lower string as `{ "*": string }`.
+	 */
+	#mergeLayer(base: RawSettings, layer: RawSettings): RawSettings {
+		return this.#deepMerge(expandShorthandRecords(base), layer);
 	}
 
 	/**

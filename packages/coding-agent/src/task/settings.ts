@@ -5,6 +5,8 @@
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
+	checkModelThresholdKey,
+	matchModelSelectorKey,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
@@ -19,6 +21,7 @@ const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSetti
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
 const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
 const EMPTY_AGENT_SOFT_REQUEST_BUDGET: Record<string, number | null> = {};
+const EMPTY_EFFORT_CEILINGS: Readonly<Record<string, Effort>> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -644,41 +647,43 @@ export const cfgTaskSoftRequestBudgetNotice = register({
  */
 export type EffortCeilingSetting = string | Readonly<Record<string, Effort>>;
 
+function isEffort(value: unknown): value is Effort {
+	return THINKING_EFFORTS.some(effort => effort === value);
+}
+
 function validateEffortCeilingSetting(id: string): (value: unknown) => void {
+	const invalidEffort = (path: string, effort: unknown) =>
+		new Error(`Invalid effort for ${path}: ${String(effort)}. Expected one of: ${THINKING_EFFORTS.join(", ")}.`);
 	return value => {
 		if (value === undefined || value === null) return;
-		const entries = typeof value === "string" ? [["*", value]] : isRecord(value) ? Object.entries(value) : [];
-		for (const [key, effort] of entries) {
-			if (!THINKING_EFFORTS.includes(effort as Effort)) {
-				throw new Error(
-					`Invalid effort for ${id}${typeof value === "string" ? "" : `.${key}`}: ${String(effort)}. Expected one of: ${THINKING_EFFORTS.join(", ")}.`,
-				);
-			}
+		if (typeof value === "string") {
+			if (!isEffort(value)) throw invalidEffort(id, value);
+			return;
+		}
+		if (!isRecord(value)) {
+			const received = Array.isArray(value) ? "an array" : `a ${typeof value}`;
+			throw new Error(`Invalid ${id}: expected an effort or a map of model selector to effort, got ${received}.`);
+		}
+		for (const [key, effort] of Object.entries(value)) {
+			const keyError = key === "*" ? undefined : checkModelThresholdKey(key);
+			if (keyError) throw new Error(`Invalid ${id} key "${key}": ${keyError}.`);
+			if (!isEffort(effort)) throw invalidEffort(`${id}.${key}`, effort);
 		}
 	};
 }
 
 /**
  * Effort ceiling `value` sets for `model`: the exact `provider/modelId` key, else the
- * longest (most specific) matching glob key, else `"*"`; `undefined` means uncapped.
- * A string value is `{ "*": value }`. Globs use `Bun.Glob`, where `*` stops at `/`.
+ * longest matching `*`-terminated prefix key, else `"*"`; `undefined` means uncapped.
+ * A string value is `{ "*": value }`. Same matching as `compaction.modelThresholds`.
  */
 export function resolveEffortCeilingForModel(
 	value: EffortCeilingSetting,
 	model: Model | undefined,
 ): Effort | undefined {
-	const map: Readonly<Record<string, Effort>> = typeof value === "string" ? { "*": value as Effort } : value;
-	if (model) {
-		const name = `${model.provider}/${model.id}`;
-		if (Object.hasOwn(map, name)) return map[name];
-		let best: string | undefined;
-		for (const pattern of Object.keys(map)) {
-			if (pattern === "*" || (best !== undefined && pattern.length <= best.length)) continue;
-			if (new Bun.Glob(pattern).match(name)) best = pattern;
-		}
-		if (best !== undefined) return map[best];
-	}
-	return Object.hasOwn(map, "*") ? map["*"] : undefined;
+	if (typeof value === "string") return isEffort(value) ? value : undefined;
+	const key = model ? matchModelSelectorKey(value, model) : "*";
+	return key !== undefined && Object.hasOwn(value, key) ? value[key] : undefined;
 }
 
 // Record settings carry no settings-panel UI; edit them with `omp config set` or config.yml.
@@ -686,7 +691,7 @@ export const cfgTaskMaxEffort = register({
 	id: "task.maxEffort",
 	type: "record",
 	stringShorthandKey: "*",
-	default: {} as Readonly<Record<string, Effort>>,
+	default: EMPTY_EFFORT_CEILINGS,
 	validate: validateEffortCeilingSetting("task.maxEffort"),
 });
 
@@ -694,7 +699,7 @@ export const cfgTaskMaxActualEffort = register({
 	id: "task.maxActualEffort",
 	type: "record",
 	stringShorthandKey: "*",
-	default: {} as Readonly<Record<string, Effort>>,
+	default: EMPTY_EFFORT_CEILINGS,
 	validate: validateEffortCeilingSetting("task.maxActualEffort"),
 });
 
