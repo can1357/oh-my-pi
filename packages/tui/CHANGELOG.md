@@ -66,6 +66,10 @@
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 - Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
 
+### Added
+
+- Tool cards can now show passive model context as one sanitized, dim line, in both the terminal and native transcripts, without exposing it as a separate transcript message; expanding tools shows the full text, and the native line shows it on hover ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Changed
@@ -896,8 +900,6 @@
 
 - SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
 - Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
-- Tool cards can now show passive model context as one sanitized, dim line, in both the terminal and native transcripts, without exposing it as a separate transcript message ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
-- Tool cards can now show passive model context as one sanitized, dim line, in both the terminal and native transcripts, without exposing it as a separate transcript message; expanding tools shows the full text, and the native line shows it on hover ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Changed
 
