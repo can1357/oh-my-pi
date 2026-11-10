@@ -867,8 +867,8 @@ type ScheduledAgentContinueOptions = {
 	 * release requests it again; a user's retry or continue (`"user"`) cancels the pass and goes on.
 	 */
 	claim?: "recovery" | "background" | "user";
-	/** Called when a hold made a `"skip"` request give way at dispatch, for a request that must be run again at the release. */
-	onStopPassHeld?: () => void;
+	/** A `"background"` request a hold refused at dispatch: the turn gate calls it once the last hold releases. */
+	park?: () => void;
 };
 
 type ScheduledAgentContinueRequest = {
@@ -1164,14 +1164,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
-	/** The prompt generation in which a `subagent_stop` hold deferred the hidden next-turn messages; the hold's release runs them. */
-	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
 	/** Aborts that only stopped a settled turn (see `abort({ turnStop })`): counted out of the cancellation generation. */
 	#turnStopAborts = 0;
-	/** A compaction continuation a `subagent_stop` hold stopped from starting; the hold's release schedules it again. */
-	#heldCompactionContinuation:
-		| { options: CompactionContinuationOptions; cancellationGeneration: number; promptSequence: number }
-		| undefined = undefined;
 	/** Queued messages a session path took out of the agent queues to put back later (follow-ups
 	 *  parked behind an IRC wake turn, a session switch's rollback snapshot), in queue order. */
 	readonly #heldQueuedMessages = new Set<AgentMessage>();
@@ -1296,6 +1290,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	});
 	/** Idle deliveries of the yield queue: they wait while handlers consult, and flush again once they may run. */
 	readonly #idleDeliveryClaim: TurnClaim = { kind: "recovery", park: () => this.yieldQueue.requestIdleFlush() };
+	/** IRC wakes and asides: refused under a hold, they stay pending and wake once the last hold releases. */
+	readonly #ircWakeClaim: TurnClaim = { kind: "background", park: () => this.#resumeStrandedIrcAsides() };
+	/** The queued-message drain: refused under a hold, it is scheduled again once the last hold releases. */
+	readonly #queuedDrainClaim: TurnClaim = { kind: "background", park: () => this.#scheduleQueuedMessageDrain() };
+	/** The hidden next-turn messages' turn: refused under a hold, it is scheduled again once the last hold releases. */
+	readonly #hiddenNextTurnClaim: TurnClaim = { kind: "background", park: () => this.#scheduleHiddenNextTurn() };
 	/** The observation whose monitor is attached; at most one at a time. */
 	#openTurnObservation: TurnObservation | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
@@ -1727,8 +1727,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) {
 			return;
 		}
-		// A `subagent_stop` pass holds the session; its release resumes these.
-		if (this.#turnGate.held) return;
+		// A `subagent_stop` pass holds the session: the turn gate resumes these once it releases.
+		if (!this.#turnGate.tryAdmit(this.#ircWakeClaim)) return;
 		// A pooled yield contract means a pool turn owns this worker (installed,
 		// dispatching, or dispatch-imminent). Waking here would either emit keyed
 		// yields against its items or re-queue into the deferral path forever, so
@@ -1872,7 +1872,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		// A `subagent_stop` pass holds the session until its verdict is published:
 		// every wake, the parent's included, waits for a turn of its own.
-		if (this.#turnGate.held) {
+		if (!this.#turnGate.tryAdmit(this.#ircWakeClaim)) {
 			this.#irc.queueDeferredWake(wakeRecords);
 			return;
 		}
@@ -1942,7 +1942,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				// The turn gate decides in this tick: a hold taken while the wake waited parks it for a turn of its own.
 				const run = this.#startAgentTurn(
-					BACKGROUND_CLAIM,
+					this.#ircWakeClaim,
 					() => this.agent.prompt(records),
 					() => {
 						observation = this.#startTurnObservation(records);
@@ -5635,9 +5635,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				return { status: "skipped", reason: "session-unavailable" };
 			}
 			const kind = request.options.claim ?? "recovery";
-			// Refused while handlers consult, the running work's own recovery is requested again once the verdict is in.
+			// Refused while handlers consult, the running work's own recovery is requested again once the verdict is
+			// in; a refused background request, once the last hold releases.
 			const claim: TurnClaim =
-				kind === "recovery" ? { kind, park: () => this.#scheduleAgentContinue(request.options) } : { kind };
+				kind === "recovery"
+					? { kind, park: () => this.#scheduleAgentContinue(request.options) }
+					: { kind, park: request.options.park };
 			for (;;) {
 				try {
 					if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
@@ -5654,8 +5657,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						}
 						// The running work's own recovery waits for the verdict: the gate parked it, so it is not skipped.
 						if (claim.kind === "recovery") return { status: "parked" };
-						// A background request gives way: the hold's release requests it again.
-						request.options.onStopPassHeld?.();
+						// A background request gives way: the gate parked it for the hold's release.
 						return { status: "skipped", reason: "session-unavailable" };
 					}
 					await run;
@@ -5815,12 +5817,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (options.terminalTextAnswer && !activeGoal) return false;
 		}
 		// A `subagent_stop` pass is judging the session's candidate: a turn started now would change it under
-		// the verdict. The continuation waits for the hold's release, which schedules it again. Compaction
+		// the verdict. The turn gate parks the continuation and schedules it again at the release. Compaction
 		// itself never waits on the hold: an extension compacting from inside a pass would deadlock on it.
-		if (this.#turnGate.held) {
-			this.#holdCompactionContinuation(options);
-			return true;
-		}
+		const claim = this.#compactionContinuationClaim(options);
+		if (!this.#turnGate.tryAdmit(claim)) return true;
 		if (queued) {
 			this.#scheduleAgentContinue({
 				source: "compaction-queued-message",
@@ -5828,40 +5828,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				generation: options.generation,
 				shouldContinue: () => this.agent.hasQueuedMessages(),
 				claim: "background",
-				onStopPassHeld: () => this.#holdCompactionContinuation(options),
+				park: claim.park,
 			});
 			return true;
 		}
 		return this.#scheduleAutoContinuePrompt(options);
 	}
 
-	/** Keep a compaction continuation a hold stopped from starting, stamped so a later abort or prompt cancels it. */
-	#holdCompactionContinuation(options: CompactionContinuationOptions): void {
-		// Superseded before it was held: the scheduler would skip it as stale, so there is nothing to keep.
-		if (options.generation !== this.#promptGeneration) return;
-		this.#heldCompactionContinuation = {
-			options,
-			cancellationGeneration: this.#cancellationGeneration(),
-			promptSequence: this.#promptSequence,
+	/**
+	 * A compaction continuation's turn claim: refused under a hold, it is scheduled again at the release, unless a
+	 * cancellation or a prompt after `promptSequence` carried the run on since. The internal stop of a settled turn
+	 * is neither: the continuation goes on under the generation that stands then.
+	 */
+	#compactionContinuationClaim(
+		options: CompactionContinuationOptions,
+		promptSequence = this.#promptSequence,
+	): TurnClaim {
+		// Superseded already: the scheduler skips it as stale, so a refusal has nothing to keep.
+		if (options.generation !== this.#promptGeneration) return BACKGROUND_CLAIM;
+		const cancellationGeneration = this.#cancellationGeneration();
+		return {
+			kind: "background",
+			park: () => {
+				if (
+					this.#isDisposed ||
+					cancellationGeneration !== this.#cancellationGeneration() ||
+					promptSequence !== this.#promptSequence
+				) {
+					return;
+				}
+				this.#scheduleCompactionContinuation({ ...options, generation: this.#promptGeneration });
+			},
 		};
-	}
-
-	/** The hold released: schedule its deferred compaction continuation again, unless it was superseded meanwhile. */
-	#resumeCompactionContinuation(): void {
-		const held = this.#heldCompactionContinuation;
-		this.#heldCompactionContinuation = undefined;
-		// A cancellation since the deferral cancelled the continuation, and a prompt that ran since carried the
-		// run on itself. The internal stop of a settled turn is neither.
-		if (
-			!held ||
-			this.#isDisposed ||
-			held.cancellationGeneration !== this.#cancellationGeneration() ||
-			held.promptSequence !== this.#promptSequence
-		) {
-			return;
-		}
-		// Only turn-stops bumped the generation since: the continuation goes on under the one that stands now.
-		this.#scheduleCompactionContinuation({ ...held.options, generation: this.#promptGeneration });
 	}
 
 	#scheduleAutoContinuePrompt(options: CompactionContinuationOptions): boolean {
@@ -5886,9 +5884,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
-					// A hold taken since the check below, or while the prompt waited behind a running turn,
-					// hands the prompt back: the release resumes it.
-					onStopPassHeld: () => this.#holdCompactionContinuation(options),
+					// A hold taken since the check below, or while the prompt waited behind a running turn, hands
+					// the prompt back for the release to resume. Its own setup counts once: only a later prompt
+					// supersedes it.
+					park: this.#compactionContinuationClaim(options, this.#promptSequence + 1).park,
 				},
 			);
 		};
@@ -5896,17 +5895,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			async signal => {
 				await Promise.resolve();
 				if (signal.aborted) return;
-				if (this.#turnGate.held) {
-					this.#holdCompactionContinuation(options);
-					return;
-				}
+				const claim = this.#compactionContinuationClaim(options);
+				if (!this.#turnGate.tryAdmit(claim)) return;
 				if (this.agent.hasQueuedMessages()) {
 					this.#scheduleAgentContinue({
 						source: "auto-continue-queued-message",
 						generation: options.generation,
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 						claim: "background",
-						onStopPassHeld: () => this.#holdCompactionContinuation(options),
+						park: claim.park,
 					});
 					return;
 				}
@@ -8871,7 +8868,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async resume(): Promise<void> {
 		// A user continue cancels a held `subagent_stop` pass, like a typed prompt.
-		if (this.#turnGate.held) await this.#waitOutStopPasses(true);
+		if (this.#turnGate.held) await this.whenTurnAdmissible("user");
 		if (!this.isStreaming) return this.#resumeIdle();
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
@@ -9168,7 +9165,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} else if (this.#turnGate.held) {
 			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
-			await this.#waitOutStopPasses(cancelsPass);
+			await this.whenTurnAdmissible(cancelsPass ? "user" : "background");
 			if (this.#cancellationGeneration() !== waitGeneration) {
 				outcome.sessionClaimed = false;
 				this.#reportDroppedPrompt(typedText, options, followUps);
@@ -9329,7 +9326,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#turnGate.held) {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
-			await this.#waitOutStopPasses(cancelsPass);
+			await this.whenTurnAdmissible(cancelsPass ? "user" : "background");
 			if (this.#cancellationGeneration() !== waitGeneration) {
 				this.#reportDroppedCustomPrompt(message, options, followUps);
 				return false;
@@ -9473,7 +9470,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#turnGate.held) {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
-			await this.#waitOutStopPasses(cancelsPass);
+			await this.whenTurnAdmissible(cancelsPass ? "user" : "background");
 			// A wait can outlast an abort() like the image preparation above: drop the prompt the same way. The
 			// abort that stops the holder's turn for a user's prompt is a turn-stop, which is no cancellation.
 			if (this.#cancellationGeneration() !== waitGeneration || this.#isDisposed) {
@@ -9749,8 +9746,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			followUpBatch?: PromptFollowUps;
 			/** The `subagent_stop` hold this prompt is a continuation of. */
 			stopPassHolder?: HoldState;
-			/** Called when a `subagent_stop` hold, taken after the caller's own check, made this prompt hand itself back. */
-			onStopPassHeld?: () => void;
+			/** A background prompt a `subagent_stop` hold handed back: the turn gate calls it once the last hold releases. */
+			park?: () => void;
+			/** Called as a hold hands this prompt back, for the caller to put back what it took for the prompt. */
+			onHandedBack?: () => void;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -9766,7 +9765,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			? { kind: "holder", hold: holder }
 			: options?.userInitiated === true || (isUserAuthoredMessage(message) && messageAttribution !== "agent")
 				? USER_CLAIM
-				: BACKGROUND_CLAIM;
+				: { kind: "background", park: options?.park };
 		const inFlight = this.#beginInFlight(claim);
 		// Client ownership is reserved by #prompt before dispatch preprocessing
 		// and released when its bracket settles; callers that reach this
@@ -9977,13 +9976,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// setup and is dropped once its pass was cancelled; any other prompt is handed back (waiting here
 			// would stall the holder's wait: this prompt is in flight). What this call already took is put back,
 			// and the caller is told, so nothing is lost with the prompt: the next-turn messages it consumed return
-			// to their queue, and a caller that owns messages of its own (the hidden next-turn turn) retries them
-			// once the hold releases. Checked before the prewalk is armed.
+			// to their queue, the caller puts back what it owns, and the gate parks the prompt for the release.
+			// Checked before the prewalk is armed.
 			const admitPastTurnGate = async (): Promise<boolean> => {
 				while (!this.#turnGate.admits(claim)) {
 					if (claim.kind === "background") {
 						this.#pendingNextTurnMessages = [...consumedNextTurnMessages, ...this.#pendingNextTurnMessages];
-						options?.onStopPassHeld?.();
+						options?.onHandedBack?.();
+						this.#turnGate.tryAdmit(claim);
 						return false;
 					}
 					if (claim.kind === "holder") {
@@ -10862,8 +10862,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (
 			this.#queuedMessageDrainScheduled ||
 			this.#modeExitDrainSuppressionDepth > 0 ||
-			// A `subagent_stop` pass holds the session; its release drains the queue.
-			this.#turnGate.held ||
+			// A `subagent_stop` pass holds the session: the turn gate drains the queue once it releases.
+			!this.#turnGate.tryAdmit(this.#queuedDrainClaim) ||
 			this.#queuedMessageDrainBlocked ||
 			!this.#canAutoContinueForFollowUp() ||
 			!this.agent.hasQueuedMessages()
@@ -10874,11 +10874,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#scheduleAgentContinue({
 			source: "queued-message-drain",
 			claim: "background",
+			park: this.#queuedDrainClaim.park,
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
 					this.#modeExitDrainSuppressionDepth === 0 &&
-					!this.#turnGate.held &&
+					this.#turnGate.tryAdmit(this.#queuedDrainClaim) &&
 					this.#canAutoContinueForFollowUp() &&
 					this.agent.hasQueuedMessages()
 				);
@@ -10994,11 +10995,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#pendingNextTurnMessages.length === 0) {
 			return;
 		}
-		// A `subagent_stop` pass holds the session: these wait for its release, which schedules them again.
-		if (this.#turnGate.held) {
-			this.#hiddenNextTurnHeldGeneration = this.#cancellationGeneration();
-			return;
-		}
+		// A `subagent_stop` pass holds the session: the turn gate schedules these again once it releases.
+		if (!this.#turnGate.tryAdmit(this.#hiddenNextTurnClaim)) return;
 
 		const queuedMessages = [...this.#pendingNextTurnMessages];
 		this.#pendingNextTurnMessages = [];
@@ -11015,9 +11013,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				skipPostPromptRecoveryWait: true,
 				// A hold taken during the prompt's setup hands it back: keep these queued, in order, for the
 				// release to run them.
-				onStopPassHeld: () => {
+				park: this.#hiddenNextTurnClaim.park,
+				onHandedBack: () => {
 					this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
-					this.#hiddenNextTurnHeldGeneration = this.#cancellationGeneration();
 				},
 			});
 		} catch (error) {
@@ -11338,7 +11336,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if ((options?.triggerTurn || options?.deliverAs === "aside") && !this.isStreaming && this.#turnGate.held) {
 			const cancelsPass = normalizedAppMessage.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
-			await this.#waitOutStopPasses(cancelsPass);
+			await this.whenTurnAdmissible(cancelsPass ? "user" : "background");
 			// An abort() during a plain wait supersedes only the turn, as one during the context-replacement
 			// wait above does: the message stays in the transcript, delivered like one that triggers none. The
 			// abort that stops the holder's turn for a user's message is a turn-stop, which is no cancellation.
@@ -13855,7 +13853,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * were judging could no longer be the one published.
 	 */
 	async retry(): Promise<boolean> {
-		if (this.#turnGate.held) await this.#waitOutStopPasses(true);
+		if (this.#turnGate.held) await this.whenTurnAdmissible("user");
 		const didRetry = await this.#recovery.retry();
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
@@ -14121,40 +14119,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			release: () => {
 				if (released) return;
 				released = true;
+				// The last release replays what the hold parked, in park order, once submissions it admitted settle:
+				// wakes, queued drains, hidden next-turn messages and compaction continuations. A cancellation since
+				// a park cancelled that turn, as it does an unparked one.
 				this.#turnGate.release(hold);
-				if (this.#turnGate.held) return;
-				this.#scheduleIdleQueueDrain();
-				// A prompt that waited out the hold goes first; parked wakes, the hidden next-turn messages and
-				// the compaction continuation the hold deferred follow it. An abort since the deferral cancelled
-				// that turn, as it does an undeferred one.
-				const resumeParked = (): void => {
-					this.#resumeStrandedIrcAsides();
-					if (this.#hiddenNextTurnHeldGeneration === this.#cancellationGeneration())
-						this.#scheduleHiddenNextTurn();
-					this.#hiddenNextTurnHeldGeneration = undefined;
-					this.#resumeCompactionContinuation();
-				};
-				if (this.hasAdmittedSubmission) {
-					void this.waitForAdmittedSubmissions().then(resumeParked);
-				} else {
-					resumeParked();
-				}
 			},
 		};
 	}
 
 	/**
-	 * Resolves once no {@link holdForStopPass} hold is active. Rejects when
-	 * `signal` aborts while a hold is still active, so a cancelled caller cannot
+	 * Resolves once a turn of `kind` may start: a `"user"` one cancels every {@link holdForStopPass} hold first, a
+	 * `"background"` one waits for the last release. Rejects when `signal` aborts first, so a cancelled caller cannot
 	 * mistake the cancellation for ownership.
 	 */
-	waitForStopPasses(signal?: AbortSignal): Promise<void> {
-		return this.#turnGate.whenAdmissible(BACKGROUND_CLAIM, signal);
-	}
-
-	/** Waits until no stop-pass hold is active; `cancel` (an explicit user prompt) first cancels every held pass. */
-	#waitOutStopPasses(cancel: boolean, signal?: AbortSignal): Promise<void> {
-		return this.#turnGate.whenAdmissible(cancel ? USER_CLAIM : BACKGROUND_CLAIM, signal);
+	whenTurnAdmissible(kind: "background" | "user", signal?: AbortSignal): Promise<void> {
+		return this.#turnGate.whenAdmissible(kind === "user" ? USER_CLAIM : BACKGROUND_CLAIM, signal);
 	}
 
 	/**
