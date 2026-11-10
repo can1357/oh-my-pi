@@ -570,7 +570,7 @@ const ROWS: &[Row] = &[
 		id: "src-script-file-elf",
 		setup: "",
 		mode: Mode::ScriptFile,
-		script: "ELF text",
+		script: "\u{7f}ELF text",
 		status: 126,
 		stdout: b"",
 		stderr: b"script.sh: script.sh: cannot execute binary file\n",
