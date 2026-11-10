@@ -5,6 +5,7 @@ import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/provid
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { LoadedCustomCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -230,6 +231,72 @@ describe("AgentSession client intent identity", () => {
 		const found = await status(session, ["intent-fresh"]);
 		expect(found.resolvedClientMessageIds).toEqual(["intent-fresh"]);
 		expect(found.unresolvedClientMessageIds).toEqual([]);
+	});
+
+	test("a command still running after switching sessions never resolves a newer input reusing its ID", async () => {
+		const disk = TempDir.createSync("@client-message-stale-finish-");
+		const auth = createInMemoryAuthStorage();
+		cleanup.push(async () => {
+			auth.close();
+			disk.removeSync();
+		});
+		const manager = SessionManager.create(disk.path(), disk.path());
+		const created = Promise.withResolvers<CorrelatedSession>();
+		const switched = Promise.withResolvers<void>();
+		const finishMove = Promise.withResolvers<void>();
+		const expanding = Promise.withResolvers<void>();
+		const finishExpand = Promise.withResolvers<void>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.registerCommand("move", {
+					handler: async () => {
+						await (await created.promise).newSession();
+						switched.resolve();
+						await finishMove.promise;
+					},
+				});
+			},
+			disk.path(),
+			new EventBus(),
+			runtime,
+			"move-command",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			disk.path(),
+			manager,
+			new ModelRegistry(auth, path.join(disk.path(), "models.yml")),
+		);
+		const expand: LoadedCustomCommand = {
+			path: "expand",
+			resolvedPath: "expand",
+			source: "user",
+			command: {
+				name: "expand",
+				description: "Expands into a prompt after a delay",
+				execute: async () => {
+					expanding.resolve();
+					await finishExpand.promise;
+					return "expanded request";
+				},
+			},
+		};
+		const { session } = setup({ manager, config: { extensionRunner, customCommands: [expand] } });
+		created.resolve(session);
+		const moving = session.prompt("/move", intent("intent-reused"));
+		await withTimeout(switched.promise, 5_000, "The command never switched sessions");
+		// The new session never saw the ID, so a new input may reuse it while the old command still runs.
+		const expanded = session.prompt("/expand", intent("intent-reused"));
+		await withTimeout(expanding.promise, 5_000, "The custom command never started");
+		finishMove.resolve();
+		expect(await moving).toBe(false);
+		finishExpand.resolve();
+		await expanded;
+		const found = await status(session, ["intent-reused"]);
+		expect(found.resolvedClientMessageIds).toEqual([]);
+		expect(found.persistedClientMessageIds).toEqual(["intent-reused"]);
 	});
 
 	test("lets a released journal be collected after its client message IDs were indexed", async () => {

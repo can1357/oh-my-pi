@@ -309,6 +309,7 @@ import type {
 	AgentSessionConfig,
 	ClientMessageQueueSnapshot,
 	ClientMessageStatus,
+	LocalClientMessageRegistration,
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
@@ -1282,8 +1283,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#clientMessageIds = new WeakMap<AgentMessage, string>();
 	#clientMessageAdmissions?: { sessionId: string; ids: Set<string> };
-	/** Correlated inputs a local command is handling, by the session that admitted them. */
-	#localClientMessages = new Map<string, string>();
+	/** Correlated inputs a local command is handling; each registration is its own token, see {@link beginLocalClientMessage}. */
+	#localClientMessages = new Set<LocalClientMessageRegistration>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -8857,7 +8858,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (expandPromptTemplates && text.startsWith("/")) {
 			if (options?.runCommands !== false) {
 				const clientMessageId = options?.clientMessageId;
-				if (clientMessageId !== undefined) this.beginLocalClientMessage(clientMessageId);
+				const registration =
+					clientMessageId === undefined ? undefined : this.beginLocalClientMessage(clientMessageId);
 				let consumed = false;
 				try {
 					const command = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
@@ -8881,7 +8883,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						text = customResult;
 					}
 				} finally {
-					if (clientMessageId !== undefined) this.finishLocalClientMessage(clientMessageId, consumed);
+					if (registration) this.finishLocalClientMessage(registration, consumed);
 				}
 			}
 
@@ -11357,26 +11359,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Mark a correlated input as handled by a local command (extension, custom or builtin command).
 	 * A session transition the command starts journals the ID as resolved in the admitting journal
 	 * before leaving it; otherwise {@link finishLocalClientMessage} journals it once the command ends.
+	 * The returned registration is the token for that finish: the same ID may be registered again in
+	 * another journal while this command still runs, and only this exact registration may be finished.
 	 */
-	beginLocalClientMessage(id: string): void {
-		this.#localClientMessages.set(id, this.sessionManager.getSessionId());
+	beginLocalClientMessage(id: string): LocalClientMessageRegistration {
+		const registration: LocalClientMessageRegistration = { id, journalId: this.sessionManager.getSessionId() };
+		this.#localClientMessages.add(registration);
+		return registration;
 	}
 
-	/** End {@link beginLocalClientMessage}; `consumed` journals the resolution unless a transition already did. */
-	finishLocalClientMessage(id: string, consumed: boolean): void {
-		const origin = this.#localClientMessages.get(id);
-		if (origin === undefined) return;
-		this.#localClientMessages.delete(id);
-		if (consumed && origin === this.sessionManager.getSessionId()) this.resolveClientMessages([id]);
+	/**
+	 * End {@link beginLocalClientMessage}; `consumed` journals the resolution. A registration a
+	 * transition already resolved is gone, so its finish is a no-op and never touches a newer one.
+	 */
+	finishLocalClientMessage(registration: LocalClientMessageRegistration, consumed: boolean): void {
+		if (!this.#localClientMessages.delete(registration)) return;
+		if (consumed && registration.journalId === this.sessionManager.getSessionId()) {
+			this.resolveClientMessages([registration.id]);
+		}
 	}
 
 	#resolveLocalClientMessagesBeforeTransition(): void {
 		if (this.#localClientMessages.size === 0) return;
+		const journalId = this.sessionManager.getSessionId();
 		const ids: string[] = [];
-		for (const [id, origin] of this.#localClientMessages) {
-			if (origin !== this.sessionManager.getSessionId()) continue;
-			ids.push(id);
-			this.#localClientMessages.delete(id);
+		for (const registration of this.#localClientMessages) {
+			if (registration.journalId !== journalId) continue;
+			ids.push(registration.id);
+			this.#localClientMessages.delete(registration);
 		}
 		this.resolveClientMessages(ids);
 	}

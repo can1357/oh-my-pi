@@ -451,6 +451,13 @@ export interface ClientMessageStatus {
 	queueTextsOmitted?: true;
 }
 
+/** A local command's hold on one correlated input; returned by `beginLocalClientMessage`, passed back to finish it. */
+export interface LocalClientMessageRegistration {
+	readonly id: string;
+	/** Journal (session manager) that admitted the input. */
+	readonly journalId: string;
+}
+
 /** Options for AgentSession.prompt(). */
 export interface PromptOptions {
 	/** Local intent correlation, never part of the model-facing message. */

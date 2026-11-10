@@ -2048,8 +2048,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;
 				// A builtin may switch sessions (`/new`, `/resume`): its ID is resolved in the session that admitted it.
-				const clientMessageId = command.clientMessageId;
-				if (clientMessageId !== undefined) session.beginLocalClientMessage(clientMessageId);
+				const registration =
+					command.clientMessageId === undefined
+						? undefined
+						: session.beginLocalClientMessage(command.clientMessageId);
 				const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 					session,
 					sessionManager: session.sessionManager,
@@ -2083,15 +2085,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
 				}).catch((builtinError: unknown) => {
-					if (clientMessageId !== undefined) session.finishLocalClientMessage(clientMessageId, false);
+					if (registration) session.finishLocalClientMessage(registration, false);
 					throw builtinError;
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
-				if (clientMessageId !== undefined) {
-					session.finishLocalClientMessage(
-						clientMessageId,
-						builtinResult !== false && !("prompt" in builtinResult),
-					);
+				if (registration) {
+					session.finishLocalClientMessage(registration, builtinResult !== false && !("prompt" in builtinResult));
 				}
 				if (!isCurrent()) return "cancelled";
 				if (builtinResult !== false) {
