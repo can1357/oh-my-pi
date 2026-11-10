@@ -121,6 +121,15 @@ describe("browser relay discovery endpoint", () => {
 	}
 
 	it("advertises the requested Host authority so a remote Puppeteer client dials the relay", async () => {
+		const port = await startReadyRelay();
+		const response = await rawGet(
+			port,
+			"GET /json/version HTTP/1.1\r\nHost: 100.100.92.97:12803\r\nConnection: close\r\n\r\n",
+		);
+		expect(parseVersion(response).webSocketDebuggerUrl).toBe("ws://100.100.92.97:12803/cdp");
+	});
+
+	it("looks up the accepted extension socket's exact loopback endpoints on macOS", async () => {
 		process.env.PI_BROWSER_RELAY_KEEP_FRONT = "1";
 		const lookups = vi.spyOn(natives, "macOSLoopbackPeerApp").mockResolvedValue(null);
 		const serve = vi.spyOn(Bun, "serve");
@@ -145,11 +154,6 @@ describe("browser relay discovery endpoint", () => {
 		} else {
 			expect(lookups).not.toHaveBeenCalled();
 		}
-		const response = await rawGet(
-			port,
-			"GET /json/version HTTP/1.1\r\nHost: 100.100.92.97:12803\r\nConnection: close\r\n\r\n",
-		);
-		expect(parseVersion(response).webSocketDebuggerUrl).toBe("ws://100.100.92.97:12803/cdp");
 	});
 
 	it("uses the loopback discovery URL when an HTTP/1.0 request has no Host header", async () => {
