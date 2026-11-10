@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
-import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import { addA2aAgentsFromUrl, A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import {
 	IncomingRequests,
 	type IncomingRequestLease,
@@ -42,6 +42,9 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SpawnSubagentOptions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import {
 	AgentRegistry,
 	type AgentRegistryApi,
@@ -49,6 +52,8 @@ import {
 	type RegistryEvent,
 	type RegistryListener,
 } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { SpawnPendingError, spawnSubagentViaExecutor } from "@oh-my-pi/pi-coding-agent/task/spawn-subagent";
 import { cfgA2aEnabled, cfgA2aPort } from "@oh-my-pi/pi-coding-agent/task/settings";
 import {
@@ -103,9 +108,10 @@ class FakeRegistry {
 		return () => this.#listeners.delete(listener);
 	}
 
-	setStatus(id: string, status: AgentRef["status"]): boolean {
+	setStatus(id: string, status: AgentRef["status"], expected?: AgentRef): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref) return false;
+		if (expected !== undefined && ref !== expected) return false;
 		const previousStatus = ref.status;
 		const leftRunning = previousStatus === "running";
 		ref.status = status;
@@ -141,6 +147,15 @@ class FakeRegistry {
 	insert(ref: AgentRef, notify = true): void {
 		this.#refs.set(ref.id, ref);
 		if (notify) this.#emit({ type: "registered", ref });
+	}
+
+	/** Attach a live session the way AgentRegistry.attachSession does, when the exact ref still owns the id. */
+	attachSession(id: string, session: AgentRef["session"], sessionFile?: string | null, expected?: AgentRef): boolean {
+		const ref = this.#refs.get(id);
+		if (!ref || (expected !== undefined && ref !== expected)) return false;
+		ref.session = session;
+		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
+		return true;
 	}
 
 	/** Drop a ref the way AgentRegistry.unregister does, including the removed event. */
@@ -2613,36 +2628,403 @@ describe("A2A outgoing reply correlation", () => {
 });
 
 describe("agent card skill filtering", () => {
-	it("lists only the main agent and running subagents; finished workers stay off the card", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-filter-"));
+	/**
+	 * The A2A-1 card contract: Main first, then running, then addressable
+	 * kept-alive idle, then revivable parked — each group newest activity
+	 * first, id as the tie-breaker. Advisors, aborted agents, completed
+	 * one-shot corpses and unrevivable parked refs stay off the card, and
+	 * `a2a.maxPeerSkills` cuts AFTER the ordering.
+	 */
+	it("card orders reachable kept-alive agents before applying maxPeerSkills", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-order-"));
 		try {
+			// Distinct lastActivity values pin the newest-first order inside
+			// each group; the two parked refs share one to pin the id tie-break.
+			const base = Date.now();
 			const registry = new FakeRegistry([
-				makeRef({ id: "Main", displayName: "Main", kind: "main", status: "running" }),
-				makeRef({ id: "LiveWorker", displayName: "Live Worker", kind: "sub", status: "running" }),
-				makeRef({ id: "DoneWorker", displayName: "Done Worker", kind: "sub", status: "idle" }),
-				makeRef({ id: "ParkedWorker", displayName: "Parked Worker", kind: "sub", status: "parked" }),
-				makeRef({ id: "AbortedWorker", displayName: "Aborted Worker", kind: "sub", status: "aborted" }),
+				makeRef({ id: "Main", displayName: "Main", kind: "main", status: "running", lastActivity: base }),
+				// running group: newest activity first.
+				makeRef({ id: "RunOld", displayName: "Run Old", kind: "sub", status: "running", lastActivity: base - 500 }),
+				makeRef({ id: "RunNew", displayName: "Run New", kind: "sub", status: "running", lastActivity: base }),
+				// kept-alive idle group: a live session makes the ref addressable
+				// (IRC wake). A finished turn's published output does NOT retire it.
+				makeRef({
+					id: "IdleOld",
+					kind: "sub",
+					status: "idle",
+					lastActivity: base - 400,
+					session: {} as never,
+					history: { outputPath: "/tmp/idle-old-report.md" },
+				}),
+				makeRef({ id: "IdleNew", kind: "sub", status: "idle", lastActivity: base, session: {} as never }),
+				// supported parked: a transcript the persisted factory can revive.
+				makeRef({
+					id: "ParkedNew",
+					kind: "sub",
+					status: "parked",
+					lastActivity: base - 300,
+					sessionFile: path.join(dir, "ParkedNew.jsonl"),
+				}),
+				makeRef({
+					id: "ParkedOld",
+					kind: "sub",
+					status: "parked",
+					lastActivity: base - 300,
+					sessionFile: path.join(dir, "ParkedOld.jsonl"),
+				}),
+				// unsupported parked: no transcript to revive from.
+				makeRef({ id: "ParkedDead", kind: "sub", status: "parked", lastActivity: base }),
+				// excluded kinds and terminal corpses.
+				makeRef({ id: "AdvisorX", kind: "advisor", status: "idle", lastActivity: base }),
+				makeRef({ id: "AbortedX", kind: "sub", status: "aborted", lastActivity: base }),
+				// completed one-shot corpse: idle with no live session and a
+				// published output — finished, not kept alive, not wakeable.
+				makeRef({
+					id: "OneShot",
+					kind: "sub",
+					status: "idle",
+					lastActivity: base,
+					lifecycle: { terminalAt: base },
+					history: { outputPath: "/tmp/one-shot.md" },
+				}),
 			]);
-			const handle = await startA2aServer({
-				settings: Settings.isolated(),
-				agentDir: dir,
-				port: 0,
-				name: "Main",
-				registry: registry.asApi(),
-				bus: new FakeBus(),
-			});
-			handles.push(handle);
-			const body = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as {
-				skills: Array<{ id: string }>;
+			// A lifecycle managing this registry proves actual parked revive
+			// capability: its persisted factory builds a reviver exactly for
+			// refs that carry a session file.
+			const lifecycle = new AgentLifecycleManager(registry.asApi());
+			lifecycle.setPersistedSubagentReviverFactory(
+				ref =>
+					ref.sessionFile ? Promise.resolve(async () => ({}) as AgentSessionHandle) : Promise.resolve(undefined),
+				() => 0,
+			);
+			const startCardServer = async (settings: Settings): Promise<A2aServerHandle> => {
+				const handle = await startA2aServer({
+					settings,
+					agentDir: dir,
+					port: 0,
+					name: "Main",
+					registry: registry.asApi(),
+					bus: new FakeBus(),
+					lifecycle,
+				});
+				handles.push(handle);
+				return handle;
 			};
-			const ids = body.skills.map(skill => skill.id);
-			expect(ids).toContain("Main");
-			expect(ids).toContain("LiveWorker");
-			expect(ids).not.toContain("DoneWorker");
-			expect(ids).not.toContain("ParkedWorker");
-			expect(ids).not.toContain("AbortedWorker");
+			const cardSkills = async (handle: A2aServerHandle): Promise<Array<{ id: string }>> => {
+				const body = (await (await fetch(`${handle.url}${AGENT_CARD_PATH}`)).json()) as {
+					skills: Array<{ id: string }>;
+				};
+				return body.skills;
+			};
+			// Default cap (8) keeps the full ordered roster: Main, running by
+			// newest activity, kept-alive idle, then supported parked by id.
+			const full = await startCardServer(Settings.isolated());
+			expect((await cardSkills(full)).map(skill => skill.id)).toEqual([
+				"Main",
+				"RunNew",
+				"RunOld",
+				"IdleNew",
+				"IdleOld",
+				"ParkedNew",
+				"ParkedOld",
+			]);
+			// The public card carries only skill fields: no transcript paths,
+			// no output artifacts, no prompts.
+			const text = JSON.stringify(await (await fetch(`${full.url}${AGENT_CARD_PATH}`)).json());
+			expect(text).not.toContain(dir);
+			expect(text).not.toContain("/tmp/one-shot.md");
+			expect(text).not.toContain("sessionFile");
+			expect(text).not.toContain("outputPath");
+			expect(text).not.toContain("systemPrompt");
+			// A cap below the roster size cuts AFTER the ordering, across
+			// status groups: the newest groups survive, the rest fall off.
+			const capped = await startCardServer(Settings.isolated({ "a2a.maxPeerSkills": 4 }));
+			expect((await cardSkills(capped)).map(skill => skill.id)).toEqual(["Main", "RunNew", "RunOld", "IdleNew"]);
+			// A peer registering from that capped card sees the same capped
+			// order through the registration cap as defense in depth.
+			const bridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge, url: capped.url, token: TOKEN, maxPeerSkills: 4 });
+			expect(bridge.list().map(agent => agent.skillId)).toEqual(["Main", "RunNew", "RunOld", "IdleNew"]);
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("a2a addressed delivery to reachable idle and parked agents", () => {
+	/**
+	 * One idle kept-alive child behind a REAL bus and IRC bridge: the ref's
+	 * session delegates `deliverIrcMessage` to an `IrcBridge` host that wakes
+	 * a turn, so the A2A → IRC → wake path is exercised end-to-end.
+	 */
+	function idleChildHarness() {
+		const woken: CustomMessage[][] = [];
+		const bridge = new IrcBridge({
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => false,
+			hasWakeRelay: () => true,
+			emitSessionEvent: async () => {},
+			wakeForIrc: (records: AgentMessage[]) => {
+				woken.push(records as CustomMessage[]);
+			},
+		} as never);
+		const session = {
+			deliverIrcMessage: async (msg: IrcMessage) => bridge.deliver(msg),
+		};
+		return { bridge, session, woken };
+	}
+
+	it("a2a addressed delivery wakes the idle kept-alive agent", async () => {
+		const { session, woken } = idleChildHarness();
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({
+				id: "IdleChild",
+				kind: "sub",
+				status: "idle",
+				session: session as never,
+				// A finished turn's published output must not retire the ref.
+				history: { outputPath: "/tmp/idle-child.md" },
+			}),
+		]);
+		const spawnCalls: SpawnSubagentOptions[] = [];
+		// A real bus: its #deliver resolves the ref, finds the live session,
+		// and calls deliverIrcMessage, which wakes through the IRC bridge.
+		const bus = new IrcBus(registry.asApi(), undefined, { settings: Settings.isolated({}) });
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			spawn: async options => {
+				spawnCalls.push(options);
+				throw new Error("delivery must not spawn a fresh agent");
+			},
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "idle-wake",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "wake-1", role: "ROLE_USER", parts: [{ text: "please check the build" }] },
+				metadata: { to: "IdleChild", from: "peer" },
+			},
+		});
+		expect(status).toBe(200);
+		// The SAME idle child received the request through the real bus, was
+		// woken exactly once, and no fresh spawn happened.
+		expect(woken).toHaveLength(1);
+		expect((woken[0]?.[0] as CustomMessage | undefined)?.details).toMatchObject({
+			external: true,
+			a2aMessageId: "wake-1",
+		});
+		expect(spawnCalls).toEqual([]);
+		const task = taskResult(json);
+		expect(task.id).toBe("IdleChild");
+		expect(task.metadata?.delivery).toMatchObject({ to: "IdleChild", outcome: "woken" });
+		// The task stays WORKING (a wake turn started), not COMPLETED from a
+		// prior turn's published output.
+		expect(task.status.state).toBe(TASK_STATE.WORKING);
+	});
+
+	it("a2a addressed delivery revives a supported parked agent through the lifecycle", async () => {
+		// A lifecycle managing this registry proves the parked ref's revive
+		// capability; the real bus routes the delivery through ensureLive,
+		// which invokes the installed factory — the same persisted-revive
+		// path the Agent Hub uses (see test/task/persisted-revive.test.ts).
+		const woken: CustomMessage[][] = [];
+		const bridge = new IrcBridge({
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => false,
+			hasWakeRelay: () => true,
+			emitSessionEvent: async () => {},
+			wakeForIrc: (records: AgentMessage[]) => {
+				woken.push(records as CustomMessage[]);
+			},
+		} as never);
+		const revivedSession = {
+			deliverIrcMessage: async (msg: IrcMessage) => bridge.deliver(msg),
+		};
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({
+				id: "ParkedChild",
+				kind: "sub",
+				status: "parked",
+				sessionFile: "/tmp/parked-child.jsonl",
+			}),
+		]);
+		const lifecycle = new AgentLifecycleManager(registry.asApi());
+		const reviveCalls: string[] = [];
+		lifecycle.setPersistedSubagentReviverFactory(
+			ref =>
+				ref.sessionFile
+					? Promise.resolve(async expected => {
+							reviveCalls.push(expected.id);
+							// The exact parked ref is claimed by the revive, mirroring
+							// the real persisted path (createAgentSession claims the
+							// ref as running; the lifecycle then transitions it idle).
+							if (registry.get(expected.id) !== expected) throw new Error("stale ref");
+							if (!registry.attachSession(expected.id, revivedSession as never, expected.sessionFile, expected))
+								throw new Error("attach failed");
+							if (!registry.setStatus(expected.id, "running", expected)) throw new Error("claim failed");
+							return revivedSession as never;
+						})
+					: Promise.resolve(undefined),
+			() => 0,
+		);
+		const spawnCalls: SpawnSubagentOptions[] = [];
+		const bus = new IrcBus(registry.asApi(), lifecycle, { settings: Settings.isolated({}) });
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			lifecycle,
+			spawn: async options => {
+				spawnCalls.push(options);
+				throw new Error("delivery must not spawn a fresh agent");
+			},
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "parked-revive",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "revive-1", role: "ROLE_USER", parts: [{ text: "resume the review" }] },
+				metadata: { to: "ParkedChild", from: "peer" },
+			},
+		});
+		expect(status).toBe(200);
+		// The ORIGINAL identity was revived (same id, same ref) and received
+		// the request; no fresh spawn, no Main substitution.
+		expect(reviveCalls).toEqual(["ParkedChild"]);
+		expect(woken).toHaveLength(1);
+		expect((woken[0]?.[0] as CustomMessage | undefined)?.details).toMatchObject({
+			external: true,
+			a2aMessageId: "revive-1",
+		});
+		expect(spawnCalls).toEqual([]);
+		const task = taskResult(json);
+		expect(task.id).toBe("ParkedChild");
+		expect(task.metadata?.delivery).toMatchObject({ to: "ParkedChild", outcome: "revived" });
+		// A revived delivery reports WORKING (the revived turn started), not
+		// the prior run's terminal state.
+		expect(task.status.state).toBe(TASK_STATE.WORKING);
+	});
+
+	it("a2a addressed delivery refuses an unrevivable parked agent like an unknown recipient", async () => {
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({ id: "DeadParked", kind: "sub", status: "parked", sessionFile: null }),
+		]);
+		const lifecycle = new AgentLifecycleManager(registry.asApi());
+		const bus = new IrcBus(registry.asApi(), lifecycle, { settings: Settings.isolated({}) });
+		const busSend = vi.fn();
+		bus.send = busSend as never;
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			lifecycle,
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "parked-dead",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "dead-1", role: "ROLE_USER", parts: [{ text: "resume" }] },
+				metadata: { to: "DeadParked", from: "peer" },
+			},
+		});
+		// The same externally observable unknown-agent contract as a missing id.
+		expect(status).toBe(404);
+		expect(errorResult(json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+		// No wake, no revive, no bus send, and no phantom incoming record.
+		expect(busSend).not.toHaveBeenCalled();
+		const incoming = IncomingRequests.global();
+		expect(await incoming.list("DeadParked")).toEqual([]);
+	});
+
+	it("a2a addressed delivery refuses a ref removed after discovery without a replacement delivery", async () => {
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({ id: "GoneChild", kind: "sub", status: "idle", session: {} as never }),
+		]);
+		const bus = new IrcBus(registry.asApi(), undefined, { settings: Settings.isolated({}) });
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		// The recipient disappears between card discovery and delivery.
+		registry.unregister("GoneChild");
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "gone-child",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "gone-1", role: "ROLE_USER", parts: [{ text: "resume" }] },
+				metadata: { to: "GoneChild", from: "peer" },
+			},
+		});
+		expect(status).toBe(404);
+		expect(errorResult(json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+		expect(await IncomingRequests.global().list("GoneChild")).toEqual([]);
+	});
+
+	it("refuses unauthenticated and wrong-token requests to an idle/parked address without waking or reviving", async () => {
+		const { session } = idleChildHarness();
+		const registry = new FakeRegistry([
+			makeRef({ id: "Main", kind: "main", status: "idle" }),
+			makeRef({ id: "IdleChild", kind: "sub", status: "idle", session: session as never }),
+			makeRef({ id: "ParkedChild", kind: "sub", status: "parked", sessionFile: "/tmp/parked-child.jsonl" }),
+		]);
+		const lifecycle = new AgentLifecycleManager(registry.asApi());
+		const ensureLive = vi.fn();
+		lifecycle.ensureLive = ensureLive as never;
+		const bus = new IrcBus(registry.asApi(), lifecycle, { settings: Settings.isolated({}) });
+		const busSend = vi.fn();
+		bus.send = busSend as never;
+		const handle = createA2aServer({
+			token: TOKEN,
+			port: 0,
+			registry: registry.asApi(),
+			bus,
+			lifecycle,
+			card: () => buildAgentCard({ url: `http://${A2A_HOST}:${handle.port}/`, version: "18.16.0", skills: [] }),
+		});
+		handles.push(handle);
+		const request = (to: string) => ({
+			jsonrpc: "2.0" as const,
+			id: "auth-probe",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "auth-1", role: "ROLE_USER" as const, parts: [{ text: "hello" }] },
+				metadata: { to },
+			},
+		});
+		// Authentication happens before any wake, revive, or bus send.
+		for (const to of ["IdleChild", "ParkedChild"]) {
+			const missing = await rpc(handle, request(to), null);
+			expect(missing.status).toBe(401);
+			const wrong = await rpc(handle, request(to), "wrong-token");
+			expect(wrong.status).toBe(401);
+		}
+		expect(ensureLive).not.toHaveBeenCalled();
+		expect(busSend).not.toHaveBeenCalled();
+		expect(await IncomingRequests.global().list("IdleChild")).toEqual([]);
 	});
 });

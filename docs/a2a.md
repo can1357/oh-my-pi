@@ -74,6 +74,28 @@ roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced
 (2 s) rescan of the live bridge registry, registering new peers and dropping
 peers whose bridge is gone.
 
+Addressed delivery reaches idle and parked subagents too. An idle kept-alive
+child is woken with a real turn through the IRC bus; a parked child is
+revived through the existing lifecycle path (its persisted transcript) and
+then woken the same way. A recipient that cannot be reached — removed between
+discovery and delivery, an aborted agent, an idle corpse with no live session,
+or a parked ref nothing can revive — is refused like an unknown agent
+(`TASK_NOT_FOUND`, HTTP 404), never delivered to a fresh or unrelated
+replacement, and a wake/revive is never started before the bearer token is
+verified. Not every parked ref can revive: the card only advertises parked
+agents the lifecycle can actually rebuild (a persisted session contract and
+an existing workspace).
+
+```text
+# In terminal A, after B's roster is registered:
+task(agent: "a2a:A2aIdleProbe", task: "Reply with the final count", wait: true)
+
+# The skill id here is the child's REGISTRY id (B's card advertises it),
+# which may differ from the human label shown in B's Agent Hub. The runtime
+# name a2a:A2aIdleProbe and B's terminal identity (a2a:<B's name>) are
+# different things: the first addresses B's child, the second B's Main.
+```
+
 Manual commands: `/a2a auto` (re-scan the bridge registry), `/a2a add <url>
 --token <t>`, `/a2a list`, `/a2a remove <name>`.
 
@@ -199,7 +221,7 @@ through the bridge, including when Main is addressed by its identity alias.
 | --- | --- |
 | Loopback-only server | The bridge binds `127.0.0.1` and refuses other hosts; bearer token required on every JSON-RPC call. |
 | Roster flood guard | `a2a.maxPeerSkills` (default 8) caps skills registered from one peer card — a peer advertising swarms of finished one-shot workers cannot flood the roster. |
-| Card filtering | The card lists only the main and currently running agents; finished one-shot workers never appear. |
+| Card filtering | The card advertises agents this terminal can actually deliver to: Main first, then running subagents, kept-alive idle subagents, and parked subagents supported by the lifecycle revive path — each group ordered by newest last activity, then id. Advisors, aborted agents, completed one-shot corpses (idle with no live session) and unrevivable parked refs never appear. `a2a.maxPeerSkills` (default 8) caps the list AFTER this ordering, so the cap drops the least recently active reachable agents, never whole status groups; peer-side registration caps stay as defense in depth. |
 | Ingress guard | Inbound A2A deliveries are `external` IRC messages, exempt from the rate/dedup/hop guard applied to in-session traffic. |
 | Output cap | Published task output is inlined as an artifact capped at 100 k Unicode code points, never splitting an astral code point (a surrogate pair) at the cut; files themselves never travel. The same code-point cap bounds the wake relay's published answer to an external peer; the uncapped plain turn text is unchanged. |
 | Reply deadline | `a2a.replyTimeoutMs` defaults to `1_800_000` ms (30 minutes); `0` means no deadline for an addressed reply. A timeout ends the local wait and expires the recipient's incoming request (open or leased) at its absolute `at + timeout` deadline; it is not a transport timeout and never cancels the remote work. Removing a recipient from the registry discards its whole request queue regardless of the timeout. |

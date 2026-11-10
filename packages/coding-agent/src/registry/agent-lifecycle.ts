@@ -168,13 +168,21 @@ export interface AgentLifecycleApi {
 	/** Reclaim a provably-dead parked corpse so a fresh spawn can reuse its id. */
 	reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean>;
 	/** True when this lifecycle owns `registry` (identity comparison). */
-	manages(registry: AgentRegistryApi): boolean;
+	manages(registry: Pick<AgentRegistryApi, "get">): boolean;
 	/** True while a park is disposing this agent's session. */
 	isParking(id: string, expected?: AgentRefExpectation): boolean;
 	/** Dispose the live session of an adopted agent and mark it `parked`. */
 	park(id: string): Promise<void>;
 	/** Return the live session, reviving it if parked or killed. */
 	ensureLive(id: string): Promise<AgentSessionHandle>;
+	/**
+	 * Whether this lifecycle could revive `ref` right now (A2A-1): a warm
+	 * adoption reviver exists for its exact ref, or it is a detached `parked`
+	 * ref whose transcript the persisted factory can cold-revive. The answer
+	 * is advisory (an in-flight park or a delayed factory read can change
+	 * it); `ensureLive` remains the authority at delivery time.
+	 */
+	canRevive(ref: AgentRef): boolean;
 	/** Dispose if live and drop timers; `tombstone` keeps a terminal `aborted` row. */
 	release(id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions): Promise<boolean>;
 	/** Tear down every adopted agent. */
@@ -361,12 +369,27 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 	}
 
 	/**
+	 * Whether this lifecycle could revive `ref` right now (A2A-1): a warm
+	 * adoption reviver bound to its exact ref, or a detached `parked` ref with
+	 * a transcript the persisted factory can cold-revive. Advisory only —
+	 * `ensureLive` stays the authority at delivery time, so an in-flight park
+	 * or a factory read that fails late still surfaces as the bus's own
+	 * refusal, never as delivery to a different agent.
+	 */
+	canRevive(ref: AgentRef): boolean {
+		if (ref.status !== "parked") return false;
+		const adopted = this.#adopted.get(ref.id);
+		if (adopted?.ref === ref && adopted.revive !== undefined) return true;
+		return ref.sessionFile !== null && this.#persistedReviverFactory !== undefined;
+	}
+
+	/**
 	 * True when this manager owns `registry` — i.e. its adopt/park/revive state
 	 * describes that registry's refs. Lets a caller holding a specific registry
 	 * (e.g. a custom-registry {@link IrcBus} that fell back to the global
 	 * manager) skip lifecycle gating that would consult unrelated park state.
 	 */
-	manages(registry: AgentRegistryApi): boolean {
+	manages(registry: Pick<AgentRegistryApi, "get">): boolean {
 		return this.#registry === registry;
 	}
 

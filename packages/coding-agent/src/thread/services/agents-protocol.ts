@@ -64,6 +64,7 @@ export type AgentLifecycleProtocol = {
 	reclaimDeadCorpse: RpcMethod<[id: string, expected: AgentRef], boolean>;
 	manages: RpcMethod<[registry: AgentRegistryApi], boolean>;
 	isParking: RpcMethod<[id: string, expected?: AgentRefExpectation], boolean>;
+	canRevive: RpcMethod<[ref: AgentRef], boolean>;
 	park: RpcMethod<[id: string], void>;
 	ensureLive: RpcMethod<[id: string], AgentSessionHandle>;
 	release: RpcMethod<[id: string, expected?: AgentRefExpectation, options?: { tombstone?: boolean }], boolean>;

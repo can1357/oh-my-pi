@@ -23,16 +23,13 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { type IrcBusApi, IrcBus } from "../irc/bus";
+import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
-import { discoverAgents } from "../task/discovery";
-import { cfgA2aPort, cfgA2aReplyTimeoutMs, cfgA2aToken } from "../task/settings";
-import type { AgentDefinition } from "../task/types";
-import { buildAgentCard, type AgentCard } from "./card";
-import { IncomingRequests, type IncomingRequestsApi } from "./incoming-requests";
-import { OutgoingRequests } from "./outgoing-requests";
 import {
 	A2A_SENDER_ID,
+	a2aReachableGroup,
 	type A2aDispatchDeps,
+	type A2aReachableGroup,
 	type A2aTask,
 	type JsonRpcFailure,
 	type JsonRpcId,
@@ -49,6 +46,12 @@ import {
 	sendA2aMessage,
 	snapshotA2aTask,
 } from "./rpc";
+import type { AgentDefinition } from "../task/types";
+import { discoverAgents } from "../task/discovery";
+import { cfgA2aMaxPeerSkills, cfgA2aPort, cfgA2aReplyTimeoutMs, cfgA2aToken } from "../task/settings";
+import { buildAgentCard, type AgentCard } from "./card";
+import { IncomingRequests, type IncomingRequestsApi } from "./incoming-requests";
+import { OutgoingRequests } from "./outgoing-requests";
 
 /** The bridge never binds anything else: an A2A endpoint on a LAN is an open door. */
 export const A2A_HOST = "127.0.0.1";
@@ -83,6 +86,13 @@ export interface A2aServerOptions {
 	card: () => AgentCard | Promise<AgentCard>;
 	/** SSE fallback poll for progress that arrives without a registry event. */
 	streamPollMs?: number;
+	/**
+	 * The agent lifecycle owning `registry` (A2A-1). Its revive capability
+	 * gates both which parked refs the card advertises and which addressed
+	 * deliveries resolve; omitted treats every parked ref as addressable and
+	 * leaves the bus's own ensureLive gate to refuse impossible revives.
+	 */
+	lifecycle?: Pick<AgentLifecycleApi, "canRevive" | "manages">;
 }
 
 export interface A2aServerHandle {
@@ -273,6 +283,9 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 	/** Every open stream's stop closure: `stop()` closes them, `server.stop` alone does not. */
 	const activeStreams = new Set<() => void>();
 	const pendingSpawns = new PendingSpawnLedger();
+	const canRevive = options.lifecycle?.manages(options.registry)
+		? (ref: AgentRef) => options.lifecycle!.canRevive(ref)
+		: undefined;
 	const dispatchDeps: A2aDispatchDeps = {
 		registry: options.registry,
 		...(options.name !== undefined ? { identityName: options.name } : {}),
@@ -286,6 +299,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		pendingSpawns,
 		incoming: options.incoming ?? IncomingRequests.global(),
 		outgoing: OutgoingRequests.global(),
+		...(canRevive !== undefined ? { canRevive } : {}),
 	};
 	const unsubscribe = options.registry.onChange(event => {
 		if (event.type === "removed") {
@@ -535,19 +549,47 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 	// A3: a random per-process id mirrored in the served card lets a reader
 	// confirm the port it found still belongs to THIS bridge (pid reuse).
 	const instanceId = randomBytes(16).toString("hex");
+	// The lifecycle owning this registry proves actual parked revive
+	// capability (A2A-1); without one, no parked ref is advertised and the
+	// bus's own ensureLive gate stays the delivery authority.
+	const lifecycle = options.lifecycle ?? AgentLifecycleManager.global();
+	const canReviveParked = lifecycle.manages(registry) ? (ref: AgentRef) => lifecycle.canRevive(ref) : undefined;
+	const maxPeerSkills = Math.max(1, cfgA2aMaxPeerSkills.get(options.settings));
 	const card = async (): Promise<AgentCard> => {
 		if (options.card) return { ...(await options.card()), instanceId };
 		const descriptions = await loadDescriptions();
-		// Only main and live subagents are advertised; finished subagents remain
-		// reachable directly by id without flooding peer rosters.
-		const skills = registry
-			.list()
-			.filter(ref => ref.kind === "main" || ref.status === "running")
-			.map(ref => ({
-				id: ref.id === MAIN_AGENT_ID ? identity : ref.id,
-				displayName: ref.displayName,
-				description: descriptions.get(ref.history?.agent ?? ref.id),
-			}));
+		// A2A-1: advertise every agent this terminal can actually deliver to —
+		// Main first, then running, kept-alive idle, and revivable parked
+		// subagents — each group sorted by newest activity, then id. The cap
+		// applies AFTER the ordering, so it drops the least recently active
+		// reachable agents, never whole status groups. Finished one-shot
+		// corpses, aborted agents, advisors and unrevivable parked refs stay
+		// off the card; they remain addressable only while a delivery path
+		// can still reach them (idle wake / lifecycle revive).
+		const groups = new Map<A2aReachableGroup, AgentRef[]>();
+		for (const ref of registry.list()) {
+			const group = a2aReachableGroup(ref);
+			if (group === undefined) continue;
+			// A kept-alive idle agent is addressable only while its live session
+			// is attached (an IRC wake needs it); a detached idle corpse is a
+			// finished one-shot the card must not advertise.
+			if (group === "idle" && ref.kind === "sub" && ref.session === null) continue;
+			if (group === "parked" && !(canReviveParked?.(ref) ?? false)) continue;
+			const bucket = groups.get(group) ?? [];
+			bucket.push(ref);
+			groups.set(group, bucket);
+		}
+		const ordered: AgentRef[] = [];
+		for (const group of ["main", "running", "idle", "parked"] as const) {
+			const bucket = groups.get(group) ?? [];
+			bucket.sort((a, b) => b.lastActivity - a.lastActivity || a.id.localeCompare(b.id));
+			ordered.push(...bucket);
+		}
+		const skills = ordered.slice(0, maxPeerSkills).map(ref => ({
+			id: ref.id === MAIN_AGENT_ID ? identity : ref.id,
+			displayName: ref.displayName,
+			description: descriptions.get(ref.history?.agent ?? ref.id),
+		}));
 		return buildAgentCard({
 			url: `http://${A2A_HOST}:${handle.port}/`,
 			version: options.version ?? VERSION,
@@ -576,6 +618,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 			token,
 			card,
 			incoming: ledger,
+			lifecycle,
 		});
 		const agentDir = options.agentDir ?? options.settings.getAgentDir();
 		await registerLocalBridge({
