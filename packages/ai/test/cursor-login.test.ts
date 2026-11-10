@@ -50,7 +50,7 @@ describe("Cursor account email", () => {
 			vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
 			stubCursor(cursorAccessToken("login"));
 
-			await auth.oauth.login("cursor", { onAuth() {}, onPrompt: async () => "" });
+			await auth.oauth.login("cursor", { onAuth() {}, onPrompt: async () => "yes" });
 
 			expect(auth.oauth.accounts("cursor").map(account => account.email)).toEqual([EMAIL]);
 		} finally {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor has a login warning: it does not officially support signing in from third-party tools
+
 ## [18.18.7] - 2026-11-10
 
 ### Added

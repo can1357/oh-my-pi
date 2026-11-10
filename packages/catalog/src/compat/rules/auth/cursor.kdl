@@ -1,5 +1,6 @@
 auth "cursor" {
     name "Cursor (Claude, GPT, etc.)"
+    login-warning "Cursor does not officially support signing in from third-party tools like omp."
     login "custom" hook="cursor"
     refresh hook="cursor"
 }

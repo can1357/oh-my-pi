@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Cursor is marked "(at your own risk)" in `/login` and `omp login`: a new login first says that Cursor does not officially support third-party tools and continues only after you type `yes`; saved logins are not asked again
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
