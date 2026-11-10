@@ -5,7 +5,7 @@
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
-- Factory Droid Gemini 4 Argon now shows Factory's 50%-off credit rate (0.8× instead of 1.6×) in the model browser until 2026-12-01 (midnight US Pacific), then 1.6× again
+- Factory Droid Gemini 4 Argon now shows Factory's 50%-off credit rate (0.8× instead of 1.6×) in the model browser until 2026-12-01 (midnight US Pacific), then 1.6× again ([#18767](https://github.com/can1357/oh-my-pi/pull/18767) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
 - Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
