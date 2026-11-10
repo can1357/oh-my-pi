@@ -161,6 +161,7 @@ Core methods:
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `onSuspensionChange`
+- `registerUrlScheme`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -389,6 +390,102 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+### Internal URL schemes (`registerUrlScheme`)
+
+`pi.registerUrlScheme(handler)` routes `<scheme>://…` URLs to your handler, the same
+`ProtocolHandler` interface the built-in schemes (`local://`, `agent://`, …) implement. It
+returns a release function.
+
+```ts
+import type { ExtensionAPI, ProtocolHandler } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	const notes = new Map<string, string>();
+	const handler: ProtocolHandler = {
+		scheme: "notes",
+		spec: {
+			backing: "remote",
+			selectors: "none",
+			immutable: false,
+			write: { via: "handler", payload: "text", scope: "workspace", tier: () => "write" },
+		},
+		async resolve(url, context) {
+			// context?.cwd / sessionId / session identify the calling session.
+			return { url: url.href, content: notes.get(url.host) ?? "", contentType: "text/plain" };
+		},
+		async write(url, content) {
+			notes.set(url.host, content);
+		},
+		async complete() {
+			return [...notes.keys()].map(value => ({ value }));
+		},
+	};
+	pi.registerUrlScheme(handler);
+}
+```
+
+- **Routing.** `read notes://x` calls `resolve`; `write notes://x` calls `write` when
+  `spec.write.via` is `"handler"` (the handler must have `write()` exactly then); composer tab
+  completion after `notes://` calls `complete(query)`. Optional `locate`, `enumerate`,
+  `readDirectory`, `promptDoc` and `promptReference` hooks work as for built-in schemes.
+- **Context.** Each call receives the caller in `context`. `read` passes the tool session's
+  `ResolveContext` (`cwd`, `sessionId`, `sessionFile`, `settings`, `agentRegistry`, the tool
+  `session`, `signal`); `write` passes a `WriteContext` (`cwd`, the tool `session`, `signal`,
+  `toolCall`); composer completion passes the focused session's `cwd`, `sessionId` and
+  `sessionFile` (no tool `session`). Other callers may pass less, so treat every field as optional.
+- **Write approval.** The write tool gates an extension scheme like any built-in non-file
+  scheme: approval asks `spec.write.tier(url, content, session)`, a scheme without `spec.write`
+  is denied at the gate as read-only, the plan-mode guard applies to handler writes unless
+  `spec.write.scope` is `"coordination"`, `"reply"` or `"device"`, and `payload: "text"` strips
+  copied hashline prefixes. Choose `scope` and `tier` as honestly as a built-in scheme would.
+- **Ownership.** The URL router is one per process, shared by every session in it (an ACP or SDK
+  host may run many). A scheme belongs to one extension source for the whole process: its
+  resolved entry path, or for an inline SDK factory the factory function itself (inline source
+  ids such as `<inline-0>` restart in every session, so two unrelated factories never share a
+  scheme). The first source to register a scheme holds it until its last registration goes, so
+  another source's `registerUrlScheme` for it throws in every session, whichever session that
+  source loads in. `registerUrlScheme` also throws for invalid syntax (`^[a-z][a-z0-9+.-]+$`
+  after lowercasing: at least two characters, so no scheme captures a Windows drive path such as
+  `C:/notes.txt`), an OMP-owned scheme, a standard one (`http`, `https`, `file`, …), or one
+  registered outside extensions (an RPC host URI scheme).
+- **Per-session routing.** Every load of the holding source may register the scheme: subagent
+  sessions load the same extensions, so the root and each subagent call `registerUrlScheme` with
+  the same scheme, and each session keeps its own handler. A call whose context names the
+  calling session (`sessionId`, or the tool `session`) goes to that session's own registration.
+  omp's own callers name it for every URL a user or model supplies: `read`, `write`, `edit`,
+  composer completion, the display targets `read` and `grep` locate, links in assistant messages
+  (the focused session), and the internal URLs MCP tool arguments are located to. A session with no active registration of
+  the scheme gets no service: `resolve`, `write`, `enumerate` and `readDirectory` throw
+  `<scheme>:// is not available in this session`, and `complete`, `locate` and `locateSync`
+  find nothing. A call that names no session goes to the earliest active registration. A query
+  hook (`complete`, `enumerate`, `readDirectory`) reaches a session's own handler whenever any
+  active registration defines it, so registrations need not share one hook set; the hooks the spec
+  governs (`write`, `locate`, `locateSync`) follow the earliest active registration's spec.
+- **Process-global parts.** The scheme's `spec` (including `spec.write.tier`), its
+  `promptDoc` and its `promptReference` (the `xd://read/urls` entry) carry no caller, so they come
+  from the earliest active registration (for `promptDoc` and `promptReference`, the earliest that
+  defines one, looked up on each call) and apply to
+  every session in the process: the scheme is advertised in the system prompt of every session
+  while any registration is active, including sessions that have none of their own and so get no
+  service.
+- **Startup.** An extension that registers a URL scheme always binds before the session starts,
+  never after the first prompt, so its `promptDoc` and composer completion are there from the
+  start.
+- **RPC hosts.** `set_host_uri_schemes` fails for a scheme an extension holds (suspended
+  registrations included), and an extension cannot register a scheme an RPC host holds. Neither
+  replaces the other's handler.
+- **Suspension.** While a live `disabledExtensions` edit suspends the load, its registrations stop
+  serving: calls from its session find no service, other sessions' registrations serve on, and the
+  scheme leaves the router when no active registration is left. On resume the registration serves
+  its session again and the scheme returns to the router. Another source still cannot take the
+  scheme while it is suspended.
+- **Teardown.** A registration is released when its load is torn down — session shutdown, a
+  factory that throws, or a startup-deferred bind finishing after its session was disposed — or
+  when you call the returned function. Releasing twice is a no-op, and a stale release never
+  removes a later owner's handler. A `createAgentSession` that fails before its session exists only
+  suspends the loads a caller passed in `preloadedExtensions` (see [Suspension and teardown](#suspension-and-teardown)): their
+  scheme leaves the router until a session adopts them.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:
@@ -547,8 +644,8 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_before_shutdown` / `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
-shortcuts, composer shapes, or file fallbacks is loaded after the composer
-accepts input, once a previous launch has recorded that about its current
+shortcuts, composer shapes, file fallbacks, or URL schemes is loaded after the
+composer accepts input, once a previous launch has recorded that about its current
 source. Its `session_start` still runs (it is delivered when the extension
 binds), and the first submitted message and every model turn wait until it is
 loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply from
