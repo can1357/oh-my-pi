@@ -24,6 +24,7 @@ const CANCELLING_EVENTS: Partial<Record<AgentSessionEvent["type"], true>> = {
 };
 
 export class RpcNextMessagePredictor {
+	readonly #session: AgentSession;
 	readonly #controller: ComposerPredictionController;
 	/** The offered prediction not yet retired; it may have gone stale since. */
 	#offered: string | undefined;
@@ -33,6 +34,7 @@ export class RpcNextMessagePredictor {
 		output: (frame: RpcNextMessagePredictionFrame) => void,
 		options: Omit<ComposerPredictionOptions, "onUpdate"> = {},
 	) {
+		this.#session = session;
 		this.#controller = new ComposerPredictionController(
 			{
 				settings: session.settings,
@@ -67,8 +69,15 @@ export class RpcNextMessagePredictor {
 		});
 	}
 
-	/** Start a prediction for the conversation as it stands, superseding any earlier one; null when none started. */
+	/**
+	 * Start a prediction for the conversation as it stands, superseding any earlier one; null when none
+	 * started. None starts while a host `bash` command runs: its result lands without a session event.
+	 */
 	request(): string | null {
+		if (this.#session.isBashRunning) {
+			this.#controller.cancel();
+			return null;
+		}
 		return this.#controller.request() ?? null;
 	}
 
@@ -104,7 +113,14 @@ export class RpcNextMessagePredictor {
 			this.#controller.cancel();
 			return;
 		}
-		// A pending request settles `stale` on its own; an offered one needs retiring.
+		this.retireStale();
+	}
+
+	/**
+	 * Retire an offered prediction the conversation moved past, for appends that emit no session event
+	 * (a recorded `bash` result). A pending request settles `stale` on its own.
+	 */
+	retireStale(): void {
 		if (this.#offered !== undefined && this.#controller.offeredId !== this.#offered) this.#controller.cancel();
 	}
 

@@ -338,4 +338,11 @@ describe("RPC next-message prediction and host input", () => {
 		},
 		30_000,
 	);
+
+	it("starts no prediction while a contextual bash command is still running", async () => {
+		const bash = client.bash("sleep 1; printf done");
+		expect(await client.predictNextMessage()).toBeNull();
+		await bash;
+		expect(frames).toEqual([]);
+	}, 30_000);
 });

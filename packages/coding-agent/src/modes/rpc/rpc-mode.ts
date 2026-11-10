@@ -2668,10 +2668,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
 					return error(id, "bash", "excludeFromContext must be a boolean");
 				}
-				const result = await session.executeBash(command.command, undefined, {
-					excludeFromContext: command.excludeFromContext,
-				});
-				return success(id, "bash", result);
+				try {
+					const result = await session.executeBash(command.command, undefined, {
+						excludeFromContext: command.excludeFromContext,
+					});
+					return success(id, "bash", result);
+				} finally {
+					// The result is appended without a session event; an offer that settled meanwhile (an
+					// extension `user_bash` hook runs before the shell counts as running) is now stale.
+					nextMessagePredictor.retireStale();
+				}
 			}
 
 			case "abort_bash": {
