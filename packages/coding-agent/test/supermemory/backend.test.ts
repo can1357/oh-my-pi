@@ -358,6 +358,38 @@ describe("supermemoryBackend", () => {
 		expect(create).toHaveBeenCalledTimes(2);
 	});
 
+	it("a continuation after a cadence change updates the original window, not a new one", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		for (const turn of ["one", "two", "three"]) {
+			session.addTurn(turn);
+			await session.endTurn();
+		}
+		await session.getSupermemorySessionState()?.dispose();
+		session.settings = Settings.isolated({ ...CONFIGURED, "supermemory.retainEveryNTurns": 1 });
+		await start(session);
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-cont",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "continued" }],
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		} as never);
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[0]);
+		expect(docs).toHaveLength(2);
+		expect(docs[1]?.customId).toBe(docs[0]?.customId);
+		expect(docs[1]?.content).toContain("continued");
+	});
+
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),
