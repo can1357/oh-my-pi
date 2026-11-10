@@ -311,11 +311,6 @@ function isInternalUrlPath(filePath: string): boolean {
 	return InternalUrlRouter.instance().canHandle(expandPath(filePath));
 }
 
-/** Whether `part` is an internal URL a search `;` list may name beside a local path. */
-function isMixedSearchListUrl(part: string): boolean {
-	return isInternalUrlPath(part) || InternalUrlRouter.instance().canResolve(part);
-}
-
 /**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths.
@@ -731,7 +726,7 @@ export async function splitDelimitedPathEntry(
 		// unless every non-URL part is an existing literal path, so a URL whose
 		// own path contains `;` (`local://report;`) stays one resource.
 		const mixed = await splitMixedUrlPathList(normalizedEntry, cwd, part =>
-			isMixedSearchListUrl(part) || (options.exclusionParts === true && isExclusionPart(part)),
+			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
 		);
 		if (mixed && mixed.length > 1) return mixed;
 	}

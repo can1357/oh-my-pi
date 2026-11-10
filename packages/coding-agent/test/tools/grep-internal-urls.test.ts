@@ -314,7 +314,7 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).not.toContain("local://PLAN.md;notes.txt");
 	});
 
-	it("keeps a single internal URL whose name ends in a semicolon whole", async () => {
+	it("keeps a single internal URL with a semicolon in its path whole", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });
 		await Bun.write(path.join(localRoot, "report;"), "semicolon needle\n");
@@ -326,6 +326,21 @@ describe("GrepTool internal URL resolution", () => {
 		);
 		expect(text).toContain("semicolon needle");
 		expect(text).not.toContain("plain needle");
+
+		registerVirtualDocs(
+			new Map([
+				["report;version:abc", "opaque needle\n"],
+				["report", "plain needle\n"],
+			]),
+		);
+		const opaqueTailText = getResultText(
+			await new GrepTool(createSession()).execute("semicolon-opaque-tail", {
+				pattern: "needle",
+				path: "virtual://report;version:abc",
+			}),
+		);
+		expect(opaqueTailText).toContain("opaque needle");
+		expect(opaqueTailText).not.toContain("plain needle");
 	});
 
 	it("searches virtual internal URL content without a backing file", async () => {
