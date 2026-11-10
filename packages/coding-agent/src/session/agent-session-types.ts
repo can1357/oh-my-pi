@@ -485,12 +485,12 @@ export interface PromptOptions {
 	 */
 	onPromptAdmitted?: () => void;
 	/**
-	 * Called synchronously when a prompt that was admitted ({@link onPromptAdmitted}) to start its own turn ends
-	 * without that turn going live: handed back, dropped, or failed in setup. It runs inside the prompt's own
-	 * in-flight bracket, before the session lets any other turn run, so a caller that took per-turn state when
-	 * the prompt was admitted gives it back before another owner can see it. Not called once the turn is live.
+	 * Called synchronously as the session's turn gate admits this prompt's own turn, right before the agent claims
+	 * it: never for a prompt that queues into a running turn, is handed back, dropped, or fails in setup. A caller
+	 * that takes per-turn state (a monitor, a tool's turn state) takes it here, so it never sits under a turn the
+	 * prompt does not own.
 	 */
-	onPromptAbandoned?: () => void;
+	onTurnAdmitted?: () => void;
 	/**
 	 * The pooled yield contract this prompt's own turn runs under (`[]` is the ordinary contract), for a prompt that
 	 * starts a turn rather than queueing into a running one. Installed when the prompt is admitted, so the session is

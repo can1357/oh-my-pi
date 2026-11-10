@@ -1591,6 +1591,81 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(result.output).toContain("FOLLOW-UP-YIELD");
 			expect(result.output).not.toContain("HOLDER-YIELD");
 		});
+
+		it("does not install a restored follow-up's pooled contract while a wake's stop pass holds the session", async () => {
+			const seen: number[] = [];
+			const run = await setup({
+				driven: true,
+				responses: [recordingItems(seen, yieldCall("RESTORED-YIELD"))],
+				onStop: () => undefined,
+			});
+			// The previous process ended mid-turn: its prompt has no answer yet.
+			run.session.sessionManager.appendMessage({ role: "user", content: "cut off", timestamp: Date.now() });
+			let itemsAtCancel: number | undefined;
+			const holdIrcWakes = run.session.holdIrcWakes.bind(run.session);
+			vi.spyOn(run.session, "holdIrcWakes").mockImplementation(() => {
+				// A wake's observation takes its hold after the follow-up passed its ownership waits, while the
+				// handlers judge the wake's candidate.
+				const hold = run.session.holdForStopPass();
+				hold.consult();
+				hold.signal.addEventListener(
+					"abort",
+					() => {
+						itemsAtCancel = run.session.getWorkPoolYieldItems().length;
+						queueMicrotask(() => hold.release());
+					},
+					{ once: true },
+				);
+				return holdIrcWakes();
+			});
+
+			const result = await runSubagentFollowUpTurn({
+				...followUpOptions(),
+				restore: true,
+				workPoolYieldItems: [item],
+			});
+
+			// The restore cancelled the pass before its contract went in, and its own turn ran under it.
+			expect(itemsAtCancel).toBe(0);
+			expect(seen).toEqual([1]);
+			expect(result.error).toBeUndefined();
+			expect(result.output).toContain("RESTORED-YIELD");
+		});
+
+		it("keeps a handed-back agent prompt from folding pending IRC records into the transcript", async () => {
+			const preflight = parkPreflight();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [{ content: ["handled the aside"] }],
+				onStop: () => undefined,
+			});
+
+			const prompted = run.session.prompt("AGENT-PROMPT", {
+				attribution: "agent",
+				synthetic: true,
+				throwOnDrop: true,
+			});
+			await preflight.entered.promise;
+			// Delivered while the prompt sets up: it waits as a pending aside for the next turn.
+			await run.session.sendCustomMessage(
+				{ customType: "ext-aside", content: "extension aside", display: false },
+				{ deliverAs: "aside" },
+			);
+			const transcript = run.session.messages.length;
+			const hold = run.session.holdForStopPass();
+			preflight.gate.resolve();
+			await expect(prompted).rejects.toThrow();
+
+			// Handed back, the prompt left the aside where it was.
+			expect(run.session.messages).toHaveLength(transcript);
+			hold.release();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+			// The aside landed with the turn the release let run.
+			expect(run.mock.calls).toHaveLength(1);
+			expect(JSON.stringify(run.mock.calls[0]?.context.messages)).toContain("extension aside");
+		});
 	});
 	describe("a stop-pass holder whose run is cancelled", () => {
 		it("refuses a continuation once the run's abort signal fires", async () => {
