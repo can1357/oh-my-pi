@@ -225,6 +225,9 @@ class RemoteCredentials implements CredentialsApi {
 	get generation(): number {
 		return this.#remote.callSync("credentials.generation");
 	}
+	generationOf(provider: string): number {
+		return this.#remote.callSync("credentials.generationOf", provider);
+	}
 	onGeneration(listener: (generation: number) => void): () => void {
 		return remoteUnsubscribe(this.#remote.callSync("credentials.onGeneration", listener));
 	}
@@ -316,7 +319,11 @@ class RemoteKeys implements KeysApi {
 		return this.#remote.call("keys.peek", provider, options);
 	}
 	source(provider: string, options?: AuthSourceOptions): AuthSource | undefined {
+		if (options?.fresh) return this.#remote.callSync("keys.source", provider, options);
 		return this.#availability.source(provider, options?.env ?? "dedicated");
+	}
+	overrideRevision(provider: string): number {
+		return this.#remote.callSync("keys.overrideRevision", provider);
 	}
 	keyless(provider: string): boolean {
 		return this.#availability.of(provider).keyless;

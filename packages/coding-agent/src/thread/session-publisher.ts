@@ -50,6 +50,7 @@ import type { AgentMessage, AgentTool, QueuedMessageGate } from "@oh-my-pi/pi-ag
 import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	onCodexAccessProgramRejected,
+	onCodexRequestAccount,
 	wouldRequestCodexAccessProgram,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -227,6 +228,7 @@ export class SessionPublisher {
 	readonly #unsubscribeRunState: () => void;
 	readonly #unsubscribeIrcWakeHolds: () => void;
 	readonly #unsubscribeDaybreakRejections: () => void;
+	readonly #unsubscribeDaybreakRequests: () => void;
 
 	constructor(session: AgentSession, bridge: SessionBridgeClient) {
 		this.session = session;
@@ -262,6 +264,15 @@ export class SessionPublisher {
 		this.#unsubscribeDaybreakRejections = onCodexAccessProgramRejected((modelId, accountId) => {
 			if (!this.#watched || this.session.model?.id !== modelId) return;
 			if (this.#view?.daybreakEligibleAccounts.includes(accountId)) this.schedule();
+		});
+		this.#unsubscribeDaybreakRequests = onCodexRequestAccount((sessionId, provider, modelId) => {
+			if (
+				this.#watched &&
+				sessionId === this.session.sessionId &&
+				this.session.model?.provider === provider &&
+				this.session.model.id === modelId
+			)
+				this.schedule();
 		});
 		session.addDisposer(() => this.close());
 	}
@@ -311,6 +322,7 @@ export class SessionPublisher {
 		this.#unsubscribeRunState();
 		this.#unsubscribeIrcWakeHolds();
 		this.#unsubscribeDaybreakRejections();
+		this.#unsubscribeDaybreakRequests();
 		this.#bridge.remote.notify("closed", this.#key);
 	}
 
@@ -524,7 +536,11 @@ export class SessionPublisher {
 			serviceTierByFamily: toWireData(session.serviceTierByFamily),
 			fastModeActive: session.isFastModeActive(),
 			daybreakModelId: session.model?.api === "openai-codex-responses" ? session.model.id : undefined,
+			daybreakProviderId: session.model?.api === "openai-codex-responses" ? session.model.provider : undefined,
 			daybreakEligibleAccounts: this.#daybreakEligibleAccounts(),
+			daybreakRequestAccountId: session.daybreakRequestAccountId(),
+			daybreakRequestAuthKey: session.daybreakRequestAuthKey(),
+			daybreakRequestSelectedOAuthAccountId: session.daybreakRequestSelectedOAuthAccountId(),
 			anthropicSlowModeLabel: session.getAnthropicSlowModeLabel(),
 			prewalk: toWireData(session.getPrewalkState()),
 			goalMode: toWireData(session.getGoalModeState()),

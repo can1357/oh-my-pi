@@ -34,6 +34,7 @@ export class KeyOverrides {
 	#runtimeOverrides: Map<string, string> = new Map();
 	#configOverrides: Map<string, string> = new Map();
 	#configFallbacks: Map<string, string> = new Map();
+	#overrideRevisions: Map<string, number> = new Map();
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 
 	constructor(resolver?: (config: string) => Promise<string | undefined>) {
@@ -63,6 +64,14 @@ export class KeyOverrides {
 		return this.#configOverrides.get(provider);
 	}
 
+	overrideRevision(provider: string): number {
+		return this.#overrideRevisions.get(provider) ?? 0;
+	}
+
+	#bump(provider: string): void {
+		this.#overrideRevisions.set(provider, this.overrideRevision(provider) + 1);
+	}
+
 	/** Config value consulted only after stored OAuth/login credentials. */
 	fallbackKey(provider: string): string | undefined {
 		return this.#configFallbacks.get(provider);
@@ -78,6 +87,7 @@ export class KeyOverrides {
 	 * Used for CLI --api-key flag.
 	 */
 	setRuntime(provider: string, apiKey: string): void {
+		if (this.#runtimeOverrides.get(provider) !== apiKey) this.#bump(provider);
 		this.#runtimeOverrides.set(provider, apiKey);
 	}
 
@@ -85,7 +95,7 @@ export class KeyOverrides {
 	 * Remove a runtime API key override.
 	 */
 	removeRuntime(provider: string): void {
-		this.#runtimeOverrides.delete(provider);
+		if (this.#runtimeOverrides.delete(provider)) this.#bump(provider);
 	}
 
 	/**
@@ -104,6 +114,8 @@ export class KeyOverrides {
 	 * resolves to its literal text) cannot shadow the key the user logged in with.
 	 */
 	setConfig(provider: string, apiKeyConfig: string, options?: { fallback?: boolean }): void {
+		const oldConfig = this.#configOverrides.get(provider);
+		const oldFallback = this.#configFallbacks.get(provider);
 		if (options?.fallback) {
 			this.#configOverrides.delete(provider);
 			this.#configFallbacks.set(provider, apiKeyConfig);
@@ -111,14 +123,17 @@ export class KeyOverrides {
 			this.#configFallbacks.delete(provider);
 			this.#configOverrides.set(provider, apiKeyConfig);
 		}
+		if (oldConfig !== this.#configOverrides.get(provider) || oldFallback !== this.#configFallbacks.get(provider))
+			this.#bump(provider);
 	}
 
 	/**
 	 * Remove a single config-sourced API key (override or fallback).
 	 */
 	removeConfig(provider: string): void {
-		this.#configOverrides.delete(provider);
-		this.#configFallbacks.delete(provider);
+		const removedOverride = this.#configOverrides.delete(provider);
+		const removedFallback = this.#configFallbacks.delete(provider);
+		if (removedOverride || removedFallback) this.#bump(provider);
 	}
 
 	/**
@@ -126,6 +141,8 @@ export class KeyOverrides {
 	 * re-parsing `models.yml` so removed entries actually disappear.
 	 */
 	clearConfig(): void {
+		for (const provider of new Set([...this.#configOverrides.keys(), ...this.#configFallbacks.keys()]))
+			this.#bump(provider);
 		this.#configOverrides.clear();
 		this.#configFallbacks.clear();
 	}
@@ -234,6 +251,10 @@ export class KeyCascade implements KeysApi {
 		}
 		if (bearing.some(credential => credential.type === "api_key")) return { kind: "api_key", concrete: true };
 		return undefined;
+	}
+
+	overrideRevision(provider: string): number {
+		return this.#deps.overrides.overrideRevision(provider);
 	}
 
 	/** Check if a provider has a concrete env token, excluding ambient sentinel auth. */

@@ -141,6 +141,7 @@ export type WireRedeemResetCreditOptions = Omit<RedeemResetCreditOptions, "baseU
 /** Every `AuthStorage` call a worker forwards to the main thread's instance. */
 export type AuthStorageProtocol = {
 	"credentials.generation": RpcMethod<[], number>;
+	"credentials.generationOf": RpcMethod<[provider: string], number>;
 	/** Returns a sync unsubscribe (`rpcSync`). */
 	"credentials.onGeneration": RpcMethod<[listener: (generation: number) => void], () => void>;
 	/** Returns a sync unsubscribe (`rpcSync`). */
@@ -175,6 +176,7 @@ export type AuthStorageProtocol = {
 	"keys.peek": RpcMethod<[provider: string, options?: AuthPeekOptions], string | undefined>;
 	/** `keys.source` with another than the default `env` mode (the availability table holds the default). */
 	"keys.source": RpcMethod<[provider: string, options?: AuthSourceOptions], AuthSource | undefined>;
+	"keys.overrideRevision": RpcMethod<[provider: string], number>;
 	/**
 	 * `keys.source` (default `env` mode) and `keys.keyless` of every bundled provider, every
 	 * provider with stored credentials, and `providers`, in one call (a worker caches it).

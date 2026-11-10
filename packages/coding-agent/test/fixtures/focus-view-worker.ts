@@ -11,7 +11,10 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { dropRejectedCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
+import {
+	dropRejectedCodexAccessPrograms,
+	reportCodexRequestAccount,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import type { RequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -48,6 +51,8 @@ export interface FocusProbe {
 	open(id: string, registry: ModelRegistry, settings: Record<string, unknown>, model?: Model<Api>): Promise<string>;
 	/** Prompt the session on its home thread; resolves when the run settles. */
 	prompt(id: string, text: string): Promise<void>;
+	/** Simulate a provider request whose bearer resolves to this account. */
+	reportRequestAccount(id: string, accountId: string): Promise<void>;
 	/** Release the reply held between its two deltas. */
 	release(): Promise<void>;
 	report(id: string): Promise<FocusSessionReport>;
@@ -173,6 +178,11 @@ const probe: FocusProbe = {
 	},
 	prompt: async (id, text) => {
 		await local(id).prompt(text);
+	},
+	reportRequestAccount: async (id, accountId) => {
+		const session = local(id);
+		if (!session.model) throw new Error("session model missing");
+		reportCodexRequestAccount(session.sessionId, session.model.provider, session.model.id, accountId);
 	},
 	release: async () => {
 		gate.resolve();

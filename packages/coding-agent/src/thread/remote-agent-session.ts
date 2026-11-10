@@ -85,7 +85,7 @@ import {
 	runningJobWidgets,
 } from "../session/async-job-views";
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
-import { selectedOAuthAccountId } from "../session/daybreak-status";
+import { daybreakAuthKey, selectedOAuthAccountId } from "../session/daybreak-status";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import { resolveRoleModelCycle, roleThinkingLevelForModel, serviceTierForModel } from "../session/model-controls";
@@ -205,7 +205,11 @@ function emptyViewState(): SessionViewState {
 		serviceTierByFamily: {},
 		fastModeActive: false,
 		daybreakModelId: undefined,
+		daybreakProviderId: undefined,
 		daybreakEligibleAccounts: [],
+		daybreakRequestAccountId: undefined,
+		daybreakRequestAuthKey: undefined,
+		daybreakRequestSelectedOAuthAccountId: undefined,
 		anthropicSlowModeLabel: undefined,
 		prewalk: undefined,
 		goalMode: undefined,
@@ -635,8 +639,23 @@ export class RemoteAgentSession implements AgentViewSession {
 		const model = this.model;
 		if (!model || model.api !== "openai-codex-responses" || !cfgProvidersOpenaiCodexDaybreak.get(this.settings))
 			return false;
-		if (this.#view.daybreakModelId !== model.id || this.#view.daybreakEligibleAccounts.length === 0) return false;
-		const accountId = selectedOAuthAccountId(this.modelRegistry.authStorage, model.provider, this.sessionId);
+		if (
+			this.#view.daybreakModelId !== model.id ||
+			this.#view.daybreakProviderId !== model.provider ||
+			this.#view.daybreakEligibleAccounts.length === 0
+		)
+			return false;
+		const auth = this.modelRegistry.authStorage;
+		const source = auth.keys.source(model.provider, { fresh: true });
+		if (!source) return false;
+		const selected =
+			source.kind === "oauth" ? selectedOAuthAccountId(auth, model.provider, this.sessionId) : undefined;
+		let accountId: string | undefined;
+		if (this.#view.daybreakRequestAuthKey === undefined) accountId = selected;
+		else if (this.#view.daybreakRequestAuthKey === daybreakAuthKey(auth, model.provider, this.sessionId))
+			accountId = this.#view.daybreakRequestAccountId;
+		else if (source.kind === "oauth" && selected !== this.#view.daybreakRequestSelectedOAuthAccountId)
+			accountId = selected;
 		return !!accountId && this.#view.daybreakEligibleAccounts.includes(accountId);
 	}
 
@@ -929,7 +948,14 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (patch.restorableQueue) this.#pruneSettled(patch.restorableQueue);
 		if (patch.leafId !== undefined) this.#entryIndex.setLeaf(patch.leafId);
 		this.#syncViewDerived(patch);
-		if (patch.daybreakEligibleAccounts !== undefined || Object.hasOwn(patch, "daybreakModelId")) {
+		if (
+			patch.daybreakEligibleAccounts !== undefined ||
+			Object.hasOwn(patch, "daybreakModelId") ||
+			Object.hasOwn(patch, "daybreakProviderId") ||
+			Object.hasOwn(patch, "daybreakRequestAccountId") ||
+			Object.hasOwn(patch, "daybreakRequestAuthKey") ||
+			Object.hasOwn(patch, "daybreakRequestSelectedOAuthAccountId")
+		) {
 			for (const listener of [...this.#daybreakListeners]) {
 				try {
 					listener();

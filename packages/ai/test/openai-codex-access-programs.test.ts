@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
 	configureCodexAccessPrograms,
 	onCodexAccessProgramRejected,
+	onCodexRequestAccount,
 	wouldRequestCodexAccessProgram,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -83,6 +84,32 @@ describe("openai-codex cyber access programs", () => {
 			"acct-daybreak": { cyberPrograms: ["standard", "daybreak_blue"] },
 			"acct-standard": { cyberPrograms: ["standard"] },
 		},
+	});
+
+	it("reports the actual bearer account for a session request", async () => {
+		const accountId = "acct-daybreak-request-account";
+		const requestModel = createCodexModel("gpt-6-sol-request-account", {
+			preferWebsockets: false,
+			accountAccess: { [accountId]: { cyberPrograms: ["daybreak_blue"] } },
+		});
+		const accounts: Array<[string, string, string, string | undefined]> = [];
+		const unsubscribe = onCodexRequestAccount((sessionId, provider, modelId, resolvedAccountId) => {
+			accounts.push([sessionId, provider, modelId, resolvedAccountId]);
+		});
+		const sent: unknown[] = [];
+		try {
+			await streamOpenAICodexResponses(requestModel, context, {
+				sessionId: "daybreak-request-account-test",
+				apiKey: createCodexTestToken(accountId),
+				fetch: createFetchMock([200], sent),
+			}).result();
+			expect(accounts).toEqual([
+				["daybreak-request-account-test", requestModel.provider, requestModel.id, accountId],
+			]);
+			expect(sent).toEqual([{ cyber: "daybreak_blue" }]);
+		} finally {
+			unsubscribe();
+		}
 	});
 
 	it("requests Daybreak Blue only for eligible accounts and drops it for good after a rejection", async () => {

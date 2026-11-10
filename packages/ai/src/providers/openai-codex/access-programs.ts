@@ -27,6 +27,36 @@ const REJECTION_PATTERN = /\baccess[ _]programs?\b|\breduced refusals\b/i;
 /** `${accountId}\0${modelId}` pairs whose program the backend rejected this process. */
 const droppedPrograms = new Set<string>();
 const rejectionListeners = new Set<(modelId: string, accountId: string) => void>();
+const requestAccountListeners = new Set<
+	(sessionId: string, provider: string, modelId: string, accountId: string | undefined) => void
+>();
+
+/** Observe the account resolved from the bearer for a Codex session request. */
+export function onCodexRequestAccount(
+	listener: (sessionId: string, provider: string, modelId: string, accountId: string | undefined) => void,
+): () => void {
+	requestAccountListeners.add(listener);
+	return () => requestAccountListeners.delete(listener);
+}
+
+/** Publish only the non-secret account id, never the bearer. */
+export function reportCodexRequestAccount(
+	sessionId: string | undefined,
+	provider: string,
+	modelId: string,
+	accountId: string | undefined,
+): void {
+	if (!sessionId) return;
+	for (const listener of Array.from(requestAccountListeners)) {
+		try {
+			listener(sessionId, provider, modelId, accountId);
+		} catch (error) {
+			logger.warn("Codex request account listener failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+}
 
 /** Subscribe to newly rejected account/model pairs in this process. */
 export function onCodexAccessProgramRejected(listener: (modelId: string, accountId: string) => void): () => void {
