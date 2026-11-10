@@ -15,6 +15,7 @@ use std::{
 	time::Duration,
 };
 
+use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::{
 	AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType,
 };
@@ -22,6 +23,7 @@ use objc2_core_foundation::{
 	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFRange, CFRetained, CFString,
 	CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
 };
+use objc2_foundation::ns_string;
 pub(super) use selection::select_dragged;
 
 use super::{
@@ -620,26 +622,26 @@ pub(super) fn restoration_window(pid: libc::pid_t) -> (Option<u32>, bool) {
 		return (None, false);
 	};
 	let focused = copy_element(&app, "AXFocusedWindow");
-	let key = focused.as_ref().and_then(window_id).or_else(|| {
-		copy_element(&app, "AXMainWindow")
-			.as_ref()
-			.and_then(window_id)
-	});
+	let key = focused
+		.as_ref()
+		.and_then(|window| window_id(window))
+		.or_else(|| copy_element(&app, "AXMainWindow").and_then(|window| window_id(&window)));
 	if key.is_some() || GET_WINDOW_ID.is_none() {
 		return (key, false);
 	}
-	let outside = focused
-		.as_ref()
-		.is_some_and(|focused| is_outside_windows(false, copy_string(focused, "AXRole").as_deref()));
+	let finder = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+		.and_then(|app| app.bundleIdentifier())
+		.is_some_and(|bundle| bundle.isEqualToString(ns_string!("com.apple.finder")));
+	let outside = focused.as_ref().is_some_and(|focused| {
+		is_outside_windows(finder, false, copy_string(focused, "AXRole").as_deref())
+	});
 	(key, outside)
 }
 
-/// [`restoration_window`]'s decision for a focused window that maps to a
-/// window id (`mapped`) and reports `role`: only an unmapped scroll area, the
-/// desktop's role, counts. A real window that fails to map, or any other
-/// element, does not.
-fn is_outside_windows(mapped: bool, role: Option<&str>) -> bool {
-	!mapped && role == Some("AXScrollArea")
+/// [`restoration_window`]'s desktop decision: a generic scroll area in any
+/// other app proves nothing, even when its window id cannot be mapped.
+fn is_outside_windows(finder: bool, mapped: bool, role: Option<&str>) -> bool {
+	finder && !mapped && role == Some("AXScrollArea")
 }
 
 /// `AXFrontmost` as `pid`'s application reports it. `AppKit` answers from the
@@ -3260,14 +3262,16 @@ mod tests {
 	}
 
 	#[test]
-	fn only_an_unmapped_scroll_area_is_focus_outside_windows() {
+	fn only_finders_unmapped_scroll_area_is_focus_outside_windows() {
 		// Finder's desktop after a click on it.
-		assert!(is_outside_windows(false, Some("AXScrollArea")));
+		assert!(is_outside_windows(true, false, Some("AXScrollArea")));
+		// Another app's unmappable scroll view is not a verified desktop.
+		assert!(!is_outside_windows(false, false, Some("AXScrollArea")));
 		// A window that maps, a real window that fails to, or anything else.
-		assert!(!is_outside_windows(true, Some("AXScrollArea")));
-		assert!(!is_outside_windows(false, Some("AXWindow")));
-		assert!(!is_outside_windows(false, Some("AXUnknown")));
-		assert!(!is_outside_windows(false, None));
+		assert!(!is_outside_windows(true, true, Some("AXScrollArea")));
+		assert!(!is_outside_windows(true, false, Some("AXWindow")));
+		assert!(!is_outside_windows(true, false, Some("AXUnknown")));
+		assert!(!is_outside_windows(true, false, None));
 	}
 
 	#[test]
