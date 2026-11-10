@@ -142,7 +142,7 @@ import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import { liveTaskAgent, sumSubagentTreeCost } from "./agent-hub-runtime";
+import { inTaskCardSession, liveTaskAgent, sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -4885,13 +4885,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		return changed;
 	}
 
-	/** {@link liveTaskAgent} over the badge's registry and this session's observed subagents. */
-	readonly liveTaskAgents: LiveTaskAgentSource = id =>
-		liveTaskAgent(
-			getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).get(id),
+	/**
+	 * {@link liveTaskAgent} over the badge's registry and this session's observed subagents. A guest
+	 * asks the host which mirrored agents its session owns; mirrored refs carry no transcript path.
+	 */
+	readonly liveTaskAgents: LiveTaskAgentSource = id => {
+		const guest = this.collabGuest;
+		const rootSessionFile = this.sessionManager.getSessionFile() ?? undefined;
+		return liveTaskAgent(
+			getRunningSubagentBadgeRegistry(guest, AgentRegistry.global()).get(id),
 			this.#observerRegistry.getSession(id),
-			this.collabGuest ? undefined : (this.sessionManager.getSessionFile() ?? undefined),
+			guest ? ref => guest.agentInHostSession(ref.id) : ref => inTaskCardSession(ref, rootSessionFile),
 		);
+	};
 
 	/**
 	 * Repaint settled task cards through the coalesced observer sync: a collab

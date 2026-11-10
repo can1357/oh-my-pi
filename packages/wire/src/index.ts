@@ -251,6 +251,12 @@ export interface AgentSnapshot {
 	 * new run. Absent otherwise, and from older hosts.
 	 */
 	acceptedAt?: number;
+	/**
+	 * Whether the agent belongs to the host's current session, so a guest's task cards may draw it
+	 * running: the registry outlives `/new` and session switches, and another session's agent can
+	 * hold the same id. Absent from older hosts, which a guest reads as belonging.
+	 */
+	inSession?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

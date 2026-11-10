@@ -21,6 +21,7 @@ import type {
 	AgentEvent as WireAgentEvent,
 	SessionEntry as WireSessionEntry,
 } from "@oh-my-pi/pi-wire";
+import { inTaskCardSession } from "../modes/agent-hub-runtime";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -1143,6 +1144,7 @@ export class CollabHost {
 	}
 
 	#snapshotAgents(): AgentSnapshot[] {
+		const rootSessionFile = this.#ctx.sessionManager.getSessionFile() ?? undefined;
 		return (
 			AgentRegistry.global()
 				.list()
@@ -1160,6 +1162,7 @@ export class CollabHost {
 					createdAt: ref.createdAt,
 					lastActivity: ref.lastActivity,
 					acceptedAt: ref.lifecycle?.acceptedAt,
+					inSession: inTaskCardSession(ref, rootSessionFile),
 				}))
 		);
 	}

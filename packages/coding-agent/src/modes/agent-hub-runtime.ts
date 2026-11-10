@@ -119,21 +119,32 @@ export function inSessionTree(
 }
 
 /**
+ * Whether a task card in `rootSessionFile`'s transcript may draw `ref` running:
+ * the registry outlives `/new` and session switches, and another session's
+ * agent can hold the same id. Without a session file every ref counts.
+ */
+export function inTaskCardSession(
+	ref: { readonly sessionFile?: string | null },
+	rootSessionFile: string | undefined,
+): boolean {
+	return !rootSessionFile || inSessionTree(ref, rootSessionFile, true);
+}
+
+/**
  * What a settled task card row draws of agent `ref` while it runs again
  * (revived or woken by IRC or hub chat, or still running after its call
  * settled); undefined otherwise. Running is the registry's call, as for the
- * HUD's agents segment; `observed` progress adds the current tool. Without a
- * `rootSessionFile` (a collab guest) every ref counts.
+ * HUD's agents segment; `observed` progress adds the current tool. `inSession`
+ * says whether the card's session owns the ref (see {@link inTaskCardSession}).
  */
 export function liveTaskAgent(
 	ref: AgentRef | undefined,
 	observed: ObservableSession | undefined,
-	rootSessionFile: string | undefined,
+	inSession: (ref: AgentRef) => boolean,
 ): LiveTaskAgentRun | undefined {
 	// A ref still `running` after its run handed over the final result is that run's tail, not a new run.
 	if (ref?.kind !== "sub" || ref.status !== "running" || ref.lifecycle?.acceptedAt !== undefined) return undefined;
-	// The registry outlives `/new` and session switches: another session's agent can hold the same id.
-	if (rootSessionFile && !inSessionTree(ref, rootSessionFile, true)) return undefined;
+	if (!inSession(ref)) return undefined;
 	// A started turn keeps the previous turn's last snapshot but clears `progressAt` until its own first frame.
 	const current =
 		observed?.status === "active" && observed.progressAt !== undefined && observed.progress?.status === "running";
