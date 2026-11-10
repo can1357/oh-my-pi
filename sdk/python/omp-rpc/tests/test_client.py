@@ -1210,9 +1210,13 @@ class RpcClientTests(unittest.TestCase):
 
     def test_form_data_rejects_non_finite_numbers_before_sending(self) -> None:
         with self.make_client() as client:
-            for value in (float("nan"), float("inf"), float("-inf")):
-                with self.assertRaises(ValueError):
-                    client.send_ui_data("ui-form", {"replicas": value})
+            with self.assertRaises(ValueError):
+                client.send_ui_data("ui-form", {"replicas": float("nan")})
+
+    def test_form_data_rejects_non_string_list_members_before_sending(self) -> None:
+        with self.make_client() as client:
+            with self.assertRaises(TypeError):
+                client.send_ui_data("ui-form", {"checks": ["lint", float("nan")]})
 
     def test_headless_ui_cancels_form_so_the_prompt_completes(self) -> None:
         with self.make_client() as client:

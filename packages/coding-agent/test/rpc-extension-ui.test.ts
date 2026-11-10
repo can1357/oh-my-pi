@@ -641,6 +641,16 @@ describe("RPC form dialog", () => {
 		expect(pendingRequests.size).toBe(0);
 	});
 
+	it("gives an omitted checkbox group an empty array", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcFormDialog(pendingRequests, output, DEPLOY_FORM);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { target: "prod", replicas: 2 } });
+
+		expect(await result).toEqual({ data: { release: "r7", target: "prod", checks: [], replicas: 2, owner: "" } });
+	});
+
 	it("checks a shared name against every field that carries it", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

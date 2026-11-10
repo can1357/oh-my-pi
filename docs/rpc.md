@@ -1409,7 +1409,7 @@ is trimmed and ignored when empty. Any other shape fails the `ask` tool call ins
 
 `data` holds the submitted values by control `name`, as an HTML form submits them. A radio group, a single
 `<select>` or a lone checkbox gives one option `value` (omitted when nothing is chosen); a checkbox group or a
-multi-select of two or more options gives an array of option values without duplicates, while one with a single
+multi-select of two or more options gives an array of option values without duplicates (empty when omitted), while one with a single
 option gives that one value like a lone checkbox; a text field gives its text, or a number for a
 `number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options
 takes one extra string that is not an option value as its "Other" answer. Hidden inputs keep the form's own values.

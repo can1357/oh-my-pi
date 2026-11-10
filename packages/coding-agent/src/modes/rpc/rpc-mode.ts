@@ -1210,7 +1210,8 @@ export async function requestRpcAskDialog(
  */
 function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | undefined {
 	const label = JSON.stringify(field.name);
-	if (value === undefined) return undefined;
+	// An omitted field means nothing checked: an empty array for array choices, as `choiceValue` gives everywhere else.
+	if (value === undefined) return choiceValue(field, new Set());
 	const entries = isArrayChoice(field) ? value : [value];
 	if (!Array.isArray(entries)) throw new Error(`Form field ${label} must carry an array of strings`);
 
