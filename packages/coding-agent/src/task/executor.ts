@@ -1696,7 +1696,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
-		progress.tokensPerSecond = sessionThroughput(activeSession);
+		const throughput = sessionThroughput(activeSession);
+		if (throughput !== undefined) progress.tokensPerSecond = throughput;
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
@@ -2452,6 +2453,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
+			if (session) {
+				const throughput = sessionThroughput(session);
+				if (throughput !== undefined) progress.tokensPerSecond = throughput;
+			}
 			activeSession = null;
 			return session;
 		},
