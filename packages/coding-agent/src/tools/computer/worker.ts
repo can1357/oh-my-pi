@@ -380,7 +380,6 @@ function strictOptions(value: unknown, keys: object, label: string): void {
 	if (value != null) strictObject(value, Object.keys(keys), label);
 }
 
-
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
@@ -1047,7 +1046,7 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
-		strictOptions(options, inputOptionsKeys, "press");
+		strictOptions(options, chord === undefined || isMenuOptions(chord) ? {} : inputOptionsKeys, "press");
 		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		guardRun(this.#getContext(), "press");
 		if (chord !== undefined && !isMenuOptions(chord)) chordKeys(chord);

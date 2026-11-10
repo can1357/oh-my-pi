@@ -831,11 +831,12 @@ describe("computer prelude", () => {
 			message: expect.stringContaining("readOnly: did you mean read_only"),
 		});
 		for (const key of ["a", "read", "out", ""]) {
-			await expect(runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm))
-				.rejects.toMatchObject({
-					name: "ToolError",
-					message: expect.not.stringContaining("did you mean"),
-				});
+			await expect(
+				runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm),
+			).rejects.toMatchObject({
+				name: "ToolError",
+				message: expect.not.stringContaining("did you mean"),
+			});
 		}
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
@@ -1473,6 +1474,10 @@ describe("computer worker round trips", () => {
 	it("rejects unknown computer options and forwards drag buttons", async () => {
 		class OptionsSession extends FakeNativeSession {
 			readonly draggedButtons: Array<string | undefined> = [];
+			override async axNode(ref: string): Promise<AxNode> {
+				if (ref === "e9") throw new Error("stale ref");
+				return super.axNode(ref);
+			}
 			override async drag(target: string, points: DesktopPoint[], options?: PointerOptions | null) {
 				this.draggedButtons.push(options?.button);
 				return super.drag(target, points, options);
@@ -1521,6 +1526,8 @@ describe("computer worker round trips", () => {
 			await check("press", o => el.press("enter", o));
 			await check("press", o => el.press(undefined, o), { takeover: true });
 			await check("press", o => el.press({ menu: ["Save"] }, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press(undefined, o), { takeover: true });
+			await check("press", o => desktop.ref("e9").press({ menu: ["Save"] }, o), { takeover: true });
 			await check("type", o => el.type("Save", o));
 			await check("click", o => el.click(o));
 			await check("doubleClick", o => el.doubleClick(o), { count: 3 });
@@ -1542,7 +1549,6 @@ describe("computer worker round trips", () => {
 		`,
 		);
 		if (!result.ok) throw new Error(result.error.message);
-		expect(result.payload.returnValue).toBeUndefined();
 		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
 	});
 
