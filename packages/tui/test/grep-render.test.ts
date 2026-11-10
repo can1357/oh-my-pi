@@ -86,6 +86,28 @@ describe("grepToolRenderer", () => {
 		expect(call).toContain("Grep: needle in lib case:insensitive");
 	});
 
+	it("renders zero matches as a single header with a warning-colored count, keeping the missing-path note", async () => {
+		const uiTheme = (await getThemeByName("dark"))!;
+		const render = (details: GrepToolDetails) =>
+			grepToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: false },
+					uiTheme,
+					{
+						pattern: "needle",
+					},
+				)
+				.render(120);
+		const lines = render({ matchCount: 0, fileCount: 0, scopePath: "src" });
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(uiTheme.fg("warning", "0 matches"));
+		expect(sanitizeText(lines[0]!)).toContain("Grep: needle in src 0 matches");
+		const withMissing = render({ matchCount: 0, fileCount: 0, scopePath: "src", missingPaths: ["gone/"] });
+		expect(withMissing).toHaveLength(2);
+		expect(sanitizeText(withMissing[1]!)).toContain("skipped missing: gone/");
+	});
+
 	it("omits the file count only when the header already names the single searched file", async () => {
 		const uiTheme = (await getThemeByName("dark"))!;
 		const header = (details: GrepToolDetails) =>

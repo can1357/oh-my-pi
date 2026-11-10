@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
