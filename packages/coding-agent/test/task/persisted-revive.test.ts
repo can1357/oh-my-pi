@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -56,7 +56,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { localSession } from "../helpers/local-session";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -1768,6 +1768,21 @@ describe("persisted subagent revival", () => {
 	});
 
 	describe("wake-turn relay", () => {
+		// The relay's rescan reads the live-bridge registry under the session's
+		// agentDir. Point it at an empty temp dir so the machine's real bridges
+		// (other omp sessions) can never leak discovery fetches into these
+		// tests — the unmatched-URL test asserts zero network calls.
+		let agentDirBackup: string | undefined;
+		beforeAll(() => {
+			agentDirBackup = process.env.PI_CODING_AGENT_DIR;
+			const dir = makeTempDir("@pi-revive-a2a-agentdir-");
+			setAgentDir(dir);
+		});
+		afterAll(() => {
+			// Restore the default resolver state the process started with.
+			setAgentDir(path.join(getConfigRootDir(), "agent"));
+			if (agentDirBackup === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		});
 		async function reviveWithWaker(cwd: string): Promise<{ ref: AgentRef; handle: RevivedSessionHandle }> {
 			AgentRegistry.resetGlobalForTests();
 			AgentLifecycleManager.resetGlobalForTests();
