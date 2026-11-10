@@ -18,7 +18,7 @@
 
 ### Changed
 
-- On Windows, the bash tool's description tells the model its shell is bash, not cmd or PowerShell, so it stops writing `dir`, `%VAR%` and other cmd syntax
+- On Windows, the bash tool's description tells the model it runs in an emulated bash environment, not cmd or PowerShell, so it writes bash instead of `dir`, `%VAR%` and other cmd syntax
 
 ## [18.18.6] - 2026-11-09
 
