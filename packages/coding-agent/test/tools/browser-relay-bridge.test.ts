@@ -501,7 +501,7 @@ describe("RelayBridge child targets", () => {
 		const page = await attachPage(bridge, ext, cdp, conn, 1);
 		const otherCdp = new FakeCdpSocket();
 		const other = bridge.cdpConnected(otherCdp);
-		await attachPage(bridge, ext, otherCdp, other, 1);
+		const otherPage = await attachPage(bridge, ext, otherCdp, other, 1);
 		const attachId = ++msgSeq;
 		bridge.cdpMessage(
 			conn,
@@ -528,12 +528,40 @@ describe("RelayBridge child targets", () => {
 		expect(otherCdp.messages.find(message => message.id === evaluateId)).toMatchObject({
 			error: { message: "Unknown session id CHILD1" },
 		});
+		await armAutoAttach(bridge, ext, conn, page);
+		await armAutoAttach(bridge, ext, other, otherPage);
+		emit(bridge, ext, {
+			method: "Target.attachedToTarget",
+			params: { sessionId: "AUTOMATIC", targetInfo: { targetId: "FRAME2", type: "iframe" } },
+		});
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: page,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: false, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		await flush();
+		expect(cdp.messages).toContainEqual({
+			sessionId: page,
+			method: "Target.detachedFromTarget",
+			params: { sessionId: "AUTOMATIC" },
+		});
+		const afterOptOut = ++msgSeq;
+		bridge.cdpMessage(conn, JSON.stringify({ ...evaluate, id: afterOptOut }));
+		ack(bridge, ext, "send", { result: { type: "number", value: 1 } });
+		await flush();
+		expect(cdp.messages.find(message => message.id === afterOptOut)).toMatchObject({
+			result: { result: { type: "number", value: 1 } },
+		});
 		emit(bridge, ext, NAVIGATE, DETACH);
 		expect(childTraffic(cdp).filter(([method]) => method !== undefined)).toEqual([
 			["Page.frameNavigated", "CHILD1"],
 			["Target.detachedFromTarget", page],
 		]);
-		expect(childTraffic(otherCdp).filter(([method]) => method !== undefined)).toEqual([]);
+		expect(childTraffic(otherCdp).filter(([method]) => method !== undefined)).toEqual(lifecycleOn(otherPage));
 	});
 
 	it("announces a real child target only to the page session that armed auto-attach", async () => {
