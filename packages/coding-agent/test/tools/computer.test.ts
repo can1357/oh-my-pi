@@ -1514,15 +1514,15 @@ describe("computer prelude", () => {
 		expect(prelude.enabled?.()).toBe(false);
 	});
 
-	it("creates the native session under the agent's label, which another session's InputBusy names", async () => {
+	it("creates the native session under the agent's id, which another session's InputBusy names", async () => {
 		const session: ToolSession = { ...toolSession(), getAgentId: () => "CursorChecks.Scout" };
 		const created: unknown[] = [];
 		const prelude = workerPrelude(session, new FakeNativeSession(), created);
 		await prelude.invoke(
 			{ action: "run", code: "await desktop.windows()", read_only: true },
-			{ session, toolCallId: "agent-label" },
+			{ session, toolCallId: "agent-id" },
 		);
-		expect(created).toEqual([expect.objectContaining({ agentLabel: "Scout" })]);
+		expect(created).toEqual([expect.objectContaining({ agentId: "CursorChecks.Scout" })]);
 	});
 });
 

@@ -8,7 +8,6 @@ import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { agentIdentity } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import {
 	type ComputerScreenshot,
@@ -237,13 +236,12 @@ function resolveComputerRunCode(params: ComputerRunParams | ComputerCallParams):
 /** Freezes the current session settings into the snapshot every worker command carries. */
 function buildComputerSnapshot(session: ToolSession, readOnly: boolean): ComputerSessionSnapshot {
 	const coordinateSafe = usesCoordinateSafeImageSizing(session.getActiveModel?.());
-	const agentId = session.getAgentId?.();
 	const configuredMaxWidth = cfgComputerMaxWidth.get(session.settings);
 	const configuredMaxHeight = cfgComputerMaxHeight.get(session.settings);
 	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
-		agentLabel: agentId ? agentIdentity(agentId).label : undefined,
+		agentId: session.getAgentId?.() ?? undefined,
 		captureMaxWidth: coordinateSafe
 			? Math.min(configuredMaxWidth, COORDINATE_SAFE_MAX_CAPTURE_WIDTH)
 			: configuredMaxWidth,

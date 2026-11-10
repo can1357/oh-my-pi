@@ -14,8 +14,8 @@ export { COMPUTER_WORKER_ARG } from "../../cli/worker-selectors";
 export interface ComputerSessionSnapshot {
 	cwd: string;
 	sessionId: string;
-	/** Label of the agent the run acts for; another session waiting for its input lock names it. */
-	agentLabel?: string;
+	/** Registry id of the agent the run acts for; another session waiting for its input lock names it. */
+	agentId?: string;
 	captureMaxWidth: number;
 	captureMaxHeight: number;
 	display: string;

@@ -166,9 +166,9 @@ pub struct DesktopSessionOptions {
 	/// Sessions created with the same key share one physical-Escape stop
 	/// count, which `desktopEscapeStops` reads after they close.
 	pub escape_stop_key: Option<String>,
-	/// The agent this session acts for, named to other sessions that wait
-	/// for its input/focus control.
-	pub agent_label:     Option<String>,
+	/// The registry id of the agent this session acts for, named to other
+	/// sessions that wait for its input/focus control.
+	pub agent_id:        Option<String>,
 }
 
 #[napi(object)]

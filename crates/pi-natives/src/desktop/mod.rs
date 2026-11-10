@@ -2056,7 +2056,7 @@ impl DesktopSession {
 	pub fn new(options: Option<DesktopSessionOptions>) -> Result<Self> {
 		let options = options.unwrap_or_default();
 		let escape_stops = control::escape_stop_counter(options.escape_stop_key.as_deref());
-		let agent = options.agent_label.map(Arc::from);
+		let agent = options.agent_id.map(Arc::from);
 		Ok(Self {
 			core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops, agent),
 		})
