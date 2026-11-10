@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added live steering for Cursor runs: after each answered exec frame, queued user input and background-job results go into the running turn as a `conversation_action` user message and count as answered once Cursor reports them appended (`user_message_appended`). Unconfirmed input returns to the caller, and a run that fails with input unconfirmed turns injection off for that Cursor endpoint until the process restarts. `LiveSteering.claim` takes `{ asides: true }`, and `LiveSteerClaim.acceptAnswered` reports input the model answered inside the response
+- Added live steering for Cursor runs: after each answered exec frame, queued user input and background-job results go into the running turn as a `conversation_action` user message and count as answered once Cursor reports them appended (`user_message_appended`). Unconfirmed input returns to the caller, and a run that fails with input unconfirmed turns injection off for that Cursor endpoint until the process restarts. `LiveSteering.claim` takes `{ asides: true }`, and `LiveSteerClaim.acceptAnswered` reports input the model answered inside the response ([#18778](https://github.com/can1357/oh-my-pi/pull/18778) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ## [18.18.7] - 2026-11-10
 

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `providers.cursorLiveSteering` (off by default): messages typed while a Cursor turn runs, and background-job results, join that turn after its next tool call instead of waiting for the turn to end
+- Added `providers.cursorLiveSteering` (off by default): messages typed while a Cursor turn runs, and background-job results, join that turn after its next tool call instead of waiting for the turn to end ([#18778](https://github.com/can1357/oh-my-pi/pull/18778) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ## [18.18.7] - 2026-11-10
 
