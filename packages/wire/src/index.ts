@@ -381,7 +381,8 @@ export type HostFrame =
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	/** `resync`: the host no longer counts this guest as joined; the guest should send `hello` again. */
+	| { t: "error"; message: string; resync?: true };
 
 export type WireFrame = GuestFrame | HostFrame;
 
@@ -445,6 +446,22 @@ export const ROOM_KEY_BYTES = 32;
  * proves prompt/abort/agent-cmd capability to the host.
  */
 export const WRITE_TOKEN_BYTES = 16;
+
+/**
+ * Each automatic rejoin costs the host a full snapshot, and a guest on a link
+ * too slow for the session is shed again after every one. Past the cap the
+ * guest stops rejoining on its own and leaves the decision to the user.
+ */
+export const MAX_AUTO_REJOINS = 3;
+export const AUTO_REJOIN_WINDOW_MS = 5 * 60_000;
+
+/** Records an automatic rejoin in {@link history} if the window has room for one. */
+export function takeAutoRejoin(history: number[], now = Date.now()): boolean {
+	while (history.length > 0 && now - history[0]! >= AUTO_REJOIN_WINDOW_MS) history.shift();
+	if (history.length >= MAX_AUTO_REJOINS) return false;
+	history.push(now);
+	return true;
+}
 
 /** Default public relay; bare `<roomId>.<key>` links resolve against it. */
 export const DEFAULT_RELAY_URL = "wss://my.omp.sh";

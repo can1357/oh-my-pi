@@ -411,6 +411,7 @@ auth "anthropic" {
     available #false
     show-in-login-list #false
     disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
+    login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
 }
 ```
 
@@ -419,6 +420,8 @@ auth "anthropic" {
 `login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
 
 `disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice. Delete the line to turn it back on — stored logins come back as they were.
+
+`login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
 
 Login kinds:
 

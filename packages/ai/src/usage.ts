@@ -435,6 +435,11 @@ export interface UsageProvider {
 	retainLastGoodOnFailure?: boolean;
 	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
 	failureBackoffMs?: number;
+	/**
+	 * Aggregate collection probes only the API key inference would send (the
+	 * auth cascade) instead of every stored credential.
+	 */
+	usesRequestKey?: boolean;
 }
 
 /** Request context used when ranking usage for a specific model. */
