@@ -50,6 +50,7 @@ import type { TeamIdentity } from "@oh-my-pi/pi-coding-agent/task/team-runtime";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { settleA2aReplies } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -1885,6 +1886,7 @@ describe("persisted subagent revival", () => {
 				});
 				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
 				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
+				await settleA2aReplies();
 			} finally {
 				h.server.stop(true);
 			}
@@ -1920,6 +1922,7 @@ describe("persisted subagent revival", () => {
 						message: { parts: [{ text: published.slice(0, A2A_ARTIFACT_MAX_CHARS) }] },
 					},
 				});
+				await settleA2aReplies();
 			} finally {
 				h.server.stop(true);
 			}
@@ -1937,7 +1940,11 @@ describe("persisted subagent revival", () => {
 					await Promise.race([h.handle.trackedReplies[0].then(() => true), Bun.sleep(250).then(() => false)]),
 				).toBe(true);
 			} finally {
+				// The turn settled without waiting for the blocked transport; release
+				// the send, then drain it so the fixture teardown resets globals with
+				// no send still in flight.
 				h.unblock();
+				await settleA2aReplies();
 				h.server.stop(true);
 			}
 		});
@@ -1952,6 +1959,7 @@ describe("persisted subagent revival", () => {
 				expect(h.calls.map(call => call.params.metadata.inReplyTo).sort()).toEqual(["req-1", "req-2"]);
 				expect(h.calls.map(call => call.params.message.parts[0]?.text)).toEqual(["answer", "answer"]);
 				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
+				await settleA2aReplies();
 			} finally {
 				h.server.stop(true);
 			}
@@ -1964,6 +1972,7 @@ describe("persisted subagent revival", () => {
 				await h.finish([externalRecord("req-1")], undefined, async () => {
 					await IncomingRequests.global().consume({ to: h.ref.id, from: "peer", messageId: "req-1" });
 				});
+				await settleA2aReplies();
 				expect(h.calls).toEqual([]);
 				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
 			} finally {
@@ -1984,6 +1993,7 @@ describe("persisted subagent revival", () => {
 				try {
 					await h.note("req-1");
 					await h.finish([externalRecord("req-1")], stop);
+					await settleA2aReplies();
 					expect(h.calls).toEqual([]);
 					expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
 						"req-1",
@@ -2005,6 +2015,7 @@ describe("persisted subagent revival", () => {
 					{ ...wakeRecord("a2a"), details: { from: "a2a", external: true } },
 					{ ...wakeRecord("Main"), details: { from: "Main", a2aMessageId: "req-2" } },
 				]);
+				await settleA2aReplies();
 				expect(h.calls).toEqual([]);
 				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
 				expect(await IncomingRequests.global().list(h.ref.id)).toHaveLength(2);

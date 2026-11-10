@@ -44,6 +44,19 @@ export interface A2aReplyRelayOptions {
 	send?: (options: SpawnA2aAgentOptions) => Promise<SpawnA2aAgentResult>;
 }
 
+/** Control handle for an installed relay. */
+export interface A2aReplyRelayHandle {
+	/** Detach the relay from the session's event stream. */
+	stop(): void;
+	/**
+	 * Wait for the relay's queued run decisions and the detached sends they
+	 * started, including work enqueued while draining. Test/control seam only:
+	 * production turn finalization never awaits it, so a slow or stuck
+	 * transport never blocks a run's settle.
+	 */
+	settled(): Promise<void>;
+}
+
 export interface SendA2aReplyOptions extends Pick<
 	A2aReplyRelayOptions,
 	"bridge" | "identity" | "rescan" | "timeoutMs" | "send"
@@ -52,20 +65,38 @@ export interface SendA2aReplyOptions extends Pick<
 	answer: string;
 }
 
-/** Install the relay on a main session; returns the unsubscribe. */
-export function installA2aReplyRelay(options: A2aReplyRelayOptions): () => void {
+/** Detached `sendA2aReply` operations in this thread, drained by {@link settleA2aReplies}. */
+const detachedSends = new Set<Promise<void>>();
+
+/**
+ * Wait until every detached A2A reply send started in this thread has
+ * finished, including work enqueued while draining. A test and control seam:
+ * production code never awaits it, so reply transport stays fully detached
+ * from turn finalization.
+ */
+export async function settleA2aReplies(): Promise<void> {
+	while (detachedSends.size > 0) {
+		await Promise.allSettled([...detachedSends]);
+	}
+}
+
+/** Install the relay on a main session; returns the control handle. */
+export function installA2aReplyRelay(options: A2aReplyRelayOptions): A2aReplyRelayHandle {
 	// Requests whose relay chance was used up, kept open for a manual reply.
-	const settled = new Set<string>();
-	let pending = Promise.resolve();
-	return options.subscribe(event => {
+	const settledRequests = new Set<string>();
+	let queue = Promise.resolve();
+	let queued = 0;
+	let stopped = false;
+	const unsubscribe = options.subscribe(event => {
 		if (event.type !== "agent_end" || event.isTerminal === false) return;
-		pending = pending
+		queued++;
+		queue = queue
 			.then(async () => {
 				for (const request of await IncomingRequests.global().list(MAIN_AGENT_ID)) {
-					if (settled.has(request.messageId)) continue;
+					if (settledRequests.has(request.messageId)) continue;
 					const answer = answerAfter(event.messages, request.at);
 					if (answer === undefined) {
-						settled.add(request.messageId);
+						settledRequests.add(request.messageId);
 						continue;
 					}
 					const consumed = await IncomingRequests.global().consume({
@@ -78,8 +109,27 @@ export function installA2aReplyRelay(options: A2aReplyRelayOptions): () => void 
 			})
 			.catch(error => {
 				logger.warn("A2A reply relay failed", { error: String(error) });
+			})
+			.finally(() => {
+				queued--;
 			});
 	});
+	return {
+		stop() {
+			if (stopped) return;
+			stopped = true;
+			unsubscribe();
+		},
+		async settled() {
+			// Drain the decision queue first (a queued decision may still start
+			// a send), then the detached sends — rechecking until both stay
+			// quiet, so work enqueued while draining is also awaited.
+			while (queued > 0 || detachedSends.size > 0) {
+				await queue;
+				await settleA2aReplies();
+			}
+		},
+	};
 }
 
 /**
@@ -106,31 +156,42 @@ function findPeer(bridge: A2aBridgeApi, from: string): A2aRuntimeAgent | undefin
 	return bridge.list().find(agent => agent.skillId === from);
 }
 
-/** Send a correlated reply to the peer that originated a request. */
+/**
+ * Send a correlated reply to the peer that originated a request. The send is
+ * registered in the thread's detached-send set the moment it starts, so
+ * {@link settleA2aReplies} can wait for it without the callers awaiting.
+ */
 export async function sendA2aReply(options: SendA2aReplyOptions): Promise<void> {
 	const { request, answer } = options;
-	try {
-		let peer = findPeer(options.bridge, request.from);
-		if (peer === undefined) {
-			await options.rescan();
-			peer = findPeer(options.bridge, request.from);
+	const tracked = (async () => {
+		try {
+			let peer = findPeer(options.bridge, request.from);
+			if (peer === undefined) {
+				await options.rescan();
+				peer = findPeer(options.bridge, request.from);
+			}
+			if (peer === undefined) {
+				logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
+				return;
+			}
+			const send = options.send ?? spawnA2aAgent;
+			const result = await send({
+				agent: peer,
+				prompt: answer,
+				inReplyTo: request.messageId,
+				fromIdentity: await options.identity(),
+				...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+			});
+			if (result.exitCode !== 0) {
+				logger.warn("A2A reply relay failed", { from: request.from, error: result.error ?? result.output });
+			}
+		} catch (error) {
+			logger.warn("A2A reply relay failed", { from: request.from, error: String(error) });
 		}
-		if (peer === undefined) {
-			logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
-			return;
-		}
-		const send = options.send ?? spawnA2aAgent;
-		const result = await send({
-			agent: peer,
-			prompt: answer,
-			inReplyTo: request.messageId,
-			fromIdentity: await options.identity(),
-			...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-		});
-		if (result.exitCode !== 0) {
-			logger.warn("A2A reply relay failed", { from: request.from, error: result.error ?? result.output });
-		}
-	} catch (error) {
-		logger.warn("A2A reply relay failed", { from: request.from, error: String(error) });
-	}
+	})();
+	detachedSends.add(tracked);
+	void tracked.finally(() => {
+		detachedSends.delete(tracked);
+	});
+	await tracked;
 }

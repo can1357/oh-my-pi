@@ -2231,7 +2231,7 @@ describe("addressed A2A reply jobs", () => {
 		const tool = await createTaskTool(bridge, Settings.isolated(), { asyncJobManager: manager });
 		let listener: ((event: AgentSessionEvent) => void) | undefined;
 		let relaySends = 0;
-		const unsubscribe = installA2aReplyRelay({
+		const relay = installA2aReplyRelay({
 			bridge,
 			subscribe: next => {
 				listener = next;
@@ -2267,12 +2267,12 @@ describe("addressed A2A reply jobs", () => {
 					},
 				],
 			} as AgentSessionEvent);
-			await Bun.sleep(0);
+			await relay.settled();
 			expect(relaySends).toBe(0);
 			expect(server.calls).toHaveLength(1);
 			expect(await IncomingRequests.global().list("Main")).toEqual([]);
 		} finally {
-			unsubscribe();
+			relay.stop();
 		}
 	});
 

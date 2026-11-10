@@ -2746,7 +2746,7 @@ export async function runRootCommand(
 						version: VERSION,
 					});
 					// A request answered in plain text still reaches its sender (A2).
-					const stopReplyRelay = installA2aReplyRelay({
+					const replyRelay = installA2aReplyRelay({
 						bridge: session.a2aBridge,
 						subscribe: listener => session.subscribe(listener),
 						identity: () => readOwnA2aIdentity(settingsInstance.getAgentDir()),
@@ -2763,7 +2763,7 @@ export async function runRootCommand(
 					postmortem.register(
 						"a2a-server",
 						() => {
-							stopReplyRelay();
+							replyRelay.stop();
 							a2a.stop();
 						},
 						{ exitOnly: true },

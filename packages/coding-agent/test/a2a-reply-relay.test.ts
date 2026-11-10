@@ -10,11 +10,18 @@ import {
 	type SpawnA2aAgentResult,
 } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
-import { installA2aReplyRelay, sendA2aReply } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
+import {
+	type A2aReplyRelayHandle,
+	installA2aReplyRelay,
+	sendA2aReply,
+} from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
 import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 
+const relays: A2aReplyRelayHandle[] = [];
+
 afterEach(() => {
+	for (const relay of relays.splice(0)) relay.stop();
 	IncomingRequests.resetGlobalForTests();
 });
 
@@ -42,7 +49,7 @@ function harness(options: { rescan?: (bridge: A2aAgentBridge) => void } = {}) {
 	const sent: SpawnA2aAgentOptions[] = [];
 	let listener: ((event: AgentSessionEvent) => void) | undefined;
 	let delivery = Promise.withResolvers<void>();
-	installA2aReplyRelay({
+	const handle = installA2aReplyRelay({
 		bridge,
 		subscribe: next => {
 			listener = next;
@@ -58,6 +65,7 @@ function harness(options: { rescan?: (bridge: A2aAgentBridge) => void } = {}) {
 			return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
 		},
 	});
+	relays.push(handle);
 	const end = (messages: AgentMessage[], isTerminal?: boolean) =>
 		listener?.({
 			type: "agent_end",
@@ -66,9 +74,12 @@ function harness(options: { rescan?: (bridge: A2aAgentBridge) => void } = {}) {
 		} as AgentSessionEvent);
 	const nextDelivery = async () => {
 		await delivery.promise;
+		// The send was observed; drain it (and anything it queued) so the
+		// assertions and the fixture teardown see a settled relay.
+		await handle.settled();
 		delivery = Promise.withResolvers<void>();
 	};
-	return { bridge, sent, end, nextDelivery };
+	return { bridge, sent, end, nextDelivery, handle };
 }
 
 describe("sendA2aReply", () => {
@@ -122,7 +133,7 @@ describe("sendA2aReply", () => {
 
 describe("A2A reply relay", () => {
 	it("sends the last text after the request back to the sender, correlated, exactly once", async () => {
-		const { bridge, sent, end, nextDelivery } = harness();
+		const { bridge, sent, end, nextDelivery, handle } = harness();
 		peer(bridge, "builder");
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-1", to: "Main", at: 100 });
 
@@ -144,29 +155,95 @@ describe("A2A reply relay", () => {
 
 		// The next run belongs to the human: nothing more goes to the peer.
 		end([assistant("unrelated follow-up", 200)]);
-		await Bun.sleep(0);
+		await handle.settled();
 		expect(sent).toHaveLength(1);
 	});
 
+	it("settled waits for selection and detached transport while terminal finalization stays nonblocking", async () => {
+		const bridge = new A2aAgentBridge();
+		const sent: SpawnA2aAgentOptions[] = [];
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		const rescanReached = Promise.withResolvers<void>();
+		const rescanGate = Promise.withResolvers<void>();
+		const sendGate = Promise.withResolvers<void>();
+		const handle = installA2aReplyRelay({
+			bridge,
+			subscribe: next => {
+				listener = next;
+				return () => {
+					listener = undefined;
+				};
+			},
+			identity: async () => ({ name: "reviewer", url: "http://127.0.0.1:2/" }),
+			rescan: async () => {
+				rescanReached.resolve();
+				await rescanGate.promise;
+				peer(bridge, "gated-builder");
+			},
+			send: async options => {
+				await sendGate.promise;
+				sent.push(options);
+				return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
+			},
+		});
+		relays.push(handle);
+		await IncomingRequests.global().note({ from: "gated-builder", messageId: "req-gated", to: "Main", at: 100 });
+
+		// The terminal end is handled and returns synchronously: nothing in the
+		// relay holds the event pipeline (finalization) hostage to the send.
+		const terminalEnd = {
+			type: "agent_end",
+			messages: [assistant("blocked transport answer", 110)],
+		} as AgentSessionEvent;
+		listener?.(terminalEnd);
+		let relaySettled = false;
+		const settledDone = handle.settled().then(() => {
+			relaySettled = true;
+		});
+
+		// Selection ran all the way to the detached send while both gates held:
+		// the request was consumed and the send is parked inside its rescan, yet
+		// the event handling above is already done — finalization never waits
+		// for the transport.
+		await rescanReached.promise;
+		expect(await IncomingRequests.global().list("Main")).toEqual([]);
+		expect(relaySettled).toBe(false);
+
+		rescanGate.resolve();
+		expect(relaySettled).toBe(false);
+
+		// Work enqueued while draining: a second request plus terminal run must
+		// be awaited too, not skipped by the already-running settled() promise.
+		await IncomingRequests.global().note({ from: "gated-builder", messageId: "req-late", to: "Main", at: 120 });
+		listener?.({ ...terminalEnd, messages: [assistant("late answer", 130)] } as AgentSessionEvent);
+		expect(relaySettled).toBe(false);
+
+		sendGate.resolve();
+		await settledDone;
+		expect(relaySettled).toBe(true);
+		expect(sent.map(send => send.prompt)).toEqual(["blocked transport answer", "late answer"]);
+		expect(sent.map(send => send.inReplyTo)).toEqual(["req-gated", "req-late"]);
+	});
+
 	it("leaves a request the model already answered through a2a: alone", async () => {
-		const { bridge, sent, end } = harness();
+		const { bridge, sent, end, handle } = harness();
 		peer(bridge, "builder");
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-1", to: "Main", at: 100 });
 		// The task tool's a2a: spawn consumes the request while the run is live.
 		expect((await IncomingRequests.global().consume({ to: "Main", from: "builder" }))?.messageId).toBe("req-1");
 
 		end([assistant("Sent the review to builder.", 150)]);
-		await Bun.sleep(0);
+		await handle.settled();
 		expect(sent).toEqual([]);
 	});
 
 	it("waits for the terminal end of the run", async () => {
-		const { bridge, sent, end, nextDelivery } = harness();
+		const { bridge, sent, end, nextDelivery, handle } = harness();
 		peer(bridge, "builder");
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-1", to: "Main", at: 100 });
 
 		end([assistant("interim", 110)], false);
-		await Bun.sleep(0);
+		await handle.settled();
 		expect(sent).toEqual([]);
 
 		end([assistant("final answer", 130)]);
@@ -175,13 +252,13 @@ describe("A2A reply relay", () => {
 	});
 
 	it("relays nothing from an aborted run and never relays a later run instead", async () => {
-		const { bridge, sent, end } = harness();
+		const { bridge, sent, end, handle } = harness();
 		peer(bridge, "builder");
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-1", to: "Main", at: 100 });
 
 		end([assistant("half an answer", 110, "aborted")]);
 		end([assistant("something the human asked next", 200)]);
-		await Bun.sleep(0);
+		await handle.settled();
 
 		expect(sent).toEqual([]);
 		// Still open, so a manual a2a: reply stays correlated.
@@ -189,13 +266,13 @@ describe("A2A reply relay", () => {
 	});
 
 	it("does not answer requests delivered to a subagent or relay text written before the request", async () => {
-		const { bridge, sent, end } = harness();
+		const { bridge, sent, end, handle } = harness();
 		peer(bridge, "builder");
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-sub", to: "Scout", at: 100 });
 		await IncomingRequests.global().note({ from: "builder", messageId: "req-main", to: "Main", at: 300 });
 
 		end([assistant("answer for the human, written before the request", 200)]);
-		await Bun.sleep(0);
+		await handle.settled();
 
 		expect(sent).toEqual([]);
 		expect((await IncomingRequests.global().list()).map(request => request.messageId)).toEqual([
