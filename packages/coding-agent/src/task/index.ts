@@ -93,7 +93,7 @@ import {
 	type SpawnA2aAgentResult,
 	spawnA2aAgent,
 } from "../a2a/agent-bridge";
-import { IncomingRequests } from "../a2a/incoming-requests";
+import { IncomingRequests, type IncomingRequestLease } from "../a2a/incoming-requests";
 import { OutgoingRequests } from "../a2a/outgoing-requests";
 import { TASK_STATE } from "../a2a/rpc";
 import {
@@ -2193,19 +2193,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	async #runA2aSpawn(args: A2aSpawnCall): Promise<AgentToolResult<TaskToolDetails>> {
 		const assignment = (args.params.task ?? "").trim();
+		// `a2aSpawn: true` is an explicit spawn outside incoming matching.
 		if (args.params.a2aSpawn === true) return this.#finishA2aRun(args, assignment);
-		const request = await IncomingRequests.global().consume({
+		const lease = await IncomingRequests.global().consume({
 			to: this.session.getAgentId?.() ?? MAIN_AGENT_ID,
 			from: args.agent.skillId,
 		});
-		if (request !== undefined) return this.#finishA2aRun(args, assignment, request.messageId);
+		if (lease !== undefined) return this.#finishA2aRun(args, assignment, lease);
 		return this.#awaitAddressedA2aReply(args, assignment);
 	}
 
 	async #finishA2aRun(
 		args: A2aSpawnCall,
 		assignment: string,
-		inReplyTo?: string,
+		lease?: IncomingRequestLease,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const id =
 			args.preAllocatedId ?? (await this.#outputManager().allocate(args.params.name?.trim() || generateTaskName()));
@@ -2234,16 +2235,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				progress: [progress],
 			},
 		});
-		const outcome = await spawnA2aAgent({
-			agent: args.agent,
-			prompt: assignment,
-			spawn: args.params.a2aSpawn === true,
-			fromIdentity: await this.#ownA2aIdentity(),
-			...(args.context !== undefined ? { context: args.context } : {}),
-			...(inReplyTo !== undefined ? { inReplyTo } : {}),
-			timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
-			signal: args.signal,
-		});
+		let outcome: SpawnA2aAgentResult;
+		try {
+			outcome = await spawnA2aAgent({
+				agent: args.agent,
+				prompt: assignment,
+				spawn: args.params.a2aSpawn === true,
+				fromIdentity: await this.#ownA2aIdentity(),
+				...(args.context !== undefined ? { context: args.context } : {}),
+				...(lease !== undefined ? { inReplyTo: lease.request.messageId } : {}),
+				timeoutMs: cfgA2aClientTimeoutMs.get(this.session.settings),
+				signal: args.signal,
+			});
+		} catch (error) {
+			// The transport threw before returning an outcome: release the claim
+			// so the peer's request stays open for a manual reply.
+			const reason = error instanceof Error ? error.message : String(error);
+			if (lease !== undefined) await IncomingRequests.global().release(lease.leaseId);
+			outcome = { exitCode: 1, output: reason, error: reason, state: TASK_STATE.FAILED };
+		}
+		// Acknowledge the actual send outcome: confirm only on success, release
+		// on failure, so the request is answered exactly once.
+		if (lease !== undefined) {
+			if (outcome.exitCode === 0) await IncomingRequests.global().confirm(lease.leaseId);
+			else await IncomingRequests.global().release(lease.leaseId);
+		}
 		return this.#packageA2aOutcome(args, assignment, id, outcome);
 	}
 

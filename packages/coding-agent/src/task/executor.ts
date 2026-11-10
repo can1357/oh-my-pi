@@ -3354,12 +3354,12 @@ async function relayA2aWakeTurnOutput(args: {
 		)
 			continue;
 		ids.add(messageId);
-		const request = await IncomingRequests.global().consume({ to: args.id, messageId });
-		if (!request) continue;
+		const lease = await IncomingRequests.global().consume({ to: args.id, messageId });
+		if (!lease) continue;
 		const { session } = args;
 		void sendA2aReply({
 			bridge: session.a2aBridge,
-			request,
+			lease,
 			answer,
 			identity: async () => {
 				try {

@@ -803,8 +803,8 @@ describe("A2A reply correlation", () => {
 		const incoming = IncomingRequests.global();
 		await incoming.note({ from: "peer", messageId: "first", to: "Main", at: 1 });
 		await incoming.note({ from: "peer", messageId: "second", to: "Main", at: 2 });
-		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("first");
-		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("second");
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.request.messageId).toBe("first");
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.request.messageId).toBe("second");
 		expect(await incoming.consume({ to: "Main", from: "peer" })).toBeUndefined();
 	});
 
@@ -813,10 +813,12 @@ describe("A2A reply correlation", () => {
 		for (const messageId of ["first", "second", "third"]) {
 			await incoming.note({ from: "peer", messageId, to: "Main", at: 1 });
 		}
-		expect((await incoming.consume({ to: "Main", from: "peer", messageId: "second" }))?.messageId).toBe("second");
+		expect((await incoming.consume({ to: "Main", from: "peer", messageId: "second" }))?.request.messageId).toBe(
+			"second",
+		);
 		expect(await incoming.consume({ to: "Main", from: "peer", messageId: "second" })).toBeUndefined();
 		expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["first", "third"]);
-		expect((await incoming.consume({ to: "Main", from: "peer" }))?.messageId).toBe("first");
+		expect((await incoming.consume({ to: "Main", from: "peer" }))?.request.messageId).toBe("first");
 	});
 });
 
@@ -1238,7 +1240,8 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 				agent: replyTarget!,
 				prompt: "the answer is 42",
 				fromIdentity: { name: builderName, url: remote.url },
-				inReplyTo: (await IncomingRequests.global().consume({ to: "Main", from: replyTarget!.skillId }))?.messageId,
+				inReplyTo: (await IncomingRequests.global().consume({ to: "Main", from: replyTarget!.skillId }))?.request
+					.messageId,
 			});
 			expect(reply.exitCode).toBe(0);
 			expect(senderInbox).toHaveLength(1);

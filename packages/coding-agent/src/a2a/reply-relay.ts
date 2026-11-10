@@ -27,8 +27,7 @@ import {
 	type SpawnA2aAgentResult,
 	spawnA2aAgent,
 } from "./agent-bridge";
-import { IncomingRequests } from "./incoming-requests";
-import type { A2aIncomingRequest } from "./rpc";
+import { IncomingRequests, type IncomingRequestLease } from "./incoming-requests";
 
 export interface A2aReplyRelayOptions {
 	bridge: A2aBridgeApi;
@@ -61,12 +60,13 @@ export interface SendA2aReplyOptions extends Pick<
 	A2aReplyRelayOptions,
 	"bridge" | "identity" | "rescan" | "timeoutMs" | "send"
 > {
-	request: A2aIncomingRequest;
+	/** The claim on the request being answered; settled by this send. */
+	lease: IncomingRequestLease;
 	answer: string;
 }
 
 /** Detached `sendA2aReply` operations in this thread, drained by {@link settleA2aReplies}. */
-const detachedSends = new Set<Promise<void>>();
+const detachedSends = new Set<Promise<unknown>>();
 
 /**
  * Wait until every detached A2A reply send started in this thread has
@@ -99,12 +99,18 @@ export function installA2aReplyRelay(options: A2aReplyRelayOptions): A2aReplyRel
 						settledRequests.add(request.messageId);
 						continue;
 					}
-					const consumed = await IncomingRequests.global().consume({
+					const lease = await IncomingRequests.global().consume({
 						to: MAIN_AGENT_ID,
 						from: request.from,
 						messageId: request.messageId,
 					});
-					if (consumed !== undefined) void sendA2aReply({ ...options, request: consumed, answer });
+					if (lease !== undefined) {
+						// This attempt used the request's one automatic-turn
+						// opportunity, even when the send fails and releases it:
+						// a later human turn is not a retry.
+						settledRequests.add(request.messageId);
+						void sendA2aReply({ ...options, lease, answer });
+					}
 				}
 			})
 			.catch(error => {
@@ -157,13 +163,20 @@ function findPeer(bridge: A2aBridgeApi, from: string): A2aRuntimeAgent | undefin
 }
 
 /**
- * Send a correlated reply to the peer that originated a request. The send is
- * registered in the thread's detached-send set the moment it starts, so
- * {@link settleA2aReplies} can wait for it without the callers awaiting.
+ * Send a correlated reply to the peer that originated the leased request. The
+ * send is registered in the thread's detached-send set the moment it starts,
+ * so {@link settleA2aReplies} can wait for it without the callers awaiting.
+ *
+ * The lease settles with the send: `exitCode === 0` confirms it (the request
+ * is permanently answered); any failure — no reachable peer, a nonzero exit,
+ * or a throw — releases it, so the request stays open for a manual reply.
+ * Returns whether the reply was successfully sent; `false` is never a silent
+ * successful acknowledgement.
  */
-export async function sendA2aReply(options: SendA2aReplyOptions): Promise<void> {
-	const { request, answer } = options;
-	const tracked = (async () => {
+export async function sendA2aReply(options: SendA2aReplyOptions): Promise<boolean> {
+	const { lease, answer } = options;
+	const request = lease.request;
+	const tracked = (async (): Promise<boolean> => {
 		try {
 			let peer = findPeer(options.bridge, request.from);
 			if (peer === undefined) {
@@ -172,7 +185,8 @@ export async function sendA2aReply(options: SendA2aReplyOptions): Promise<void> 
 			}
 			if (peer === undefined) {
 				logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
-				return;
+				await IncomingRequests.global().release(lease.leaseId);
+				return false;
 			}
 			const send = options.send ?? spawnA2aAgent;
 			const result = await send({
@@ -184,14 +198,20 @@ export async function sendA2aReply(options: SendA2aReplyOptions): Promise<void> 
 			});
 			if (result.exitCode !== 0) {
 				logger.warn("A2A reply relay failed", { from: request.from, error: result.error ?? result.output });
+				await IncomingRequests.global().release(lease.leaseId);
+				return false;
 			}
+			await IncomingRequests.global().confirm(lease.leaseId);
+			return true;
 		} catch (error) {
 			logger.warn("A2A reply relay failed", { from: request.from, error: String(error) });
+			await IncomingRequests.global().release(lease.leaseId);
+			return false;
 		}
 	})();
 	detachedSends.add(tracked);
 	void tracked.finally(() => {
 		detachedSends.delete(tracked);
 	});
-	await tracked;
+	return tracked;
 }

@@ -1822,6 +1822,8 @@ describe("persisted subagent revival", () => {
 			const { promise: blocked, resolve: unblock } = Promise.withResolvers<void>();
 			const { promise: called, resolve: notifyCall } = Promise.withResolvers<void>();
 			const { promise: calledTwice, resolve: notifySecondCall } = Promise.withResolvers<void>();
+			/** Switched on by a test: every RPC answers with a JSON-RPC error, so the send fails. */
+			let failRpc = false;
 			const server = Bun.serve({
 				hostname: "127.0.0.1",
 				port: 0,
@@ -1834,6 +1836,8 @@ describe("persisted subagent revival", () => {
 					calls.push(body);
 					notifyCall();
 					if (calls.length === 2) notifySecondCall();
+					if (failRpc)
+						return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32000, message: "boom" } });
 					if (blockSend) await blocked;
 					return Response.json({
 						jsonrpc: "2.0",
@@ -1870,7 +1874,19 @@ describe("persisted subagent revival", () => {
 				handle.setLastAssistantStop(stop);
 				await complete?.();
 			};
-			return { ref, handle, calls, server, busSend, note, finish, called, calledTwice, unblock };
+			return {
+				ref,
+				handle,
+				calls,
+				server,
+				busSend,
+				note,
+				finish,
+				called,
+				calledTwice,
+				unblock,
+				fail: () => (failRpc = true),
+			};
 		}
 
 		it("sends an external wake answer to the peer without relaying to the pseudo-sender", async () => {
@@ -1965,16 +1981,41 @@ describe("persisted subagent revival", () => {
 			}
 		});
 
-		it("does not automatically answer a request explicitly consumed during the wake", async () => {
+		it("does not automatically answer a request explicitly claimed during the wake", async () => {
 			const h = await externalHarness();
 			try {
 				await h.note("req-1");
 				await h.finish([externalRecord("req-1")], undefined, async () => {
-					await IncomingRequests.global().consume({ to: h.ref.id, from: "peer", messageId: "req-1" });
+					// An explicit task-tool claim leases the request while the
+					// turn is live; the automatic relay must not take it back.
+					const lease = await IncomingRequests.global().consume({
+						to: h.ref.id,
+						from: "peer",
+						messageId: "req-1",
+					});
+					expect(lease?.request.messageId).toBe("req-1");
 				});
 				await settleA2aReplies();
 				expect(h.calls).toEqual([]);
 				expect(h.busSend.mock.calls.some(([message]) => message.to === "a2a")).toBe(false);
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("keeps a failed automatic answer open for a manual reply", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				// The peer accepts the connection but answers with a JSON-RPC
+				// error, so the send fails and the lease must be released.
+				h.fail();
+				await h.finish([externalRecord("req-1")]);
+				await h.called;
+				await settleA2aReplies();
+				expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
+					"req-1",
+				]);
 			} finally {
 				h.server.stop(true);
 			}

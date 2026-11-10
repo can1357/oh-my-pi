@@ -55,11 +55,15 @@ on demand:
    answer. Use `wait` on that job to receive the correlated reply.
    The addressed agent can explicitly reply by spawning `a2a:<sender>` with
    the task tool; otherwise Main can relay its final text, and a subagent can
-   relay its wake-turn published output or final text. Failed, aborted, or empty
-   turns leave the request open for an explicit reply. The process-wide incoming
-   ledger covers Main, subagents, and worker links; only the addressed agent
-   can claim its request. Automatic relays atomically claim before sending
-   detached, so remote transport does not hold up turn settlement.
+   relay its wake-turn published output or final text. Claiming a request is
+   temporary: it is confirmed only when the reply send succeeds and released
+   otherwise, so failed, aborted, or empty turns leave the request open for an
+   explicit reply. A worker lost with an unacknowledged claim reopens exactly
+   its requests; no exactly-once delivery across network or acknowledgement
+   failure is promised. The process-wide incoming ledger covers Main,
+   subagents, and worker links; only the addressed agent can claim its request.
+   Automatic relays atomically claim before sending detached, so remote
+   transport does not hold up turn settlement.
 
 Terminals that start later become visible on demand: a bare `read agent://`
 roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced
@@ -110,10 +114,16 @@ A spawn of `a2a:<name>` goes through the task tool like any agent:
    A subagent must `wait` on its reply job before its run ends; otherwise the
    job is cancelled and a late reply arrives at Main over IRC.
 
-An explicit task-tool reply consumes the outstanding request addressed to that
-agent from that peer and attaches `metadata.inReplyTo`. Set `a2aSpawn: true`
-to spawn a new remote agent instead: this bypasses reply matching and follows
-the remote task's result rather than opening an addressed reply job.
+An explicit task-tool reply claims the outstanding request addressed to that
+agent from that peer and attaches `metadata.inReplyTo`. The claim is a
+temporary lease: it is acknowledged only when the reply send actually succeeds,
+and released back to its original position when the send fails, throws, or the
+claiming worker is lost, so a failed attempt never strands the request. Set
+`a2aSpawn: true` to spawn a new remote agent instead: this bypasses reply
+matching entirely and follows the remote task's result rather than opening an
+addressed reply job. There is no exactly-once delivery guarantee across
+network or acknowledgement failure: a worker lost after the peer accepted the
+reply but before the local acknowledgement can leave the request reopened.
 
 For remote spawns, task states follow the A2A task model: `SUBMITTED` ->
 `WORKING` -> `COMPLETED`/`FAILED` (via `GetTask` polling or SSE updates).

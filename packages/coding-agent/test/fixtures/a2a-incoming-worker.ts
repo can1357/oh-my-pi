@@ -1,5 +1,9 @@
 import { MessagePort, parentPort } from "node:worker_threads";
-import { IncomingRequests, type IncomingRequestMatch } from "../../src/a2a/incoming-requests";
+import {
+	IncomingRequests,
+	type IncomingRequestLease,
+	type IncomingRequestMatch,
+} from "../../src/a2a/incoming-requests";
 import type { A2aIncomingRequest } from "../../src/a2a/rpc";
 import { loadedModulesChangedSince } from "../../src/thread/code-skew";
 import { isThreadId, setCurrentThreadId } from "../../src/thread/identity";
@@ -10,7 +14,9 @@ import { a2aIncomingThreadService } from "../../src/thread/services/a2a-incoming
 
 export interface IncomingProbe {
 	note(request: A2aIncomingRequest): Promise<void>;
-	consume(match: IncomingRequestMatch): Promise<A2aIncomingRequest | undefined>;
+	consume(match: IncomingRequestMatch): Promise<IncomingRequestLease | undefined>;
+	confirm(leaseId: string): Promise<boolean>;
+	release(leaseId: string): Promise<boolean>;
 	list(to?: string): Promise<A2aIncomingRequest[]>;
 }
 
@@ -24,6 +30,8 @@ if (!port) throw new Error("fixture must run in a worker");
 const probe: IncomingProbe = {
 	note: request => IncomingRequests.global().note(request),
 	consume: match => IncomingRequests.global().consume(match),
+	confirm: leaseId => IncomingRequests.global().confirm(leaseId),
+	release: leaseId => IncomingRequests.global().release(leaseId),
 	list: to => IncomingRequests.global().list(to),
 };
 const probeService: ThreadService = {
@@ -68,7 +76,10 @@ port.on("message", (message: unknown) => {
 			},
 			{
 				name: `${message.threadId}↔main`,
-				sync: { port: message.replyPort, counter: new Int32Array(message.counter) },
+				sync: {
+					port: message.replyPort,
+					counter: new Int32Array(message.counter),
+				},
 			},
 		);
 		for (const service of services) service.installWorker?.(link);
