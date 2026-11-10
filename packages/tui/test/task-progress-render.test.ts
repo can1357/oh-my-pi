@@ -623,6 +623,26 @@ describe("task progress rendering", () => {
 			`${agentColored("DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ":")} ${theme.fg("text", "List workspace packages")}`,
 		);
 		expect(row).not.toContain(theme.fg("accent", "List workspace packages"));
+
+		// The settled result row keeps the same name colour.
+		const resultRow = findRow(
+			taskToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						projectAgentsDir: null,
+						totalDurationMs: 0,
+						results: [finishedResult({ id: "DonePkg", description: "List workspace packages" })],
+					},
+				},
+				{ expanded: false, isPartial: false },
+				theme,
+			),
+			"DonePkg",
+		);
+		expect(resultRow).toContain(
+			`${agentColored("DonePkg", theme.bold("DonePkg"))}${theme.fg("text", ": List workspace packages")}`,
+		);
 	});
 
 	it("keeps a frozen snapshot of a live row dim instead of its identity colour", async () => {

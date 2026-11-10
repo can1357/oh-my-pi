@@ -35,6 +35,10 @@
 - The `/resume` picker deletes sessions through the `app.session.delete` action (default Backspace or Delete) and shows its keys in the hints, so `keybindings.yml` can replace the shortcut, for example with Ctrl+D, or disable it with `[]`; a bound key that also deletes backward, such as Backspace or Ctrl+W, still edits a typed search query ([#17938](https://github.com/can1357/oh-my-pi/issues/17938), [#18961](https://github.com/can1357/oh-my-pi/pull/18961) by [@wolfiesch](https://github.com/wolfiesch))
 - Typing `/job` lists the `jobs` command first again instead of jumping whole-hyphen-segment skill matches like `skill:…-job-…` above it: inner-segment skill hits now tie (rather than outrank) command-prefix matches, so the tie keeps the popup command-first ([#18891](https://github.com/can1357/oh-my-pi/issues/18891), [#18916](https://github.com/can1357/oh-my-pi/pull/18916) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Added
+
+- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main is blue, and each subagent keeps the same one of six other colours in both places, live or finished
+
 ## [18.19.0] - 2026-11-12
 
 ### Added
@@ -76,10 +80,6 @@
 ## [18.18.8] - 2026-11-11
 
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-### Added
-
-- Agent names in Task tool rows and the agent hub take a colour of their own in the terminal UI (Tern's native view keeps its styling): Main is blue and every subagent keeps the same one of six other colours wherever it appears
 
 ### Changed
 
