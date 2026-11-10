@@ -185,6 +185,48 @@
 		"waitForSelector",
 		"screenshot",
 	];
+	// `console()` and `errors()` answer `{ entries, nextSeq, dropped }`; array methods, `length` and
+	// iteration on it say to read `.entries` instead of failing with "is not a function" or `undefined`.
+	const arrayMembers = [
+		"slice",
+		"filter",
+		"map",
+		"forEach",
+		"find",
+		"findLast",
+		"some",
+		"every",
+		"reduce",
+		"at",
+		"includes",
+		"join",
+		"flatMap",
+	];
+	const captureResult = (method, result) => {
+		if (result === null || typeof result !== "object" || !Array.isArray(result.entries)) return result;
+		const readEntries = member =>
+			new TypeError(
+				`tab.${method}() returns { entries, nextSeq, dropped }, not an array, so it has no ${member}; read its entries: (await tab.${method}()).entries${member.startsWith(".") ? member : ""}`,
+			);
+		for (const member of arrayMembers) {
+			Object.defineProperty(result, member, {
+				value: () => {
+					throw readEntries(`.${member}()`);
+				},
+			});
+		}
+		Object.defineProperty(result, "length", {
+			get: () => {
+				throw readEntries(".length");
+			},
+		});
+		Object.defineProperty(result, Symbol.iterator, {
+			value: () => {
+				throw readEntries("iterator");
+			},
+		});
+		return result;
+	};
 	const makeElement = (name, handleMethod, handleArgs) => {
 		const element = {};
 		const renderedArgs = handleArgs.map(value => JSON.stringify(value)).join(", ");
@@ -216,6 +258,10 @@
 		tab.toString = () => `<tab ${name}>`;
 		for (const method of directMethods) {
 			tab[method] = (...args) => callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]);
+		}
+		for (const method of ["console", "errors"]) {
+			tab[method] = async (...args) =>
+				captureResult(method, await callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]));
 		}
 		tab.id = id => makeElement(name, "id", encodeArgs("tab helper argument", [id]));
 		tab.ref = id => makeElement(name, "ref", encodeArgs("tab helper argument", [id]));

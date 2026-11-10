@@ -51,6 +51,8 @@ function responseFor(parameters: unknown): FacadeResponse {
 			waitForSelector: true,
 			id: true,
 			ref: true,
+			console: { entries: [{ seq: 1, type: "console", level: "warn", text: "low disk" }], nextSeq: 2, dropped: 0 },
+			errors: { entries: [], nextSeq: 2, dropped: 0 },
 		};
 		return { text: "", details: { value: method === undefined ? undefined : values[method] } };
 	}
@@ -244,6 +246,34 @@ describe("browser JavaScript facade", () => {
 		expect(message).not.toContain("{ url");
 		expect(calls).toEqual([]);
 	});
+
+	it("tells console() and errors() callers that treat the result as an array to read .entries", async () => {
+		const { context } = recordingFacade();
+		runInContext('globalThis.tab = browser.tab("docs");', context);
+
+		for (const use of [
+			"(await tab.console()).slice(-20)",
+			"(await tab.console()).filter(entry => entry.level === 'warn')",
+			"(await tab.console()).length",
+			"[...(await tab.console())]",
+		]) {
+			await expect(runInContext(`(async () => ${use})()`, context)).rejects.toThrow(
+				"tab.console() returns { entries, nextSeq, dropped }, not an array",
+			);
+		}
+		await expect(
+			runInContext("(async () => (await tab.console()).map(entry => entry.text))()", context),
+		).rejects.toThrow("read its entries: (await tab.console()).entries.map()");
+		await expect(runInContext("(async () => (await tab.errors()).slice(0, 5))()", context)).rejects.toThrow(
+			"tab.errors() returns { entries, nextSeq, dropped }, not an array",
+		);
+		expect(
+			await runInContext("(async () => (await tab.console()).entries.map(entry => entry.text))()", context),
+		).toEqual(["low disk"]);
+		expect(await runInContext("(async () => JSON.stringify(await tab.console()))()", context)).toBe(
+			'{"entries":[{"seq":1,"type":"console","level":"warn","text":"low disk"}],"nextSeq":2,"dropped":0}',
+		);
+	});
 });
 
 describe("browser facade in real Eval runtimes", () => {
@@ -260,6 +290,7 @@ describe("browser facade in real Eval runtimes", () => {
 				'print(await tab.id(5).fill("Grace"));',
 				'print(await tab.evaluate(value => value.length, "abc", /a/i));',
 				"print(await tab.run((_scope, count) => count + 1, { args: [7] }));",
+				"print(await tab.console());",
 			].join("\n"),
 			{ cwd: process.cwd(), sessionId: `browser-facade-js-${crypto.randomUUID()}`, session },
 		);
@@ -272,6 +303,7 @@ describe("browser facade in real Eval runtimes", () => {
 			"true",
 			"9",
 			"8",
+			"{ entries: [ { seq: 1, type: 'console', level: 'warn', text: 'low disk' } ], nextSeq: 2, dropped: 0 }",
 		]);
 		expect(calls).toContainEqual({
 			action: "call",
