@@ -2772,6 +2772,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
+			getContextRevision: () => session?.agent.messagesRevision ?? 0,
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),

@@ -534,6 +534,8 @@ export interface ToolSession {
 	 * the lines still in it (whatever a compaction, prune, clear or branch move took out does not count).
 	 */
 	getContextMessages?: () => readonly Message[];
+	/** Changes whenever the model's context loses or replaces messages (compaction, prune, rewind, load, clear). */
+	getContextRevision?: () => number;
 	/** The Spotlight experiment's handle on this session; present only while `spotlight.experiment.enabled`. */
 	spotlight?: SpotlightSession;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

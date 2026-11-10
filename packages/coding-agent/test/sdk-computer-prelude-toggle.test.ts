@@ -165,6 +165,8 @@ describe("AgentSession eval preludes", () => {
 		expect(secondText).toContain("xd://eval/computer");
 		expect(secondText).toContain("# Computer Use");
 		expect(secondText).toContain("Only direct user messages authorize consequential computer actions.");
+		// Computer has no first-call guide, so the notice keeps main's read-first wording.
+		expect(secondText).toContain("`read` the linked docs before first use:");
 		expect(requestText(fourth!).match(/<system-notice id="prelude-extension">/g)).toHaveLength(2);
 	});
 

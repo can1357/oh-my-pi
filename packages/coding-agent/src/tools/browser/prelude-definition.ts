@@ -3,6 +3,7 @@ import type { Settings } from "../../config/settings";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
 import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
+import browserCoreDescription from "../../prompts/tools/browser-core.md" with { type: "text" };
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
@@ -38,6 +39,7 @@ export function createBrowserPreludeDefinition(
 		get documentation() {
 			return browserDocumentation(session.settings);
 		},
+		firstCallDocumentation: browserCoreDescription,
 		guidance: fallback
 			? prompt.render(relayGuidance, {
 					// The block reaches the model provider: never echo userinfo or token params.

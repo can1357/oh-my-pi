@@ -2070,11 +2070,17 @@ export class SessionTools {
 		// Topic docs are served through `read`; sessions without it get them inline,
 		// matching the eval description's `inlineTopics` fallback.
 		const canRead = this.getActiveToolNames().includes("read");
+		const entries = added.map(definition => ({
+			name: definition.name,
+			summary: evalPreludeSummary(definition),
+			firstCall: canRead && Boolean(definition.firstCallDocumentation?.trim()),
+		}));
 		return {
 			role: "custom",
 			customType: EVAL_PRELUDE_NOTICE_MESSAGE_TYPE,
 			content: prompt.render(evalPreludeNoticePrompt, {
-				added: added.map(definition => ({ name: definition.name, summary: evalPreludeSummary(definition) })),
+				added: entries,
+				anyFirstCall: entries.some(entry => entry.firstCall),
 				removed,
 				canRead,
 				sections: added.flatMap(definition => [

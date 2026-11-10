@@ -229,6 +229,25 @@ describe("eval tool description", () => {
 		expect(withoutRead.description).not.toContain("<fixture>");
 		expect(withoutRead.description).not.toContain("xd://eval/fixture");
 	});
+
+	it("lists a prelude with a first-call guide apart from the read-first docs, without the guide", () => {
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "Fixture summary line.\n\nFULL PRELUDE DOCUMENTATION",
+			firstCallDocumentation: "FIRST CALL GUIDE",
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const description = new EvalTool(makeSession({ preludes: () => [prelude] })).description;
+		const [readFirst, firstCall] = description.split("No `read` needed before first use");
+		expect(readFirst).not.toContain("xd://eval/fixture");
+		expect(firstCall).toContain("xd://eval/fixture");
+		expect(description).not.toContain("FIRST CALL GUIDE");
+	});
 });
 
 describe("eval tool dynamic schema", () => {

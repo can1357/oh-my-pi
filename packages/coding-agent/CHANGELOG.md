@@ -252,6 +252,10 @@
 - Isolated tasks that edit a file whose name contains spaces now commit that file, including in a nested git repository, instead of leaving it unstaged or committing a different file that shares part of the name ([#18715](https://github.com/can1357/oh-my-pi/pull/18715) by [@eggpeat](https://github.com/eggpeat))
 - A disposed or switched session now releases every persistent shell it owns, including the ones a surface keeps under a name of its own (`/loop` conditions), instead of holding one native shell per surface for the life of the process ([#18717](https://github.com/can1357/oh-my-pi/pull/18717) by [@eggpeat](https://github.com/eggpeat))
 
+### Changed
+
+- Browser tasks start without reading `xd://eval/browser`: the first browser call of a conversation returns a short browser guide (helpers with their signatures, selector forms, the re-observe rule) with its output, and `xd://eval/browser` still holds the full guide
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
