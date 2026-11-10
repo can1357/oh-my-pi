@@ -1,6 +1,8 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { MessageDividerComponent } from "../chrome/message-divider";
+import { sanitizeStatusText } from "../chrome/shared";
+import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { theme } from "../theme";
 
 /** A turn whose response provably came from a different model than was requested. */
@@ -69,6 +71,18 @@ export class ServedModelTracker {
 }
 
 /**
+ * Either id can be host-chosen text rather than ours: an OpenAI-compatible host
+ * answers `chunk.model` with an absolute checkpoint path, and an aggregator names
+ * its upstream in free-form `provider` text. This label is painted inside the
+ * transcript, where an escape sequence would move the cursor and a home path would
+ * be exposed, so it goes through the same sanitizer, home shortening and width cap
+ * the status line applies to host-reported strings.
+ */
+function hostLabel(value: string): string {
+	return truncateToWidth(shortenPath(sanitizeStatusText(value)), TRUNCATE_LENGTHS.TITLE);
+}
+
+/**
  * Slim left-aligned divider rendered after the first assistant turn whose
  * response came from a different model than requested. Same shape as the
  * cache-miss divider, in the warning color:
@@ -80,8 +94,10 @@ export class ServedModelMarkerComponent extends MessageDividerComponent {
 		super({
 			label: () => {
 				const dot = theme.sep.dot.trim();
-				const via = info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider;
-				return `${theme.status.warning} served ${info.served} ${dot} requested ${info.requested} ${dot} via ${via}`;
+				const served = hostLabel(info.served);
+				const requested = hostLabel(info.requested);
+				const via = hostLabel(info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider);
+				return `${theme.status.warning} served ${served} ${dot} requested ${requested} ${dot} via ${via}`;
 			},
 			labelColor: "warning",
 			ruleColor: "dim",
@@ -90,8 +106,12 @@ export class ServedModelMarkerComponent extends MessageDividerComponent {
 			native: {
 				icon: "warn",
 				label: () => {
-					const via = info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider;
-					return `Served ${info.served} · requested ${info.requested} · via ${via}`;
+					const served = hostLabel(info.served);
+					const requested = hostLabel(info.requested);
+					const via = hostLabel(
+						info.upstreamProvider ? `${info.provider}/${info.upstreamProvider}` : info.provider,
+					);
+					return `Served ${served} · requested ${requested} · via ${via}`;
 				},
 			},
 		});
