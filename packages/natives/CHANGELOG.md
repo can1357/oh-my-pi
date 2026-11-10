@@ -4,12 +4,13 @@
 
 ### Breaking Changes
 
-- Embedded-shell Frames snapshots use layout 31; execution saved by layout 29 or layout 30 cannot resume after upgrading. Restore refuses such an image without deleting the snapshot; with the same magic and IR version, explicitly dropping frames preserves root state but abandons running scripts with status 255.
+- Embedded-shell Frames snapshots use layout 31; execution saved by layout 29 or layout 30 cannot resume after upgrading. Restore refuses such an image without deleting the snapshot; with the same magic and IR version, explicitly dropping frames preserves root state but abandons running scripts with status 255. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
 - Shell snapshots and both restore modes report native process identifiers even after their virtual owner ends; cancelling the whole shell also ends those retained programs, except the ones a detached (`nohup`) owner started, which run on as they do while their owner lives. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 - Shell restore now refuses an incompatible engine image before reading state-store records; dropping frames cannot bypass a different IR record schema. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
+- Pausing the whole shell now stops the native programs it retained after their virtual owner ended, including those a detached (`nohup`) owner started, and resuming it continues them; before, such a program kept running and producing output while the shell reported itself paused. ([#18212](https://github.com/can1357/oh-my-pi/pull/18212) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.18.2] - 2026-11-08
 
