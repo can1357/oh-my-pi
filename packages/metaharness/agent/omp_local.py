@@ -17,7 +17,8 @@ this runs the working tree at `/work/pi`. Install modes (`OMP_BENCH_INSTALL`):
 Auth never enters the container: a generated `~/.omp/agent/models.yml` routes the
 configured providers' `baseUrl` at the host's pm2 auth-gateway (default
 `http://host.docker.internal:4000`, `transport: pi-native`), so the gateway
-resolves credentials host-side. No provider API keys are passed in.
+resolves credentials host-side. No provider API keys are passed in; the gateway
+token reaches omp as a mode 0600 file (`_GATEWAY_TOKEN_FILE`) that models.yml reads.
 
 All knobs come from environment variables the runner sets on the `harbor` process
 (see `OMP_BENCH_*` below); the agent reads them from `os.environ` directly.
@@ -31,7 +32,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import secrets
 import shlex
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import override
@@ -128,6 +132,79 @@ _OUTPUT_FILENAME = "omp.txt"
 # grades those services, so keep them alive until the container is torn down.
 _SERVICE_GRACE_ENV = {"OMP_DAEMON_IDLE_GRACE_MS": str(24 * 60 * 60 * 1000)}
 
+# Gateway mode: the gateway token is written to this file under $HOME (mode 0600),
+# and every provider's models.yml `apiKey` is a fixed command that reads it. omp
+# runs an `apiKey` that starts with `!` as a shell command, so the token never goes
+# into models.yml; and it never goes into omp's environment, which every process
+# omp starts would inherit. Must match `src/gateway-models.ts`.
+_GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token"
+_GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.omp/agent/gateway-token"'
+_TOKEN_DST = "/tmp/omp-gateway-token"
+
+# Variables the gateway token travels in on the host; none may reach the agent's
+# own environment. Must match `refuseGatewayTokenInEnv` in `src/gateway-models.ts`.
+_GATEWAY_TOKEN_VARS = ("METAHARNESS_GATEWAY_TOKEN", "OMP_BENCH_GATEWAY_TOKEN")
+
+
+def _strings(value: object):
+    """Every string a decoded JSON value holds, keys included; numbers as their text."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, bool | int | float):
+        yield json.dumps(value)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+
+
+def _decoded(raw: str):
+    """`raw` and, if it is JSON, every string it decodes to (escapes such as \\u0074 resolved)."""
+    yield raw
+    try:
+        yield from _strings(json.loads(raw))
+    except ValueError:
+        pass
+
+
+def _supplied_gateway_token() -> str:
+    """The gateway token from the private file OMP_BENCH_GATEWAY_TOKEN_FILE names ("" if none).
+
+    The runner never puts the token itself in Harbor's environment: Harbor expands
+    `${NAME}` from that environment in task files, so a task could name it.
+    """
+    path = _env("OMP_BENCH_GATEWAY_TOKEN_FILE")
+    return Path(path).read_text(encoding="utf-8") if path else ""
+
+
+def _refuse_gateway_token_in_inputs(forward_env: dict[str, str], token: str) -> None:
+    """Refuse agent inputs that would carry the gateway token anywhere but its private file.
+
+    Forwarded env reaches the agent's environment, which every process the agent starts
+    inherits; every other OMP_BENCH_* input (settings, agent arguments, providers, ...)
+    ends up in a generated file or the agent's launch command. Each input is checked as
+    the agent will decode it, against the token as supplied; only "no-auth", the open
+    gateway, is no secret. No message repeats a name that holds the token.
+    Must match `refuseGatewayTokenIn` in `src/gateway-models.ts`.
+    """
+    secret = token not in ("", "no-auth")
+    for name, value in forward_env.items():
+        if name in _GATEWAY_TOKEN_VARS or (secret and (token in name or token in value)):
+            shown = "A forwarded variable" if secret and token in name else name
+            raise ValueError(f"{shown} names or holds the gateway token, which must not reach the agent's environment")
+    if not secret:
+        return
+    for name, value in os.environ.items():
+        if not name.startswith("OMP_BENCH_"):
+            continue
+        if token in name:
+            raise ValueError("An OMP_BENCH_* variable has the gateway token in its name")
+        if any(token in text for text in _decoded(value)):
+            raise ValueError(f"{name} holds the gateway token, which must reach the agent only through its private file")
+
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
     "amazon-bedrock": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
@@ -160,20 +237,59 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _yaml(tree: dict, indent: int = 0) -> str:
-    """Render a nested dict of scalars/lists as YAML (config.yml subset; no anchors or multiline strings)."""
-    pad = "  " * indent
-    out: list[str] = []
-    for key, value in tree.items():
-        if isinstance(value, dict):
-            out.append(f"{pad}{key}:")
-            out.append(_yaml(value, indent + 1))
-        elif isinstance(value, list):
-            out.append(f"{pad}{key}:")
-            out.extend(f"{pad}  - {json.dumps(item)}" for item in value)
-        else:
-            out.append(f"{pad}{key}: {json.dumps(value)}")
-    return "\n".join(out)
+def _yaml_document(comment: str, tree: dict) -> str:
+    """Serialize `tree` for a config.yml/models.yml reader.
+
+    JSON is YAML 1.2, and `json.dumps` quotes every key and value, so no
+    caller-supplied provider id, URL or setting key can add or change structure.
+    """
+    return f"# {comment}\n{json.dumps(tree, indent=2)}\n"
+
+
+async def _place_file(agent, environment: BaseEnvironment, content: str, staging: str, home_relative: str) -> None:
+    """Put `content` at `$HOME/<home_relative>` for the agent user, mode 0600.
+
+    The agent user makes a private staging directory (`mktemp -d`, mode 0700) and the
+    upload lands in it under an unpredictable name, mode 0600, owned by whatever user
+    Harbor uploads as; no other container user can reach it. Root only hands that one
+    file to the agent user (`chown -h`, which never follows a link); the agent user
+    copies it into its own home and replaces the target by rename. The content never
+    becomes shell text, and root never writes to an existing path. The agent user owns
+    the staging directory, so it removes it with everything in it on every path, also
+    when nothing can run as root; root removes it only if the agent user cannot.
+    """
+    made = await agent.exec_as_agent(environment, command=f"mktemp -d {shlex.quote(staging)}-XXXXXXXXXX")
+    stage_dir = (made.stdout or "").strip()
+    if not re.fullmatch(re.escape(staging) + r"-[A-Za-z0-9]{10}", stage_dir):
+        raise RuntimeError(f"mktemp gave an unexpected staging directory: {stage_dir!r}")
+    staged_path = f"{stage_dir}/{secrets.token_hex(8)}"
+    staged = shlex.quote(staged_path)
+    target = f'"$HOME/{home_relative}"'
+    partial = f'"$HOME/{home_relative}.partial"'
+    try:
+        owner = (await agent.exec_as_agent(environment, command='printf %s:%s "$(id -u)" "$(id -g)"')).stdout.strip()
+        if not re.fullmatch(r"\d+:\d+", owner):
+            raise RuntimeError(f"could not read the agent user's uid:gid (got {owner!r})")
+        with tempfile.TemporaryDirectory(prefix="omp-bench-") as tmp:
+            source = Path(tmp) / "content"
+            source.write_text(content, encoding="utf-8")
+            source.chmod(0o600)
+            await environment.upload_file(str(source), staged_path)
+        await agent.exec_as_root(environment, command=f"chown -h {owner} {staged}")
+        await agent.exec_as_agent(
+            environment,
+            command=(
+                f'umask 077 && mkdir -p "$(dirname {target})" && rm -f {partial} && '
+                f"cat {staged} > {partial} && rm -f {target} && mv -f {partial} {target}"
+            ),
+        )
+    finally:
+        for run in (agent.exec_as_agent, agent.exec_as_root):
+            try:
+                await run(environment, command=f"rm -rf {shlex.quote(stage_dir)}")
+            except Exception:  # noqa: BLE001 - best-effort cleanup; the first error is the one to report
+                continue
+            break
 
 
 def _loads(line: str) -> dict | None:
@@ -227,7 +343,8 @@ class OmpLocal(BaseInstalledAgent):
         self._gateway_url = _env(
             "OMP_BENCH_GATEWAY_URL", "http://host.docker.internal:4000"
         )
-        self._gateway_token = _env("OMP_BENCH_GATEWAY_TOKEN", "no-auth-dummy")
+        supplied_token = _supplied_gateway_token()
+        self._gateway_token = supplied_token or "no-auth-dummy"
         self._gateway_providers = [
             p.strip()
             for p in _env(
@@ -255,6 +372,7 @@ class OmpLocal(BaseInstalledAgent):
         # Extra env (PI_* dialect knobs, explicit --env) the runner forwards into
         # the in-container omp run, JSON-encoded in OMP_BENCH_FORWARD_ENV.
         self._forward_env = self._parse_forward_env()
+        _refuse_gateway_token_in_inputs(self._forward_env, supplied_token)
         # Source-mount paths (defaults must match the runner's compose overlay).
         self._source_dir = _env("OMP_BENCH_SOURCE_DIR", "/opt/omp/src")
         self._source_bun = _env("OMP_BENCH_SOURCE_BUN", "/opt/omp/bin/bun")
@@ -299,7 +417,7 @@ class OmpLocal(BaseInstalledAgent):
         bun_dir = os.path.dirname(self._bun)
         return (
             f"export BUN_INSTALL={shlex.quote(self._home + '/.bun')}; "
-            f'export PATH="{bun_dir}:$PATH"; '
+            f'export PATH={shlex.quote(bun_dir)}:"$PATH"; '
             f"{command}"
         )
 
@@ -339,7 +457,7 @@ class OmpLocal(BaseInstalledAgent):
                 command=(
                     "set -e; "
                     f"export BUN_INSTALL={shlex.quote(self._home + '/.bun')}; "
-                    f'curl -fsSL https://bun.sh/install | bash -s "bun-v{self._bun_version}"; '
+                    f"curl -fsSL https://bun.sh/install | bash -s {shlex.quote('bun-v' + self._bun_version)}; "
                     f"{shlex.quote(self._home + '/.bun/bin/bun')} --version"
                 ),
             )
@@ -468,37 +586,30 @@ class OmpLocal(BaseInstalledAgent):
 
     async def _write_models_yaml(self, environment: BaseEnvironment) -> None:
         if self._models_yaml_path and os.path.isfile(self._models_yaml_path):
-            await environment.upload_file(self._models_yaml_path, _MODELS_DST)
-            staged = _MODELS_DST
+            models = Path(self._models_yaml_path).read_text(encoding="utf-8")
         else:
-            content = self._generate_models_yaml()
-            staged = _MODELS_DST
-            heredoc = (
-                f"cat > {_MODELS_DST} <<'OMP_MODELS_EOF'\n{content}\nOMP_MODELS_EOF"
-            )
-            await self.exec_as_agent(environment, command=heredoc)
-        await self.exec_as_agent(
-            environment,
-            command=(
-                f'mkdir -p "$HOME/.omp/agent"; '
-                f'cp {shlex.quote(staged)} "$HOME/.omp/agent/models.yml"'
-            ),
-        )
+            models = self._generate_models_yaml()
+        await _place_file(self, environment, models, _MODELS_DST, ".omp/agent/models.yml")
+        await _place_file(self, environment, self._gateway_token, _TOKEN_DST, _GATEWAY_TOKEN_FILE)
 
     def _generate_models_yaml(self) -> str:
-        lines = [
-            "# Generated by metaharness runner — routes auth via host gateway.",
-            "providers:",
-        ]
-        for provider in self._gateway_providers:
-            lines += [
-                f"  {provider}:",
-                f"    baseUrl: {self._gateway_url}",
-                "    auth: oauth",
-                "    transport: pi-native",
-                f"    apiKey: {self._gateway_token}",
-            ]
-        return "\n".join(lines)
+        # Bun's YAML reader, which omp uses, expands a `<<` key as a merge key even
+        # when quoted; every other key reads back unchanged. Must match `src/gateway-models.ts`.
+        if "<<" in self._gateway_providers:
+            raise ValueError('gateway provider id "<<" is the YAML merge key, which omp cannot read as a provider id')
+        providers = {
+            provider: {
+                "baseUrl": self._gateway_url,
+                "auth": "oauth",
+                "transport": "pi-native",
+                "apiKey": _GATEWAY_TOKEN_API_KEY,
+            }
+            for provider in self._gateway_providers
+        }
+        return _yaml_document(
+            "Generated by metaharness runner — routes auth via host gateway.",
+            {"providers": providers},
+        )
 
     async def _write_config(self, environment: BaseEnvironment) -> None:
         """Write $HOME/.omp/agent/config.yml: the web_search and find toggles.
@@ -519,15 +630,12 @@ class OmpLocal(BaseInstalledAgent):
                 if not isinstance(node, dict):
                     raise ValueError(f"setting {dotted!r} conflicts with a scalar parent")
             node[parts[-1]] = value
-        content = "# Generated by metaharness runner.\n" + _yaml(tree)
-        heredoc = f"cat > {_CONFIG_DST} <<'OMP_CONFIG_EOF'\n{content}\nOMP_CONFIG_EOF"
-        await self.exec_as_agent(environment, command=heredoc)
-        await self.exec_as_agent(
+        await _place_file(
+            self,
             environment,
-            command=(
-                f'mkdir -p "$HOME/.omp/agent"; '
-                f'cp {shlex.quote(_CONFIG_DST)} "$HOME/.omp/agent/config.yml"'
-            ),
+            _yaml_document("Generated by metaharness runner.", tree),
+            _CONFIG_DST,
+            ".omp/agent/config.yml",
         )
 
     @staticmethod
@@ -613,7 +721,7 @@ class OmpLocal(BaseInstalledAgent):
         # Exec env for the omp run: the service grace first, then direct-auth
         # (no-gateway) mode's selected providers' keys (via exec env, never
         # argv); forwarded PI_* / --env knobs apply last so an explicit --env
-        # always wins.
+        # always wins. Gateway mode adds nothing: omp reads the token from its file.
         run_env: dict[str, str] = dict(_SERVICE_GRACE_ENV)
         if not self._gateway_on:
             run_env.update(self._collect_provider_keys(provider))

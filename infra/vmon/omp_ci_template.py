@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -115,7 +116,11 @@ def xwin_download(sha: str) -> str:
     repositories splat, before the checkout. The script only names the xwin
     pins, so vmon's step cache keeps this layer across template rebuilds
     until bazel/toolchains/msvc/sysroot.bzl or MODULE.bazel change them; the
-    Bazel warm-up below then splats from the cache without the CDN."""
+    Bazel warm-up below then splats from the cache without the CDN.
+
+    Every pin read from those two files is one shell word (`shlex.quote`):
+    the files come from the built ref, so unquoted text there would run as a
+    command while the template builds."""
     bzl = fetch(f"{RAW_URL}/{sha}/bazel/toolchains/msvc/sysroot.bzl")
     module = fetch(f"{RAW_URL}/{sha}/MODULE.bazel")
     version = pin(r'_XWIN_VERSION = "([^"]+)"', bzl)
@@ -127,21 +132,25 @@ def xwin_download(sha: str) -> str:
         arch = re.search(r'arch = "([^"]+)"', call)
         sdk = re.search(r'sdk_version = "([^"]+)"', call)
         downloads.append(
-            f"retry xwin --accept-license --arch {arch[1] if arch else 'x86_64'}"
-            f" --variant desktop --manifest-version {manifest}"
-            + (f" --sdk-version {sdk[1]}" if sdk else "")
+            f"retry xwin --accept-license --arch {shlex.quote(arch[1] if arch else 'x86_64')}"
+            f" --variant desktop --manifest-version {shlex.quote(manifest)}"
+            + (f" --sdk-version {shlex.quote(sdk[1])}" if sdk else "")
             + f" --cache-dir {REPO_CACHE}/xwin download"
         )
     if not downloads:
         sys.exit("omp_ci_template.py: no xwin_sysroot repositories in MODULE.bazel")
     lines = "\n".join(downloads)
+    url = shlex.quote(
+        f"https://github.com/Jake-Shadle/xwin/releases/download/{version}/xwin-{version}-{triple}.tar.gz"
+    )
+    directory = shlex.quote(f"xwin-{version}-{triple}")
     return f"""set -eux
 {RETRY}
 tmp="$(mktemp -d)"
-retry curl -fsSL -o "$tmp/xwin.tar.gz" "https://github.com/Jake-Shadle/xwin/releases/download/{version}/xwin-{version}-{triple}.tar.gz"
-echo "{digest}  $tmp/xwin.tar.gz" | sha256sum -c -
+retry curl -fsSL -o "$tmp/xwin.tar.gz" {url}
+echo {shlex.quote(digest)}"  $tmp/xwin.tar.gz" | sha256sum -c -
 tar -xzf "$tmp/xwin.tar.gz" -C "$tmp"
-PATH="$tmp/xwin-{version}-{triple}:$PATH"
+PATH="$tmp/"{directory}":$PATH"
 mkdir -p {REPO_CACHE}/xwin
 {lines}
 rm -rf "$tmp"

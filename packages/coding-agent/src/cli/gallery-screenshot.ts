@@ -16,7 +16,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import { quotePosixArgument } from "../utils/shell-quote";
 import type { GallerySection } from "./gallery-cli";
 
 /** Nerd Font family so the gallery's icon glyphs (PUA) render instead of tofu. */
@@ -36,6 +35,21 @@ const CELL_WIDTH_RATIO = 0.65;
 const CELL_HEIGHT_RATIO = 1.5;
 /** Keep each image well under headless-Chromium's tall-canvas limits. */
 const MAX_IMAGE_HEIGHT_PX = 8000;
+/**
+ * Fixed file names inside each capture's private directory, where VHS runs.
+ * VHS reads a tape string up to its closing quote with no escapes and types
+ * `Type` text into a shell, so no path the caller chose may appear in the tape.
+ */
+const CAPTURE_ANSI = "screen.ansi";
+const CAPTURE_TAPE = "screen.tape";
+const CAPTURE_GIF = "screen.gif";
+const CAPTURE_PNG = "screen.png";
+/**
+ * Characters a font family cannot carry into VHS: the tape string has no escapes,
+ * and VHS evaluates the family inside a single-quoted JavaScript string in the
+ * page that types into the recorded shell.
+ */
+const UNSAFE_FONT_CHARACTERS = /['"`\\\p{Cc}]/u;
 
 export interface GalleryScreenshotOptions {
 	/** Gallery render width in columns (matches the ANSI line width). */
@@ -69,6 +83,11 @@ export async function captureGalleryScreenshots(
 	}
 
 	const font = options.font ?? DEFAULT_SCREENSHOT_FONT;
+	if (UNSAFE_FONT_CHARACTERS.test(font)) {
+		throw new Error(
+			`Screenshot font family ${JSON.stringify(font)} cannot contain quotes, backslashes or control characters: VHS has no way to escape them.`,
+		);
+	}
 	const fontSize = options.fontSize ?? DEFAULT_SCREENSHOT_FONT_SIZE;
 	const cellHeight = fontSize * Math.max(LINE_HEIGHT, 1) * CELL_HEIGHT_RATIO;
 	const cellWidth = fontSize * CELL_WIDTH_RATIO;
@@ -111,50 +130,40 @@ async function renderChunk(args: RenderChunkArgs): Promise<void> {
 	const widthPx = Math.ceil(args.width * args.cellWidth) + 2 * PADDING;
 	const heightPx = Math.ceil((rows + 2) * args.cellHeight) + 2 * PADDING;
 
-	const dir = path.dirname(args.outPng);
-	const stem = path.basename(args.outPng, path.extname(args.outPng));
-	const ansiPath = path.join(dir, `.${stem}.ansi`);
-	const tapePath = path.join(dir, `.${stem}.tape`);
-	const gifPath = path.join(dir, `.${stem}.gif`);
-
-	// CRLF so each gallery line is its own terminal row regardless of how the
-	// captured shell handles bare LF.
-	await Bun.write(ansiPath, `${args.lines.join("\r\n")}\r\n`);
-	await Bun.write(
-		tapePath,
-		buildTape({
-			gifPath,
-			outPng: args.outPng,
-			ansiPath,
-			widthPx,
-			heightPx,
-			font: args.font,
-			fontSize: args.fontSize,
-			themeJson: args.themeJson,
-		}),
-	);
-
+	// The capture's files live in a private directory beside the PNG, under fixed
+	// names, so the tape VHS runs and the command it types hold no caller path.
+	const workDir = await fs.promises.mkdtemp(path.join(path.dirname(args.outPng), ".omp-gallery-"));
 	try {
-		const result = await Bun.$`${args.vhs} ${tapePath}`.quiet().nothrow();
-		if (result.exitCode !== 0 || !(await Bun.file(args.outPng).exists())) {
+		// CRLF so each gallery line is its own terminal row regardless of how the
+		// captured shell handles bare LF.
+		await Bun.write(path.join(workDir, CAPTURE_ANSI), `${args.lines.join("\r\n")}\r\n`);
+		await Bun.write(
+			path.join(workDir, CAPTURE_TAPE),
+			buildTape({
+				widthPx,
+				heightPx,
+				font: args.font,
+				fontSize: args.fontSize,
+				themeJson: args.themeJson,
+			}),
+		);
+
+		const result = await Bun.$`${args.vhs} ${CAPTURE_TAPE}`.cwd(workDir).quiet().nothrow();
+		const capturedPng = path.join(workDir, CAPTURE_PNG);
+		if (result.exitCode !== 0 || !(await Bun.file(capturedPng).exists())) {
 			const detail = result.stderr.toString().trim() || result.stdout.toString().trim();
 			throw new Error(`VHS failed to render the gallery screenshot${detail ? `: ${detail.slice(-600)}` : ""}`);
 		}
+		await fs.promises.rename(capturedPng, args.outPng);
 	} finally {
-		await Promise.all([
-			fs.promises.rm(ansiPath, { force: true }),
-			fs.promises.rm(tapePath, { force: true }),
-			fs.promises.rm(gifPath, { force: true }),
-		]);
+		await fs.promises.rm(workDir, { recursive: true, force: true });
 	}
 }
 
 interface TapeArgs {
-	gifPath: string;
-	outPng: string;
-	ansiPath: string;
 	widthPx: number;
 	heightPx: number;
+	/** Free of every `UNSAFE_FONT_CHARACTERS` character. */
 	font: string;
 	fontSize: number;
 	themeJson: string;
@@ -165,23 +174,23 @@ function buildTape(args: TapeArgs): string {
 	// is captured from the final visible frame. Setup is hidden so the typed
 	// `cat` command and shell prompt never appear in the capture, and a trailing
 	// `sleep` keeps the shell from drawing a fresh prompt under the output.
-	const shellCommand = `clear; cat ${quotePosixArgument(args.ansiPath)}; sleep 120`;
+	// VHS runs in the capture directory, so every name below is relative to it.
 	return `${[
-		`Output ${JSON.stringify(args.gifPath)}`,
+		`Output "${CAPTURE_GIF}"`,
 		`Set Width ${args.widthPx}`,
 		`Set Height ${args.heightPx}`,
-		`Set FontFamily ${JSON.stringify(args.font)}`,
+		`Set FontFamily "${args.font}"`,
 		`Set FontSize ${args.fontSize}`,
 		`Set Padding ${PADDING}`,
 		`Set LineHeight ${LINE_HEIGHT}`,
 		`Set Theme ${args.themeJson}`,
 		"Hide",
-		`Type ${JSON.stringify(shellCommand)}`,
+		`Type "clear; cat ${CAPTURE_ANSI}; sleep 120"`,
 		"Enter",
 		"Sleep 1.2s",
 		"Show",
 		"Sleep 400ms",
-		`Screenshot ${JSON.stringify(args.outPng)}`,
+		`Screenshot "${CAPTURE_PNG}"`,
 	].join("\n")}\n`;
 }
 
