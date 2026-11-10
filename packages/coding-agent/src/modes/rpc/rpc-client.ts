@@ -1532,7 +1532,12 @@ export class RpcClient {
 	 * streamed meanwhile. A local-only prompt answered synchronously resolves with
 	 * the events seen so far.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
+	async promptAndWait(
+		message: string,
+		images?: ImageContent[],
+		timeout = 60000,
+		clientMessageId?: string,
+	): Promise<AgentEvent[]> {
 		const id = `req_${++this.#requestId}`;
 		const events: AgentEvent[] = [];
 		const { promise, resolve, reject } = Promise.withResolvers<AgentEvent[]>();
@@ -1547,7 +1552,7 @@ export class RpcClient {
 		this.#promptErrorWaiters.set(id, reject);
 		let timeoutId: NodeJS.Timeout | undefined;
 		try {
-			const response = await this.#send({ type: "prompt", message, images }, 30_000, id);
+			const response = await this.#send({ type: "prompt", message, images, clientMessageId }, 30_000, id);
 			const data = this.#getData<{ agentInvoked?: boolean } | undefined>(response);
 			if (data?.agentInvoked === false) return events;
 			timeoutId = this.#startTimeout(timeout, () => {

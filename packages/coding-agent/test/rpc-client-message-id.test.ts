@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as path from "node:path";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
+import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { isRecord, readJsonl, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -361,4 +363,28 @@ describe("RPC client message identity", () => {
 			unresolvedClientMessageIds: [],
 		});
 	});
+
+	test("RpcClient.promptAndWait sends its client message ID and receives the correlated echo", async () => {
+		const directory = TempDir.createSync("@rpc-client-prompt-and-wait-");
+		const client = new RpcClient({
+			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
+			cwd: directory.path(),
+			env: { PI_CODING_AGENT_DIR: directory.path(), PI_NO_TITLE: "1" },
+		});
+		cleanup.push(async () => {
+			await client.stop();
+			directory.removeSync();
+		});
+		await client.start();
+		const userEcho = (events: readonly AgentEvent[]) =>
+			events.find(event => event.type === "message_end" && event.message.role === "user");
+		const correlated = await client.promptAndWait("correlated", undefined, 10_000, "intent-wait");
+		expect(userEcho(correlated)).toMatchObject({ clientMessageId: "intent-wait" });
+		const plain = await client.promptAndWait("plain", undefined, 10_000);
+		expect(userEcho(plain)).not.toHaveProperty("clientMessageId");
+		expect(await client.getClientMessageStatus(["intent-wait"])).toMatchObject({
+			messages: [{ clientMessageId: "intent-wait", message: { content: [{ type: "text", text: "correlated" }] } }],
+			persistedClientMessageIds: ["intent-wait"],
+		});
+	}, 30_000);
 });
