@@ -16,8 +16,7 @@ export function truncateCodePoints(text: string, maxCodePoints: number): string 
 	let end = 0;
 	let counted = 0;
 	while (end < text.length && counted < maxCodePoints) {
-		const codePoint = text.codePointAt(end);
-		if (codePoint === undefined) break;
+		const codePoint = text.codePointAt(end)!;
 		end += codePoint > 0xffff ? 2 : 1;
 		counted++;
 	}
