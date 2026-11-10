@@ -19,7 +19,7 @@ import { initializeExtensions } from "../modes/runtime-init";
 import type { AsyncJobManagerApi } from "../async";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
@@ -146,7 +146,6 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
 	};
 }
 
-
 /**
  * The session `subagent_stop` reports as a cold-revived child's spawner. A child
  * of the top-level session joins that live session. A nested child was spawned
@@ -156,7 +155,7 @@ export function persistedAgentDefinition(displayName: string, init: PersistedSes
  * naming the top-level session, which did not spawn it.
  */
 export async function resolveSpawner(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	topLevel: AgentSessionHandle,
 	ref: AgentRef,
 	recordedParentFile: string | undefined,
