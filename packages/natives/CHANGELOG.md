@@ -117,7 +117,7 @@
 - Computer input no longer fails with `InputBusy` the moment another omp session's call holds the desktop, such as an `apps.open` waiting for its window: it waits up to 5 seconds for that call to finish, on macOS, Linux and Windows ([#18746](https://github.com/can1357/oh-my-pi/pull/18746) by [@will-bogusz](https://github.com/will-bogusz))
 ### Added
 
-- Added OS-level process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network posture.
+- Added OS-level process containment through MXC (seatbelt, bubblewrap, processcontainer): `sandboxSupport()`, `sandboxDiscoverPaths(env)` and `SandboxProcess.spawn()` run an argv under read-write/read-only/denied path lists with an `allow`, `deny` or loopback-`proxy` network posture ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.18.6] - 2026-11-09
 

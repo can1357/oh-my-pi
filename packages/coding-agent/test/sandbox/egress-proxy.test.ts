@@ -434,6 +434,31 @@ describe("EgressProxy", () => {
 		expect(calls).toHaveLength(2);
 	});
 
+	it("asks again for a request that waited on an approval: one approval covers one request", async () => {
+		const answers = [Promise.withResolvers<boolean>(), Promise.withResolvers<boolean>()];
+		const allArrived = Promise.withResolvers<void>();
+		let reads = 0;
+		let calls = 0;
+		const proxy = await startProxy({
+			allowedHosts: () => {
+				if (++reads === 2) allArrived.resolve();
+				return [];
+			},
+			decide: () => answers[calls++].promise,
+		});
+		// `ask.example` does not resolve: the approved request fails as unreachable (502), not blocked.
+		const responses = Promise.all([
+			request(proxy, connectHead("ask.example:443")),
+			request(proxy, connectHead("ask.example:8443")),
+		]);
+		await allArrived.promise;
+		answers[0].resolve(true);
+		answers[1].resolve(false);
+		const [first, second] = await responses;
+		expect(calls).toBe(2);
+		expect([statusOf(first), statusOf(second)].sort()).toEqual([403, 502]);
+	});
+
 	it("refuses when decide is absent or throws", async () => {
 		const withoutDecide = await startProxy({ allowedHosts: () => [] });
 		expectBlocked(await request(withoutDecide, connectHead("unknown.example:443")));

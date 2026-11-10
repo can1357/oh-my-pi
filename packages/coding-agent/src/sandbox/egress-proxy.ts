@@ -14,7 +14,10 @@ import { hostMatches } from "./policy";
 
 export interface EgressProxyOptions {
 	allowedHosts(): readonly string[];
-	/** Asked for a host not on the list; absent → refuse. Concurrent asks for one host share a single call. */
+	/**
+	 * Asked for a host not on the list; absent → refuse. A `true` answers only the request that
+	 * asked: concurrent requests for the host share a pending refusal, but ask again after an approval.
+	 */
 	decide?(host: string, port: number): Promise<boolean>;
 	onBlocked?(host: string, port: number): void;
 	/** Milliseconds a client has to deliver a complete request head; established tunnels are never timed out. Default 30 000. */
@@ -299,12 +302,17 @@ class EgressGate {
 		return { kind: "connect", addresses };
 	}
 
-	#decide(host: string, port: number): Promise<boolean> {
+	/**
+	 * Concurrent requests for one host wait for the pending answer. A refusal answers them all; an
+	 * approval answers only the request that asked (it may be "this connection only"), so each waiter
+	 * asks again, and a standing grant the approval recorded answers that without a prompt.
+	 */
+	async #decide(host: string, port: number): Promise<boolean> {
 		const decide = this.#options.decide;
-		if (!decide) return Promise.resolve(false);
+		if (!decide) return false;
 		const pending = this.#pendingDecisions.get(host);
-		if (pending) return pending;
-		if (this.#pendingDecisions.size >= MAX_PENDING_DECISIONS) return Promise.resolve(false);
+		if (pending) return (await pending) && this.#decide(host, port);
+		if (this.#pendingDecisions.size >= MAX_PENDING_DECISIONS) return false;
 		const ask = async (): Promise<boolean> => {
 			try {
 				return (await decide.call(this.#options, host, port)) === true;

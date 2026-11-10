@@ -16,7 +16,7 @@ It is off by default.
 In-process file tools (`read`, `write`, `edit` including deletes and moves, `ast_edit`, `grep`, `glob`, `find`, `ast_grep`, the `lsp` tool's file and `rename_file` destination, an `ida` `.i64`/`.idb` opened in place, and the same tools called from an eval cell as `tool.write`, `tool.edit`, …) run inside omp, so the OS backend cannot contain them. While the sandbox is active, omp checks every local path such a call names against the same filesystem policy before the tool runs, in every approval mode. Workspace edits an LSP server sends (rename, code actions, `workspace/applyEdit`) are checked file by file before any is applied.
 
 - A write (any call that modifies: write, edit, delete, move, `ast_edit`) must land under a writable root: the workspace, the private temp directory, `allowWrite`, or a `sandbox_request` write grant. In `read-only` mode only the temp directory.
-- A read must not touch a `denyRead` path; with `readScope: workspace` it must also lie under a readable root (the workspace, `allowRead`, tool paths, or a read grant). A recursive search rooted above a `denyRead` path is refused; name a narrower path.
+- A read must lie under a readable root contained commands get for the current [read scope](#read-scope) (so `readScope: all` still excludes device and virtual trees, Linux `/tmp`, and anything outside the profile on Windows), or under a writable root, `allowRead` or a read grant, and must not touch a `denyRead` path. A recursive search rooted above a `denyRead` path is refused; name a narrower path.
 - A refused call fails with a sandbox message that points the agent at `sandbox_request`; a granted request then covers the file tools as well as contained commands. A `denyRead` path cannot be requested.
 - Internal URLs (`local://`, `skill://`, `artifact://`, …) are omp's own storage and are not checked.
 
@@ -121,7 +121,7 @@ Setting `sandbox.filesystem.denyRead` replaces this list; include the defaults y
 
 | Mode              | Writable                                                                                     |
 | ----------------- | -------------------------------------------------------------------------------------------- |
-| `workspace-write` | The workspace, the private temp directory, `allowWrite`, and the git directory commits write to when it lies outside the workspace: the repository's common git directory in a linked worktree, and the enclosing repository's `.git` when omp starts in a subdirectory of a checkout |
+| `workspace-write` | The workspace, the private temp directory, `allowWrite`, and the git metadata commits write to when it lies outside the workspace: in a linked worktree, the worktree's own `worktrees/<name>` and the common dir's `objects`, `refs`, `logs` and `reftable` (its `hooks/`, `config` and other worktrees stay read-only, so git operations that rewrite `packed-refs` or `config`, such as `branch -d` of a packed branch, `fetch --prune` or `push -u`, fail contained); the enclosing repository's `.git` when omp starts in a subdirectory of an ordinary checkout |
 | `read-only`       | The private temp directory only                                                              |
 
 Each sandbox runtime gets its own private temp directory, exposed to contained processes as `TMPDIR`, `TMP` and `TEMP`. The system temp directory is not writable for them: it holds files omp later runs on the host and other programs' control sockets (editor, tmux, ssh-agent).
@@ -182,7 +182,7 @@ In the interactive TUI, a connection to a host that is not on the list asks: all
 | **once**, **for this session** | Public and private ranges (intranet services); never loopback, link-local or unspecified addresses, on every connection |
 | `allowedHosts` entry, including **always** answers and the panel's **Allow** | Any address (exact entry, no restriction) |
 
-Approving a host does not restart shells or kernels: the proxy reads the allowlist and session grants live.
+Approving a host does not restart shells or kernels: the proxy reads the allowlist and session grants live. A running process only ever narrows, though: it reaches a listed host only while the list still has it and it was listed when the process started, or you added it to your own list since. A host that a project switch (`/move`, a resumed session in another directory) puts back on the effective list is not reachable from processes started before the switch.
 
 Without an approver unknown hosts are refused: print mode and subagents without a UI never ask. An RPC client can opt in to answering host requests (`set_sandbox_host_prompts`, then `sandbox_host_request` / `respond_sandbox_host`; an unanswered request is denied after 2 minutes). The RPC interface also reads and edits the sandbox (`get_sandbox`, `set_sandbox_setting`, `reset_sandbox_setting`, `edit_sandbox_list`, `grant_sandbox_host`, `revoke_sandbox_host`) and pushes `sandbox_update` on every change; see [RPC: Sandbox](./rpc.md#sandbox).
 
@@ -297,7 +297,7 @@ Containment is decided when a server connects. After toggling the sandbox or cha
 
 ## Telemetry
 
-MXC can emit telemetry. omp builds `mxc-sdk` with `MXC_TELEMETRY_COMPONENT_PATH` set to an empty string (`.cargo/config.toml`, mirrored for Bazel in `MODULE.bazel`), which selects MXC's unrouted build, and spawns every contained process without a telemetry request. omp sends no sandbox telemetry anywhere.
+MXC can emit telemetry, on Windows only, as ETW events. omp turns it off at both ends: `mxc-sdk` is built without a Microsoft telemetry route (`MXC_TELEMETRY_COMPONENT_PATH` empty in `.cargo/config.toml`, mirrored for Bazel in `MODULE.bazel`; `mxc-sdk` 1.0.1 routes only when built with `MXC_TELEMETRY_PROVIDER_GROUP_GUID`), and every contained process is spawned with MXC telemetry explicitly disabled, so the ETW provider is never registered. omp sends no sandbox telemetry anywhere.
 
 ## Known limits
 

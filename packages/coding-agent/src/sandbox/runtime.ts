@@ -214,10 +214,14 @@ const ACCESS_LISTS = {
 	read: cfgSandboxAllowRead,
 	host: cfgSandboxAllowedHosts,
 } as const satisfies Record<SandboxAccessKind, Setting<string[]>>;
-let proxyStart: Promise<EgressProxy> | undefined;
+/**
+ * Egress proxies per runtime, then per allowlist a contained process started under. Each process
+ * reaches only the hosts its runtime listed when it started plus hosts you add to your own list
+ * later, so it never gains another runtime's list or one a later project leaves in (a
+ * `reloadForCwd` changes the settings in place).
+ */
+const proxies = new Map<SandboxRuntime, Map<string, Promise<EgressProxy>>>();
 let cancelProxyCleanup: (() => void) | undefined;
-/** Settings `always` approvals persist to: the instance of the runtime that last spawned through the proxy. */
-let proxySettings: Settings | undefined;
 /** Live runtimes by settings instance, then realpath'd workspace. */
 const runtimes = new WeakMap<Settings, Map<string, SandboxRuntime>>();
 /** Workspace paths as given → the canonical path at first sight, per realm. */
@@ -237,15 +241,24 @@ function emitUnavailableWarning(reason: string): void {
 	else logger.warn(message);
 }
 
+/** A runtime's allowlist when a contained process started: effective, and of the operator layers alone. */
+interface AllowlistAtStart {
+	hosts: ReadonlySet<string>;
+	operator: ReadonlySet<string>;
+}
+
 /**
- * Exact proxy entries: the configured lists only. Session grants are answered by
- * {@link decideHost} instead, so they keep the proxy's prompt-approved rules (private ranges yes,
- * loopback/link-local/unspecified no) rather than the unrestricted rules of an exact entry.
+ * Exact proxy entries of one process: the hosts `runtime` lists now that it listed when the process
+ * started or that the operator layers gained since (you added them), so a removal takes effect live
+ * and a project reload adds nothing. Session grants are answered by {@link decideHost} instead, so
+ * they keep the proxy's prompt-approved rules (private ranges yes, loopback/link-local/unspecified
+ * no) rather than the unrestricted rules of an exact entry.
  */
-function proxyAllowedHosts(): string[] {
-	const hosts = new Set<string>();
-	for (const runtime of liveRuntimes) for (const host of runtime.configuredHosts()) hosts.add(host);
-	return [...hosts];
+function proxyAllowedHosts(runtime: SandboxRuntime, atStart: AllowlistAtStart): string[] {
+	const operator = runtime.operatorHosts();
+	return runtime
+		.configuredHosts()
+		.filter(host => atStart.hosts.has(host) || (operator.includes(host) && !atStart.operator.has(host)));
 }
 
 function notifyAll(): void {
@@ -328,7 +341,8 @@ function grantHostIn(settings: Settings, host: string, scope: "session" | "alway
 	grantsChanged();
 }
 
-async function decideHost(host: string, port: number): Promise<boolean> {
+/** `settings` receives an `always` approval: the settings of the runtime the asking process runs under. */
+async function decideHost(settings: Settings, host: string, port: number): Promise<boolean> {
 	if (hostMatches(host, [...sessionGrants])) return true;
 	if (!hostApprover) return false;
 	const answer = await hostApprover(host, port);
@@ -337,49 +351,45 @@ async function decideHost(host: string, port: number): Promise<boolean> {
 			return true;
 		case "session":
 		case "always":
-			// Set by `ensureProxy` before the proxy can consult this.
-			if (proxySettings) grantHostIn(proxySettings, host, answer);
-			else {
-				sessionGrants.add(host);
-				blockedLog.delete(host);
-				grantsChanged();
-			}
+			grantHostIn(settings, host, answer);
 			return true;
 		case "deny":
 			return false;
 	}
 }
 
-function ensureProxy(settings: Settings): Promise<EgressProxy> {
-	proxySettings = settings;
-	if (!proxyStart) {
-		const start = EgressProxy.start({
-			allowedHosts: proxyAllowedHosts,
-			decide: decideHost,
-			onBlocked: host => recordBlockedHost(host),
-		});
-		proxyStart = start;
-		cancelProxyCleanup = postmortem.register("sandbox-egress-proxy", closeProxy);
-		start.catch(() => {
-			if (proxyStart === start) {
-				proxyStart = undefined;
-				cancelProxyCleanup?.();
-				cancelProxyCleanup = undefined;
-			}
-		});
+function ensureProxy(runtime: SandboxRuntime, settings: Settings): Promise<EgressProxy> {
+	let byAllowlist = proxies.get(runtime);
+	if (!byAllowlist) {
+		byAllowlist = new Map();
+		proxies.set(runtime, byAllowlist);
 	}
-	return proxyStart;
+	const atStart: AllowlistAtStart = {
+		hosts: new Set(runtime.configuredHosts()),
+		operator: new Set(runtime.operatorHosts()),
+	};
+	const key = JSON.stringify([[...atStart.hosts].sort(), [...atStart.operator].sort()]);
+	const existing = byAllowlist.get(key);
+	if (existing) return existing;
+	const start = EgressProxy.start({
+		allowedHosts: () => proxyAllowedHosts(runtime, atStart),
+		decide: (host, port) => decideHost(settings, host, port),
+		onBlocked: host => recordBlockedHost(host),
+	});
+	byAllowlist.set(key, start);
+	cancelProxyCleanup ??= postmortem.register("sandbox-egress-proxy", closeProxies);
+	start.catch(() => {
+		if (byAllowlist.get(key) === start) byAllowlist.delete(key);
+	});
+	return start;
 }
 
-async function closeProxy(): Promise<void> {
-	const start = proxyStart;
-	proxyStart = undefined;
-	proxySettings = undefined;
+async function closeProxies(): Promise<void> {
+	const starts = [...proxies.values()].flatMap(byAllowlist => [...byAllowlist.values()]);
+	proxies.clear();
 	cancelProxyCleanup?.();
 	cancelProxyCleanup = undefined;
-	if (!start) return;
-	const proxy = await start.catch(() => undefined);
-	await proxy?.close();
+	await Promise.all(starts.map(async start => (await start.catch(() => undefined))?.close()));
 }
 
 // ── Policy context gathering ─────────────────────────────────────────────────
@@ -493,19 +503,33 @@ function nativeAddonDir(): string | undefined {
 	}
 }
 
+/** Git metadata outside the workspace that contained git reads (`read`) and writes (`write`) to commit. */
+interface GitGrant {
+	read: string;
+	write: string[];
+}
+
+/** Common-dir stores a linked worktree's commits and fetches write: objects, refs and reflogs. */
+const LINKED_WORKTREE_STORES = ["objects", "refs", "logs", "reftable"] as const;
+
 /**
- * Git directory contained git must write to commit, when it lies outside the workspace; `undefined`
- * otherwise. Covers a linked worktree rooted at the workspace (its common dir) and a workspace that
- * is a strict subdirectory of a checkout: an ordinary one (its `.git` directory) or a linked
- * worktree (the common dir, which holds `worktrees/<name>`). Never granted for a repository rooted
- * at the filesystem root, the home directory or an ancestor of it (a dotfiles repo at `~`).
+ * Git metadata contained git needs to commit, when it lies outside the workspace; `undefined`
+ * otherwise. Covers a linked worktree rooted at the workspace and a workspace that is a strict
+ * subdirectory of a checkout: an ordinary one (its `.git` directory, which git writes at its root)
+ * or a linked worktree. Never granted for a repository rooted at the filesystem root, the home
+ * directory or an ancestor of it (a dotfiles repo at `~`).
+ *
+ * A linked worktree's common dir is shared with the main checkout and every other worktree, so it is
+ * readable but only its object, ref and reflog stores are writable, plus this worktree's own
+ * `worktrees/<name>` (index, HEAD). Its `hooks/`, `config` and other worktrees' metadata stay
+ * read-only: host git in the main checkout runs those, and the worktree's diff never shows them.
  *
  * The workspace's `.git` metadata is writable by contained processes, so a linked worktree's common
  * dir is accepted only when it has the real linked-worktree shape: the git dir is
  * `<commonDir>/worktrees/<name>` outside the workspace, and its `gitdir` back-pointer (written by
  * git, outside the workspace) names the worktree's `.git` entry.
  */
-function writableGitDir(workspace: string, home: string, platform: NodeJS.Platform): string | undefined {
+function gitGrant(workspace: string, home: string, platform: NodeJS.Platform): GitGrant | undefined {
 	try {
 		const info = vcs.gitInfo(workspace);
 		if (!info) return undefined;
@@ -524,7 +548,7 @@ function writableGitDir(workspace: string, home: string, platform: NodeJS.Platfo
 		if (entryStat.isDirectory()) {
 			// Ordinary checkout: at the workspace root its `.git` is already writable.
 			if (atWorkspace || gitDir !== entry || commonDir !== entry) return undefined;
-			return entry;
+			return { read: entry, write: [entry] };
 		}
 		if (gitDir === commonDir) return undefined;
 		const worktrees = path.dirname(gitDir);
@@ -532,7 +556,11 @@ function writableGitDir(workspace: string, home: string, platform: NodeJS.Platfo
 		if (isWithin(gitDir, workspace, platform)) return undefined;
 		const backPointer = fs.readFileSync(path.join(gitDir, "gitdir"), "utf8").trim();
 		if (realpathIfExists(path.resolve(gitDir, backPointer)) !== entry) return undefined;
-		return commonDir;
+		// A store replaced by a symlink would carry the grant out of the common dir.
+		const stores = LINKED_WORKTREE_STORES.map(store => path.join(commonDir, store)).filter(
+			store => realpathIfExists(store) === store,
+		);
+		return { read: commonDir, write: [gitDir, ...stores] };
 	} catch (error) {
 		logger.debug("sandbox: git dir lookup failed", { workspace, error: String(error) });
 		return undefined;
@@ -540,7 +568,7 @@ function writableGitDir(workspace: string, home: string, platform: NodeJS.Platfo
 }
 
 /** Everything in {@link SandboxPolicyContext} except the per-request extras. */
-type BaseContext = Omit<SandboxPolicyContext, "extraRead" | "extraWrite"> & { gitWriteDir?: string };
+type BaseContext = Omit<SandboxPolicyContext, "extraRead" | "extraWrite"> & { git?: GitGrant };
 
 /**
  * Synchronous (~10 ms, once per runtime) so {@link SandboxRuntime.effectivePolicy} can stay
@@ -565,7 +593,7 @@ function gatherContext(workspace: string, tmpdir: string): BaseContext {
 		rootEntries,
 		discovered,
 		runtimePaths,
-		gitWriteDir: writableGitDir(workspace, home, platform),
+		git: gitGrant(workspace, home, platform),
 	};
 }
 
@@ -725,7 +753,7 @@ export class SandboxRuntime {
 		pendingAccess.clear();
 		workspacePins.clear();
 		accessQueue = Promise.resolve();
-		void closeProxy();
+		void closeProxies();
 	}
 
 	status(): SandboxStatus {
@@ -823,7 +851,7 @@ export class SandboxRuntime {
 		const fsPolicy = this.#policy(config, request.extraWrite, request.extraRead);
 		const tempDir = this.tempDir();
 		if (network === "allowlist") {
-			const proxy = await ensureProxy(this.#settings);
+			const proxy = await ensureProxy(this, this.#settings);
 			policy = { ...fsPolicy, network: "proxy", proxyUrl: proxy.url };
 		} else {
 			policy = { ...fsPolicy, network };
@@ -1031,7 +1059,7 @@ export class SandboxRuntime {
 		liveRuntimes.delete(this);
 		runtimes.get(this.#settings)?.delete(this.#workspace);
 		this.#removeTempDir();
-		if (liveRuntimes.size === 0) await closeProxy();
+		if (liveRuntimes.size === 0) await closeProxies();
 	}
 
 	#removeTempDir(): void {
@@ -1046,6 +1074,11 @@ export class SandboxRuntime {
 	/** Configured allowlist (proxy input). @internal */
 	configuredHosts(): readonly string[] {
 		return this.#current().config.allowedHosts;
+	}
+
+	/** The allowlist of the operator layers alone (yours, never a project's). @internal */
+	operatorHosts(): readonly string[] {
+		return cfgSandboxAllowedHosts.get(this.#settings.grantAuthority());
 	}
 
 	/** Runs the change listeners. @internal */
@@ -1150,11 +1183,9 @@ export class SandboxRuntime {
 				};
 			}
 		}
-		// `readScope: all` reads the whole filesystem except denied paths: the root-children list the
-		// backends get leaves out system entries no file tool needs refusing (`/private` on macOS).
-		const allowed =
-			under(policy.readwritePaths) ||
-			(kind === "read" && (this.#current().config.readScope === "all" || under(policy.readonlyPaths)));
+		// The readable roots contained processes get, so `readScope: all` stops where theirs does
+		// (device and virtual trees, Linux `/tmp`, everything outside the profile on Windows).
+		const allowed = under(policy.readwritePaths) || (kind === "read" && under(policy.readonlyPaths));
 		if (allowed) return undefined;
 		const roots = kind === "write" ? "writable" : "readable";
 		return { reason: `${resolved} is outside the sandbox's ${roots} roots`, protected: false };
@@ -1195,22 +1226,17 @@ export class SandboxRuntime {
 	#policy(config: SandboxConfig, extraWrite?: readonly string[], extraRead?: readonly string[]): ResolvedFsPolicy {
 		const tempDir = this.tempDir();
 		if (this.#context?.tmpdir !== tempDir) this.#context = gatherContext(this.#workspace, tempDir);
-		const { gitWriteDir, ...context } = this.#context;
+		const { git, ...context } = this.#context;
 		const platform = context.platform;
 		// Writable roots are pinned to the canonical path they had when first admitted: a contained
 		// process can replace a writable root with a symlink, which must never be followed.
 		const sessionWrites = this.#intactSessionWrites();
 		const pin = (entries: readonly string[]) => entries.flatMap(entry => this.#pinnedWrite(entry, context));
 		const allowWrite = pin(config.allowWrite);
-		const pinnedExtra = pin([...(gitWriteDir ? [gitWriteDir] : []), ...(extraWrite ?? [])]);
+		const pinnedExtra = pin([...(git?.write ?? []), ...(extraWrite ?? [])]);
 		const write = [...sessionWrites, ...pinnedExtra];
 		// Readable too: read-only mode drops `extraWrite`, and `readScope: workspace` would hide it.
-		const read = [
-			...(gitWriteDir ? [gitWriteDir] : []),
-			...sessionWrites,
-			...sessionPathGrants.read,
-			...(extraRead ?? []),
-		];
+		const read = [...(git ? [git.read] : []), ...sessionWrites, ...sessionPathGrants.read, ...(extraRead ?? [])];
 		const resolved = materialize(
 			resolveFsPolicy({ ...config, allowWrite }, { ...context, extraWrite: write, extraRead: read }),
 			platform,

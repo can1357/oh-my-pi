@@ -15,6 +15,7 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { sandboxFileToolDenial } from "@oh-my-pi/pi-coding-agent/sandbox/file-tools";
 import { SandboxRuntime } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
 import {
+	cfgSandboxAllowRead,
 	cfgSandboxDenyRead,
 	cfgSandboxEnabled,
 	cfgSandboxMode,
@@ -106,13 +107,12 @@ describe("sandbox policy on in-process file tools", () => {
 		expect(await denial(pathTool("edit", "write"), target, "write")).toBeUndefined();
 	});
 
-	it("reads follow readScope: all reads anywhere but protected paths, workspace only the workspace", async () => {
+	it("reads follow the readable roots contained processes get, minus protected paths", async () => {
 		const read = pathTool("read", "read");
 		const secrets = path.join(outside, "secrets");
 		fs.mkdirSync(secrets);
 		cfgSandboxDenyRead.set(settings, [secrets]);
-		cfgSandboxReadScope.set(settings, "all");
-		expect(await denial(read, { path: path.join(outside, "file.txt") }, "read")).toBeUndefined();
+		cfgSandboxAllowRead.set(settings, [outside]);
 		// A protected path cannot be requested, so the refusal does not point at sandbox_request.
 		const protectedRead = await denial(read, { path: path.join(secrets, "key") }, "read");
 		expect(protectedRead).toContain("denyRead");
@@ -120,8 +120,18 @@ describe("sandbox policy on in-process file tools", () => {
 		// A recursive search above a protected path would read into it.
 		expect(await denial(read, { path: outside, tree: true }, "read")).toContain("name a narrower path");
 		expect(await denial(read, { path: outside }, "read")).toBeUndefined();
+		cfgSandboxAllowRead.set(settings, []);
+
+		// `all` reads system and profile trees, but it is not the filesystem root: device and virtual
+		// trees (and Linux `/tmp`) stay unreadable, as they are to contained processes.
+		const systemFile = process.platform === "win32" ? path.join(os.homedir(), "notes.txt") : "/usr/notes.txt";
+		cfgSandboxReadScope.set(settings, "all");
+		expect(await denial(read, { path: systemFile }, "read")).toBeUndefined();
+		if (process.platform !== "win32") {
+			expect(await denial(read, { path: "/dev/null" }, "read")).toContain("readable roots");
+		}
 		cfgSandboxReadScope.set(settings, "workspace");
-		expect(await denial(read, { path: path.join(outside, "file.txt") }, "read")).toContain("readable roots");
+		expect(await denial(read, { path: systemFile }, "read")).toContain("readable roots");
 		expect(await denial(read, { path: "src/a.ts" }, "read")).toBeUndefined();
 	});
 

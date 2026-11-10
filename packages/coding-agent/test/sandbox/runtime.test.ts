@@ -86,6 +86,18 @@ function git(cwd: string, ...args: string[]): void {
 	if (result.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${result.stderr.toString()}`);
 }
 
+/** `<outside>/main` with a linked worktree at `<outside>/wt`: the main repo's `.git`, the worktree's git dir and root. */
+function linkedWorktree(): { commonDir: string; gitDir: string; worktree: string } {
+	const main = path.join(outside, "main");
+	const worktree = path.join(outside, "wt");
+	fs.mkdirSync(main);
+	git(main, "init", "-q");
+	git(main, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+	git(main, "worktree", "add", "-q", worktree);
+	const commonDir = path.join(main, ".git");
+	return { commonDir, gitDir: path.join(commonDir, "worktrees", "wt"), worktree };
+}
+
 beforeEach(() => {
 	state = beginSettingsTest();
 	restoreEnvValue("PI_SANDBOX", undefined);
@@ -322,25 +334,22 @@ describe("SandboxRuntime", () => {
 		expect(policy.readonlyPaths).not.toContain(outside);
 	});
 
-	/** `<outside>/main` with a linked worktree at `<outside>/wt`; returns the main repo's `.git`. */
-	function linkedWorktree(): { commonDir: string; worktree: string } {
-		const main = path.join(outside, "main");
-		const worktree = path.join(outside, "wt");
-		fs.mkdirSync(main);
-		git(main, "init", "-q");
-		git(main, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
-		git(main, "worktree", "add", "-q", worktree);
-		return { commonDir: path.join(main, ".git"), worktree };
-	}
-
-	it.skipIf(!Bun.which("git"))("grants a real linked worktree's common dir", async () => {
-		const { commonDir, worktree } = linkedWorktree();
-		cfgSandboxMode.set(settings, "read-only");
-		cfgSandboxReadScope.set(settings, "workspace");
-		expect((await runtime(worktree)).effectivePolicy().readonlyPaths).toContain(commonDir);
-		cfgSandboxMode.set(settings, "workspace-write");
-		expect((await runtime(worktree)).effectivePolicy().readwritePaths).toContain(commonDir);
-	});
+	it.skipIf(!Bun.which("git"))(
+		"grants a linked worktree its common dir's stores, never the shared hooks or config",
+		async () => {
+			const { commonDir, gitDir, worktree } = linkedWorktree();
+			cfgSandboxMode.set(settings, "read-only");
+			cfgSandboxReadScope.set(settings, "workspace");
+			expect((await runtime(worktree)).effectivePolicy().readonlyPaths).toContain(commonDir);
+			cfgSandboxMode.set(settings, "workspace-write");
+			const policy = (await runtime(worktree)).effectivePolicy();
+			expect(policy.readonlyPaths).toContain(commonDir);
+			for (const store of [gitDir, path.join(commonDir, "objects"), path.join(commonDir, "refs")]) {
+				expect(policy.readwritePaths).toContain(store);
+			}
+			expect(policy.readwritePaths).not.toContain(commonDir);
+		},
+	);
 
 	it.skipIf(!Bun.which("git") || process.platform === "win32")(
 		"ignores a workspace .git symlinked to another worktree's entry",
@@ -380,12 +389,15 @@ describe("SandboxRuntime", () => {
 	});
 
 	it.skipIf(!Bun.which("git"))(
-		"grants the common dir to a workspace in a linked worktree's subdirectory",
+		"grants the common dir's stores to a workspace in a linked worktree's subdirectory",
 		async () => {
-			const { commonDir, worktree } = linkedWorktree();
+			const { commonDir, gitDir, worktree } = linkedWorktree();
 			const pkg = path.join(worktree, "pkg");
 			fs.mkdirSync(pkg);
-			expect((await runtime(pkg)).effectivePolicy().readwritePaths).toContain(commonDir);
+			const policy = (await runtime(pkg)).effectivePolicy();
+			expect(policy.readwritePaths).toContain(gitDir);
+			expect(policy.readwritePaths).toContain(path.join(commonDir, "objects"));
+			expect(policy.readwritePaths).not.toContain(commonDir);
 		},
 	);
 
@@ -440,6 +452,33 @@ describe.skipIf(!backend.supported || process.platform === "win32")("SandboxRunt
 		expect(result.child.exitCode).toBe(result.code);
 		expect(instance.resultMeta({ output: result.stderr })?.denied).toBe(true);
 	});
+
+	it.skipIf(!Bun.which("git"))(
+		"commits from a linked worktree but cannot plant a hook in the shared common dir",
+		async () => {
+			const { commonDir, worktree } = linkedWorktree();
+			const instance = await runtime(worktree);
+			const hook = path.join(commonDir, "hooks", "post-checkout");
+			const child = await instance.spawn({
+				argv: [
+					"/bin/sh",
+					"-c",
+					`git -c user.email=t@t -c user.name=t commit -q --allow-empty -m contained && echo committed; echo evil > '${hook}'`,
+				],
+				cwd: worktree,
+				env: { ...childEnv(), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+			});
+			child.stdin.end();
+			const [stdout, stderr, code] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+			expect(stdout, stderr).toBe("committed\n");
+			expect(code).not.toBe(0);
+			expect(fs.existsSync(hook)).toBe(false);
+		},
+	);
 
 	it("writes its private TMPDIR but not the system temp dir", async () => {
 		const instance = await runtime();
@@ -642,3 +681,47 @@ describe.skipIf(!backend.supported || process.platform === "win32")("SandboxRunt
 		},
 	);
 });
+
+describe.skipIf(!backend.supported || !backend.proxy || process.platform === "win32")(
+	"SandboxRuntime allowlist across a project reload",
+	() => {
+		it("a running process keeps the allowlist it started under when a later project allows more", async () => {
+			const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("served") });
+			const agentDir = path.join(path.dirname(workspace), "agent");
+			const projectB = path.join(outside, "project-b");
+			fs.mkdirSync(projectB);
+			try {
+				await Bun.write(
+					path.join(agentDir, "config.yml"),
+					YAML.stringify({
+						sandbox: { enabled: true, network: { mode: "allowlist", allowedHosts: ["127.0.0.1"] } },
+					}),
+				);
+				// Project A drops the host from its allowlist; project B leaves the global list as is.
+				await Bun.write(
+					path.join(workspace, ".omp", "config.yml"),
+					YAML.stringify({ sandbox: { network: { allowedHosts: [] } } }),
+				);
+				settings = await Settings.init({ agentDir, cwd: workspace });
+				const instance = await runtime();
+				const curl = `curl -sS --max-time 10 --proxy "$HTTP_PROXY" -o /dev/null -w '%{http_code}' http://127.0.0.1:${server.port}/`;
+				const child = await instance.spawn({
+					argv: ["/bin/sh", "-c", `read go; ${curl}`],
+					cwd: workspace,
+					env: childEnv(),
+				});
+				await settings.reloadForCwd(projectB);
+				// Under B's settings a new process reaches the host...
+				const fresh = await run(await runtime(projectB), curl);
+				expect(fresh.stdout).toBe("200");
+				// ...but the process started under A still does not.
+				child.stdin.write("go\n");
+				child.stdin.end();
+				const [stdout] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+				expect(stdout).toBe("403");
+			} finally {
+				await server.stop(true);
+			}
+		});
+	},
+);

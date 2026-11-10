@@ -73,10 +73,10 @@
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 ### Added
 
-- Added the `/sandbox` panel (Overview, Filesystem, Network and Effective policy pages) for the OS sandbox; in Tern it renders as a native preferences sheet beside the transcript, in a plain terminal as a fullscreen panel
-- Bash and eval tool cards show a `sandboxed` badge when the run was contained by the OS sandbox, with a warning note for hosts the sandbox blocked or a likely sandbox denial
-- Added the sandbox access dialog for the agent's `sandbox_request` (intent, command, effect, what it does if denied; Allow for this session, Always allow, Deny, Reply with instructions), in the composer and natively in Tern, plus a `sandbox_request` tool card showing the request and your decision
-- The `/sandbox` panel's Filesystem page lists paths allowed this session, each with a remove action
+- Added the `/sandbox` panel (Overview, Filesystem, Network and Effective policy pages) for the OS sandbox; in Tern it renders as a native preferences sheet beside the transcript, in a plain terminal as a fullscreen panel ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Bash and eval tool cards show a `sandboxed` badge when the run was contained by the OS sandbox, with a warning note for hosts the sandbox blocked or a likely sandbox denial ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- Added the sandbox access dialog for the agent's `sandbox_request` (intent, command, effect, what it does if denied; Allow for this session, Always allow, Deny, Reply with instructions), in the composer and natively in Tern, plus a `sandbox_request` tool card showing the request and your decision ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
+- The `/sandbox` panel's Filesystem page lists paths allowed this session, each with a remove action ([#18701](https://github.com/can1357/oh-my-pi/pull/18701) by [@apoc](https://github.com/apoc))
 
 ## [18.18.7] - 2026-11-10
 
