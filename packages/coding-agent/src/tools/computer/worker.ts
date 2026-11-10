@@ -1769,7 +1769,11 @@ export class ComputerWorkerCore {
 					}
 				}
 			}
-			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids, exactApp)) };
+			return {
+				windows,
+				appPids,
+				matches: windows.filter(window => matchesFilter(window, filter, appPids, exactApp)),
+			};
 		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
