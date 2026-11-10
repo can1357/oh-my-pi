@@ -133,13 +133,11 @@ describe("browser prelude relay guidance", () => {
 });
 
 describe("resolveBrowserKind in a subagent", () => {
-	// `taskDepth: 0` like a `/tan` clone: subagent-ness comes from the session, not the task depth.
-	const subagent = (settings: Record<string, unknown>): ToolSession =>
+	const subagent = (settings: Record<string, unknown>, taskDepth = 1): ToolSession =>
 		({
 			cwd: process.cwd(),
 			hasUI: false,
-			taskDepth: 0,
-			subagent: true,
+			taskDepth,
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(settings),
@@ -160,10 +158,26 @@ describe("resolveBrowserKind in a subagent", () => {
 		).toBe("connected");
 	});
 
+	it("skips Tern and cmux even when PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent", () => {
+		const forced = { ...pane, PI_BROWSER_TERN: "1", PI_BROWSER_CMUX: "1" };
+		expect(resolveBrowserKind({ action: "open" }, subagent({}), forced).kind).toBe("headless");
+		expect(
+			resolveBrowserKind({ action: "open" }, subagent({}), {
+				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+				PI_BROWSER_CMUX: "1",
+			}).kind,
+		).toBe("headless");
+	});
+
+	it("leaves a /tan clone (task depth 0) on its parent's defaults, which its copied prompt describes", () => {
+		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane).kind).toBe("relay");
+	});
+
 	it("still opens the user's Chrome or Tern when the open asks", () => {
 		const session = subagent({ "browser.relay": true });
 		expect(resolveBrowserKind({ action: "open", app: { relay: true } }, session, pane).kind).toBe("relay");
 		expect(resolveBrowserKind({ action: "open", app: { tern: true } }, session, pane).kind).toBe("tern");
+		expect(resolveBrowserKind({ action: "open", app: { target: "docs" } }, session, pane).kind).toBe("tern");
 		expect(
 			resolveBrowserKind({ action: "open", app: { relay: true } }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
 		).toBe("headless");
