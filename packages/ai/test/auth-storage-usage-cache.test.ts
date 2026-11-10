@@ -1696,6 +1696,30 @@ describe("AuthStorage usage cache: disabled providers", () => {
 		]);
 	});
 
+	it("drops broker answers for a provider disabled while the broker call was in flight", async () => {
+		const store = makeStore([gatewayRow()]);
+		const aggregate = Promise.withResolvers<UsageReport[] | null>();
+		const perCredential = Promise.withResolvers<UsageReport | null>();
+		store.fetchUsageReports = () => aggregate.promise;
+		store.getUsageReport = () => perCredential.promise;
+		const storage = await openStorage(store);
+		// `report()` is the per-credential path health, rotation, and selection use; it is not on the public facade.
+		const usage = storage.usage as UsageService;
+		try {
+			const pendingAggregate = storage.usage.reports();
+			const pendingReport = usage.report(GATEWAY_PROVIDER, { type: "oauth", access: "a", refresh: "r", expires: 0 });
+			storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+			aggregate.resolve([gatewayReport(GATEWAY_PROVIDER, "broker", 50), gatewayReport("anthropic", "broker", 60)]);
+			perCredential.resolve(gatewayReport(GATEWAY_PROVIDER, "broker", 50));
+
+			expect((await pendingAggregate)?.map(report => report.provider)).toEqual(["anthropic"]);
+			expect(await pendingReport).toBeNull();
+		} finally {
+			aggregate.resolve(null);
+			perCredential.resolve(null);
+		}
+	});
+
 	it("discards a probe that straddles disabling without caching or recording it", async () => {
 		const store = makeStore([gatewayRow()]);
 		const recorded: UsageHistoryEntry[] = [];

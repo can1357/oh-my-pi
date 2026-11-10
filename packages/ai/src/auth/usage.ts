@@ -718,9 +718,9 @@ export class UsageService implements UsageApi {
 			const storeHook = this.#deps.store.getUsageReport?.bind(this.#deps.store);
 			if (storeHook) {
 				const report = await storeHook(provider, credential, options?.signal);
-				if (report) {
-					this.#deps.blocks.reconcileRequest(oauthUsageRequest(provider, credential, options?.baseUrl), report);
-				}
+				// Disabled while the broker answered: no usage concept now.
+				if (!report || this.#disabledProviders.has(provider)) return null;
+				this.#deps.blocks.reconcileRequest(oauthUsageRequest(provider, credential, options?.baseUrl), report);
 				return report;
 			}
 		}
@@ -828,12 +828,14 @@ export class UsageService implements UsageApi {
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
-			// Brokers that predate `exclude` still return excluded providers' rows; drop them here.
+			// Brokers that predate `exclude` still return excluded providers' rows, and a
+			// provider disabled while the broker answered must not surface either.
 			const reports = fetched
 				? fetched.filter(
 						report =>
 							(options?.provider === undefined || report.provider === options.provider) &&
-							!excluded.has(report.provider),
+							!excluded.has(report.provider) &&
+							!this.#disabledProviders.has(report.provider),
 					)
 				: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
