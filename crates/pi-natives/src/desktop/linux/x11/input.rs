@@ -1439,7 +1439,7 @@ mod tests {
 	fn a_takeover_refuses_a_typing_user_but_not_its_own_keys() {
 		use std::{
 			io::{BufRead, BufReader},
-			process::{Command, Stdio},
+			process::{Child, Command, Stdio},
 		};
 
 		use x11rb::{
@@ -1449,14 +1449,23 @@ mod tests {
 
 		use crate::desktop::{control::CancellationSource, keys::parse_key};
 
-		let mut server = Command::new("Xvfb")
-			.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
-			.stdout(Stdio::piped())
-			.stderr(Stdio::null())
-			.spawn()
-			.expect("Xvfb starts");
+		struct Server(Child);
+		impl Drop for Server {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let mut server = Server(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
 		let mut number = String::new();
-		BufReader::new(server.stdout.take().expect("Xvfb stdout"))
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
 			.read_line(&mut number)
 			.expect("Xvfb reports its display");
 		let display = format!(":{}", number.trim());
@@ -1607,7 +1616,5 @@ mod tests {
 		);
 		assert_eq!(input.wm().input_focus(), focus);
 		assert_eq!(keys_received(), 0);
-		let _ = server.kill();
-		let _ = server.wait();
 	}
 }
