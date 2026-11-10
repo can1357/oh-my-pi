@@ -20,7 +20,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		macos::{
 			application_windows, ax_window_ids, has_onscreen_window, has_open_window,
-			onscreen_windows, window_on_another_space,
+			is_standard_window, window_on_another_space, window_titles,
 		},
 		types::DesktopWindow,
 	},
@@ -522,7 +522,7 @@ pub(super) fn open_document(
 				DesktopError::invalid_target(format!("no application opens {target:?}"))
 			})?,
 		};
-		before = window_titles();
+		before = window_titles().unwrap_or_default();
 		let configuration = open_configuration(activate);
 		launch_services(target, |completion| {
 			workspace.openURLs_withApplicationAtURL_configuration_completionHandler(
@@ -552,6 +552,7 @@ pub(super) fn open_document(
 			&path.as_deref().map_or_default(item_names),
 			&before,
 			|| key_capable_windows(pid),
+			is_standard_window,
 			poll_window,
 		)?,
 		None => None,
@@ -581,17 +582,6 @@ fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow
 	}
 }
 
-/// The title of every on-screen window by id; empty when the list cannot be
-/// read.
-fn window_titles() -> HashMap<String, String> {
-	onscreen_windows().map_or_default(|windows| {
-		windows
-			.into_iter()
-			.map(|window| (window.id, window.title))
-			.collect()
-	})
-}
-
 /// The names a window showing the file or folder at `path` can be titled
 /// with: its file name, and the name Finder shows when that differs (Pages
 /// titles `Budget.pages`, its extension hidden, as "Budget").
@@ -617,11 +607,10 @@ fn item_names(path: &Path) -> Vec<String> {
 /// given until `timeout`. A window titled with one of the file's `names`
 /// shows it at once, as do the frontmost window when no title can be read
 /// (without Screen Recording other apps' titles are empty). A browser shows
-/// a page in a tab of a window it already had, titled with the page's
-/// `<title>`, so else it is the window whose title changed since the open
-/// (`before` holds the titles from then; see [`changed_window`]), once that
-/// title has held for [`SETTLE_POLLS`] polls, or at `timeout` whatever it
-/// changed to. For a URL (no `names`) the frontmost window is returned at
+/// a page in an existing window whose title changes, or a new standard
+/// document window (not an Open dialog), so either is a candidate. Return it
+/// once its title has held for [`SETTLE_POLLS`] polls, or at `timeout` whatever
+/// it changed to. For a URL (no `names`) the frontmost window is returned at
 /// `timeout` if none changed, as for a page that kept the old tab's title;
 /// for a file, none is.
 fn shown_window(
@@ -629,6 +618,7 @@ fn shown_window(
 	names: &[String],
 	before: &HashMap<String, String>,
 	mut windows: impl FnMut() -> Option<Vec<DesktopWindow>>,
+	mut is_document: impl FnMut(&DesktopWindow) -> bool,
 	mut wait: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<Option<DesktopWindow>> {
 	let deadline = Instant::now() + timeout;
@@ -649,8 +639,10 @@ fn shown_window(
 		{
 			return Ok(Some(window.clone()));
 		}
-		changed = match (changed_window(&shown, names.is_empty(), before, &mut first_titles), changed)
-		{
+		changed = match (
+			changed_window(&shown, names.is_empty(), before, &mut first_titles, &mut is_document),
+			changed,
+		) {
 			(Some(window), Some((held, polls)))
 				if held.id == window.id && held.title == window.title =>
 			{
@@ -673,22 +665,21 @@ fn shown_window(
 	}
 }
 
-/// The first of `windows`, front to back, whose title differs from its title
-/// in `before`, or for one that opened since, from the first title seen
-/// (recorded in `first_titles`). For a `url` a window that opened since
-/// counts at once; for a file it counts once its title changes, so an Open
-/// panel the application shows first never does.
+/// The first window whose title changed, or a new URL or standard document
+/// window. Other new windows must change title: an unchanged Open dialog
+/// does not prove the file opened.
 fn changed_window(
 	windows: &[DesktopWindow],
 	url: bool,
 	before: &HashMap<String, String>,
 	first_titles: &mut HashMap<String, String>,
+	is_document: &mut impl FnMut(&DesktopWindow) -> bool,
 ) -> Option<DesktopWindow> {
 	let mut changed = None;
 	for window in windows {
 		let was: Option<&str> = match before.get(&window.id) {
 			Some(title) => Some(title),
-			None if url => None,
+			None if url || is_document(window) => None,
 			None => Some(
 				first_titles
 					.entry(window.id.clone())
@@ -1123,6 +1114,7 @@ mod tests {
 				let listed = polls[poll.get().min(polls.len() - 1)];
 				Some(listed.iter().map(|(id, title)| titled(id, title)).collect())
 			},
+			|window| window.title != "Open",
 			|| {
 				poll.set(poll.get() + 1);
 				assert!(poll.get() < 100, "the window never settled");
@@ -1151,6 +1143,12 @@ mod tests {
 		polls.extend([&[("91", "Untitled")] as &[_]; SETTLE_POLLS as usize - 1]);
 		polls.push(&[("91", "Bravo")]);
 		assert_eq!(shown_after(&[], &[("91", "Alpha")], &polls), shown("91", "Bravo"));
+		// A hidden window becoming visible keeps its old title longer than
+		// the settle period; the all-Space baseline keeps it from counting
+		// as newly created before the requested page arrives.
+		let mut visible: Vec<&[(&str, &str)]> = vec![&[("91", "Alpha")]; SETTLE_POLLS as usize + 2];
+		visible.push(&[("91", "Bravo")]);
+		assert_eq!(shown_after(&[], &[("91", "Alpha")], &visible), shown("91", "Bravo"));
 		// The page went to the front window, though another one is listed.
 		let front = shown_after(&[], &[("62", "New Tab"), ("53", "e.html")], &[&[
 			("62", "Charlie"),
@@ -1170,6 +1168,9 @@ mod tests {
 			&[("71", "Delta")],
 		]);
 		assert_eq!(file, shown("71", "Delta"));
+		// The page can already have its final title at the very first poll.
+		let loaded = shown_after(&["d.html"], &[], &[&[("71", "Delta")]]);
+		assert_eq!(loaded, shown("71", "Delta"));
 		// For a URL a new window counts at once, already titled with the page.
 		let url = shown_after(&[], &[("9", "Finder")], &[&[], &[("101", "Alpha")]]);
 		assert_eq!(url, shown("101", "Alpha"));
@@ -1185,6 +1186,7 @@ mod tests {
 			&names,
 			&titles(&[]),
 			|| Some(vec![titled("7", "Budget")]),
+			|_| true,
 			no_wait,
 		);
 		assert_eq!(
@@ -1206,6 +1208,7 @@ mod tests {
 			&["notes.txt".to_owned()],
 			&titles(&[]),
 			|| Some(vec![titled("1", "Open")]),
+			|_| false,
 			|| Ok(()),
 		);
 		assert!(panel.expect("no failure").is_none());
@@ -1216,6 +1219,7 @@ mod tests {
 			&["notes.txt".to_owned()],
 			&titles(&[("3", ""), ("4", "")]),
 			|| Some(vec![window("3"), window("4")]),
+			|_| false,
 			no_wait,
 		);
 		assert_eq!(
@@ -1235,6 +1239,7 @@ mod tests {
 				names,
 				&titles(&[("53", "Alpha")]),
 				|| Some(listed.clone()),
+				|_| true,
 				|| Ok(()),
 			)
 			.expect("no failure")
@@ -1247,7 +1252,7 @@ mod tests {
 		// A file nothing shows: none.
 		assert_eq!(at_deadline(&["d.html".to_owned()], vec![titled("53", "Alpha")]), None);
 		// Without a window list there is nothing to return.
-		let unlisted = shown_window(Duration::ZERO, &[], &titles(&[]), || None, || Ok(()));
+		let unlisted = shown_window(Duration::ZERO, &[], &titles(&[]), || None, |_| false, || Ok(()));
 		assert!(unlisted.expect("no failure").is_none());
 	}
 

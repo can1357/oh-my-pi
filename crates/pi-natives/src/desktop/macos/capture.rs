@@ -1,6 +1,7 @@
 mod screen_capture_kit;
 
 use std::{
+	collections::HashMap,
 	ffi::c_void,
 	mem,
 	ptr::{self, NonNull},
@@ -340,11 +341,6 @@ impl MacCapture {
 	}
 }
 
-/// Every window on screen, front to back, as `windows()` lists them.
-pub(in crate::desktop) fn onscreen_windows() -> CoreResult<Vec<DesktopWindow>> {
-	window_snapshot(None, None)
-}
-
 /// The windows `pid` has on screen at the normal window layer, front to back,
 /// as `windows()` lists them; its status items and other system-layer
 /// surfaces are left out.
@@ -470,6 +466,28 @@ pub(in crate::desktop) fn normal_window_ids(pid: libc::pid_t) -> Option<Vec<u32>
 				.then(|| window_number(dictionary, kCGWindowNumber))
 				.flatten()
 				.and_then(|id| u32::try_from(id).ok())
+			})
+			.collect(),
+	)
+}
+
+/// Titles of normal-layer windows across all Spaces, including hidden and
+/// minimized windows, so becoming visible is not mistaken for creation.
+pub(in crate::desktop) fn window_titles() -> Option<HashMap<String, String>> {
+	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)?;
+	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
+	// documented window keys are CFStrings and whose values are CFTypes.
+	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated;
+	// the CoreGraphics key constants are process-lived.
+	Some(
+		unsafe { snapshot.iter_unchecked() }
+			.filter_map(|dictionary| unsafe {
+				if window_number(dictionary, kCGWindowLayer) != Some(0) {
+					return None;
+				}
+				let id = u32::try_from(window_number(dictionary, kCGWindowNumber)?).ok()?;
+				Some((id.to_string(), window_string(dictionary, kCGWindowName)))
 			})
 			.collect(),
 	)

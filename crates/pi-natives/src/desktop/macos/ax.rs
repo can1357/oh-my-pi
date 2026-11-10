@@ -315,6 +315,21 @@ pub(super) struct PointOwner {
 	pub(super) window: Option<u32>,
 }
 
+/// Whether AX identifies this as a document window, rather than a dialog.
+pub(in crate::desktop) fn is_standard_window(window: &DesktopWindow) -> bool {
+	let Some(app) = window
+		.pid
+		.and_then(|pid| libc::pid_t::try_from(pid).ok())
+		.and_then(probe_application)
+	else {
+		return false;
+	};
+	let Ok(element) = find_window(&app, window) else {
+		return false;
+	};
+	copy_string(&element, "AXSubrole").as_deref() == Some("AXStandardWindow")
+}
+
 /// `WindowServer` id of `pid`'s `AXFocusedWindow`.
 pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	let app = probe_application(pid)?;
