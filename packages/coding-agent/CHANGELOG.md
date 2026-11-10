@@ -147,6 +147,10 @@
 - Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
 - Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
 
+### Changed
+
+- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
@@ -264,10 +268,6 @@
 - Fixed `grep` and `glob` treating a `;` list that starts with an internal URL and includes a local path, such as `artifact://1;notes.txt`, as one address; each listed target is now searched ([#18714](https://github.com/can1357/oh-my-pi/pull/18714) by [@eggpeat](https://github.com/eggpeat))
 - Isolated tasks that edit a file whose name contains spaces now commit that file, including in a nested git repository, instead of leaving it unstaged or committing a different file that shares part of the name ([#18715](https://github.com/can1357/oh-my-pi/pull/18715) by [@eggpeat](https://github.com/eggpeat))
 - A disposed or switched session now releases every persistent shell it owns, including the ones a surface keeps under a name of its own (`/loop` conditions), instead of holding one native shell per surface for the life of the process ([#18717](https://github.com/can1357/oh-my-pi/pull/18717) by [@eggpeat](https://github.com/eggpeat))
-### Changed
-
-- Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
-- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its label and omp process id
 
 ## [18.18.7] - 2026-11-10
 

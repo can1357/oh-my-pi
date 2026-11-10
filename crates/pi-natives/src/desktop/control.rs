@@ -486,7 +486,7 @@ static HOLDER: Mutex<Option<Arc<str>>> = Mutex::new(None);
 
 struct ProcessLease;
 impl ProcessLease {
-	fn acquire(agent: Option<Arc<str>>) -> CoreResult<Self> {
+	fn acquire() -> CoreResult<Self> {
 		if OWNED
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
 			.is_err()
@@ -498,8 +498,13 @@ impl ProcessLease {
 					.map_or_else(busy, |holder| held_by(holder, std::process::id())),
 			);
 		}
-		*HOLDER.lock() = agent;
 		Ok(Self)
+	}
+
+	/// Names `agent` to this process's other sessions, once the kernel lease
+	/// is held too.
+	fn name(&self, agent: Arc<str>) {
+		*HOLDER.lock() = Some(agent);
 	}
 }
 impl Drop for ProcessLease {
@@ -516,7 +521,7 @@ fn busy() -> DesktopError {
 /// `InputBusy` naming the agent whose session in omp `pid` owns control.
 fn held_by(agent: &str, pid: u32) -> DesktopError {
 	DesktopError::input_busy(format!(
-		"agent \"{agent}\" (omp pid {pid}) owns input/focus control; no input was sent"
+		"agent {agent:?} (omp pid {pid}) owns input/focus control; no input was sent"
 	))
 }
 
@@ -654,13 +659,14 @@ impl KernelOwner {
 		let thread = thread::Builder::new()
 			.name("desktop-owner".into())
 			.spawn(move || {
-				let leases = ProcessLease::acquire(agent.clone())
+				let leases = ProcessLease::acquire()
 					.and_then(|process| KernelLease::acquire().map(|kernel| (kernel, process)));
 				match leases {
 					Ok((kernel, process)) => {
-						#[cfg(unix)]
-						if let Some(agent) = &agent {
-							kernel.record(agent);
+						if let Some(agent) = agent {
+							#[cfg(unix)]
+							kernel.record(&agent);
+							process.name(agent);
 						}
 						// Withdrawn from release helpers before the lock is released.
 						#[cfg(target_os = "macos")]
@@ -1034,7 +1040,12 @@ impl KernelLease {
 			));
 		}
 		match file.try_lock() {
-			Ok(()) => Ok(Self { file, shared: false }),
+			Ok(()) => {
+				// A host that died holding the lock left its record behind; this
+				// lease names its own agent or none.
+				let _ = file.set_len(0);
+				Ok(Self { file, shared: false })
+			},
 			Err(std::fs::TryLockError::WouldBlock) => {
 				Err(Self::holder(&file).map_or_else(busy, |(pid, agent)| held_by(&agent, pid)))
 			},
@@ -1048,10 +1059,9 @@ impl KernelLease {
 	/// locked. Best effort: input never waits on the record.
 	fn record(&self, agent: &str) {
 		use std::os::unix::fs::FileExt;
-		let record = format!("{}\n{agent}", std::process::id());
-		if self.file.set_len(0).is_ok() {
-			let _ = self.file.write_all_at(record.as_bytes(), 0);
-		}
+		let _ = self
+			.file
+			.write_all_at(format!("{}\n{agent}", std::process::id()).as_bytes(), 0);
 	}
 
 	/// The omp pid and agent a live host recorded in the locked `file`; `None`
@@ -1406,6 +1416,40 @@ mod tests {
 	}
 
 	#[test]
+	fn input_refused_by_another_sessions_control_names_its_agent() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let holder =
+			CancellationSource::counting_escapes(Arc::default(), Some(Arc::from("CursorChecks.Scout")));
+		let held = InputLease::acquire(&holder.token(), false).expect("the holder takes control");
+		let named = format!("agent \"CursorChecks.Scout\" (omp pid {})", std::process::id());
+		// Another session of this omp.
+		let waiter = CancellationSource::default();
+		let (refused, _) = acquire_on_test_clock(&waiter.token(), Instant::now(), |_| {});
+		let Err(refused) = refused else {
+			panic!("busy while held")
+		};
+		assert!(refused.message.contains(&named), "{}", refused.message);
+		// Another omp, through the lock file.
+		#[cfg(unix)]
+		{
+			let Err(other) = KernelLease::at(&KernelLease::path()) else {
+				panic!("busy while held")
+			};
+			assert!(other.message.contains(&named), "{}", other.message);
+		}
+		drop(held);
+		// Its name goes with its control.
+		let unnamed = InputLease::acquire(&waiter.token(), false).expect("control once released");
+		let (refused, _) = acquire_on_test_clock(&holder.token(), Instant::now(), |_| {});
+		let Err(refused) = refused else {
+			panic!("busy while held")
+		};
+		assert_eq!(refused.message, busy().message, "a holder without an agent is not named");
+		drop(unnamed);
+		remove_test_lock();
+	}
+
+	#[test]
 	fn input_refuses_control_released_during_the_final_poll() {
 		let _serial = OWNERSHIP_TEST.lock();
 		let source = CancellationSource::default();
@@ -1705,24 +1749,10 @@ mod tests {
 	#[test]
 	fn process_ownership_fails_closed_and_releases() {
 		let _serial = OWNERSHIP_TEST.lock();
-		let first = ProcessLease::acquire(Some(Arc::from("Scout"))).expect("first lease");
-		let Err(named) = ProcessLease::acquire(None) else {
-			panic!("busy while held")
-		};
-		assert!(
-			named
-				.message
-				.contains(&format!("agent \"Scout\" (omp pid {})", std::process::id())),
-			"{}",
-			named.message
-		);
+		let first = ProcessLease::acquire().expect("first lease");
+		assert!(ProcessLease::acquire().is_err());
 		drop(first);
-		let unnamed = ProcessLease::acquire(None).expect("lease after release");
-		let Err(busy_error) = ProcessLease::acquire(None) else {
-			panic!("busy while held")
-		};
-		assert_eq!(busy_error.message, busy().message, "a holder without an agent is not named");
-		drop(unnamed);
+		assert!(ProcessLease::acquire().is_ok());
 	}
 
 	#[cfg(target_os = "macos")]
@@ -1789,18 +1819,8 @@ mod tests {
 			panic!("busy while held")
 		};
 		assert_eq!(unnamed.message, busy().message, "a holder without a record is not named");
-		first.record("Scout");
-		let Err(named) = KernelLease::at(&path) else {
-			panic!("busy while held")
-		};
-		assert!(
-			named
-				.message
-				.contains(&format!("agent \"Scout\" (omp pid {})", std::process::id())),
-			"{}",
-			named.message
-		);
-		// A record left by a host that has exited names nobody.
+		// A record naming a process that has exited, as a host killed while a
+		// release helper still holds its lock leaves, names nobody.
 		let mut gone = std::process::Command::new("true")
 			.spawn()
 			.expect("short-lived process");
@@ -1808,7 +1828,6 @@ mod tests {
 		assert!(gone.wait().expect("process exits").success());
 		{
 			use std::os::unix::fs::FileExt;
-			first.file.set_len(0).expect("clear record");
 			first
 				.file
 				.write_all_at(format!("{gone_pid}\nGhost").as_bytes(), 0)
@@ -1824,7 +1843,14 @@ mod tests {
 			0,
 			"release clears the record"
 		);
-		let second = KernelLease::at(&path).expect("lease after release");
+		// A host that died holding the lock left its record, and its pid now
+		// belongs to a live process: the next lease clears it.
+		std::fs::write(&path, format!("{}\nGhost", std::process::id())).expect("dead host's record");
+		let second = KernelLease::at(&path).expect("lease after the dead host");
+		let Err(cleared) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert_eq!(cleared.message, busy().message, "the next holder never inherits a name");
 		drop(second);
 		std::fs::remove_file(path).expect("remove test lock");
 	}
