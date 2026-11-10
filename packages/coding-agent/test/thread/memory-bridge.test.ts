@@ -116,7 +116,10 @@ describe("memory thread service", () => {
 			async request<T>(method: MnemosyneOssWorkerMethod, params: Record<string, unknown> = {}) {
 				if (method === "remember") {
 					const record: MnemosyneOssWorkerRecord = {
-						id: "worker-memory", bank: "bridge-bank", content: String(params.content), editable: true,
+						id: "worker-memory",
+						bank: "bridge-bank",
+						content: String(params.content),
+						editable: true,
 					};
 					memories.set(record.id, record);
 					return { id: record.id } as T;
@@ -128,16 +131,21 @@ describe("memory thread service", () => {
 				if (method === "recall") return { items: [...memories.values()] } as T;
 				throw new Error(`unexpected worker request: ${method}`);
 			},
-			async shutdown() { shutdowns++; },
+			async shutdown() {
+				shutdowns++;
+			},
 		};
 		const parent = new MnemosyneOssSessionState({
 			sessionId: "parent-session",
 			session: parentSession,
-			config: loadMnemosyneOssConfig(Settings.isolated({
-				"mnemosyne-oss.bank": "bridge-bank",
-				"mnemosyne-oss.autoRecall": false,
-				"mnemosyne-oss.autoRetain": false,
-			}), tempDir),
+			config: loadMnemosyneOssConfig(
+				Settings.isolated({
+					"mnemosyne-oss.bank": "bridge-bank",
+					"mnemosyne-oss.autoRecall": false,
+					"mnemosyne-oss.autoRetain": false,
+				}),
+				tempDir,
+			),
 			worker: pythonWorker,
 		});
 		parent.lastRecallSnippet = "<memories>parent recall</memories>";

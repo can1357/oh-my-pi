@@ -90,7 +90,11 @@ function buildProbe(): MemoryProbe {
 			const session = childSession(settings);
 			try {
 				await mnemosyneOssBackend.start({
-					session, settings, modelRegistry, agentDir: "/tmp", taskDepth: 1,
+					session,
+					settings,
+					modelRegistry,
+					agentDir: "/tmp",
+					taskDepth: 1,
 					parentMnemosyneOssSessionState: parent,
 				});
 				const alias = session.getMnemosyneOssSessionState();

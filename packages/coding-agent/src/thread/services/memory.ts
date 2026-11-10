@@ -35,7 +35,12 @@ import {
 	MNEMOSYNE_OSS_SESSION_STATE_KIND,
 	type MnemosyneOssSessionStateProtocol,
 } from "./memory-protocol";
-import { RemoteHindsightClient, RemoteHindsightSessionState, RemoteMnemopiSessionState, RemoteMnemosyneOssSessionState } from "./memory-remote";
+import {
+	RemoteHindsightClient,
+	RemoteHindsightSessionState,
+	RemoteMnemopiSessionState,
+	RemoteMnemosyneOssSessionState,
+} from "./memory-remote";
 
 const serveHindsightClient: RpcServe<HindsightApi, HindsightClientProtocol> = {
 	retain: (client, bankId, content, options) => client.retain(bankId, content, options),
@@ -99,8 +104,12 @@ const serveMnemosyneOssState: RpcServe<MnemosyneOssSessionState, MnemosyneOssSes
 	lastRecallSnippet: state => state.lastRecallSnippet,
 	lastRecallAt: state => state.lastRecallAt,
 	lastWriteAt: state => state.lastWriteAt,
-	setLastRecallAt: (state, value) => { state.lastRecallAt = value; },
-	setLastWriteAt: (state, value) => { state.lastWriteAt = value; },
+	setLastRecallAt: (state, value) => {
+		state.lastRecallAt = value;
+	},
+	setLastWriteAt: (state, value) => {
+		state.lastWriteAt = value;
+	},
 	workerRequest: (state, ...args) => state.worker.request(...args),
 	workerShutdown: state => state.worker.shutdown(),
 	recall: (state, ...args) => state.recall(...args),
