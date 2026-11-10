@@ -16,6 +16,7 @@ import { readLatestSessionTitle, visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
+import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -457,7 +458,15 @@ async function scanSessionFile(
 			cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: undefined });
 			return undefined;
 		}
-		const latestTitle = await readLatestSessionTitle(file, storage);
+		// A journal that cannot be read through still lists under its header title, so callers such as
+		// gc meet the read error themselves; the result is not cached, so a later scan finds the title.
+		let latestTitle: SessionTitleUpdate | undefined;
+		let titleRead = true;
+		try {
+			latestTitle = await readLatestSessionTitle(file, storage);
+		} catch {
+			titleRead = false;
+		}
 		const resolvedTitle = latestTitle ? (normalizeTitleOverride(latestTitle.title) ?? undefined) : header.title;
 
 		let parsedMessageCount = 0;
@@ -543,7 +552,7 @@ async function scanSessionFile(
 		};
 		// The cache keeps its own shallow copy; hits also hand out copies, so
 		// callers can never mutate the shared cached object.
-		cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
+		if (titleRead) cache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, info: { ...info } });
 		return info;
 	} catch {
 		return undefined;
