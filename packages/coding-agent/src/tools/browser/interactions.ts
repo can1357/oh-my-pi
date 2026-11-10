@@ -246,12 +246,14 @@ export function composedContains(ancestor: unknown, descendant: unknown): boolea
 
 interface ClickFlags {
 	viaLabel: boolean;
+	/** Checking a hover target: an `opacity:0` element may be one only hovering reveals (a row's actions). */
+	hover: boolean;
 }
 
 /** Page half of {@link isClickActionable}; `contains` is {@link composedContains}, bound in by `clickActionableInPage`. */
 function checkClickActionable(
 	el: unknown,
-	{ viaLabel }: ClickFlags,
+	{ viaLabel, hover }: ClickFlags,
 	contains: typeof composedContains,
 ): ActionabilityResult {
 	const element = el as unknown as PageElement;
@@ -272,6 +274,7 @@ function checkClickActionable(
 	if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
 	// A custom checkbox or radio keeps its real control at opacity:0 under the box it draws; the hit test below decides.
 	if (
+		!hover &&
 		Number(style.opacity) === 0 &&
 		!element.matches(
 			'input[type="checkbox"], input[type="radio"], [role="checkbox" i], [role="radio" i], [role="switch" i]',
@@ -348,9 +351,9 @@ const clickActionableInPage = new Function(
 export async function isClickActionable(
 	handle: ElementHandle,
 	signal?: AbortSignal,
-	options: Pick<ClickAtOptions, "button"> = {},
+	options: Pick<ClickAtOptions, "button"> & { hover?: boolean } = {},
 ): Promise<ActionabilityResult> {
-	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left" };
+	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left", hover: options.hover === true };
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
@@ -358,7 +361,7 @@ async function actionableClickPoint(
 	handle: ElementHandle,
 	label: string,
 	signal: AbortSignal | undefined,
-	options: ClickAtOptions,
+	options: ClickAtOptions & { hover?: boolean },
 ): Promise<ClickPoint> {
 	await untilAborted(signal, () =>
 		handle.evaluate(el => {
@@ -483,6 +486,16 @@ export async function clickElement(
 	if (!delivered) {
 		throw new ToolError(`${label}: the browser did not deliver the click to the element (disabled or inert)`);
 	}
+}
+
+/**
+ * Move the pointer onto an element at the point a click would use, once it can take one there: a hidden match
+ * waits and then fails with the reason, like a click, and a covered one fails at once. An `opacity:0` element is
+ * hovered, since hovering may be what shows it.
+ */
+export async function hoverElement(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
+	const point = await actionableClickPoint(handle, label, signal, { hover: true });
+	await untilAborted(signal, () => handle.frame.page().mouse.move(point.x, point.y));
 }
 
 /**

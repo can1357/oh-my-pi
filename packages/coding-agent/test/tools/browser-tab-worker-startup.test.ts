@@ -344,6 +344,65 @@ describe("OMP-owned browser input", () => {
 		},
 		45_000,
 	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"checks a hover target the way it checks a click target, on selectors and handles",
+		async () => {
+			const browser = headless();
+			const name = `hover-actionable-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's action shows only on hover.
+			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }</style>
+				<a class="menu" href="#" style="display:none">Menu</a>
+				<a class="menu" id="mobile" href="#" onmouseover="this.dataset.hovered = 'yes'">Menu</a>
+				<div class="row">Row <button class="del" onmouseover="this.dataset.hovered = 'yes'">Delete</button></div>
+				<button id="covered" style="position:absolute;left:0;top:80px;width:120px;height:40px">Covered</button>
+				<div id="overlay" style="position:fixed;left:0;top:80px;width:120px;height:40px;z-index:1"></div>`;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent(fixture)}`,
+					timeoutMs: 30_000,
+				});
+				const message = async (code: string, timeoutMs: number): Promise<unknown> =>
+					(
+						await runInTab(name, {
+							code: `try { ${code} return "hovered"; } catch (error) { return error instanceof Error ? error.message : String(error); }`,
+							timeoutMs,
+							session,
+						})
+					).returnValue;
+
+				expect(await message(`await tab.hover(".menu");`, 3_000)).toBe(
+					'tab.hover(".menu") timed out after 2000ms; the element never became clickable (last check: display:none; selector matches 2 element(s))',
+				);
+				expect(await message(`await tab.hover("#covered");`, 10_000)).toBe(
+					'tab.hover("#covered") blocked: covered by <div#overlay>',
+				);
+				expect(await message(`await (await tab.waitForSelector("#covered")).hover();`, 10_000)).toBe(
+					"handle.hover() blocked: covered by <div#overlay>",
+				);
+				expect(
+					await message(
+						`await tab.hover("#mobile"); if ((await tab.attr("#mobile", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
+						10_000,
+					),
+				).toBe("hovered");
+				expect(
+					await message(
+						`await tab.hover(".del"); if ((await tab.attr(".del", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
+						10_000,
+					),
+				).toBe("hovered");
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
 });
 
 describe("visible OMP-owned browser tabs", () => {

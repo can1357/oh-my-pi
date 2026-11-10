@@ -176,6 +176,7 @@ import {
 	dragBetween,
 	fillViaHandle,
 	highlightElement,
+	hoverElement,
 	type HighlightOptions,
 	type InteractionHandle,
 	installCancelledReleaseGuard,
@@ -795,6 +796,7 @@ export function toActionableHandle(
 				clickCount: options?.count,
 			});
 		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { clickCount: 2 });
+		enriched.hover = () => hoverElement(enriched, "handle.hover()");
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
 		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
@@ -886,6 +888,17 @@ export function toActionableHandle(
 				"handle.dblclick()",
 				signal,
 				() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+				invalidate,
+			),
+		);
+	enriched.hover = () =>
+		guard<void>("handle.hover()", signal =>
+			runGuardedHandleAction(
+				enriched,
+				originals,
+				"handle.hover()",
+				signal,
+				() => hoverElement(enriched, "handle.hover()", signal),
 				invalidate,
 			),
 		);
@@ -3072,7 +3085,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await untilAborted(sig, () => handle.hover());
+							await hoverElement(handle, `tab.hover(${JSON.stringify(selector)})`, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
