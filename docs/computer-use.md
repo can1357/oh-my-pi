@@ -51,6 +51,7 @@ await computer.close();
 ```
 
 Unknown option or filter keys are rejected with the helper name and valid keys. A spelling suggestion appears only when exactly one valid key matches after ignoring case, underscores, and hyphens.
+`windows()` lists once and rejects `wait`; use `window({ ..., wait })` to wait for one matching window.
 
 Python uses the same names; keyword arguments become the trailing options object, and `win.raise_()` stands in for the keyword `raise`:
 

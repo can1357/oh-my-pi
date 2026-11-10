@@ -1,4 +1,5 @@
 {
+	/* COMPUTER_OPTION_VALIDATOR */
 	const validateOptions = (label, options) => {
 		if (options === undefined) return {};
 		if (options === null || typeof options !== "object" || Array.isArray(options)) {
@@ -235,20 +236,9 @@
 		}
 		const opts = validateOptions("computer.run", options);
 		const allowed = ["args", "read_only", "timeout"];
-		const unknown = Object.keys(opts).filter(key => !allowed.includes(key));
-		if (unknown.length > 0) {
-			// Keep normalization in sync with worker.ts strictObject; this realm cannot import ToolError.
-			const hints = unknown.flatMap(key => {
-				const normalized = key.toLowerCase().replace(/[_-]/g, "");
-				const matches = allowed.filter(name => {
-					const candidate = name.toLowerCase().replace(/[_-]/g, "");
-					return normalized.length > 0 && candidate === normalized;
-				});
-				return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
-			});
-			const error = new Error(
-				`computer.run: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`,
-			);
+		const message = unknownOptionsMessage(opts, allowed, "computer.run");
+		if (message) {
+			const error = new Error(message);
 			// Match the host's strict-option ToolError rather than the facade's argument-shape TypeErrors.
 			error.name = "ToolError";
 			throw error;

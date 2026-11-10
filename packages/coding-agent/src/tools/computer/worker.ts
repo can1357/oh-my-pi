@@ -45,6 +45,7 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { unknownOptionsMessage } from "./option-errors";
 import {
 	type ComputerEscapeScope,
 	type ComputerScreenshot,
@@ -178,6 +179,7 @@ const holdMouseOptionsKeys: Record<keyof HoldMouseOptions, true> = {
 	takeover: true,
 };
 const windowFilterKeys: Record<keyof WindowFilter, true> = { id: true, app: true, title: true, wait: true };
+const windowListFilterKeys: Record<keyof Omit<WindowFilter, "wait">, true> = { id: true, app: true, title: true };
 const applicationQueryKeys: Record<keyof ApplicationQuery, true> = { query: true, runningOnly: true };
 const applicationOpenOptionsKeys: Record<keyof ApplicationOpenOptions, true> = {
 	activate: true,
@@ -370,20 +372,8 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new ToolError(`${label} must be an object with only: ${allowed.join(", ")}`);
 	}
-	const unknown = Object.keys(value).filter(key => !allowed.includes(key));
-	if (unknown.length === 0) return;
-	// Keep normalization in sync with computer.run in prelude.js, which runs in an isolated realm.
-	const hints = unknown.flatMap(key => {
-		const normalized = key.toLowerCase().replace(/[_-]/g, "");
-		const matches = allowed.filter(name => {
-			const candidate = name.toLowerCase().replace(/[_-]/g, "");
-			return normalized.length > 0 && candidate === normalized;
-		});
-		return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
-	});
-	throw new ToolError(
-		`${label}: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`,
-	);
+	const message = unknownOptionsMessage(value, allowed, label);
+	if (message) throw new ToolError(message);
 }
 
 function strictOptions(value: unknown, keys: object, label: string): void {
@@ -1986,8 +1976,8 @@ export class ComputerWorkerCore {
 					return session.controlState();
 				},
 			},
-			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
-				strictOptions(filter, windowFilterKeys, "windows");
+			windows: async (filter?: Omit<WindowFilter, "wait">): Promise<DesktopWindow[]> => {
+				strictOptions(filter, windowListFilterKeys, "windows");
 				const { signal } = getContext();
 				const { matches } = await listWindows(filter, signal);
 				return matches.slice(0, MAX_LISTED_WINDOWS);

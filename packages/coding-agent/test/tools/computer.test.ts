@@ -1510,7 +1510,8 @@ describe("computer worker round trips", () => {
 			await check("wait", o => wait(() => true, o), { timeout: 10, interval: 10 }, { timeoutMs: 10 });
 			await check("observe", o => win.observe(o), { silent: true, all: true, maxDepth: 3 });
 			await check("find", o => win.find(o), { role: "button", title: "Save", value: "", limit: 1 });
-			await check("windows", o => desktop.windows(o), { id: "42", app: "Code", title: "Editor", wait: 0 }, { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { id: "42", app: "Code", title: "Editor" }, { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { id: "42" }, { wait: 5000 });
 			await check("windows", o => desktop.windows(o), { id: "42" }, { d: true });
 			await check("click", o => win.click(1, 2, o), { button: "left" }, { on: true });
 			await check("control.acquire", o => desktop.control.acquire(o), undefined, { "": true });
