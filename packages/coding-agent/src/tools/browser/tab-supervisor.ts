@@ -264,6 +264,7 @@ type ExitTrackedWorker = WorkerHandle & { [kWorkerExited]?: true };
 // awaits) cannot interleave and leak a worker + browser refCount.
 const acquireChains = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
+const WORKER_RECOVERY_TIMEOUT_MS = 5_000;
 // Staging folders of closed tabs are swept at most this often (see `sweepUploadStaging`).
 const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 let lastUploadSweep = 0;
@@ -295,7 +296,7 @@ const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any
 // How to give a call that ran out of time a longer budget; nothing once it had the browser tool's maximum.
 function longerBudgetHint(timeoutMs: number): string {
 	if (timeoutMs >= TOOL_TIMEOUTS.browser.max * 1000) return "";
-	return ` To give long page work more time, raise the Eval cell's \`timeout\` or pass \`timeout\` to \`tab.run\` (seconds, at most ${TOOL_TIMEOUTS.browser.max}).`;
+	return ` To give long page work more time, raise the Eval cell's \`timeout\` or pass \`timeout\` to \`tab.run\` (seconds, at most ${TOOL_TIMEOUTS.browser.max}); also raise or disable \`tools.maxTimeout\` if it caps that budget.`;
 }
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
@@ -1243,9 +1244,16 @@ async function runInTabWithSnapshot(
 			}
 		}
 	}
+	const cancellation = Promise.withResolvers<never>();
+	let abortTimer: ReturnType<typeof setTimeout> | undefined;
+	let cancellationExpired = false;
 	const abort = (): void => {
 		safeSend(tab, { type: "abort", id });
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(opts.signal?.reason);
+		abortTimer = setTimeout(() => {
+			cancellationExpired = true;
+			cancellation.reject(new ToolAbortError());
+		}, GRACE_MS);
 	};
 	if (opts.signal?.aborted) abort();
 	else opts.signal?.addEventListener("abort", abort, { once: true });
@@ -1269,7 +1277,7 @@ async function runInTabWithSnapshot(
 		const hungReason = `Browser code execution hung past its ${opts.timeoutMs}ms budget`;
 		try {
 			const result = await raceWithTimeout(
-				promise,
+				Promise.race([promise, cancellation.promise]),
 				opts.timeoutMs + GRACE_MS,
 				hungReason,
 				async reason => await forceKillTab(name, reason),
@@ -1290,6 +1298,10 @@ async function runInTabWithSnapshot(
 			}
 			return result;
 		} catch (error) {
+			if (cancellationExpired) {
+				await forceKillTab(name, "Browser code execution did not stop after cancellation");
+				throw error;
+			}
 			if (error instanceof ToolError && error.message === hungReason) {
 				throw new ToolError(
 					`${hungReason}, so omp released tab ${JSON.stringify(name)} (closing its page if omp opened it); open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
@@ -1389,6 +1401,7 @@ async function runInTabWithSnapshot(
 			throw error;
 		}
 	} finally {
+		clearTimeout(abortTimer);
 		opts.signal?.removeEventListener("abort", abort);
 		tab.pending.delete(id);
 		// Completion is use too: a run outlasting the idle timeout must
@@ -1420,7 +1433,9 @@ async function recoverWorkerTab(
 	};
 	try {
 		if (tab.worker.mode === "inline") return await killTab(reason);
-		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, { recover: opts.recover });
+		return await recycleTimedOutWorkerTab(tab, Math.min(timeoutMs + GRACE_MS, WORKER_RECOVERY_TIMEOUT_MS), {
+			recover: opts.recover,
+		});
 	} catch (recycleError) {
 		logger.warn("Failed to recycle browser tab worker; killing tab", {
 			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
