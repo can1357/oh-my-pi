@@ -4,6 +4,7 @@
 
 ### Added
 
+- The model status line shows a Daybreak icon when the selected Codex account will request Daybreak Blue, and clears it if access is rejected ([#18730](https://github.com/can1357/oh-my-pi/pull/18730) by [@fabian-lu-ha](https://github.com/fabian-lu-ha))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
 ### Fixed

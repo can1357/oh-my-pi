@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The model status line can display a Daybreak icon in Unicode, Nerd Font, and ASCII modes ([#18730](https://github.com/can1357/oh-my-pi/pull/18730) by [@fabian-lu-ha](https://github.com/fabian-lu-ha))
+
 ### Changed
 
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
