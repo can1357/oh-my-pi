@@ -337,22 +337,6 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(
-	window: DesktopWindow,
-	filter?: WindowFilter,
-	appPids?: ReadonlySet<number>,
-	exactApp = false,
-): boolean {
-	if (!filter) return true;
-	const app = filter.app?.toLocaleLowerCase();
-	const title = filter.title?.toLocaleLowerCase();
-	return (
-		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || (exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
-		(!title || window.title.toLocaleLowerCase().includes(title))
-	);
-}
-
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;
 	if (typeof wait !== "number" || !Number.isFinite(wait) || wait < 0 || wait > MAX_WINDOW_WAIT_MS) {
@@ -1769,10 +1753,18 @@ export class ComputerWorkerCore {
 					}
 				}
 			}
+			const title = filter?.title?.toLocaleLowerCase();
 			return {
 				windows,
 				appPids,
-				matches: windows.filter(window => matchesFilter(window, filter, appPids, exactApp)),
+				matches: windows.filter(window => {
+					if (!filter) return true;
+					return (
+						(filter.id === undefined || window.id === String(filter.id)) &&
+						(!app || (exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!title || window.title.toLocaleLowerCase().includes(title))
+					);
+				}),
 			};
 		};
 		const desktopTarget = new Win(session, getContext, {
