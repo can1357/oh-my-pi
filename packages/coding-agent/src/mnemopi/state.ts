@@ -1000,14 +1000,14 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		void this.#warmEmbeddings(controller.signal).catch(error => {
 			this.#logLifecycleFailure(
 				"embedding warmup",
-				this.scoped.recall.map(target => target.bank),
+				this.#local().recall.map(target => target.bank),
 				error,
 			);
 		});
 	}
 
 	async #warmEmbeddings(signal: AbortSignal): Promise<void> {
-		for (const target of this.scoped.recall) {
+		for (const target of this.#local().recall) {
 			if (signal.aborted) return;
 			await target.memory.beam.warmRecallCache({ channelId: target.bank }, signal);
 		}
