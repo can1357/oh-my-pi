@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { normalizeToLF } from "../../src/edit/normalize";
 import { sha256File } from "../../src/utils/file-hash";
 import { type CalibrationDump, compareCalibration, corpusSha256, runUpstreamCompat } from "./compat";
 import { loadBeamUpstreamCompat, loadDataset } from "./datasets";
@@ -42,7 +43,7 @@ export async function harnessHash(dir: string = import.meta.dir): Promise<string
 	const parts = await Promise.all(
 		files.map(
 			async file =>
-				`${file.replaceAll("\\", "/")}\0${(await Bun.file(path.join(dir, file)).text()).replaceAll("\r\n", "\n")}`,
+				`${file.replaceAll("\\", "/")}\0${normalizeToLF(await Bun.file(path.join(dir, file)).text())}`,
 		),
 	);
 	return Bun.hash(parts.join("\0")).toString(16);
