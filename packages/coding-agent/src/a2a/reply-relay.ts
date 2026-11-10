@@ -77,7 +77,7 @@ const detachedSends = new Set<Promise<unknown>>();
  */
 export async function settleA2aReplies(): Promise<void> {
 	while (detachedSends.size > 0) {
-		await Promise.allSettled([...detachedSends]);
+		await Promise.allSettled(detachedSends);
 	}
 }
 
