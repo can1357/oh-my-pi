@@ -104,7 +104,8 @@ class CdpConnection {
 	/** Tabs this connection claimed as drive targets (`/cdp?claim=` / `Target.createTarget`). */
 	readonly claims = new Set<string>();
 	/** Real child session id → the session it was announced on; its events and detach go there. */
-	readonly childParents = new Map<string, { parent: string; explicit: boolean }>();
+	readonly childParents = new Map<string, string>();
+	readonly explicitChildren = new Set<string>();
 
 	constructor(
 		readonly id: number,
@@ -1156,7 +1157,7 @@ export class RelayBridge {
 		if (!tab) return;
 		for (const [child, known] of tab.realSessions) {
 			if (known.parent !== parent || conn.childParents.has(child)) continue;
-			conn.childParents.set(child, { parent: sessionId, explicit: false });
+			conn.childParents.set(child, sessionId);
 			conn.socket.send(JSON.stringify({ sessionId, method: "Target.attachedToTarget", params: known.event }));
 		}
 	}
@@ -1218,7 +1219,8 @@ export class RelayBridge {
 			const response = (result as Record<string, unknown> | undefined) ?? {};
 			// An explicit attach grants ownership even when this connection did not arm auto-attach.
 			if (msg.method === "Target.attachToTarget" && msg.sessionId && typeof response.sessionId === "string") {
-				conn.childParents.set(response.sessionId, { parent: msg.sessionId, explicit: true });
+				conn.childParents.set(response.sessionId, msg.sessionId);
+				conn.explicitChildren.add(response.sessionId);
 			}
 			beforeReply?.();
 			this.#reply(conn, msg, response);
@@ -1584,8 +1586,11 @@ export class RelayBridge {
 				if (!conn.childParents.has(sourceSessionId)) continue;
 				conn.socket.send(payload);
 				if (nested && method === "Target.attachedToTarget" && !conn.childParents.has(nested))
-					conn.childParents.set(nested, { parent: sourceSessionId, explicit: false });
-				else if (nested && method === "Target.detachedFromTarget") conn.childParents.delete(nested);
+					conn.childParents.set(nested, sourceSessionId);
+				else if (nested && method === "Target.detachedFromTarget") {
+					conn.childParents.delete(nested);
+					conn.explicitChildren.delete(nested);
+				}
 			}
 			return;
 		}
@@ -1633,10 +1638,11 @@ export class RelayBridge {
 				let parent: string | undefined;
 				if (method === "Target.attachedToTarget") {
 					parent = conn.childTargetSessionForTab(tabKey);
-					if (parent && !conn.childParents.has(child)) conn.childParents.set(child, { parent, explicit: false });
+					if (parent && !conn.childParents.has(child)) conn.childParents.set(child, parent);
 				} else {
-					parent = conn.childParents.get(child)?.parent;
+					parent = conn.childParents.get(child);
 					conn.childParents.delete(child);
+					conn.explicitChildren.delete(child);
 				}
 				if (parent) conn.socket.send(JSON.stringify({ sessionId: parent, method, params }));
 			}
@@ -2014,19 +2020,20 @@ export class RelayBridge {
 
 	#forgetConnectionChildren(conn: CdpConnection, tab: TabState, automaticOnly = false): void {
 		for (const child of [...tab.realSessions.keys()].reverse()) {
-			const ownership = conn.childParents.get(child);
-			if (!ownership) continue;
+			const parent = conn.childParents.get(child);
+			if (!parent) continue;
 			if (automaticOnly) {
-				let ancestor = ownership;
-				while (!ancestor.explicit) {
-					const parent = conn.childParents.get(ancestor.parent);
-					if (!parent) break;
-					ancestor = parent;
+				let ancestor = child;
+				while (!conn.explicitChildren.has(ancestor)) {
+					const next = conn.childParents.get(ancestor);
+					if (!next) break;
+					ancestor = next;
 				}
-				if (ancestor.explicit) continue;
+				if (conn.explicitChildren.has(ancestor)) continue;
 			}
 			conn.childParents.delete(child);
-			this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, ownership.parent);
+			conn.explicitChildren.delete(child);
+			this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, parent);
 		}
 	}
 
