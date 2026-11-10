@@ -164,7 +164,10 @@ describe("/summary", () => {
 	it("skips malformed and vanished children but surfaces real read errors instead of an empty report", async () => {
 		const main = path.join(dir.path(), "root.jsonl");
 		await transcript(main);
-		await transcript(path.join(dir.path(), "root", "valid.jsonl"), [answer("kept reply", 100)]);
+		const malformed = [null, [null], [{ type: "text" }]].map(content =>
+			answer("", 200, { content: content as unknown as AssistantMessage["content"] }),
+		);
+		await transcript(path.join(dir.path(), "root", "valid.jsonl"), [...malformed, answer("kept reply", 100)]);
 		const registry = new AgentRegistry();
 		for (const id of ["malformed", "vanished"]) {
 			const file = path.join(dir.path(), "root", `${id}.jsonl`);

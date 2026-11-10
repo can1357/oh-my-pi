@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { Markdown } from "@oh-my-pi/pi-tui";
+import { splitTextLines } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
@@ -87,10 +88,6 @@ export async function listSessionSummaries(
 	);
 }
 
-function displayTime(item: SessionSummary): string {
-	return item.timestamp === 0 ? "Unknown time" : new Date(item.timestamp).toISOString();
-}
-
 export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 	name: "summary",
 	icon: "news",
@@ -126,33 +123,24 @@ export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 			let item: SessionSummary | undefined = items[0];
 			if (!args) {
 				const now = Date.now();
-				const byLabel = new Map(
-					items.map((summary, index) => [
-						`${index + 1}. ${summary.timestamp ? formatAge(Math.max(1, Math.round((now - summary.timestamp) / 1000))) : "Unknown time"} · ${oneLineLabel(summary.agentName)}`,
-						summary,
-					]),
-				);
-				const selected = await ctx.showHookSelector(
-					"Session summaries",
-					Array.from(byLabel, ([label, summary]) => ({
-						label,
-						preview: summary.text,
-					})),
-				);
+				const options = items.map((summary, index) => ({
+					label: `${index + 1}. ${summary.timestamp ? formatAge(Math.max(1, Math.round((now - summary.timestamp) / 1000))) : "Unknown time"} · ${oneLineLabel(summary.agentName)}`,
+					preview: summary.text,
+				}));
+				const selected = await ctx.showHookSelector("Session summaries", options);
 				if (!shouldContinue()) return;
-				item = selected === undefined ? undefined : byLabel.get(selected);
+				item = items[options.findIndex(option => option.label === selected)];
 			}
 			if (!item) return;
-			const summary = item;
+			const { agentName, timestamp, text } = item;
 			const reference = prompt.compile(summaryReferencePrompt)({
-				agentName: oneLineLabel(summary.agentName),
-				timestamp: displayTime(summary),
-				lines: summary.text.split(/\r?\n/),
+				agentName: oneLineLabel(agentName),
+				timestamp: timestamp ? new Date(timestamp).toISOString() : "Unknown time",
+				lines: splitTextLines(text),
 			});
 			const action = {
 				label: "Inject",
 				keys: ctx.keybindings.getKeys("app.summary.inject"),
-				closeOnAction: true,
 				onAction: () => {
 					if (!shouldContinue() || ctx.focusedAgentId || ctx.collabGuest || session.isSessionTransitioning) return;
 					if (!ctx.editor.getExpandedText().includes(reference.trim())) {
@@ -163,8 +151,8 @@ export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 				},
 			};
 			ctx.showCommandReport({
-				title: `Summary · ${oneLineLabel(item.agentName)}`,
-				body: new Markdown(replaceTabs(item.text), 0, 0, getMarkdownTheme()),
+				title: `Summary · ${oneLineLabel(agentName)}`,
+				body: new Markdown(replaceTabs(text), 0, 0, getMarkdownTheme()),
 				action: ctx.focusedAgentId || ctx.collabGuest ? undefined : action,
 			});
 		} catch (error) {

@@ -18,6 +18,14 @@ describe("parseTurnBudget", () => {
 	it("matches the directive embedded in a sentence", () => {
 		expect(parseTurnBudget("be exhaustive +500k please")).toEqual({ total: 500_000, hard: false });
 	});
+	it("ignores quoted historical directives but keeps the authored directive", () => {
+		expect(parseTurnBudget("> use +5k! from the old draft\n\nMy current draft is +200k")).toEqual({
+			total: 200_000,
+			hard: false,
+		});
+		expect(parseTurnBudget("> +5k!")).toBeNull();
+		expect(parseTurnBudget("> +5k!\n\nUse +200k!")).toEqual({ total: 200_000, hard: true });
+	});
 
 	it("ignores non-directives and junk", () => {
 		expect(parseTurnBudget("nothing here")).toBeNull();

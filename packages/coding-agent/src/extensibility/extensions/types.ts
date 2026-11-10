@@ -165,7 +165,6 @@ export type { AgentToolResult, AgentToolUpdateCallback };
 export interface ExtensionUISelectOption {
 	label: string;
 	description?: string;
-	preview?: string;
 }
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;

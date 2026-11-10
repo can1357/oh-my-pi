@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Text } from "@oh-my-pi/pi-tui";
+import { splitTextLines } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -157,7 +158,7 @@ describe("text-mode command reports on a real terminal core", () => {
 		async fullscreen => {
 			const key = "\x1b\x12";
 			await mountTranscript(5);
-			const text = fullscreen ? (await seedSummaryTree()).report : "Short reference summary";
+			const text = fullscreen ? (await seedSummaryTree()).report : "Short reference summary\rsecond\r\nthird\nlast";
 			if (!fullscreen) await writeSummaryReply(session.sessionManager, text, Date.now());
 			const beforeEntries = structuredClone(session.sessionManager.getEntries());
 			const beforeMessages = structuredClone(session.messages);
@@ -172,9 +173,10 @@ describe("text-mode command reports on a real terminal core", () => {
 					mode.editor.getExpandedText().includes("> CHILD_SUMMARY_END_MARKER"),
 			);
 			const draft = mode.editor.getExpandedText();
-			for (const line of text.split(/\r?\n/)) expect(draft).toContain(`> ${line}`);
+			const lines = splitTextLines(text);
+			for (const line of lines) expect(draft).toContain(`> ${line}`);
 			expect(draft.startsWith("> ")).toBe(true);
-			expect(draft.endsWith(`> ${text.split(/\r?\n/).at(-1)}\n\n${question}`)).toBe(true);
+			expect(draft.endsWith(`> ${lines.at(-1)}\n\n${question}`)).toBe(true);
 			expect(mode.editor.getCursor()).toEqual({ line: draft.split("\n").length - 1, col: "question".length });
 			expect(session.isStreaming).toBe(false);
 			expect(session.messages).toEqual(beforeMessages);
