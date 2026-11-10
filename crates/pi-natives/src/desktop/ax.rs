@@ -2227,6 +2227,28 @@ mod tests {
 		assert_eq!(nodes[0].title, None);
 		assert_eq!(nodes[0].description.as_deref(), Some("Reload"));
 	}
+	#[test]
+	fn query_accepts_role_aliases_without_widening_printed_substrings() {
+		let mut radio = p(&normalize_role_macos("AXRadioButton"), Some("Choice"));
+		radio.native_role = "AXRadioButton".into();
+		let mut field = p(&normalize_role_macos("AXTextField"), Some("Name"));
+		field.native_role = "AXTextField".into();
+		let mut m = Mock {
+			props: [(1, p("window", None)), (2, radio), (3, field)].into(),
+			children: [(1, vec![2, 3])].into(),
+			..Default::default()
+		};
+		for role in ["radiobutton", "AXRadioButton"] {
+			let nodes = find(&mut m, Some(role), None);
+			assert_eq!(nodes.len(), 1, "{role}");
+			assert_eq!(nodes[0].role, "radio");
+		}
+		assert!(find(&mut m, Some("button"), None).is_empty());
+		let nodes = find(&mut m, Some("text field"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "textfield");
+	}
+
 	fn tree(m: &mut Mock) -> String {
 		snapshot(m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
 			.unwrap()
