@@ -29,7 +29,7 @@ import { Effort } from "../src/effort";
 import { providerEntry } from "../src/compat/providers";
 import { readModelCache, writeModelCache } from "../src/model-cache";
 import { resolveProviderModels } from "../src/model-manager";
-import { calculateUncachedInputCost, getTimeBasedPricingPeriod } from "../src/models";
+import { calculateUncachedInputCost, getEffectiveTokenCost, getTimeBasedPricingPeriod } from "../src/models";
 import { devinModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec, ThinkingConfig } from "../src/types";
 
@@ -934,19 +934,51 @@ describe("devin catalog pricing", () => {
 		};
 	}
 
-	const PROMO_ENDS = Date.parse("2027-01-01T00:00:00Z");
+	const PROMO_ENDS = Date.parse("2027-01-01T08:00:00Z");
 	// Input cost of one million uncached prompt tokens: the input rate in force.
 	const inputRateAt = (model: Model<Api>, timestamp: number) =>
 		calculateUncachedInputCost(model.cost, 1_000_000, timestamp);
 
-	it("prices plan-included SWE-2 at the promo fallback and bills list from the promo's end", () => {
-		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
-		// A dated card is not a peak/off-peak tariff.
-		expect(getTimeBasedPricingPeriod(model.cost, PROMO_ENDS)).toBeUndefined();
-		// A row built during the promo still bills list once it ends.
-		expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
-		expect(inputRateAt(model, PROMO_ENDS)).toBeCloseTo(3, 10);
+	it("keeps SWE-2 Flash, SWE-2 and SWE-2 Fast billing separate across their promo cutoffs", () => {
+		// SWE-2 Flash was billed at SWE-2 rates, 7.5x its real price, and SWE-2 Fast at half its own.
+		const now = Date.parse("2026-11-06T00:00:00Z");
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			// Each family's logical id and a raw effort uid that arrives without family metadata.
+			for (const [ids, promoEnds, promo, list] of [
+				[
+					["swe-2-flash", "swe-2-flash-max"],
+					Date.parse("2026-11-18T18:00:00Z"),
+					{ input: 0.075, output: 0.375, cacheRead: 0.0075, cacheWrite: 0.09375 },
+					{ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+				],
+				[
+					["swe-2", "swe-2-high"],
+					PROMO_ENDS,
+					{ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0 },
+					{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+				],
+				[
+					// No dated card: Devin publishes no end date or list price for SWE-2 Fast.
+					["swe-2-fast", "swe-2-high-lightning"],
+					PROMO_ENDS,
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+					{ input: 1, output: 5, cacheRead: 0.1, cacheWrite: 0 },
+				],
+			] as const) {
+				for (const id of ids) {
+					const model = buildModel(spec(id));
+					expect(model.cost).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, now)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds - 1)).toMatchObject(promo);
+					expect(getEffectiveTokenCost(model.cost, promoEnds)).toMatchObject(list);
+					// A dated card is not a peak/off-peak tariff.
+					expect(getTimeBasedPricingPeriod(model.cost, promoEnds)).toBeUndefined();
+				}
+			}
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
 	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
@@ -957,7 +989,7 @@ describe("devin catalog pricing", () => {
 			for (const model of [buildModel(spec("swe-2")), buildModel(promoEra)]) {
 				expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 				// Requests made during the promo keep the promo price.
-				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.75, 10);
+				expect(inputRateAt(model, PROMO_ENDS - 1)).toBeCloseTo(0.5, 10);
 			}
 		} finally {
 			clock.mockRestore();

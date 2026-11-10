@@ -126,16 +126,16 @@ impl Prof {
 		fn s(v: impl std::fmt::Display) -> BString {
 			BString::from(v.to_string())
 		}
-		let mut w = vec![s(&self.funcs.len()), s(&self.arcs.len()), s(&self.stack.len())];
+		let mut w = vec![s(self.funcs.len()), s(self.arcs.len()), s(self.stack.len())];
 		for f in &self.funcs {
-			w.extend([f.name.clone(), s(&f.calls), s(&f.time), s(&f.self_)]);
+			w.extend([f.name.clone(), s(f.calls), s(f.time), s(f.self_)]);
 		}
 		for a in &self.arcs {
-			w.extend([s(&a.from), s(&a.to), s(&a.calls), s(&a.time), s(&a.self_)]);
+			w.extend([s(a.from), s(a.to), s(a.calls), s(a.time), s(a.self_)]);
 		}
 		for e in &self.stack {
-			let arc = e.arc.map_or_else(|| BString::from("-"), |a| s(&a));
-			w.extend([s(&e.f), s(&e.beg), s(&e.prev), arc, s(&e.depth)]);
+			let arc = e.arc.map_or_else(|| BString::from("-"), s);
+			w.extend([s(e.f), s(e.beg), s(e.prev), arc, s(e.depth)]);
 		}
 		Record::Words(w)
 	}
@@ -291,7 +291,7 @@ fn f2(v: f64, width: usize) -> String {
 
 /// `calls` as C's `(double)`.
 #[allow(clippy::cast_precision_loss, reason = "zsh's (double) cast")]
-fn d(n: i64) -> f64 {
+const fn d(n: i64) -> f64 {
 	n as f64
 }
 
@@ -326,8 +326,8 @@ fn report(p: &Prof) -> String {
 	let mut arcs: Vec<usize> = (0..p.arcs.len()).rev().collect();
 	arcs.sort_by(|&a, &b| desc(p.arcs[a].time, p.arcs[b].time));
 	let mut out = String::from(
-		"num  calls                time                       self            name\n\
-		 -----------------------------------------------------------------------------------\n",
+		"num  calls                time                       self            \
+		 name\n-----------------------------------------------------------------------------------\n",
 	);
 	let fline = |out: &mut String, i: usize| {
 		let f = &p.funcs[i];
@@ -365,9 +365,10 @@ fn report(p: &Prof) -> String {
 	}
 	fs.sort_by(|&a, &b| desc(p.funcs[a].time, p.funcs[b].time));
 	for &i in &fs {
-		out.push_str(
-			"\n-----------------------------------------------------------------------------------\n\n",
-		);
+		out.push_str(concat!(
+			"\n-------------------------------------------",
+			"----------------------------------------\n\n",
+		));
 		for &ai in &arcs {
 			let a = &p.arcs[ai];
 			if a.to == i {
@@ -421,10 +422,16 @@ mod tests {
 		};
 		let rule =
 			"-----------------------------------------------------------------------------------";
-		let want =
-			format!(
-			"num  calls                time                       self            name\n{rule}\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n\n{rule}\n\n 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n       2/2         3.00     1.50   75.00%      3.00     1.50             inner [1]\n\n{rule}\n\n       2/2         3.00     1.50   75.00%      3.00     1.50             outer [2]\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n"
-		);
+		let want = format!(
+				"num  calls                time                       self            name\n{rule}\n \
+				 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  inner\n 2)    \
+				 1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n\n{rule}\n\n \
+				 2)    1           4.00     4.00  100.00%      1.00     1.00   25.00%  outer\n       \
+				 2/2         3.00     1.50   75.00%      3.00     1.50             inner \
+				 [1]\n\n{rule}\n\n       2/2         3.00     1.50   75.00%      3.00     1.50             \
+				 outer [2]\n 1)    2           3.00     1.50   75.00%      3.00     1.50   75.00%  \
+				 inner\n"
+			);
 		assert_eq!(report(&p), want);
 	}
 

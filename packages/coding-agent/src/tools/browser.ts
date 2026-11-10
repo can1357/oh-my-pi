@@ -440,6 +440,12 @@ async function openOnKind(
 			"ignore_https_errors is not supported through the Chrome relay: the extension debugger API does not expose the CDP Security domain. Pass app.relay:false to use omp's Chromium instead.",
 		);
 	}
+	// Chrome never lets an extension choose where downloads go. Refused here, before an existing tab is closed to reopen.
+	if (params.downloads !== undefined && kind.kind === "relay") {
+		throw new ToolError(
+			"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.",
+		);
+	}
 
 	// First browser use may have to download Chrome for Testing (~180 MB).
 	// That is a one-time install, not part of the open, so it runs before the
@@ -692,6 +698,7 @@ async function runBrowser(
 		timeoutMs,
 		signal,
 		session,
+		waitsForDownload: params.action === "call" && params.chain?.[0]?.method === "waitForDownload",
 	});
 
 	if (screenshots.length) details.screenshots = screenshots;

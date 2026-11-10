@@ -18,6 +18,8 @@
  * here is optional.
  */
 
+import type { ShellVizPresentation } from "./shell-viz";
+
 /** Protocol version this build speaks. */
 export const TSP_VERSION = 1;
 /** APC identifier: every TSP message body starts with `tsp;`. */
@@ -81,6 +83,7 @@ export const TSP_KINDS = [
 	"chart",
 	"meter",
 	"effort",
+	"shell",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -128,6 +131,23 @@ export type TspText = string | readonly TspSpan[];
  */
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
+/**
+ * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
+ * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
+ * at the row's end).
+ */
+export type TspMenuEntry =
+	| TspAction
+	| { header: string }
+	| {
+			id: TspAction;
+			label?: string;
+			icon?: string;
+			detail?: string;
+			disabled?: boolean | string;
+			danger?: boolean;
+	  };
+
 /** Props every node accepts. */
 export interface TspCommonProps {
 	role?: string;
@@ -139,7 +159,16 @@ export interface TspCommonProps {
 	basis?: "auto" | "content" | number;
 	min?: { w?: TspExtent; h?: TspExtent };
 	max?: { w?: TspExtent; h?: TspExtent };
-	actions?: { click?: TspAction; dblclick?: TspAction; menu?: readonly TspAction[] };
+	/**
+	 * What a pointer does: `menu` lists what a right-click offers; `hold` what a long press on a touch screen
+	 * offers (a phone's hold menu over the lifted node), which a desktop ignores.
+	 */
+	actions?: {
+		click?: TspAction;
+		dblclick?: TspAction;
+		menu?: readonly TspMenuEntry[];
+		hold?: readonly TspMenuEntry[];
+	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
 	aria?: string;
@@ -516,6 +545,10 @@ export interface TspToastProps {
 	text: string;
 	sub?: string;
 	ttl?: number;
+	/** A button after the text (Undo): clicking it takes the toast down and sends this action for the node. */
+	action?: TspAction;
+	/** The button's text; defaults to the action's name labeled (`undo` → Undo). */
+	label?: string;
 }
 export interface TspRowsProps {
 	/** Width the rows were rendered at. */
@@ -936,6 +969,26 @@ export interface TspChartProps {
 	size?: "sm" | "md" | "lg";
 }
 
+/** Engine-produced shell presentation; hosts render rows and forward controls, never syntax or history. */
+export interface TspShellProps {
+	/** Canonical semantic presentation, shared with the ANSI inspector. */
+	presentation: ShellVizPresentation;
+	/** Show replay controls only in the explicitly opened inspector. */
+	inspector?: boolean;
+	/** Changed only by explicit seek/reset/live-mode transitions, clearing native highlight trails. */
+	replayEpoch?: number;
+	/** This mounted call received a real execution-start event, not a settled historical load. */
+	liveOrigin?: boolean;
+	/** Working directory shown ahead of the script when it differs from the project's. */
+	cwd?: string;
+	lang?: "bash" | "zsh";
+	/**
+	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 */
+	preview?: { lines: number };
+}
+
 /** Kind-specific props, indexed by kind. */
 export interface TspPropsByKind {
 	col: TspColProps;
@@ -983,6 +1036,7 @@ export interface TspPropsByKind {
 	chart: TspChartProps;
 	meter: TspMeterProps;
 	effort: TspEffortProps;
+	shell: TspShellProps;
 }
 
 /**

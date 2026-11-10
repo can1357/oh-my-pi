@@ -157,7 +157,7 @@
    }
   },
   {
-   "name": "writes nothing when a later section fails",
+   "name": "writes a section beside a sibling whose operations are all rejected",
    "files": {
     "a.ts": "const a = 1;\n",
     "b.ts": "const b = 2;\n"
@@ -166,12 +166,28 @@
     "input": "*** Edit File: a.ts\n*** Find\nconst a = 1;\n*** Replace\nconst a = 10;\n*** Edit File: b.ts\n*** Find\nmissing\n*** Replace\nnew\n"
    },
    "expect": {
-    "error": "No files were modified — sections apply atomically.",
+    "textContains": ["[b.ts]\nRejected the operations below", "Operation 1 did not match b.ts"],
     "files": {
-     "a.ts": "const a = 1;\n",
+     "a.ts": "const a = 10;\n",
      "b.ts": "const b = 2;\n"
     },
-    "writes": 0
+    "writes": 1
+   }
+  },
+  {
+   "name": "applies the other operations and reports a rejected one against the written file",
+   "files": {
+    "a.ts": "first();\nsecond();\n"
+   },
+   "args": {
+    "input": "*** Edit File: a.ts\n*** Find\nfirst();\n*** Replace\nchanged();\n*** Find\nmissing();\n*** Replace\nx();\n"
+   },
+   "expect": {
+    "textContains": ["Rejected the operations below", "Operation 2 did not match a.ts", "1: changed();"],
+    "files": {
+     "a.ts": "changed();\nsecond();\n"
+    },
+    "writes": 1
    }
   },
   {
@@ -898,7 +914,7 @@
    }
   },
   {
-   "name": "rejects an overlapping op that no longer matches the earlier op's result atomically",
+   "name": "rejects an overlapping op that no longer matches the earlier op's result alone",
    "files": {
     "a.ts": "const value = oldValue;\n"
    },
@@ -906,11 +922,11 @@
     "input": "*** Edit File: a.ts\n*** Find\nconst value = ⟪oldValue⟫;\n*** Replace\nnewValue\n*** Find\n⟪oldValue⟫\n*** Replace\nnewerValue\n"
    },
    "expect": {
-    "error": "operation 2 overlaps operation 1, so it was located in the file as operation 1 left it.\nOperation 2 did not match a.ts",
+    "textContains": ["Operation 2 did not match a.ts"],
     "files": {
-     "a.ts": "const value = oldValue;\n"
+     "a.ts": "const value = newValue;\n"
     },
-    "writes": 0
+    "writes": 1
    }
   },
   {

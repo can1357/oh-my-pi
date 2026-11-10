@@ -65,7 +65,8 @@ fn bang_events_words_and_modifiers() {
 	assert_eq!(out, "a b c\na b c\nc a\nX b c\necho\necho\n");
 	assert_eq!(
 		err,
-		"echo a b c\necho c a\necho X b c\necho echo \nzsh: substitution failed\necho echo \necho echo \n"
+		"echo a b c\necho c a\necho X b c\necho echo \nzsh: substitution failed\necho echo \necho \
+		 echo \n"
 	);
 	assert_eq!(st, 0);
 }
@@ -86,8 +87,8 @@ fn bang_errors_abandon_the_event() {
 	assert_eq!(out, "a b\n1\n    1  echo a b\n    2  echo $?\n");
 	assert_eq!(
 		err,
-		"zsh: event not found: foo\nzsh: no such word in event\nzsh: illegal modifier: z\nzsh: \
-		 no such event: zz\n"
+		"zsh: event not found: foo\nzsh: no such word in event\nzsh: illegal modifier: z\nzsh: no \
+		 such event: zz\n"
 	);
 }
 
@@ -140,12 +141,15 @@ fn history_parameters() {
 #[test]
 fn history_file_round_trips() {
 	let fs = MemFs::new();
-	fs.add_file("/h/in", ZSH_FILE, 0o600);
-	let (_, err, st) =
-		command("SAVEHIST=100; setopt extendedhistory; fc -R /h/in; fc -W /h/out", fs.clone(), true);
+	fs.add_file("/home/in", ZSH_FILE, 0o600);
+	let (_, err, st) = command(
+		"SAVEHIST=100; setopt extendedhistory; fc -R /home/in; fc -W /home/out",
+		fs.clone(),
+		true,
+	);
 	assert_eq!(err, "");
 	assert_eq!(st, 0);
-	assert_eq!(fs.read("/h/out").as_deref(), Some(ZSH_FILE));
+	assert_eq!(fs.read("/home/out").as_deref(), Some(ZSH_FILE));
 }
 
 /// An interactive shell reads `HISTFILE` once its startup files ran and
@@ -154,22 +158,23 @@ fn history_file_round_trips() {
 #[test]
 fn startup_read_and_exit_save() {
 	let fs = MemFs::new();
-	fs.add_file("/h/hist", b": 1600000000:5;echo old\n", 0o600);
+	fs.add_file("/home/hist", b": 1600000000:5;echo old\n", 0o600);
 	let input = "fc -l\necho new\n";
 	let (out, err, _) = run_stdin(input, fs.clone(), true);
 	assert_eq!(err, "");
 	// No HISTFILE yet at startup: nothing read.
 	assert_eq!(out, "    1  fc -l\nnew\n");
 	// `histsavebycopy` would refuse: the in-memory file belongs to root.
-	let input = "HISTFILE=/h/hist; SAVEHIST=10; setopt extendedhistory; unsetopt histsavebycopy\n";
+	let input =
+		"HISTFILE=/home/hist; SAVEHIST=10; setopt extendedhistory; unsetopt histsavebycopy\n";
 	let (_, err, _) = run_stdin(input, fs.clone(), true);
 	assert_eq!(err, "");
 	assert_eq!(
-		fs.read("/h/hist").unwrap(),
-		b": 1600000000:5;echo old\n: 1700000000:0;HISTFILE=/h/hist; SAVEHIST=10; setopt \
+		fs.read("/home/hist").unwrap(),
+		b": 1600000000:5;echo old\n: 1700000000:0;HISTFILE=/home/hist; SAVEHIST=10; setopt \
 		  extendedhistory; unsetopt histsavebycopy\n"
 	);
-	assert!(fs.read("/h/hist.LOCK").is_none());
+	assert!(fs.read("/home/hist.LOCK").is_none());
 }
 
 /// `zshaddhistory` sees each event (with its newline); a nonzero status

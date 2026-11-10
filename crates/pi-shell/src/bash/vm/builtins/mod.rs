@@ -31,39 +31,39 @@ mod test;
 pub mod trap;
 mod vars;
 pub mod zsh_args;
-mod zsh_dir;
-mod zsh_kill;
+pub(crate) mod zsh_dir;
 pub mod zsh_jobs;
+mod zsh_kill;
+mod zsh_mod_attr;
+mod zsh_mod_cap;
+mod zsh_mod_clone;
+pub mod zsh_mod_curses;
 mod zsh_mod_datetime;
+pub mod zsh_mod_example;
+mod zsh_mod_files;
+pub mod zsh_mod_langinfo;
+pub mod zsh_mod_mapfile;
 pub mod zsh_mod_mathfunc;
 pub mod zsh_mod_nearcolor;
+pub mod zsh_mod_newuser;
 pub mod zsh_mod_pcre;
-pub mod zsh_mod_regex;
 mod zsh_mod_private;
+pub mod zsh_mod_regex;
+mod zsh_mod_rlimits;
+pub mod zsh_mod_sched;
+mod zsh_mod_socket;
+mod zsh_mod_stat;
+pub mod zsh_mod_system;
+pub mod zsh_mod_tcp;
 pub mod zsh_mod_termcap;
 pub mod zsh_mod_terminfo;
 mod zsh_mod_util;
-mod zsh_mod_cap;
-pub mod zsh_mod_example;
-pub mod zsh_mod_newuser;
-mod zsh_mod_rlimits;
-pub mod zsh_mod_sched;
 pub mod zsh_mod_watch;
-pub mod zsh_mod_zprof;
-mod zsh_mod_clone;
-pub mod zsh_mod_curses;
-pub mod zsh_mod_zpty;
-mod zsh_mod_zutil;
-mod zsh_mod_attr;
-mod zsh_mod_files;
-pub mod zsh_mod_mapfile;
-mod zsh_mod_stat;
-pub mod zsh_mod_langinfo;
-mod zsh_mod_socket;
-pub mod zsh_mod_system;
-pub mod zsh_mod_tcp;
-mod zsh_mod_zselect;
 pub mod zsh_mod_zftp;
+pub mod zsh_mod_zprof;
+pub mod zsh_mod_zpty;
+mod zsh_mod_zselect;
+mod zsh_mod_zutil;
 pub mod zsh_module;
 pub mod zsh_names;
 pub mod zsh_print;
@@ -77,12 +77,12 @@ use bstr::{BStr, BString};
 
 pub use self::{
 	io::select_next,
-	names::{Aliases, alias_table, flush_hash, legal_alias_name},
+	names::{Aliases, alias_table, flush_hash, legal_alias_name, resets_hash},
 	test::cond_test,
 	trap::hard_ignore,
 	vars::{
 		Lhs, assign, assign_loop_var, assign_special_prefix, declare_line, define_function,
-		parse_compound, prefix_value, set_value,
+		emit_assignment, emit_assignment_at, parse_compound, prefix_value, set_value,
 	},
 	zsh_vars::assign_zsh_loop_var,
 };
@@ -204,6 +204,11 @@ pub struct Ctx<'a, 'c> {
 	pub cx:          &'a mut Cx<'c>,
 	pub vp:          &'a mut Vproc,
 	probes:          &'a [(Probe, ProbeResult)],
+	/// Where in `probes` the re-run's next probe is expected: a builtin
+	/// asks again in the order it was answered, so its answers are found
+	/// without searching the log (a builtin that asks many probes, each a
+	/// re-run, would otherwise compare every answer per probe).
+	probe_at:        std::cell::Cell<usize>,
 	/// Output and diagnostics in order.
 	pub chunks:      Vec<Chunk>,
 	/// Script line (diagnostics, `$LINENO`).
@@ -246,6 +251,7 @@ impl<'a, 'c> Ctx<'a, 'c> {
 			cx,
 			vp,
 			probes,
+			probe_at: std::cell::Cell::new(0),
 			chunks: Vec::new(),
 			line,
 			name,
@@ -260,15 +266,29 @@ impl<'a, 'c> Ctx<'a, 'c> {
 
 	/// The answer to `p`, or a request for it.
 	pub fn probe(&self, p: Probe) -> Result<ProbeResult, Need> {
-		// Each probe is answered once; a builtin that reads in parts asks
-		// for its latest ones again.
-		self
-			.probes
-			.iter()
-			.rev()
-			.find(|(q, _)| *q == p)
-			.map(|(_, r)| r.clone())
-			.ok_or(Need::Probe(p))
+		// A digest this shell already read answers at once, as its probe
+		// would: an `$fpath` search asks every digest for every function.
+		if let Probe::DumpHas(q) = &p
+			&& let Some(funcs) = self.k.dump_funcs(&q.path, (q.mtime_ns, q.size))
+		{
+			return Ok(ProbeResult::Ok(funcs.contains(q.name.as_slice())));
+		}
+		// Each probe is answered once (only an unanswered one joins the
+		// log), so the answer at the replay position is the only one.
+		let at = self.probe_at.get();
+		if let Some((q, r)) = self.probes.get(at)
+			&& *q == p
+		{
+			self.probe_at.set(at + 1);
+			return Ok(r.clone());
+		}
+		match self.probes.iter().rposition(|(q, _)| *q == p) {
+			Some(i) => {
+				self.probe_at.set(i + 1);
+				Ok(self.probes[i].1.clone())
+			},
+			None => Err(Need::Probe(p)),
+		}
 	}
 
 	/// The probes answered so far, in the order they were answered (for a

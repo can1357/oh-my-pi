@@ -300,6 +300,26 @@ function countAssistantMarkers(content: string): number {
 	return countRoleMarkers(content, "assistant");
 }
 
+/**
+ * The message of a complete `message` record line when it is a user or
+ * assistant turn. JSON escapes quotes inside strings, so a bare `"user"` or
+ * `"assistant"` can only be a key or value: lines without either skip the
+ * parse, and large non-turn records (memory recall, tool results) cost one
+ * substring scan. Malformed or partial lines return undefined.
+ */
+function parseTurnLine(line: string): Message | undefined {
+	if (!line.includes('"user"') && !line.includes('"assistant"')) return undefined;
+	let record: { type?: unknown; message?: Message };
+	try {
+		record = JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+	if (record.type !== "message") return undefined;
+	const role = record.message?.role;
+	return role === "user" || role === "assistant" ? record.message : undefined;
+}
+
 function extractFirstDisplayMessageFromPrefix(content: string): string | undefined {
 	let fallback: string | undefined;
 	let index = content.indexOf('"role"');
@@ -402,10 +422,9 @@ function getSessionListWorkerCount(fileCount: number): number {
 }
 
 /**
- * Scan a single session file into a {@link SessionInfo}. Always reads the 4 KB
- * header/first-message prefix; only reads the 32 KB tail window (and derives
- * {@link SessionStatus}) when `withStatus` is set — the recent/most-recent
- * lookups skip it.
+ * Scan a single session file into a {@link SessionInfo}. Reads the 4 KB
+ * prefix, plus the 32 KB tail when `withStatus` is set; a record the windows
+ * miss is recovered by one {@link SessionStorage.scanLines} pass.
  */
 async function scanSessionFile(
 	file: string,
@@ -475,20 +494,37 @@ async function scanSessionFile(
 			}
 		}
 
-		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
-		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
-		// Either bounded window may hold the only copy of an assistant record,
-		// and neither may: a >prefix record before a >suffix tail leaves the
-		// middle unexamined. When both windows miss, ask the backend for a full
-		// line-boundary scan rather than trusting the gap.
 		assistantTurns = Math.max(assistantTurns, countAssistantMarkers(content), countAssistantMarkers(suffix));
-		if (assistantTurns === 0 && storage.hasAssistantTurn) {
+		// Records between the bounded windows go unseen: a first prompt behind a
+		// large leading entry (memory recall, attachment) or a reply (after a
+		// `/skill:` invocation), and an assistant record that fits in neither
+		// window. Recover both in one line-boundary pass rather than trusting the gap.
+		let needPrompt = !firstMessage;
+		let needTurn = assistantTurns === 0;
+		if ((needPrompt || needTurn) && size > SESSION_LIST_PREFIX_BYTES && storage.scanLines) {
 			try {
-				if (await storage.hasAssistantTurn(file)) assistantTurns = 1;
+				await storage.scanLines(file, line => {
+					const message = parseTurnLine(line);
+					if (message?.role === "assistant" && needTurn) {
+						assistantTurns = 1;
+						needTurn = false;
+					} else if (message?.role === "user" && needPrompt) {
+						// Cap at what a prompt read from the prefix could hold.
+						const text = textContent(message.content, " ").slice(0, SESSION_LIST_PREFIX_BYTES);
+						if (text) {
+							firstMessage = text;
+							allMessages.unshift(text);
+							needPrompt = false;
+						}
+					}
+					return !needPrompt && !needTurn;
+				});
 			} catch {
 				// Backend unreadable: keep the bounded-window evidence.
 			}
 		}
+		firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
+		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
 		const info: SessionInfo = {
 			path: file,
 			id: header.id,
@@ -692,12 +728,12 @@ export async function listAllSessions(
  * lifecycle shows no assistant activity (pending user-only or unscannable)
  * and neither a title nor a first prompt worth showing. Covers header-only
  * records (`newSession()` boundaries, `ensureOnDisk()` stubs, drafts) and
- * user-only sessions whose prompt text never made the prefix scan. A title or
- * first prompt is user intent worth resuming, so named 0-turn sessions stay
- * discoverable. The tail — not the 4 KB prefix — decides answered-ness, so a
- * transcript whose first assistant record starts past the prefix is never
- * elided. The picker and `--continue` skip these; every other consumer (GC,
- * ACP, `resolveResumableSession`) keeps the unfiltered scan.
+ * user-only sessions with no prompt text. A title or first prompt is user
+ * intent worth resuming, so named 0-turn sessions stay discoverable. The
+ * bounded windows plus the gap scan — not the 4 KB prefix alone — decide
+ * answered-ness, so a transcript whose first assistant record starts past the
+ * prefix is never elided. The picker and `--continue` skip these; every other
+ * consumer (GC, ACP, `resolveResumableSession`) keeps the unfiltered scan.
  */
 export function isEmptySession(session: SessionInfo): boolean {
 	if (session.status !== undefined && session.status !== "pending" && session.status !== "unknown") return false;
@@ -903,6 +939,22 @@ const CONVERSATION_ENTRY_TYPES: Record<string, true> = {
 	reset_boundary: true,
 };
 
+/**
+ * True for an entry whose type is in {@link CONVERSATION_ENTRY_TYPES}, other than
+ * an eval-state snapshot (a `custom_message` at startup, a `message` after a
+ * compaction): an entry that marks when the conversation last moved.
+ */
+export function movesConversation(entry: { type?: unknown; customType?: unknown; message?: object }): boolean {
+	if (typeof entry.type !== "string" || !Object.hasOwn(CONVERSATION_ENTRY_TYPES, entry.type)) return false;
+	const customType =
+		entry.type === "custom_message"
+			? entry.customType
+			: entry.message && "customType" in entry.message
+				? entry.message.customType
+				: undefined;
+	return customType !== EVAL_STATE_CONTEXT_TYPE;
+}
+
 /** The newest conversation entry of a session file. */
 interface SessionActivity {
 	/** Epoch milliseconds of the entry. */
@@ -912,11 +964,9 @@ interface SessionActivity {
 }
 
 /**
- * The newest entry in `session` whose type is in {@link CONVERSATION_ENTRY_TYPES},
- * other than an eval-state snapshot (a `custom_message` at startup, a `message`
- * after a compaction): when the conversation last moved, not when a process
- * last wrote. Falls back to the header's creation time, and to `-Infinity`
- * for an unreadable file.
+ * The newest entry in `session` that {@link movesConversation}: when the
+ * conversation last moved, not when a process last wrote. Falls back to the
+ * header's creation time, and to `-Infinity` for an unreadable file.
  */
 async function lastActivity(session: SessionInfo, storage: SessionStorage): Promise<SessionActivity> {
 	for (let window = ACTIVITY_TAIL_BYTES; ; window *= 4) {
@@ -946,9 +996,7 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 			}
 			// The header carries the session id, not an entry id; the creation time below covers it.
 			reachedHeader = entry.type === "session";
-			if (typeof entry.type !== "string" || !Object.hasOwn(CONVERSATION_ENTRY_TYPES, entry.type)) continue;
-			const customType = entry.type === "custom_message" ? entry.customType : entry.message?.customType;
-			if (customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			if (!movesConversation(entry)) continue;
 			const time = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
 			if (Number.isFinite(time)) return { time, id: typeof entry.id === "string" ? entry.id : undefined };
 		}

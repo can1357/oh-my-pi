@@ -72,6 +72,7 @@ rust_library(
         "util.rm",
         "util.rmdir",
         "util.rsync",
+        "util.sd",
         "util.sed",
         "util.seq",
         "util.sha1sum",
@@ -107,9 +108,11 @@ rust_library(
     version = "0.2.0",
     deps = all_crate_deps(normal = True) + [
         "//crates/pi-ast",
+        "//crates/pi-diff",
         "//crates/pi-walker",
         "//crates/pi-iso",
         "//crates/pi-vfs",
+        "//crates/vendor/jaq-core",
         "//crates/vendor/grep-searcher",
     ],
 )

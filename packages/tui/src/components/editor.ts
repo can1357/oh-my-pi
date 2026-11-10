@@ -3471,10 +3471,11 @@ export class Editor implements Component, Focusable {
 		this.#applyUndo();
 	}
 
-	setText(text: string): void {
+	/** Replace the buffer; the caret lands at the end unless `cursor: "start"` (multi-row text only). */
+	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
-		this.#setTextInternal(text);
+		this.#setTextInternal(text, options.cursor);
 	}
 	submit(): void {
 		if (this.disableSubmit) return;

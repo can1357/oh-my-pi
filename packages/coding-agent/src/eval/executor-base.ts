@@ -150,27 +150,47 @@ export function getRemainingTimeoutMs(deadlineMs?: number): number | undefined {
 	return deadlineMs - Date.now();
 }
 
-export function isCancellationError(error: unknown, cancelledErrorClass: CancelledErrorClass): boolean {
-	return (
-		error instanceof cancelledErrorClass ||
-		(typeof DOMException !== "undefined" &&
-			error instanceof DOMException &&
-			(error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
+/** What can ask for a cell to stop: the caller's (or the cell's own) abort signal, and the caller's deadline. */
+export interface CancellationRequest {
+	signal?: AbortSignal;
+	deadlineMs?: number;
 }
 
+/**
+ * Whether `error` ended the cell because a cancellation was requested: it is
+ * the executor's own cancelled error (thrown only on an abort or a passed
+ * deadline), or the request's signal aborted, or its deadline has passed. The
+ * error's name proves nothing: a kernel's own startup budget, a transport's
+ * request timeout and the user's code all throw errors named "AbortError" or
+ * "TimeoutError" that nobody asked for, and those are failures to report
+ * with their text, not cancellations.
+ */
+export function isCancellationError(
+	error: unknown,
+	cancelledErrorClass: CancelledErrorClass,
+	request: CancellationRequest,
+): boolean {
+	if (error instanceof cancelledErrorClass) return true;
+	if (request.signal?.aborted) return true;
+	const remainingMs = getRemainingTimeoutMs(request.deadlineMs);
+	return remainingMs !== undefined && remainingMs <= 0;
+}
+
+/** For a cancellation (see {@link isCancellationError}): whether it was a timeout rather than an abort. */
 export function isTimedOutCancellation(
 	error: unknown,
 	cancelledErrorClass: CancelledErrorClass,
 	signal?: AbortSignal,
+	deadlineMs?: number,
 ): boolean {
 	if (error instanceof cancelledErrorClass) return error.timedOut;
 	if (typeof DOMException !== "undefined" && error instanceof DOMException) return error.name === "TimeoutError";
 	if (error instanceof Error && error.name === "TimeoutError") return true;
 	const reason = signal?.reason;
 	if (typeof DOMException !== "undefined" && reason instanceof DOMException) return reason.name === "TimeoutError";
-	return reason instanceof Error ? reason.name === "TimeoutError" : false;
+	if (reason instanceof Error) return reason.name === "TimeoutError";
+	const remainingMs = getRemainingTimeoutMs(deadlineMs);
+	return remainingMs !== undefined && remainingMs <= 0;
 }
 
 export async function waitForPromiseWithCancellation<T>(
@@ -608,8 +628,12 @@ export async function executeWithKernelBase<
 			stdinRequested: false,
 		};
 	} catch (err) {
-		if (isCancellationError(err, cancelledErrorClass) || abortShield.abortRequested || abortShield.signal?.aborted) {
-			const timedOut = abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal);
+		if (
+			isCancellationError(err, cancelledErrorClass, { signal: abortShield.signal, deadlineMs }) ||
+			abortShield.abortRequested
+		) {
+			const timedOut =
+				abortShield.timedOut || isTimedOutCancellation(err, cancelledErrorClass, abortShield.signal, deadlineMs);
 			const dumped = await sink.dump(
 				timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
 			);

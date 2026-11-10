@@ -86,17 +86,17 @@ const LABELED: Lineage = Lineage { label: LABEL, detached: false };
 fn the_whole_subshell_tree_and_its_externals_carry_the_lineage() {
 	let spawns = Arc::default();
 	let mut r = rig(&spawns);
-	let src = "/x/plain; wrap /x/direct; wrap sh -c '/x/nested | /x/stage; (/x/sub)'";
+	let src = "/fake/plain; wrap /fake/direct; wrap sh -c '/fake/nested | /fake/stage; (/fake/sub)'";
 	drive(&mut r, src, LABELED, |_, _| {});
 	let mut seen = spawns.lock().clone();
 	seen.sort_by(|a, b| a.0.cmp(&b.0));
 	let none = Lineage::default();
 	assert_eq!(seen, [
-		(BString::from("/x/direct"), LABELED),
-		(BString::from("/x/nested"), LABELED),
-		(BString::from("/x/plain"), none),
-		(BString::from("/x/stage"), LABELED),
-		(BString::from("/x/sub"), LABELED),
+		(BString::from("/fake/direct"), LABELED),
+		(BString::from("/fake/nested"), LABELED),
+		(BString::from("/fake/plain"), none),
+		(BString::from("/fake/stage"), LABELED),
+		(BString::from("/fake/sub"), LABELED),
 	]);
 }
 

@@ -78,6 +78,7 @@ export function createProcessTerminalRenderHarness(
 	initialRows = 30,
 	terminalOptions: ProcessTerminalOptions = { conpty: false },
 	startOptions?: TUIStartOptions,
+	observeInput?: (data: string) => void,
 ): ProcessTerminalRenderHarness {
 	// This harness exercises the real ProcessTerminal I/O pipeline, so it opts
 	// out of the test-default headless suppression and restores the prior value
@@ -116,6 +117,20 @@ export function createProcessTerminalRenderHarness(
 	// are hermetic: the ambient WSL env (WSL_DISTRO_NAME / WSL_INTEROP) must not
 	// change what the suite observes. See ProcessTerminalOptions.
 	const terminal = new ProcessTerminal(terminalOptions);
+	const start = terminal.start.bind(terminal);
+	const startSpy =
+		observeInput &&
+		vi.spyOn(terminal, "start").mockImplementation((onInput, onResize, onDisconnect, options) =>
+			start(
+				data => {
+					observeInput(data);
+					onInput(data);
+				},
+				onResize,
+				onDisconnect,
+				options,
+			),
+		);
 	const tui = new TUI(terminal);
 	const probe = new WidthProbe();
 	tui.addChild(probe);
@@ -174,6 +189,7 @@ export function createProcessTerminalRenderHarness(
 			setTerminalHeadless(previousHeadless);
 			if (ownsClock) vi.useRealTimers();
 			for (const spy of spies) spy.mockRestore();
+			if (startSpy) startSpy.mockRestore();
 			for (const [target, key, descriptor] of PRISTINE) {
 				// A piped test run has no own `isTTY`/`columns`/`rows` descriptor, so
 				// the captured pristine value is `undefined`. Deleting the forced

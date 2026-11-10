@@ -7,7 +7,7 @@
 //! dispatch loop loads the control word before each op.
 
 mod api;
-mod arith;
+pub(crate) mod arith;
 mod builtins;
 mod callstack;
 mod command;
@@ -62,7 +62,7 @@ use self::{
 use crate::bash::{
 	diag::{Diag, DiagSite, render},
 	engine::Engine,
-	error::{RestoreError, ShellError},
+	error::ShellError,
 	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
@@ -70,9 +70,7 @@ use crate::bash::{
 	ids::{CallId, CmdTag, JobId, ModeId, RunId, ToolRef, UnitId, Vpid},
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
-	store::{
-		Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, VarValue,
-	},
+	store::{Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, VarValue},
 };
 
 /// Ops a vproc runs per scheduler turn.
@@ -80,6 +78,14 @@ const SLICE: u32 = 1024;
 
 /// bash version this engine implements (`$BASH_VERSION`).
 pub const BASH_VERSION: &str = "5.3.0(1)-release";
+
+/// Largest buffer a kernel keeps for reuse (the spare syntax tree, the unit
+/// blob encoder): every ordinary command fits, and a huge one's buffers are
+/// freed instead of held for the shell's lifetime.
+const SPARE_BUFFER_BYTES: usize = 1 << 20;
+
+/// Unit ids [`Kernel::written`] remembers before it starts over.
+const WRITTEN_MAX: usize = 1 << 16;
 
 /// Engine types are `Send`; hosts move shells between threads.
 const _: () = {
@@ -145,6 +151,11 @@ pub struct ShellInit {
 	/// its startup files: `ZSH_EXECUTION_STRING` (the `-c` string) and
 	/// `ZSH_SCRIPT` (the script file).
 	pub zsh_params:  Vec<(BString, BString)>,
+	/// The system zsh's function directories, which a zsh shell's `fpath`
+	/// starts with when the environment sets no `FPATH` (zsh's compiled-in
+	/// `FPATH_DIR` and its subdirectories). `None`: zsh 5.9's default
+	/// layout.
+	pub zsh_fpath:   Option<Vec<BString>>,
 	/// Whose shell it is: a user's, or a program's ([`Profile::Tool`]).
 	pub profile:     Profile,
 }
@@ -196,6 +207,7 @@ impl Default for ShellInit {
 			shell_pid:   0,
 			startup:     Vec::new(),
 			zsh_params:  Vec::new(),
+			zsh_fpath:   None,
 			profile:     Profile::User,
 		}
 	}
@@ -211,7 +223,8 @@ pub struct Script {
 	/// back when it ends (`None`: the shell's current mode, which an
 	/// `emulate` in the script changes for later runs too).
 	pub mode:         Option<ModeId>,
-	/// Positional parameters for the script.
+	/// Positional parameters for the script, replacing the inherited current
+	/// positional scope in a new subshell without changing its caller.
 	pub args:         Option<Vec<BString>>,
 	/// Which virtual process runs it.
 	pub vproc:        VprocSel,
@@ -387,40 +400,46 @@ pub struct Shell {
 /// Shell-wide state shared by all vprocs (kept apart from `procs` so ops can
 /// borrow a vproc and the kernel at once).
 pub struct Kernel {
-	pub engine:          Arc<Engine>,
-	pub ctl:             Arc<Ctl>,
-	pub waker:           Waker,
+	pub engine:             Arc<Engine>,
+	pub ctl:                Arc<Ctl>,
+	pub waker:              Waker,
 	/// Facts derived from the root state in the store (the state itself
 	/// lives in the store).
-	pub root:            Root,
-	pub mask:            EventMask,
-	pub seq:             u64,
-	pub next_vpid:       u32,
-	pub next_run:        u64,
-	pub next_call:       u64,
-	pub next_cmd:        u64,
-	pub next_job:        u32,
-	pub done:            VecDeque<(RunId, i32)>,
-	pub calls_out:       VecDeque<(CallId, ToolCall)>,
-	pub results:         HashMap<CallId, CallOutcome>,
-	/// Units announced with `UnitCompiled` (not imaged: a restored shell
-	/// announces again what it can still run).
-	pub announced:       HashSet<UnitId>,
-	/// Every unit the shell can still run is to be announced before the
-	/// next step runs anything: set by `create` and `restore` (the host may
-	/// have seen none of them; see [`Shell::announce_live`]).
-	pub reannounce:      bool,
-	/// Unit blobs known to be in the store ([`Kernel::persist_unit`],
-	/// `externalize`).
-	pub written:         HashSet<UnitId>,
+	pub root:               Root,
+	pub mask:               EventMask,
+	pub seq:                u64,
+	pub next_vpid:          u32,
+	pub next_run:           u64,
+	pub next_call:          u64,
+	pub next_cmd:           u64,
+	pub next_job:           u32,
+	pub done:               VecDeque<(RunId, i32)>,
+	pub calls_out:          VecDeque<(CallId, ToolCall)>,
+	pub results:            HashMap<CallId, CallOutcome>,
+	/// Units announced by each vproc to the current observer. A prior
+	/// background vproc's rejected events must not suppress current units.
+	/// Not imaged: restored/cached frames announce lazily when executed.
+	pub announced:          HashSet<(Vpid, UnitId, Option<crate::bash::event::SourceOrigin>)>,
+	/// Observed script origins by actual activation depth. Empty without
+	/// tracing.
+	pub trace_sources:      HashMap<Vpid, HashMap<usize, crate::bash::event::SourceOrigin>>,
+	/// Origin of each currently executing source-context unit in its actual
+	/// vproc.
+	pub trace_unit_origins: HashMap<Vpid, Arc<HashMap<UnitId, crate::bash::event::SourceOrigin>>>,
+	/// Unit blobs known to be in the store ([`Kernel::note_written`]); at
+	/// most [`WRITTEN_MAX`] ids.
+	pub written:            HashSet<UnitId, crate::bash::ids::UnitIdState>,
+	/// Reused buffer for encoding unit blobs ([`Kernel::persist_unit`]); not
+	/// imaged.
+	blob_buf:               Vec<u8>,
 	/// The `next_vpid` value last written as `MiscKey::NextVpid`
 	/// ([`Kernel::vpid`], [`Kernel::sync_root`]).
-	pub written_vpid:    u32,
-	pub paused:          bool,
-	pub argv0:           BString,
-	pub shell_pid:       u32,
+	pub written_vpid:       u32,
+	pub paused:             bool,
+	pub argv0:              BString,
+	pub shell_pid:          u32,
 	/// Idempotent fs ops dropped by the last suspend (re-issued on resume).
-	pub dropped_fs:      u32,
+	pub dropped_fs:         u32,
 	/// Child vprocs created during a turn, adopted by the scheduler after it.
 	/// Every child vproc has a `Record::Proc` from its adoption until its
 	/// exit status is collected ([`Kernel::proc_exited`],
@@ -429,24 +448,36 @@ pub struct Kernel {
 	/// bytes a slot, not a whole vproc (`cmd &` in a loop spawns ~200 per
 	/// slice: that kept ~600 bytes per idle vproc; the target is ≤ 2 KiB).
 	#[expect(clippy::vec_box, reason = "slack capacity of 8-byte slots, not of whole vprocs")]
-	pub spawned:         Vec<Box<Vproc>>,
+	pub spawned:            Vec<Box<Vproc>>,
 	/// `$RANDOM` generator state (written through as `MiscKey::Random` by
 	/// [`Kernel::next_random`] and [`Kernel::seed_random`]).
-	pub rand:            state::Random,
+	pub rand:               state::Random,
 	/// `now_ns` at shell creation (`$SECONDS`; `MiscKey::StartNs`).
-	pub start_ns:        u64,
+	pub start_ns:           u64,
 	/// Startup files (`path`, contents) the root vproc sources when its
 	/// first run starts ([`ShellInit::startup`]); not imaged (the first run
 	/// starts at the first step).
-	pub startup:         Vec<(BString, BString)>,
+	pub startup:            Vec<(BString, BString)>,
 	/// Which DEBUG/ERR/RETURN traps may be set: lets `exec::start_trap`
 	/// skip its checks before every command; not imaged.
-	pub pseudo_traps:    exec::PseudoTraps,
+	pub pseudo_traps:       exec::PseudoTraps,
 	/// Re-parsed `${ ;}` bodies ([`exec::NoforkUnits`]); not imaged.
-	pub nofork_units:    exec::NoforkUnits,
+	pub nofork_units:       exec::NoforkUnits,
+	/// The functions each zsh word code digest (`.zwc`) holds, by path,
+	/// with the modification time and size they were read at
+	/// ([`Kernel::dump_funcs`]): an `$fpath` search asks of the same digests
+	/// for every function it resolves. Per shell, as its host's files are
+	/// (shells sharing an engine may see other files at a path); not imaged.
+	zsh_dumps:              parking_lot::Mutex<HashMap<BString, DumpFuncs>>,
+	/// Syntax-tree buffers of the last command run, lent to the next parse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle); at most
+	/// [`SPARE_BUFFER_BYTES`], see [`Kernel::keep_spare_tree`]); not imaged.
+	pub spare_tree:         crate::bash::syntax::Tree,
 	/// The arithmetic this shell evaluated last ([`arith::Recent`]); not
 	/// imaged.
-	pub arith_recent:    arith::Recent,
+	pub arith_recent:       arith::Recent,
+	/// [`arith_recent`](Self::arith_recent) for zsh's evaluator.
+	pub zsh_arith_recent:   zsh::math::Recent,
 	/// The last event clock reading while it is still current
 	/// ([`Kernel::stamp`]): set by a reading that ends a duration or starts a
 	/// command, cleared by [`Kernel::clock_stale`] before anything that can
@@ -455,41 +486,51 @@ pub struct Kernel {
 	/// `FuncEnter` events of a command (and a function's `FuncExit`) share
 	/// one `Host::now_ns` with the previous `CmdEnd` (xeon overhead profile:
 	/// `now_ns` a third of the default-mask event cost). Not imaged.
-	pub clock:           Option<u64>,
+	pub clock:              Option<u64>,
 	/// The empty document an async command without job control reads as
 	/// `/dev/null`, shared by all of them (it never yields a byte, so one
 	/// object serves every reader): an fd object and two buffers less per
 	/// background vproc (idle vproc ≤ 2 KiB). Not imaged (a restored
 	/// child keeps its own object).
-	pub null_input:      Option<FdRef>,
+	pub null_input:         Option<FdRef>,
 	/// `(label, caller)`: the labeled subshell trees host callouts started
 	/// ([`ShellApi::run_subshell_in`]) and the vproc that ran each callout;
 	/// virtual signals to the caller reach the tree (`Shell::deliver`).
 	/// Pruned there once no vproc carries the label; not imaged (callouts
 	/// do not survive a restore).
-	pub callout_labels:  Vec<(u32, Vpid)>,
+	pub callout_labels:     Vec<(u32, Vpid)>,
 	/// The last root run that `exit` or `set -e` ended
 	/// ([`Shell::ended_by_exit`]); not imaged.
-	pub exited:          Option<RunId>,
+	pub exited:             Option<RunId>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
-	pub exec_signals:    HashMap<RunId, i32>,
+	pub exec_signals:       HashMap<RunId, i32>,
 	/// Signal death associated with the most recently reported run.
-	pub reported_signal: Option<(RunId, i32)>,
+	pub reported_signal:    Option<(RunId, i32)>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
-	pub bangs:           Vec<proc::Bang>,
+	pub bangs:              Vec<proc::Bang>,
 	/// `(job, OS pid)`: jobs settled on their program's OS pid during the
 	/// turn, written into the job tables and `$!` of every vproc by the
 	/// scheduler after it (`Shell::adopt`); empty between turns, not
 	/// imaged.
-	pub settled:         Vec<(Vpid, u32)>,
+	pub settled:            Vec<(Vpid, u32)>,
+	/// `(OS pid, vproc, job)`: a job's `$!` names a program a vproc other
+	/// than the job's own runs (a background pipeline's last stage), so
+	/// `kill` of that pid signals that vproc, and finds no process once it
+	/// ended though the job runs on. Dropped when the job ends; not imaged
+	/// (a restored shell signals the job's vproc).
+	pub pid_owners:         Vec<(u32, Vpid, Vpid)>,
+	/// The math options ([`zsh::arith::math_options`]) last read for a vproc
+	/// without an overlay, with the [`state::Root::opts_gen`] and mode they
+	/// were read under: every `(( ))` asks.
+	pub math_opts:          Option<(u64, ModeId, zsh::math::Options)>,
 	/// Background jobs' lone commands whose redirections wait for their name
 	/// to resolve ([`proc::Deferral`]): imaged (a restored command goes on).
-	pub deferrals:       Vec<proc::Deferral>,
+	pub deferrals:          Vec<proc::Deferral>,
 	/// Job control of the interactive shell (process groups, the
 	/// terminal, stop events); not imaged.
-	pub jobctl:          jobctl::JobCtl,
+	pub jobctl:             jobctl::JobCtl,
 }
 
 /// A child vproc's entry in the process table ([`Kernel::proc_state`]).
@@ -511,7 +552,39 @@ impl ProcState {
 	}
 }
 
+/// A digest's function names, with the modification time (ns) and size
+/// of the file they were read from.
+type DumpFuncs = ((i64, u64), Arc<std::collections::HashSet<BString>>);
+
 impl Kernel {
+	/// The functions (metafied names) of the digest `path` as this shell
+	/// last read it, while its modification time and size are `stamp`.
+	pub(crate) fn dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+	) -> Option<Arc<std::collections::HashSet<BString>>> {
+		self
+			.zsh_dumps
+			.lock()
+			.get(path)
+			.filter(|(s, _)| *s == stamp)
+			.map(|(_, f)| Arc::clone(f))
+	}
+
+	/// Remember the functions `funcs` of the digest `path` at `stamp`.
+	pub(crate) fn cache_dump_funcs(
+		&self,
+		path: &[u8],
+		stamp: (i64, u64),
+		funcs: Arc<std::collections::HashSet<BString>>,
+	) {
+		self
+			.zsh_dumps
+			.lock()
+			.insert(BString::from(path), (stamp, funcs));
+	}
+
 	fn new(engine: &Arc<Engine>, root: Root, argv0: BString, shell_pid: u32) -> Self {
 		let ctl = Ctl::new();
 		Self {
@@ -530,8 +603,10 @@ impl Kernel {
 			calls_out: VecDeque::new(),
 			results: HashMap::new(),
 			announced: HashSet::new(),
-			reannounce: true,
-			written: HashSet::new(),
+			trace_sources: HashMap::new(),
+			trace_unit_origins: HashMap::new(),
+			written: HashSet::default(),
+			blob_buf: Vec::new(),
 			written_vpid: engine.config().vpid_base,
 			paused: false,
 			argv0,
@@ -543,7 +618,10 @@ impl Kernel {
 			startup: Vec::new(),
 			pseudo_traps: exec::PseudoTraps::default(),
 			nofork_units: HashMap::new(),
+			zsh_dumps: parking_lot::Mutex::new(HashMap::new()),
+			spare_tree: crate::bash::syntax::Tree::default(),
 			arith_recent: arith::Recent::default(),
+			zsh_arith_recent: zsh::math::Recent::default(),
 			clock: None,
 			null_input: None,
 			callout_labels: Vec::new(),
@@ -552,6 +630,8 @@ impl Kernel {
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
+			pid_owners: Vec::new(),
+			math_opts: None,
 			deferrals: Vec::new(),
 			jobctl: jobctl::JobCtl::default(),
 		}
@@ -585,8 +665,11 @@ impl Kernel {
 		let bang = self.bangs.swap_remove(i);
 		if let Some(pid) = os {
 			self.settled.push((bang.job, pid));
+			if bang.vproc != bang.job {
+				self.pid_owners.push((pid, bang.vproc, bang.job));
+			}
 		}
-		jobctl::bang_settled(self, bang.job, os);
+		jobctl::bang_settled(self, bang.vproc, os);
 		self.ctl.notify();
 	}
 
@@ -623,17 +706,43 @@ impl Kernel {
 	/// once per id: a function body is in the store from its definition on,
 	/// so a shell restored from the store alone keeps its line numbers.
 	pub fn persist_unit(&mut self, store: &mut dyn StateStore, unit: &Unit) {
-		if self.written.contains(&unit.id) {
+		if !self.note_written(unit.id) {
 			return;
 		}
-		let written = postcard::to_stdvec(unit)
+		let mut buf = core::mem::take(&mut self.blob_buf);
+		buf.clear();
+		let written = postcard::to_extend(unit, buf)
 			.map_err(StoreError::Encode)
-			.and_then(|bytes| store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &bytes));
-		match written {
-			Ok(()) => {
-				self.written.insert(unit.id);
-			},
-			Err(err) => self.fail(err),
+			.and_then(|buf| {
+				let put = store.put_blob(crate::bash::store::BlobSlot::Unit(unit.id), &buf);
+				if buf.capacity() <= SPARE_BUFFER_BYTES {
+					self.blob_buf = buf;
+				}
+				put
+			});
+		if let Err(err) = written {
+			self.written.remove(&unit.id);
+			self.fail(err);
+		}
+	}
+
+	/// Note that `id`'s blob is in the store; `false` when it already was
+	/// known. Past [`WRITTEN_MAX`] ids the set starts over: forgetting one
+	/// only costs writing its blob again, while a long-lived shell compiles
+	/// new units without end.
+	pub(crate) fn note_written(&mut self, id: UnitId) -> bool {
+		if self.written.len() >= WRITTEN_MAX && !self.written.contains(&id) {
+			self.written.clear();
+		}
+		self.written.insert(id)
+	}
+
+	/// Lend `tree`'s buffers to the next parse ([`Kernel::spare_tree`]),
+	/// unless they outgrew [`SPARE_BUFFER_BYTES`]: one huge command's tree
+	/// is freed rather than held for the shell's lifetime.
+	pub(crate) fn keep_spare_tree(&mut self, tree: crate::bash::syntax::Tree) {
+		if tree.heap_bytes() <= SPARE_BUFFER_BYTES {
+			self.spare_tree = tree;
 		}
 	}
 
@@ -660,6 +769,16 @@ impl Kernel {
 		id
 	}
 
+	/// The vproc that runs (or ran) the program OS pid `pid` names when
+	/// that is not its job's own vproc ([`Self::pid_owners`]).
+	pub fn pid_owner(&self, pid: u32) -> Option<Vpid> {
+		self
+			.pid_owners
+			.iter()
+			.find(|&&(p, ..)| p == pid)
+			.map(|&(_, owner, _)| owner)
+	}
+
 	/// Child vproc `vpid` of `parent` ended with `status`; the record stays
 	/// until the status is collected ([`Self::proc_collect`]).
 	pub fn proc_exited(
@@ -669,6 +788,7 @@ impl Kernel {
 		parent: Option<Vpid>,
 		status: i32,
 	) {
+		self.pid_owners.retain(|&(.., job)| job != vpid);
 		let rec = Record::Proc { parent, status: Some(status) };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
 	}
@@ -685,6 +805,19 @@ impl Kernel {
 			Err(err) => {
 				self.root.fail(err);
 				None
+			},
+		}
+	}
+
+	/// Whether `vp` started child vproc `vpid` (its record names `vp` as
+	/// parent): a subshell copies `$!`, not its parent's children.
+	pub fn started(&mut self, store: &mut dyn StateStore, vp: Vpid, vpid: Vpid) -> bool {
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { parent, .. })) => *parent == Some(vp),
+			Ok(_) => false,
+			Err(err) => {
+				self.root.fail(err);
+				false
 			},
 		}
 	}
@@ -788,6 +921,32 @@ impl Kernel {
 	#[inline]
 	pub fn emit_op(&mut self, cx: &mut Cx<'_>, vp: &Vproc, node: u32, data: EventData<'_>) {
 		if self.mask.contains(data.kind()) {
+			if self
+				.mask
+				.contains(crate::bash::event::EventKind::UnitCompiled)
+				&& matches!(
+					&data,
+					EventData::Subshell { .. }
+						| EventData::Background { .. }
+						| EventData::Pipeline { .. }
+				)
+				&& let Some(origins) = self.trace_unit_origins.get(&vp.vpid).cloned()
+			{
+				match &data {
+					EventData::Subshell { child } | EventData::Background { pid: child, .. } => {
+						self.trace_unit_origins.entry(*child).or_insert(origins);
+					},
+					EventData::Pipeline { stages } => {
+						for child in *stages {
+							self
+								.trace_unit_origins
+								.entry(*child)
+								.or_insert_with(|| Arc::clone(&origins));
+						}
+					},
+					_ => {},
+				}
+			}
 			let t_ns = cx.host.now_ns();
 			self.deliver_op(cx, vp, node, data, t_ns);
 		}
@@ -1048,18 +1207,16 @@ fn host_stdio(host: &mut dyn Host, cache: &mut [Option<FdRef>; 3]) -> FdTable {
 fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(), StoreError> {
 	let ppid = cx.host.ppid();
 	let need_shell = state::global(cx.store, b"SHELL")?.is_none();
-	let deferred_shell = if need_shell && init.mode.dialect() != crate::bash::ids::Dialect::Zsh {
-		match cx.host.login_shell_initializer() {
+	let deferred_shell = need_shell
+		&& init.mode.dialect() != crate::bash::ids::Dialect::Zsh
+		&& match cx.host.login_shell_initializer() {
 			Some(initializer) => cx.store.defer_scalar(b"SHELL", Attrs::NONE, initializer)?,
 			None => false,
-		}
-	} else {
-		false
-	};
+		};
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx, k.engine.config().platform)
 	} else {
-		startup_values(cx, &init.argv0, ppid, StartupVars {
+		startup_values(cx, &init.argv0, ppid, k.engine.config().platform, StartupVars {
 			lookup_shell: need_shell && !deferred_shell,
 			interactive:  init.interactive,
 		})
@@ -1095,6 +1252,15 @@ fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(),
 				}
 			}
 		}
+	}
+	if init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+		&& let Some(dirs) = &init.zsh_fpath
+		&& !init.env.iter().any(|(n, _)| n == "FPATH")
+	{
+		let sep = crate::bash::vm::probe::path_separator(k.engine.config().platform);
+		let joined = bstr::join([sep], dirs);
+		k.root
+			.set_var(cx.store, b"FPATH", Some(Var::scalar(BString::from(joined), Attrs::NONE)));
 	}
 	for (name, value) in &init.zsh_params {
 		k.root
@@ -1138,10 +1304,23 @@ pub fn zsh_startup_values(
 		(b"PSVAR", b""),
 		(b"FIGNORE", b""),
 	];
-	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`).
+	// `MODULE_PATH` is never imported (`PM_DONTIMPORT`). The directory
+	// lists take the platform's separator, as their ties split them.
+	let sep = crate::bash::vm::probe::path_separator(platform);
 	let mut out: Vec<(&'static [u8], Var, bool)> = defaults
 		.into_iter()
-		.map(|(name, value)| (name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH"))
+		.map(|(name, value)| {
+			let value: BString = if matches!(name, b"PATH" | b"FPATH") {
+				value
+					.iter()
+					.map(|&c| if c == b':' { sep } else { c })
+					.collect::<Vec<u8>>()
+					.into()
+			} else {
+				value.into()
+			};
+			(name, Var::scalar(value, Attrs::NONE), name == b"MODULE_PATH")
+		})
 		.collect();
 	// `setiparam`: integers.
 	let integers: [(&'static [u8], &[u8]); 3] =
@@ -1151,9 +1330,14 @@ pub fn zsh_startup_values(
 	}
 	// zsh exports `HOME` and `LOGNAME` (`addenv` when not imported).
 	if !user.home.is_empty() {
-		out.push((&b"HOME"[..], Var::scalar(user.home.clone(), Attrs::EXPORT), false));
+		let home = if platform == crate::bash::ids::Platform::Windows {
+			builtins::zsh_dir::windows_spelling(&user.home, &user.home)
+		} else {
+			user.home.clone()
+		};
+		out.push((&b"HOME"[..], Var::scalar(home, Attrs::EXPORT), false));
 	}
-	out.push((&b"LOGNAME"[..], Var::scalar(user.name.clone(), Attrs::EXPORT), false));
+	out.push((&b"LOGNAME"[..], Var::scalar(user.name, Attrs::EXPORT), false));
 	let (_, release, machine) = cx.host.uname().unwrap_or_default();
 	let macos = cfg!(target_os = "macos");
 	// The configure-time `MACHTYPE`, `VENDOR` and `OSTYPE` of the system's
@@ -1181,6 +1365,9 @@ pub fn zsh_startup_values(
 			o.extend_from_slice(b".0");
 		}
 		o
+	} else if platform == crate::bash::ids::Platform::Windows {
+		// MSYS2's zsh, the zsh Windows users and plugins know.
+		BString::from("msys")
 	} else {
 		BString::from("linux-gnu")
 	};
@@ -1188,8 +1375,7 @@ pub fn zsh_startup_values(
 		.host
 		.terminal()
 		.and_then(|t| t.open_controlling().ok().flatten())
-		.map(|s| s.name)
-		.unwrap_or_default();
+		.map_or_default(|s| s.name);
 	// `HOST` is set before the environment is imported, the others after.
 	let cputype = if !machine.is_empty() {
 		machine
@@ -1251,6 +1437,7 @@ pub fn startup_values(
 	cx: &Cx<'_>,
 	argv0: &[u8],
 	ppid: u32,
+	platform: crate::bash::ids::Platform,
 	options: StartupVars,
 ) -> Vec<(&'static [u8], Var, bool)> {
 	let user = cx.host.user();
@@ -1277,7 +1464,7 @@ pub fn startup_values(
 		(b"SHELL", shell),
 		(b"TERM", BString::from("dumb")),
 		// bash's `DEFAULT_PATH_VALUE` when the environment has no PATH.
-		(b"PATH", BString::from(crate::bash::invocation::DEFAULT_PATH)),
+		(b"PATH", BString::from(crate::bash::invocation::default_path(platform))),
 	];
 	let mut out = Vec::with_capacity(defaults.len() + 2 + usize::from(options.interactive));
 	if options.interactive {
@@ -1359,6 +1546,15 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::StartNs, k.start_ns.to_string());
 		k.startup.clone_from(&init.startup);
 		let mut foreign: Vec<BString> = Vec::new();
+		// zsh on Windows keeps directories spelled with `/` (`cd` does), so
+		// `$PWD`, `$HOME` and `~` agree from the start.
+		let zsh_on_windows = init.mode.dialect() == crate::bash::ids::Dialect::Zsh
+			&& engine.config().platform == crate::bash::ids::Platform::Windows;
+		let cwd = if zsh_on_windows {
+			builtins::zsh_dir::windows_spelling(&init.cwd, &init.cwd)
+		} else {
+			init.cwd.clone()
+		};
 		for (name, value) in &init.env {
 			if let Some(func) = name
 				.strip_prefix(b"BASH_FUNC_")
@@ -1366,8 +1562,13 @@ impl Shell {
 			{
 				import_function(&mut k, cx.store, func, value);
 			} else if is_ident(name) {
+				let value = if zsh_on_windows && name == "HOME" {
+					builtins::zsh_dir::windows_spelling(value, value)
+				} else {
+					value.clone()
+				};
 				k.root
-					.set_var(cx.store, name, Some(Var::scalar(value.clone(), Attrs::EXPORT)));
+					.set_var(cx.store, name, Some(Var::scalar(value, Attrs::EXPORT)));
 			} else {
 				let mut entry = name.clone();
 				entry.push(b'=');
@@ -1383,7 +1584,7 @@ impl Shell {
 			);
 		}
 		k.root
-			.set_var(cx.store, b"PWD", Some(Var::scalar(init.cwd.clone(), Attrs::EXPORT)));
+			.set_var(cx.store, b"PWD", Some(Var::scalar(cwd.clone(), Attrs::EXPORT)));
 		let zsh = init.mode.dialect() == crate::bash::ids::Dialect::Zsh;
 		let shlvl = state::global(cx.store, b"SHLVL")?
 			.and_then(|v| v.as_scalar())
@@ -1425,7 +1626,7 @@ impl Shell {
 			.set_misc(cx.store, MiscKey::Argv0, init.argv0.clone());
 		k.root
 			.set_misc(cx.store, MiscKey::ShellPid, shell_pid.to_string());
-		k.root.set_misc(cx.store, MiscKey::Cwd, init.cwd.clone());
+		k.root.set_misc(cx.store, MiscKey::Cwd, cwd.clone());
 		k.root.set_misc(cx.store, MiscKey::Status, "0");
 		k.root
 			.set_misc(cx.store, MiscKey::Mode, <&'static str>::from(init.mode));
@@ -1468,7 +1669,7 @@ impl Shell {
 				fds.set(fd, Some(FdRef::open(file, FdOrigin::Host)));
 			}
 		}
-		let mut root = Vproc::new(vpid, None, fds, init.cwd, None, false);
+		let mut root = Vproc::new(vpid, None, fds, cwd, None, false);
 		root.mode = init.mode;
 		if zsh {
 			let start = mode::ZshStart {
@@ -1622,9 +1823,6 @@ impl Shell {
 					.insert(name, Some(Var::scalar(value, Attrs::EXPORT)));
 			}
 		}
-		if let Some(args) = script.args {
-			overlay.positional = Some(args);
-		}
 		let mut fds = p.fds.clone();
 		if let Some(stdio) = stdio {
 			for (fd, s) in stdio.into_iter().enumerate() {
@@ -1637,7 +1835,7 @@ impl Shell {
 		}
 		let cwd = script.cwd.unwrap_or_else(|| p.cwd.clone());
 		let status = p.status;
-		let mut scopes = match store {
+		let mut scopes = match store.as_deref_mut() {
 			Some(store) => state::copy_scopes(&self.k.root, store, p).unwrap_or_else(|err| {
 				self.k.root.fail(err);
 				Vec::new()
@@ -1663,6 +1861,15 @@ impl Shell {
 		vp.lineage = lineage.unwrap_or(parent_lineage);
 		vp.status = status;
 		vp.scopes = scopes;
+		if let Some(args) = script.args {
+			// A copied function scope takes precedence over the overlay: install
+			// the script's arguments at that level, as `set --` does.
+			if let Some(store) = store {
+				state::set_positional(&mut self.k.root, store, &mut vp, args);
+			} else if let Some(overlay) = &mut vp.overlay {
+				overlay.positional = Some(args);
+			}
+		}
 		vp.mode = mode;
 		vp.runs.push_back(run);
 		self.k.spawned.push(Box::new(vp));
@@ -1708,62 +1915,9 @@ impl Shell {
 		// Subshells a host submitted since the last step.
 		self.adopt(cx);
 		self.settle_callouts();
-		if self.k.reannounce {
-			self.announce_live(cx);
-		}
 		let step = self.step_inner(cx, budget);
 		self.k.sync_root(cx.store, &self.procs[0]);
 		step
-	}
-
-	/// Announce (`UnitCompiled`, as shell-level events) every unit this
-	/// shell can still run: the bodies of the functions the store and the
-	/// subshell overlays define, and the units of every frame. Runs at the
-	/// first step after `create` (imported functions) and `restore` (the
-	/// host may be a new process that saw no event of the shell), with the
-	/// event mask the host set by then. A function whose body is neither
-	/// cached nor in the store is announced when a call recompiles it.
-	fn announce_live(&mut self, cx: &mut Cx<'_>) {
-		self.k.reannounce = false;
-		self.k.announced.clear();
-		let mut ids = Vec::new();
-		let scanned = cx.store.scan(Table::Func, &mut |_, rec| {
-			if let Record::Func { unit, .. } = rec {
-				ids.push(*unit);
-			}
-		});
-		if let Err(err) = scanned {
-			self.k.fail(err);
-			return;
-		}
-		for vp in &self.procs {
-			if let Some(ov) = &vp.overlay {
-				ids.extend(ov.records.values().filter_map(|rec| match rec {
-					Some(Record::Func { unit, .. }) => Some(*unit),
-					_ => None,
-				}));
-			}
-		}
-		let mut units = Vec::with_capacity(ids.len());
-		for id in ids {
-			match frames::load_unit(&self.k.engine, cx.store, id) {
-				Ok(unit) => units.push(unit),
-				Err(RestoreError::Store(err)) => {
-					self.k.fail(err);
-					return;
-				},
-				// Missing or unusable: the call recompiles the body from its
-				// source and announces it then.
-				Err(_) => {},
-			}
-		}
-		for vp in &self.procs {
-			units.extend(vp.frames.iter().filter_map(|f| f.unit.clone()));
-		}
-		let root = self.procs[0].vpid;
-		for unit in &units {
-			exec::announce(&mut self.k, cx, root, None, unit, unit.line);
-		}
 	}
 
 	fn step_inner(&mut self, cx: &mut Cx<'_>, budget: Budget) -> Step {
@@ -1844,6 +1998,8 @@ impl Shell {
 			// A subshell vproc exits once its frames and diagnostics are done.
 			if p.transient && !p.has_work() && p.out.is_empty() {
 				let p = self.procs.remove(i);
+				self.k.trace_sources.remove(&p.vpid);
+				self.k.trace_unit_origins.remove(&p.vpid);
 				jobctl::forget_vproc(&mut self.k, p.vpid);
 				// A job that ended undecided keeps its virtual pid.
 				self.k.settle_bang(p.vpid, None);
@@ -2135,6 +2291,8 @@ impl Shell {
 		}
 		if self.procs[i].transient {
 			let p = self.procs.remove(i);
+			self.k.trace_sources.remove(&p.vpid);
+			self.k.trace_unit_origins.remove(&p.vpid);
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
 			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
@@ -2444,9 +2602,12 @@ impl Shell {
 		ControlHandle(Arc::clone(&self.k.ctl))
 	}
 
-	/// Select the emitted event kinds.
-	pub const fn set_event_mask(&mut self, mask: EventMask) {
+	/// Select the emitted event kinds for a new observer generation.
+	/// Units are announced again only when parsed or executed, even when
+	/// the mask is unchanged; cached functions are never read ahead.
+	pub fn set_event_mask(&mut self, mask: EventMask) {
 		self.k.mask = mask;
+		self.k.announced.clear();
 	}
 
 	/// The current event mask.
@@ -2636,6 +2797,7 @@ impl Vproc {
 			pending_traps: crate::bash::signal::SigSet::EMPTY,
 			stopped: false,
 			transient,
+			exit_trap_run: false,
 			jobs: proc::JobTable::default(),
 			last_bg: proc::LastBg::default(),
 			getopts: proc::GetoptsState { optind: None, next: None, at: None },
@@ -2737,6 +2899,9 @@ impl Vproc {
 		// Exact: `clone_from` into the empty vector reserves four slots.
 		vp.pipestatus.reserve_exact(self.pipestatus.len());
 		vp.pipestatus.extend_from_slice(&self.pipestatus);
+		// `$!` is a parameter every subshell copies; `wait` and `kill`
+		// still check that the child it names is this vproc's own.
+		vp.last_bg = self.last_bg;
 		vp.getopts.clone_from(&self.getopts);
 		vp.command.clone_from(&self.command);
 		vp.rlimits.clone_from(&self.rlimits);

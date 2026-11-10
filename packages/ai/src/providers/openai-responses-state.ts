@@ -20,7 +20,7 @@ export function openAIResponsesReplaysNativeHistory(
 	model: Pick<Model, "api" | "provider" | "compat"> | null | undefined,
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 ): boolean {
-	if (model?.api !== "openai-responses" || !providerSessionState) return true;
+	if (!providerSessionState || (model?.api !== "openai-responses" && model?.api !== "openrouter")) return true;
 	const state = providerSessionState.get(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`) as
 		| OpenAIResponsesProviderSessionState
 		| undefined;

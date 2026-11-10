@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use crate::bash::{
 	ids::{ModeId, Platform, UnitId, Vpid},
 	ir::{self, Unit},
-	syntax::{CompleteCommand, Features, NO_ALIASES, TextMode},
+	syntax::{CompleteCommand, Features, NO_ALIASES, TextMode, tree::Tree},
 	vm::{ArithCache, PatternCache, TextKind, ZshPatternCache},
 };
 
@@ -84,7 +84,7 @@ pub struct Engine {
 
 #[derive(Default)]
 struct UnitCache {
-	map:   HashMap<UnitId, Arc<Unit>>,
+	map:   HashMap<UnitId, Arc<Unit>, crate::bash::ids::UnitIdState>,
 	order: VecDeque<UnitId>,
 	bytes: usize,
 }
@@ -150,19 +150,50 @@ impl Engine {
 		*h.finalize().as_bytes()
 	}
 
-	/// Compile one parsed top-level command of `src`; constructs not
-	/// implemented yet become a unit that fails loudly.
+	/// Compile an owned command. Only an observer retains its canonical
+	/// tree; otherwise the tree comes back, for the next parse to reuse
+	/// ([`Parser::recycle`](crate::bash::syntax::Parser::recycle)).
 	pub(crate) fn compile(
 		&self,
-		cc: &CompleteCommand,
+		cc: CompleteCommand,
 		src: &[u8],
 		mode: ModeId,
 		features: Features,
-	) -> Arc<Unit> {
-		let unit = ir::lower_deferred(cc, src, mode, features).unwrap_or_else(|what| {
-			ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+		observed: bool,
+	) -> (Arc<Unit>, Option<Tree>) {
+		// A source-replayable command's unit is named by its source: one
+		// already compiled (a loop's `eval`, a re-sourced file) is reused
+		// without lowering again.
+		let replay = ir::replay_hasher(&cc, src, mode, features).map(|h| (ir::replay_id(&h), h));
+		let cached = replay
+			.as_ref()
+			.and_then(|(id, _)| self.units.lock().map.get(id).cloned());
+		let unit = cached.unwrap_or_else(|| {
+			let lowered = match replay {
+				Some((id, h)) => ir::lower_deferred_hashed(&cc, src, mode, features, h, id),
+				None => ir::lower_deferred(&cc, src, mode, features),
+			};
+			let compiled = lowered.unwrap_or_else(|what| {
+				ir::abort_unit(cc.span.slice(src), mode, features, cc.line, vec![what.into()], 0, 2)
+			});
+			self.intern(compiled)
 		});
-		self.intern(unit)
+		if observed && unit.trace_syntax.get().is_none() {
+			let syntax = Arc::new(
+				crate::bash::trace::syntax::UnitSyntax::list(cc).with_context(mode, features.bits()),
+			);
+			Self::share_syntax(&unit, &syntax);
+			(unit, None)
+		} else {
+			(unit, Some(cc.tree))
+		}
+	}
+
+	fn share_syntax(unit: &Unit, syntax: &Arc<crate::bash::trace::syntax::UnitSyntax>) {
+		let _ = unit.trace_syntax.set(Arc::clone(syntax));
+		for function in &unit.funcs {
+			Self::share_syntax(&function.body, syntax);
+		}
 	}
 
 	/// Share `unit` through the cache (an identical cached unit wins). The
@@ -197,9 +228,34 @@ impl Engine {
 		text: &[u8],
 		kind: TextKind,
 		mode: ModeId,
+		observed: bool,
 	) -> Result<Arc<Unit>, TextError> {
 		let key = (kind, mode, BString::from(text));
 		if let Some(u) = self.texts.lock().get(&key) {
+			if observed && u.trace_syntax.get().is_none() {
+				let syntax = match kind {
+					TextKind::Arith | TextKind::HereDoc => {
+						let mode = if kind == TextKind::Arith {
+							TextMode::Arith
+						} else {
+							TextMode::HereDoc
+						};
+						crate::bash::syntax::parse_text(text, Features::NONE, mode)
+							.ok()
+							.map(|(tree, root)| {
+								crate::bash::trace::syntax::UnitSyntax::new(
+									0,
+									crate::bash::trace::syntax::SyntaxTree::from_word(tree, root),
+								)
+								.with_context(u.mode, u.features)
+							})
+					},
+					TextKind::Compound => crate::bash::trace::syntax::UnitSyntax::restore(u),
+				};
+				if let Some(syntax) = syntax {
+					let _ = u.trace_syntax.set(Arc::new(syntax));
+				}
+			}
 			return Ok(Arc::clone(u));
 		}
 		let unsupported = |what: &str| TextError {
@@ -213,9 +269,19 @@ impl Engine {
 				} else {
 					TextMode::HereDoc
 				};
-				let word = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
+				let (tree, root) = crate::bash::syntax::parse_text(text, Features::NONE, tmode)
 					.map_err(|e| TextError { line: e.line, msg: BString::from(e.bash_msg()) })?;
-				ir::lower_text(&word, text, mode, Features::NONE).map_err(unsupported)?
+				let word = crate::bash::syntax::tree::Word::at(&tree, root);
+				let unit = ir::lower_text(word, text, mode, Features::NONE).map_err(unsupported)?;
+				if observed {
+					let syntax = crate::bash::trace::syntax::UnitSyntax::new(
+						0,
+						crate::bash::trace::syntax::SyntaxTree::from_word(tree, root),
+					)
+					.with_context(mode, Features::NONE.bits());
+					let _ = unit.trace_syntax.set(Arc::new(syntax));
+				}
+				unit
 			},
 			TextKind::Compound => {
 				// bash parses the text as words with the shell parser
@@ -237,7 +303,17 @@ impl Engine {
 				if parser.next_command().is_some() {
 					return Err(unsupported("a compound array value that is not one word list"));
 				}
-				ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?
+				let unit = ir::lower_compound(&cc, &src, mode, Features::NONE).map_err(unsupported)?;
+				if let Some(msg) = unit.syntax_abort() {
+					return Err(TextError { line: 1, msg: msg.clone() });
+				}
+				if observed {
+					let _ = unit.trace_syntax.set(Arc::new(
+						crate::bash::trace::syntax::UnitSyntax::list(cc)
+							.with_context(mode, Features::NONE.bits()),
+					));
+				}
+				unit
 			},
 		};
 		let unit = Arc::new(unit);

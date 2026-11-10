@@ -1,8 +1,8 @@
 //! Terminal system calls behind the engine's [`Terminal`] seam.
 //!
 //! - [`NativeTerminal`]: the process host's [`Terminal`] over the real
-//!   terminals of this process (Unix; every operation off Unix fails with
-//!   `Unsupported`).
+//!   terminals of this process (Unix), or over its console (Windows,
+//!   [`crate::sys::console`]).
 //! - [`TermiosGuard`]: saves a terminal's modes and puts them back when dropped
 //!   (optionally switching it to raw mode first).
 //! - Free functions over raw descriptors (`attrs`, `set_attrs`, `window_size`,
@@ -13,10 +13,9 @@ use std::io;
 
 use bstr::BString;
 
-use crate::bash::{OsHandle, Pty, SetWhen, Shtty, Terminal, Termios, TtyInfo};
-
 #[cfg(unix)]
 pub use self::unix::*;
+use crate::bash::{OsHandle, Pty, SetWhen, Shtty, Terminal, Termios, TtyInfo};
 
 #[cfg(unix)]
 mod unix {
@@ -180,8 +179,8 @@ mod unix {
 	}
 
 	#[cfg(not(target_os = "linux"))]
-	fn code(baud: u32) -> Option<libc::speed_t> {
-		Some(libc::speed_t::from(baud))
+	fn code(baud: u32) -> libc::speed_t {
+		libc::speed_t::from(baud)
 	}
 
 	const fn field(t: &mut libc::termios, f: Field) -> &mut libc::tcflag_t {
@@ -267,11 +266,15 @@ mod unix {
 		os.c_cc[libc::VMIN] = t.min;
 		os.c_cc[libc::VTIME] = t.time;
 		// An unknown speed keeps the encoding's.
-		if let Some(i) = code(t.ispeed) {
+		#[cfg(target_os = "linux")]
+		let (ispeed, ospeed) = (code(t.ispeed), code(t.ospeed));
+		#[cfg(not(target_os = "linux"))]
+		let (ispeed, ospeed) = (Some(code(t.ispeed)), Some(code(t.ospeed)));
+		if let Some(i) = ispeed {
 			// SAFETY: `os` is a valid termios.
 			unsafe { libc::cfsetispeed(&raw mut os, i) };
 		}
-		if let Some(o) = code(t.ospeed) {
+		if let Some(o) = ospeed {
 			// SAFETY: `os` is a valid termios.
 			unsafe { libc::cfsetospeed(&raw mut os, o) };
 		}
@@ -432,9 +435,10 @@ mod unix {
 		flags != -1 && flags & libc::O_ACCMODE == libc::O_RDWR
 	}
 
-	/// zsh's `init_io`: the shell's terminal and its name. The tty of fd 0
-	/// reopened read-write by name, else fd 0 itself when it is open
-	/// read-write; else fd 1's when it is a read-write terminal; else
+	/// zsh's `init_io`: the shell's terminal and its name.
+	///
+	/// The tty of fd 0 reopened read-write by name, else fd 0 itself when it is
+	/// open read-write; else fd 1's when it is a read-write terminal; else
 	/// `/dev/tty`. The descriptor is at 10 or above, close-on-exec; the
 	/// process's own descriptors are only duplicated, never taken over.
 	pub fn open_controlling() -> io::Result<Option<(OwnedFd, BString)>> {
@@ -637,7 +641,11 @@ pub struct NativeTerminal {
 	/// The device of the terminal [`Terminal::open_controlling`] opened.
 	#[cfg(unix)]
 	shtty:   Option<libc::dev_t>,
-	#[cfg_attr(not(unix), expect(dead_code, reason = "nothing to restore off Unix"))]
+	/// The console (whose modes always go back: it is shared with the
+	/// shell that started this one).
+	#[cfg(windows)]
+	console: crate::sys::console::WindowsConsole,
+	#[cfg_attr(not(unix), expect(dead_code, reason = "the console is always restored"))]
 	restore: bool,
 }
 
@@ -645,12 +653,14 @@ impl NativeTerminal {
 	/// A terminal host; `restore` puts every terminal's modes back when it
 	/// is dropped.
 	#[must_use]
-	pub fn new(restore: bool) -> Self {
+	pub const fn new(restore: bool) -> Self {
 		Self {
 			#[cfg(unix)]
 			guards: Vec::new(),
 			#[cfg(unix)]
 			shtty: None,
+			#[cfg(windows)]
+			console: crate::sys::console::WindowsConsole::new(),
 			restore,
 		}
 	}
@@ -763,62 +773,57 @@ impl Terminal for NativeTerminal {
 	}
 }
 
-#[cfg(not(unix))]
-fn unsupported<T>() -> io::Result<T> {
-	Err(io::ErrorKind::Unsupported.into())
-}
-
-#[cfg(not(unix))]
+#[cfg(windows)]
 impl Terminal for NativeTerminal {
-	fn is_terminal(&self, _h: OsHandle) -> bool {
-		false
+	fn is_terminal(&self, h: OsHandle) -> bool {
+		self.console.is_terminal(h)
 	}
 
-	fn attrs(&self, _h: OsHandle) -> io::Result<Termios> {
-		unsupported()
+	fn attrs(&self, h: OsHandle) -> io::Result<Termios> {
+		self.console.attrs(h)
 	}
 
-	fn set_attrs(&mut self, _h: OsHandle, _attrs: &Termios, _when: SetWhen) -> io::Result<()> {
-		unsupported()
+	fn set_attrs(&mut self, h: OsHandle, attrs: &Termios, when: SetWhen) -> io::Result<()> {
+		self.console.set_attrs(h, attrs, when)
 	}
 
-	fn size(&self, _h: OsHandle) -> io::Result<TtyInfo> {
-		unsupported()
+	fn size(&self, h: OsHandle) -> io::Result<TtyInfo> {
+		self.console.size(h)
 	}
 
-	fn set_size(&mut self, _h: OsHandle, _size: TtyInfo) -> io::Result<()> {
-		unsupported()
+	fn set_size(&mut self, h: OsHandle, size: TtyInfo) -> io::Result<()> {
+		self.console.set_size(h, size)
 	}
 
-	fn foreground(&self, _h: OsHandle) -> io::Result<i32> {
-		unsupported()
+	fn foreground(&self, h: OsHandle) -> io::Result<i32> {
+		self.console.foreground(h)
 	}
 
-	fn set_foreground(&mut self, _h: OsHandle, _pgid: i32) -> io::Result<()> {
-		unsupported()
+	fn set_foreground(&mut self, h: OsHandle, pgid: i32) -> io::Result<()> {
+		self.console.set_foreground(h, pgid)
 	}
 
-	fn session(&self, _h: OsHandle) -> io::Result<i32> {
-		unsupported()
+	fn session(&self, h: OsHandle) -> io::Result<i32> {
+		self.console.session(h)
 	}
 
-	fn name(&self, _h: OsHandle) -> io::Result<BString> {
-		unsupported()
+	fn name(&self, h: OsHandle) -> io::Result<BString> {
+		self.console.name(h)
 	}
 
 	fn process_group(&self) -> i32 {
-		0
+		self.console.process_group()
 	}
 
-	fn set_process_group(&mut self, _pid: i32, _pgid: i32) -> io::Result<()> {
-		unsupported()
+	fn set_process_group(&mut self, pid: i32, pgid: i32) -> io::Result<()> {
+		self.console.set_process_group(pid, pgid)
 	}
 
 	fn open_controlling(&mut self) -> io::Result<Option<Shtty>> {
-		unsupported()
+		self.console.open_controlling()
 	}
 
-	fn open_pty(&mut self, _size: Option<TtyInfo>) -> io::Result<Pty> {
-		unsupported()
+	fn open_pty(&mut self, size: Option<TtyInfo>) -> io::Result<Pty> {
+		self.console.open_pty(size)
 	}
 }

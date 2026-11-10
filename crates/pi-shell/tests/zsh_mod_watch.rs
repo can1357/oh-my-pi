@@ -38,8 +38,8 @@ fn same_as_zsh(script: &str) {
 fn zsh_mod_watch_log_matches_zsh() {
 	same_as_zsh("zmodload zsh/watch; log; echo $?; watch=(all); log; echo $?");
 	same_as_zsh(
-		"zmodload zsh/watch; watch=(all); \
-		 WATCHFMT='%n|%a|%l|%m|%M|%T|%t|%W|%D|%w|%D{%Y %H:%M:%S}|%(m.remote.local)|%F{red}%f'; log",
+		"zmodload zsh/watch; watch=(all); WATCHFMT='%n|%a|%l|%m|%M|%T|%t|%W|%D|%w|%D{%Y \
+		 %H:%M:%S}|%(m.remote.local)|%F{red}%f'; log",
 	);
 	same_as_zsh(
 		"zmodload zsh/watch; watch=(notme); log; watch=(\"$USER\"); log; watch=(nosuchuser); log",

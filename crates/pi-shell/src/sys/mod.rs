@@ -25,6 +25,8 @@
 //! Executors that sandbox or virtualize the filesystem wrap or replace these.
 
 pub mod cmdline;
+#[cfg(windows)]
+pub mod console;
 mod fs;
 mod fs_ops;
 #[cfg(any(windows, test))]
@@ -48,17 +50,25 @@ pub mod socket;
 mod spawn;
 pub mod tty;
 pub mod uname;
+pub mod user;
 pub mod utmp;
 
+#[cfg(windows)]
+pub(crate) use crate::sys::spawn::break_console_groups;
 pub use crate::sys::{
 	fs::{StdFile, StdFs, std_stream},
 	park::Parker,
 	relay::{ByteDecoder, OutputDecoding},
-	spawn::{
-		Exits, Leftover, NativeSpawner, Sessions, SpawnConfig, UnsupportedFd, dispositions_changed,
-	},
+	spawn::{Exits, Leftover, NativeSpawner, Sessions, SpawnConfig, dispositions_changed},
 };
 pub(crate) use crate::sys::{pump::End, relay::Relays};
+
+/// The C library's `PATH_MAX`, which zsh sizes path buffers by. Windows has
+/// no such limit for the engine's paths, so it takes Linux's.
+#[cfg(unix)]
+pub const PATH_MAX: usize = libc::PATH_MAX as usize;
+#[cfg(not(unix))]
+pub const PATH_MAX: usize = 4096;
 
 #[cfg(test)]
 mod suites;

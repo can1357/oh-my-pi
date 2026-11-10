@@ -13,16 +13,26 @@ import { LateDiagnosticsMessageComponent } from "@oh-my-pi/pi-tui/chat/late-diag
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { setInternalUrlSchemeHost } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { buildAsyncResultBlock, buildFileMentionBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { text } from "@oh-my-pi/pi-tui/native/describe";
+import { card, node, text } from "@oh-my-pi/pi-tui/native/describe";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import {
+	messageBlock,
+	onTranscriptPresentationRedrawn,
+	PresentedBlock,
+	presentNative,
+	setTranscriptPresenters,
+} from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { TspNode, TspOp } from "@oh-my-pi/pi-wire";
 import { TspHarness } from "./tsp-harness";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { Container } from "@oh-my-pi/pi-tui/tui";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -78,6 +88,96 @@ function toolTranscript(): TranscriptEntryLike[] {
 				toolCallId: "call-1",
 				toolName: "lookup_thing",
 				content: [{ type: "text", text: Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n") }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: a tool call whose wire name aliases a canonical registry entry. */
+function aliasToolTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([{ type: "toolCall", id: "call-1", name: "shell", arguments: { command: "ls -la" } }]),
+		},
+		{
+			type: "message",
+			id: "r1",
+			parentId: "a1",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "shell",
+				content: [{ type: "text", text: "file-a\nfile-b" }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: an aliased write call whose target is a reply-scoped out:// URL. */
+function aliasReplyWriteTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([
+				{
+					type: "toolCall",
+					id: "call-1",
+					name: "xd://write",
+					arguments: { path: "out://final", content: "Rebuild answer: 42" },
+				},
+			]),
+		},
+		{
+			type: "message",
+			id: "r1",
+			parentId: "a1",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "xd://write",
+				content: [{ type: "text", text: "ok" }],
+				isError: false,
+				timestamp: 2,
+			},
+		},
+	];
+}
+
+/** Viewer transcript entries: an aliased read call plus its result as a separate message. */
+function aliasReadTranscript(): TranscriptEntryLike[] {
+	return [
+		{
+			type: "message",
+			id: "a2",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00Z",
+			message: assistant([
+				{ type: "toolCall", id: "call-2", name: "xd://read", arguments: { path: "/tmp/rebuild-target.ts" } },
+			]),
+		},
+		{
+			type: "message",
+			id: "r2",
+			parentId: "a2",
+			timestamp: "2026-01-01T00:00:01Z",
+			message: {
+				role: "toolResult",
+				toolCallId: "call-2",
+				toolName: "xd://read",
+				content: [{ type: "text", text: "const rebuilt = true;\n" }],
 				isError: false,
 				timestamp: 2,
 			},
@@ -253,6 +353,251 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("keeps diagnostics an edit card absorbed visible when a presenter registered later hides the card", async () => {
+		// Regression guard: diagnostics routed into the card before any presenter existed, then
+		// hidden with it once a presenter hid the card.
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("write", { path: "src/a.ts", content: "x" }, {}, undefined, ui);
+		const transcript = new TranscriptContainer();
+		try {
+			const h = await startWith(h => {
+				tool.setArgsComplete("call-1");
+				tool.setExecutionStarted("call-1");
+				tool.updateResult({ content: [{ type: "text", text: "Wrote 1 line" }], isError: false });
+				transcript.addChild(tool);
+				h.tui.addChild(transcript);
+			});
+			expect(
+				tool.attachLateDiagnostics([{ path: "src/a.ts", summary: "1 error", errored: true, messages: ["bad"] }]),
+			).toBe(true);
+			await h.render();
+			expect(h.find(node => node.p?.role === "omp.diagnostics.late")).toBeUndefined();
+
+			setTranscriptPresenters([block => (block.type === "toolCall" ? "hidden" : undefined)]);
+			tool.refreshTranscriptPresentation();
+			await h.render();
+			const late = h.find(node => node.p?.role === "omp.diagnostics.late");
+			expect(late).toBeDefined();
+			expect(late?.p).not.toMatchObject({ hidden: true });
+
+			// `display.hideToolActivity` hides them like the card they came from.
+			transcript.setToolActivityVisible(false);
+			await h.render();
+			const hiddenLate = h.find(node => node.p?.role === "omp.diagnostics.late");
+			expect(hiddenLate === undefined || hiddenLate.p?.hidden === true).toBe(true);
+		} finally {
+			setTranscriptPresenters([]);
+			tool.dispose();
+		}
+	});
+
+	it("draws a replayed transcript without the extension presenters", async () => {
+		// Regression guard: an overlay's replay (another agent's history, the link browser, rewind,
+		// /copy) handed to the main transcript's presenters, which hid or compacted calls there.
+		setTranscriptPresenters([block => (block.type === "toolCall" ? "hidden" : undefined)]);
+		try {
+			const h = await startWith(h => {
+				const builder = new ChatTranscriptBuilder({
+					ui: h.tui,
+					cwd: "/tmp",
+					requestRender: () => h.tui.requestRender(),
+				});
+				builder.append(toolTranscript());
+				h.tui.addChild(builder.container);
+			});
+			const card = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup_thing");
+			expect(card).toBeDefined();
+			expect(card?.p).not.toMatchObject({ hidden: true });
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("draws a replayed transcript's `!` runs and messages without the extension presenters", () => {
+		// Regression guard: a replay (link browser, rewind, transcript viewer) drawing its message
+		// and event blocks through the main session's presenters while its tool cards draw stock.
+		setTranscriptPresenters([block => (block.type === "message" ? "hidden" : undefined)]);
+		try {
+			const entries: TranscriptEntryLike[] = [
+				{
+					type: "message",
+					id: "b1",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00Z",
+					message: {
+						role: "bashExecution",
+						command: "echo viewer-run",
+						output: "VIEWER-OUT",
+						exitCode: 0,
+						cancelled: false,
+						truncated: false,
+						timestamp: 1,
+					},
+				},
+			];
+			const builder = new ChatTranscriptBuilder({
+				ui: { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} } as never,
+				cwd: "/tmp",
+				requestRender: () => {},
+			});
+			builder.append(entries);
+			expect(Bun.stripANSI(builder.container.render(80).join("\n"))).toContain("echo viewer-run");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("reports a message block whose presentation changed under rows it already drew", () => {
+		// Regression guard: a `!` run or message block in terminal scrollback (never drawn again)
+		// keeping its stale rows there after its data changed outside a refresh (a `!` run recorded).
+		setTranscriptPresenters([
+			block =>
+				block.type === "message" && block.message.role === "custom" && block.message.customType === "late"
+					? "hidden"
+					: "compact",
+		]);
+		const redrawn: unknown[] = [];
+		const unsubscribe = onTranscriptPresentationRedrawn(owner => redrawn.push(owner));
+		try {
+			const message = createCustomMessage("early", "body", true, undefined, "2026-01-01");
+			const block = new PresentedBlock(new CustomMessageComponent(message), messageBlock(message));
+			block.render(80);
+			expect(redrawn).toEqual([]);
+
+			block.setBlock(messageBlock({ ...message, customType: "late" }));
+			expect(redrawn).toEqual([block]);
+		} finally {
+			unsubscribe();
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("keeps a skill whose prompt the user opened in Tern full when a presenter later hides it", () => {
+		// Regression guard: the skill's `prompt` disclosure is a nested toggle, so the wrapper missed
+		// the user's expansion and a later hidden/compact answer folded the opened prompt away.
+		let answer: "full" | "hidden" = "full";
+		setTranscriptPresenters([block => (block.type === "message" ? answer : undefined)]);
+		try {
+			const message = createCustomMessage(
+				"skill-prompt",
+				"SKILL-PROMPT-TEXT",
+				true,
+				{ name: "unslop", path: "/s/SKILL.md", lineCount: 1 },
+				"2026-01-01",
+			);
+			const block = new PresentedBlock(new SkillMessageComponent(message as never), messageBlock(message));
+			expect(block.render(80).length).toBeGreaterThan(0);
+
+			block.handleNativeEvent({ type: "toggle", key: "prompt", collapsed: false });
+			answer = "hidden";
+			block.refreshTranscriptPresentation();
+			expect(Bun.stripANSI(block.render(80).join("\n"))).toContain("SKILL-PROMPT-TEXT");
+			const cx = { cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => false };
+			expect(JSON.stringify(block.describe(cx))).toContain("SKILL-PROMPT-TEXT");
+		} finally {
+			setTranscriptPresenters([]);
+		}
+	});
+
+	it("draws a wrapped block that paints its own rows as those rows", async () => {
+		// Regression guard: the wrapper asking `inner.describe()` directly, so a Container subclass
+		// that overrides render but inherits the column description lost its rows in Tern.
+		class PaintedRows extends Container {
+			override render(): readonly string[] {
+				return ["PAINTED-ROW"];
+			}
+		}
+		const message = createCustomMessage("painted", "body", true, undefined, "2026-01-01");
+		const h = await startWith(h => h.tui.addChild(new PresentedBlock(new PaintedRows(), messageBlock(message))));
+		const rows = h.find(node => node.k === "rows");
+		expect(JSON.stringify(rows?.p)).toContain("PAINTED-ROW");
+	});
+
+	it("renders an aliased wire-named tool call through the canonical renderer", async () => {
+		const bashTool = {
+			name: "bash",
+			label: "Bash",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "shell" ? bashTool : undefined),
+				isBuiltInTool: name => name === "bash",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasToolTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The wire name never keys the card; the canonical registry name does.
+		expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.shell")).toBeUndefined();
+		const card = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.bash");
+		expect(card?.p).toMatchObject({ name: "bash", status: "done" });
+		// The canonical bash renderer described the call; the generic fallback would not.
+		expect(h.find(node => node.k === "code" && node.p?.role === "omp.tool.bash.command")?.p).toMatchObject({
+			text: "ls -la",
+		});
+		expect(h.errors).toEqual([]);
+	});
+
+	it("rebuilds an aliased reply-scoped write as prose, not a tool card", async () => {
+		setInternalUrlSchemeHost({
+			spec: scheme => (scheme === "out" ? { selectors: "none", write: { scope: "reply" } } : undefined),
+			specs: () => new Map([["out", { selectors: "none", write: { scope: "reply" } }]]),
+		});
+		const writeTool = {
+			name: "write",
+			label: "Write",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "xd://write" ? writeTool : undefined),
+				isBuiltInTool: name => name === "write",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasReplyWriteTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The wire name resolves to canonical `write`, so the reply-scoped target
+		// draws as assistant prose; a tool card would mean the reply-write check
+		// never saw the canonical name.
+		expect(h.find(node => node.k === "tool")).toBeUndefined();
+		expect(h.find(node => node.k === "md")?.p).toMatchObject({ text: "Rebuild answer: 42" });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps an aliased read result in the collapsed read group", async () => {
+		const readTool = {
+			name: "read",
+			label: "Read",
+			description: "demo",
+			parameters: {},
+		} as unknown as AgentTool;
+		const h = await startWith(h => {
+			const builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				getTool: name => (name === "xd://read" ? readTool : undefined),
+				isBuiltInTool: name => name === "read",
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+			});
+			builder.append(aliasReadTranscript());
+			h.tui.addChild(builder.container);
+		});
+		// The result resolved to canonical `read`, so the group materializes and
+		// settles (one file renders as the group's inline read row); a wire-name
+		// check would discard the result with no read node at all.
+		const group = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.read");
+		expect(group?.p).toMatchObject({ status: "done", collapsible: false });
+		expect(h.errors).toEqual([]);
+	});
+
 	it("mirrors a native toggle into the tool card and re-collapses it on a transcript-wide collapse", async () => {
 		let builder: ChatTranscriptBuilder | undefined;
 		const h = await startWith(h => {
@@ -306,6 +651,161 @@ describe("native transcript", () => {
 		} finally {
 			tool.dispose();
 		}
+	});
+
+	it("folds a presenter's compact call into one inline row showing every presenter row, and opens the full card on toggle", () => {
+		// Regression guard: Tern clipping a multi-row compact call to its first row, or its toggle
+		// leaving the compact row in place instead of the full card.
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ui);
+		setTranscriptPresenters([
+			block =>
+				block.type === "toolCall"
+					? { compact: { label: "worker", rows: ["row one", "row two", "row three"] } }
+					: undefined,
+		]);
+		try {
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			tool.updateResult({ content: [{ type: "text", text: "hi" }], isError: false });
+			// A terminal that draws `tool` nodes, as Tern does.
+			const cx = { cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => false };
+			const compact = tool.describe(cx);
+			expect(compact.p).toMatchObject({ frame: "inline", collapsed: true, preview: { lines: 3 }, target: "worker" });
+			expect(compact.c).toHaveLength(1);
+			expect(JSON.stringify(compact.c)).toContain("row three");
+
+			tool.handleNativeEvent({ type: "toggle", key: "", collapsed: false });
+			const full = tool.describe(cx);
+			// omp's own bash card is an inline row too: tell them apart by the presenter's label.
+			expect(full.p).not.toMatchObject({ target: "worker" });
+			expect(JSON.stringify(full)).not.toContain("row one");
+		} finally {
+			setTranscriptPresenters([]);
+			tool.dispose();
+		}
+	});
+
+	it("sends a presenter's compact label and rows as single sanitized lines, so the preview shows every row", () => {
+		// Regression guard: a row with a line break overran `preview.lines` and clipped the last row;
+		// tabs and ANSI from raw tool output reached Tern verbatim.
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ui);
+		setTranscriptPresenters([
+			block =>
+				block.type === "toolCall"
+					? {
+							compact: {
+								label: "work\ner\t\x1b[31mred",
+								rows: ["a\nb", [{ t: "c\td\x1b[1m", s: "muted" }], "last"],
+							},
+						}
+					: undefined,
+		]);
+		try {
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			tool.updateResult({ content: [{ type: "text", text: "hi" }], isError: false });
+			const cx = { cols: 120, reduceMotion: false, dark: true, supports: () => true, feature: () => false };
+			const compact = tool.describe(cx);
+			expect(compact.p).toMatchObject({ preview: { lines: 3 } });
+			const label = JSON.stringify(compact.p);
+			const body = JSON.stringify(compact.c);
+			for (const sent of [label, body]) {
+				expect(sent).not.toContain("\\t");
+				expect(sent).not.toContain("\\u001b");
+			}
+			expect(label).not.toContain("\\n");
+			const bodyText = (compact.c ?? []).flatMap(child =>
+				"k" in child && child.k === "text" ? (child.p?.spans ?? []).map(part => part.t) : [],
+			);
+			expect(bodyText.join("").split("\n")).toHaveLength(3);
+			expect(bodyText.join("")).toContain("last");
+		} finally {
+			setTranscriptPresenters([]);
+			tool.dispose();
+		}
+	});
+
+	it("keeps a compact tool row toggleable when the full drawing has no body", () => {
+		// Regression guard: a bodiless tool folded to a row with no toggle, so its full drawing was unreachable.
+		const full = node("tool", { name: "read", title: "Read", target: "src/a.ts", status: "done" });
+		const compact = presentNative(full, { mode: "compact", label: "worker", rows: [] }, { role: "r", title: "Read" });
+		expect(compact.p).toMatchObject({ collapsible: true, collapsed: true, target: "worker" });
+	});
+
+	it("sanitizes a non-tool block's own head target when compact", () => {
+		// Regression guard: raw call input (tabs, ANSI, line breaks) reaching the compact card's head.
+		const full = card({ role: "r" }, [text("body")]);
+		const compact = presentNative(
+			full,
+			{ mode: "compact", rows: [] },
+			{
+				role: "r",
+				title: "Bash",
+				target: "echo\thi\x1b[31m\nnext",
+			},
+		);
+		const head = JSON.stringify(compact.p);
+		expect(head).not.toContain("\\t");
+		expect(head).not.toContain("\\u001b");
+		expect(head).not.toContain("\\n");
+	});
+
+	describe("a compact call in the terminal", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		function compactCall(rows: string[]): ToolExecutionComponent {
+			setTranscriptPresenters([
+				block => (block.type === "toolCall" ? { compact: { label: "JOB", rows } } : undefined),
+			]);
+			const tool = new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ui);
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			return tool;
+		}
+
+		it("keeps a plain-string row's spacing", () => {
+			// Regression guard: whitespace runs in a string row collapsing (alignment, quoted values).
+			const tool = compactCall(['x = "a  b"', "\tindented"]);
+			try {
+				const drawn = Bun.stripANSI(tool.render(80).join("\n"));
+				expect(drawn).toContain('x = "a  b"');
+				expect(drawn).toContain("     indented");
+			} finally {
+				setTranscriptPresenters([]);
+				tool.dispose();
+			}
+		});
+
+		it("strips control sequences from omp's own summary on a plain compact row", () => {
+			// Regression guard: a bash command's escape sequence reaching the terminal through the compact head.
+			setTranscriptPresenters([block => (block.type === "toolCall" ? "compact" : undefined)]);
+			const tool = new ToolExecutionComponent("bash", { command: "echo \x1b[?1049hboom\tx" }, {}, undefined, ui);
+			try {
+				tool.setArgsComplete("call-1");
+				const drawn = tool.render(80).join("\n");
+				expect(drawn).not.toContain("\x1b[?1049h");
+				expect(drawn).not.toContain("\t");
+				expect(Bun.stripANSI(drawn)).toContain("boom");
+			} finally {
+				setTranscriptPresenters([]);
+				tool.dispose();
+			}
+		});
+
+		it("keeps its head first in a squeezed allocation", () => {
+			// Regression guard: a one-row allocation keeping the last presenter row instead of the head.
+			const tool = compactCall(["detail", "tail"]);
+			try {
+				tool.setTranscriptAllocation(1, { tick: 0, now: 0 });
+				const drawn = tool.render(80).map(row => Bun.stripANSI(row));
+				expect(drawn).toHaveLength(1);
+				expect(drawn[0]).toContain("JOB");
+			} finally {
+				setTranscriptPresenters([]);
+				tool.dispose();
+			}
+		});
 	});
 
 	it("describes a custom tool (MCP) through the tool's own describe hooks", async () => {

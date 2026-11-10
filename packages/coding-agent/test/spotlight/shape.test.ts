@@ -360,11 +360,11 @@ describe("spotlight shaping", () => {
 	});
 
 	it("traces an outline: signatures stay, a named body opens, a hot body opens on rank, the rest fold", async () => {
-		// Ten functions of 20 body lines each, read from file line 41 on: function k's body is window lines
-		// 2 + 23k … 21 + 23k.
+		// Twelve functions of 20 body lines each, read from file line 41 on: function k's body is window lines
+		// 2 + 23k … 21 + 23k. The keep budget (15% of 276 lines) fits the named body and one ranked body.
 		const names = ["alphaHandler", "betaHandler", "computeRetryDelay", "deltaHandler", "epsilonHandler"];
 		const lines: string[] = [];
-		for (let k = 0; k < 10; k++) {
+		for (let k = 0; k < 12; k++) {
 			lines.push(`function ${names[k % 5]}${k}(a) {`);
 			for (let j = 0; j < 19; j++) lines.push(`  const v${j} = a * ${j} + ${k};`);
 			lines.push("  return a;", "}", "");
@@ -388,7 +388,7 @@ describe("spotlight shaping", () => {
 		expect(trace.why[23 * 2]).toBe("s");
 		expect(body(2)).toBe("n".repeat(20));
 		expect(body(4)).toBe("a".repeat(20));
-		for (const k of [0, 1, 3, 5, 9]) {
+		for (const k of [0, 1, 3, 5, 11]) {
 			expect(body(k)).toBe("f".repeat(20));
 			expect(trace.map).toContainEqual([2 + 23 * k, 21 + 23 * k]);
 		}
@@ -405,6 +405,42 @@ describe("spotlight shaping", () => {
 		expect(rankPartAt(rank.values[0], 23 * 4 + 5, rank.max)).toBeCloseTo(1, 2);
 		expect(rankPartAt(rank.values[0], 5, rank.max)).toBeCloseTo(0.1, 2);
 		expect(rank.last?.line).toBe(23 * 4 + 2);
+	});
+
+	it("shows the run around the hottest line of a best body too long for the keep budget, folding the rest", async () => {
+		// A class body of eight flat declaration paragraphs (window lines 13-91, 1-based) is the window's best block
+		// but outgrows the keep budget (15% of 238 lines); paragraph 2 (lines 33-41) holds the hottest line.
+		const lines = Array.from({ length: 10 }, (_, i) => `// header ${i}`);
+		lines.push("class Engine {", "public:");
+		for (let p = 0; p < 8; p++) {
+			for (let j = 0; j < 8; j++) lines.push(`\t/// member ${p} doc ${j}`);
+			lines.push(`\tvirtual void member${p}() = 0;`, "");
+		}
+		lines.push("};", "");
+		for (let k = 0; k < 12; k++) {
+			lines.push(`void cold${k}() {`);
+			for (let j = 0; j < 9; j++) lines.push(`  int v${j} = ${k};`);
+			lines.push("}", "");
+		}
+		const shown = lines.map((l, i) => `${i + 1}|${l}`);
+		const out = await shapeResult(
+			{
+				tool: "read",
+				text: `[src/engine.h#ab12]\n${shown.join("\n")}`,
+				read: { path: "src/engine.h", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			},
+			context(),
+			scorer(item => (item.includes("member 2 doc 4") ? 1 : 0.1)),
+			newShapeState(),
+			sink(),
+		);
+		expect(out.steps).toEqual(["outline"]);
+		const trace = traceOf(out, shown);
+		expect(trace.why.slice(32, 41).join("")).toBe("a".repeat(9));
+		expect(trace.map).toContainEqual([13, 32]);
+		expect(trace.map).toContainEqual([42, 91]);
+		expect(trace.rank?.last?.line).toBe(33);
 	});
 
 	it("falls back to head + tail when Spotlight does not answer, and still cuts to the budget", async () => {
@@ -544,6 +580,46 @@ describe("spotlight shaping", () => {
 		expect(trace.why.join("")).toBe(`-${"r".repeat(14)}-`);
 		expect(trace.map).toEqual([1, [2, 15], 16]);
 		expect(trace.rank).toBeUndefined();
+	});
+
+	it("collapses seen lines only in the order the agent saw them: a dropped or changed line splits the marker", async () => {
+		const state = newShapeState();
+		const first = migrations(20);
+		await shapeResult(
+			bash("bin/migrate --dry-run", [...first.slice(0, 14), "took 41ms", ...first.slice(14)].join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+		// Migration 6 is gone and the short timing line changed: every long line was seen, but not in this order.
+		const again = [
+			"Applying migrations to staging",
+			...first.slice(0, 6),
+			...first.slice(7, 14),
+			"took 52ms",
+			...first.slice(14),
+			"Done: 19 applied, 0 failed",
+		];
+
+		const out = await shapeResult(
+			bash("bin/migrate", again.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+
+		expect(out.text).toBe(
+			[
+				"Applying migrations to staging",
+				"… [6 lines as shown before: read artifact://1:2-7]",
+				"… [7 lines as shown before: read artifact://1:8-14]",
+				"took 52ms",
+				"… [6 lines as shown before: read artifact://1:16-21]",
+				"Done: 19 applied, 0 failed",
+			].join("\n"),
+		);
 	});
 
 	it("keeps the last line of output that repeats an earlier run but stops short of it", async () => {

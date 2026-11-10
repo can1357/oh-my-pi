@@ -48,9 +48,10 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/s
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -300,6 +301,11 @@ describe("AgentSession retry fallback", () => {
 	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
+	// Restored in afterEach after any test that redirects the agent dir.
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalPiProfile = process.env.PI_PROFILE;
+	const originalOmpProfile = process.env.OMP_PROFILE;
+
 	// The model registry is an immutable fixture whose construction builds a
 	// canonical index over ~2.7k bundled models (~100ms). Build it (and the
 	// auth DB) once for the whole file instead of per-test; reset only the
@@ -338,6 +344,10 @@ describe("AgentSession retry fallback", () => {
 			session = undefined;
 		}
 		vi.restoreAllMocks();
+		restoreEnvValue("PI_CODING_AGENT_DIR", originalAgentDir);
+		restoreEnvValue("PI_PROFILE", originalPiProfile);
+		restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+		__resetDirsFromEnvForTests();
 	});
 
 	it("advances through a role-keyed fallback chain across retries", async () => {
@@ -4078,6 +4088,26 @@ describe("AgentSession retry fallback", () => {
 			failure: () =>
 				AIError.finalize(
 					Object.assign(new Error("concurrent connections limit (retry-after-ms=1)"), { status: 429 }),
+					{
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+					},
+				),
+			extraSettings: { "retry.rateLimitWalksChain": true },
+			primaryAttempts: 1,
+		},
+		{
+			// "Too many tokens" on a 429 is a throttle, not overflow: it walks the chain.
+			name: "a Bedrock 429 token-cap body with retry.rateLimitWalksChain on",
+			failure: () =>
+				AIError.finalize(
+					Object.assign(
+						new Error(
+							"429 Too many tokens, please wait before trying again. (type=rate_limit_error param=rate_limit_exceeded) retry-after-ms=1",
+						),
+						{ status: 429 },
+					),
 					{
 						api: "anthropic-messages",
 						provider: "anthropic",
@@ -7974,6 +8004,8 @@ describe("AgentSession retry fallback", () => {
 		const descriptorAuthStorage = await AuthStorage.create(path.join(tempDir.path(), "descriptor-auth.db"));
 		try {
 			const coldRegistry = new ModelRegistry(descriptorAuthStorage, modelsConfigPath);
+			// LiteLLM's cache is keyed by credential, so its cold state is known only after hydration.
+			await coldRegistry.hydrateCredentialScopedModelCaches();
 			expect(coldRegistry.find("litellm", "Qwen3.8-27B")).toBeUndefined();
 			expect(coldRegistry.isProviderDiscoveryPending("litellm")).toBe(true);
 
@@ -9052,43 +9084,54 @@ describe("AgentSession retry fallback", () => {
 
 	it("carries attribution across a fork, which continues the conversation under a new id", async () => {
 		using tempDir = TempDir.createSync("@omp-fallback-fork-");
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
-		if (!primaryModel || !fallbackModel) {
-			throw new Error("Expected bundled test models to exist");
+		// Keep the fork's transcript registration inside the fork dir instead
+		// of the real custom-session-files registry.
+		setAgentDir(path.join(tempDir.path(), "agent"));
+		try {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled test models to exist");
+			}
+
+			const requestedModels: string[] = [];
+			const agent = createFallbackAgent(primaryModel, requestedModels);
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+			const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+
+			await session.prompt("Fail over to the fallback");
+			await session.waitForIdle();
+			const served = {
+				selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+				modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+				thinkingLevel: undefined,
+				isFallback: true,
+				contextWindow: fallbackModel.contextWindow,
+			};
+			expect(session.servingModel).toEqual(served);
+
+			const sessionIdBeforeFork = sessionManager.getSessionId();
+			expect(await session.fork()).toBe(true);
+			expect(sessionManager.getSessionId()).not.toBe(sessionIdBeforeFork);
+
+			// A fork clones the transcript and keeps running the same session, so the
+			// work the fallback produced is still this session's — unlike a switch to
+			// an unrelated transcript, which expires it.
+			expect(session.servingModel).toEqual(served);
+		} finally {
+			// Dispose while the fork dir still exists. `using` removes the dir
+			// when this scope returns. A dispose from the suite afterEach would
+			// recreate the dir with a headerless session_exit stub.
+			await session?.dispose();
+			session = undefined;
 		}
-
-		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels);
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
-		});
-		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
-
-		await session.prompt("Fail over to the fallback");
-		await session.waitForIdle();
-		const served = {
-			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
-			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
-			thinkingLevel: undefined,
-			isFallback: true,
-			contextWindow: fallbackModel.contextWindow,
-		};
-		expect(session.servingModel).toEqual(served);
-
-		const sessionIdBeforeFork = sessionManager.getSessionId();
-		expect(await session.fork()).toBe(true);
-		expect(sessionManager.getSessionId()).not.toBe(sessionIdBeforeFork);
-
-		// A fork clones the transcript and keeps running the same session, so the
-		// work the fallback produced is still this session's — unlike a switch to
-		// an unrelated transcript, which expires it.
-		expect(session.servingModel).toEqual(served);
 	});
 
 	it("keeps attribution on a served fallback while the next candidate is unproven", async () => {

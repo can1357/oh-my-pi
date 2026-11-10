@@ -601,10 +601,15 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function getTaskIsolationSegment(repoRoot: string, id: string): string {
+/**
+ * Deterministic task-isolation dir of one run (`repoRoot` + agent id) under the
+ * worktrees dir: it holds the owner marker and either the native `m` mount or
+ * the record of an ovnfs checkout (see `./ovnfs`).
+ */
+export function taskIsolationBaseDir(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	return getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`);
 }
 
 /**
@@ -652,7 +657,7 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+	const baseDir = taskIsolationBaseDir(repoRoot, id);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
@@ -964,7 +969,9 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
  * If the agent did not commit, the captured delta is collapsed onto a single
  * branch commit with an AI-generated (or fallback) message.
  *
- * Returns `null` when no root or nested changes exist.
+ * Returns `null` when no root or nested changes exist. `delta` is the run's
+ * change set when the caller already read it (as {@link captureDeltaPatch}
+ * would); otherwise it is captured here.
  */
 export async function commitToBranch(
 	isolationDir: string,
@@ -972,13 +979,14 @@ export async function commitToBranch(
 	taskId: string,
 	description: string | undefined,
 	commitMessage?: (diff: string) => Promise<string | null>,
+	delta?: DeltaPatchResult,
 ): Promise<CommitToBranchResult | null> {
 	const baselineSha = baseline.root.headCommit;
 	const isolationRepo = vcs.requireGit(isolationDir);
 	const isolationHead = (await isolationRepo.headSha()) ?? "";
 	const agentCommitted = isolationHead !== "" && isolationHead !== baselineSha;
 
-	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
+	const { rootPatch, nestedPatches } = delta ?? (await captureDeltaPatch(isolationDir, baseline));
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
 	if (!rootPatch.trim()) return { rootPatch, nestedPatches };
 

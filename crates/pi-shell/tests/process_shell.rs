@@ -123,3 +123,40 @@ fn command_strings_and_exit_statuses_match_zsh() {
 		assert_eq!(obash(args), run("/bin/zsh", args), "{args:?}");
 	}
 }
+
+/// A standalone shell abandons the externals still running when it exits:
+/// a background job without `nohup` gets `TERM` and is gone shortly after.
+#[test]
+fn a_standalone_exit_ends_running_background_externals() {
+	let out = Command::new(env!("CARGO_BIN_EXE_obash"))
+		.args(["-c", "/bin/sleep 31 >/dev/null 2>&1 </dev/null & echo $!"])
+		.output()
+		.expect("start obash");
+	assert_eq!(out.status.code(), Some(0));
+	let pid: libc::pid_t = String::from_utf8(out.stdout)
+		.expect("utf-8 pid")
+		.trim()
+		.parse()
+		.expect("the job's pid");
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	// SAFETY: signal 0 only checks that the process exists.
+	while unsafe { libc::kill(pid, 0) } == 0 {
+		assert!(std::time::Instant::now() < deadline, "sleep {pid} still runs after obash exited");
+		std::thread::sleep(std::time::Duration::from_millis(20));
+	}
+}
+
+/// `$!` of a background pipeline is its last process's pid (zsh runs that
+/// stage in the job's shell), as the process reports `$$` itself; it was
+/// the shell's virtual pid, unknown to the system.
+#[test]
+fn a_background_pipelines_bang_is_its_last_process() {
+	let script = "T=$(/bin/mktemp); /bin/sleep 0.1 | /bin/sh -c 'echo $$ >\"$1\"; exec /bin/sleep \
+	              0.1' sh $T & p=$!; wait; [[ $p == $(<$T) ]] && print last; /bin/rm -f $T";
+	let args = ["-f", "-c", script];
+	let ours = obash(&args);
+	assert_eq!(ours, (b"last\n".to_vec(), Vec::new(), Some(0)));
+	if have_zsh() {
+		assert_eq!(ours, run("/bin/zsh", &args));
+	}
+}

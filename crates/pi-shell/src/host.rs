@@ -63,14 +63,23 @@ pub trait SpawnObserver: Send + Sync {
 /// Cheap to clone; clones share the current generation.
 #[derive(Clone, Default)]
 pub struct StdStreams {
-	slots: Arc<Mutex<Arc<[Slot; 3]>>>,
+	slots:       Arc<Mutex<Arc<[Slot; 3]>>>,
+	write_order: Arc<Mutex<Option<Arc<Mutex<()>>>>>,
+	/// Observer and clock for the installed capture generation, registered
+	/// lazily when its engine-side files are acquired.
+	output_end:  Arc<Mutex<Option<CaptureObserver>>>,
 	/// Stdout and stderr of the current run are one text capture
 	/// ([`StdStreams::install`]).
-	text:  Arc<AtomicBool>,
+	text:        Arc<AtomicBool>,
 }
 
 /// One swappable stream.
 type Slot = Mutex<Option<Box<dyn File>>>;
+
+struct CaptureObserver {
+	events: Arc<dyn crate::bash::EventSink>,
+	start:  Instant,
+}
 
 impl StdStreams {
 	/// Install the three streams of the next command (`None`: like
@@ -81,6 +90,8 @@ impl StdStreams {
 		let slots =
 			streams.map(|file| Mutex::new(file.map(|f| Box::new(StdFile::new(f)) as Box<dyn File>)));
 		*self.slots.lock() = Arc::new(slots);
+		*self.write_order.lock() = None;
+		*self.output_end.lock() = None;
 		self.text.store(text, Ordering::Release);
 	}
 
@@ -106,26 +117,78 @@ impl StdStreams {
 
 	/// Remove every stream, closing the files installed last.
 	pub fn clear(&self) {
-		for slot in self.slots.lock().iter() {
+		let order = self.write_order.lock().clone();
+		let _order = order.as_ref().map(|order| order.lock());
+		let slots = self.slots.lock();
+		let present = [slots[1].lock().is_some(), slots[2].lock().is_some()];
+		for slot in slots.iter() {
 			*slot.lock() = None;
+		}
+		drop(slots);
+		let observer = self.output_end.lock().take();
+		if let Some(CaptureObserver { events, start }) = observer {
+			let t_ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+			if self.text.load(Ordering::Acquire) {
+				if present.into_iter().any(|present| present) {
+					events.output_end(t_ns, 1);
+				}
+			} else {
+				for (index, present) in present.into_iter().enumerate() {
+					if present {
+						events.output_end(t_ns, index as i32 + 1);
+					}
+				}
+			}
 		}
 	}
 
 	/// The engine-side file of stream `fd`.
-	fn file(&self, fd: StdFd) -> Box<dyn File> {
+	fn file(
+		&self,
+		fd: StdFd,
+		events: Option<Arc<dyn crate::bash::EventSink>>,
+		start: Instant,
+	) -> Box<dyn File> {
 		let index = match fd {
 			StdFd::Stdin => 0,
 			StdFd::Stdout => 1,
 			StdFd::Stderr => 2,
 		};
-		Box::new(StreamFile { slots: Arc::clone(&self.slots.lock()), index })
+		let write_order = if index != 0
+			&& let Some(events) = &events
+		{
+			self
+				.output_end
+				.lock()
+				.get_or_insert_with(|| CaptureObserver { events: Arc::clone(events), start });
+			Some(Arc::clone(
+				self
+					.write_order
+					.lock()
+					.get_or_insert_with(|| Arc::new(Mutex::new(()))),
+			))
+		} else {
+			None
+		};
+		Box::new(StreamFile {
+			slots: Arc::clone(&self.slots.lock()),
+			index,
+			events,
+			start,
+			merged: self.text.load(Ordering::Acquire),
+			write_order,
+		})
 	}
 }
 
 /// An engine [`File`] forwarding to one of the [`StdStreams`].
 struct StreamFile {
-	slots: Arc<[Slot; 3]>,
-	index: usize,
+	slots:       Arc<[Slot; 3]>,
+	index:       usize,
+	merged:      bool,
+	write_order: Option<Arc<Mutex<()>>>,
+	events:      Option<Arc<dyn crate::bash::EventSink>>,
+	start:       Instant,
 }
 
 impl StreamFile {
@@ -138,12 +201,46 @@ impl StreamFile {
 }
 
 impl File for StreamFile {
+	fn observes_output(&self) -> bool {
+		self.index != 0 && self.events.is_some()
+	}
+
+	fn output_key(&self) -> Option<(usize, i32)> {
+		self.observes_output().then(|| {
+			(Arc::as_ptr(&self.slots).addr(), if self.merged { 1 } else { self.index as i32 })
+		})
+	}
+
+	fn poll_write_tagged(
+		&mut self,
+		cx: &mut Context<'_>,
+		bytes: &[u8],
+		tag: Option<crate::bash::CmdTag>,
+	) -> Poll<io::Result<usize>> {
+		let _order = self.write_order.as_ref().map(|order| order.lock());
+		let mut slot = self.slots[self.index].lock();
+		let Some(file) = slot.as_mut() else {
+			return Poll::Ready(Ok(bytes.len()));
+		};
+		let result = file.poll_write(cx, bytes);
+		if self.index != 0
+			&& let Poll::Ready(Ok(n)) = &result
+			&& *n != 0
+			&& let Some(events) = &self.events
+		{
+			let t_ns = u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+			let fd = if self.merged { 1 } else { self.index as i32 };
+			events.output(tag, t_ns, fd, &bytes[..*n]);
+		}
+		result
+	}
+
 	fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
 		self.with(Poll::Ready(Ok(0)), |f| f.poll_read(cx, buf))
 	}
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-		self.with(Poll::Ready(Ok(buf.len())), |f| f.poll_write(cx, buf))
+		self.poll_write_tagged(cx, buf, None)
 	}
 
 	fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -162,10 +259,21 @@ impl File for StreamFile {
 		self.with(None, |f| f.os_handle())
 	}
 
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.with(None, |f| f.os_output_handle())
+	}
+
 	fn dup(&self) -> io::Result<Box<dyn File>> {
 		// Share the generation, not a duplicate OS handle: clear closes the
 		// run's pipe even while a background job retains this file.
-		Ok(Box::new(Self { slots: Arc::clone(&self.slots), index: self.index }))
+		Ok(Box::new(Self {
+			slots:       Arc::clone(&self.slots),
+			index:       self.index,
+			merged:      self.merged,
+			events:      self.events.clone(),
+			write_order: self.write_order.clone(),
+			start:       self.start,
+		}))
 	}
 }
 
@@ -190,6 +298,8 @@ pub struct PiHost {
 	vfs:      Option<crate::vfs::VfsFs>,
 	/// Mirrors the pipeline pipes of the command being run.
 	pipe_tap: Option<Arc<dyn crate::bash::PipeTap>>,
+	/// Observes the events of the command being run.
+	events:   Option<Arc<dyn crate::bash::EventSink>>,
 }
 
 /// What launching an external needs of a [`PiHost`], owned and cheap to
@@ -219,7 +329,12 @@ impl TextSink {
 	fn is_same(&self, other: &Self) -> bool {
 		match (self, other) {
 			(Self::Run, Self::Run) => true,
-			(Self::Capture(a), Self::Capture(b)) => a.same(b),
+			(Self::Capture(a), Self::Capture(b)) => {
+				a.same(b)
+					|| a
+						.output_key()
+						.is_some_and(|key| b.output_key() == Some(key))
+			},
 			_ => false,
 		}
 	}
@@ -230,18 +345,31 @@ impl Launcher {
 	fn text_sink_of(&self, stdio: &StdioSpec) -> Option<TextSink> {
 		match stdio {
 			StdioSpec::Inherit(os) => self.streams.is_text(*os).then_some(TextSink::Run),
-			StdioSpec::Pipe(fd) => fd.is_capture().then(|| TextSink::Capture(fd.clone())),
-			StdioSpec::Null | StdioSpec::File(_) => None,
+			StdioSpec::Pipe(fd) => {
+				(fd.is_capture() || fd.observes_output()).then(|| TextSink::Capture(fd.clone()))
+			},
+			StdioSpec::Null | StdioSpec::Closed | StdioSpec::File(_) => None,
 		}
 	}
 
-	/// Point the stdout and stderr of `spec` that write into a text sink at
-	/// relays. Streams of one sink share a relay, so their interleaving
-	/// survives; pipeline pipes and files are left alone.
-	fn route_text(&self, spec: &mut SpawnSpec<'_>, relays: &mut Relays<'_>) -> io::Result<()> {
+	/// Route text captures and observed outputs through one relay per final
+	/// sink, including inherited extra descriptors. Only text sinks decode;
+	/// pipeline pipes and files are left alone.
+	fn route_text(
+		&self,
+		spec: &mut SpawnSpec<'_>,
+		relays: &mut Relays<'_>,
+		visible_only: bool,
+	) -> io::Result<()> {
 		let mut routed: Vec<(TextSink, OsHandle)> = Vec::new();
-		for index in [1, 2] {
-			let Some(sink) = self.text_sink_of(&spec.stdio[index]) else {
+		for stdio in spec.stdio[1..]
+			.iter_mut()
+			.chain(spec.extra_fds.iter_mut().map(|(_, stdio)| stdio))
+		{
+			if visible_only && !matches!(&*stdio, StdioSpec::Pipe(fd) if fd.observes_output()) {
+				continue;
+			}
+			let Some(sink) = self.text_sink_of(stdio) else {
 				continue;
 			};
 			let os = if let Some(&(_, os)) = routed.iter().find(|(known, _)| known.is_same(&sink)) {
@@ -254,11 +382,18 @@ impl Launcher {
 					},
 					TextSink::Capture(fd) => End::Fd(fd.clone()),
 				};
-				let os = relays.attach(end)?;
+				let text = match &sink {
+					TextSink::Run => true,
+					TextSink::Capture(fd) => {
+						fd.is_capture()
+							|| (fd.observes_output() && self.streams.text.load(Ordering::Acquire))
+					},
+				};
+				let os = relays.attach(end, text)?;
 				routed.push((sink, os));
 				os
 			};
-			spec.stdio[index] = StdioSpec::Inherit(os);
+			*stdio = StdioSpec::Inherit(os);
 		}
 		Ok(())
 	}
@@ -266,9 +401,14 @@ impl Launcher {
 	/// Start the external `spec` names, now. Text routing and the observer
 	/// see a spawn only once it succeeded.
 	fn launch(&self, mut spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
-		let mut relays = self.decoding.as_deref().map(Relays::new);
+		let observed = spec.stdio[1..]
+			.iter()
+			.chain(spec.extra_fds.iter().map(|(_, stdio)| stdio))
+			.any(|stdio| matches!(stdio, StdioSpec::Pipe(fd) if fd.observes_output()));
+		let mut relays =
+			(self.decoding.is_some() || observed).then(|| Relays::new(self.decoding.as_deref()));
 		if let Some(relays) = &mut relays {
-			self.route_text(&mut spec, relays)?;
+			self.route_text(&mut spec, relays, self.decoding.is_none())?;
 		}
 		let lineage = spec.lineage;
 		let mut child = self.spawner.spawn(spec)?;
@@ -317,6 +457,7 @@ impl PiHost {
 			user: OnceCell::new(),
 			vfs: None,
 			pipe_tap: None,
+			events: None,
 		}
 	}
 
@@ -342,6 +483,12 @@ impl PiHost {
 	/// (`None`: none).
 	pub fn set_pipe_tap(&mut self, tap: Option<Arc<dyn crate::bash::PipeTap>>) {
 		self.pipe_tap = tap;
+	}
+
+	/// Forward the events of the commands run from now on to `sink`
+	/// (`None`: none). The caller sets the shell's event mask to match.
+	pub fn set_event_sink(&mut self, sink: Option<Arc<dyn crate::bash::EventSink>>) {
+		self.events = sink;
 	}
 
 	/// Where builtins report an error their exit status hides (jq after a
@@ -405,6 +552,14 @@ impl crate::bash::Host for PiHost {
 			.tools
 			.native_extra(name)
 			.map_or(Resolved::NotFound, Resolved::Native)
+	}
+
+	/// On Windows, a utility written in the syntax of the System32 program it
+	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
+	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
+	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
+		cfg!(windows)
+			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default())
 	}
 
 	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),
@@ -507,7 +662,12 @@ impl crate::bash::Host for PiHost {
 	}
 
 	fn stdio(&mut self, fd: StdFd) -> Option<Box<dyn File>> {
-		Some(self.launcher.streams.file(fd))
+		Some(
+			self
+				.launcher
+				.streams
+				.file(fd, self.events.clone(), self.start),
+		)
 	}
 
 	fn now_ns(&self) -> u64 {
@@ -559,7 +719,7 @@ impl crate::bash::Host for PiHost {
 	}
 
 	fn user(&self) -> UserInfo {
-		self.user.get_or_init(read_user).clone()
+		self.user.get_or_init(crate::sys::user::read_user).clone()
 	}
 
 	fn umask(&self) -> u32 {
@@ -630,7 +790,10 @@ impl crate::bash::Host for PiHost {
 		Ok(crate::bash::CpuTimes { user_ns, sys_ns, child_user_ns, child_sys_ns })
 	}
 
-	fn event(&mut self, _ev: &Event<'_>) -> Verdict {
+	fn event(&mut self, ev: &Event<'_>) -> Verdict {
+		if let Some(sink) = &self.events {
+			sink.event(ev);
+		}
 		Verdict::Continue
 	}
 }
@@ -778,44 +941,4 @@ impl Drop for RuntimeTimer {
 	fn drop(&mut self) {
 		self.task.abort();
 	}
-}
-
-/// The current user: ids, groups, and `USER`/`HOME` (`USERNAME`/
-/// `USERPROFILE` on Windows) of the process environment.
-fn read_user() -> UserInfo {
-	let var = |k: &str| {
-		std::env::var_os(k).map_or_else(BString::default, |v| BString::from(v.as_encoded_bytes()))
-	};
-	#[cfg(unix)]
-	// SAFETY: getuid/geteuid/getgid have no preconditions.
-	let (uid, euid, gid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getgid()) };
-	#[cfg(not(unix))]
-	let (uid, euid, gid) = (0, 0, 0);
-	let (name, home) = if cfg!(windows) {
-		(var("USERNAME"), var("USERPROFILE"))
-	} else {
-		(var("USER"), var("HOME"))
-	};
-	UserInfo { uid, euid, gid, groups: groups(), name, home }
-}
-
-/// The process's supplementary group ids (`GROUPS`); empty where the
-/// platform has none or `getgroups` fails.
-fn groups() -> Vec<u32> {
-	#[cfg(unix)]
-	{
-		// SAFETY: a zero count with a null pointer only asks for the count.
-		let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-		let Ok(len) = usize::try_from(n) else {
-			return Vec::new();
-		};
-		let mut ids: Vec<libc::gid_t> = vec![0; len];
-		// SAFETY: `ids` has room for `n` entries; getgroups writes at most
-		// that many and returns how many it wrote.
-		let got = unsafe { libc::getgroups(n, ids.as_mut_ptr()) };
-		ids.truncate(usize::try_from(got).unwrap_or(0));
-		ids
-	}
-	#[cfg(not(unix))]
-	Vec::new()
 }

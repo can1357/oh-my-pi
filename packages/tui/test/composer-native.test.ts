@@ -116,6 +116,16 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("routes a picked thinking level (`thinking.set` with the level as value)", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, thinking: "high" });
+		editor.onSetThinkingLevel = vi.fn();
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", value: "low", mods: [] });
+		editor.handleNativeEvent({ type: "action", key: "bar/effort", act: "thinking.set", mods: [] });
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledTimes(1);
+		expect(editor.onSetThinkingLevel).toHaveBeenCalledWith("low");
+	});
+
 	it("quotes the session title in italics as the placeholder; a viewed subagent's name wins", () => {
 		const placeholder = (state: ComposerNativeState) =>
 			nodes(composer(state).describe(cx)).find(n => n.k === "editor")?.p;
@@ -593,7 +603,7 @@ describe("native composer without a status strip", () => {
 		composer.start();
 		try {
 			composer.editor.composerState = () => ({ running: false, thinking: "high" });
-			const { dock } = composer.describeSurface();
+			const { dock } = composer.describeSurface(cx);
 			expect(dock).toEqual([composer.editor]);
 			const described = composer.editor.describe(cx);
 			expect(nodes(described).some(n => n.p !== undefined && "role" in n.p && n.p.role === "omp.status")).toBe(
@@ -694,14 +704,14 @@ describe("native surface tail", () => {
 			const queued = new Container();
 			composer.setRuntimeChildren([transcript, deferred, queued], { nativeTail: [deferred] });
 
-			const live = composer.describeSurface();
+			const live = composer.describeSurface(cx);
 			expect(live.main.slice(-2)).toEqual([answer, run]);
 			expect(live.dock).toEqual([queued]);
 
 			// The next prompt flushes it into the transcript: same block, same place.
 			deferred.removeChild(run);
 			transcript.addChild(run);
-			const flushed = composer.describeSurface();
+			const flushed = composer.describeSurface(cx);
 			expect(flushed.main.slice(-2)).toEqual([answer, run]);
 			expect(flushed.main).toHaveLength(live.main.length);
 		} finally {

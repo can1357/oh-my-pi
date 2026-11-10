@@ -126,7 +126,7 @@ describe("ExtensionRunner", () => {
 		);
 		const actions = {
 			sendMessage: () => {},
-			sendUserMessage: () => {},
+			sendUserMessage: async () => {},
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -177,7 +177,7 @@ describe("ExtensionRunner", () => {
 		runner.initialize(
 			{
 				sendMessage: () => {},
-				sendUserMessage: () => {},
+				sendUserMessage: async () => {},
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],
@@ -1018,7 +1018,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1233,7 +1233,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1488,7 +1488,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1818,7 +1818,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2389,6 +2389,107 @@ describe("ExtensionRunner", () => {
 			}
 		});
 
+		it("keeps a session_before_* handler's dialog answerable past the handler budget, unlike a non-gate event", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-dialog.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_switch", async (_event, ctx) => ({ cancel: await ctx.ui.confirm("Leave?", "") }));
+						pi.on("agent_end", async (_event, ctx) => {
+							await ctx.ui.confirm("Still there?", "");
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: string[] = [];
+			runner.onError(error => errors.push(error.error));
+			let presented = Promise.withResolvers<AbortSignal | undefined>();
+			let answer = Promise.withResolvers<boolean>();
+			const confirm: ExtensionUIContext["confirm"] = async (_title, _message, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			// The runner proxies the UI context, so the overrides sit on its prototype.
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { confirm: { value: confirm } })));
+			vi.useFakeTimers();
+			let now = 0;
+			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			try {
+				testSetExtensionHandlerTimeoutMs(15);
+				// The operator answers well after the handler budget.
+				const gate = runner.emit({ type: "session_before_switch", reason: "new" });
+				await presented.promise;
+				now = 100;
+				vi.advanceTimersByTime(100);
+				answer.resolve(true);
+				expect(await gate).toEqual({ cancel: true });
+				expect(errors).toEqual([]);
+
+				// Real timers from here: the handler's own 15ms budget is what ends the wait.
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				presented = Promise.withResolvers();
+				answer = Promise.withResolvers();
+				const notification = runner.emit({ type: "agent_end", messages: [] });
+				const dialogSignal = await presented.promise;
+				await notification;
+				expect(errors).toHaveLength(1);
+				expect(errors[0]).toContain("timed out after 15ms");
+				expect(dialogSignal?.aborted).toBe(true);
+			} finally {
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("closes a gate handler's pending dialog and drops its late result when the event's signal aborts", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-abort.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_shutdown", async (_event, ctx) => {
+							await ctx.ui.select("Outcome", ["done"]);
+							return { cancel: true };
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const presented = Promise.withResolvers<AbortSignal | undefined>();
+			const answer = Promise.withResolvers<string | undefined>();
+			// Ignores its signal, like a handler that never checks it.
+			const select: ExtensionUIContext["select"] = async (_title, _options, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { select: { value: select } })));
+			const controller = new AbortController();
+			const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+			const dialogSignal = await presented.promise;
+			controller.abort();
+			expect(await emission).toBeUndefined();
+			expect(dialogSignal?.aborted).toBe(true);
+			answer.resolve("done");
+		});
+
 		it("cancels a pending confirmation and blocks tool execution when the outer dispatch aborts (#4223)", async () => {
 			const extensionPath = path.join(tempDir.path(), "confirm-abort-tool-call.ts");
 			fs.writeFileSync(
@@ -2490,7 +2591,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2565,7 +2666,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: (_customType, data) => {
 						snapshots.push(data);
 					},
@@ -2636,7 +2737,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2694,7 +2795,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2725,6 +2826,7 @@ describe("ExtensionRunner", () => {
 					notify: () => {},
 					onTerminalInput: () => () => {},
 					rerenderMessage: () => {},
+					refreshTranscript: () => {},
 					getLinkClicksAvailable: () => false,
 					setStatus: () => {},
 					setWorkingMessage: () => {},
@@ -4220,6 +4322,196 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("event delivery order", () => {
+		type Handler = (event: { type: string; toolCallId?: string }) => unknown;
+		const inlineExtension = (name: string, handlers: Record<string, Handler>): Extension => {
+			const extensionPath = path.join(extensionsDir, `${name}.ts`);
+			return {
+				path: extensionPath,
+				resolvedPath: extensionPath,
+				handlers: new Map(
+					Object.entries(handlers).map(([type, handler]) => [
+						type,
+						[async (...args: unknown[]) => handler(args[0] as { type: string; toolCallId?: string })],
+					]),
+				),
+				tools: new Map(),
+				assistantThinkingRenderers: [],
+				assistantTextRenderers: [],
+				transcriptPresenters: [],
+				linkSchemes: [],
+				fileWriteFallbackHandlers: [],
+				fileDeleteFallbackHandlers: [],
+				messageRenderers: new Map(),
+				composerShapes: new Map(),
+				commands: new Map(),
+				flags: new Map(),
+				shortcuts: new Map(),
+			};
+		};
+
+		it("delivers a call's end after its start even while an earlier extension is still handling the start", async () => {
+			const releaseSlowStart = Promise.withResolvers<void>();
+			const seen: string[] = [];
+			const slow = inlineExtension("slow-start", {
+				tool_execution_start: async () => {
+					seen.push("slow:start");
+					await releaseSlowStart.promise;
+				},
+			});
+			const observer = inlineExtension("observer", {
+				tool_execution_start: () => seen.push("observer:start"),
+				tool_execution_end: () => seen.push("observer:end"),
+			});
+			const runner = new ExtensionRunner(
+				[slow, observer],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const start = runner.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: {} });
+			const end = runner.emit({
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "read",
+				result: {},
+				isError: false,
+			});
+			// One loop turn drains every microtask, so an end that was not queued
+			// behind the start has reached the observer by now.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(seen).toEqual(["slow:start"]);
+
+			releaseSlowStart.resolve();
+			await Promise.all([start, end]);
+			expect(seen).toEqual(["slow:start", "observer:start", "observer:end"]);
+		});
+
+		it("delivers an event emitted inside a handler at once instead of queueing it behind that handler", async () => {
+			// Queued behind its own emitter the inner emit would wait out this budget.
+			testSetExtensionHandlerTimeoutMs(1_000);
+			try {
+				const errors: ExtensionError[] = [];
+				const seen: string[] = [];
+				// Stands in for `ctx.newSession()` from `agent_end`: the handler awaits a
+				// session event that both it and a later extension still queued on
+				// `agent_end` handle.
+				const switcher = inlineExtension("switcher", {
+					agent_end: async () => {
+						await runner.emit({ type: "session_switch", reason: "new", previousSessionFile: undefined });
+						seen.push("switcher:agent_end");
+					},
+					session_switch: () => seen.push("switcher:session_switch"),
+				});
+				const observer = inlineExtension("observer", {
+					agent_end: () => seen.push("observer:agent_end"),
+					session_switch: () => seen.push("observer:session_switch"),
+				});
+				const runner = new ExtensionRunner(
+					[switcher, observer],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				runner.onError(error => errors.push(error));
+
+				await runner.emit({ type: "agent_end", messages: [] });
+				expect(errors).toEqual([]);
+				expect(seen).toEqual([
+					"switcher:session_switch",
+					"observer:session_switch",
+					"switcher:agent_end",
+					"observer:agent_end",
+				]);
+			} finally {
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("stops queueing a stalled extension's events behind each other after one handler budget", async () => {
+			// Real timers: the bound under test is the handler timeout itself, which
+			// runs on setTimeout/performance.now.
+			const budgetMs = 100;
+			testSetExtensionHandlerTimeoutMs(budgetMs);
+			const stall = Promise.withResolvers<void>();
+			try {
+				const entered: number[] = [];
+				const stalled = inlineExtension("stalled-updates", {
+					tool_execution_update: async () => {
+						entered.push(performance.now());
+						await stall.promise;
+					},
+				});
+				const runner = new ExtensionRunner(
+					[stalled],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				const timeouts: string[] = [];
+				runner.onError(error => timeouts.push(error.error));
+
+				const emittedAt = performance.now();
+				const updates = Array.from({ length: 4 }, (_, i) =>
+					runner.emit({
+						type: "tool_execution_update",
+						toolCallId: "call-1",
+						toolName: "bash",
+						args: {},
+						partialResult: i,
+					}),
+				);
+				await Promise.all(updates);
+
+				expect(timeouts).toHaveLength(4);
+				// Served one after another the fourth update would start after three
+				// full budgets; capped, every update starts within about one.
+				expect(entered).toHaveLength(4);
+				expect(Math.max(...entered) - emittedAt).toBeLessThan(2 * budgetMs);
+			} finally {
+				stall.resolve();
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("stops waiting behind an extension's earlier event when the queued event's signal aborts", async () => {
+			const stall = Promise.withResolvers<void>();
+			try {
+				let asked = 0;
+				const busy = inlineExtension("busy", {
+					agent_end: () => stall.promise,
+					session_before_shutdown: () => {
+						asked++;
+					},
+				});
+				const runner = new ExtensionRunner(
+					[busy],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				void runner.emit({ type: "agent_end", messages: [] });
+				const controller = new AbortController();
+				const startedAt = performance.now();
+				const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+				controller.abort();
+				expect(await emission).toBeUndefined();
+				// The default budget would hold the event for 30 seconds behind agent_end.
+				expect(performance.now() - startedAt).toBeLessThan(1_000);
+				expect(asked).toBe(0);
+			} finally {
+				stall.resolve();
+			}
+		});
+	});
+
 	describe("credential_disabled", () => {
 		it("delivers credential_disabled events to subscribed extensions with the typed payload", async () => {
 			const eventsPath = path.join(tempDir.path(), "credential-disabled-events.jsonl");
@@ -4345,7 +4637,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4370,8 +4662,11 @@ describe("ExtensionRunner", () => {
 				},
 			);
 
-			// Drain microtasks so the fire-and-forget emit() calls inside initialize() complete.
-			for (let i = 0; i < 5; i++) await Promise.resolve();
+			// The drained emits inside initialize() are fire-and-forget and run one at a time per
+			// extension; one loop turn lets their microtask chain finish.
+			const drained = Promise.withResolvers<void>();
+			setImmediate(drained.resolve);
+			await drained.promise;
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -4417,7 +4712,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4507,7 +4802,7 @@ describe("ExtensionRunner", () => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
-					sendUserMessage: () => {},
+					sendUserMessage: async () => {},
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -4532,8 +4827,11 @@ describe("ExtensionRunner", () => {
 				},
 			);
 
-			// Drain microtasks so the fire-and-forget emit() calls inside initialize() complete.
-			for (let i = 0; i < 5; i++) await Promise.resolve();
+			// The drained emits inside initialize() are fire-and-forget and run one at a time per
+			// extension; one loop turn lets their microtask chain finish.
+			const drained = Promise.withResolvers<void>();
+			setImmediate(drained.resolve);
+			await drained.promise;
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -4760,6 +5058,7 @@ describe("ExtensionRunner", () => {
 				tools: new Map(),
 				assistantThinkingRenderers: [],
 				assistantTextRenderers: [],
+				transcriptPresenters: [],
 				linkSchemes: [],
 				fileWriteFallbackHandlers: [],
 				fileDeleteFallbackHandlers: [],

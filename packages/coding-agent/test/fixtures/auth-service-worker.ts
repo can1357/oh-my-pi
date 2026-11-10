@@ -14,6 +14,7 @@ export interface AuthProbe {
 	keyError(provider: string, sessionId: string): Promise<{ missingApiKey: boolean; message: string }>;
 	accountId(provider: string, sessionId: string): Promise<string | undefined>;
 	restrict(provider: string, sessionId: string, identityKeys: string[]): Promise<number>;
+	isExplicit(provider: string, sessionId: string): Promise<boolean>;
 	unrestrict(provider: string, sessionId: string, handle: number): Promise<void>;
 	sameStorage(storage: AuthStorage): Promise<boolean>;
 	watchGenerations(): Promise<void>;
@@ -67,6 +68,7 @@ function buildProbe(storage: AuthStorage): AuthProbe {
 		accountId: async (provider, sessionId) => storage.oauth.identity(provider, sessionId)?.accountId,
 		restrict: async (provider, sessionId, identityKeys) =>
 			leases.push(storage.sessions.restrict(provider, sessionId, identityKeys)) - 1,
+		isExplicit: async (provider, sessionId) => storage.sessions.isExplicit(provider, sessionId),
 		unrestrict: async (provider, sessionId, handle) => {
 			const lease = leases[handle];
 			if (lease === undefined) throw new Error(`no lease ${handle}`);

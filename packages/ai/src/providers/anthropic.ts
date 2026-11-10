@@ -153,7 +153,7 @@ import { prepareAnthropicImageContext } from "./anthropic-images";
 import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
-import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
+import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
@@ -848,6 +848,12 @@ export interface AnthropicOptions extends StreamOptions {
 	/** Force OAuth bearer auth mode for proxy tokens that don't match Anthropic token prefixes. */
 	isOAuth?: boolean;
 	/**
+	 * Send no Claude Code app headers (`x-app: cli`,
+	 * `anthropic-dangerous-direct-browser-access`) on an API-key request. For
+	 * adapter wrappers that present another client's identity.
+	 */
+	omitClaudeCodeAppHeaders?: boolean;
+	/**
 	 * Pre-built Anthropic Messages client. When provided, skips internal client
 	 * construction entirely. Accepts any structurally compatible client,
 	 * including SDK clients such as `AnthropicVertex`.
@@ -874,6 +880,8 @@ export type AnthropicClientOptionsArgs = {
 	headers?: Record<string, string>;
 	dynamicHeaders?: Record<string, string>;
 	isOAuth?: boolean;
+	/** See {@link AnthropicOptions.omitClaudeCodeAppHeaders}. */
+	omitClaudeCodeAppHeaders?: boolean;
 	hasTools?: boolean;
 	/** Whether a tool in ANTHROPIC_BUFFERED_INPUT_TOOLS is present; suppresses the request-wide fine-grained streaming beta. */
 	hasBufferedInputTools?: boolean;
@@ -1682,13 +1690,16 @@ function rememberPrefixDroppedThinking(
 
 /**
  * Replay keys of the thinking blocks in the request's latest assistant turn.
- * Anthropic validates every assistant message after the last user message
- * carrying more than tool results as one "latest assistant message" (its error
- * indices count blocks across that whole run).
+ * Anthropic validates the last run of assistant messages, joined only by tool
+ * results, as one "latest assistant message" (its error indices count blocks
+ * across that whole run), even when user messages follow it: a steer or a
+ * reminder sent after the turn's tool results, or the next prompt.
  */
 function latestAssistantTurnThinkingKeys(params: MessageCreateParamsStreaming): string[] {
 	const keys: string[] = [];
-	for (let index = params.messages.length - 1; index >= 0; index--) {
+	let index = params.messages.length - 1;
+	while (index >= 0 && params.messages[index]!.role !== "assistant") index--;
+	for (; index >= 0; index--) {
 		const message = params.messages[index]!;
 		if (message.role !== "assistant") {
 			const toolResultsOnly =
@@ -2218,6 +2229,7 @@ const streamAnthropicOnce = (
 					headers: options?.headers,
 					dynamicHeaders: copilotDynamicHeaders?.headers,
 					isOAuth: options?.isOAuth,
+					omitClaudeCodeAppHeaders: options?.omitClaudeCodeAppHeaders,
 					hasTools: !!context.tools?.length,
 					hasBufferedInputTools:
 						context.tools?.some(tool => ANTHROPIC_BUFFERED_INPUT_TOOLS.has(tool.name)) ?? false,
@@ -3994,6 +4006,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		hasBufferedInputTools = false,
 		thinkingEnabled = false,
 		isOAuth,
+		omitClaudeCodeAppHeaders,
 		maxRetryDelayMs,
 		sessionId,
 		disableStrictTools: disableStrictToolsOverride,
@@ -4127,6 +4140,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		apiKey,
 		baseUrl,
 		isOAuth: oauthToken,
+		omitClaudeCodeAppHeaders,
 		extraBetas: betaFeatures,
 		stream,
 		modelHeaders: requestModelHeaders,
@@ -5920,10 +5934,7 @@ export function convertAnthropicMessages(
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
 					: undefined;
-			const hasProviderControls =
-				payload?.clearAt !== undefined ||
-				payload?.effort !== undefined ||
-				(payload?.toolChanges !== undefined && payload.toolChanges.length > 0);
+			const hasProviderControls = hasAnthropicMessageControls(msg);
 
 			let content: string | ContentBlockParam[];
 			if (typeof msg.content === "string") {

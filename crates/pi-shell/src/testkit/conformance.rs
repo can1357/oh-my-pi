@@ -59,6 +59,7 @@ pub fn store_conformance<S: StateStore>(
 	set_elem_keeps_indices_sorted_and_assoc_keys_in_order(&mut make());
 	append_changes_keep_attributes_and_order(&mut make());
 	del_elem_removes_one_element(&mut make());
+	insert_elem_places_a_new_key(&mut make());
 	fine_grained_changes_reject_the_wrong_shape(&mut make());
 	deleting_a_scope_drops_its_locals(&mut make());
 	scan_visits_each_table_alone(&mut make());
@@ -527,6 +528,65 @@ fn del_elem_removes_one_element(store: &mut dyn StateStore) {
 	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)), "key a removed");
 }
 
+/// `InsertElem` puts a new key before every key of its zsh hash bucket,
+/// the entries being listed bucket by bucket (zsh's hash order); later
+/// lookups find every key at its new place, and a present key takes the
+/// value where it is.
+fn insert_elem_places_a_new_key(store: &mut dyn StateStore) {
+	const BUCKETS: usize = 17;
+	let bucket = |k: &str| crate::bash::store::zsh_bucket(k.as_bytes(), BUCKETS);
+	// The listing zsh keeps: bucket by bucket.
+	let mut keys = vec!["z", "a", "m", "k1", "k2", "k3"];
+	keys.sort_by_key(|k| bucket(k));
+	let value = |k: &str, keys: &[&str]| -> BString {
+		match k {
+			"a" => bytes(b"3"),
+			_ if ["q", "e", "k9"].contains(&k) && keys.contains(&k) => bytes(b"9"),
+			_ => bytes(b"1"),
+		}
+	};
+	let m = VarValue::Assoc(
+		keys
+			.iter()
+			.map(|k| (bytes(k.as_bytes()), bytes(b"1")))
+			.collect(),
+	);
+	apply(store, Change::Put(var(b"m"), var_rec(Attrs::ASSOC, m)));
+	for new in ["q", "e", "k9"] {
+		apply(store, Change::InsertElem(var(b"m"), BUCKETS, BStr::new(new), BStr::new("9")));
+		let at = keys.partition_point(|k| bucket(k) < bucket(new));
+		keys.insert(at, new);
+	}
+	apply(store, Change::InsertElem(var(b"m"), BUCKETS, BStr::new("a"), BStr::new("3")));
+	let want = VarValue::Assoc(
+		keys
+			.iter()
+			.map(|k| (bytes(k.as_bytes()), value(k, &keys)))
+			.collect(),
+	);
+	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)));
+	apply(store, Change::DelElem(var(b"m"), Elem::Key(BStr::new("q"))));
+	apply(store, Change::AppendElem(var(b"m"), Elem::Key(BStr::new("a")), BStr::new("+")));
+	keys.retain(|&k| k != "q");
+	let want = VarValue::Assoc(
+		keys
+			.iter()
+			.map(|k| {
+				let mut v = value(k, &keys);
+				if *k == "a" {
+					v.push(b'+');
+				}
+				(bytes(k.as_bytes()), v)
+			})
+			.collect(),
+	);
+	assert_eq!(
+		read(store, var(b"m")),
+		Some(var_rec(Attrs::ASSOC, want)),
+		"the index followed the insert"
+	);
+}
+
 /// Set, append and delete deltas on an absent record, a non-variable, a
 /// value of the other kind or an element of the other kind fail with
 /// [`StoreError::Shape`] of the key's table and change nothing.
@@ -574,6 +634,7 @@ fn fine_grained_changes_reject_the_wrong_shape(store: &mut dyn StateStore) {
 			| Change::AppendScalar(key, _)
 			| Change::SetElem(key, ..)
 			| Change::AppendElem(key, ..)
+			| Change::InsertElem(key, ..)
 			| Change::DelElem(key, _) => key.table(),
 		};
 		let res = store.apply(change);
@@ -1027,13 +1088,18 @@ fn a_local_is_visible_while_its_function_runs<S: StateStore>(store: &mut S) {
 /// the op that made them, one change at a time.
 fn cd_set_o_and_alias_are_visible_after_each_op<S: StateStore>(store: &mut S) {
 	let mut host = FakeHost::new();
-	for d in ["/a", "/b", "/c"] {
+	for d in ["/one", "/two", "/three"] {
 		host.fs.add_dir(d);
 	}
 	let mut shell = create(&mut host, store);
-	let cwd =
-		distinct_values(&mut shell, &mut host, store, "cd /a; cd /b; cd /c", Key::Misc(MiscKey::Cwd));
-	let want: Vec<Option<Record>> = ["/a", "/b", "/c"]
+	let cwd = distinct_values(
+		&mut shell,
+		&mut host,
+		store,
+		"cd /one; cd /two; cd /three",
+		Key::Misc(MiscKey::Cwd),
+	);
+	let want: Vec<Option<Record>> = ["/one", "/two", "/three"]
 		.iter()
 		.map(|d| Some(Record::Misc(BString::from(*d))))
 		.collect();
@@ -1138,10 +1204,10 @@ fn a_host_option_write_reaches_the_next_glob<S: StateStore>(
 	bump: &mut impl FnMut(&mut S),
 ) {
 	let mut host = FakeHost::new();
-	host.fs.add_file("/d/a", b"", 0o644);
+	host.fs.add_file("/dir/a", b"", 0o644);
 	let mut shell = create(&mut host, store);
-	let src = "n=0; set -- /d/*; while [ \"$1\" != '/d/*' ]; do n=$((n+1)); set -- /d/*; done; \
-	           echo \"$1 $n\"";
+	let src = "n=0; set -- /dir/*; while [ \"$1\" != '/dir/*' ]; do n=$((n+1)); set -- /dir/*; \
+	           done; echo \"$1 $n\"";
 	let run = shell.submit(Script::command(src.as_bytes()));
 	for _ in 0..200 {
 		let done = one_op(&mut shell, &mut host, store, run, &mut |_| {});
@@ -1155,7 +1221,7 @@ fn a_host_option_write_reaches_the_next_glob<S: StateStore>(
 	assert_eq!(status, 0);
 	let n = read_number(store, b"n");
 	assert!(n == n0 || n == n0 + 1, "the next glob saw noglob: {n0} then {n}");
-	assert_eq!(host.stdout.bytes(), format!("/d/* {n}\n").as_bytes());
+	assert_eq!(host.stdout.bytes(), format!("/dir/* {n}\n").as_bytes());
 }
 
 /// A working directory the host writes (`MiscKey::Cwd` + epoch bump)
@@ -1165,14 +1231,14 @@ fn a_host_cwd_write_reaches_the_next_command<S: StateStore>(
 	bump: &mut impl FnMut(&mut S),
 ) {
 	let mut host = FakeHost::new();
-	host.fs.add_dir("/a");
-	host.fs.add_dir("/b");
+	host.fs.add_dir("/one");
+	host.fs.add_dir("/two");
 	let mut shell = create(&mut host, store);
-	assert_eq!(run(&mut shell, &mut host, store, "cd /a"), 0);
-	apply(store, Change::Put(Key::Misc(MiscKey::Cwd), Record::Misc(bytes(b"/b"))));
+	assert_eq!(run(&mut shell, &mut host, store, "cd /one"), 0);
+	apply(store, Change::Put(Key::Misc(MiscKey::Cwd), Record::Misc(bytes(b"/two"))));
 	bump(&mut *store);
 	let ran = run_settled(&mut shell, &mut host, store, "pwd");
-	assert_eq!(ran.stdout, "/b\n", "pwd prints the cwd the host wrote");
+	assert_eq!(ran.stdout, "/two\n", "pwd prints the cwd the host wrote");
 }
 
 /// The session of [`a_copy_between_commands_restores_in_a_fresh_shell`]:

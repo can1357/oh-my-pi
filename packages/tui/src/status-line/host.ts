@@ -97,7 +97,7 @@ export interface StatusLineSession {
 		};
 	};
 	modelRegistry: {
-		isUsingOAuth(model: Model): boolean;
+		isUsingSubscription(model: Model): boolean;
 	};
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
 	autoResolvedThinkingLevel(): string | undefined;
@@ -124,7 +124,7 @@ export interface FooterSession {
 	isAutoThinking: boolean;
 	autoResolvedThinkingLevel(): string | undefined;
 	getContextUsage: StatusLineSession["getContextUsage"];
-	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
+	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingSubscription">;
 	/**
 	 * Cumulative session rollup. Unlike the active-window stats it spans every
 	 * entry in the session, so compaction does not reset the counters, and it
