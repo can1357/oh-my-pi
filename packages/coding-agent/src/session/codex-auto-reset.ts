@@ -76,6 +76,8 @@ export const WINDOW_EXHAUSTED_MIN_FRACTION = 0.999;
 export const MAX_PLAUSIBLE_WEEKLY_REMAINING_MS = 7 * 24 * 3_600_000 + 60 * 60_000;
 /** A 5h reset can never be more than one window length (5h) away; +1h slack for skew. */
 export const MAX_PLAUSIBLE_PRIMARY_REMAINING_MS = 5 * 3_600_000 + 60 * 60_000;
+/** Slack before a live 429 deadline past the reported resets counts as a later window: the hint is rounded. */
+const LIVE_HINT_TOLERANCE_MS = 5 * 60_000;
 /** Shared last-chance expiry horizon; bypasses salvage usage thresholds and non-terminal deferrals, never consent or cooldown. */
 export const IMMINENT_RESET_EXPIRY_MS = 5 * 60_000;
 /** Below this usage on BOTH chat windows, non-imminent salvage restores too little to bother. */
@@ -480,13 +482,17 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				}
 				unblockAtMs = latest;
 				blockedWindows = exhausted.map(e => e.window);
-				// A live wait no 5h window can span proves a weekly block the pre-block report missed.
+				// A plausible live wait that outlasts every exhausted window's reset (by more
+				// than rounding slack) or that no 5h window can span proves a weekly block
+				// the pre-block report missed; the account stays blocked until then.
 				if (
 					liveUnblockAtMs !== undefined &&
-					liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS &&
-					!blockedWindows.includes("weekly")
+					liveUnblockAtMs - nowMs <= MAX_PLAUSIBLE_WEEKLY_REMAINING_MS &&
+					(liveUnblockAtMs - nowMs > MAX_PLAUSIBLE_PRIMARY_REMAINING_MS ||
+						liveUnblockAtMs - latest > LIVE_HINT_TOLERANCE_MS)
 				) {
-					blockedWindows.push("weekly");
+					if (!blockedWindows.includes("weekly")) blockedWindows.push("weekly");
+					unblockAtMs = Math.max(unblockAtMs, liveUnblockAtMs);
 				}
 			} else if (liveUnblockAtMs !== undefined) {
 				// The report's windows look healthy but the live 429 says otherwise:

@@ -507,11 +507,16 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			rule: "blocked-account",
 			reason: "window-disabled",
 		});
-		// A live wait no 5h window can span proves weekly, even when the pre-block report shows only 5h exhausted.
+		// A live wait running past every reported reset proves weekly, even when the
+		// pre-block report shows only 5h exhausted (its 5h window resets in 2h).
 		const stale = report({ primaryUsed: 1, weeklyUsed: 0.5 });
-		const longWait = planCodexResetRedemptions(input([stale], { settings, activeBlockUnblockAtMs: NOW + 3 * DAY }));
-		expect(longWait.actions).toEqual([]);
-		expect(planCodexResetRedemptions(input([stale], { settings })).actions).toMatchObject([{ window: "5h" }]);
+		const plan = (liveMs?: number) =>
+			planCodexResetRedemptions(input([stale], { settings, activeBlockUnblockAtMs: liveMs && NOW + liveMs }));
+		expect(plan(3 * DAY).actions).toEqual([]);
+		expect(plan(3 * HOUR).actions).toEqual([]);
+		// A hint that only echoes the reported 5h reset stays a 5h block.
+		expect(plan(2 * HOUR).actions).toMatchObject([{ window: "5h" }]);
+		expect(plan().actions).toMatchObject([{ window: "5h" }]);
 	});
 
 	it("returns nothing when the policy is disabled", () => {
