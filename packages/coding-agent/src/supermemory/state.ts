@@ -60,6 +60,13 @@ interface RetentionCursorData {
 	turn: number;
 }
 
+/** Transcript messages captured for one retention job, with the identity they belong to. */
+interface SettledHistory {
+	messages: HindsightMessage[];
+	generation: number;
+	transcriptId: string;
+}
+
 function isRetentionCursor(data: unknown): data is RetentionCursorData {
 	return (
 		typeof data === "object" &&
@@ -266,11 +273,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			if (this.#config.autoRetain && event.isTerminal !== false) {
 				// Snapshot the settled history now: a job queued behind a slow upload must not read a
 				// turn that started afterwards and close its window before the answer exists.
-				const settled =
-					countUserTurns(this.session.sessionManager) - this.lastRetainedTurn >= this.#config.retainEveryNTurns
-						? extractMessages(this.session.sessionManager)
-						: undefined;
-				if (settled) void this.#enqueueRetention(() => this.#retainDue(settled));
+				if (countUserTurns(this.session.sessionManager) - this.lastRetainedTurn >= this.#config.retainEveryNTurns) {
+					const settled = this.#settledHistory();
+					void this.#enqueueRetention(() => this.#retainDue(settled));
+				}
 			}
 			void this.drainOutbox();
 		});
@@ -437,23 +443,34 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `/memory enqueue`: retain every due window, then the unretained tail. */
 	async forceRetainCurrentSession(): Promise<void> {
 		await this.#enqueueRetention(async () => {
-			await this.#retainDue(extractMessages(this.session.sessionManager));
-			const messages = extractMessages(this.session.sessionManager);
+			const history = this.#settledHistory();
+			await this.#retainDue(history);
+			const { messages } = history;
 			const userStarts = userTurnStarts(messages);
 			if (userStarts.length > this.lastRetainedTurn) {
-				await this.#retainWindow(messages, userStarts, this.lastRetainedTurn, userStarts.length);
+				await this.#retainWindow(messages, userStarts, this.lastRetainedTurn, userStarts.length, history);
 			}
 		});
 	}
 
-	/** Every complete `retainEveryNTurns` window of `messages` not stored yet, oldest first. */
-	async #retainDue(messages: HindsightMessage[]): Promise<void> {
+	/** The transcript as it stands now, bound to its identity so a later `/new` or reset discards it. */
+	#settledHistory(): SettledHistory {
+		return {
+			messages: extractMessages(this.session.sessionManager),
+			generation: this.#transcriptGeneration,
+			transcriptId: this.transcriptId,
+		};
+	}
+
+	/** Every complete `retainEveryNTurns` window of `history` not stored yet, oldest first. */
+	async #retainDue(history: SettledHistory): Promise<void> {
 		if (this.#disposed) return;
 		const every = this.#config.retainEveryNTurns;
+		const { messages } = history;
 		const userStarts = userTurnStarts(messages);
 		while (userStarts.length - this.lastRetainedTurn >= every) {
 			const start = this.lastRetainedTurn;
-			if (!(await this.#retainWindow(messages, userStarts, start, start + every))) return;
+			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
 		}
 	}
 
@@ -463,10 +480,14 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		userStarts: number[],
 		startTurn: number,
 		endTurn: number,
+		identity: Omit<SettledHistory, "messages">,
 	): Promise<boolean> {
-		const generation = this.#transcriptGeneration;
-		// A late reply from a disposed state must not record its window against the session's next transcript.
-		const transcriptId = this.transcriptId;
+		// A late reply, or a job queued before `/new` or a reset, must not record its window
+		// against the session's next transcript.
+		const { generation, transcriptId } = identity;
+		if (this.#disposed || generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) {
+			return false;
+		}
 		const window = messages.slice(userStarts[startTurn], userStarts[endTurn] ?? messages.length);
 		const { transcript } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
 		if (transcript) {

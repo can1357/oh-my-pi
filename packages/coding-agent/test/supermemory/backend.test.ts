@@ -614,6 +614,29 @@ describe("supermemoryBackend", () => {
 		expect(cursors(session).at(-1)?.[1]).toBe(2);
 	});
 
+	it("a job queued before the transcript changes uploads nothing and records no cursor for the new one", async () => {
+		const first = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
+			sent.resolve();
+			return first.promise;
+		});
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitEnd();
+		await sent.promise;
+		session.addTurn("two");
+		session.emitEnd();
+		// `/new` while turn two's job waits behind turn one's upload.
+		session.transcriptId = "t2";
+		first.resolve({ id: "d", status: "queued" });
+		await session.getSupermemorySessionState()?.flush();
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
+	});
+
 	it("repeated /memory enqueue tails upsert one open window instead of adding documents", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")
