@@ -753,6 +753,15 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		settingsOf(scope).writeEntry(this, key, value === undefined ? undefined : this.#normalizeEntry(key, value));
 	}
 
+	/** Like {@link setEntry}, but writes the entry to the project layer (`<cwd>/.omp/config.yml`). */
+	setProjectEntry(scope: ScopeLike, key: string, value: RecordEntryOf<T> | undefined): void {
+		settingsOf(scope).writeProjectEntry(
+			this,
+			key,
+			value === undefined ? undefined : this.#normalizeEntry(key, value),
+		);
+	}
+
 	/**
 	 * Adds (`member`) or removes `item` in this list setting's persisted global value, leaving every
 	 * other item as it is.

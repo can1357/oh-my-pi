@@ -9621,6 +9621,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showExtensionsDashboard();
 	}
 
+	showModelRulesSelector(): void {
+		void this.#selectorController.showModelRulesSelector();
+	}
+
 	showAgentsDashboard(): void {
 		void this.#selectorController.showAgentsDashboard();
 	}
