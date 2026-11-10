@@ -1432,8 +1432,12 @@ interface SubagentRunMonitor {
 	 * yield tool's section state and the refused workpool items are released for
 	 * that continuation. `cancelled`: the pass was cancelled before its verdict,
 	 * so the candidate was never judged and the run reports as cancelled.
+	 * `unjudged`: the run ended holding a candidate no pass judged (sections the
+	 * continuation of an earlier refusal recorded, a yield it latched too late): it
+	 * is dropped like a cancelled one, but a refusal that still stands on the run
+	 * stays in force, so the earlier payload cannot be published in its place.
 	 */
-	rejectCandidate(verdict: "refused" | "cancelled"): void;
+	rejectCandidate(verdict: "refused" | "cancelled" | "unjudged"): void;
 	/**
 	 * True once a terminal yield with pending owner async work stopped the
 	 * free-running turn (recoverable, like a budget stop) instead of
@@ -2503,7 +2507,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
 		rejectCandidate: verdict => {
 			yieldCalled = false;
-			yieldInvalidatedByStop = verdict === "refused";
+			// An unjudged candidate was never refused: a refusal that already stands on the run stays in force.
+			if (verdict !== "unjudged") yieldInvalidatedByStop = verdict === "refused";
 			yieldAcceptedAt = undefined;
 			// The 99% set when the candidate latched is stale: the run works again.
 			progress.completionPercent = undefined;
@@ -2525,7 +2530,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			// rejected payload again.
 			const refused = progress.extractedToolData?.yield ?? [];
 			if (progress.extractedToolData) delete progress.extractedToolData.yield;
-			if (verdict === "cancelled") return;
+			if (verdict !== "refused") return;
 			const yieldTool = activeSession?.getToolByName("yield");
 			// The tool's "sections recorded" flag would otherwise accept a data-less
 			// finalize against the sections just discarded.
@@ -3197,7 +3202,7 @@ async function driveSessionToResult(
 			!candidateAllowed &&
 			session.extensionRunner?.hasHandlers("subagent_stop")
 		) {
-			monitor.rejectCandidate("cancelled");
+			monitor.rejectCandidate("unjudged");
 			if (exitCode === 0) exitCode = 1;
 		}
 		if (passCancelled) {
