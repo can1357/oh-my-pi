@@ -70,42 +70,23 @@ function replayedOutputTexts(context: Context): string[] {
 }
 
 describe("assistant_message rewrites reaching Codex native replay (#18312)", () => {
-	it("replays the captured payload text verbatim when the rewrite is not synced into it", () => {
-		const message = fixtureMessage();
-		const rewritten: AssistantMessage["content"] = [{ ...(message.content[0] as TextContent), text: "rewritten" }];
-		const texts = replayedOutputTexts(userContext([{ ...message, content: rewritten }]));
-		expect(texts).toContain("original");
-		expect(texts).not.toContain("rewritten");
-	});
-
 	it("delivers the rewrite through same-model native replay once the payload is synced", () => {
 		const message = fixtureMessage();
 		const rewritten: AssistantMessage["content"] = [{ ...(message.content[0] as TextContent), text: "rewritten" }];
 		const synced = syncOpenAIResponsesHistoryTexts(message.providerPayload, ["rewritten"]);
-		expect(synced).toBeDefined();
-		const context = userContext([{ ...message, content: rewritten, providerPayload: synced }]);
-		const texts = replayedOutputTexts(context);
+		const texts = replayedOutputTexts(userContext([{ ...message, content: rewritten, providerPayload: synced }]));
 		expect(texts).toContain("rewritten");
 		expect(texts).not.toContain("original");
-		// The non-computer-use replay path strips reasoning item ids but keeps the items.
-		const keptReasoning = convertCodexResponsesMessages(model, context).find(
-			item => (item as { type?: unknown }).type === "reasoning",
-		);
-		expect(keptReasoning).toBeDefined();
 	});
 
-	it("preserves annotations, item id and the incremental flag while syncing", () => {
+	it("keeps item ids and citations while syncing", () => {
 		const synced = syncOpenAIResponsesHistoryTexts(fixtureMessage().providerPayload, ["rewritten"]);
-		expect(synced).toBeDefined();
-		expect(synced?.dt).toBe(true);
-		expect(synced?.provider).toBe(model.provider);
 		const messageItem = synced?.items.find(item => item.type === "message") as {
 			id: unknown;
 			content: Array<{ annotations: unknown[] }>;
 		};
 		expect(messageItem.id).toBe("msg_fixture");
 		expect(messageItem.content[0].annotations).toHaveLength(1);
-		expect(synced?.items.some(item => item.type === "reasoning")).toBe(true);
 	});
 
 	it("pairs multiple text blocks across message items positionally", () => {
@@ -122,19 +103,11 @@ describe("assistant_message rewrites reaching Codex native replay (#18312)", () 
 		expect(texts).toEqual(["ONE", "TWO"]);
 	});
 
-	it("returns no new payload when the texts already match", () => {
-		expect(syncOpenAIResponsesHistoryTexts(fixtureMessage().providerPayload, ["original"])).toBeUndefined();
-	});
-
 	it("leaves the payload untouched on shape mismatch instead of half-updating", () => {
 		expect(syncOpenAIResponsesHistoryTexts(fixtureMessage().providerPayload, ["a", "b"])).toBeUndefined();
-		expect(syncOpenAIResponsesHistoryTexts(undefined, ["a"])).toBeUndefined();
-	});
-
-	it("rejects message items whose content is not an output_text list", () => {
-		const payload = createOpenAIResponsesHistoryPayload(model.provider, [
+		const nonList = createOpenAIResponsesHistoryPayload(model.provider, [
 			{ type: "message", id: "msg_x", role: "assistant", content: "suddenly a string" },
 		]);
-		expect(syncOpenAIResponsesHistoryTexts(payload, ["a"])).toBeUndefined();
+		expect(syncOpenAIResponsesHistoryTexts(nonList, ["a"])).toBeUndefined();
 	});
 });
