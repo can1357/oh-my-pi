@@ -458,7 +458,10 @@ pub fn shebang(sample: &[u8]) -> Option<(&[u8], bool)> {
 /// words; an executable whose first [`SAMPLE`] bytes begin with `#!` is
 /// `exec_sys_diag` then `INTERP: bad interpreter: ` and the description,
 /// which is what Bash 5.3.0 reports and the only place a line number is
-/// left out (bash's `sys_error`); an `ENOEXEC` with no `#!` is `cannot
+/// left out (bash's `sys_error`); an `ENOEXEC` whose sample could not be
+/// READ is that read's own error, because bash has nothing to judge the
+/// file by either and reports what its own attempt to run the file as a
+/// script returned; an `ENOEXEC` with a sample and no `#!` is `cannot
 /// execute binary file: ` and the description; an `ENOENT` for a file that
 /// IS there is `cannot execute: required file not found`. Everything else
 /// is `exec_diag` and the description.

@@ -579,24 +579,17 @@ const DEFERRED: &[Row] = &[
 /// `required file not found`), the text file runs as the script it is, and
 /// the binary one is recognised as binary.
 const ROOT_OVERRIDES: &[(&str, i32, &[&str])] = &[
-	(
-		"unreadable-missing-interpreter",
-		126,
-		&["/does/not/exist: bad interpreter: No such file or directory"],
-	),
-	(
-		"deferred-unreadable-missing-interpreter",
-		0,
-		&["/does/not/exist: bad interpreter: No such file or directory", "status=126"],
-	),
+	("unreadable-missing-interpreter", 126, &[
+		"/does/not/exist: bad interpreter: No such file or directory"
+	]),
+	("deferred-unreadable-missing-interpreter", 0, &[
+		"/does/not/exist: bad interpreter: No such file or directory",
+		"status=126",
+	]),
 	("unreadable-text-without-shebang", 0, &["hi"]),
 	("deferred-unreadable-text-without-shebang", 0, &["status=0"]),
 	("unreadable-binary-without-shebang", 126, &["cannot execute binary file"]),
-	(
-		"deferred-unreadable-binary-without-shebang",
-		0,
-		&["cannot execute binary file", "status=126"],
-	),
+	("deferred-unreadable-binary-without-shebang", 0, &["cannot execute binary file", "status=126"]),
 ];
 
 /// Runs every row in a fresh shell and a fresh directory, reporting all
@@ -630,7 +623,7 @@ async fn check(rows: &[Row]) {
 		let (status, wants): (i32, &[&str]) = if root {
 			ROOT_OVERRIDES
 				.iter()
-				.find(|(n, _, _)| *n == row.name)
+				.find(|(n, ..)| *n == row.name)
 				.map(|(_, s, w)| (*s, *w))
 				.unwrap_or((row.status, row.wants))
 		} else {

@@ -1071,14 +1071,19 @@ unsafe fn exec_refused(
 	// SAFETY: as above; the descriptor is closed below.
 	let fd = unsafe { libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC) };
 	let mut buf = [0u8; crate::bash::SAMPLE];
-	let read = if fd < 0 {
-		0
+	// The errno of the sample that could not be taken, 0 when it was: a
+	// file the shell may execute but not read tells this child nothing
+	// about itself, and bash's answer there is that error, not a guess.
+	// `self::errno` because the parameter of the same name shadows it.
+	let (read, sample_err) = if fd < 0 {
+		(0, self::errno())
 	} else {
 		// SAFETY: `buf` is writable for its whole length.
 		let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-		// SAFETY: our own descriptor.
+		let err = if n < 0 { self::errno() } else { 0 };
+		// SAFETY: our own descriptor; after reading the errno it may have set.
 		unsafe { libc::close(fd) };
-		usize::try_from(n).unwrap_or(0)
+		(usize::try_from(n).unwrap_or(0), err)
 	};
 	if let Some((interp, cr)) = crate::bash::shebang(&buf[..read]) {
 		// bash's `sys_error`: no line number before this one, and 126
@@ -1087,9 +1092,18 @@ unsafe fn exec_refused(
 		child_say(&[sys_diag, interp, tail, b": bad interpreter: ", text, b"\n"], 126);
 	}
 	if errno == libc::ENOEXEC {
-		// bash's `check_binary_file`: the engine runs a text file without
-		// `#!` as a script instead of deferring it here, so what reaches
-		// this is the binary one.
+		if sample_err != 0 {
+			// bash could not read the file either, so it never reached
+			// `check_binary_file`: it went on to run the file as a shell
+			// script and reported what THAT open returned. Measured on
+			// Bash 5.3.0: a mode-0111 file is `Permission denied` and 126,
+			// whatever its contents, which is what the immediate path
+			// reports through the engine's own script fallback.
+			child_say(&[diag, errno_text(sample_err, texts), b"\n"], status);
+		}
+		// bash's `check_binary_file`: the engine runs a READABLE text file
+		// without `#!` as a script instead of deferring it here, so what
+		// reaches this with a sample is the binary one.
 		child_say(&[diag, b"cannot execute binary file: ", text, b"\n"], 126);
 	}
 	if errno == libc::ENOENT {
