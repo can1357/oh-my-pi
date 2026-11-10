@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, task::Waker, time::Duration};
 
 use bstr::BString;
 use pi_shell::{
@@ -11,6 +11,7 @@ use pi_shell::{
 	host::{PiHost, TERM_GRACE},
 	session::{RunStdio, Session, SessionConfig},
 	sys::StdFs,
+	tools::{ToolCalls, ToolConfig},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -40,31 +41,91 @@ fn command(pid_file: &std::path::Path) -> String {
 	)
 }
 
+/// Writes a program that ignores `TERM`, so a targeted signal leaves it
+/// retained, and appends one byte every 10 ms, so a test measures what the
+/// program itself did instead of what the engine reports about itself.
+fn write_ticker(dir: &std::path::Path) -> std::path::PathBuf {
+	let script = dir.join("ticker.py");
+	std::fs::write(
+		&script,
+		"import os,signal,sys,time\n\
+		 signal.signal(signal.SIGTERM,signal.SIG_IGN)\n\
+		 t=open(sys.argv[1]+'.ticks','ab',buffering=0)\n\
+		 open(sys.argv[1],'w').write(str(os.getpid()))\n\
+		 while True:\n\
+		 \x20t.write(b'x')\n\
+		 \x20time.sleep(0.01)\n",
+	)
+	.unwrap();
+	script
+}
+
+/// How many bytes the ticking program has written so far.
+fn ticks(pid_file: &std::path::Path) -> u64 {
+	let mut path = pid_file.as_os_str().to_owned();
+	path.push(".ticks");
+	std::fs::metadata(std::path::Path::new(&path)).map_or(0, |m| m.len())
+}
+
+/// The kernel's state letter for `pid` (`T` once stopped), on a host with
+/// `/proc`; `None` elsewhere. The comm field is parenthesised and may hold
+/// spaces, so the state follows its last `)`.
+fn proc_state(pid: u32) -> Option<char> {
+	let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+	stat
+		.rsplit_once(')')?
+		.1
+		.split_whitespace()
+		.next()?
+		.chars()
+		.next()
+}
+
 struct NativeShell {
 	engine: Arc<Engine>,
 	shell:  Shell,
 	host:   PiHost,
 	store:  MemStore,
+	/// `nohup` is a host callout, not a command: without a driver for it
+	/// the calling vproc blocks for ever (`session::Session` runs the same
+	/// three lines around its own `step`).
+	tools:  ToolCalls,
 }
 
 impl NativeShell {
 	fn new() -> Self {
 		let engine = Engine::new(EngineConfig::default());
+		let env = vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))];
 		let mut host = PiHost::new(Box::new(StdFs::default()), tokio::runtime::Handle::current());
+		let config = ToolConfig::from_env(&env, None, tokio::runtime::Handle::current());
+		host.set_tools(config.clone());
+		let tools = ToolCalls::new(config, host.spawn_log(), Waker::noop().clone());
 		let mut store = MemStore::new();
 		let shell =
 			Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, ShellInit {
-				env: vec![(BString::from("PATH"), BString::from("/usr/bin:/bin"))],
+				env,
 				..ShellInit::default()
 			})
 			.unwrap();
-		Self { engine, shell, host, store }
+		Self { engine, shell, host, store, tools }
 	}
 
 	fn step(&mut self) -> Step {
-		self
-			.shell
-			.step(&mut Cx { host: &mut self.host, store: &mut self.store }, Budget::default())
+		let mut cx = Cx { host: &mut self.host, store: &mut self.store };
+		self.tools.poll(&mut self.shell, &mut cx);
+		let step = self.shell.step(&mut cx, Budget::default());
+		match &step {
+			Step::Call { id, call } => {
+				let (id, call) = (*id, call.clone());
+				self.tools.on_call(&mut self.shell, &mut cx, id, call);
+			},
+			Step::Done { run, status } => {
+				let signal = self.shell.exec_signal(*run);
+				self.tools.on_done(*run, *status, signal);
+			},
+			_ => {},
+		}
+		step
 	}
 
 	async fn drive_for(&mut self, duration: Duration) {
@@ -76,9 +137,15 @@ impl NativeShell {
 	}
 
 	async fn start(&mut self, pid_file: &std::path::Path) -> Program {
+		self.start_cmd(pid_file, command(pid_file)).await
+	}
+
+	/// Run `cmd` in a subshell of its own, wait until it has written its pid
+	/// into `pid_file`, and name the virtual process that owns it.
+	async fn start_cmd(&mut self, pid_file: &std::path::Path, cmd: String) -> Program {
 		let run = self.shell.submit(Script {
 			vproc: VprocSel::NewSubshell,
-			..Script::command(command(pid_file).into_bytes())
+			..Script::command(cmd.into_bytes())
 		});
 		let until = tokio::time::Instant::now() + Duration::from_secs(15);
 		while !pid_file.exists() {
@@ -339,4 +406,117 @@ async fn both_restore_modes_report_an_active_native_once_from_identical_snapshot
 		);
 		assert!(alive(program.pid), "restore must not terminate the original native program");
 	}
+}
+
+/// A retained program must stop while the whole shell is paused and run
+/// again once it resumes, measured in the bytes the program itself wrote.
+async fn pause_stops_retained(
+	native: &mut NativeShell,
+	pid_file: &std::path::Path,
+	pid: u32,
+	what: &str,
+) {
+	let before = ticks(pid_file);
+	native.drive_for(Duration::from_millis(200)).await;
+	let running = ticks(pid_file);
+	println!("{what}: before pause ticks {before} -> {running}");
+	assert!(running > before, "{what}: the retained program wrote nothing before the pause");
+
+	native.shell.control().pause();
+	assert!(matches!(native.step(), Step::Paused));
+	// Let a write already in flight land, then measure a quiet window.
+	tokio::time::sleep(Duration::from_millis(150)).await;
+	let paused_at = ticks(pid_file);
+	let state = proc_state(pid);
+	tokio::time::sleep(Duration::from_millis(400)).await;
+	let still = ticks(pid_file);
+	println!("{what}: paused state={state:?} ticks {paused_at} -> {still}");
+	assert_eq!(still, paused_at, "{what}: a paused shell left its retained program running");
+	if cfg!(target_os = "linux") {
+		assert_eq!(state, Some('T'), "{what}: the retained program was not stopped");
+	}
+
+	native.shell.control().resume();
+	native.step();
+	let until = tokio::time::Instant::now() + Duration::from_secs(5);
+	while ticks(pid_file) == still && tokio::time::Instant::now() < until {
+		native.drive_for(Duration::from_millis(10)).await;
+	}
+	let after = ticks(pid_file);
+	println!("{what}: resumed state={:?} ticks {still} -> {after}", proc_state(pid));
+	assert!(after > still, "{what}: resume did not continue the retained program");
+	assert!(alive(pid), "{what}: the retained program did not survive pause and resume");
+}
+
+/// A targeted signal that ends a virtual process whose native child ignored
+/// it leaves the only handle to that child in the engine's retained set,
+/// with no vproc and no frame behind it. A whole-shell pause must reach it:
+/// the host asked the shell to stop, and a program that keeps running and
+/// producing output while `step` reports `Paused` is the very thing the
+/// pause exists to prevent. Resume must reach it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_pause_stops_a_retained_native_and_resume_continues_it() {
+	let dir = tempfile::tempdir().unwrap();
+	let script = write_ticker(dir.path());
+	let pid_file = dir.path().join("retained");
+	let mut native = NativeShell::new();
+	let cmd = format!(
+		"/usr/bin/python3 '{}' '{}'; echo unreachable",
+		script.display(),
+		pid_file.display()
+	);
+	let retained = native.start_cmd(&pid_file, cmd).await;
+	native
+		.shell
+		.control()
+		.signal(SigTarget::Vpid(retained.owner), Signal::Term);
+	assert!(matches!(native.step(), Step::Done { run, status: 143 } if run == retained.run));
+	assert_eq!(native.shell.live_external_jobs(), 1, "the program outlived its owner");
+	pause_stops_retained(&mut native, &pid_file, retained.pid, "retained").await;
+}
+
+/// The same for a retained program whose owner was DETACHED. Whole-shell
+/// cancellation spares it, because `nohup` means "keep running when the
+/// shell goes away"; a pause is not the shell going away but the host
+/// suspending it, and `set_paused` already stops an ACTIVE detached vproc's
+/// native child without filtering on lineage. A retained program is that
+/// same program a moment later, so pause and resume reach it too.
+///
+/// `nohup` is given a shell FUNCTION, so the detached owner is a subshell of
+/// its own and the native program underneath it is not the job's program:
+/// `kill -TERM %1` then ends the owner while the program runs on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_pause_stops_a_retained_detached_native_and_resume_continues_it() {
+	let dir = tempfile::tempdir().unwrap();
+	let script = write_ticker(dir.path());
+	let pid_file = dir.path().join("detached");
+	let mut native = NativeShell::new();
+	let run = native.shell.submit(Script::command(
+		format!(
+			"worker(){{ /usr/bin/python3 '{script}' '{pid}' >/dev/null 2>&1; echo UNREACHABLE; }}; \
+			 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; \
+			 kill -TERM %1; wait %1",
+			script = script.display(),
+			pid = pid_file.display()
+		)
+		.into_bytes(),
+	));
+	let until = tokio::time::Instant::now() + Duration::from_secs(30);
+	loop {
+		// `nohup`'s own subshell reports a `Done` of its own: wait for this
+		// script's.
+		if matches!(native.step(), Step::Done { run: done, .. } if done == run) {
+			break;
+		}
+		assert!(
+			tokio::time::Instant::now() < until,
+			"the detached owner never ended (the program had written its pid: {})",
+			pid_file.exists()
+		);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+	let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+	let _cleanup = Program { pid, owner: Vpid(0), run: RunId(0) };
+	assert_eq!(native.shell.live_external_jobs(), 1, "the detached program stayed retained");
+	pause_stops_retained(&mut native, &pid_file, pid, "retained detached").await;
 }
