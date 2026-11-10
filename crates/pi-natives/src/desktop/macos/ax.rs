@@ -612,22 +612,29 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 		})
 }
 
-/// Whether `pid`'s `AXFocusedWindow` is no window at all, as Finder's desktop
-/// is once a click on it took focus, even while Finder's windows stay open.
-/// `false` when `_AXUIElementGetWindow` is unavailable, since then no element
-/// maps and that proves nothing.
-pub(super) fn focus_outside_windows(pid: libc::pid_t) -> bool {
-	if GET_WINDOW_ID.is_none() {
-		return false;
-	}
-	let Some(focused) = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedWindow"))
-	else {
-		return false;
+/// The key window and outside-window focus from one application probe and
+/// one `AXFocusedWindow` read. The main window still takes precedence over
+/// an unmapped focused element, as it does in [`key_window_id`].
+pub(super) fn restoration_window(pid: libc::pid_t) -> (Option<u32>, bool) {
+	let Some(app) = probe_application(pid) else {
+		return (None, false);
 	};
-	is_outside_windows(window_id(&focused).is_some(), copy_string(&focused, "AXRole").as_deref())
+	let focused = copy_element(&app, "AXFocusedWindow");
+	let key = focused.as_ref().and_then(window_id).or_else(|| {
+		copy_element(&app, "AXMainWindow")
+			.as_ref()
+			.and_then(window_id)
+	});
+	if key.is_some() || GET_WINDOW_ID.is_none() {
+		return (key, false);
+	}
+	let outside = focused
+		.as_ref()
+		.is_some_and(|focused| is_outside_windows(false, copy_string(focused, "AXRole").as_deref()));
+	(key, outside)
 }
 
-/// [`focus_outside_windows`]'s decision for a focused window that maps to a
+/// [`restoration_window`]'s decision for a focused window that maps to a
 /// window id (`mapped`) and reports `role`: only an unmapped scroll area, the
 /// desktop's role, counts. A real window that fails to map, or any other
 /// element, does not.

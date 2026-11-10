@@ -2098,9 +2098,10 @@ impl UserKey {
 /// The front application `pid`'s [`UserKey`]; `None` when neither its key
 /// window nor its windowlessness can be established.
 fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	let (key, outside_windows) = ax::restoration_window(pid);
 	restorable_key(
-		ax::key_window_id(pid),
-		|| ax::focus_outside_windows(pid),
+		key,
+		|| outside_windows,
 		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
 		|| capture::has_onscreen_window(pid),
 	)
