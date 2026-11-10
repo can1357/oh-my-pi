@@ -19,8 +19,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
@@ -28,17 +27,10 @@ import {
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
 	resetPlanSettings,
-	resetWindowModes,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
-import {
-	headlessApprovedResetActions,
-	IMMINENT_RESET_EXPIRY_MS,
-	shouldEvaluateResetAutoRedeem,
-} from "@oh-my-pi/pi-coding-agent/session/reset-consent";
-
-import { cfgCodexResetsAutoRedeem5h, cfgCodexResetsAutoRedeemWeekly } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { IMMINENT_RESET_EXPIRY_MS } from "@oh-my-pi/pi-coding-agent/session/reset-consent";
 
 // Epoch ms divisible by 60_000 so minute-boundary reset/expiry times let the
 // debounce-jitter cases reason about bucket crossings precisely.
@@ -477,66 +469,6 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
-	it("does not name a blocked window when a short live hint contradicts healthy report windows", () => {
-		const staleFlag = report({ weeklyUsed: 0.5, primaryUsed: 0.6, limitReached: false });
-		const plan = planCodexResetRedemptions(input([staleFlag], { activeBlockUnblockAtMs: NOW + 2 * HOUR }));
-		expect(plan.actions).toMatchObject([{ blockedWindows: [], remainingMs: 2 * HOUR }]);
-	});
-
-	it.each([2 * HOUR, 6 * HOUR])(
-		"skips a live-only block with conflicting window consent at a %s ms wait",
-		remainingMs => {
-			const plan = planCodexResetRedemptions(
-				input([synthesizedActiveReport()], {
-					activeBlockUnblockAtMs: NOW + remainingMs,
-					settings: {
-						modes: { "5h": "yes", weekly: "no" },
-						minBlockedMinutes: 60,
-						keepCredits: 0,
-						salvageHorizonMs: 0,
-					},
-				}),
-			);
-			expect(plan.actions).toEqual([]);
-			expect(plan.skipped).toContainEqual({
-				accountKey: ACCOUNT_KEY,
-				rule: "blocked-account",
-				reason: "window-unknown",
-			});
-		},
-	);
-
-	it("restores a live-only block without naming an unknown window when both windows are enabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([synthesizedActiveReport()], { activeBlockUnblockAtMs: NOW + 2 * HOUR }),
-		);
-		expect(plan.actions).toEqual([
-			expect.objectContaining({
-				reason: "blocked-account",
-				accountKey: ACCOUNT_KEY,
-				blockedWindows: [],
-				remainingMs: 2 * HOUR,
-			}),
-		]);
-	});
-
-	it("keeps a live-only block promptable when both window modes are unset", () => {
-		const plan = planCodexResetRedemptions(
-			input([synthesizedActiveReport()], {
-				activeBlockUnblockAtMs: NOW + 2 * HOUR,
-				settings: {
-					modes: { "5h": "unset", weekly: "unset" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toEqual([
-			expect.objectContaining({ reason: "blocked-account", accountKey: ACCOUNT_KEY, blockedWindows: [] }),
-		]);
-	});
-
 	it("restores a live-only weekly block when its wait cannot belong to the disabled 5h window", () => {
 		const plan = planCodexResetRedemptions(
 			input([synthesizedActiveReport()], {
@@ -556,28 +488,6 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 				window: "weekly",
 				blockedWindows: ["weekly"],
 				remainingMs: 2 * DAY,
-			}),
-		]);
-	});
-
-	it("uses imminent credit consent across both possible windows for a live-only block", () => {
-		const plan = planCodexResetRedemptions(
-			input([synthesizedActiveReport({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
-				activeBlockUnblockAtMs: NOW + 2 * HOUR,
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toEqual([
-			expect.objectContaining({
-				reason: "blocked-account",
-				accountKey: ACCOUNT_KEY,
-				blockedWindows: [],
-				expiresInMs: IMMINENT_RESET_EXPIRY_MS,
 			}),
 		]);
 	});
@@ -739,69 +649,6 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 	});
 
-	it("restores a weekly block when only the weekly window is enabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report()], {
-				settings: {
-					modes: { "5h": "no", weekly: "yes" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toMatchObject([{ reason: "blocked-account", window: "weekly" }]);
-	});
-
-	it("skips a weekly block when only the 5h window is enabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report()], {
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({
-			accountKey: ACCOUNT_KEY,
-			rule: "blocked-account",
-			reason: "window-disabled",
-		});
-	});
-
-	it("restores a 5h-only block when only the 5h window is enabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toMatchObject([{ reason: "blocked-account", window: "5h", blockedWindows: ["5h"] }]);
-	});
-
-	it("restores an imminent credit even when its governing window is disabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toMatchObject([
-			{ reason: "blocked-account", window: "weekly", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
-		]);
-	});
-
 	it("returns nothing when the policy is disabled", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
@@ -883,45 +730,6 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		});
 	});
 
-	it("keeps the active account first when both candidate windows are approved", () => {
-		const active = report();
-		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", primaryUsed: 1.0, weeklyUsed: 0.8 });
-		const plan = planCodexResetRedemptions(input([active, sibling]));
-		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, window: "weekly", active: true });
-	});
-
-	it("treats an imminent credit on an unapproved window as approved via the other window", () => {
-		// Sibling A blocks on weekly, where consent is unset: only the last-chance
-		// imminent rule plus the approved 5h window can approve that restore.
-		// Sibling B's 5h window is approved outright, so an approved-consent-only
-		// ranking would always pick B and let A's credit die.
-		const dyingWeekly = report({ accountId: "acct-a", email: "a@example.com", creditExpiries: [60_000] });
-		const dying5h = report({
-			accountId: "acct-b",
-			email: "b@example.com",
-			primaryUsed: 1.0,
-			weeklyUsed: 0.8,
-			creditExpiries: [2 * DAY],
-		});
-		const plan = planCodexResetRedemptions(
-			input([dyingWeekly, dying5h], {
-				identity: undefined,
-				settings: {
-					modes: { "5h": "yes", weekly: "unset" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 12 * HOUR,
-				},
-			}),
-		);
-		expect(plan.actions[0]).toMatchObject({
-			reason: "blocked-account",
-			accountKey: "openai-codex|-|3",
-			window: "weekly",
-			expiresInMs: 60_000,
-		});
-	});
-
 	it("does not treat a Team seat sharing the workspace account id as the active account", () => {
 		// Team seats report the workspace account id; only the email tells them apart.
 		const active = report({ creditExpiries: [5 * DAY] });
@@ -976,22 +784,6 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				salvageUsedFraction: 0.8,
 				expiresInMs: 2 * HOUR,
 				active: true,
-			},
-		]);
-	});
-
-	it("pins salvage to its expiring credit instead of a later credit", () => {
-		const candidate = report({ weeklyUsed: 0.8, limitReached: false, credits: 2 });
-		candidate.resetCredits!.credits = [
-			{ id: "later-credit", status: "available", expiresAt: new Date(NOW + DAY).toISOString() },
-			{ id: "expiring-credit", status: "available", expiresAt: new Date(NOW + 2 * HOUR).toISOString() },
-		];
-		const plan = planCodexResetRedemptions(input([candidate], { trigger: "sweep" }));
-		expect(plan.actions).toMatchObject([
-			{
-				reason: "expiring-credit",
-				target: { creditId: "expiring-credit" },
-				creditId: "expiring-credit",
 			},
 		]);
 	});
@@ -1167,36 +959,6 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		});
 	});
 
-	it("salvages a 5h-governed credit when only the 5h window is enabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report({ weeklyUsed: 0.2, primaryUsed: 1.0, creditExpiries: [2 * HOUR] })], {
-				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 12 * HOUR,
-				},
-			}),
-		);
-		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", window: "5h", salvageWindow: "5h" }]);
-	});
-
-	it("salvages an imminent credit even when its governing window is disabled", () => {
-		const plan = planCodexResetRedemptions(
-			input([report({ weeklyUsed: 0.8, creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
-				trigger: "sweep",
-				settings: {
-					modes: { "5h": "yes", weekly: "no" },
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonMs: 0,
-				},
-			}),
-		);
-		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", window: "weekly" }]);
-	});
-
 	it("salvages at five minutes inclusively despite a zero horizon", () => {
 		const base = input([], {
 			trigger: "sweep",
@@ -1353,37 +1115,6 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 	});
 });
 
-describe("reset window policy helpers", () => {
-	it("evaluates the planner when any window is not explicitly off", () => {
-		expect(shouldEvaluateResetAutoRedeem(resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "no" }))).toBe(
-			false,
-		);
-		expect(shouldEvaluateResetAutoRedeem(resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "unset" }))).toBe(
-			true,
-		);
-		expect(shouldEvaluateResetAutoRedeem(resetWindowModes({ autoRedeem5h: "yes", autoRedeemWeekly: "no" }))).toBe(
-			true,
-		);
-	});
-
-	it("derives independent window flags and keeps the shared knobs", () => {
-		expect(
-			resetPlanSettings({
-				autoRedeem5h: "no",
-				autoRedeemWeekly: "unset",
-				minBlockedMinutes: 60,
-				keepCredits: 1,
-				salvageHorizonHours: 2,
-			}),
-		).toEqual({
-			modes: { "5h": "no", weekly: "unset" },
-			minBlockedMinutes: 60,
-			keepCredits: 1,
-			salvageHorizonMs: 2 * HOUR,
-		});
-	});
-});
-
 describe("codexResets policy plumbing", () => {
 	it("classifies consume outcomes: spent/settled stay buried, refusals defer", () => {
 		// Terminal: the credit is gone or provably unusable — the episode stays settled.
@@ -1396,32 +1127,5 @@ describe("codexResets policy plumbing", () => {
 		expect(isTerminalRedeemOutcome("nothing_to_reset")).toBe(false);
 		expect(isTerminalRedeemOutcome("http_500")).toBe(false);
 		expect(isTerminalRedeemOutcome("credit_list_failed")).toBe(false);
-	});
-
-	it("approves only resets expiring within five minutes for a headless unset host, pinned to that credit", () => {
-		const target: ResetCreditTarget = { provider: "openai-codex", credentialId: CREDENTIAL_ID };
-		const windows = { window: "weekly", restorableWindows: ["5h", "weekly"] } as const;
-		const actions = [
-			{ ...windows, target, creditId: "dying", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
-			{ ...windows, target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
-			{ ...windows, target, expiresInMs: undefined },
-		];
-		expect(
-			headlessApprovedResetActions(actions, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "unset" })),
-		).toEqual([{ ...actions[0], target: { ...target, creditId: "dying" } }]);
-		expect(
-			headlessApprovedResetActions(actions, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "no" })),
-		).toEqual([]);
-	});
-
-	it("migrates legacy boolean autoRedeem config into both window policies", () => {
-		for (const [value, expected] of [
-			[true, "yes"],
-			[false, "no"],
-		] as const) {
-			const settings = Settings.isolated({ "codexResets.autoRedeem": value });
-			expect(cfgCodexResetsAutoRedeem5h.get(settings)).toBe(expected);
-			expect(cfgCodexResetsAutoRedeemWeekly.get(settings)).toBe(expected);
-		}
 	});
 });

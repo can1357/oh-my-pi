@@ -16,7 +16,8 @@
 
 ### Changed
 
-- Saved-reset auto-redeem now sets 5h, weekly and Claude Fable spending independently: `codexResets.autoRedeem5h`/`autoRedeemWeekly` and `claudeResets.autoRedeem5h`/`autoRedeemWeekly`/`autoRedeemFable` replace each provider's single `autoRedeem`, whose value migrates into every new key ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+- Saved-reset auto-redeem now sets 5h, weekly and Claude Fable spending independently: `codexResets.autoRedeem5h`/`autoRedeemWeekly` and `claudeResets.autoRedeem5h`/`autoRedeemWeekly`/`autoRedeemFable` replace each provider's single `autoRedeem`, whose value migrates into the 5h and weekly keys; Fable spending starts `unset` ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+- Sessions without a prompt UI (such as `omp -p`) no longer spend saved resets while auto-redeem is `unset`, even ones about to expire; only `yes` spends without asking ([#18661](https://github.com/can1357/oh-my-pi/pull/18661))
 - A Claude Fable launch reset is now spent only for a block that includes the Fable weekly cap, never for a 5h-only block, and only when Fable usage is above zero ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
 
 ## [18.18.6] - 2026-11-09

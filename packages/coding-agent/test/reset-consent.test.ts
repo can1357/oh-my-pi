@@ -40,7 +40,7 @@ interface Outcome {
 
 interface PlannedAction<W extends string> {
 	accountKey: string;
-	window: W;
+	window?: W;
 	restorableWindows: readonly W[];
 	target: { provider: string };
 	expiresInMs?: number;
@@ -57,11 +57,11 @@ function planOutcome<W extends ResetConsentWindow>(
 			const consent = actionConsent(action, modes);
 			return [
 				action.accountKey,
-				action.window,
+				action.window ?? "?",
 				action.restorableWindows.join(","),
 				consent.mode,
 				consent.keys.join(","),
-				consent.saveKey,
+				consent.saveKeys.join(","),
 			].join("|");
 		}),
 		skipped: skipped.map(skip => `${skip.rule}|${skip.reason}`),
@@ -106,7 +106,13 @@ function codexReport({
 				{ id: "codex-credit", status: "available", expiresAt: new Date(NOW + creditExpiresInMs).toISOString() },
 			],
 		},
-		metadata: { accountId: "acct", email: "user@example.com", resetCreditCredentialId: 1, limitReached: true },
+		metadata: {
+			accountId: "acct",
+			email: "user@example.com",
+			resetCreditCredentialId: 1,
+			resetCreditActive: true,
+			limitReached: true,
+		},
 	};
 }
 
@@ -370,6 +376,20 @@ const rows: { name: string; run: () => Partial<Outcome>; expected: Partial<Outco
 		expected: { actions: [], skipped: ["account|disabled"] },
 	},
 	{
+		name: "codex: a live-only block within one 5h span asks for the unset window and saves both",
+		run: () =>
+			codexPlan("yes", "unset", codexReport({ weeklyUsed: 0.5 }), { activeBlockUnblockAtMs: NOW + 2 * HOUR }),
+		expected: {
+			actions: [`openai-codex|-|1|?|5h,weekly|unset|${codexKey("weekly")}|${codexKey("5h")},${codexKey("weekly")}`],
+			skipped: [],
+		},
+	},
+	{
+		name: "codex: a live-only block within one 5h span is skipped when either window is off",
+		run: () => codexPlan("yes", "no", codexReport({ weeklyUsed: 0.5 }), { activeBlockUnblockAtMs: NOW + 2 * HOUR }),
+		expected: { actions: [], skipped: ["blocked-account|window-disabled", "expiring-credit|no-expiring-credit"] },
+	},
+	{
 		name: "claude: a weekly block spends under weekly consent",
 		run: () =>
 			claudePlan(
@@ -481,7 +501,7 @@ const rows: { name: string; run: () => Partial<Outcome>; expected: Partial<Outco
 		expected: { actions: [], skipped: ["blocked-account|fable-only", "expiring-credit|no-expiring-credit"] },
 	},
 	{
-		name: "claude: a Fable grant without report row or used fraction never spends",
+		name: "claude: a server-reported Fable blocker is Fable usage without a row or used fraction",
 		run: () =>
 			claudePlan(
 				{ autoRedeem5h: "yes", autoRedeemWeekly: "no", autoRedeemFable: "yes" },
@@ -492,38 +512,27 @@ const rows: { name: string; run: () => Partial<Outcome>; expected: Partial<Outco
 				),
 				{ modelId: "claude-fable-5", activeBlockUnblockAtMs: NOW + 5 * DAY },
 			),
-		expected: { actions: [], skipped: ["account|no-fable-usage"] },
-	},
-	{
-		name: "claude: the grant's own used fraction spends an unavailable-row Fable cap block",
-		run: () =>
-			claudePlan(
-				{ autoRedeem5h: "yes", autoRedeemWeekly: "no", autoRedeemFable: "yes" },
-				claudeReport({ includeFable: false, weeklyUsed: 0.5 }),
-				claudeStatus(
-					fableCredit({ blocking: [FABLE_ID], usedFractions: { [FABLE_ID]: 0.6 } }),
-					claudeReport({ includeFable: false, weeklyUsed: 0.5 }),
-				),
-				{ modelId: "claude-fable-5", activeBlockUnblockAtMs: NOW + 5 * DAY },
-			),
 		expected: {
 			actions: [`anthropic|org-a|11|fable|fable|yes|${claudeKey("fable")}|${claudeKey("fable")}`],
 			skipped: [],
 		},
 	},
 	{
-		name: "claude: the used-fraction fallback still refuses a 5h-only block",
+		name: "claude: a stale zero Fable row yields to the grant's own used fraction",
 		run: () =>
 			claudePlan(
-				{ autoRedeem5h: "yes", autoRedeemWeekly: "no", autoRedeemFable: "yes" },
-				claudeReport({ fiveHourUsed: 1, weeklyUsed: 0.5, includeFable: false }),
+				{ autoRedeem5h: "no", autoRedeemWeekly: "no", autoRedeemFable: "yes" },
+				claudeReport({ fableUsed: 0, weeklyUsed: 0.5 }),
 				claudeStatus(
-					fableCredit({ blocking: [], usedFractions: { [FABLE_ID]: 0.6 } }),
-					claudeReport({ fiveHourUsed: 1, weeklyUsed: 0.5, includeFable: false }),
+					fableCredit({ requiresLimit: false, expiresAt: iso(2 * HOUR), usedFractions: { [FABLE_ID]: 0.6 } }),
+					claudeReport({ fableUsed: 0, weeklyUsed: 0.5 }),
 				),
-				{ modelId: "claude-fable-5" },
+				{ trigger: "sweep", modelId: "claude-fable-5" },
 			),
-		expected: { actions: [], skipped: ["blocked-account|fable-only", "expiring-credit|no-expiring-credit"] },
+		expected: {
+			actions: [`anthropic|org-a|11|fable|fable|yes|${claudeKey("fable")}|${claudeKey("fable")}`],
+			skipped: [],
+		},
 	},
 	{
 		name: "claude: an expiring Fable grant salvages from its used fraction when the row is missing",

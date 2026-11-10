@@ -1390,12 +1390,12 @@ export const cfgCodexResetsAutoRedeem5h = register({
 		group: "Services",
 		label: "Codex Auto-Redeem Saved Resets (5h)",
 		description:
-			"Govern saved Codex resets for 5-hour-only blocks and expiry salvage whose fullest chat window is 5h. Independent of the weekly setting. unset asks first (without prompt UI, only credits expiring within 5 minutes are spent), yes spends without prompting, and no disables this window. Imminent credits can still spend when either window permits it.",
+			"Govern saved Codex resets for 5-hour-only blocks and expiry salvage whose fullest chat window is 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. A credit expiring within 5 minutes may spend when either window is yes.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+				description: "Ask before spending for this window; without a prompt UI, never spend.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
@@ -1413,12 +1413,12 @@ export const cfgCodexResetsAutoRedeemWeekly = register({
 		group: "Services",
 		label: "Codex Auto-Redeem Saved Resets (Weekly)",
 		description:
-			"Govern saved Codex resets that clear any weekly block and expiry salvage whose fullest chat window is weekly. Independent of the 5h setting. unset asks first (without prompt UI, only credits expiring within 5 minutes are spent), yes spends without prompting, and no disables this window. Imminent credits can still spend when either window permits it.",
+			"Govern saved Codex resets that clear any weekly block and expiry salvage whose fullest chat window is weekly. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. A credit expiring within 5 minutes may spend when either window is yes.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+				description: "Ask before spending for this window; without a prompt UI, never spend.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
@@ -1488,12 +1488,12 @@ export const cfgClaudeResetsAutoRedeem5h = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Saved Resets (5h)",
 		description:
-			"Govern non-Fable Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. Independent of weekly and Fable settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Juniper never spends when only weekly spending is enabled.",
+			"Govern non-Fable Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. Juniper never spends when only weekly spending is enabled.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+				description: "Ask before spending for this window; without a prompt UI, never spend.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
@@ -1511,12 +1511,12 @@ export const cfgClaudeResetsAutoRedeemWeekly = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Saved Resets (Weekly)",
 		description:
-			"Govern non-Fable Claude Cedar resets that clear weekly or model-scoped blocks and expiry salvage whose fullest covered limit is not 5h. Independent of 5h and Fable settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Provider eligibility and covered-limit requirements still apply.",
+			"Govern non-Fable Claude Cedar resets that clear weekly or model-scoped blocks and expiry salvage whose fullest covered limit is not 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Ask before spending for this window; without prompt UI, spend only imminent credits.",
+				description: "Ask before spending for this window; without a prompt UI, never spend.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
@@ -1534,12 +1534,12 @@ export const cfgClaudeResetsAutoRedeemFable = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Fable Resets",
 		description:
-			"Govern Claude Fable launch resets, which restore Fable weekly usage (capped at 50% of the weekly limit) plus the 5h window. Blocked-account restores use them only when the Fable weekly cap is used up, never for a 5h-only block. Never spend when Fable usage is 0 or unknown, including expiry salvage. Independent of 5h and weekly settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables Fable resets.",
+			"Govern Claude Fable launch resets, which restore Fable weekly usage (capped at 50% of the weekly limit) plus the 5h window. Spent only for a block that includes the Fable weekly cap, and never while Fable usage is 0 or unknown. unset asks first and never spends without a prompt, yes spends without asking, no disables Fable resets.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Ask before spending a Fable reset; without prompt UI, spend only imminent credits.",
+				description: "Ask before spending a Fable reset; without a prompt UI, never spend.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Fable resets without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic Fable reset spending." },

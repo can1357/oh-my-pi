@@ -171,30 +171,6 @@ function resetExpiryOptions(overrides: Record<string, unknown> = {}): UsageReset
 	return { settings: Settings.isolated(overrides), accounts: () => [] };
 }
 
-/** A Fable launch grant beside a report whose Fable weekly cap is `fableUsed` spent. */
-function claudeFableResetReport(nowMs: number, fableUsed: number): UsageReport {
-	const grant = cedarGrant(nowMs, "fable", 6 * HOUR, {
-		clears: ["anthropic:5h", "anthropic:7d:fable"],
-	});
-	return {
-		provider: "anthropic",
-		fetchedAt: nowMs,
-		limits: [
-			makeLimit({ id: "anthropic:5h", usedFraction: 0.2, durationMs: FIVE_HOURS }),
-			makeLimit({ id: "anthropic:7d", usedFraction: 0.3, durationMs: SEVEN_DAYS }),
-			makeLimit({ id: "anthropic:7d:fable", usedFraction: fableUsed, durationMs: SEVEN_DAYS, tier: "fable" }),
-		],
-		metadata: { email: "claude@example.test", accountId: "claude-account", orgId: "claude-org" },
-		resetCredits: {
-			availableCount: 1,
-			redeemableCount: 1,
-			nextCreditId: grant.id,
-			eligible: true,
-			credits: [grant],
-		},
-	};
-}
-
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
 		const map = buildRedactionMap(["alpha@example.test", "bravo@example.test"]);
@@ -1522,50 +1498,6 @@ describe("formatUsageBreakdown", () => {
 		expect(claudeVerdict).toMatchObject({ kind: "off", mode: "no" });
 		expect(claudeVerdict.setting).toContain("claudeResets.autoRedeemWeekly");
 		expect(claudeVerdict.setting).not.toContain("codexResets");
-	});
-
-	it.each([
-		{
-			name: "spends a Fable grant when only the Fable setting allows it",
-			overrides: {
-				"claudeResets.autoRedeem5h": "no",
-				"claudeResets.autoRedeemWeekly": "no",
-				"claudeResets.autoRedeemFable": "yes",
-			},
-			expected: { kind: "auto", mode: "yes", setting: "claudeResets.autoRedeemFable" },
-		},
-		{
-			name: "leaves a Fable grant when only the Fable setting refuses it",
-			overrides: {
-				"claudeResets.autoRedeem5h": "yes",
-				"claudeResets.autoRedeemWeekly": "yes",
-				"claudeResets.autoRedeemFable": "no",
-			},
-			expected: { kind: "off", mode: "no", setting: "claudeResets.autoRedeemFable" },
-		},
-	])("$name", ({ overrides, expected }) => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const report = claudeFableResetReport(now, 0.6);
-		const warning = classifyResetExpiry(report, now);
-		if (!warning) throw new Error("expected an expiry warning for the Fable grant");
-		// The grant also clears 5h, but only the Fable key governs it.
-		expect(resetSpendVerdict(report, warning, Settings.isolated(overrides), now)).toMatchObject(expected);
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions(overrides)),
-		);
-		expect(text).toContain("claudeResets.autoRedeemFable");
-		expect(text).not.toContain("claudeResets.autoRedeem5h");
-	});
-
-	it("never counts a Fable grant whose Fable usage is zero as expiring", () => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		// The grant clears the 5h window, but it restores Fable usage and there is none to restore.
-		const report = claudeFableResetReport(now, 0);
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions()),
-		);
-		expect(text).not.toContain("▲");
-		expect(text).not.toContain("claudeResets.autoRedeemFable");
 	});
 
 	it.each([

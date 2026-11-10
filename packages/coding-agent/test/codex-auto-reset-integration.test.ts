@@ -22,7 +22,7 @@ import {
 	cfgCodexResetsAutoRedeem5h,
 	cfgCodexResetsAutoRedeemWeekly,
 } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { getTestModel } from "./helpers/model-fixtures";
@@ -32,21 +32,6 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const CODEX_USAGE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
-
-/**
- * A blocked turn must finish *while* an unrelated prompt stays open, and only a
- * temporal bound can express "did not wait". Fake timers can't drive this
- * pipeline (it awaits mocked network calls and reset lock files), so the bound
- * is a real delay — paid only when the regression is present.
- */
-async function expectSettledWithin<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-	return await Promise.race([
-		promise,
-		Bun.sleep(ms).then(() => {
-			throw new Error(label);
-		}),
-	]);
-}
 
 interface CodexAccount {
 	accountId: string;
@@ -259,38 +244,13 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		return elicitations;
 	}
 
-	it("restores a blocked turn with a reset expiring within five minutes and continues", async () => {
+	it("never spends a reset about to expire while auto-redeem is unset", async () => {
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
 			weeklyUsed: 1,
 			limitReached: true,
 			creditExpiresInMs: 4 * MINUTE,
-		};
-		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: "recovered after reset redemption" }],
-		});
-	});
-
-	it("still needs consent to restore a blocked turn with a reset that has more time left", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 6 * HOUR,
 		};
 		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
 		mockSchedulerWaitWithClock();
@@ -303,34 +263,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
 	});
 
-	it("spends only the reset about to expire from a mixed salvage batch", async () => {
-		const expiring = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 0.1,
-			limitReached: false,
-			creditExpiresInMs: 4 * MINUTE,
-		};
-		const salvageable = {
-			accountId: "acct-b",
-			credentialId: 2,
-			weeklyUsed: 0.8,
-			limitReached: false,
-			creditExpiresInMs: 2 * HOUR,
-		};
-		const { session, coordinator, targets, notices } = buildSession({ accounts: [expiring, salvageable] });
-
-		await session.fetchUsageReports();
-		await coordinator.sweepPromise;
-
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
-		expect([...coordinator.attemptedKeys]).toEqual([expect.stringContaining("openai-codex|-|1|")]);
-	});
-
-	it("spends a reset about to expire for an ACP client without form elicitation", async () => {
+	it("never spends for an ACP client without form elicitation while auto-redeem is unset", async () => {
 		const account = {
 			accountId: "acct-a",
 			credentialId: 1,
@@ -352,11 +285,8 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		// Extensions keep ACP's UI context; only the consent prompt knows it cannot reach anyone.
 		expect(session.extensionRunner?.hasUI()).toBe(true);
 		expect(elicitations).toEqual([]);
-		expect(targets).toEqual([
-			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
-		]);
-		expect(notices).toContainEqual(expect.stringContaining(`Spending a saved Codex reset for ${EMAIL}`));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(targets).toEqual([]);
+		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
 	});
 
 	it("still asks an ACP client with form elicitation about a reset about to expire", async () => {
@@ -449,10 +379,10 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		let laterTargets: ResetCreditTarget[] = [];
 
 		try {
-			await expectSettledWithin(prompted.promise, 2_000, "no salvage question was asked");
+			await withTimeout(prompted.promise, 2_000, "no salvage question was asked");
 			// The weekly-approved restore is spent and the turn continues before the
 			// sibling's unset salvage question is answered.
-			await expectSettledWithin(recovering, 2_000, "blocked turn waited for unrelated salvage consent");
+			await withTimeout(recovering, 2_000, "blocked turn waited for unrelated salvage consent");
 			expect(targets.map(target => target.credentialId)).toEqual([1]);
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 
@@ -475,7 +405,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			later = peer.session
 				.prompt("block again while the salvage question stays open")
 				.then(() => peer.session.waitForIdle());
-			await expectSettledWithin(later, 2_000, "a later blocked pass waited for the pending salvage question");
+			await withTimeout(later, 2_000, "a later blocked pass waited for the pending salvage question");
 			expect(consent).toHaveBeenCalledTimes(1);
 			expect([...targets, ...laterTargets].map(target => target.credentialId)).toEqual([1]);
 
@@ -528,10 +458,10 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			.then(() => session.waitForIdle());
 
 		try {
-			await expectSettledWithin(prompted.promise, 2_000, "no sibling salvage question was asked");
+			await withTimeout(prompted.promise, 2_000, "no sibling salvage question was asked");
 			// Restore is below the threshold, but the approved last-chance salvage
 			// still resets the active credential without waiting for its sibling.
-			await expectSettledWithin(recovering, 2_000, "active salvage recovery waited for sibling consent");
+			await withTimeout(recovering, 2_000, "active salvage recovery waited for sibling consent");
 			expect(targets).toEqual([
 				{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
 			]);
@@ -612,7 +542,7 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		});
 		mockSchedulerWaitWithClock();
 
-		await expectSettledWithin(
+		await withTimeout(
 			session.prompt("recover through the blocked account's own expiring reset").then(() => session.waitForIdle()),
 			5_000,
 			"the blocked turn never recovered",
@@ -651,5 +581,28 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
 		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("unset");
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("does not ask again about an imminent credit the user declined", async () => {
+		const consent = vi.fn(async () => "No");
+		const { session, coordinator, targets } = buildSession({
+			accounts: [
+				{ accountId: "acct-a", credentialId: 1, weeklyUsed: 1, limitReached: true, creditExpiresInMs: 4 * MINUTE },
+			],
+			streamErrorFirst: true,
+			consent,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+		// No saves only the governing weekly key; 5h stays unset and would keep the credit askable.
+		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("no");
+		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("unset");
+
+		await session.fetchUsageReports();
+		await coordinator.sweepPromise;
+		expect(consent).toHaveBeenCalledTimes(1);
+		expect(targets).toEqual([]);
 	});
 });

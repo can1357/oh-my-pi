@@ -386,7 +386,6 @@ import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import {
 	actionConsent,
-	headlessApprovedResetActions,
 	type ResetProvider,
 	type ResetSettingKey,
 	shouldEvaluateResetAutoRedeem,
@@ -1016,6 +1015,11 @@ interface ResetWindowSetting {
 	id: string;
 	get(scope: Settings): ResetAutoRedeemMode;
 	set(scope: Settings, value: ResetAutoRedeemMode): void;
+}
+
+/** The credit a planned spend would use, so a refusal covers it whichever rule plans it next. */
+function declinedCreditKey(action: CodexResetAction | ClaudeResetAction): string {
+	return `${action.accountKey}|${action.target.creditId ?? action.attemptKey}`;
 }
 
 /** Saved-reset consent handles by the setting id that governs them. */
@@ -15343,9 +15347,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Ask before a provider's first automatic spend and return the approved
 	 * actions. Consent is persisted per governing window in that provider's
-	 * settings keys; a host that cannot prompt (no extension UI, or one whose
-	 * prompts cannot reach a human) spends only credits about to expire and
-	 * gets a one-shot notice for the rest while a window is unset.
+	 * settings keys. A host that cannot prompt (no extension UI, or one whose
+	 * prompts cannot reach a human) spends nothing under `unset` and gets a
+	 * one-shot notice instead: only an explicit `yes` spends unasked. A No is
+	 * also remembered per credit: saved to the governing key only, it can leave
+	 * a sibling window `unset` that would otherwise ask about the same credit again.
 	 */
 	async #confirmAutoRedeem(
 		provider: ResetProvider,
@@ -15358,10 +15364,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI() || !this.#interactivePrompts) {
-			// Nobody can be asked: spend only a credit that would otherwise be lost.
-			const approved = headlessApprovedResetActions(actions, modes);
-			const waiting = actions.find(action => !approved.some(spend => spend.attemptKey === action.attemptKey));
-			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
+			const waiting = actions[0];
+			if (!coordinator.notifiedKeys.has(waiting.attemptKey)) {
 				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
 					"warning",
@@ -15369,14 +15373,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					source,
 				);
 			}
-			for (const action of approved) {
-				this.emitNotice(
-					"info",
-					`Spending a saved ${providerLabel} reset for ${action.label} before it expires in ${formatDuration(action.expiresInMs ?? 0)}; auto-redeem is unset and no prompt UI is available. Set ${actionConsent(action, modes).keys.join(" or ")} to no to let resets expire instead.`,
-					source,
-				);
-			}
-			return approved;
+			return [];
 		}
 
 		const lines = actions.map(action => {
@@ -15399,27 +15396,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			actions.length === 1
 				? `Spend a saved ${providerLabel} rate-limit reset?\n${lines[0]}`
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
+		// An answer is remembered on the windows that govern each spend (both Codex windows
+		// when the blocked one is unknown); restorable siblings stay untouched so one
+		// salvage cannot enable every window for good.
+		const saveKeys = [...new Set(actions.flatMap(action => actionConsent(action, modes).saveKeys))].filter(
+			key => resetAutoRedeemSettings[key].get(this.settings) === "unset",
+		);
+		const remember = (answer: ResetAutoRedeemMode): string =>
+			saveKeys.length > 0 ? ` and set ${saveKeys.join(", ")} to ${answer}` : "";
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: `Redeem now and answer yes for the unset window(s) this spend uses.`,
-				},
-				{
-					label: "No",
-					description: `Do not auto-redeem these saved ${providerLabel} resets.`,
-				},
+				{ label: "Yes", description: `Redeem now${remember("yes")}.` },
+				{ label: "No", description: `Do not redeem${remember("no")}.` },
 			]);
 			if (choice === "Yes" || choice === "No") {
-				// A prompt answer belongs to the window that governs the spend; its restorable
-				// siblings stay untouched so one salvage cannot enable every window for good.
-				for (const action of actions) {
-					const handle = resetAutoRedeemSettings[actionConsent(action, modes).saveKey];
-					if (handle.get(this.settings) === "unset") {
-						handle.set(this.settings, choice === "Yes" ? "yes" : "no");
-					}
+				const answer = choice === "Yes" ? "yes" : "no";
+				for (const key of saveKeys) {
+					const handle = resetAutoRedeemSettings[key];
+					if (handle.get(this.settings) === "unset") handle.set(this.settings, answer);
 				}
 				if (choice === "Yes") return actions;
+				for (const action of actions) coordinator.declinedCredits.add(declinedCreditKey(action));
 			}
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
@@ -15449,7 +15446,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options: { detachUnrelatedPrompt?: boolean } = {},
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
 		const approved = actions.filter(action => actionConsent(action, modes).mode === "yes");
-		const prompted = actions.filter(action => actionConsent(action, modes).mode === "unset");
+		const prompted = actions.filter(
+			action =>
+				actionConsent(action, modes).mode === "unset" &&
+				!coordinator.declinedCredits.has(declinedCreditKey(action)),
+		);
 		const spent = await this.#executeResetActions(provider, approved, coordinator);
 		if (prompted.length === 0) return spent;
 		// Only a real prompt can hold a turn; a headless host answers immediately.
@@ -15467,7 +15468,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#askResetConsentInBackground(provider, modes, prompted, coordinator);
 			return spent;
 		}
-		// Keep confirmed objects: headless approval pins the exact credit in its target.
 		const confirmed = await this.#confirmAutoRedeem(provider, prompted, coordinator, modes);
 		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
 		return {

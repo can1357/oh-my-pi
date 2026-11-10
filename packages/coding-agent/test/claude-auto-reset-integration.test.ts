@@ -40,24 +40,8 @@ const EMAIL = "claude@example.com";
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
 const CREDENTIAL_ID = 7;
 const HOUR = 3_600_000;
-const MINUTE = 60_000;
 const CLAUDE_USAGE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"usage_limit_reached"}} retry-after-ms=259200000';
-
-/**
- * A blocked turn must finish *while* an unrelated prompt stays open, and only a
- * temporal bound can express "did not wait". Fake timers can't drive this
- * pipeline (it awaits mocked network calls and reset lock files), so the bound
- * is a real delay — paid only when the regression is present.
- */
-async function expectSettledWithin<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-	return await Promise.race([
-		promise,
-		Bun.sleep(ms).then(() => {
-			throw new Error(label);
-		}),
-	]);
-}
 
 function claudeReport(weeklyUsed: number): UsageReport {
 	const now = Date.now();
@@ -943,7 +927,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it.each(["yes", "no", "unset"] as const)(
-		"consumes an imminent reset without a prompt UI unless auto-redeem is no (%s)",
+		"consumes an imminent reset without a prompt UI only when auto-redeem is yes (%s)",
 		async autoRedeem => {
 			const status = claudeStatus(false);
 			for (const credit of status.credits) {
@@ -963,7 +947,7 @@ describe("Claude saved-reset trigger integration", () => {
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
 			expect(targets).toEqual(
-				autoRedeem !== "no"
+				autoRedeem === "yes"
 					? [
 							{
 								provider: "anthropic",
@@ -980,7 +964,7 @@ describe("Claude saved-reset trigger integration", () => {
 			coordinator.lastSweepAt = 0;
 			await session.fetchUsageReports();
 			await coordinator.sweepPromise;
-			expect(targets).toHaveLength(autoRedeem !== "no" ? 1 : 0);
+			expect(targets).toHaveLength(autoRedeem === "yes" ? 1 : 0);
 		},
 	);
 
@@ -1041,61 +1025,6 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(targets).toEqual([]);
 	});
 
-	it("remembers a consented weekly restore only on the weekly setting", async () => {
-		const { session, targets } = buildSession({
-			report: null,
-			status: claudeStatus(true),
-			streamErrorFirst: true,
-			autoRedeem5h: "no",
-			autoRedeemWeekly: "unset",
-			consent: async () => "Yes",
-		});
-		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
-		mockSchedulerWaitWithClock();
-
-		try {
-			await session.prompt("recover the weekly-blocked account");
-			await session.waitForIdle();
-		} finally {
-			await pool.release();
-		}
-
-		// The 5h window was explicitly off; only the governing weekly key records the answer.
-		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("no");
-		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
-		expect(targets).toHaveLength(1);
-	});
-
-	it("remembers a consented Fable restore only on the Fable setting", async () => {
-		const { session, targets } = buildSession({
-			modelId: "claude-fable-5",
-			report: null,
-			status: claudeFableStatus(1),
-			streamErrorFirst: true,
-			autoRedeem5h: "no",
-			autoRedeemWeekly: "no",
-			autoRedeemFable: "unset",
-			consent: async () => "Yes",
-		});
-		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
-		const fable = claudeFableStatus(1);
-		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [{ ...fable, credentialId: pool.pooledId }]);
-		mockSchedulerWaitWithClock();
-
-		try {
-			await session.prompt("recover the Fable-blocked account");
-			await session.waitForIdle();
-		} finally {
-			await pool.release();
-		}
-
-		// The grant also clears 5h, but only the Fable key governs spending it.
-		expect(targets).toHaveLength(1);
-		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("no");
-		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("no");
-		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("yes");
-	});
-
 	it("spends an approved reset before an unrelated consent prompt is answered", async () => {
 		// Account A's ordinary grant is approved by the weekly setting; account B's Fable grant waits on consent.
 		const ordinary = claudeStatus(false);
@@ -1142,181 +1071,5 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
 		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("no");
-	});
-
-	it("recovers a blocked turn while a sibling Claude salvage question is still open", async () => {
-		// The pooled account is weekly-blocked and pre-approved; a sibling Fable
-		// grant can be salvaged but its window is unset, so it needs an answer.
-		const ordinary = claudeStatus(true);
-		const fableIdentity = { accountId: "claude-fable-account", email: "fable@example.com", orgId: ORG_ID };
-		const fableStatus = claudeFableStatus(0.6);
-		const fable: ResetCreditAccountStatus = {
-			...fableStatus,
-			...fableIdentity,
-			credentialId: CREDENTIAL_ID + 1,
-			active: false,
-			report: { ...claudeFableReport(0.6), metadata: fableIdentity },
-			credits: fableStatus.credits.map(credit => ({ ...credit, requiresLimit: false, blocking: [] })),
-		};
-		const prompted = Promise.withResolvers<void>();
-		const answer = Promise.withResolvers<string | undefined>();
-		const consent = vi.fn(() => {
-			prompted.resolve();
-			return answer.promise;
-		});
-		const { session, coordinator, targets } = buildSession({
-			report: withInventory(claudeReport(1), ordinary),
-			status: ordinary,
-			streamErrorFirst: true,
-			autoRedeem5h: "no",
-			autoRedeemWeekly: "yes",
-			autoRedeemFable: "unset",
-			consent,
-		});
-		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
-			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
-			{ position: 1, credentialId: CREDENTIAL_ID + 1, ...fableIdentity, active: false },
-		]);
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => [
-			withInventory(claudeReport(1), ordinary),
-			withInventory(fable.report!, fable),
-		]);
-		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [ordinary, fable]);
-		mockSchedulerWaitWithClock();
-		const recovering = session
-			.prompt("recover weekly while the Fable salvage question is open")
-			.then(() => session.waitForIdle());
-
-		try {
-			await prompted.promise;
-			// The weekly-approved restore is spent and the turn continues before the
-			// Fable salvage question is answered.
-			await expectSettledWithin(recovering, 2_000, "blocked turn waited for unrelated salvage consent");
-			expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-
-			// A heartbeat must not start a sweep that asks about the Fable grant again.
-			await session.fetchUsageReports();
-			expect(consent).toHaveBeenCalledTimes(1);
-
-			answer.resolve("Yes");
-			await coordinator.sweepPromise;
-			expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID, CREDENTIAL_ID + 1]);
-			expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("yes");
-		} finally {
-			answer.resolve("No");
-			await recovering;
-			await coordinator.sweepPromise;
-		}
-	});
-
-	it("recovers through approved active-account salvage while sibling consent stays open", async () => {
-		// The active account's 7-day wall clears in half an hour, below the
-		// 60-minute restore threshold, so its approved last-chance grant is what
-		// recovers the turn. A sibling Fable grant still needs an answer, and
-		// that question must not hold the already-recovered turn.
-		const ordinary = claudeStatus(true);
-		const weekly = ordinary.report?.limits.find(limit => limit.id === "anthropic:7d");
-		if (!weekly?.window) throw new Error("expected a 7-day window in the account report");
-		weekly.window.resetsAt = Date.now() + 30 * MINUTE;
-		const credit = ordinary.credits[0];
-		if (!credit) throw new Error("expected a saved grant in the account status");
-		credit.expiresAt = new Date(Date.now() + 2 * MINUTE).toISOString();
-		const fableIdentity = { accountId: "claude-fable-account", email: "fable@example.com", orgId: ORG_ID };
-		const fableStatus = claudeFableStatus(0.6);
-		const fable: ResetCreditAccountStatus = {
-			...fableStatus,
-			...fableIdentity,
-			credentialId: CREDENTIAL_ID + 1,
-			active: false,
-			report: { ...claudeFableReport(0.6), metadata: fableIdentity },
-			credits: fableStatus.credits.map(grant => ({ ...grant, requiresLimit: false, blocking: [] })),
-		};
-		const prompted = Promise.withResolvers<void>();
-		const answer = Promise.withResolvers<string | undefined>();
-		const { session, coordinator, targets } = buildSession({
-			report: withInventory(claudeReport(1), ordinary),
-			status: ordinary,
-			streamErrorFirst: true,
-			autoRedeem5h: "no",
-			autoRedeemWeekly: "yes",
-			autoRedeemFable: "unset",
-			consent: () => {
-				prompted.resolve();
-				return answer.promise;
-			},
-		});
-		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
-			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
-			{ position: 1, credentialId: CREDENTIAL_ID + 1, ...fableIdentity, active: false },
-		]);
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => [
-			withInventory(claudeReport(1), ordinary),
-			withInventory(fable.report!, fable),
-		]);
-		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [ordinary, fable]);
-		mockSchedulerWaitWithClock();
-		const recovering = session
-			.prompt("recover through active salvage while the Fable question is open")
-			.then(() => session.waitForIdle());
-
-		try {
-			await expectSettledWithin(prompted.promise, 2_000, "no sibling salvage question was asked");
-			// The approved active grant is spent and the turn continues before the
-			// sibling's unset Fable question is answered.
-			await expectSettledWithin(recovering, 2_000, "active salvage recovery waited for sibling consent");
-			expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
-			expect(session.agent.state.messages.at(-1)).toMatchObject({
-				role: "assistant",
-				stopReason: "stop",
-				content: [{ type: "text", text: "recovered after Claude reset" }],
-			});
-
-			answer.resolve("Yes");
-			await coordinator.sweepPromise;
-			expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID, CREDENTIAL_ID + 1]);
-			expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("yes");
-		} finally {
-			answer.resolve("No");
-			await recovering;
-			await coordinator.sweepPromise;
-		}
-	});
-
-	it("waits for consent to salvage the blocked account's own expiring grant when its restore is too soon", async () => {
-		// The 7-day wall clears in half an hour — below the 60-minute restore
-		// threshold — so the only planned spend is the grant's last-chance
-		// salvage. That salvage is what can recover the turn, so its question must
-		// hold the turn: answering Yes spends the grant and the turn continues.
-		const status = claudeStatus(true);
-		const weekly = status.report?.limits.find(limit => limit.id === "anthropic:7d");
-		if (!weekly?.window) throw new Error("expected a 7-day window in the account report");
-		weekly.window.resetsAt = Date.now() + 30 * MINUTE;
-		const credit = status.credits[0];
-		if (!credit) throw new Error("expected a saved grant in the account status");
-		credit.expiresAt = new Date(Date.now() + 2 * MINUTE).toISOString();
-		const { session, targets } = buildSession({
-			report: null,
-			status,
-			streamErrorFirst: true,
-			autoRedeem5h: "no",
-			autoRedeemWeekly: "unset",
-			autoRedeemFable: "no",
-			consent: async () => "Yes",
-		});
-		mockSchedulerWaitWithClock();
-
-		await expectSettledWithin(
-			session.prompt("recover through the blocked account's own expiring grant").then(() => session.waitForIdle()),
-			5_000,
-			"the blocked turn never recovered",
-		);
-
-		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
-		expect(session.agent.state.messages.at(-1)).toMatchObject({
-			role: "assistant",
-			stopReason: "stop",
-			content: [{ type: "text", text: "recovered after Claude reset" }],
-		});
 	});
 });

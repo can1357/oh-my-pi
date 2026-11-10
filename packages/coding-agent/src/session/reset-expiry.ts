@@ -3,12 +3,12 @@
  * will spend them first. Shared by `omp usage` and the TUI status line so both
  * warn about the accounts the salvage planners would act on.
  */
-import {
-	type UsageLimit,
-	type UsageReport,
-	type UsageResetCredit,
-	type UsageResetCreditDetail,
-	type UsageResetCredits,
+import type {
+	UsageLimit,
+	UsageReport,
+	UsageResetCredit,
+	UsageResetCreditDetail,
+	UsageResetCredits,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { bankedResetCreditExpiryMs } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -35,7 +35,7 @@ import {
 	resetWindowModes,
 	SALVAGE_MIN_USED_FRACTION,
 } from "./codex-auto-reset";
-import { IMMINENT_RESET_EXPIRY_MS, actionConsent, classifyResetGrant } from "./reset-consent";
+import { CODEX_RESET_WINDOWS, IMMINENT_RESET_EXPIRY_MS, actionConsent, classifyResetGrant } from "./reset-consent";
 import { cfgClaudeResets, cfgCodexResets, type ResetAutoRedeemMode } from "./settings";
 
 const SOON_MS = 7 * 24 * 3_600_000;
@@ -92,9 +92,8 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 				? { limit: codexWindow.limit, usedFraction: codexWindow.usedFraction }
 				: undefined;
 		}
-		// A Fable grant is worth salvaging only by its own measured Fable usage, whether the
-		// report row or the grant's own used fraction reports it.
-		const grant = classifyResetGrant(provider, credit, report);
+		// A Fable grant is worth salvaging only by its own measured Fable usage.
+		const grant = classifyResetGrant(credit, report);
 		return grant.fullest && grant.fullest.used >= SALVAGE_MIN_USED_FRACTION
 			? { limit: grant.fullest.limit, usedFraction: grant.fullest.used }
 			: undefined;
@@ -149,13 +148,13 @@ const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
 
 /** Windows a credit restores, classified from the grant the warning identifies. */
 function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ClaudeResetWindow[] {
-	if (warning.provider === "openai-codex") return classifyResetGrant("openai-codex", {}, report).restorableWindows;
+	if (warning.provider === "openai-codex") return CODEX_RESET_WINDOWS;
 	// Several grants can share an expiry, so the warned grant is the one its id names, never an expiry match.
 	const credit =
 		warning.creditId === undefined
 			? undefined
 			: (report.resetCredits?.credits ?? []).find(candidate => candidate.id === warning.creditId);
-	if (credit) return classifyResetGrant(warning.provider, credit, report).restorableWindows;
+	if (credit) return classifyResetGrant(credit, report).restorableWindows;
 	const window: ClaudeResetWindow =
 		warning.limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : warning.limit.scope.tier === "fable" ? "fable" : "weekly";
 	return [window];
@@ -190,12 +189,7 @@ export function resetSpendVerdict(
 	const restorable = restorableResetWindows(report, warning);
 	// Last-chance spending happens at expiry, so judge consent by that moment's rule.
 	const consent = actionConsent(
-		{
-			target: { provider: warning.provider },
-			window: restorable[0] ?? "weekly",
-			restorableWindows: restorable,
-			expiresInMs: 0,
-		},
+		{ target: { provider: warning.provider }, restorableWindows: restorable, expiresInMs: 0 },
 		modes,
 	);
 	const kind = consent.mode === "no" ? "off" : consent.mode === "unset" ? "ask" : "auto";

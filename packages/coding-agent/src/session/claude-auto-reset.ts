@@ -374,9 +374,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			input.trigger === "blocked"
 				? (claudeRankingStrategy.scopeLimitsForReserve?.(report, { modelId: input.modelId }) ?? report.limits)
 				: report.limits;
-		const grant = classifyResetGrant(CLAUDE_PROVIDER, credit, report, limits);
-		// Unmeasured Fable usage (no row, no used fraction) restores nothing a
-		// salvage or restore could point at, so the grant stays unspent.
+		const grant = classifyResetGrant(credit, report, limits);
+		// A Fable grant with no measured Fable usage (no row, used fraction or
+		// server blocker) restores nothing worth a spend, so it stays unspent.
 		if (grant.kind === "fable" && (!grant.fullest || grant.fullest.used <= 0)) {
 			skip("no-fable-usage");
 			continue;
@@ -618,23 +618,17 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("incomplete-coverage");
 			continue;
 		}
-		const covered = snapshot.grant.coveredLimits;
-		if (covered.length === 0) {
-			skip("unsupported-window");
-			continue;
-		}
-		// A Fable grant is judged on the Fable cap alone: its five-hour coverage
-		// must never make ordinary 5h usage look like a salvage-worthy Fable spend.
+		// What a salvage restores: a Fable grant's Fable cap, else its fullest covered limit.
 		const fullest = snapshot.grant.fullest;
 		if (!fullest) {
-			skip("no-fable-usage");
+			skip("unsupported-window");
 			continue;
 		}
 		if (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION) {
 			skip("window-mostly-free");
 			continue;
 		}
-		const window: ClaudeResetWindow = snapshot.grant.kind === "fable" ? "fable" : claudeResetWindow(fullest.limit.id);
+		const window = fullest.window;
 		const consent = actionConsent(
 			{
 				target: snapshot.target,
@@ -652,7 +646,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			snapshot.credit.requiresLimit === true &&
 			(snapshot.grant.kind === "fable"
 				? !exhausted.includes(fullest.limit.id)
-				: serverBlockers.length === 0 && !covered.some(isExhausted))
+				: serverBlockers.length === 0 && !snapshot.grant.coveredLimits.some(isExhausted))
 		) {
 			skip("no-blocked-window");
 			continue;
