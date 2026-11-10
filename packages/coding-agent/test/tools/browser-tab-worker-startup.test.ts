@@ -522,6 +522,24 @@ describe("OMP-owned browser evaluation", () => {
 						const timedOut = await page
 							.waitForFunction(() => false, { timeout: 200 })
 							.then(() => "resolved", error => error.name + ": " + error.message);
+						// A predicate that never settles still times out at its deadline.
+						const stalled = await page
+							.waitForFunction(() => new Promise(() => {}), { timeout: 200 })
+							.then(() => "resolved", error => error.name + ": " + error.message);
+						// "mutation" polling sees a node that exists only until the task that added it ends.
+						const mutationWait = page.waitForFunction(() => document.querySelector("#flash")?.id, {
+							polling: "mutation",
+							timeout: 5_000,
+						});
+						// Give the wait time to install its observer; a timer poll would still miss the flash.
+						await new Promise(resolve => setTimeout(resolve, 500));
+						await page.evaluate(() => {
+							const flash = document.createElement("i");
+							flash.id = "flash";
+							document.body.append(flash);
+							Promise.resolve().then(() => Promise.resolve()).then(() => flash.remove());
+						});
+						const mutation = await mutationWait.then(handle => handle.jsonValue(), error => String(error));
 						const seen = {
 							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
 							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
@@ -531,6 +549,8 @@ describe("OMP-owned browser evaluation", () => {
 							$$eval: await page.$$eval("x-answer", elements => elements.map(element => element.answer)),
 							waitForFunction: await waited.jsonValue(),
 							timedOut,
+							stalled,
+							mutation,
 							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
 							registry: await page.evaluate(() => String(customElements)),
 							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
@@ -558,6 +578,8 @@ describe("OMP-owned browser evaluation", () => {
 						$$eval: [42, 42],
 						waitForFunction: "ready",
 						timedOut: "TimeoutError: Waiting failed: 200ms exceeded",
+						stalled: "TimeoutError: Waiting failed: 200ms exceeded",
+						mutation: "flash",
 						chained: 47,
 						registry: "[object CustomElementRegistry]",
 						leaked: [],

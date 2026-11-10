@@ -784,6 +784,58 @@ async function evaluateInRealm(
 }
 
 /**
+ * Page-side half of the run page's `waitForFunction` for `"raf"` and `"mutation"` polling: resolve with the first
+ * truthy value of `predicate(...args)`, checked at once and then on every animation frame, or on every DOM
+ * mutation in the document, or with `undefined` after `ms` (never when `null`).
+ */
+function waitInPage(
+	predicate: (...args: unknown[]) => unknown,
+	mode: string,
+	ms: number | null,
+	...args: unknown[]
+): Promise<unknown> {
+	type Observer = { observe(node: unknown, options: object): void; disconnect(): void };
+	const pageGlobal = globalThis as unknown as {
+		document: unknown;
+		requestAnimationFrame(callback: () => void): void;
+		setTimeout(callback: () => void, ms: number): void;
+		MutationObserver: new (callback: () => void) => Observer;
+	};
+	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+	let settled = false;
+	let observer: Observer | undefined;
+	const finish = (failed: boolean, value: unknown) => {
+		if (settled) return;
+		settled = true;
+		observer?.disconnect();
+		if (failed) reject(value);
+		else resolve(value);
+	};
+	const check = async () => {
+		if (settled) return;
+		try {
+			const value = await predicate(...args);
+			if (value) finish(false, value);
+		} catch (error) {
+			finish(true, error);
+		}
+		if (!settled && mode === "raf") pageGlobal.requestAnimationFrame(() => void check());
+	};
+	if (ms !== null) pageGlobal.setTimeout(() => finish(false, undefined), ms);
+	if (mode === "mutation") {
+		observer = new pageGlobal.MutationObserver(() => void check());
+		observer.observe(pageGlobal.document, {
+			attributes: true,
+			characterData: true,
+			childList: true,
+			subtree: true,
+		});
+	}
+	void check();
+	return promise;
+}
+
+/**
  * The `page` that `tab.run` code receives. The stealth patch runs Puppeteer's page evaluations in its isolated
  * world, where page globals and custom-element members do not exist; this page runs the code handed to
  * `evaluate`, `evaluateHandle`, `$eval`, `$$eval` and `waitForFunction` in the main world, as `tab.evaluate` does.
@@ -813,48 +865,71 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 			"$$eval",
 			async (selector: string, fn: PageFunction, ...args: unknown[]) => {
 				const elements = await page.$$(selector);
+				const target = realm();
+				// Adopt every match at once: one CDP round trip each, run together rather than in turn.
+				const adopted = await Promise.allSettled(elements.map(element => target.adoptHandle(element)));
 				try {
-					const target = realm();
-					const adopted = await adoptElementArgs(target, elements);
+					const failed = adopted.find(result => result.status === "rejected");
+					if (failed) throw failed.reason;
+					const nodes = adopted.map(result => (result as PromiseFulfilledResult<ElementHandle>).value);
+					const list = await target.evaluateHandle((...found: unknown[]) => found, ...nodes);
 					try {
-						const list = await target.evaluateHandle((...nodes: unknown[]) => nodes, ...adopted.args);
-						try {
-							return await evaluateInRealm(target, fn, [list, ...args], false);
-						} finally {
-							await list.dispose();
-						}
+						return await evaluateInRealm(target, fn, [list, ...args], false);
 					} finally {
-						await adopted.dispose();
+						await list.dispose();
 					}
 				} finally {
-					await Promise.all(elements.map(element => element.dispose()));
+					await Promise.all([
+						...adopted.map(result => (result.status === "fulfilled" ? result.value.dispose() : undefined)),
+						...elements.map(element => element.dispose()),
+					]);
 				}
 			},
 		],
 		[
 			"waitForFunction",
 			// Puppeteer's own wait installs its query bindings as globals of the world it polls, which every page
-			// script can see in the main world; poll by evaluating instead, across navigations, as its wait does.
+			// script can see in the main world. This evaluates instead, retrying across navigations as its wait does:
+			// "raf" and "mutation" polling wait in the page (see `waitInPage`), and a number or no `polling` polls on a
+			// timer every that many ms (100 by default, not Puppeteer's "raf": a hidden tab runs no animation frames).
 			async (fn: PageFunction, options: FrameWaitForFunctionOptions = {}, ...args: unknown[]) => {
 				const timeout = options.timeout ?? page.getDefaultTimeout();
+				const inPage = typeof options.polling === "string";
 				const interval = typeof options.polling === "number" ? options.polling : 100;
 				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
 				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
+				const timedOut = () => puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
+				const attempt = async (target: Realm, left: number): Promise<JSHandle> => {
+					if (!inPage) return (await evaluateInRealm(target, fn, args, true)) as JSHandle;
+					const predicate = await target.evaluateHandle(
+						typeof fn === "string" ? `() => (${fn})` : `(${fn.toString()})`,
+					);
+					try {
+						const ms = Number.isFinite(left) ? left : null;
+						const waitArgs = [predicate, options.polling, ms, ...args];
+						return (await evaluateInRealm(target, waitInPage as PageFunction, waitArgs, true)) as JSHandle;
+					} finally {
+						await predicate.dispose();
+					}
+				};
 				for (;;) {
 					throwIfAborted(waitSignal);
+					const left = Math.max(0, deadline - Date.now());
+					// The deadline also bounds a predicate that never settles, not only the polls between attempts.
+					const evalSignal = Number.isFinite(left)
+						? AbortSignal.any([waitSignal, AbortSignal.timeout(left)])
+						: waitSignal;
 					try {
 						const target = realm();
-						const value = (await untilAborted(waitSignal, () =>
-							evaluateInRealm(target, fn, args, true),
-						)) as JSHandle;
+						const value = (await untilAborted(evalSignal, () => attempt(target, left))) as JSHandle;
 						if (await target.evaluate(held => Boolean(held), value)) return value;
 						await value.dispose();
 					} catch (error) {
+						if (!waitSignal.aborted && evalSignal.aborted) throw timedOut();
 						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;
 					}
-					if (Date.now() + interval > deadline)
-						throw puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
-					await untilAborted(waitSignal, () => Bun.sleep(interval));
+					if (inPage ? Date.now() >= deadline : Date.now() + interval > deadline) throw timedOut();
+					if (!inPage) await untilAborted(waitSignal, () => Bun.sleep(interval));
 				}
 			},
 		],
