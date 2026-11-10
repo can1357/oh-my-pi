@@ -429,9 +429,10 @@ function seedRow(db: Database, row: SeedRow): void {
 			row.supersededBy ?? null,
 		],
 	);
-	db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, 'test')", [
+	db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)", [
 		row.id,
 		row.vector ?? "[1,0]",
+		currentEmbeddingModel(),
 	]);
 }
 

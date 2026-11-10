@@ -1317,7 +1317,9 @@ describe("Mnemopi backend lifecycle", () => {
 			// Spied right after start resolves: warmup yields to the event loop before its first query.
 			const query = vi.spyOn(started.getScopedRecallTargets()[0].memory.beam.db, "query");
 			const vectorReads = () =>
-				query.mock.calls.filter(([sql]) => sql.includes("FROM memory_embeddings WHERE memory_id IN")).length;
+				query.mock.calls.filter(
+					([sql]) => sql.includes("FROM memory_embeddings WHERE ") && sql.includes("memory_id IN"),
+				).length;
 			return { started, warm, vectorReads, ids };
 		};
 
@@ -1330,7 +1332,7 @@ describe("Mnemopi backend lifecycle", () => {
 			expect(warmedReads).toBeGreaterThan(0);
 
 			const target = started.getScopedRecallTargets()[0];
-			const results = await target.memory.beam.recall("qqqzzz", 10, {
+			const results = await target.memory.recall("qqqzzz", 10, {
 				channelId: target.bank,
 				queryEmbedding: [1, 0],
 			});
