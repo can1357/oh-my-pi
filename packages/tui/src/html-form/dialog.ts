@@ -33,7 +33,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
 import { Editor } from "../components/editor";
-import { Image } from "../components/image";
+import { Image, type ImageBudget } from "../components/image";
 import { Input } from "../components/input";
 import { renderTableRow, type TableColumn } from "../components/table";
 import {
@@ -86,9 +86,11 @@ import {
 	type TextField,
 } from "./parse";
 
-/** What the dialog needs from its `TUI`: the terminal's height and a way to ask for a frame. */
+/** What the dialog needs from its `TUI`: the terminal's height, a way to ask for a frame, and its image budget. */
 export interface HtmlFormHost {
 	readonly terminal: { readonly rows: number };
+	/** Gives pictures stable Kitty ids, so their placements leave with the form instead of outliving it. */
+	readonly imageBudget?: ImageBudget;
 	requestRender(): void;
 }
 
@@ -124,6 +126,7 @@ const CAPTION_MAX_ROWS = 4;
 /** Tallest a picture draws, in rows, and its share of the terminal below that. */
 const MAX_PICTURE_ROWS = 16;
 const PICTURE_SHARE = 0.35;
+let nextFormId = 0;
 /** Options a PgUp/PgDn moves an open dropdown's highlight by. */
 const DROPDOWN_PAGE = 5;
 /** Native action a text well's click sends, suffixed with the field index. */
@@ -295,6 +298,9 @@ export class HtmlFormDialog implements Component, Focusable {
 	#native: { key: string; node: NativeNode } | undefined;
 	readonly #media = new Map<MediaBlock, MediaSlot>();
 	readonly #mediaAbort = new AbortController();
+	/** Budget keys of this form's raster pictures, released on dispose so their placements go with the form. */
+	readonly #imageKeys: string[] = [];
+	readonly #imageKeyPrefix = `html-form${nextFormId++}`;
 	/** Bumped when a picture loads, fails or rasterizes: its rows change the panel's natural height. */
 	#mediaVersion = 0;
 	/** Each field's question ({@link fieldQuestions}): Review keys and the hidden row's summary. */
@@ -583,8 +589,12 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#stopCountdown();
 		this.#mediaAbort.abort();
 		for (const slot of this.#media.values()) {
-			if (slot.state === "ready" && slot.rows instanceof SvgFigure) slot.rows.dispose();
+			if (slot.state === "ready" && slot.rows instanceof SvgFigure) {
+				slot.rows.release();
+				slot.rows.dispose();
+			}
 		}
+		for (const key of this.#imageKeys) this.#options.tui?.imageBudget?.release(key);
 		this.#panel.dispose();
 	}
 
@@ -619,20 +629,27 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#options.tui?.requestRender();
 	}
 
-	/** Rows draw a raster through {@link Image} and an SVG through {@link SvgFigure}; natively both are image blobs. */
+	/**
+	 * Rows draw a raster through {@link Image} and an SVG through {@link SvgFigure}; natively both are image blobs.
+	 * Both go through the TUI's image budget: without an id, a Kitty image is a self-contained
+	 * `a=T` placement that repainting the rows never removes, so it outlives the form.
+	 */
 	#readyMedia(media: FormMedia, alt: string): MediaSlot {
 		const maxRows = this.#pictureRows();
+		const budget = this.#options.tui?.imageBudget;
 		const native = nativeImageNode(media.bytes, media.mime, { alt, max: { h: `${maxRows}lines` } });
 		if (isSvgMedia(media)) {
-			const figure = new SvgFigure({ maxRows: () => maxRows, onChange: () => this.#mediaChanged() });
+			const figure = new SvgFigure({ budget, maxRows: () => maxRows, onChange: () => this.#mediaChanged() });
 			figure.update(new TextDecoder().decode(media.bytes), true);
 			return { state: "ready", rows: figure, native };
 		}
+		const imageKey = `${this.#imageKeyPrefix}:${this.#imageKeys.length}`;
+		this.#imageKeys.push(imageKey);
 		const image = new Image(
 			media.bytes.toBase64(),
 			media.mime,
 			{ fallbackColor: text => theme.fg("dim", text) },
-			{ maxHeightCells: maxRows, filename: alt, requestRender: () => this.#mediaChanged() },
+			{ maxHeightCells: maxRows, filename: alt, budget, imageKey, requestRender: () => this.#mediaChanged() },
 		);
 		return { state: "ready", rows: image, native };
 	}

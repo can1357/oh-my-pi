@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { setKeybindings, type TerminalFrameProvider } from "@oh-my-pi/pi-tui";
+import { setKeybindings, type TerminalFrameProvider, TUI } from "@oh-my-pi/pi-tui";
 import { defaultFormData, fieldError, formAnswers } from "@oh-my-pi/pi-tui/html-form/data";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -15,6 +15,10 @@ import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } 
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { VirtualRenderScheduler } from "./virtual-render-scheduler";
+import { VirtualTerminal } from "./virtual-terminal";
 
 const ENTER = "\r";
 const SPACE = " ";
@@ -229,6 +233,70 @@ describe("html form", () => {
 				expect(texts.some(line => line.startsWith("▣ old logo — couldn't load"))).toBe(true);
 			} finally {
 				form.dispose();
+			}
+		});
+
+		it("places a Kitty picture under its own id and deletes it when the form closes", async () => {
+			// An id-less `a=T` placement survives the rows that drew it being repainted,
+			// so a closed form would leave its picture painted over whatever comes next.
+			const terminalInfo = TERMINAL as unknown as { id: string; imageProtocol: ImageProtocol | null };
+			const originalProtocol = terminalInfo.imageProtocol;
+			const originalId = terminalInfo.id;
+			terminalInfo.id = "xterm";
+			const originalGraphics = { ...getKittyGraphics() };
+			const originalCells = { ...getCellDimensions() };
+			terminalInfo.imageProtocol = ImageProtocol.Kitty;
+			setKittyGraphics({ unicodePlaceholders: false });
+			setCellDimensions({ widthPx: 10, heightPx: 10 });
+			const term = new VirtualTerminal(60, 30);
+			const writes: string[] = [];
+			const realWrite = term.write.bind(term);
+			vi.spyOn(term, "write").mockImplementation((data: string) => {
+				writes.push(data);
+				realWrite(data);
+			});
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const loaded = Promise.withResolvers<void>();
+			const form = new HtmlFormDialog(
+				parseHtmlForm(`<form><img src="data:image/png;base64,${PNG_1PX}" alt="dot">
+					<label><input type="checkbox" name="ok"> OK</label></form>`),
+				{
+					onSubmit: vi.fn(),
+					onCancel: vi.fn(),
+					tui: {
+						terminal: tui.terminal,
+						imageBudget: tui.imageBudget,
+						requestRender: () => {
+							tui.requestRender();
+							loaded.resolve();
+						},
+					},
+				},
+			);
+			tui.addChild(form);
+			try {
+				tui.start();
+				await loaded.promise;
+				await scheduler.settle(term);
+				const shown = writes.join("");
+				expect(shown).not.toContain("\x1b_Ga=T");
+				const id = /\x1b_Ga=p,[^\x1b]*\bi=(\d+)/u.exec(shown)?.[1];
+				expect(id).toBeDefined();
+
+				writes.length = 0;
+				tui.removeChild(form);
+				form.dispose();
+				tui.requestRender();
+				await scheduler.settle(term);
+				expect(writes.join("")).toContain(`\x1b_Ga=d,d=I,i=${id}`);
+			} finally {
+				tui.stop();
+				vi.restoreAllMocks();
+				terminalInfo.imageProtocol = originalProtocol;
+				terminalInfo.id = originalId;
+				setKittyGraphics(originalGraphics);
+				setCellDimensions(originalCells);
 			}
 		});
 	});

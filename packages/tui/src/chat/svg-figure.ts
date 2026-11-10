@@ -261,6 +261,11 @@ export class SvgFigure implements Component {
 		this.#timer = undefined;
 	}
 
+	/** Retire the current raster as soon as no frame shows it: for an owner that is closing for good. */
+	release(): void {
+		if (this.#raster) this.#options.budget?.release(this.#raster.key);
+	}
+
 	debugState(): Record<string, unknown> {
 		return {
 			final: this.#final,
