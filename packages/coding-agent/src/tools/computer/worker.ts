@@ -1496,7 +1496,11 @@ export class ComputerWorkerCore {
 				// addon; normal CLI startup and selector pings never execute desktop code.
 				const createSession =
 					this.#createSession ?? (await import("@oh-my-pi/pi-natives/desktop")).createDesktopSession;
-				const session = await createSession({ display: snapshot.display, escapeStopKey: escape.key });
+				const session = await createSession({
+					display: snapshot.display,
+					escapeStopKey: escape.key,
+					agentLabel: snapshot.agentLabel,
+				});
 				const guarded = this.#guard(session);
 				this.#session = session;
 				this.#guarded = guarded;
