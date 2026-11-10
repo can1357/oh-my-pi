@@ -944,6 +944,10 @@ describe("devin catalog seed", () => {
 			const devinHost = await idsAfterFailedDiscovery("default");
 			expect(devinHost).toContain("swe-2-high");
 			expect(devinHost).not.toContain("swe-1-6-fast");
+			// Devin's host spelled with a trailing slash is still Devin's host.
+			expect(await idsAfterFailedDiscovery("default-slash", "https://server.codeium.com/")).not.toContain(
+				"swe-1-6-fast",
+			);
 			// A configured Cascade host may still serve it, so its cached row stays.
 			expect(await idsAfterFailedDiscovery("configured", "https://cascade.internal")).toContain("swe-1-6-fast");
 		} finally {

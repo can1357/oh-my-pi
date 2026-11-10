@@ -350,13 +350,16 @@ const DEVIN_RETIRED_SEED_MODEL_IDS = ["swe-1-6-fast"] as const;
 export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): ModelManagerOptions<"devin-agent"> {
 	const { apiKey, baseUrl, fetch } = config;
 	const staticModels = seedModels<"devin-agent">("devin");
-	const defaultHost = baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL;
+	// Same canonical form `fetchDevinModels` requests: trailing slashes dropped.
+	const host = baseUrl?.replace(/\/+$/, "");
+	const defaultHost = host === undefined || host === DEVIN_DEFAULT_BASE_URL;
 	return {
 		providerId: "devin",
 		cacheProviderId: resolveModelCacheProviderId("devin"),
 		...(defaultHost ? { dropCachedModelIdsOnStaticMismatch: DEVIN_RETIRED_SEED_MODEL_IDS } : undefined),
 		// A configured host serves its own Cascade deployment; keep the seed on it.
-		staticModels: defaultHost ? staticModels : staticModels.map(model => ({ ...model, baseUrl })),
+		staticModels:
+			baseUrl === undefined || defaultHost ? staticModels : staticModels.map(model => ({ ...model, baseUrl })),
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
