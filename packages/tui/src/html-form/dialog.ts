@@ -56,7 +56,6 @@ import {
 	type NativeUiEvent,
 	type TspSpan,
 } from "../native/node";
-import { formatTooltipKey } from "../key-hint-format";
 import { actionBar, actionButton, itemIndex } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 import type { AskDialogInputGuard } from "../overlays/ask-dialog";
@@ -133,12 +132,6 @@ const EDIT_ACT = "edit:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
 const OTHER_ITEM = "other";
 const OTHER_PLACEHOLDER = "type your own";
-/**
- * Tern pads an accent button 14px left and 8px right, leaving room for the keycap after its label,
- * but hides keycaps inside the ask card, so Next, Submit and Show sit 6px right of centre. An en
- * space (6.25px at the button's 12.5px face) after the label evens the two sides.
- */
-const ACCENT_TAIL = "\u2002";
 /** Widest a question tab's label or a Review key grows before it is clipped. */
 const TAB_LABEL_WIDTH = 28;
 /** Below this a tab shows its number alone; a clipped label any shorter reads as noise. */
@@ -1819,23 +1812,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
 			...(lead ? [null] : []),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
-			...(next
-				? [
-						actionButton(
-							submit ? "Next" : `Next${ACCENT_TAIL}`,
-							"next",
-							submit ? {} : { tone: "accent", title: "Next" },
-						),
-					]
-				: []),
+			...(next ? [actionButton("Next", "next", submit ? {} : { tone: "accent" })] : []),
 			...(submit
-				? [
-						actionButton(`${SUBMIT_LABEL}${ACCENT_TAIL}`, "submit", {
-							...(next ? {} : { keys: "enter" }),
-							tone: "accent",
-							title: next ? SUBMIT_LABEL : `${SUBMIT_LABEL}  ${formatTooltipKey("enter")}`,
-						}),
-					]
+				? [actionButton(SUBMIT_LABEL, "submit", { ...(next ? {} : { keys: "enter" }), tone: "accent" })]
 				: []),
 		]);
 	}
@@ -1849,11 +1828,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			// The summary grows (`omp.ask.summary`), end-aligning Cancel and Show.
 			text([span("Question  ", "muted"), span(this.#hiddenSummary())], { truncate: "end", role: "omp.ask.summary" }),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
-			actionButton(`Show${ACCENT_TAIL}`, "show", {
-				tone: "accent",
-				title: hideKey ? `Show  ${formatTooltipKey(hideKey)}` : "Show",
-				...(hideKey ? { keys: hideKey } : {}),
-			}),
+			actionButton("Show", "show", { tone: "accent", ...(hideKey ? { keys: hideKey } : {}) }),
 		);
 		return col([actionBar(items)], { role: "omp.editor.ask.hidden", gap: "md" });
 	}
