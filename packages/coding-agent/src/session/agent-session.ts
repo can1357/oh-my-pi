@@ -1164,6 +1164,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
 	/** Aborts that only stopped a settled turn (see `abort({ turnStop })`): counted out of the cancellation generation. */
 	#turnStopAborts = 0;
+	/** An abort() is cancelling the held passes: their prompts' cancellation listeners must not abort the turn again. */
+	#cancellingHoldsForAbort = false;
 	/** A compaction continuation a `subagent_stop` hold stopped from starting; the hold's release schedules it again. */
 	#heldCompactionContinuation:
 		| { options: CompactionContinuationOptions; cancellationGeneration: number; promptSequence: number }
@@ -9093,17 +9095,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// abort that landed after its capture) must not start the continuation.
 		// Checked after preprocessing and after the abort check above, since
 		// cancelling the pass aborts the holder's turn, with no await between here
-		// and dispatch. A plain wait can outlast an abort() the same way the
-		// preprocessing can, so the generation is checked again after it; a user's
-		// prompt needs no second check, as the abort that cancels the holder's turn
-		// bumps the generation itself.
+		// and dispatch. A wait can outlast an abort() the same way the preprocessing can, so the generation is
+		// checked again after it. The abort that stops the holder's turn for a user's prompt is a turn-stop,
+		// which is no cancellation.
 		if (holder) {
 			holder.cancel.signal.throwIfAborted();
 		} else if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
-			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
+			if (this.#cancellationGeneration() !== waitGeneration) {
 				outcome.sessionClaimed = false;
 				this.#reportDroppedPrompt(typedText, options, followUps);
 				if (options?.throwOnDrop) throw new PromptDroppedError();
@@ -9258,13 +9259,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		},
 	): Promise<boolean> {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
-		// A user skill prompt cancels an active stop pass; agent prompts wait for it, and are dropped when an
-		// abort() lands meanwhile (the abort that cancels the holder's turn for a user's prompt is not one).
+		// A user skill prompt cancels an active stop pass; agent prompts wait for it. Either is dropped when an
+		// abort() lands meanwhile (the abort that stops the holder's turn for a user's prompt is a turn-stop).
 		if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
-			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
+			if (this.#cancellationGeneration() !== waitGeneration) {
 				this.#reportDroppedCustomPrompt(message, options, followUps);
 				return false;
 			}
@@ -9408,10 +9409,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const cancelsPass = message.attribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
-			// A plain wait can outlast an abort() like the image preparation above: drop the prompt the same
-			// way. A user's prompt cancels the pass, and the abort that stops the holder's turn bumps the
-			// generation; the internal stop of a settled turn is no cancellation.
-			if (!cancelsPass && (this.#cancellationGeneration() !== waitGeneration || this.#isDisposed)) {
+			// A wait can outlast an abort() like the image preparation above: drop the prompt the same way. The
+			// abort that stops the holder's turn for a user's prompt is a turn-stop, which is no cancellation.
+			if (this.#cancellationGeneration() !== waitGeneration || this.#isDisposed) {
 				outcome.sessionClaimed = false;
 				this.#reportDroppedCustomPrompt(message, options, followUps);
 				return false;
@@ -11225,10 +11225,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
 			// An abort() during a plain wait supersedes only the turn, as one during the context-replacement
-			// wait above does: the message stays in the transcript, delivered like one that triggers none. A
-			// user's message needs no check, as the abort that cancels the holder's turn bumps the generation;
-			// the internal stop of a settled turn is no cancellation.
-			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
+			// wait above does: the message stays in the transcript, delivered like one that triggers none. The
+			// abort that stops the holder's turn for a user's message is a turn-stop, which is no cancellation.
+			if (this.#cancellationGeneration() !== waitGeneration) {
 				options = { ...options, triggerTurn: false, deliverAs: undefined };
 			}
 		}
@@ -12444,8 +12443,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		preserveCompaction?: boolean;
 		/**
 		 * The abort only ends a turn whose outcome is already settled (a yield parked behind owner work, a soft
-		 * budget stop) and the session goes on: work it still owes, such as a deferred next-turn message or a
-		 * compaction's continuation, is not cancelled by it. Every other abort counts as a cancellation.
+		 * budget stop) or that a user prompt's cancelled `subagent_stop` pass was running, and the session goes
+		 * on: work it still owes, such as a deferred next-turn message or a compaction's continuation, is not
+		 * cancelled by it, and it does not cancel the held passes. Every other abort (except a manual compaction's
+		 * startup) is an interrupt: it cancels them.
 		 */
 		turnStop?: boolean;
 	}): Promise<void> {
@@ -12481,7 +12482,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
-			if (options?.turnStop) this.#turnStopAborts++;
+			if (options?.turnStop) {
+				this.#turnStopAborts++;
+			} else if (!options?.preserveCompaction) {
+				// An explicit interrupt (a user's Esc, an extension's ctx.abort(), a session switch) cancels every held
+				// `subagent_stop` pass: a handler still pending must not, with its later `block`, start a continuation
+				// after the cancellation finished. The internal stop of a settled turn and a manual compaction's startup
+				// abort are not interrupts. The holders' pending prompts stop on the cancelled hold; this abort already
+				// stops the running turn, so the cancellation does not abort it again.
+				this.#cancellingHoldsForAbort = true;
+				try {
+					for (const hold of this.#stopPassHolds) hold.cancel.abort();
+				} finally {
+					this.#cancellingHoldsForAbort = false;
+				}
+			}
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -13995,7 +14010,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			prompt: async (text, options) => {
 				// A user prompt cancelling the pass must not wait behind the holder's own
 				// turn: stop it, so the pass can drop its candidate and release.
-				const stopTurn = (): void => void this.abort();
+				const stopTurn = (): void => {
+					// An abort() that cancelled this pass stops the turn itself. A user prompt's cancel stops it as a
+					// turn-stop, which is no cancellation of what the session still owes (and not of that prompt).
+					if (!this.#cancellingHoldsForAbort) void this.abort({ turnStop: true });
+				};
 				state.cancel.signal.addEventListener("abort", stopTurn, { once: true });
 				try {
 					state.cancel.signal.throwIfAborted();

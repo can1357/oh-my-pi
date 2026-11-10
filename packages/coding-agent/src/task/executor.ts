@@ -775,9 +775,9 @@ export const SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED =
 function subagentStopRefusalUnresolved(structured: boolean): string {
 	return structured ? SUBAGENT_STOP_REFUSAL_UNRESOLVED : SUBAGENT_STOP_REPORT_REFUSAL_UNRESOLVED;
 }
-/** Why a pass's candidate was dropped: an explicit user prompt cancelled the pass before its verdict. */
+/** Why a pass's candidate was dropped: an explicit user prompt or session interrupt cancelled the pass before its verdict. */
 const SUBAGENT_STOP_PASS_CANCELLED =
-	"a user prompt cancelled the subagent_stop pass before its verdict, so the result was not published";
+	"a user prompt or interrupt cancelled the subagent_stop pass before its verdict, so the result was not published";
 /** Why a wake turn's candidate was dropped: a newer turn took the session before handlers could judge it. */
 const WAKE_SUPERSEDED_UNJUDGED =
 	"a newer turn took the session before the subagent_stop handlers judged this turn's result, so it was not published";
