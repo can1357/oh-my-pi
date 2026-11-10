@@ -565,8 +565,11 @@ pub struct DiagSite<'a> {
 	pub origin:     &'a Origin,
 	/// Current line.
 	pub line:       u32,
-	/// The text being read is a `.` file, so a syntax error in it is not the
-	/// `-c` string's and bash does not print `-c`.
+	/// The diagnostic was raised while some frame has a recorded source
+	/// file — the file a `.` is reading, or, for a running function, the
+	/// file it was defined in (`$0` for one defined in the `-c` string).
+	/// [`Self::shell_name`] is then that file, and a syntax error under it
+	/// is not reported as the `-c` string's: bash does not print `-c`.
 	pub sourced:    bool,
 	/// The locale is UTF-8 (which bytes print as they are in names).
 	pub utf8:       bool,
