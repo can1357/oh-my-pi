@@ -264,6 +264,23 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(1);
 	});
 
+	it("preserves disabled and enabled MCP tools across refreshes while enabling new tools", async () => {
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
+		const search = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search nucleus");
+		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
+		const lookup = createMcpCustomTool("mcp__nucleus_lookup", "nucleus", "lookup", "Lookup nucleus");
+
+		await session.refreshMCPTools([search, fetch]);
+		await session.setActiveToolsByName(["read", fetch.name]);
+		await session.refreshMCPTools([search, fetch]);
+		expect(session.getEnabledToolNames()).toEqual(expect.arrayContaining(["read", fetch.name]));
+		expect(session.getEnabledToolNames()).not.toContain(search.name);
+
+		await session.refreshMCPTools([search, fetch, lookup]);
+		expect(session.getEnabledToolNames()).toEqual(expect.arrayContaining(["read", fetch.name, lookup.name]));
+		expect(session.getEnabledToolNames()).not.toContain(search.name);
+	});
+
 	for (const exit of ["restore snapshot", "preserve active"] as const) {
 		it(`restores MCP tools after a failed vibe exit is retried (${exit})`, async () => {
 			let failExit = false;
