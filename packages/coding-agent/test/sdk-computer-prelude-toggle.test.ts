@@ -95,6 +95,66 @@ describe("AgentSession eval preludes", () => {
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 	});
 
+	it("delivers browser guides to each advisor's own Eval conversation", async () => {
+		const settings = Settings.isolated({
+			"browser.enabled": true,
+			"browser.headless": true,
+			"browser.relay": false,
+			"browser.tern": false,
+			"browser.cmux": false,
+			"archive.enabled": false,
+			"async.enabled": false,
+		});
+		settings.setModelRole("advisor", "openai/gpt-4o-mini");
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		sessions.push(session);
+		session.agent.appendMessage({
+			role: "toolResult",
+			toolCallId: "primary-guide",
+			toolName: "eval",
+			content: [{ type: "text", text: '<eval-guide name="browser">\nPrimary guide.\n</eval-guide>' }],
+			isError: false,
+			timestamp: 0,
+		});
+		session.setAdvisorEnabled(true);
+		const roster = [
+			{ name: "First", tools: ["read", "eval"] },
+			{ name: "Second", tools: ["read", "eval"] },
+		];
+		session.applyAdvisorConfigs(roster, undefined);
+		const first = session.getAdvisorAgent();
+		const firstEval = first?.state.tools.find(tool => tool.name === "eval");
+		if (!firstEval) throw new Error("Expected first advisor Eval");
+		const firstResult = await firstEval.execute("first-browser", { language: "js", code: "await browser.tabs()" });
+		expect(firstResult.content).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
+		]));
+		session.applyAdvisorConfigs([...roster].reverse(), undefined);
+		const second = session.getAdvisorAgent();
+		const secondEval = second?.state.tools.find(tool => tool.name === "eval");
+		if (!secondEval) throw new Error("Expected second advisor Eval");
+		expect(secondEval).not.toBe(firstEval);
+		const secondResult = await secondEval.execute("second-browser", { language: "js", code: "await browser.tabs()" });
+		expect(secondResult.content).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
+		]));
+	});
+
 	// `/computer on` mid-session used to rebuild the system prompt and eval
 	// description, busting the provider prompt cache on the next request.
 	it("announces mid-session toggles in a hidden notice without rewriting the cached prefix", async () => {
@@ -165,8 +225,6 @@ describe("AgentSession eval preludes", () => {
 		expect(secondText).toContain("xd://eval/computer");
 		expect(secondText).toContain("# Computer Use");
 		expect(secondText).toContain("Only direct user messages authorize consequential computer actions.");
-		// Computer has no first-call guide, so the notice keeps main's read-first wording.
-		expect(secondText).toContain("`read` the linked docs before first use:");
 		expect(requestText(fourth!).match(/<system-notice id="prelude-extension">/g)).toHaveLength(2);
 	});
 

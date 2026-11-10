@@ -117,18 +117,7 @@ Relay (`app: "relay"`: the user's Chrome through the omp relay):
 - `target` borrows an existing tab by URL/title substring. Reopening an open name keeps its tab.
 - `app: "auto"` skips the relay however it is enabled; the next default applies.
 - It is the user's real logged-in browser: sites attribute actions to the user. NEVER navigate a borrowed tab without authorization.
-{{#if linux}}
-- On Linux under X11, Chrome 150 and later raises its window, taking the user's next keystrokes,
-  when a mouse or touch press lands in a tab its window shows (`shown` in the relay's `browser.targets()`) while another window is in front.
-  - Presses: `click`, `dblclick`, `tap`, `drag`, `mouseDown`, `clickAt`,
-    `check`/`uncheck` unless already in the requested state (a refused change still presses; unchecking a native radio does not),
-    `uploadFile` on anything but an `<input type=file>`.
-  - A control that opens a new tab or popup may raise Chrome however it is activated.
-  - Not presses: keys (`type`, `fill`, `press`), `focus`, `select`, `hover`, scrolling, screenshots.
-  - A tab its window is not showing never comes forward.
-  - When the user must keep their app in front, on a shown tab use
-    `focus()` then `press("Enter")` for a button, `press("Space")` for a checkbox, `uploadFile` on the file input itself.
-{{/if}}
+{{{x11Guidance}}}
 
 Tern:
 

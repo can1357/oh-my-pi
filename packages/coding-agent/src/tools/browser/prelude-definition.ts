@@ -3,6 +3,7 @@ import type { Settings } from "../../config/settings";
 import type { EvalPreludeDefinition } from "../../eval/preludes";
 import { redactUrlForLog } from "../../mcp/json-rpc";
 import relayGuidance from "../../prompts/system/browser-relay.md" with { type: "text" };
+import x11Guidance from "../../prompts/system/browser-x11.md" with { type: "text" };
 import browserCoreDescription from "../../prompts/tools/browser-core.md" with { type: "text" };
 import browserDescription from "../../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../../sdk";
@@ -18,10 +19,14 @@ import { cfgBrowserCdpUrl, cfgBrowserEnabled, cfgBrowserRelayUrl } from "./setti
  * elsewhere when a configured browser (`browser.cdpUrl`, `browser.relayUrl`) is on another machine, which may be Linux.
  */
 export function browserDocumentation(settings: Settings, platform: NodeJS.Platform = process.platform): string {
+	return prompt.render(browserDescription, { x11Guidance: browserX11Guidance(settings, platform) });
+}
+
+function browserX11Guidance(settings: Settings, platform: NodeJS.Platform = process.platform): string | undefined {
 	const remoteBrowser = [cfgBrowserCdpUrl.get(settings), cfgBrowserRelayUrl.get(settings)].some(
 		url => typeof url === "string" && url.trim() !== "" && !isLoopbackRelayUrl(url.trim()),
 	);
-	return prompt.render(browserDescription, { linux: platform === "linux" || remoteBrowser });
+	return platform === "linux" || remoteBrowser ? x11Guidance.trim() : undefined;
 }
 
 /** Build the browser eval facade after an eval runtime first requests preludes. */
@@ -40,14 +45,17 @@ export function createBrowserPreludeDefinition(
 			return browserDocumentation(session.settings);
 		},
 		firstCallDocumentation: browserCoreDescription,
-		guidance: fallback
-			? prompt.render(relayGuidance, {
-					// The block reaches the model provider: never echo userinfo or token params.
-					cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
-					tern: fallback.kind === "tern",
-					cmux: fallback.kind === "cmux",
-				})
-			: undefined,
+		get guidance() {
+			const relay = fallback
+				? prompt.render(relayGuidance, {
+						// The block reaches the model provider: never echo userinfo or token params.
+						cdpUrl: fallback.kind === "connected" ? redactUrlForLog(fallback.cdpUrl) : undefined,
+						tern: fallback.kind === "tern",
+						cmux: fallback.kind === "cmux",
+					})
+				: undefined;
+			return [relay, browserX11Guidance(session.settings)].filter(Boolean).join("\n\n") || undefined;
+		},
 		javascript: browserJavascript,
 		python: browserPython,
 		exports: ["browser"],

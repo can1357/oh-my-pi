@@ -1498,7 +1498,7 @@ export class SessionAdvisors {
 				}
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
-			const advisorAgent = new Agent({
+			advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
 					model: advisorModel,
