@@ -1418,6 +1418,13 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByStop(): boolean;
 	/**
+	 * True from a `subagent_stop` refusal until a fresh candidate lands (a yield, or for a `structured: false`
+	 * run a new report turn). Unlike {@link yieldInvalidatedByStop}, cancelling the continuation, a failure or
+	 * any other ending of the run does not clear it: finalization enforces that refused output is never
+	 * published, so it must be able to tell however the run ended.
+	 */
+	refusalStands(): boolean;
+	/**
 	 * Drop the candidate a `subagent_stop` pass did not accept: every recorded
 	 * yield item it assembled from, or a message-result run's last report turn.
 	 * `refused`: a handler refused it, so the run demands a fresh one after the
@@ -1551,6 +1558,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldInvalidatedByAsync = false;
 	/** True once a `subagent_stop` handler refused the recorded yield. */
 	let yieldInvalidatedByStop = false;
+	/**
+	 * True from a `subagent_stop` refusal until a fresh candidate lands. Unlike {@link yieldInvalidatedByStop}
+	 * a cancellation does not clear it: refused output must stay unpublished however the run then ends.
+	 */
+	let refusalStands = false;
 	/** Epoch ms the current terminal yield was recorded; cleared when it is invalidated. */
 	let yieldAcceptedAt: number | undefined;
 	let yieldTurnStopRequested = false;
@@ -1916,6 +1928,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldInvalidatedByStop = false;
+				refusalStands = false;
 				yieldAcceptedAt = Date.now();
 				// Submitted: the remaining work is finalization (or waiting on owned
 				// async jobs), so stop showing the last stale self-estimate.
@@ -2286,7 +2299,10 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							lastReportTurnText = text;
 							// A message-result run records no yield, so a fresh report turn is
 							// the only thing that supersedes a refused one.
-							if (!structured) yieldInvalidatedByStop = false;
+							if (!structured) {
+								yieldInvalidatedByStop = false;
+								refusalStands = false;
+							}
 						} else if (completedServerWork) lastReportTurnText = undefined;
 					}
 					// A yield awaiting validation suppresses the budget check for
@@ -2485,10 +2501,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
 		yieldInvalidatedByStop: () => yieldInvalidatedByStop,
+		refusalStands: () => refusalStands,
 		rejectCandidate: verdict => {
 			yieldCalled = false;
 			// An unjudged candidate was never refused: a refusal that already stands on the run stays in force.
 			if (verdict !== "unjudged") yieldInvalidatedByStop = verdict === "refused";
+			if (verdict === "refused") {
+				// Refused output is never published, whatever ends the run: it leaves the run's output with the
+				// candidate, and the standing refusal (which only a fresh candidate clears, not a cancellation)
+				// makes finalization drop the rest.
+				refusalStands = true;
+				outputChunks.length = 0;
+				finalOutputChunks.length = 0;
+			}
 			yieldAcceptedAt = undefined;
 			// The 99% set when the candidate latched is stale: the run works again.
 			progress.completionPercent = undefined;
@@ -3221,15 +3246,19 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// the narration of earlier turns.
 	const structured = args.structured !== false;
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
-	// A `subagent_stop` handler refused the run's candidate (its `yield`, or a
-	// message-result run's report turn) and no continuation turn produced a
-	// replacement: the payload was explicitly rejected, so none of it may be
-	// published. Dropping the yield items keeps the refused report out of
-	// result assembly, the `<id>.md` artifact, and the structured sidecar; on a
-	// resumed turn that leaves the previous accepted artifact (and its sidecar)
-	// in place. The child's transcript remains the audit trail — the refusal
-	// gates publication, not the record of what ran.
-	const refusedYield = monitor.yieldInvalidatedByStop() && !monitor.yieldCalled();
+	// Refused output is never published, however the run ended. A `subagent_stop`
+	// handler refused the run's candidate (its `yield`, or a message-result run's
+	// report turn) and no fresh candidate has landed since: the payload was
+	// explicitly rejected, so none of it may be published, whether a continuation
+	// failed to replace it or the run was cancelled, failed or timed out first.
+	// This reads the monitor's standing refusal, which only a fresh candidate
+	// clears, not the unresolved-refusal flag a cancelled run reports instead.
+	// Dropping the yield items keeps the refused report out of result assembly,
+	// the `<id>.md` artifact, and the structured sidecar; on a resumed turn that
+	// leaves the previous accepted artifact (and its sidecar) in place. The
+	// child's transcript remains the audit trail — the refusal gates
+	// publication, not the record of what ran.
+	const refusedYield = monitor.refusalStands() && !monitor.yieldCalled();
 	const yieldItems = refusedYield ? undefined : (progress.extractedToolData?.yield as YieldItem[] | undefined);
 	if (refusedYield && progress.extractedToolData) {
 		// The run failed on the refusal, so the rejected payload must not reach
