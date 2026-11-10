@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Cursor hiding Claude Fable 5, 5.1 and 5.2: models Cursor flags as requiring data retention are listed, since Cursor serves them with ghost mode on
+- Fixed Cursor hiding Claude Fable 5, 5.1 and 5.2: models Cursor flags as requiring data retention are listed, since Cursor serves them with ghost mode on ([#18777](https://github.com/can1357/oh-my-pi/pull/18777) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ## [18.18.7] - 2026-11-10
 
