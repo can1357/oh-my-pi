@@ -90,17 +90,18 @@ class "gemini" {
 			thinking-efforts "low" "medium" "high"
 		}
 	}
-	// Gemini 4 Argon's introductory list price ($2/$10, $0.10 cached) ends
-	// 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20 cached, on the
-	// Gemini API and Vertex global endpoint alike. Cloud Billing days start at
-	// midnight US Pacific. Both cards are pinned over whatever stencil.so or
-	// the bundled pricing peer reports: the switch needs no regeneration, and
-	// a row built after upstream catches up still prices earlier requests at
-	// the introductory rate.
-	// https://ai.google.dev/gemini-api/docs/pricing
+	// Gemini 4 Argon's and Carbon's introductory list price ($2/$10, $0.10
+	// cached) ends 2026-11-30; from 2026-12-01 Google bills $4/$20, $0.20
+	// cached, on the Gemini API and Vertex global endpoint alike. Cloud Billing
+	// days start at midnight US Pacific. Both cards are pinned over whatever
+	// stencil.so or the bundled pricing peer reports: the switch needs no
+	// regeneration, and a row built after upstream catches up still prices
+	// earlier requests at the introductory rate.
+	// https://aistudio.google.com/docs/pricing
 	// https://cloud.google.com/vertex-ai/generative-ai/pricing
+	// https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/
 	on "google" "google-vertex" "google-antigravity" {
-		models "gemini-4-argon" {
+		models "gemini-4-argon" "gemini-4-carbon" {
 			cost-patch {
 				input 2
 				output 10
