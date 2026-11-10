@@ -174,7 +174,9 @@ describe("prefixed tool rows", () => {
 								{ name: "unrelated", question: "Unrelated?", answer: "First" },
 								{ name: "db", question: "Database?", answer: "First" },
 							],
-							notes: [{ name: "db", question: "Database?", option: "Second", text: "Team standard" }],
+							notes: [
+								{ name: "db", question: "Database?", option: "Second", value: "second", text: "Team standard" },
+							],
 						},
 					},
 					{ expanded: false, isPartial: false },

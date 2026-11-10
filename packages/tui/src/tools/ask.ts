@@ -105,14 +105,15 @@ function detailsNotes(details: AskToolDetails | undefined): OptionNote[] {
 	const notes: OptionNote[] = [];
 	for (const entry of raw) {
 		if (!isRecord(entry)) continue;
-		const { name, question, option, text } = entry;
+		const { name, question, option, value, text } = entry;
 		if (
 			typeof name === "string" &&
 			typeof question === "string" &&
 			typeof option === "string" &&
+			typeof value === "string" &&
 			typeof text === "string"
 		) {
-			notes.push({ name, question, option, text });
+			notes.push({ name, question, option, value, text });
 		}
 	}
 	return notes;

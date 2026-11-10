@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Ask forms support `n` on radio/checkbox options and `Alt+n` on select-menu options to add or edit notes, with selected notes shown alongside submitted answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+- Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
 
 ## [18.18.7] - 2026-11-10
 

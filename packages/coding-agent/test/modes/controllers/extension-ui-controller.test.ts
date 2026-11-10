@@ -316,7 +316,7 @@ describe("ExtensionUiController form dialog", () => {
 
 		expect(await pending).toEqual({
 			data: { db: "postgres" },
-			notes: [{ name: "db", question: "Database", option: "Postgres", text: "shared cache" }],
+			notes: [{ name: "db", question: "Database", option: "Postgres", value: "postgres", text: "shared cache" }],
 		});
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
@@ -341,7 +341,7 @@ describe("ExtensionUiController form dialog", () => {
 
 		expect(await pending).toEqual({
 			data: { db: "sqlite" },
-			notes: [{ name: "db", question: "Database", option: "SQLite", text: "local store" }],
+			notes: [{ name: "db", question: "Database", option: "SQLite", value: "sqlite", text: "local store" }],
 			timedOut: true,
 		});
 		expect(onTimeout).toHaveBeenCalledTimes(1);

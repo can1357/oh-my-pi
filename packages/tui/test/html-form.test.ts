@@ -102,7 +102,7 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual({ region: "us" });
 			expect(form.debugState().open).toBe("region");
-			expect(form.render(100).join("\n")).toContain("✎ note");
+			expect(form.render(100).join("\n")).toContain("✎ draft");
 			form.handleInput("\x1bn");
 			form.handleInput(" changed");
 			form.handleInput(ESC);
@@ -111,12 +111,13 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual({ region: "eu" });
 			expect(form.render(100).join("\n")).toContain("✎ note");
+			expect(form.render(100).join("\n")).not.toContain("✎ draft");
 			form.handleInput("\x1bn");
 			expect(form.debugState().noteEdit).toBe("region=eu");
 			form.handleInput(" edited");
 			form.handleInput(ENTER);
 			expect(form.optionNotes()).toEqual([
-				{ name: "region", question: "Region", option: "EU", text: "data residency edited" },
+				{ name: "region", question: "Region", option: "EU", value: "eu", text: "data residency edited" },
 			]);
 			expect(onSubmit).not.toHaveBeenCalled();
 			expect(onCancel).not.toHaveBeenCalled();
@@ -149,7 +150,7 @@ describe("html form", () => {
 			form.handleInput(SPACE);
 			expect(form.data()).toEqual({ pick: "same" });
 			expect(form.optionNotes()).toEqual([
-				{ name: "pick", question: "pick", option: "Second", text: "second option only" },
+				{ name: "pick", question: "pick", option: "Second", value: "same", text: "second option only" },
 			]);
 			form.handleInput(DOWN);
 			form.handleInput("same");
@@ -184,8 +185,8 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual(before);
 			const rows = form.render(100);
-			expect(rows.find(row => row.includes("Postgres"))).toContain("✎ note");
-			expect(rows.find(row => row.includes("SQLite"))).not.toContain("✎ note");
+			expect(rows.find(row => row.includes("Postgres"))).toContain("✎ draft");
+			expect(rows.find(row => row.includes("SQLite"))).not.toContain("✎");
 			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
 			form.handleInput("n");
 			form.handleInput("!");
@@ -198,6 +199,39 @@ describe("html form", () => {
 			expect(form.debugState().notes).toEqual({ db: {}, extras: {}, region: {} });
 			expect(onSubmit).not.toHaveBeenCalled();
 			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("follows a remapped note key, keeping text keys out of dropdown notes", () => {
+			setKeybindings(
+				KeybindingsManager.inMemory({ "tui.select.cancel": "escape", "app.ask.note": ["x", "ctrl+e"] }),
+			);
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput("x");
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			form.dispose();
+
+			const select = dialog(SELECT_FORM).form;
+			select.handleInput("x");
+			expect(select.debugState().noteEdit).toBeUndefined();
+			select.handleInput("\x05");
+			expect(select.debugState().noteEdit).toBe("region=us");
+			select.dispose();
+		});
+
+		it("hides and restores the form with a note draft still open", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			form.handleInput("draft");
+			form.handleInput("\x1bh");
+			expect(form.render(100).join("\n")).not.toContain("Note for");
+			form.handleInput(ENTER);
+			expect(form.render(100).join("\n")).toContain("Note for SQLite");
+			form.handleInput(" kept");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: "draft kept" } });
 			form.dispose();
 		});
 
@@ -222,7 +256,7 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.debugState().notes).toMatchObject({ db: { 0: "sqlite draft edited" } });
 			expect(form.optionNotes()).toEqual([
-				{ name: "extras", question: "Extras", option: "Docker", text: "docker reason" },
+				{ name: "extras", question: "Extras", option: "Docker", value: "docker", text: "docker reason" },
 			]);
 			form.dispose();
 		});
@@ -252,11 +286,16 @@ describe("html form", () => {
 			expect(onTimeout).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(501);
 			expect(onTimeout).toHaveBeenCalledTimes(1);
-			expect(onTimeout).toHaveBeenCalledWith(form.data());
-			expect(form.debugState().noteEdit).toBeUndefined();
-			expect(form.optionNotes()).toEqual([
-				{ name: "db", question: "Which store should ledger use?", option: "SQLite", text: "draft" },
+			expect(onTimeout).toHaveBeenCalledWith(form.data(), [
+				{
+					name: "db",
+					question: "Which store should ledger use?",
+					option: "SQLite",
+					value: "sqlite",
+					text: "draft",
+				},
 			]);
+			expect(form.debugState().noteEdit).toBeUndefined();
 			expect(onCancel).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(2000);
 			expect(onTimeout).toHaveBeenCalledTimes(1);
@@ -512,13 +551,16 @@ describe("html form", () => {
 			form.handleInput(TAB); // notes
 			form.handleInput(TAB); // Submit
 			form.handleInput(ENTER);
-			expect(onSubmit).toHaveBeenCalledWith({
-				db: "pg",
-				extras: ["ci", "docker"],
-				region: "ap",
-				workers: 4,
-				notes: "",
-			});
+			expect(onSubmit).toHaveBeenCalledWith(
+				{
+					db: "pg",
+					extras: ["ci", "docker"],
+					region: "ap",
+					workers: 4,
+					notes: "",
+				},
+				[],
+			);
 		});
 
 		it("opens a long prefilled input at its start, and End reveals the tail", () => {
@@ -572,7 +614,7 @@ describe("html form", () => {
 			form.handleInput(TAB);
 			form.handleInput(TAB);
 			form.handleInput(ENTER);
-			expect(onSubmit).toHaveBeenCalledWith({ domain: "a", n: "" });
+			expect(onSubmit).toHaveBeenCalledWith({ domain: "a", n: "" }, []);
 			form.handleInput(ESC);
 			expect(onCancel).toHaveBeenCalledTimes(1);
 		});
@@ -587,7 +629,7 @@ describe("html form", () => {
 			vi.advanceTimersByTime(4000);
 			expect(onTimeout).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(2000);
-			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" });
+			expect(onTimeout).toHaveBeenCalledWith({ db: "pg", extras: ["ci"], region: "us", workers: 4, notes: "" }, []);
 			form.dispose();
 		});
 
@@ -607,7 +649,7 @@ describe("html form", () => {
 			form.handleNativeEvent({ type: "select", key: tabs, item: "review" });
 			expect(findPath(form.describe(CX), node => node.k === "kv")).toBeDefined();
 			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" });
+			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" }, []);
 		});
 
 		it("natively: Submit shows only on the last question tab (and Review) and sends from there", () => {
@@ -619,7 +661,10 @@ describe("html form", () => {
 			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // last question tab, not Review
 			expect(findPath(root, node => node.key === "submit")).toBeDefined();
 			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" });
+			expect(onSubmit).toHaveBeenCalledWith(
+				{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
+				[],
+			);
 		});
 
 		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {

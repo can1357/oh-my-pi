@@ -32,7 +32,10 @@ export interface FormAnswer {
 export interface OptionNote {
 	name: string;
 	question: string;
+	/** The option's shown label. */
 	option: string;
+	/** The option's submitted value, as it appears in the form data. */
+	value: string;
 	text: string;
 }
 

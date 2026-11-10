@@ -893,19 +893,15 @@ export class ExtensionUiController {
 	): Promise<ExtensionFormDialogResult | undefined> {
 		return this.#presentDialog<ExtensionFormDialogResult>(dialogOptions?.signal, settle => {
 			const inputGuard = this.#draftInputGuard();
-			const resultFor = (data: HtmlFormData, timedOut = false): ExtensionFormDialogResult => {
-				const notes = dialog.optionNotes();
-				return { data, ...(notes.length ? { notes } : {}), ...(timedOut ? { timedOut: true } : {}) };
-			};
 			const dialog = new HtmlFormDialog(form, {
 				tui: this.ctx.ui,
 				cwd: this.ctx.sessionManager.getCwd(),
 				timeout: dialogOptions?.timeout,
-				onTimeout: data => {
+				onTimeout: (data, notes) => {
 					dialogOptions?.onTimeout?.();
-					settle(resultFor(data, true));
+					settle({ data, ...(notes.length ? { notes } : {}), timedOut: true });
 				},
-				onSubmit: data => settle(resultFor(data)),
+				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
 				inputGuard,
 			});

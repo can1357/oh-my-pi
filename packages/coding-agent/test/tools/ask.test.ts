@@ -122,7 +122,9 @@ describe("AskTool form dialog", () => {
 		});
 	});
 	it("passes selected option notes separately from form data", async () => {
-		const notes = [{ name: "store", question: "Session store", option: "Redis", text: "  shared\ncache " }];
+		const notes = [
+			{ name: "store", question: "Session store", option: "Redis", value: "redis", text: "  shared\ncache " },
+		];
 		const result = await new AskTool(createSession()).execute(
 			"call-notes",
 			{ html: DB_FORM },
@@ -132,7 +134,7 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(text(result)).toBe(
-			`User answers:\n${JSON.stringify({ store: "redis" }, null, 2)}\nOption notes:\n- Session store: Redis — shared cache`,
+			`User answers:\n${JSON.stringify({ store: "redis" }, null, 2)}\nOption notes:\n- Session store: Redis [store="redis"] — shared cache`,
 		);
 		expect(result.details).toEqual({
 			answers: [
@@ -172,7 +174,9 @@ describe("AskTool form dialog", () => {
 	});
 
 	it("reports a timed-out submission as the form's current values", async () => {
-		const notes = [{ name: "store", question: "Session store", option: "SQLite", text: "no service needed" }];
+		const notes = [
+			{ name: "store", question: "Session store", option: "SQLite", value: "sqlite", text: "no service needed" },
+		];
 		const result = await new AskTool(createSession()).execute(
 			"call-timeout",
 			{ html: DB_FORM },
@@ -182,7 +186,7 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(text(result)).toBe(
-			`No answer before the timeout; submitted the form's current values:\n${JSON.stringify({ store: "sqlite", ttl: 30 }, null, 2)}\nOption notes:\n- Session store: SQLite — no service needed`,
+			`No answer before the timeout; submitted the form's current values:\n${JSON.stringify({ store: "sqlite", ttl: 30 }, null, 2)}\nOption notes:\n- Session store: SQLite [store="sqlite"] — no service needed`,
 		);
 		expect(result.details?.timedOut).toBe(true);
 		expect(result.details?.notes).toEqual(notes);

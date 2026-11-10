@@ -43,16 +43,13 @@ const finish = (output: string, code: number): never => {
 	console.log(output);
 	process.exit(code);
 };
-const form = parseHtmlForm(html);
-const dialog = new HtmlFormDialog(form, {
+const dialog = new HtmlFormDialog(parseHtmlForm(html), {
 	tui,
-	onSubmit: data => {
-		const notes = dialog.optionNotes();
+	onSubmit: (data, notes) =>
 		finish(
 			`${JSON.stringify(data, null, 2)}${notes.length ? `\nOption notes:\n${JSON.stringify(notes, null, 2)}` : ""}`,
 			0,
-		);
-	},
+		),
 	onCancel: () => finish("cancelled", 1),
 });
 tui.addChild(dialog);
