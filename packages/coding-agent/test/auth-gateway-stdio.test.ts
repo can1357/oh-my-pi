@@ -108,6 +108,16 @@ describe("auth-gateway stdio model selectors", () => {
 			expect(selectorCandidates(key(jev), Settings.isolated({}), kinded)).toEqual([]);
 		});
 	});
+
+	it("resolves Codex dictation on the transcription route only", () => {
+		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
+		const catalog = [...models, dictation];
+		const byKind = (kind: ModelKind | "all" = "chat") =>
+			kind === "all" ? catalog : catalog.filter(model => modelKind(model) === kind);
+		const kinded = { getAll: byKind, getAvailable: byKind };
+		expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded, "stt")).toEqual([dictation]);
+		expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded)).toEqual([]);
+	});
 });
 
 describe("auth-gateway stdio model resolver", () => {
