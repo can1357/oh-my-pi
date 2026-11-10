@@ -228,7 +228,7 @@ Each marked task gets a fresh per-task review after green and before acceptance.
 - Produces recorded command outcomes plus terminal identities, target child ID, idle state, skill address, original request/reply correlation, one received answer and cleanup evidence. Controller runs the live test itself; a subagent report, mocked server, two requests within one process, or Main-to-Main substitution is not acceptance.
 
 - [ ] **Step 1: State the live regression test and red condition.** Test name: `two processes discover and address an idle kept-alive child after card expansion`. Assert B's child is idle and still kept alive, its ID appears in B's card, A registers the corresponding `a2a:` address, and A's actual task plus `wait` receives exactly the child's unique answer. The old running-only card fails the child-visibility/address-discovery assertion, as specified by A2A-1; use Task 8's recorded failing regression as red evidence rather than inventing a prior live run. Any missing assertion in the final real run is FAIL, not a reason to replace the target with Main or a running child.
-- [ ] **Step 2: Run final automated gates once after all edits/reviews land.** From `packages/coding-agent/` run:
+- [x] **Step 2: Run final automated gates once after all edits/reviews land.** From `packages/coding-agent/` run:
 
   ```sh
   bun --version
@@ -245,13 +245,13 @@ Each marked task gets a fresh per-task review after green and before acceptance.
 
 ## Execution evidence (controller fills during approved implementation)
 
-- Runtime executable/version and task commits: not run; planning-only assignment.
-- Red/green outputs and per-task review verdicts: not run.
-- Final package checks and Rust baseline comparison: not run.
-- Final whole-branch review: not run.
-- Live terminal identities/URLs, idle child ID and actual `a2a:` name: not run.
-- Live original message ID, reply-job ID, correlated marker and duplicate check: not run.
-- Clean shutdown/discovery cleanup: not run.
+- Runtime executable/version and task commits: bun 1.4.4 (~/.bun/bin/bun first in PATH). Task commits: T1 df746e6d65 (+chore 0329fe8b07), T2 371e2991dd, T3 d369cbf8fe (+chore 2a3c09d7f7), T4 4b559e867f, T5 9d5fc814c5, T6 a1d1a0f09c, T7 ab61dfaa65 (+polish 3a3eae00f3), T8 cd16dffd45 + fix 40dc418a3c, format chore for persisted-revive test. Branch: sdd/open-issues-2026-11-09.
+- Red/green outputs and per-task review verdicts: every task recorded red (assertion failures, per task-N-report.md Evidence sections) before its fix; per-task reviews returned spec_compliant for all eight; fix rounds: T1 re-review all_addressed, T8 fix round 1 re-review all_addressed (see ledger .superpowers/sdd/2026-11-09-a2a-followups/progress.md for the full verdict chain). Final whole-branch review: Mergeable YES, 0 Critical/Important, 1 Minor (write-only LedgerEntry.seq).
+- Final package checks and Rust baseline comparison: focused 8-file suite 320 pass / 0 fail (bun test a2a-server a2a-client a2a-incoming-requests a2a-reply-relay thread/a2a-incoming thread/a2a-outgoing session/irc-bridge-relay task/persisted-revive); bun run check exit 0 (after one oxfmt drift fix in persisted-revive.test.ts, committed); cargo test -p pi-shell: 2447 pass / 19 fail — failure set byte-identical to the pre-branch macOS baseline (zsh mod/zle/prompt/git/ps host failures unrelated to A2A files); no new failures.
+- Final whole-branch review: complete (sdd-final-reviewer over all 12 A2A commits; ledger triage all-accept; Mergeable YES).
+- Live terminal identities/URLs, idle child ID and actual `a2a:` name: NOT RUN — prerequisite unavailable: two interactive omp TUI terminals with live model credentials (bun run dev --a2a-name … --a2a-port 0) cannot be driven headlessly by this controller session. Task 8's recorded failing regression (card running-only order) serves as the red evidence per Step 1; the composite live path remains the one unverified acceptance step, per plan text permitting "record the precise prerequisite and leave this task unchecked".
+- Live original message ID, reply-job ID, correlated marker and duplicate check: not run (same prerequisite as above).
+- Clean shutdown/discovery cleanup: not run (same prerequisite as above).
 
 ## Planner self-review
 
