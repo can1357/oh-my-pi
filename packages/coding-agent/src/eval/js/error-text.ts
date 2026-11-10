@@ -13,7 +13,7 @@ const OMP_ROOT = (() => {
 
 /** Frame locations that are never the cell's code: engine internals, omp's preludes, a compiled omp. */
 const HOST_LOCATION = /^(?:native\b|unknown$|node:|bun:|\[eval-prelude:)|\$bunfs|~BUN/;
-const FRAME_LINE = /^\s+at (?:.*\((.*)\)|(.*))$/;
+const FRAME_LINE = /^\s+at (?:.*? \((.*)\)|(.*))$/;
 
 export interface CellErrorSource {
 	/** The cell's file name as its frames show it. */

@@ -66,6 +66,17 @@ describe("uncaught JavaScript cell errors", () => {
 		expect(result.output).toContain("omp frames hidden;");
 	});
 
+	it("keeps multiline diagnostics when folding an unawaited rejection", async () => {
+		const message = "first\n    at map (native:1:11)\nlast";
+		const result = await executeJs(
+			`Promise.reject(new Error(${JSON.stringify(message)})); const { promise, resolve } = Promise.withResolvers(); setImmediate(resolve); await promise;`,
+			options,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain(`Unhandled rejection (missing await?): ${message}\n`);
+		expect(result.output).not.toContain(REPO_ROOT);
+	});
+
 	it("take omp's tree from its own code, not from PI_PACKAGE_DIR", async () => {
 		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
 console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)", { filename: "js-cell-1.js", cwd: "/tmp" }));`;
@@ -95,12 +106,12 @@ describe("formatCellError", () => {
 			"    at eval (unknown)",
 			"    at processTicksAndRejections (node:internal/process/task_queues:105:5)",
 			"    at open ([eval-prelude:browser]:262:24)",
-			"    at run (/opt/omp/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/shared/runtime.ts:556:14)",
+			"    at run (/opt/omp (copy)/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/shared/runtime.ts:556:14)",
 			"    at helper (/home/me/project/lib/helper.ts:3:9)",
 			"    at <anonymous> (:0:43)",
 			"    at browser.call (js-cell-1d89.js)",
 		].join("\n");
-		expect(formatCellError(stack, source)).toBe(
+		expect(formatCellError(stack, { ...source, ompRoot: "/opt/omp (copy)/node_modules" })).toBe(
 			[
 				"TypeError: x is not a function",
 				"1 | foo()",

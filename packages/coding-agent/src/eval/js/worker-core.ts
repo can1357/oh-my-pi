@@ -102,7 +102,12 @@ function foldFloatingRejections(active: ActiveRun, result: RunResult, hooks: Run
 	let reported = rejections;
 	if (result.ok) {
 		const error = errorPayload(rejections[0]);
-		error.message = `Unhandled rejection (missing await?): ${error.message}`;
+		const message = `Unhandled rejection (missing await?): ${error.message}`;
+		if (error.stack) {
+			const name = error.name ?? "Error";
+			error.stack = error.stack.replace(`${name}: ${error.message}`, `${name}: ${message}`);
+		}
+		error.message = message;
 		folded = { type: "result", runId: active.runId, ok: false, error };
 		reported = rejections.slice(1);
 	}
