@@ -189,7 +189,7 @@ impl AtSpiAx {
 				items.push(DesktopMenuItem {
 					title,
 					path: item_path,
-					enabled: state.contains(State::Enabled) && state.contains(State::Sensitive),
+					enabled: state_enabled(state),
 					checked: state.contains(State::Checked),
 					has_submenu,
 					shortcut,

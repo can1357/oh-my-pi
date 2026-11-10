@@ -17,6 +17,7 @@ use x11rb::{
 use crate::desktop::{
 	error::{CoreResult, DesktopError},
 	frame::{FrameGeometry, compose},
+	linux::ax::{NativeGeometry, NativeWindows},
 	types::{DesktopDisplay, DesktopWindow, DisplaySelector, Target},
 };
 
@@ -58,6 +59,7 @@ impl ComponentMask {
 	}
 }
 
+#[derive(Clone)]
 pub struct X11Capture {
 	conn:        Arc<RustConnection>,
 	root:        Window,
@@ -416,6 +418,51 @@ impl X11Capture {
 			setup.image_byte_order == ImageOrder::LSB_FIRST,
 			self.masks,
 		)
+	}
+}
+
+impl NativeWindows for X11Capture {
+	fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
+		Self::windows(self)
+	}
+
+	fn geometry(&self, id: &str) -> Option<NativeGeometry> {
+		let id = id.parse::<Window>().ok()?;
+		// As `windows` lists them: a minimized or unmapped window is nowhere.
+		let attributes = self.conn.get_window_attributes(id).ok()?.reply().ok()?;
+		let state = self.intern("_NET_WM_STATE").ok()?;
+		let hidden = self.intern("_NET_WM_STATE_HIDDEN").ok()?;
+		if attributes.map_state != MapState::VIEWABLE
+			|| self
+				.property(id, state, AtomEnum::ATOM, 64)
+				.and_then(|reply| Some(reply.value32()?.any(|item| item == hidden)))
+				.unwrap_or(false)
+		{
+			return None;
+		}
+		let geometry = self.conn.get_geometry(id).ok()?.reply().ok()?;
+		let origin = self
+			.conn
+			.translate_coordinates(id, self.root, 0, 0)
+			.ok()?
+			.reply()
+			.ok()?;
+		let shadow = self
+			.intern("_GTK_FRAME_EXTENTS")
+			.ok()
+			.and_then(|atom| self.property(id, atom, AtomEnum::CARDINAL, 4))
+			.and_then(|reply| {
+				let mut extents = reply.value32()?;
+				Some([extents.next()?, extents.next()?, extents.next()?, extents.next()?])
+			})
+			.unwrap_or_default();
+		Some(NativeGeometry {
+			x: i32::from(origin.dst_x),
+			y: i32::from(origin.dst_y),
+			width: u32::from(geometry.width),
+			height: u32::from(geometry.height),
+			shadow,
+		})
 	}
 }
 

@@ -7,6 +7,13 @@
 - Fixed the bash tool's shell reporting the kernel's bare error for a command it refused to execute when that command's own redirection had to be applied by the spawned process: a bad `#!` interpreter is now named (`…: bad interpreter: …`, status 126), a directory is `Is a directory`, a binary without `#!` is `cannot execute binary file`, a file the shell may execute but not read is `Permission denied`, and a file whose missing interpreter cannot be read is `cannot execute: required file not found` (status 127), as in Bash 5.3 ([#18213](https://github.com/can1357/oh-my-pi/pull/18213) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell misreading an over-long, unterminated or `NUL`-bearing `#!` line in that diagnostic: like Bash it now reads the interpreter out of one sample of the file's first bytes, so the name stops where Bash stops it ([#18213](https://github.com/can1357/oh-my-pi/pull/18213) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.18.6] - 2026-11-09
+
+### Fixed
+
+- Fixed GTK4 apps such as Files (Nautilus) on X11: element clicks and `computer.elementAt()` now find their elements where they are on screen, and `ax()` no longer marks their enabled controls `(disabled)` ([#18643](https://github.com/can1357/oh-my-pi/pull/18643) by [@will-bogusz](https://github.com/will-bogusz))
+- `grep` no longer searches the file its own output is redirected into, nor standard input redirected from that same file: both are refused with `input file is also the output`, as GNU grep does ([#14808](https://github.com/can1357/oh-my-pi/issues/14808), [#16489](https://github.com/can1357/oh-my-pi/pull/16489) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

@@ -2883,10 +2883,12 @@ export class ModelRegistry {
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },
 			);
+			// An offline pass only reads the cache: a missing row means "not fetched
+			// yet" (a cold, credential-scoped namespace), not an unreachable provider.
 			const status =
 				result.source === "cache"
 					? "cached"
-					: result.source === "bundled" && result.stale
+					: result.source === "bundled" && result.stale && strategy !== "offline"
 						? "unavailable"
 						: result.source === "bundled"
 							? "idle"
