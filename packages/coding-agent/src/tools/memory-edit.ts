@@ -118,7 +118,7 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 			if (error instanceof SupermemoryHttpError && error.status === 404) {
 				throw new Error(`Memory ${params.id} was not found ${location}.`);
 			}
-			if (error instanceof SupermemoryHttpError && error.status === 409) {
+			if (error instanceof SupermemoryHttpError && error.status === 409 && params.op !== "update") {
 				throw new Error(`Memory ${params.id} is already forgotten ${location}.`);
 			}
 			throw error;

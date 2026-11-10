@@ -102,7 +102,6 @@ const serveMnemopiState: RpcServe<MnemopiSessionState, MnemopiSessionStateProtoc
 
 const serveSupermemoryState: RpcServe<SupermemorySessionState, SupermemorySessionStateProtocol> = {
 	containerTag: state => state.containerTag,
-	config: state => state.config,
 	aliasOf: state => state.aliasOf,
 	lastRecallSnippet: state => state.lastRecallSnippet,
 	search: (state, query, limit, signal) => state.search(query, limit, signal),

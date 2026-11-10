@@ -150,18 +150,26 @@ describe("Supermemory retain outbox", () => {
 		expect(requests).toHaveLength(sent);
 	});
 
-	it("refuses a call that would overflow the outbox without queueing any of it", async () => {
+	it("delivers a queued memory only with the API key it was queued under", async () => {
 		status = 503;
-		const { tool, state } = await startSession();
-		await tool.execute("first", { items: [{ content: "kept" }] });
-		await state.drainOutbox();
-		const dir = path.dirname((await eventFiles())[0]);
-		await Promise.all(
-			Array.from({ length: 999 }, (_, index) =>
-				Bun.write(path.join(dir, `omp-retain-${index.toString(16).padStart(32, "0")}.json`), "{}"),
-			),
-		);
-		await expect(tool.execute("overflow", { items: [{ content: "extra" }] })).rejects.toThrow(/outbox full/);
-		expect(await eventFiles()).toHaveLength(1000);
+		const first = await startSession();
+		await first.tool.execute("call-1", { items: [{ content: "account A fact" }] });
+		await first.state.drainOutbox();
+		await first.state.dispose();
+
+		status = 200;
+		const sent = requests.length;
+		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-other-account";
+		const other = await startSession();
+		await other.state.drainOutbox();
+		await other.state.dispose();
+		expect(requests).toHaveLength(sent);
+		expect(await eventFiles()).toHaveLength(1);
+
+		Bun.env.SUPERMEMORY_API_KEY = API_KEY;
+		const again = await startSession();
+		await again.state.drainOutbox();
+		expect(requests.at(-1)?.content).toBe("account A fact");
+		expect(await eventFiles()).toEqual([]);
 	});
 });

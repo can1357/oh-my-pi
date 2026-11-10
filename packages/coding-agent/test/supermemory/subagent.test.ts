@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
 import type { SupermemorySessionState } from "@oh-my-pi/pi-coding-agent/supermemory/state";
@@ -24,6 +23,7 @@ interface WireRequest {
 let temp: TempDir;
 let server: Bun.Server<undefined>;
 let requests: WireRequest[];
+const states: SupermemorySessionState[] = [];
 
 beforeEach(() => {
 	temp = TempDir.createSync("@supermemory-subagent-test-");
@@ -45,6 +45,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	for (const state of states.reverse()) await state.dispose();
+	states.length = 0;
 	server.stop(true);
 	for (const [name, value] of savedEnv) {
 		if (value === undefined) delete Bun.env[name];
@@ -53,11 +55,11 @@ afterEach(async () => {
 	await temp.remove();
 });
 
-/** A session at `cwd` with its own agent dir, notices and listeners. */
+/** A session at `cwd` with its own agent dir, notices and recorded transcript entries. */
 async function startSession(name: string, cwd: string, taskDepth: number, parent?: SupermemorySessionState) {
 	const notices: string[] = [];
 	const entries: SessionEntry[] = [];
-	const listeners = new Set<AgentSessionEventListener>();
+	const listeners = new Set<(event: unknown) => void>();
 	const agentDir = path.join(temp.path(), name);
 	let state: SupermemorySessionState | undefined;
 	const settings = Settings.isolated({ "memory.backend": "supermemory", "supermemory.retainEveryNTurns": 1 });
@@ -67,11 +69,14 @@ async function startSession(name: string, cwd: string, taskDepth: number, parent
 		sessionManager: {
 			getEntries: () => entries,
 			getBranch: () => entries,
-			appendCustomEntry: () => "",
+			appendCustomEntry: (customType: string, data: unknown) => {
+				entries.push({ type: "custom", customType, data, id: `c${entries.length}`, parentId: null } as never);
+				return "";
+			},
 			getCwd: () => cwd,
 			getSessionId: () => `${name}-transcript`,
 		},
-		subscribe(listener: AgentSessionEventListener) {
+		subscribe(listener: (event: unknown) => void) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
@@ -82,6 +87,18 @@ async function startSession(name: string, cwd: string, taskDepth: number, parent
 			const previous = state;
 			state = next;
 			return previous;
+		},
+		addTurn(text: string) {
+			entries.push({
+				type: "message",
+				id: `u${entries.length}`,
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "user", content: text, timestamp: 0 },
+			} as never);
+		},
+		endTurn() {
+			for (const listener of listeners) listener({ type: "agent_end", messages: [] });
 		},
 	};
 	await supermemoryBackend.start({
@@ -94,13 +111,14 @@ async function startSession(name: string, cwd: string, taskDepth: number, parent
 	});
 	const started = state;
 	if (!started) throw new Error(`${name}: Supermemory state was not installed`);
+	states.push(started);
 	const tools = { settings, getSupermemorySessionState: () => state } as unknown as ToolSession;
 	return {
 		session,
 		state: started,
 		notices,
 		agentDir,
-		listeners,
+		entries,
 		retain: new MemoryRetainTool(tools),
 		recall: new MemoryRecallTool(tools),
 		edit: new MemoryEditTool(tools),
@@ -140,16 +158,20 @@ describe("Supermemory subagent alias", () => {
 		expect(await outboxFiles(child.agentDir)).toEqual([]);
 		expect(parent.notices.join(" ")).toContain("1 memory kept in the Supermemory outbox");
 		expect(child.notices).toEqual([]);
-		await parent.state.dispose();
 	});
 
-	it("never auto-recalls or auto-retains in a child, and shows the parent's recall snippet", async () => {
+	it("never auto-recalls, auto-retains or writes cursors in a child, and shows the parent's recall snippet", async () => {
 		const parent = await startSession("parent", "/tmp", 0);
 		parent.state.lastRecallSnippet = "<supermemory>parent recall</supermemory>";
 		const child = await startSession("child", "/tmp", 1, parent.state);
 
 		expect(await supermemoryBackend.beforeAgentStartPrompt!(child.session as never, "q", undefined)).toBeUndefined();
-		expect(child.listeners.size).toBe(0);
+		child.session.addTurn("child turn one");
+		child.session.addTurn("child turn two");
+		child.session.endTurn();
+		await supermemoryBackend.enqueue("/tmp", "/tmp", child.session as never);
+		await parent.state.flush();
+		expect(child.entries.filter(entry => entry.type === "custom")).toEqual([]);
 		const instructions = await supermemoryBackend.buildDeveloperInstructions(
 			"/tmp",
 			"/tmp",
@@ -158,7 +180,6 @@ describe("Supermemory subagent alias", () => {
 		);
 		expect(instructions).toContain("<supermemory>parent recall</supermemory>");
 		expect(requests).toEqual([]);
-		await parent.state.dispose();
 	});
 
 	it("clearing or disposing a child leaves the parent's state intact", async () => {
@@ -173,6 +194,5 @@ describe("Supermemory subagent alias", () => {
 		await parent.retain.execute("after-child", { items: [{ content: "parent fact" }] });
 		await parent.state.drainOutbox();
 		expect(await outboxFiles(parent.agentDir)).toHaveLength(1);
-		await parent.state.dispose();
 	});
 });

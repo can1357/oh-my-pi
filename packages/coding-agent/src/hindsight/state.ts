@@ -153,6 +153,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		const agentDir = options.agentDir ?? getAgentDir();
 		this.retainQueue = new MemoryOutboxQueue({
 			label: "Hindsight",
+			destination: this.bankId,
 			flushBatchSize: RETAIN_FLUSH_BATCH_SIZE,
 			notice: message => this.session.emitNotice("warning", message, HINDSIGHT_NOTICE_SOURCE),
 			toEvents: (toolCallId, items) => {

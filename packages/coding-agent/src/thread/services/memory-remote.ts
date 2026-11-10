@@ -49,7 +49,6 @@ import type {
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
 import type { SupermemoryDocument, SupermemorySearchItem } from "../../supermemory/client";
-import type { ConfiguredSupermemoryConfig } from "../../supermemory/config";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RemoteObject } from "../rpc";
 import type {
@@ -301,10 +300,6 @@ export class RemoteSupermemorySessionState implements SupermemorySessionStateApi
 
 	get containerTag(): string {
 		return this.#remote.callSync("containerTag");
-	}
-
-	get config(): ConfiguredSupermemoryConfig {
-		return this.#remote.callSync("config");
 	}
 
 	get aliasOf(): SupermemorySessionStateApi | undefined {

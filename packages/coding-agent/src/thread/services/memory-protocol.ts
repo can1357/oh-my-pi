@@ -3,7 +3,7 @@
  * reference: the Hindsight client, a parent `HindsightSessionState` (routing,
  * config, snippets, and its confirmed-bank set), a parent `MnemopiSessionState`
  * (identity, config, and every scoped-bank operation), and a parent
- * `SupermemorySessionState` (container, config, recall snippet, and tool operations).
+ * `SupermemorySessionState` (container, recall snippet, and tool operations).
  *
  * Bank targets cross as `{ bank }`; main resolves the name to its live store.
  */
@@ -50,7 +50,6 @@ import type {
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
 import type { SupermemoryDocument, SupermemorySearchItem } from "../../supermemory/client";
-import type { ConfiguredSupermemoryConfig } from "../../supermemory/config";
 import type { SupermemoryRetainInput, SupermemorySessionStateApi } from "../../supermemory/state";
 import type { RpcMethod } from "../rpc";
 
@@ -137,7 +136,6 @@ export type MnemopiSessionStateProtocol = {
 /** A parent Supermemory state's fields (read live) and the tool reads, writes and edits it runs. */
 export type SupermemorySessionStateProtocol = {
 	containerTag: RpcMethod<[], string>;
-	config: RpcMethod<[], ConfiguredSupermemoryConfig>;
 	aliasOf: RpcMethod<[], SupermemorySessionStateApi | undefined>;
 	lastRecallSnippet: RpcMethod<[], string | undefined>;
 	search: RpcMethod<[query: string, limit: number | undefined, signal?: AbortSignal], SupermemorySearchItem[]>;

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `supermemory` memory backend: first-turn recall and periodic retention against Supermemory, scoped per repository through an opaque container tag, with `recall`, `retain`, `learn`, and `memory_edit` support (`update` creates a new memory version; `forget`/`invalidate` soft-forget). `retain`/`learn` writes go through the durable outbox Hindsight uses (now shared, under `<agentDir>/supermemory-outbox/`), and a resumed session retries automatic-retention windows that failed before exit. Subagents, in-process or on worker threads, share the parent's Supermemory container, outbox and recall instead of starting their own
+- Added the `supermemory` memory backend: first-turn recall, periodic retention (retried after resume), `recall`/`retain`/`learn`/`memory_edit`, writes that survive outages, and subagents that share the parent's memory
 
 ## [18.18.3] - 2026-11-09
 

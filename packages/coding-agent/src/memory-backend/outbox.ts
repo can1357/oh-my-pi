@@ -294,6 +294,8 @@ export class MemoryOutbox<E extends MemoryOutboxEvent> {
 export interface MemoryOutboxQueueOptions<E extends MemoryOutboxEvent, I> {
 	/** Backend name in notices. */
 	label: string;
+	/** Destination (bank, container tag) named in log warnings; never a credential. */
+	destination: string;
 	/** Called on first use: queues that never write touch no disk. */
 	createOutbox: () => MemoryOutbox<E>;
 	/** One tool call's events; throws to refuse the whole call. */
@@ -374,7 +376,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 	}
 
 	async #drain(): Promise<void> {
-		const { label, notice } = this.#options;
+		const { label, notice, destination } = this.#options;
 		let outbox: MemoryOutbox<E>;
 		let result: DrainResult;
 		try {
@@ -382,7 +384,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 			result = await outbox.drain();
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
-			logger.warn(`${label} outbox drain failed`, { error: errorText });
+			logger.warn(`${label} outbox drain failed`, { destination, error: errorText });
 			notice(`${label} outbox unavailable: ${noticeErrorText(errorText)}. Undelivered memories stay on disk.`);
 			this.#schedule(FLUSH_INTERVAL_MS);
 			return;
@@ -399,7 +401,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 			if (result.busy) this.#schedule(FLUSH_INTERVAL_MS);
 			return;
 		}
-		logger.warn(`${label} retain delivery failed`, { kept: result.kept, error: result.error });
+		logger.warn(`${label} retain delivery failed`, { destination, kept: result.kept, error: result.error });
 		// One notice per outage, not per retry.
 		if (++this.#failures === 1) {
 			notice(

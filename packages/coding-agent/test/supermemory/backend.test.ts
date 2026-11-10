@@ -3,16 +3,21 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { supermemoryBackend } from "@oh-my-pi/pi-coding-agent/supermemory/backend";
-import { SupermemoryClient } from "@oh-my-pi/pi-coding-agent/supermemory/client";
+import { SupermemoryClient, SupermemoryHttpError } from "@oh-my-pi/pi-coding-agent/supermemory/client";
 import type { SupermemorySessionState } from "@oh-my-pi/pi-coding-agent/supermemory/state";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const CONFIGURED = { "memory.backend": "supermemory" };
+
+/** Per-test agent dir: the backend drains `<agentDir>/supermemory-outbox` on start and dispose. */
+let temp: TempDir;
 
 function makeSession(options: { settings?: Record<string, unknown>; cwd?: string } = {}) {
 	const listeners = new Set<AgentSessionEventListener>();
 	const entries: SessionEntry[] = [];
+	const notices: string[] = [];
 	let state: SupermemorySessionState | undefined;
 	const cwd = options.cwd ?? "/tmp";
 	const session = {
@@ -39,7 +44,8 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		emitNotice: () => {},
+		emitNotice: (_level: string, message: string) => notices.push(message),
+		notices,
 		getXdevToolEntries: () => [],
 		getSupermemorySessionState: () => state,
 		setSupermemorySessionState(next: SupermemorySessionState | undefined) {
@@ -79,7 +85,7 @@ async function start(session: { settings: Settings }, taskDepth = 0) {
 		session: session as never,
 		settings: session.settings,
 		modelRegistry: {} as never,
-		agentDir: "/tmp",
+		agentDir: temp.path(),
 		taskDepth,
 	});
 }
@@ -138,15 +144,17 @@ function denyNetwork() {
 
 describe("supermemoryBackend", () => {
 	beforeEach(() => {
+		temp = TempDir.createSync("@supermemory-backend-test-");
 		Bun.env.SUPERMEMORY_API_KEY = "sm-synthetic-key";
 		Bun.env.SUPERMEMORY_BASE_URL = "http://127.0.0.1:1";
 	});
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		for (const [name, value] of savedEnv) {
 			if (value === undefined) delete Bun.env[name];
 			else Bun.env[name] = value;
 		}
+		await temp.remove();
 	});
 
 	it("stays inert without an API key", async () => {
@@ -415,6 +423,31 @@ describe("supermemoryBackend", () => {
 		expect(docs[0]?.customId).toBe(failed?.customId);
 	});
 
+	it("skips a window the server refuses for good, keeps retaining later ones, and never retries it", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockRejectedValueOnce(new SupermemoryHttpError(422))
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("refused");
+		await session.endTurn();
+		session.addTurn("accepted");
+		await session.endTurn();
+		await session.getSupermemorySessionState()?.dispose();
+		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([
+			{ turnStart: 0, turnEnd: 1 },
+			{ turnStart: 1, turnEnd: 2 },
+		]);
+		expect(session.notices).toHaveLength(1);
+		create.mockClear();
+
+		await start(session);
+		session.addTurn("resumed");
+		await session.endTurn();
+		expect(create.mock.calls.map(call => call[0]?.metadata)).toMatchObject([{ turnStart: 2, turnEnd: 3 }]);
+	});
+
 	it("redacts the API key and recognizable secrets in stored content and search queries", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")
@@ -423,7 +456,7 @@ describe("supermemoryBackend", () => {
 		const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
 		const session = makeSession();
 		await start(session);
-		const memory = { agentDir: "/tmp", cwd: "/tmp", session: session as never };
+		const memory = { agentDir: temp.path(), cwd: "/tmp", session: session as never };
 		await supermemoryBackend.save!(memory, { content: `token ${secret} and key sm-synthetic-key` });
 		await supermemoryBackend.search!(memory, `find ${secret}`);
 		const sent = `${create.mock.calls[0]?.[0]?.content} ${search.mock.calls[0]?.[0]?.q}`;

@@ -89,13 +89,12 @@ export interface SupermemoryAliasOptions {
 }
 
 /**
- * What a subagent alias routes to its parent: container, config, recall snippet, and every
+ * What a subagent alias routes to its parent: container, recall snippet, and every
  * tool read, write and edit. A subagent worker holds a remote implementation whose calls run
  * on main's state, so writes land in the parent's outbox.
  */
 export interface SupermemorySessionStateApi {
 	readonly containerTag: string;
-	readonly config: ConfiguredSupermemoryConfig;
 	readonly aliasOf?: SupermemorySessionStateApi;
 	readonly lastRecallSnippet?: string;
 	search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]>;
@@ -109,8 +108,9 @@ export interface SupermemorySessionStateApi {
 	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void>;
 }
 
-/** Client and outbox a primary state owns. */
+/** Config, client and outbox a primary state owns. */
 interface SupermemoryOwnResources {
+	config: ConfiguredSupermemoryConfig;
 	client: SupermemoryClient;
 	outbox: MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>;
 }
@@ -131,7 +131,6 @@ function renderLines(items: readonly string[], budget: number): string {
 /** Per-session Supermemory runtime state owned by its AgentSession. */
 export class SupermemorySessionState implements SupermemorySessionStateApi {
 	readonly session: AgentSession;
-	readonly config: ConfiguredSupermemoryConfig;
 	readonly containerTag: string;
 	readonly automatic: boolean;
 	/**
@@ -144,7 +143,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** User turns already covered by automatic retention documents. */
 	lastRetainedTurn = 0;
 	readonly #writes = new Set<Promise<unknown>>();
-	/** Client and outbox of a primary state; an alias has none. */
+	/** Config, client and outbox of a primary state; an alias has none. */
 	readonly #own: SupermemoryOwnResources | undefined;
 	#retention: Promise<void> = Promise.resolve();
 	#recallGeneration = 0;
@@ -158,22 +157,21 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.session = options.session;
 		if ("aliasOf" in options) {
 			this.aliasOf = options.aliasOf;
-			this.config = options.aliasOf.config;
 			this.containerTag = options.aliasOf.containerTag;
 			this.automatic = false;
 			return;
 		}
-		const client = options.client;
-		this.config = options.config;
+		const { client, config } = options;
 		this.containerTag = options.containerTag;
 		this.automatic = options.automatic;
 		const outbox = new MemoryOutboxQueue<SupermemoryOutboxEvent, SupermemoryRetainInput>({
 			label: "Supermemory",
+			destination: this.containerTag,
 			// One document per request: drain as soon as a write lands.
 			flushBatchSize: 1,
 			notice: message => this.session.emitNotice("warning", message, SUPERMEMORY_NOTICE_SOURCE),
 			toEvents: (toolCallId, items) => {
-				const key = this.config.apiKey;
+				const key = config.apiKey;
 				const sessionId = cleanOutboxText(this.transcriptId, key);
 				return items.map((item, index) => {
 					const content = cleanOutboxText(item.content, key);
@@ -187,8 +185,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			createOutbox: () =>
 				new MemoryOutbox<SupermemoryOutboxEvent>({
 					root: path.join(options.agentDir, "supermemory-outbox"),
-					apiUrl: this.config.baseUrl,
-					container: this.containerTag,
+					apiUrl: config.baseUrl,
+					// Account too: a write queued under one key is never delivered with another.
+					container: this.#scope(),
 					label: "Supermemory",
 					isEvent: event =>
 						typeof event.content === "string" &&
@@ -210,7 +209,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 					},
 				}),
 		});
-		this.#own = { client, outbox };
+		this.#own = { config, client, outbox };
 		this.#resumeRetention();
 	}
 
@@ -237,7 +236,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			this.lastRetainedTurn = cursor.data.turn;
 			return;
 		}
-		const every = this.config.retainEveryNTurns;
+		const every = this.#config.retainEveryNTurns;
 		this.lastRetainedTurn = Math.floor(countUserTurns(this.session.sessionManager) / every) * every;
 	}
 
@@ -255,7 +254,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (!this.automatic) return;
 		this.#unsubscribe = this.session.subscribe(event => {
 			if (event.type !== "agent_end") return;
-			if (this.config.autoRetain) void this.#enqueueRetention(() => this.#retainDue());
+			if (this.#config.autoRetain) void this.#enqueueRetention(() => this.#retainDue());
 			void this.drainOutbox();
 		});
 	}
@@ -265,15 +264,19 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		return this.session.sessionManager.getSessionId();
 	}
 
-	/** This state's client and outbox; an alias routes through {@link aliasOf} before reaching here. */
+	/** This state's config, client and outbox; an alias routes through {@link aliasOf} before reaching here. */
 	#local(): SupermemoryOwnResources {
 		if (this.#own) return this.#own;
 		throw new Error("A Supermemory subagent alias has no client or outbox; use its parent state.");
 	}
 
+	get #config(): ConfiguredSupermemoryConfig {
+		return this.#local().config;
+	}
+
 	/** Strips the API key and recognizable secrets from text bound for the server. */
 	#redact(text: string): string {
-		return redactMemorySecrets(text.replaceAll(this.config.apiKey, "[REDACTED]"));
+		return redactMemorySecrets(text.replaceAll(this.#config.apiKey, "[REDACTED]"));
 	}
 
 	/**
@@ -319,20 +322,24 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `memory_edit forget`/`invalidate`: soft-forgets memory `id` in this state's container. */
 	forgetMemory(id: string, reason: string | undefined, signal?: AbortSignal): Promise<void> {
 		if (this.aliasOf) return this.aliasOf.forgetMemory(id, reason, signal);
-		return this.#local().client.forgetMemory({ id, containerTag: this.containerTag, reason }, signal);
+		return this.#local().client.forgetMemory(
+			{ id, containerTag: this.containerTag, reason: reason === undefined ? undefined : this.#redact(reason) },
+			signal,
+		);
 	}
 
 	async search(query: string, limit: number | undefined, signal?: AbortSignal): Promise<SupermemorySearchItem[]> {
 		if (this.aliasOf) return this.aliasOf.search(query, limit, signal);
-		const resultLimit = Math.max(1, Math.min(limit ?? this.config.recallLimit, this.config.recallLimit));
+		const config = this.#config;
+		const resultLimit = Math.max(1, Math.min(limit ?? config.recallLimit, config.recallLimit));
 		const results = await this.#local().client.search(
 			{
 				q: this.#redact(query),
 				containerTag: this.containerTag,
-				searchMode: this.config.searchMode,
+				searchMode: config.searchMode,
 				// The search API rejects limit < 2; ask for at least 2 and trim locally.
 				limit: Math.max(2, resultLimit),
-				threshold: this.config.threshold,
+				threshold: config.threshold,
 			},
 			signal,
 		);
@@ -343,7 +350,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		promptText: string,
 		signal?: AbortSignal,
 	): Promise<MemoryPromptPreparation | undefined> {
-		if (!this.automatic || !this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
+		if (!this.automatic || !this.#config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
 		const query = promptText.trim();
 		if (!query) return undefined;
 		const generation = ++this.#recallGeneration;
@@ -399,8 +406,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	#scope(): string {
 		return JSON.stringify([
 			"supermemory",
-			this.config.baseUrl,
-			Bun.hash(this.config.apiKey).toString(16),
+			this.#config.baseUrl,
+			Bun.hash(this.#config.apiKey).toString(16),
 			this.containerTag,
 		]);
 	}
@@ -419,7 +426,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/** Every complete `retainEveryNTurns` window not stored yet, oldest first. */
 	async #retainDue(): Promise<void> {
-		const every = this.config.retainEveryNTurns;
+		const every = this.#config.retainEveryNTurns;
 		if (countUserTurns(this.session.sessionManager) - this.lastRetainedTurn < every) return;
 		const messages = extractMessages(this.session.sessionManager);
 		const userStarts = userTurnStarts(messages);
@@ -458,14 +465,24 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 					this.#windowCustomId(startTurn),
 				);
 			} catch (error) {
-				logger.warn("Supermemory: auto-retain failed", { error: String(error) });
-				return false;
+				const status = error instanceof SupermemoryHttpError ? error.status : undefined;
+				if (sendFailure(error, status) !== "rejected") {
+					logger.warn("Supermemory: auto-retain failed", { error: String(error) });
+					return false;
+				}
+				// Refused for good: retrying it forever would block every later window.
+				logger.warn("Supermemory: auto-retain refused", { error: String(error) });
+				this.session.emitNotice(
+					"warning",
+					`Memory retention skipped turns ${startTurn + 1}-${endTurn}: the server refused them (HTTP ${status}).`,
+					SUPERMEMORY_NOTICE_SOURCE,
+				);
 			}
 		}
 		if (generation !== this.#transcriptGeneration) return false;
 		this.lastRetainedTurn = endTurn;
 		// A `/memory enqueue` tail is an open window: a resume re-sends it complete under the same customId.
-		if (endTurn - startTurn === this.config.retainEveryNTurns) this.#appendCursor(endTurn);
+		if (endTurn - startTurn === this.#config.retainEveryNTurns) this.#appendCursor(endTurn);
 		return true;
 	}
 
