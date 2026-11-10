@@ -134,6 +134,44 @@ describe("CfgProtocolHandler", () => {
 		]);
 	});
 
+	it("keeps asking for the sandbox's own settings while it is enabled, despite a session grant", async () => {
+		const settings = Settings.isolated({ "sandbox.enabled": true });
+		const asked: string[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(`${request.path}${request.save ? "/save" : ""}`), "session"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		const session = { getSessionId: () => "a" };
+
+		await write("cfg://advisor/enabled", "true", settings, session);
+		await write("cfg://advisor/syncBacklog", '"3"', settings, session);
+		await write("cfg://sandbox/network/mode", '"allow"', settings, session);
+		await write("cfg://sandbox/filesystem/readScope", '"workspace"', settings, session);
+		// A sandbox prompt answered "for this session" grants nothing for later sandbox writes.
+		await write("cfg://sandbox/network/mode", '"deny"', settings, session);
+		expect(asked).toEqual([
+			"advisor.enabled",
+			"sandbox.network.mode",
+			"sandbox.filesystem.readScope",
+			"sandbox.network.mode",
+		]);
+	});
+
+	it("answers sandbox settings from the session grant while the sandbox is off", async () => {
+		const settings = Settings.isolated();
+		const asked: string[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request.path), "session"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		const session = { getSessionId: () => "a" };
+		await write("cfg://advisor/enabled", "true", settings, session);
+		await write("cfg://sandbox/network/mode", '"allow"', settings, session);
+		expect(asked).toEqual(["advisor.enabled"]);
+	});
+
 	it("fails an unanswered write without changing anything and asks again next time", async () => {
 		const settings = Settings.isolated();
 		let answer: "timeout" | "once" = "timeout";

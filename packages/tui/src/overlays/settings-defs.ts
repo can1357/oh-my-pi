@@ -94,6 +94,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"GitHub",
 		"Output Limits",
 		"Execution",
+		"Sandbox",
 		"Discovery & MCP",
 		"Extensions",
 		"Developer",

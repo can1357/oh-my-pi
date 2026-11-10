@@ -32,6 +32,11 @@ import { cfgExtensionAssistantTextRenderers } from "../../extensibility/settings
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
+	type SandboxAccessDialogAnswer,
+	SandboxAccessDialogComponent,
+	type SandboxAccessView,
+} from "@oh-my-pi/pi-tui/overlays/sandbox-access-dialog";
+import {
 	type AskDialogInputGuard,
 	type AskDialogPrompt,
 	type AskDialogPromptDraft,
@@ -805,6 +810,41 @@ export class ExtensionUiController {
 		} finally {
 			unsubscribe();
 		}
+	}
+
+	/**
+	 * The agent's sandbox access request in the composer's place, queued with the other dialogs
+	 * so an overlapping approval waits its turn. The composer stays mounted beneath; over a
+	 * draft the dialog opens on Deny, so an Enter meant for the draft never grants. Dismissing
+	 * or aborting it denies.
+	 */
+	async showSandboxAccess(
+		view: SandboxAccessView,
+		options: { signal?: AbortSignal } = {},
+	): Promise<SandboxAccessDialogAnswer> {
+		const answer = await this.#presentDialog<SandboxAccessDialogAnswer>(options.signal, settle => {
+			const editor = this.ctx.editor;
+			const drafting = editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight;
+			const dialog = new SandboxAccessDialogComponent(view, {
+				tui: this.ctx.ui,
+				onAnswer: settle,
+				initialChoice: drafting ? "deny" : undefined,
+			});
+			this.ctx.closeLinkBrowser();
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(dialog);
+			this.ctx.editorContainer.addChild(editor);
+			this.ctx.ui.setFocus(dialog);
+			this.ctx.ui.requestRender();
+			return () => {
+				dialog.dispose();
+				this.ctx.editorContainer.clear();
+				this.ctx.editorContainer.addChild(editor);
+				this.ctx.ui.setFocus(editor);
+				this.ctx.ui.requestRender();
+			};
+		});
+		return answer ?? { decision: "deny" };
 	}
 
 	async showAskDialog(

@@ -29,3 +29,7 @@ export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 export const TEXT_PREDICT_WORKER_ARG = "__omp_worker_text_predict";
 /** Terminal-output selector shared by the CLI dispatcher and worker launcher. */
 export const TERMINAL_OUTPUT_WORKER_ARG = "__omp_worker_terminal_output";
+/** Sandboxed JS eval subprocess selector (stdio-framed transport) shared by the CLI dispatcher and the JS context manager. */
+export const JS_EVAL_STDIO_WORKER_ARG = "__omp_worker_js_eval_stdio";
+/** In-sandbox shell host selector shared by the CLI dispatcher and `sandbox/shell-client.ts`. */
+export const SANDBOX_HOST_ARG = "__omp_sandbox_host";

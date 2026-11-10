@@ -418,4 +418,76 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: { records: "BtwHistoryRecord[]" },
 		unwrap: "records",
 	},
+
+	{
+		name: "get_sandbox",
+		doc: "Sandbox state of the session's workspace: status, settings, locks and the resolved policy.",
+		result: "SandboxState",
+	},
+	{
+		name: "set_sandbox_setting",
+		doc: "Write one sandbox setting to the global config (lists and scope replace the whole operator list); returns the new state.",
+		params: { setting: "SandboxSettingId", value: "boolean | string | string[]" },
+		result: "SandboxState",
+	},
+	{
+		name: "reset_sandbox_setting",
+		doc: "Remove a sandbox setting from the global config, so another layer or the default applies; returns the new state.",
+		params: { setting: "SandboxSettingId" },
+		result: "SandboxState",
+	},
+	{
+		name: "edit_sandbox_list",
+		doc: "Add, remove or replace (needs `replacement`) one entry of a sandbox list in the global config; returns the new state.",
+		params: { list: "SandboxListId", op: "SandboxListOp", entry: "string", "replacement?": "string" },
+		result: "SandboxState",
+	},
+	{
+		name: "grant_sandbox_host",
+		doc: "Allow a host for this session, or always (appended to the global allowlist); returns the new state.",
+		params: { host: "string", scope: "SandboxGrantScope" },
+		result: "SandboxState",
+	},
+	{
+		name: "revoke_sandbox_host",
+		doc: "Drop a host's session grant (persisted entries are removed with `edit_sandbox_list`); returns the new state.",
+		params: { host: "string" },
+		result: "SandboxState",
+	},
+	{
+		name: "set_sandbox_host_prompts",
+		doc: "Opt in to `sandbox_host_request` frames for hosts off the allowlist (off: such hosts are refused); returns the applied setting.",
+		params: { enabled: "boolean" },
+		result: { enabled: "boolean" },
+		unwrap: "enabled",
+	},
+	{
+		name: "respond_sandbox_host",
+		doc: "Answer a pending `sandbox_host_request`; bypasses the command queue.",
+		params: { requestId: "string", decision: "SandboxHostDecision" },
+	},
+	{
+		name: "grant_sandbox_path",
+		doc: "Allow exactly this path for this session (write implies read; persistent entries use `edit_sandbox_list`); returns the new state.",
+		params: { kind: "SandboxPathKind", path: "string" },
+		result: "SandboxState",
+	},
+	{
+		name: "revoke_sandbox_path",
+		doc: "Drop a path's session grant; returns the new state.",
+		params: { kind: "SandboxPathKind", path: "string" },
+		result: "SandboxState",
+	},
+	{
+		name: "set_sandbox_access_prompts",
+		doc: "Opt in to `sandbox_access_request` frames for the agent's path and host requests (off: they are refused); returns the applied setting.",
+		params: { enabled: "boolean" },
+		result: { enabled: "boolean" },
+		unwrap: "enabled",
+	},
+	{
+		name: "respond_sandbox_access",
+		doc: "Answer a pending `sandbox_access_request` (`instruct` needs `instructions`); bypasses the command queue.",
+		params: { requestId: "string", decision: "SandboxAccessDecision", "instructions?": "string" },
+	},
 ];

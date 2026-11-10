@@ -647,6 +647,15 @@ Values are read when each tool call starts, so the next call follows `/fork`, `/
 echo "$PI_SESSION_ID"
 ```
 
+### OS sandbox
+
+See [OS sandbox](./sandbox.md).
+
+| Variable      | Behavior                                                                                                                                                                                             |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_SANDBOX`  | Truthy value (`1`, `y`, `true`, `yes`, `on`, upper- or lower-case) enables the OS sandbox (`sandbox.enabled`). Any other value is ignored: it can only enable, so a repository `.env` cannot disable the sandbox |
+| `OMP_SANDBOX` | Set to `1` by omp in the environment of every process it runs inside the OS sandbox (bash, eval, extension `exec`, opted-in MCP servers); not read by omp                                         |
+
 ---
 
 ## 8) UI/theme/session detection (auto-detected env)

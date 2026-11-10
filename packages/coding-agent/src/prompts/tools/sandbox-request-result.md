@@ -1,0 +1,3 @@
+{{#if granted}}{{target}} is now {{access}} for contained commands ({{#if always}}always: saved to the global sandbox config{{else}}this session{{/if}}). Re-run the command.{{/if}}{{#if alreadyAllowed}}{{target}} is already {{access}} for contained commands; the sandbox did not cause the failure. Look for another cause.{{/if}}{{#if denied}}Denied by the user: {{target}}. Do not retry or work around it; continue with your alternative or tell the user what is blocked.{{/if}}{{#if instructed}}The user did not grant access to {{target}} and replied:
+{{instructions}}
+Follow these instructions.{{/if}}{{#if refused}}Request not sent to the user: {{reason}}{{/if}}

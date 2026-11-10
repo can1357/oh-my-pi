@@ -117,7 +117,7 @@ async function createHookAPI(
 			commands.set(name, { name, ...options });
 		},
 		exec(command: string, args: string[], options?: ExecOptions) {
-			return execCommand(command, args, options?.cwd ?? cwd, options);
+			return execCommand(command, args, options?.cwd ?? cwd, options, cwd);
 		},
 		logger,
 		typebox,

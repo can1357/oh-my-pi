@@ -741,6 +741,8 @@ export class Settings {
 	#layerGeneration = 0;
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
+	/** This instance's entry in {@link liveSettingsInstances}. */
+	#liveRef: WeakRef<Settings>;
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -750,7 +752,8 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
-		liveSettingsInstances.add(new WeakRef(this));
+		this.#liveRef = new WeakRef(this);
+		liveSettingsInstances.add(this.#liveRef);
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
 
@@ -851,6 +854,8 @@ export class Settings {
 		const revision = this.revision;
 		if (this.#grantView?.revision === revision) return this.#grantView.view;
 		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		// An internal read-only view: a legacy `SettingsManager.create()` lookup must never resolve to it.
+		liveSettingsInstances.delete(view.#liveRef);
 		view.#storage = this.#storage;
 		view.#global = this.#operatorLayers();
 		inheritWarnings(view, this);

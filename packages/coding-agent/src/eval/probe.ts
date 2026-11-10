@@ -166,16 +166,25 @@ export type CandidateProbeResult =
 	| { ok: true; index: number }
 	| { ok: false; aborted: boolean; timedOut?: boolean; failures: string[] };
 
+/** Runs one bounded probe; {@link runBoundedProbe} unless the caller must contain it (OS sandbox). */
+export type BoundedProbeRunner = (command: string[], options: BoundedProbeSpawnOptions) => Promise<BoundedProbeResult>;
+
 /**
  * Probe candidates in priority order and return the first that exits 0, sharing
  * ONE discovery deadline across the whole list. Each candidate is bounded by the
  * budget still remaining, so N hung candidates can never consume N× the eval
  * timeout (issue #9466 review). A fast failure (wrong exit code, ENOENT) barely
- * touches the budget, so healthy fallbacks still get their turn.
+ * touches the budget, so healthy fallbacks still get their turn. `runProbe`
+ * replaces the host spawn (a sandbox-contained probe), keeping these semantics.
  */
 export async function probeCandidates(
 	candidates: ProbeCandidate[],
-	{ cwd, signal, timeoutMs }: BackendProbeOptions & { cwd: string },
+	{
+		cwd,
+		signal,
+		timeoutMs,
+		runProbe = runBoundedProbe,
+	}: BackendProbeOptions & { cwd: string; runProbe?: BoundedProbeRunner },
 ): Promise<CandidateProbeResult> {
 	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
 	const deadline = Date.now() + bound;
@@ -193,7 +202,7 @@ export async function probeCandidates(
 			break;
 		}
 		try {
-			const probe = await runBoundedProbe(candidate.command, {
+			const probe = await runProbe(candidate.command, {
 				cwd,
 				env: candidate.env,
 				signal,

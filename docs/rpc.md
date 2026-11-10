@@ -31,7 +31,7 @@ Behavior notes:
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
 - Extension startup (`session_start`) runs after `ready`. While it runs, only `extension_ui_response` (an extension may be waiting on a dialog) and `set_ask_dialog` are handled; every other valid frame is read and waits, in order, until startup finishes (a malformed line still gets its `parse` failure at once). If stdin closes during startup, dialogs the extension awaits are rejected so startup can finish.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
+- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected and pending sandbox host requests are denied; accepted commands are drained, the session is disposed, pending stdout is delivered, and normal shutdown exits with code `0`. A session-persistence failure still latched at disposal exits with code `1` after delivering its `notice` frame.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
@@ -98,6 +98,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 14.   Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 15.   Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
 16.   Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
+17.   Sandbox frames (`sandbox_update`; after `set_sandbox_host_prompts` `sandbox_host_request` / `sandbox_host_request_cancelled`; after `set_sandbox_access_prompts` `sandbox_access_request` / `sandbox_access_request_cancelled`); see [Sandbox](#sandbox)
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -327,6 +328,25 @@ they typed past it. Feedback tunes the engine's learned state.
 
 See [Side questions (`/btw`)](#side-questions-btw).
 
+### OS sandbox
+
+Every command answers `data: SandboxState` (the state after the change) unless noted; see [Sandbox](#sandbox).
+
+- `{ id?, type: "get_sandbox" }`
+- `{ id?, type: "set_sandbox_setting", setting: SandboxSettingId, value: boolean | string | string[] }`
+- `{ id?, type: "reset_sandbox_setting", setting: SandboxSettingId }`
+- `{ id?, type: "edit_sandbox_list", list: SandboxListId, op: "add" | "remove" | "replace", entry: string, replacement?: string }`
+- `{ id?, type: "grant_sandbox_host", host: string, scope: "session" | "always" }`
+- `{ id?, type: "revoke_sandbox_host", host: string }`
+- `{ id?, type: "set_sandbox_host_prompts", enabled: boolean }` → `data: { enabled: boolean }`
+- `{ id?, type: "respond_sandbox_host", requestId: string, decision: "once" | "session" | "always" | "deny" }` (no `data`)
+- `{ id?, type: "grant_sandbox_path", kind: "write" | "read", path: string }`
+- `{ id?, type: "revoke_sandbox_path", kind: "write" | "read", path: string }`
+- `{ id?, type: "set_sandbox_access_prompts", enabled: boolean }` → `data: { enabled: boolean }`
+- `{ id?, type: "respond_sandbox_access", requestId: string, decision: "session" | "always" | "deny" | "instruct", instructions?: string }` (no `data`)
+
+`SandboxSettingId` is `"enabled" | "mode" | "scope" | "fallback" | "readScope" | "networkMode"` or a `SandboxListId`: `"allowWrite" | "allowRead" | "denyRead" | "allowedHosts"`.
+
 ## Response Schema
 
 All command results use `RpcResponse`:
@@ -547,9 +567,14 @@ field is absent outside both stages. No event carries it, so re-read
 		"contextWindow": 200000,
 		"percent": 0.55
 	},
-	"goal": null
+	"goal": null,
+	"sandbox": { "state": "active", "backend": "seatbelt" }
 }
 ```
+
+`sandbox` is the OS sandbox status of the session's workspace: `state` is `off`,
+`active` (with its `backend`) or `unavailable`; `get_sandbox` has the full state
+(see [Sandbox](#sandbox)).
 
 Fields whose values are `undefined` are omitted from JSON, including an unset
 model/thinking level, session name/file, or unavailable `contextUsage`.
@@ -930,7 +955,7 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, side-question frames, sandbox frames, builtin slash-command side channels, and session-persistence and `btw-history` `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
 The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved, and enough is added to rebuild the message client-side. `text_start`, `thinking_start`, and `toolcall_start` carry `block`: the shell of the content block at `contentIndex`, with its streamed content emptied (`text` and `thinking` are `""`, a tool call's `arguments` are `{}`; its `id`, `name`, and other metadata are kept), so the deltas that follow always apply from empty. The server snapshots a block when it handles the event, not when the model emitted it, so a start's snapshot can already hold text that a later delta delivers; hence the emptying. `text_end` and `thinking_end` keep `content` and add `block`: the same block without its text, so its signature and other metadata (`textSignature`, `thinkingSignature`, ...) are available; rebuild the block as `{ ...block, text: content }` or `{ ...block, thinking: content }`. `image_end` carries the whole image as `content` and `toolcall_end` the whole tool call as `toolCall`; each is the block at `contentIndex`. A `start` (a restart of the streaming message within a turn) carries `message`: the whole message to restart from; that snapshot can likewise be ahead of the deltas that follow, so treat each block's `*_end` as authoritative for its final content. `text_delta` and `thinking_delta` carry the text to append to the block at `contentIndex`; `toolcall_delta` carries a fragment of the tool call's arguments JSON, and the arguments are complete only in `toolcall_end`'s `toolCall`. Rebuilding covers the message's `content`: `usage`, `responseId`, `stopReason`, and the other message fields arrive only in `message_end`. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message and is authoritative: it can differ from the rebuilt content, for example when inline-edit recovery lifts edit payload text out of a text block and synthesizes an `edit` tool call just before it. Block kinds with no start event also arrive only in full there. Hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
@@ -1234,12 +1259,184 @@ If the retry finds the topic deleted or rewritten on disk (for example by
 another process), it can never succeed: the answer is reported lost as another
 such notice and dropped, and the `btw` or session change proceeds.
 
+## Sandbox
+
+The sandbox commands show and edit the [OS sandbox](./sandbox.md) of the
+session's workspace (its cwd) with the semantics of the `/sandbox` panel: every
+write goes to the global config layer, never to project config. A client
+detects support by sending `get_sandbox`; an older server answers
+`Unknown command: get_sandbox`.
+
+A client that shows the sandbox:
+
+1. Sends `get_sandbox` once and renders the `SandboxState` it answers.
+2. Replaces its copy with the `state` of every `sandbox_update` frame. The
+   server pushes one whenever the state changes (any `sandbox.*` setting, a
+   host the egress proxy blocked, a host or path granted or revoked, prompts
+   turned on or off), at most one per event-loop tick, when `/move` or `/wt`
+   moves the session to another directory, and once after `ready` when the sandbox is
+   enabled, so an `unavailable` backend is reported without asking. Sandbox
+   frames are not session events: `set_event_filter` never drops them.
+3. Edits with the mutation commands. Each answers the state after the change;
+   a row listed in `locked` is shown read-only, since writing it fails.
+4. Optionally answers host prompts and the agent's access requests (below).
+
+```ts
+interface SandboxState {
+	workspace: string; // directory the policy is resolved for (the session cwd)
+	status:
+		| { state: "off" }
+		| { state: "active"; backend: string; network: "allowlist" | "deny" | "allow"; warnings: string[] }
+		| { state: "unavailable"; reason: string; fallback: "warn" | "block" };
+	// Scalars as effective here; scope and the lists as the non-project layers hold them (what a write replaces).
+	settings: {
+		enabled: boolean;
+		mode: "workspace-write" | "read-only";
+		scope: ("bash" | "eval" | "exec")[];
+		fallback: "warn" | "block";
+		readScope: "all" | "workspace";
+		networkMode: "allowlist" | "deny" | "allow";
+		allowWrite: string[];
+		allowRead: string[];
+		denyRead: string[];
+		allowedHosts: string[];
+	};
+	locked: Partial<Record<SandboxSettingId, string>>; // decided by $PI_SANDBOX, a session override, --config, or project tightening; value = reason
+	listNotes: Partial<Record<SandboxListId, string>>; // project config narrows the list here
+	ignored: { id: string; reason: string }[]; // project values dropped because they would loosen the sandbox
+	effective: { readwritePaths: string[]; readonlyPaths: string[]; deniedPaths: string[] }; // resolved policy
+	blockedHosts: string[]; // refused this session and still not allowed, most recent first
+	sessionHosts: string[]; // allowed for this session only
+	sessionPaths: { write: string[]; read: string[] }; // paths allowed for this session only
+	hostPrompts: boolean; // set_sandbox_host_prompts is on
+	accessPrompts: boolean; // set_sandbox_access_prompts is on
+}
+```
+
+`status.network` is the mode as enforced here: a mode the host cannot enforce
+runs as `deny` and adds a warning.
+
+Mutations:
+
+- `set_sandbox_setting` writes one setting. `enabled` takes a boolean, `mode`,
+  `fallback`, `readScope` and `networkMode` take one of their strings, `scope`
+  and the four lists take a string array that replaces the whole list.
+- `reset_sandbox_setting` removes the setting from the global config, so
+  another layer or the default applies.
+- `edit_sandbox_list` adds or removes one entry, or replaces `entry` with
+  `replacement` (added first, so a rejected replacement leaves `entry` in
+  place). Removing an absent entry changes nothing.
+- `grant_sandbox_host` with `scope: "session"` allows the host for the rest of
+  this process without writing settings (with the rules of an approved
+  prompt: private addresses yes, loopback and link-local no); `scope: "always"`
+  also appends it to the global `allowedHosts` as an exact entry.
+- `revoke_sandbox_host` drops a session grant. A persisted entry is removed
+  with `edit_sandbox_list` (`list: "allowedHosts"`, `op: "remove"`).
+
+Failure codes:
+
+| `code` | When |
+|---|---|
+| `sandbox_locked` | The setting (for `edit_sandbox_list` the list; for an `always` grant or an `always` answer to `respond_sandbox_host`, `allowedHosts`; for an `always` answer to `respond_sandbox_access`, the list the request's kind writes) is in `locked`: a global write would be shadowed. Nothing is written, and a refused `always` answer leaves the request pending, so the client can answer `session` instead; the message carries the reason. |
+| `invalid_value` | Unknown setting or list, wrong value type, unknown enum member or scope, empty entry, unknown `${token}` in a path, `replace` without `replacement`, a host with whitespace, an unknown `decision`, `instruct` without non-blank `instructions`, a path `grant_sandbox_path` refuses; the message names the problem. Nothing is written. |
+| `unknown_request` | `respond_sandbox_host` or `respond_sandbox_access` for a request that is not pending (answered, timed out, cancelled, or never sent). |
+
+```json
+{ "id": "s1", "type": "set_sandbox_setting", "setting": "networkMode", "value": "deny" }
+{ "id": "s1", "type": "response", "command": "set_sandbox_setting", "success": true, "data": { "workspace": "/work/app", "status": { "state": "active", "backend": "seatbelt", "network": "deny", "warnings": [] }, "settings": { "networkMode": "deny", … }, … } }
+{ "type": "sandbox_update", "state": { "workspace": "/work/app", … } }
+{ "id": "s2", "type": "set_sandbox_setting", "setting": "enabled", "value": false }
+{ "id": "s2", "type": "response", "command": "set_sandbox_setting", "success": false, "error": "sandbox enabled cannot be changed here: Set by $PI_SANDBOX", "code": "sandbox_locked" }
+```
+
+### Host prompts
+
+By default an RPC server never asks about hosts: in `allowlist` mode a host off
+the list is refused (and listed in `blockedHosts`), so a headless client never
+hangs on a prompt. After `set_sandbox_host_prompts { enabled: true }` the server
+asks instead:
+
+```json
+{ "type": "sandbox_host_request", "id": "1597…", "host": "example.com", "port": 443, "timeoutMs": 120000 }
+{ "id": "r1", "type": "respond_sandbox_host", "requestId": "1597…", "decision": "session" }
+{ "id": "r1", "type": "response", "command": "respond_sandbox_host", "success": true }
+```
+
+`decision` is `once` (this connection), `session` (the host for this session),
+`always` (also appended to the global `allowedHosts`), or `deny`. A `session`
+or `always` answer is recorded by the runtime and followed by a
+`sandbox_update`. One request is pending per host; concurrent connections to
+it share the answer. `respond_sandbox_host` bypasses the command queue, so it
+answers a prompt while another command runs.
+
+A request unanswered for `timeoutMs` (120 s) is denied and closed with
+`{ type: "sandbox_host_request_cancelled", id, reason: "timeout" }`. Turning
+prompts off, closing stdin, or shutting down denies every pending request
+with `reason: "aborted"` and uninstalls the prompt, so unknown hosts are
+refused again.
+
+### Access requests
+
+The agent's `sandbox_request` tool asks for one path (to write or read) or one
+host it needs, saying why. By default an RPC server never asks: the request is
+refused at once ("no one to ask") and the agent reports instead. After
+`set_sandbox_access_prompts { enabled: true }` each request is sent to the
+client:
+
+```json
+{ "type": "sandbox_access_request", "id": "1598…", "kind": "write", "target": "/home/me/build-out", "intent": "Run the release build, which writes its artifacts to ~/build-out.", "command": "make release OUT=~/build-out", "alternative": "Write the artifacts to ./out inside the workspace instead.", "effect": "Contained commands will be able to create, change and delete files under /home/me/build-out.", "workspace": "/home/me/app", "canAlways": true }
+{ "id": "a1", "type": "respond_sandbox_access", "requestId": "1598…", "decision": "session" }
+{ "id": "a1", "type": "response", "command": "respond_sandbox_access", "success": true }
+```
+
+| Field | Meaning |
+|---|---|
+| `kind` | `write` (a path to create, change and delete files under; implies read), `read` (a path to read), or `host` (a host to connect to) |
+| `target` | The resolved absolute path or canonical host name; a grant covers exactly this target |
+| `intent` | What the agent is doing and why it needs `target`, written by the agent |
+| `command` | The command that needs the access, verbatim, when the agent gave one |
+| `alternative` | What the agent does instead when denied, when it gave one |
+| `effect` | What a grant lets contained commands do, written by omp; every client shows the same sentence |
+| `workspace` | The session's workspace |
+| `canAlways` | False when a global write to the backing list (`allowWrite`, `allowRead` or `allowedHosts`) would not take effect (locked, or supplied by project config): offer no `always` |
+
+`target`, `intent`, `command` and `alternative` are supplied by the agent, and
+`effect` embeds `target`. Render all of them as plain, escaped text: never as
+Markdown, HTML or terminal escape sequences.
+
+`decision` is one of:
+
+- `session`: grant exactly `target` for the rest of this process (`sessionPaths` or `sessionHosts`);
+- `always`: also append it to the global `allowWrite`, `allowRead` or `allowedHosts`;
+  refused with `sandbox_locked`, leaving the request pending, while that list is
+  locked or the frame said `canAlways: false` (for example when project config
+  supplies the list);
+- `deny`: grant nothing; the agent is told not to retry or work around it;
+- `instruct`: grant nothing and reply with `instructions` (required, non-blank),
+  which the agent follows.
+
+A grant is followed by a `sandbox_update`. There is no timeout: the agent's turn
+waits like any question to the user. When the tool call is aborted, prompts are
+turned off, stdin closes or the session ends, a pending request is denied and
+closed with `{ type: "sandbox_access_request_cancelled", id, reason: "aborted" }`.
+`respond_sandbox_access` bypasses the command queue.
+
+`grant_sandbox_path` grants a path for the session without a request. `~` is
+expanded and a relative `path` resolves against the workspace; the grant
+covers the resolved real path. A `write` path that does not exist yet is
+created as an empty directory (the policy only takes existing paths). The
+runtime refuses a filesystem root, a protected path such as a denied secret
+store, or an invalid target with `invalid_value`. `revoke_sandbox_path` drops
+a session grant. Persistent entries are edited with `edit_sandbox_list`.
+
 ## Prompt/Queue Concurrency and Ordering
 
 Ordinary commands run on a serialized queue. Extension UI responses and host
 tool/URI updates/results bypass that queue, so they can complete a request
-while its command handler is waiting. `bash` also bypasses the serial queue and
-is tracked as background command work; its response may arrive out of order.
+while its command handler is waiting; so do `respond_sandbox_host` and
+`respond_sandbox_access`. `bash`
+also bypasses the serial queue and is tracked as background command work; its
+response may arrive out of order.
 `prompt` and `steer_subagent` start in queue order but await admission in the
 background, so their responses may also arrive after later commands'.
 
@@ -1798,6 +1995,7 @@ Current helper characteristics:
 - Supports host-owned custom tools via `setCustomTools()` and automatic handling of `host_tool_call` / `host_tool_cancel`
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
 - Drives draft-only speech input with `dictationStart(captureId)`, `dictationStop()`, and `onDictation()`
+- Shows and edits the sandbox with `getSandbox()`, `setSandboxSetting()`, `resetSandboxSetting()`, `editSandboxList()`, `grantSandboxHost()`, `revokeSandboxHost()`, `grantSandboxPath()`, `revokeSandboxPath()`, `setSandboxHostPrompts()`, `respondSandboxHost()`, `setSandboxAccessPrompts()` and `respondSandboxAccess()`, and delivers `sandbox_update`, `sandbox_host_request`, `sandbox_host_request_cancelled`, `sandbox_access_request` and `sandbox_access_request_cancelled` through `onSandbox()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
 

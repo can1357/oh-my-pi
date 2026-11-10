@@ -344,6 +344,10 @@ webrtc = "0.17.2"
 # ──────────────────────────────────────────────────────────────────────────────
 # System & Platform
 # ──────────────────────────────────────────────────────────────────────────────
+# OS process containment (seatbelt / bubblewrap / processcontainer) for the
+# agent sandbox; default features only. See MXC_TELEMETRY_COMPONENT_PATH in
+# .cargo/config.toml.
+mxc-sdk = "=1.0.1"
 libc = "0.2.191"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",

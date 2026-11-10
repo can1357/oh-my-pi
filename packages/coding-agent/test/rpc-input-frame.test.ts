@@ -311,6 +311,7 @@ describe("RpcInputDispatcher", () => {
 						queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
 						todoPhases: [],
 						goal: null,
+						sandbox: { state: "off" },
 					},
 				};
 			}
@@ -382,6 +383,26 @@ describe("RpcInputDispatcher", () => {
 		releasePrediction.resolve();
 		await flushMicrotasks();
 		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["after", "predict"]);
+	});
+
+	test("respond_sandbox_host and respond_sandbox_access overtake a blocked serial command and the commands queued behind it", async () => {
+		const releaseSlow = Promise.withResolvers<void>();
+		const { deps, outputs } = makeDeps(async command => {
+			if (command.type === "compact") await releaseSlow.promise;
+			return { id: command.id, type: "response", command: command.type, success: true } as RpcResponse;
+		});
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "slow", type: "compact" });
+		dispatcher.dispatch({ id: "queued", type: "get_sandbox" });
+		dispatcher.dispatch({ id: "answer", type: "respond_sandbox_host", requestId: "r", decision: "deny" });
+		dispatcher.dispatch({ id: "access", type: "respond_sandbox_access", requestId: "a", decision: "deny" });
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["answer", "access"]);
+
+		releaseSlow.resolve();
+		await dispatcher.drain();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["answer", "access", "slow", "queued"]);
 	});
 
 	test("a prompt waits for an earlier session change without blocking a later abort", async () => {

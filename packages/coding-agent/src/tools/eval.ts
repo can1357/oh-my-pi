@@ -72,6 +72,7 @@ import {
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
+import { SandboxRuntime } from "../sandbox/runtime";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -844,6 +845,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			}
 			session.assertEvalExecutionAllowed?.();
 
+			// Every cell runs contained when the sandbox applies to `eval`; the card reports it.
+			const sandboxRuntime = await SandboxRuntime.for(session.cwd);
+			const evalSandbox = sandboxRuntime.applies("eval") ? sandboxRuntime : undefined;
+			const evalStartedAt = Date.now();
 			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
 			const images: ImageContent[] = [];
 			const replies: string[] = [];
@@ -1103,6 +1108,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						isError: true,
 					};
 					if (notice) details.notice = notice;
+					const sandboxMeta = evalSandbox?.resultMeta({ blockedSince: evalStartedAt, output: combinedOutput });
+					if (sandboxMeta) details.sandbox = sandboxMeta;
 
 					return toolResult(details)
 						.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])
@@ -1132,6 +1139,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				replies: replies.length > 0 ? replies : undefined,
 			};
 			if (notice) details.notice = notice;
+			const sandboxMeta = evalSandbox?.resultMeta({ blockedSince: evalStartedAt });
+			if (sandboxMeta) details.sandbox = sandboxMeta;
 
 			return toolResult(details)
 				.content([{ type: "text", text: notice ? `${notice}\n\n${outputText}` : outputText }, ...images])

@@ -305,6 +305,8 @@ async function executeProcess(opts: {
 		const result = await executeBash(opts.command, {
 			cwd: opts.cwd,
 			sessionKey: `autoresearch:${opts.cwd}`,
+			// The harness is agent-written: it runs in the OS sandbox when that applies here.
+			sandboxWorkspace: opts.cwd,
 			timeout: opts.timeoutMs > 0 ? opts.timeoutMs : 2_147_000_000,
 			signal: opts.signal,
 			chunkThrottleMs: 0,

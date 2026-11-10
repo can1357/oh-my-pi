@@ -80,6 +80,7 @@ import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcBtwController } from "./rpc-btw";
 import { RpcGoalController } from "./rpc-goal";
+import { type RpcSandboxCommand, RpcSandboxController, RpcSandboxError } from "./rpc-sandbox";
 import { RpcDictationBridge, type RpcDictationControllerFactory } from "./rpc-dictation";
 import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
 import { RpcOutputWriter } from "./rpc-output";
@@ -427,7 +428,9 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * (`prompt` and `steer_subagent` are also backgrounded there, but start through
  * the serial tail.) `btw_cancel` is synchronous and must overtake a `btw` still
  * starting or a long serial command; `abort_branch_summary` likewise overtakes
- * the `navigate_tree` whose summary it stops.
+ * the `navigate_tree` whose summary it stops; `respond_sandbox_host` and
+ * `respond_sandbox_access` answer a prompt that a running command (a
+ * backgrounded `bash`, a prompt's tool call) is waiting on.
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
 const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
@@ -437,6 +440,8 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"live_connect",
 	"btw_cancel",
 	"abort_branch_summary",
+	"respond_sandbox_host",
+	"respond_sandbox_access",
 ]);
 
 /**
@@ -1510,6 +1515,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			sessionChangesInProgress--;
 		}
 	};
+	// Sandbox frames go straight to `output`, so `set_event_filter` never drops them.
+	const sandbox = new RpcSandboxController({
+		cwd: () => session.sessionManager.getCwd(),
+		output,
+		waitForUser: dialog => session.waitForUser(dialog),
+	});
 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
@@ -1832,6 +1843,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	const disposeAndExit = async (): Promise<never> => {
 		try {
+			// Deny host prompts a contained command still waits on, and stop sandbox frames.
+			sandbox.dispose();
 			// The process ends regardless; report an unsaved side answer instead of skipping dispose.
 			await btw.close().catch(btwError => {
 				const message = toError(btwError).message;
@@ -1889,6 +1902,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		void emitAvailableCommandsUpdate();
 	});
 	await emitAvailableCommandsUpdate();
+	// A client learns about an enabled (or unavailable) sandbox without asking.
+	sandbox.start().catch(sandboxError => logger.warn("RPC sandbox: startup failed", { error: String(sandboxError) }));
 
 	const inputGate = new RpcUserInputGate();
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
@@ -1971,6 +1986,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					},
 					notifyConfigChanged: async () => {
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+						// `/move` and `/wt` change the session cwd, and with it the sandbox workspace.
+						sandbox.syncWorkspace();
 					},
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
@@ -2017,6 +2034,17 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const abortBuiltinCommands = (reason: string): void => {
 		for (const controller of builtinCommandAborts) controller.abort(reason);
 		builtinCommandAborts.clear();
+	};
+
+	const handleSandboxCommand = async (command: RpcSandboxCommand): Promise<RpcResponse> => {
+		try {
+			return success(command.id, command.type, await sandbox.handle(command));
+		} catch (sandboxError) {
+			if (sandboxError instanceof RpcSandboxError) {
+				return error(command.id, command.type, sandboxError.message, sandboxError.code);
+			}
+			throw sandboxError;
+		}
 	};
 
 	// Handle a single command
@@ -2300,6 +2328,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					})),
 					contextUsage: session.getContextUsage(),
 					goal: session.getGoalModeState() ?? null,
+					sandbox: await sandbox.summary(),
 				};
 				return success(id, "get_state", state);
 			}
@@ -2864,6 +2893,24 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return success(id, "get_btw_history", { records: await btw.history() });
 
 			// =================================================================
+			// OS sandbox
+			// =================================================================
+
+			case "get_sandbox":
+			case "set_sandbox_setting":
+			case "reset_sandbox_setting":
+			case "edit_sandbox_list":
+			case "grant_sandbox_host":
+			case "revoke_sandbox_host":
+			case "set_sandbox_host_prompts":
+			case "respond_sandbox_host":
+			case "grant_sandbox_path":
+			case "revoke_sandbox_path":
+			case "set_sandbox_access_prompts":
+			case "respond_sandbox_access":
+				return handleSandboxCommand(command);
+
+			// =================================================================
 			// Word prediction
 			// =================================================================
 
@@ -2960,6 +3007,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+	// A contained command waiting on a host prompt only the client could answer is denied now.
+	sandbox.dispose();
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	dictationBridge.dispose();

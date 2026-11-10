@@ -7,6 +7,7 @@ import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import { cfgSandboxEnabled } from "../sandbox/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
@@ -1169,6 +1170,8 @@ export const cfgDevAutoqaConsent = register({
 /** Settings read by `resolveBuiltinToolPlan` (`tools/index.ts`); a live session reconciles its built-ins when any changes. */
 export const cfgBuiltinToolGates = combine({
 	ask: cfgAskEnabled,
+	/** `sandbox_request` exists only while the sandbox is enabled. */
+	sandbox: cfgSandboxEnabled,
 	astEdit: cfgAstEditEnabled,
 	astGrep: cfgAstGrepEnabled,
 	async: cfgAsyncEnabled,

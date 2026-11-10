@@ -34,6 +34,7 @@ import {
 	createSourceMeta,
 	expandEnvVarsDeep,
 	loadFilesFromDir,
+	parseMCPSandboxOptions,
 	parseRequestIdFormat,
 	scanSkillsFromDir,
 } from "./helpers";
@@ -284,6 +285,8 @@ interface RawMcpServer {
 	args?: string[];
 	env?: Record<string, string>;
 	cwd?: string;
+	sandbox?: unknown;
+	sandboxNetwork?: unknown;
 	url?: string;
 	headers?: Record<string, string>;
 	auth?: MCPServer["auth"];
@@ -346,6 +349,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid instructions ${JSON.stringify(cfg.instructions)}, ignoring`,
 				);
 			}
+			const sandboxOptions = parseMCPSandboxOptions(cfg, (field, value) =>
+				logger.warn(
+					`[omp-plugins] MCP server "${serverName}" in ${mcpPath}: invalid ${field} ${JSON.stringify(value)}, ignoring`,
+				),
+			);
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
@@ -356,6 +364,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				...(cfg.args !== undefined && { args: cfg.args }),
 				...(cfg.env !== undefined && { env: cfg.env }),
 				...(rooted.cwd !== undefined && { cwd: rooted.cwd }),
+				...sandboxOptions,
 				...(cfg.url !== undefined && { url: cfg.url }),
 				...(cfg.headers !== undefined && { headers: cfg.headers }),
 				...(cfg.auth !== undefined && { auth: cfg.auth }),

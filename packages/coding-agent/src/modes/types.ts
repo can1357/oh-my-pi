@@ -643,6 +643,7 @@ export interface InteractiveModeContext {
 	/** Open the fullscreen `/usage` dashboard overlay for the given reports. */
 	showUsageDashboard(reports: UsageReport[]): void;
 	showAdvisorConfigure(): void;
+	showSandboxConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;

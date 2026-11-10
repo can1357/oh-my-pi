@@ -194,7 +194,7 @@ export async function loadCustomCommands(options: LoadCustomCommandsOptions = {}
 	const sharedApi: CustomCommandAPI = {
 		cwd,
 		exec: (command: string, args: string[], execOptions) =>
-			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions),
+			execCommand(command, args, execOptions?.cwd ?? cwd, execOptions, cwd),
 		typebox,
 		arktype,
 		zod,

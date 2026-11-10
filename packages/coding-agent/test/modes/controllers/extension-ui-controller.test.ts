@@ -7,6 +7,8 @@ import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../sr
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
+import { SandboxAccessDialogComponent } from "@oh-my-pi/pi-tui/overlays/sandbox-access-dialog";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
@@ -944,5 +946,55 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 
 		harness.handleInput("\x1b");
 		expect(await answer).toBeUndefined();
+	});
+});
+
+describe("ExtensionUiController sandbox access request", () => {
+	const view = {
+		kind: "write" as const,
+		target: "/work/out",
+		intent: "Build into /work/out.",
+		effect: "Contained commands will be able to create, change and delete files under /work/out.",
+		canAlways: true,
+	};
+
+	it("waits behind an open approval, then denies on abort and gives the composer back", async () => {
+		const harness = makeHarness();
+		const approval = harness.controller.showCollabAwareApproval({
+			full: "Allow tool: bash\nCommand: ls",
+			compact: "Allow tool: bash\nCommand: ls",
+		});
+		const aborted = new AbortController();
+		const access = harness.controller.showSandboxAccess(view, { signal: aborted.signal });
+		// Let any microtask-deferred mount land before checking that only the approval is up.
+		for (let tick = 0; tick < 5; tick++) await Promise.resolve();
+		// Only the approval is mounted; the request queues behind it.
+		const [first] = harness.editorContainer.children;
+		expect(first).toBeInstanceOf(ApprovalDialogComponent);
+		expect(harness.editorContainer.children.some(child => child instanceof SandboxAccessDialogComponent)).toBe(false);
+		harness.handleInput("\x1b");
+		expect(await approval).toBe("deny");
+		// The request mounts once the approval settles.
+		expect(harness.editorContainer.children[0]).toBeInstanceOf(SandboxAccessDialogComponent);
+		expect(harness.getFocused()).toBe(harness.editorContainer.children[0]);
+		aborted.abort();
+		expect(await access).toEqual({ decision: "deny" });
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
+
+	it("opens on Deny over a composer draft, so a bare Enter denies", async () => {
+		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
+		try {
+			const harness = makeHarness();
+			harness.editor.setText("keep the build dir");
+			const access = harness.controller.showSandboxAccess(view);
+			now.mockReturnValue(2_000);
+			harness.handleInput("\r");
+			expect(await access).toEqual({ decision: "deny" });
+			expect(harness.editor.getText()).toBe("keep the build dir");
+		} finally {
+			now.mockRestore();
+		}
 	});
 });

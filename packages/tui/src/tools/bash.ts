@@ -39,6 +39,7 @@ import {
 	runOutput,
 	type RunState,
 } from "./native-view";
+import { sandboxBadge, sandboxNoteLines, sandboxNoteNodes, type ToolSandboxMeta } from "./sandbox-meta";
 import { renderShellVisualization, shellVizText } from "./shell-viz-render";
 import { node } from "../native/describe";
 
@@ -113,6 +114,8 @@ export interface BashToolDetails {
 		jobId: string;
 		type: "bash";
 	};
+	/** OS sandbox the command ran in; absent when it ran uncontained. */
+	sandbox?: ToolSandboxMeta;
 }
 
 function escapeBashEnvValueForDisplay(value: unknown): string {
@@ -413,12 +416,14 @@ function shellToolHead(
 	settled: boolean,
 ): NativeToolHead {
 	const exit = settled && details?.exitCode !== undefined && details.exitCode !== 0 ? details.exitCode : undefined;
+	const sandbox = details?.sandbox;
 	return {
 		title,
 		target: intent,
 		targetKind: intent ? "text" : undefined,
 		command,
 		exit,
+		badges: sandbox ? [sandboxBadge(sandbox)] : undefined,
 		note: settled && details?.timedOut === true ? "timed out" : undefined,
 	};
 }
@@ -703,9 +708,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					);
 					const outputLines: string[] = [...formatted.lines];
 					if (warningLine) outputLines.push(warningLine);
+					outputLines.push(...sandboxNoteLines(details?.sandbox, uiTheme, contentWidth));
 
 					const snapshot: ToolCardSnapshot = {
 						header,
+						headerMeta: details?.sandbox ? uiTheme.fg("dim", "sandboxed") : undefined,
 						phase: isPartial ? "partial" : isError ? (isTimeout ? "warning" : "error") : "success",
 						// Shell cards keep the neutral segmented look in every phase: the
 						// phase colours status and border, never a background wash. A
@@ -854,9 +861,10 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				],
 				{ key: "run", tone: RUN_BOX_TONE[state] },
 			);
+			const notes = sandboxNoteNodes(details?.sandbox);
 			return {
 				tool: shellToolHead(config.resolveTitle(args, options), command, callIntent(args), details, !isPartial),
-				body: [box],
+				body: [box, ...notes],
 				tone: state === "timed-out" ? "warning" : undefined,
 				preview: "children",
 				inline: true,

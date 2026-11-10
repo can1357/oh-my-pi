@@ -6,7 +6,7 @@
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
-import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, isRecord, MAIN_CONFIG_FILENAMES, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { type: "text" };
@@ -14,6 +14,7 @@ import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import { normalizeToLF } from "../edit/normalize";
+import { sandboxEnabled } from "../sandbox/policy";
 import type {
 	ExtensionApprovalAnswer,
 	ExtensionApprovalGrant,
@@ -323,7 +324,7 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
 
 /** `tools.restrictedFolders` as one call sees it. */
 export interface ApprovalRestrictions {
-	/** Folders where every action needs an explicit approval, whatever the mode, policy, or grant. */
+	/** Folders (or single files) where every action needs an explicit approval, whatever the mode, policy, or grant. */
 	restrictedFolders: readonly string[];
 	/**
 	 * Directory the call runs in: a tool that names no path is matched by it (or by its own `cwd`
@@ -332,13 +333,33 @@ export interface ApprovalRestrictions {
 	cwd?: string;
 }
 
-/** The restrictions `settings` configure for calls running in `cwd`; `undefined` when none are. */
+/**
+ * omp's global settings files, which hold the operator's sandbox policy (`config.yml`) and can
+ * enable or redirect it (`.env`: `PI_SANDBOX`, `PI_CONFIG_FILES`). While the sandbox is enabled
+ * the in-process file tools must not rewrite them unnoticed; contained commands cannot anyway.
+ */
+function sandboxProtectedConfigFiles(settings: Settings): string[] {
+	const agentDir = settings.getAgentDir();
+	return [
+		...MAIN_CONFIG_FILENAMES.map(name => path.join(agentDir, name)),
+		path.join(agentDir, ".env"),
+		path.join(getConfigRootDir(), ".env"),
+	];
+}
+
+/**
+ * The restrictions `settings` configure for calls running in `cwd`; `undefined` when none are.
+ * While the sandbox is enabled, omp's global settings files are restricted too.
+ */
 export function approvalRestrictions(
 	settings: Settings | undefined,
 	cwd: string | undefined,
 ): ApprovalRestrictions | undefined {
 	if (!settings) return undefined;
-	const restrictedFolders = cfgToolsRestrictedFolders.get(settings);
+	const configured = cfgToolsRestrictedFolders.get(settings);
+	const restrictedFolders = sandboxEnabled(settings)
+		? [...configured, ...sandboxProtectedConfigFiles(settings)]
+		: configured;
 	if (restrictedFolders.length === 0) return undefined;
 	return cwd === undefined ? { restrictedFolders } : { restrictedFolders, cwd };
 }

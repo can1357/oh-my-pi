@@ -218,6 +218,13 @@ import {
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type CfgApproval, type CfgChangeRequest, setCfgApprovalHost } from "../internal-urls/cfg-protocol";
 import {
+	type HostApproval,
+	type SandboxAccessAnswer,
+	type SandboxAccessRequest,
+	SandboxRuntime,
+} from "../sandbox/runtime";
+import { hostApprovalFor, sandboxAccessView, sandboxHostPrompt } from "./sandbox-panel";
+import {
 	createTodoHudStateData,
 	getTodoHudVisibility,
 	nextActionableTask,
@@ -2533,6 +2540,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			persistentSettings: Settings.instance,
 		});
+		// Hosts the sandbox's egress proxy does not list ask here; without this approver they are refused.
+		SandboxRuntime.setHostApprover((host, port) =>
+			this.session.waitForUser(() => this.#promptSandboxHost(host, port)),
+		);
+		// The agent's `sandbox_request` asks here; without this approver requests are refused.
+		SandboxRuntime.setAccessApprover((request, signal) =>
+			this.session.waitForUser(() => this.#promptSandboxAccess(request, signal)),
+		);
 
 		await logger.time(
 			"InteractiveMode.init:slashCommands",
@@ -8151,6 +8166,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		return "deny";
 	}
 
+	/**
+	 * Ask whether a contained command may reach `host`, through the tool-approval dialog: this
+	 * connection only, the rest of the session, or always. The runtime records a session or
+	 * always answer itself (always: the global allowlist). Dismissing the dialog, or stopping
+	 * the mode, refuses the connection.
+	 */
+	async #promptSandboxHost(host: string, port: number): Promise<HostApproval> {
+		const answer = await this.#extensionUiController.showCollabAwareApproval(sandboxHostPrompt(host, port), {
+			signal: this.#dialogLifetime.signal,
+		});
+		return hostApprovalFor(answer);
+	}
+
+	/**
+	 * Ask the user about the agent's access request (a path to write or read, a host to reach) in
+	 * the composer's place: allow for this session, always, deny, or reply with instructions.
+	 * Dismissing it, aborting the call or stopping the mode denies.
+	 */
+	async #promptSandboxAccess(request: SandboxAccessRequest, signal?: AbortSignal): Promise<SandboxAccessAnswer> {
+		const lifetime = signal ? AbortSignal.any([signal, this.#dialogLifetime.signal]) : this.#dialogLifetime.signal;
+		return this.#extensionUiController.showSandboxAccess(sandboxAccessView(request), { signal: lifetime });
+	}
+
 	stop(): void {
 		this.#closeAttempt?.abort();
 		this.syncIdleMaintenanceView(null);
@@ -8217,6 +8255,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
 		setCfgApprovalHost(null);
+		SandboxRuntime.setHostApprover(undefined);
+		SandboxRuntime.setAccessApprover(undefined);
 		setWordPredictionHost(undefined);
 		this.#disposeImageBlobWriter?.();
 		this.#disposeImageBlobWriter = undefined;
@@ -9573,6 +9613,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showAdvisorConfigure(): void {
 		this.#selectorController.showAdvisorConfigure();
+	}
+
+	showSandboxConfigure(): void {
+		this.#selectorController.showSandboxConfigure();
 	}
 
 	showHistorySearch(): void {

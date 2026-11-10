@@ -142,6 +142,10 @@ export const stateDefs = {
 		dumpTools: absentAs("ToolDescriptor[]", []),
 		"contextUsage?": "ContextUsage",
 		goal: absentAs(doc("GoalModeState | null", "Current goal mode; null when the session has no goal."), null),
+		"sandbox?": doc(
+			"SandboxSummary",
+			"Sandbox status of the session's workspace; absent on servers without the sandbox commands.",
+		),
 	},
 
 	BashResult: {
@@ -182,6 +186,14 @@ export const stateDefs = {
 			JSON_OBJECT,
 			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
 		),
+		"sandbox?": doc("SandboxResultMeta", "Present when the command ran inside the OS sandbox."),
+	},
+	SandboxResultMeta: {
+		backend: "string",
+		mode: "SandboxMode",
+		network: "SandboxNetworkMode",
+		"blockedHosts?": doc("string[]", "Hosts the egress proxy refused during this command."),
+		"denied?": doc("boolean", "The output looks like a filesystem denial by the sandbox."),
 	},
 	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },
@@ -356,5 +368,117 @@ export const stateDefs = {
 	PromptAck: doc(
 		{ "agentInvoked?": "boolean" },
 		"`agentInvoked: false` means the prompt completed locally and no `prompt_result` follows.",
+	),
+
+	SandboxSettingId: doc(
+		"'enabled' | 'mode' | 'scope' | 'fallback' | 'readScope' | 'networkMode' | 'allowWrite' | 'allowRead' | 'denyRead' | 'allowedHosts'",
+		"A `sandbox.*` setting the sandbox commands address.",
+	),
+	SandboxListId: doc("'allowWrite' | 'allowRead' | 'denyRead' | 'allowedHosts'", "A path or host list setting."),
+	SandboxMode: "'workspace-write' | 'read-only'",
+	SandboxScope: "'bash' | 'eval' | 'exec'",
+	SandboxFallback: "'warn' | 'block'",
+	SandboxReadScope: "'all' | 'workspace'",
+	SandboxNetworkMode: "'allowlist' | 'deny' | 'allow'",
+	SandboxListOp: "'add' | 'remove' | 'replace'",
+	SandboxGrantScope: "'session' | 'always'",
+	SandboxHostDecision: doc(
+		"'once' | 'session' | 'always' | 'deny'",
+		"Answer to a `sandbox_host_request`: allow this connection, allow the host for the session, add it to the global allowlist, or refuse.",
+	),
+	SandboxPathKind: "'write' | 'read'",
+	SandboxAccessKind: "'write' | 'read' | 'host'",
+	SandboxAccessDecision: doc(
+		"'session' | 'always' | 'deny' | 'instruct'",
+		"Answer to a `sandbox_access_request`: grant the target for the session, add it to the global list, refuse, or reply with `instructions` and grant nothing.",
+	),
+	SandboxStatusOff: { state: "'off'" },
+	SandboxStatusActive: {
+		state: "'active'",
+		backend: "string",
+		network: doc(
+			"SandboxNetworkMode",
+			"Network mode as enforced here (a mode this host cannot enforce runs as deny).",
+		),
+		warnings: "string[]",
+	},
+	SandboxStatusUnavailable: {
+		state: "'unavailable'",
+		reason: "string",
+		fallback: doc("SandboxFallback", "`warn`: commands run unsandboxed; `block`: they fail."),
+	},
+	SandboxStatus: doc(
+		"SandboxStatusOff | SandboxStatusActive | SandboxStatusUnavailable",
+		"Runtime status of the sandbox, discriminated by `state`.",
+	),
+	SandboxSummary: doc(
+		{ state: "'off' | 'active' | 'unavailable'", "backend?": doc("string", "Containment backend while active.") },
+		"Sandbox status without the detail `get_sandbox` returns.",
+	),
+	SandboxSettingValues: doc(
+		{
+			enabled: "boolean",
+			mode: "SandboxMode",
+			scope: "SandboxScope[]",
+			fallback: "SandboxFallback",
+			readScope: "SandboxReadScope",
+			networkMode: "SandboxNetworkMode",
+			allowWrite: "string[]",
+			allowRead: "string[]",
+			denyRead: "string[]",
+			allowedHosts: "string[]",
+		},
+		"Values an edit starts from: scalars as effective here, scope and lists from the operator layers (what a write replaces).",
+	),
+	SandboxLocked: doc(
+		{
+			"enabled?": "string",
+			"mode?": "string",
+			"scope?": "string",
+			"fallback?": "string",
+			"readScope?": "string",
+			"networkMode?": "string",
+			"allowWrite?": "string",
+			"allowRead?": "string",
+			"denyRead?": "string",
+			"allowedHosts?": "string",
+		},
+		"Settings another layer decides, with the reason; writing one fails with `sandbox_locked`.",
+	),
+	SandboxListNotes: doc(
+		{ "allowWrite?": "string", "allowRead?": "string", "denyRead?": "string", "allowedHosts?": "string" },
+		"Per-list note when project config narrows the list in this workspace.",
+	),
+	SandboxIgnoredValue: doc(
+		{ id: "string", reason: "string" },
+		"A project-layer value dropped because it would loosen the sandbox.",
+	),
+	SandboxEffectivePolicy: doc(
+		{ readwritePaths: "string[]", readonlyPaths: "string[]", deniedPaths: "string[]" },
+		"Resolved filesystem policy for the workspace.",
+	),
+	SandboxSessionPaths: doc(
+		{ write: "string[]", read: "string[]" },
+		"Paths allowed for this session only: writable (and readable), and readable.",
+	),
+	SandboxState: doc(
+		{
+			workspace: doc("string", "Directory the policy is resolved for (the session cwd)."),
+			status: "SandboxStatus",
+			settings: "SandboxSettingValues",
+			locked: "SandboxLocked",
+			listNotes: "SandboxListNotes",
+			ignored: "SandboxIgnoredValue[]",
+			effective: "SandboxEffectivePolicy",
+			blockedHosts: doc("string[]", "Hosts refused this session that are still not allowed, most recent first."),
+			sessionHosts: doc("string[]", "Hosts allowed for this session only."),
+			sessionPaths: doc("SandboxSessionPaths", "Paths allowed for this session only."),
+			hostPrompts: doc("boolean", "Unknown hosts raise `sandbox_host_request` frames (`set_sandbox_host_prompts`)."),
+			accessPrompts: doc(
+				"boolean",
+				"The agent's access requests raise `sandbox_access_request` frames (`set_sandbox_access_prompts`).",
+			),
+		},
+		"Sandbox state of the session's workspace; every sandbox mutation answers it and `sandbox_update` pushes it.",
 	),
 } satisfies WireDefs;

@@ -7,8 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
-import type { Subprocess } from "bun";
+import { $which, getProjectDir, readJsonl, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
 import type {
 	JsonRpcError,
@@ -30,6 +29,8 @@ import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 import { isThenable } from "../../utils/ipc";
+import { definedEnv } from "../../sandbox/env";
+import { SandboxRuntime } from "../../sandbox/runtime";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
@@ -436,6 +437,17 @@ interface KillableSubprocess {
 }
 
 /**
+ * The process surface the transport drives: Bun's piped `Subprocess`, or a sandboxed child. A
+ * contained child's `kill()` takes no signal and always kills its whole contained tree.
+ */
+interface StdioProcess extends KillableSubprocess {
+	readonly stdin: FrameSink & { end(): unknown };
+	readonly stdout: ReadableStream<Uint8Array>;
+	readonly stderr: ReadableStream<Uint8Array>;
+	readonly exitCode: number | null;
+}
+
+/**
  * Race `exited` against a timer. Resolves `true` once the process has exited
  * within `timeoutMs`, `false` if the timer wins first. `exited` resolving OR
  * rejecting both count as "exited" — mirrors `waitForExit()` in
@@ -549,11 +561,50 @@ export async function terminateStdioProcess(
 }
 
 /**
+ * The argv a contained server launches with. On Windows a `.cmd`/`.bat` shim, and a bare command
+ * not found on PATH, resolve to a pre-escaped `cmd.exe /c "<line>"` that needs
+ * `windowsVerbatimArguments`; the sandbox binding quotes argv itself and would corrupt that line,
+ * so such a server is refused with what to change instead.
+ */
+export function containedStdioArgv(spawnCommand: StdioSpawnCommand, command: string): string[] {
+	if (spawnCommand.windowsVerbatimArguments) {
+		throw new Error(
+			`MCP server command "${command}" launches through cmd.exe (a .cmd/.bat shim, or a command not found on PATH), which cannot run inside the sandbox. Point "command" at node or bun plus the server script, or drop "sandbox": true.`,
+		);
+	}
+	return spawnCommand.cmd;
+}
+
+/**
+ * Directories a contained server must read to start its command: the directory of the resolved
+ * executable and, when that is a symlink (`npx`, shims), of its real target. A command that
+ * resolves nowhere is reported here, before the contained spawn turns it into an opaque exit 127.
+ */
+async function commandReadRoots(
+	command: string,
+	cwd: string,
+	env: Record<string, string | undefined>,
+): Promise<string[]> {
+	const resolved = path.isAbsolute(command)
+		? command
+		: // Fresh lookup: a cached miss would keep failing after the tool is installed, even on reconnect.
+			($which(command, { PATH: env.PATH ?? env.Path ?? "", cwd, cache: WhichCachePolicy.Fresh }) ??
+			path.resolve(cwd, command));
+	let real: string;
+	try {
+		real = await fs.realpath(resolved);
+	} catch {
+		throw Object.assign(new Error(`MCP stdio command not found: ${command}`), { code: "ENOENT" });
+	}
+	return [path.dirname(resolved), path.dirname(real)];
+}
+
+/**
  * Stdio transport for MCP servers.
  * Spawns a subprocess and communicates via stdin/stdout.
  */
 export class StdioTransport implements MCPTransport {
-	#process: Subprocess<"pipe", "pipe", "pipe"> | null = null;
+	#process: StdioProcess | null = null;
 	#pendingRequests = new Map<
 		string | number,
 		{
@@ -570,6 +621,8 @@ export class StdioTransport implements MCPTransport {
 	 * actually spawned into its own session may target it.
 	 */
 	#detached = false;
+	/** The server runs inside the OS sandbox (see `connect()`). */
+	#contained = false;
 	readonly #requestIds = new RequestIdAllocator();
 
 	onClose?: () => void;
@@ -615,17 +668,33 @@ export class StdioTransport implements MCPTransport {
 		// triggers macOS Apple Events TCC prompts uses the same shape; the
 		// one-object `{ cmd }` overload timed out before prompting for `mcpbridge`
 		// even with `detached: false` (#5085).
-		this.#process = Bun.spawn(spawnCommand.cmd, {
-			cwd,
-			env,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			windowsHide: spawnCommand.windowsHide,
-			detached: spawnCommand.detached,
-			windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
-		});
-		this.#detached = spawnCommand.detached;
+		const sandbox = this.config.sandbox === true ? await SandboxRuntime.for(getProjectDir()) : undefined;
+		if (sandbox?.applies("mcp")) {
+			// Opted-in server under an active sandbox: contained, never a silent uncontained
+			// fallback. The contained child leads its own tree, so close() never group-signals it.
+			const argv = containedStdioArgv(spawnCommand, this.config.command);
+			this.#process = await sandbox.spawn({
+				argv,
+				cwd,
+				env: definedEnv(env),
+				extraRead: await commandReadRoots(argv[0], cwd, env),
+				network: this.config.sandboxNetwork ?? "allow",
+			});
+			this.#detached = false;
+			this.#contained = true;
+		} else {
+			this.#process = Bun.spawn(spawnCommand.cmd, {
+				cwd,
+				env,
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				windowsHide: spawnCommand.windowsHide,
+				detached: spawnCommand.detached,
+				windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
+			});
+			this.#detached = spawnCommand.detached;
+		}
 
 		this.#connected = true;
 
@@ -984,7 +1053,11 @@ export class StdioTransport implements MCPTransport {
 			// 2-3. Group-aware SIGTERM (when this transport actually spawned
 			// detached), bounded wait, then escalate to SIGKILL. See
 			// `terminateStdioProcess` for the exact signaling/escalation rules.
-			await terminateStdioProcess(proc, this.#detached);
+			// No signal crosses the sandbox, so a contained server gets the same
+			// grace to exit on the EOF above before its tree is killed.
+			if (!this.#contained || !(await waitForProcessExit(proc.exited, TERM_GRACE_MS))) {
+				await terminateStdioProcess(proc, this.#detached);
+			}
 		}
 
 		if (this.#readLoop) {

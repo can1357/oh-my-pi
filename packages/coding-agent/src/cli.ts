@@ -37,6 +37,7 @@ import {
 	COMPUTER_WORKER_ARG,
 	DAEMON_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
+	JS_EVAL_STDIO_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
@@ -44,8 +45,10 @@ import {
 	SUBAGENT_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
+	SANDBOX_HOST_ARG,
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
+import type * as JsStdioTransport from "./eval/js/stdio-transport";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
@@ -163,6 +166,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
+	const { smokeTestSandboxHost } = await import("./sandbox/shell-client");
 	await smokeTestSyncWorker();
 	await smokeTestSpotlightWorker();
 	await smokeTestStatsActivityWorker();
@@ -193,6 +197,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
 	await smokeTestSubagentWorker();
+	await smokeTestSandboxHost();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -277,6 +282,18 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(
 			transport => startJsEvalProcess(transport, interceptUnhandledRejections),
 			{ rethrowConnectedSendErrors: true },
+		);
+		return true;
+	}
+	if (arg === JS_EVAL_STDIO_WORKER_ARG) {
+		// Sandboxed JS evaluator: Bun IPC cannot cross the container boundary, so the same
+		// evaluator speaks structured-clone frames over stdin/stdout. Same synchronous bootstrap
+		// as the IPC selector above.
+		const { startJsEvalProcess }: typeof JsProcessEntry = require("./eval/js/process-entry");
+		const { interceptUnhandledRejections }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
+		const { runStdioSubprocessWorker }: typeof JsStdioTransport = require("./eval/js/stdio-transport");
+		await runStdioSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(transport =>
+			startJsEvalProcess(transport, interceptUnhandledRejections),
 		);
 		return true;
 	}
@@ -532,6 +549,20 @@ export async function runCli(argv: string[]): Promise<void> {
 	// This must run before worker selector dispatch so that worker subprocesses
 	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
 	if (isProcessEntry) declareWorkerHostEntry();
+
+	if (resolvedArgv[0] === SANDBOX_HOST_ARG) {
+		// The sandbox host's stdout carries its JSONL protocol only. Rebind every JS-level
+		// stdout writer to stderr before the host graph (and the native addon) loads; the host
+		// writes protocol lines through its own `Bun.stdout` writer.
+		process.stdout.write = process.stderr.write.bind(process.stderr);
+		console.log = console.error;
+		console.info = console.error;
+		console.debug = console.error;
+		console.trace = console.error;
+		const { runSandboxHost } = await import("./sandbox/host");
+		await runSandboxHost();
+		return;
+	}
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the

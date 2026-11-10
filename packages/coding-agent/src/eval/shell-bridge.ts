@@ -59,6 +59,9 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 	let truncated = false;
 	const result = await executeBash(command, {
 		cwd: cwd ? resolveToCwd(cwd, session.cwd) : session.cwd,
+		// A contained cell must not escape through `sh()`: the shell runs in the sandbox when it applies.
+		sandboxWorkspace: session.cwd,
+		sandboxScope: "eval",
 		// 0 disables the executor deadline: the cell's own deadline governs.
 		timeout: timeout === undefined ? 0 : timeout * 1000,
 		signal,

@@ -268,6 +268,7 @@ import { createSpeculativeToolExecutionConfig } from "./speculation/host";
 import { closeAllConnections } from "./ssh/connection-manager";
 import {
 	type BuildSystemPromptResult,
+	buildSandboxPrompt,
 	buildSystemPrompt as buildSystemPromptInternal,
 	cfgSystemPromptInputs,
 	composeAppendPrompt,
@@ -4352,6 +4353,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			// What the OS sandbox contains, only while it is active for this workspace.
+			const sandboxPrompt = await buildSandboxPrompt(settings, promptCwd, {
+				requestTool: hasSession
+					? session.hasBuiltInTool("sandbox_request")
+					: builtInRegistryToolNames.has("sandbox_request"),
+			}).catch((error: unknown) => {
+				logger.warn("Sandbox prompt block unavailable", { error: String(error) });
+				return undefined;
+			});
+			if (sandboxPrompt) appendParts.push(sandboxPrompt);
 			// List each mounted MCP tool once. A routed tool that the xd:// catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.

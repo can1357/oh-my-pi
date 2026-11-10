@@ -1,0 +1,339 @@
+# OS Sandbox
+
+The OS sandbox runs the commands the agent executes inside an operating-system container, built on Microsoft's [MXC](https://github.com/microsoft/mxc) (`mxc-sdk`, linked into the `pi_natives` addon). Contained processes can write only to the workspace, a private temp directory, and paths you grant; omp's credential store and common secret stores are unreadable; network access is off, unrestricted, or limited to a hostname allowlist enforced by an omp-run egress proxy.
+
+It is off by default.
+
+## What is contained
+
+| Contained (when enabled)                                                                                                                       | Scope   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| The `bash` tool: the embedded shell, its in-process builtins (`cat`, `rm`, `sed`, redirects, …), child processes, background (`async`) runs, and interactive PTY runs | `bash`  |
+| Python eval kernels and JavaScript eval cells (contained JS eval runs in a separate process instead of an in-process worker), including commands a cell runs through `sh()` | `eval`  |
+| Commands run through the `exec()` API of extensions, hooks, custom tools, and custom commands                                                    | `exec`  |
+| MCP stdio servers whose config sets `sandbox: true` (see [MCP servers](#mcp-servers))                                                            | per server |
+
+Not contained:
+
+- In-process file tools (`read`, `write`, `edit`, `grep`, …). They run inside omp itself; govern them with [approval mode](./approval-mode.md) and `tools.restrictedFolders`. The same holds for eval helpers that call those tools from a cell (`tool.write`, `tool.edit`, …): they run in the parent omp process, so a contained cell can still write outside the workspace through them.
+- LSP servers and `debug` launches. LSP server binaries resolve from the workspace's `node_modules/.bin` and `.venv/bin` first, and `debug` runs the program the agent names, so a contained command can plant a binary the parent then runs uncontained.
+- The browser, SSH, and host helpers omp runs itself (git/VCS operations, updates, clipboard).
+- JS eval `%packages`: `bun add --ignore-scripts` runs in the parent (network access and writes to omp's package cache; no lifecycle scripts).
+- URL paths in bash commands (`skill://`, `pr://`, `mcp://`, …): the parent resolves them. File-backed schemes return a host path the contained shell then opens under the sandbox policy; virtual and remote schemes are rendered by the parent with the same reach as the `read` tool.
+- Your own commands: `!` / `!!`, `/loop` conditions, and the RPC `bash` command run unsandboxed in your shell.
+- Processes an extension starts on its own (for example with `Bun.spawn`) instead of through `exec()`.
+- MCP stdio servers without `sandbox: true`, and HTTP/SSE MCP servers.
+
+While the sandbox applies to `bash`, a `bash` call with `name` (a managed service) is refused, since services run under the launch broker outside any sandbox; use `async: true` instead. A sandboxed command never runs in an ACP client's terminal.
+
+Contained `bash` commands and eval cells can also write the session's `local://` directory (in `workspace-write` mode), so `local://` artifacts keep working.
+
+Environment of contained commands:
+
+- They receive omp's full process environment, including API keys omp loaded from the agent directory's `.env` (the file itself is unreadable).
+- Contained bash commands do not load direnv/devenv environments (`.envrc`): the load would run files the contained agent can write, on the host, outside the sandbox.
+- Contained bash shells (including PTY runs) do not inherit your `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` or `NO_PROXY`. In `allowlist` mode MXC points the proxy variables at omp's egress proxy, which cannot chain to an upstream proxy: on a network that requires a corporate HTTP proxy, `allowlist` mode cannot reach the internet.
+
+While the sandbox applies, nothing that project-layer settings choose runs on the host for a contained call:
+
+- The bash rc snapshot (your shell's aliases and functions, captured on the host) uses the shell from your own config layers; when a project config sets a different `shellPath`, contained shells run without a snapshot.
+- The Python interpreter probe (which picks the interpreter, including a workspace `.venv`) runs contained, like the kernel.
+
+## Enabling
+
+- `/sandbox` opens the sandbox panel (interactive TUI only).
+- `/sandbox on`, `/sandbox off`, `/sandbox status` are quick forms. `on`/`off` write `sandbox.enabled` to the global config and say so when another layer keeps the effective state different. `status` prints the state (`off`, `active (<backend>) · <mode> · network <mode> · applies to …`, or `unavailable — <reason>`), backend warnings, hosts blocked this session, and ignored project values.
+- `/settings` → **Tools** → **Sandbox** lists every `sandbox.*` setting.
+- `config.yml`:
+
+```yaml
+sandbox:
+   enabled: true
+   mode: workspace-write
+   fallback: warn
+   filesystem:
+      readScope: all
+      allowWrite: ["~/.cache"]
+   network:
+      mode: allowlist
+      allowedHosts:
+         - github.com
+         - "*.github.com"
+         - registry.npmjs.org
+```
+
+- `PI_SANDBOX=1` (any of `1`, `y`, `true`, `yes`, `on`, upper- or lower-case) turns it on for the process. Any other value is ignored; the variable can never turn the sandbox off.
+
+The `/sandbox` panel and `/settings` write the global config only. Changes apply to the next contained command. A persistent bash shell or eval context started under an older filesystem or network-mode policy is replaced, so shell state such as `cd` and exported variables starts fresh after such a change. Allowlist changes, including host approvals, apply live and do not restart anything.
+
+## Settings
+
+| Key                             | Type                               | Default                                  | Meaning                                                                                                                                                                       |
+| ------------------------------- | ---------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sandbox.enabled`               | boolean                            | `false`                                  | Run agent commands contained. `PI_SANDBOX` can only turn it on.                                                                                                               |
+| `sandbox.mode`                  | `workspace-write` \| `read-only`   | `workspace-write`                        | What contained commands may write (see [Modes](#modes)).                                                                                                                      |
+| `sandbox.scope`                 | array of `bash`, `eval`, `exec`    | `[bash, eval, exec]`                     | Which executors run contained. MCP servers opt in per server instead.                                                                                                        |
+| `sandbox.fallback`              | `warn` \| `block`                  | `warn`                                   | What happens when the sandbox is enabled but this host has no usable backend (see [Unavailable backend](#unavailable-backend)).                                              |
+| `sandbox.filesystem.readScope`  | `all` \| `workspace`               | `all`                                    | What contained commands may read (see [Read scope](#read-scope)). Denied paths stay unreadable either way.                                                                    |
+| `sandbox.filesystem.allowWrite` | array of paths                     | `[]`                                     | Extra writable paths in `workspace-write` mode.                                                                                                                               |
+| `sandbox.filesystem.allowRead`  | array of paths                     | `[]`                                     | Extra readable paths, in either read scope.                                                                                                                                   |
+| `sandbox.filesystem.denyRead`   | array of paths                     | [secret stores](#default-denied-paths)   | Paths contained commands can neither read nor write; outranks every other list.                                                                                               |
+| `sandbox.network.mode`          | `allowlist` \| `deny` \| `allow`   | `allowlist`                              | Network access of contained commands (see [Network](#network)).                                                                                                               |
+| `sandbox.network.allowedHosts`  | array of host names                | [registries and forges](#default-allowed-hosts) | Hosts reachable in `allowlist` mode. `*.example.com` matches subdomains of `example.com`, not `example.com` itself; case and a trailing dot are ignored.            |
+
+### Path entries
+
+Path lists accept:
+
+| Form           | Expands to                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------ |
+| `~`, `~/…`     | Your home directory                                                                              |
+| `${home}`      | Your home directory                                                                              |
+| `${workspace}` | The session's workspace (project directory)                                                      |
+| `${tmp}`       | The sandbox's private temp directory (what contained processes see as `TMPDIR`)                  |
+| `${authDb}`    | omp's credential database (`agent.db` in the agent directory, XDG-aware)                         |
+| `${agentDir}`  | omp's agent directory (normally `~/.omp/agent`)                                                  |
+| relative path  | Resolved against the workspace                                                                   |
+
+Any other `${…}` token is rejected when the setting is written, so a typo such as `${HOME}` fails instead of matching nothing. Paths are resolved through symlinks before they reach the backend (on macOS `/tmp` becomes `/private/tmp`). Entries that do not exist when a process starts are dropped from its policy, and so are readable or writable entries you cannot access yourself (for example `/root`; bubblewrap would refuse the whole request).
+
+### Default denied paths
+
+`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials`, `~/.config/gh`, `${authDb}`, `${authDb}-wal`, `${authDb}-shm`, `${agentDir}/.env`, `${agentDir}/models.yml`, `${agentDir}/mcp.json`, `${agentDir}/.mcp.json`.
+
+Setting `sandbox.filesystem.denyRead` replaces this list; include the defaults you want to keep.
+
+### Default allowed hosts
+
+`github.com`, `*.github.com`, `*.githubusercontent.com`, `gitlab.com`, `registry.npmjs.org`, `pypi.org`, `files.pythonhosted.org`, `crates.io`, `*.crates.io`, `proxy.golang.org`, `sum.golang.org`.
+
+## Modes
+
+| Mode              | Writable                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------- |
+| `workspace-write` | The workspace, the private temp directory, `allowWrite`, and, in a linked git worktree, the repository's common git directory (commits write there) |
+| `read-only`       | The private temp directory only                                                              |
+
+Each sandbox runtime gets its own private temp directory, exposed to contained processes as `TMPDIR`, `TMP` and `TEMP`. The system temp directory is not writable for them: it holds files omp later runs on the host and other programs' control sockets (editor, tmux, ssh-agent).
+
+Everything else readable is read-only. `denyRead` entries are neither readable nor writable.
+
+Writable roots are pinned to the real path they first resolved to: the workspace, session grants, and `allowWrite` entries. A root later replaced by a symlink is not followed: a session grant is dropped, an `allowWrite` entry is skipped with a warning, and a replaced workspace makes contained commands fail. A session-granted directory that is merely deleted (a `cargo clean`, an `rm -rf build`) keeps its grant and is recreated empty for the next contained command.
+
+## Read scope
+
+| `readScope` | Readable                                                                                                                                                                                   |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `all`       | macOS/Linux: every top-level directory except device and virtual trees (`/dev` on macOS, plus hidden root entries; `/dev`, `/proc`, `/sys`, `/run` on Linux, which the backend mounts as needed) and, on Linux, the host's `/tmp` (contained processes see an empty private one). Windows: the tool, profile and temp directories MXC discovers, plus your user profile. |
+| `workspace` | The workspace, the tool directories MXC discovers from `PATH`, and omp's own runtime files                                                                                                 |
+
+In both scopes the workspace, `allowRead`, and the files omp needs to start inside the sandbox (its executable's directory, the native addon, the source checkout when run from source) stay readable. MXC's backends add their own baseline on top (on macOS: `/bin`, `/usr`, `/System`, `/Library`, `/private/etc` and device nodes).
+
+## Build tools and caches
+
+Execution is not restricted: a contained command can run any readable program (`cargo`, `git`, `node`, compilers under `/usr`, Homebrew, `~/.cargo/bin`). What fails is a write outside the writable roots, so tools that populate a cache in your home directory need that cache granted:
+
+```yaml
+sandbox:
+  filesystem:
+    allowWrite: ["~/.cargo/registry", "~/.cargo/git", "~/.npm", "~/.bun/install/cache"]
+```
+
+- Builds and installs that stay inside the workspace (`target/`, `node_modules/`, `.venv/`) need nothing; `cargo build` works with already-downloaded dependencies.
+- A writable cache can be tampered with by a contained command and is later used by uncontained builds; grant caches deliberately, never a directory of executables such as `~/.cargo/bin`.
+- With `readScope: workspace`, add the tool's own files to `allowRead` when they are not on `PATH` (for Rust: `~/.rustup`, `~/.cargo`).
+- The agent can also ask for a cache directory it needs with [`sandbox_request`](#access-requests); you decide per request.
+
+## Network
+
+| `network.mode` | Behaviour                                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `allowlist`    | Only `allowedHosts` (plus hosts you approve), through omp's egress proxy                                           |
+| `deny`         | No network                                                                                                        |
+| `allow`        | Unrestricted network (on Linux, not the host's loopback; see [Per-OS behaviour](#per-os-behaviour))               |
+
+### How the allowlist works
+
+- On the first contained `allowlist` spawn, omp starts an HTTP proxy on `127.0.0.1` (a random port) inside the omp process. It handles `CONNECT host:port` tunnels and absolute-URI `http://` requests and checks each destination name against the allowlist.
+- The backend confines the contained process's egress to that loopback port in the kernel: a process cannot bypass the proxy by connecting elsewhere.
+- Proxy use is cooperative: MXC sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `FTP_PROXY` (and their lower-case forms) to the proxy URL and removes any `NO_PROXY`. Tools that honour these variables (curl, git over HTTPS, npm, pip, cargo, Go, …) work; tools that ignore them get no network at all rather than filtered network.
+- A refused request gets HTTP `403` with `X-Omp-Sandbox: blocked`; the host is recorded as blocked for this session.
+- The proxy resolves the name itself and connects to the address it checked:
+  - an exact (non-wildcard) entry may resolve to any address, including private and loopback ones;
+  - a name matched only by a wildcard must resolve to public addresses;
+  - IP literals, `localhost` and `*.localhost` are allowed only when listed verbatim; wildcards and prompts never reach them.
+
+### Approving hosts
+
+In the interactive TUI, a connection to a host that is not on the list asks: allow **once** (this connection), **for this session**, or **always** (appended to the global `sandbox.network.allowedHosts`). Dismissing the prompt refuses the connection.
+
+| Grant | Addresses the host may resolve to |
+| --- | --- |
+| **once**, **for this session** | Public and private ranges (intranet services); never loopback, link-local or unspecified addresses, on every connection |
+| `allowedHosts` entry, including **always** answers and the panel's **Allow** | Any address (exact entry, no restriction) |
+
+Approving a host does not restart shells or kernels: the proxy reads the allowlist and session grants live.
+
+Without an approver unknown hosts are refused: print mode and subagents without a UI never ask. An RPC client can opt in to answering host requests (`set_sandbox_host_prompts`, then `sandbox_host_request` / `respond_sandbox_host`; an unanswered request is denied after 2 minutes). The RPC interface also reads and edits the sandbox (`get_sandbox`, `set_sandbox_setting`, `reset_sandbox_setting`, `edit_sandbox_list`, `grant_sandbox_host`, `revoke_sandbox_host`) and pushes `sandbox_update` on every change; see [RPC: Sandbox](./rpc.md#sandbox).
+
+The `/sandbox` panel's **Network** page lists **Blocked this session** with an **Allow** action, which adds the host to the global allowlist (an exact, unrestricted entry, like answering **always**).
+
+## Access requests
+
+When a contained command needs a path or host it does not have, the agent asks with the `sandbox_request` tool instead of failing or working around the denial. The tool exists only while `sandbox.enabled` is on. The agent can never grant itself anything: only your answer in the dialog does. Typical case: a build redirected outside the workspace (`CARGO_TARGET_DIR=/Volumes/fast/target cargo build`).
+
+A request names one target: a path to **write** (create, change and delete files under it), a path to **read**, or a **host** to connect to (exact hostname, no wildcard, scheme or port). Paths are resolved (`~` expanded, relative to the session cwd, symlinks followed) before you see them.
+
+The dialog (`Sandbox request: write to <target>`, `read <target>`, or `connect to <host>`) shows:
+
+| Field | Content |
+| --- | --- |
+| Intent | What the agent is doing and why it needs this exact target, in its words |
+| Command | The command that needs the access, when given |
+| Effect | omp's own statement of the consequence, e.g. "Contained commands will be able to create, change and delete files under /Volumes/fast/target." |
+| If denied | What the agent says it will do instead, when given |
+
+Actions:
+
+- **Allow for this session**: exactly the requested path or host, not saved. Path grants are listed under `/sandbox` → **Filesystem** → **Allowed this session**, where you can remove them. A write path that does not exist yet is created as an empty directory.
+- **Always allow (saved to global config)**: appends the target to `sandbox.filesystem.allowWrite`, `allowRead` or `network.allowedHosts`. Not offered when that list comes from another layer (environment, a session override, a `--config` file, or project config), since a global write would be shadowed.
+- **Deny** (also Esc): nothing is granted; the agent is told not to retry or work around it.
+- **Reply with instructions…**: nothing is granted; your text goes back to the agent.
+
+The dialog appears in every approval mode, `yolo` included. A granted path changes the policy, so the sandboxed shell and eval kernels restart on their next call (`cd` and exported variables reset); a granted host applies live.
+
+Removing a session grant takes effect on the next sandboxed call, which restarts the shell and kernels. A command still running, background jobs of a shell no later call replaces, and opted-in MCP servers keep the policy they started with.
+
+Host requests follow `sandbox.network.mode`: with `deny` they are refused (only you can change the mode); with `allow` every host is already reachable.
+
+Refused without asking (the agent gets the reason):
+
+- a filesystem root, or a path at or under a `denyRead` entry;
+- a write while `sandbox.mode` is `read-only`, or a host while `network.mode` is `deny`;
+- a target that is already allowed (reported as already allowed, no dialog);
+- the sandbox off or unavailable, an empty intent, or a target with control characters;
+- no one to ask: print mode, subagents running on worker threads, or an RPC client that has not opted in with `set_sandbox_access_prompts` (see [RPC: Access requests](./rpc.md#access-requests)). Subagents running on the main thread share the dialog: their requests are shown to you.
+
+One request is shown at a time; identical concurrent requests share one dialog. Session grants (paths and hosts) belong to the omp process thread, not to a workspace or session: every session and main-thread subagent in that thread shares them, and worker-thread subagents do not see them.
+
+## Project config may only tighten
+
+A cloned repository's `.omp/config.yml` (and a repository `.env`) must not be able to weaken containment. Every `sandbox.*` value is compared with what your own layers (global config, `--config` overlays, environment) produce, and the project layer is honoured only where it is at least as strict:
+
+| Setting                                         | The project may                                                  | Ignored                         |
+| ----------------------------------------------- | ---------------------------------------------------------------- | ------------------------------- |
+| `enabled`                                       | turn it on                                                       | turning it off                  |
+| `mode`                                          | set `read-only`                                                  | `workspace-write` over your `read-only` |
+| `fallback`                                      | set `block`                                                      | `warn` over your `block`        |
+| `filesystem.readScope`                          | set `workspace`                                                  | `all` over your `workspace`     |
+| `network.mode`                                  | move toward `deny` (`allow` → `allowlist` → `deny`)              | anything looser                 |
+| `filesystem.denyRead`, `scope`                  | add entries                                                      | removing entries                |
+| `filesystem.allowWrite`, `allowRead`, `network.allowedHosts` | drop entries                                        | adding entries                  |
+
+A project `null` cannot reset a value to its default either. `PI_SANDBOX` can only enable, so a repository `.env` cannot disable the sandbox through it.
+
+Ignored values are reported by `/sandbox status` (`Ignored project value <id>: <reason>`) and on the panel's **Overview** page under **Ignored project values**. `/settings` hides the list editors for `scope`, `allowWrite`, `allowRead`, `denyRead` and `allowedHosts` while the project layer sets them, so a project list is never promoted to your global config.
+
+While the sandbox is enabled, omp's global settings files are protected from the in-process file tools: `config.yml` / `config.yaml` and `.env` in the agent directory, and `.env` in omp's config root (normally `~/.omp/.env`) are treated like `tools.restrictedFolders` entries. Every `read`, `write`, `edit` or search call that targets them asks Approve/Deny in every approval mode (see [approval mode](./approval-mode.md#restricted-folders)) and is refused without a UI. Contained commands cannot write them anyway.
+
+Agent writes to `cfg://sandbox.*` settings always ask while the sandbox is enabled, in every approval mode; a "for this session" answer to another `cfg://` write does not cover them, and without a UI they are refused.
+
+## Per-OS behaviour
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| Backend | seatbelt | bubblewrap | processcontainer |
+| Requires | macOS 15 or newer | A working `bwrap` (MXC requires 0.5.0 or newer) and usable unprivileged user namespaces, checked by actually starting a probe sandbox (Ubuntu 24.04's AppArmor restriction or a container's seccomp profile can block them) | The native processcontainer tier: Windows 11 24H2, build 26100.9278 / 26200.9278 or newer. Older builds report the sandbox as unavailable; omp does not use MXC's AppContainer fallback, which would rewrite ACLs of host directories |
+| `allowlist` | Proxy, kernel-confined | Needs the host networking tools MXC uses for proxy confinement (`slirp4netns`, `unshare`, `nsenter`, `ip`, `iptables`/`iptables-restore`); without them network is **denied** | Proxy, confined to loopback by the OS when the backend tier supports an identity-less loopback proxy; otherwise network is **denied** |
+| `allow` | Unrestricted | Needs the same networking tools, otherwise **denied**; never reaches the host's loopback (private network namespace) | Unrestricted |
+| Verification | Exercised on this platform | Compile-checked; covered by the `--smoke-test` probe in CI | Compile-checked; covered by the `--smoke-test` probe in CI |
+
+When a configured network mode cannot be enforced, the sandbox runs with `deny` (stricter), and `/sandbox status` and the panel show a warning. The requirement rows come from MXC's documentation; omp reports MXC's own reason string when a backend is missing.
+
+`omp --smoke-test` includes a sandbox probe: where a backend is available it starts the sandbox host contained, runs `echo`, and checks that a write outside the workspace fails; where none is available it prints the reason and passes. On a CI runner without a usable backend the probe therefore only confirms that omp starts and reports the reason.
+
+### Unavailable backend
+
+When the sandbox is enabled but no backend can contain processes on this host:
+
+- `fallback: warn` (default): one warning (a startup notification in the TUI, a log warning otherwise), and commands run **unsandboxed**.
+- `fallback: block`: every call that should run contained fails with the reason, until a backend is available or you run `/sandbox off`.
+
+## What the agent sees
+
+- While the sandbox is active, the system prompt gains a block naming what runs contained, the backend, the writable and unreadable paths, and the network mode. It tells the model that denials are expected and never to retry or work around them; when `sandbox_request` is available, to ask with it (narrowest target, clear intent), otherwise to tell you the path or host it needs.
+- When a contained `bash` result looks like a filesystem denial (a non-zero exit with `Operation not permitted`, `Permission denied`, `Read-only file system`, `EPERM`, `EACCES` or `EROFS` in the output) or the proxy refused a host during the call, a sandbox notice is appended to the result, pointing at `sandbox_request` when it is available.
+- A `sandbox_request` call shows as a tool card with the kind, target and intent, and, once answered, the decision (with your instructions or the refusal reason).
+- Contained `bash` and eval results carry a `sandboxed` badge on their tool card (its tooltip names backend, mode and network), plus a warning note: `blocked by sandbox: host …` or `possible sandbox denial`.
+
+Contained processes see `OMP_SANDBOX=1` in their environment.
+
+## The `/sandbox` panel
+
+Four pages:
+
+- **Overview**: status line (Active · backend / Unavailable · reason / Off), **Enabled**, **Mode**, **Applies to**, **If unavailable**, backend warnings, ignored project values.
+- **Filesystem**: **Read scope**, the **Writable**, **Readable** and **Denied** lists, one editable row per entry with an **Add** action, and **Allowed this session** (paths granted through access requests, each with a remove action).
+- **Network**: **Mode**, the allowed hosts, and **Blocked this session** with **Allow**.
+- **Effective policy**: the resolved writable, readable and denied paths for the current workspace (read-only).
+
+In Tern the panel renders as a native preferences sheet docked beside the transcript, like `/settings`; in a plain terminal it is the same content as a fullscreen ANSI panel. Rows another layer decides are locked and show the reason: `Set by $PI_SANDBOX`, `Set by a session override`, `Set by the --config file`, or `Tightened by project config`. Edits there would be shadowed, so they are refused (RPC refuses them with `sandbox_locked`).
+
+## MCP servers
+
+MCP stdio servers opt in per server with `sandbox: true` and choose their network with `sandboxNetwork` (`allow` by default, independent of `sandbox.network.mode`); see [MCP configuration](./mcp-config.md#stdio-transport). An opted-in server runs contained only while `sandbox.enabled` is on; `sandbox.scope` does not apply to it.
+
+Containment is decided when a server connects. After toggling the sandbox or changing its policy, an already-running server keeps its state until `/mcp reconnect <name>`. The project-may-only-tighten rule does not cover MCP: a server defined in a project's MCP config runs uncontained unless it sets `sandbox: true` itself. On Windows, a `sandbox: true` server whose command launches through `cmd.exe` (a `.cmd`/`.bat` shim such as a bare `npx`, or a command not found on `PATH`) is refused; point `command` at `node` or `bun` and pass the script.
+
+## Telemetry
+
+MXC can emit telemetry. omp builds `mxc-sdk` with `MXC_TELEMETRY_COMPONENT_PATH` set to an empty string (`.cargo/config.toml`, mirrored for Bazel in `MODULE.bazel`), which selects MXC's unrouted build, and spawns every contained process without a telemetry request. omp sends no sandbox telemetry anywhere.
+
+## Known limits
+
+- **Proxy use is cooperative.** Tools that ignore `HTTP_PROXY`/`HTTPS_PROXY` get no network in `allowlist` mode. SSH (including `git` over `ssh://`) does not work in `allowlist` mode.
+- **The proxy has no authentication.** While it runs, any local process on the machine can use it to reach allowed hosts.
+- **No TLS interception.** The proxy sees only the name on the `CONNECT` line; an allowed name on shared hosting or a CDN can front for other tenants.
+- **Listed and approved names can point at private addresses.** An exact `allowedHosts` entry may resolve to any address, loopback included; a host approved once or for the session may resolve to private ranges. A name whose DNS an attacker controls could therefore be re-pointed at internal or host-local services (DNS rebinding). Answering **always** at the prompt (or **Allow** in the panel) is a persistent, unrestricted grant: give it only to names you trust.
+- **Session grants stay in one thread.** Host approvals "for this session" and the blocked-host list are not shared with subagents running on worker threads; only `allowedHosts` entries (written to settings) reach them.
+- **Blocked hosts are attributed by time.** A refusal is reported on whichever contained results were running when it happened, so concurrent jobs can show each other's blocked hosts.
+- **Filesystem denials are reported heuristically and after the fact.** There is no live "allow this path?" prompt; the kernel answers synchronously. The denial notice is a match on the output of a failed command and can miss or misattribute.
+- **The workspace is a trust root.** It is writable, so files a contained command writes there take effect uncontained later: project extensions, hooks, custom tools and commands (loaded into omp at the next start), `.mcp.json` / `.omp/mcp.json` server commands, `.git/hooks` (run by git on the host), and a project `.env` (see the `PI_CONFIG_FILES` item below). Review the workspace diff, including `.omp/`, `.mcp.json`, `.env` and git hooks, before restarting omp or running project tooling outside the sandbox.
+- **`.git/config` is writable** too in `workspace-write` mode, as part of the workspace.
+- **Sessions started in a repository subdirectory cannot write the repository's `.git`**, so contained `git add`/`commit` fail there; add the repository's `.git` to `sandbox.filesystem.allowWrite`. Linked worktrees are handled: their common git directory is writable.
+- **Denied paths that do not exist when a process starts are not protected** for that process.
+- **Pinned roots leave a short window.** omp checks that a writable root is still the directory it pinned just before starting a contained process; a swap between that check and the backend applying the policy is not caught.
+- **In-process file tools are not OS-contained** (see [What is contained](#what-is-contained)).
+- **`PI_CONFIG_FILES` from a project `.env`.** A project `.env` can set `PI_CONFIG_FILES`, which loads its files as trusted `--config` overlays; those count as your own layers and can turn the sandbox off at the next start. A contained command can create that `.env` in any workspace, trusted or not, so this is covered by the review above. This predates the sandbox.
+- **Contained processes get omp's full environment**, including API keys loaded from the agent directory's `.env`. That matches unsandboxed bash, but with allowlisted hosts it remains a way to send keys out.
+- **Linux: the environment is visible on the host.** bubblewrap receives the environment as arguments of the host-side `bwrap` process, so other local users can read it (API keys included) from `/proc/<pid>/cmdline` while a contained process runs.
+- **Linux: no host loopback.** Contained processes cannot reach services on the host's `127.0.0.1`, even in `allow` mode.
+- **Contained JS eval and stdin.** Child processes a JS eval cell starts inherit the evaluator's protocol stdin; a child that reads stdin can stall the cell.
+- **Windows: Python eval tool helpers need network.** Their bridge to omp uses TCP on Windows, so they fail in `deny` mode.
+- **The `sandboxed` badge appears when a command finishes**, not while it runs.
+- **PTY on macOS:** a contained PTY works, but `tty` prints `not a tty`; programs that only check `isatty()` are unaffected.
+- **Linux and Windows** are compile-checked and exercised only by the CI smoke probe; the runtime behaviour described here was exercised on macOS.
+
+## Implementation files
+
+- `packages/coding-agent/src/sandbox/settings.ts` -- `sandbox.*` settings, defaults, path tokens
+- `packages/coding-agent/src/sandbox/policy.ts` -- effective config (project-may-only-tighten rule), filesystem policy, host matching
+- `packages/coding-agent/src/sandbox/platform.ts` -- per-OS read roots and omp runtime paths
+- `packages/coding-agent/src/sandbox/runtime.ts` -- per-workspace runtime: availability, fallback, network degradation, host grants, contained spawns
+- `packages/coding-agent/src/sandbox/egress-proxy.ts` -- allowlist egress proxy
+- `packages/coding-agent/src/sandbox/host.ts`, `host-protocol.ts`, `shell-client.ts` -- in-sandbox shell/PTY host, its client, the smoke probe
+- `packages/coding-agent/src/sandbox/process.ts` -- adapter from the native process to a Bun-like child
+- `packages/coding-agent/src/exec/bash-executor.ts`, `tools/bash.ts`, `tools/bash-interactive.ts` -- bash integration
+- `packages/coding-agent/src/eval/py/kernel.ts`, `eval/js/context-manager.ts`, `eval/shell-bridge.ts` -- contained eval and its `sh()`
+- `packages/coding-agent/src/exec/exec.ts` -- contained extension/hook/custom-tool `exec()`
+- `packages/coding-agent/src/mcp/transports/stdio.ts` -- contained MCP stdio servers
+- `packages/coding-agent/src/slash-commands/builtin-collaboration.ts` -- `/sandbox`
+- `packages/coding-agent/src/modes/sandbox-panel.ts` -- `/sandbox` panel data, lock reasons, writes
+- `packages/coding-agent/src/modes/rpc/rpc-sandbox.ts` -- RPC sandbox commands, host and access requests
+- `packages/coding-agent/src/tools/sandbox-request.ts` -- `sandbox_request` tool
+- `packages/coding-agent/src/tools/approval.ts` -- protection of omp's settings files while the sandbox is enabled
+- `packages/coding-agent/src/prompts/system/sandbox.md`, `prompts/tools/sandbox-denial.md`, `prompts/tools/sandbox-request.md`, `prompts/tools/sandbox-request-result.md` -- model-facing text
+- `packages/tui/src/overlays/sandbox-config.ts` -- `/sandbox` panel (ANSI and Tern)
+- `packages/tui/src/tools/sandbox-meta.ts` -- `sandboxed` badge and notes on tool cards
+- `packages/tui/src/overlays/sandbox-access-dialog.ts`, `tools/sandbox-request.ts` -- access-request dialog and tool card
+- `crates/pi-natives/src/sandbox.rs` -- MXC binding (`sandboxSupport`, `sandboxDiscoverPaths`, `SandboxProcess`); see the [natives changelog](../packages/natives/CHANGELOG.md)

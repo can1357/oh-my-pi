@@ -156,6 +156,7 @@ Environment variables are never written back to `config.yml`. Variables declared
 | `SEARXNG_ENDPOINT` / `SEARXNG_TOKEN`                | `searxng.endpoint` / `searxng.token`              | Fallbacks when the setting is absent, null, or blank.                                             |
 | `SEARXNG_BASIC_USERNAME` / `SEARXNG_BASIC_PASSWORD` | `searxng.basicUsername` / `searxng.basicPassword` | Fallbacks only when absent or null; configured empty strings remain valid credentials.            |
 | `MNEMOPI_EMBEDDING_MODEL`                           | `mnemopi.embeddingModel`                          | Fallback when absent, null, or blank.                                                             |
+| `PI_SANDBOX`                                        | `sandbox.enabled`                                 | A truthy value enables the OS sandbox; any other value is ignored (it can never disable it).      |
 | `PI_CONFIG_FILES`                                   | CLI config overlays                               | Platform path-list (`:` on Unix, `;` on Windows); files load in order before `--config` overlays. |
 
 Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, environment, and `.env` files); see [Providers](./providers.md) and the full [Environment variables](./environment-variables.md) reference.
@@ -739,6 +740,18 @@ lsp:
 | `lsp.requestTimeout`              | number  | `10`      | Seconds to wait for a language server's diagnostics, hover and other answers when the agent passes no `timeout` (the call deadline is at least 20 s); late post-edit diagnostics wait at least this long. The `lsp` tool's `timeout` raises or lowers it per call, within 5–300 s and `tools.maxTimeout`.                                                                                                                                                                                                          |
 | `shellPath`                       | string  | _(unset)_ | External shell for services, terminals, and `!`; plain bash tool calls use the embedded bash.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `shellCommandPrefix`              | string  | _(unset)_ | Passed to legacy Pi extensions that construct their own shell tools; OMP's native shell does not apply it.                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Sandbox
+
+The OS sandbox contains agent commands (bash, eval, extension `exec`, opted-in MCP stdio servers): writes limited to the workspace, secret stores unreadable, network off, unrestricted, or allowlisted. Off by default; enable with `/sandbox on` or `sandbox.enabled: true`. A project `.omp/config.yml` may only tighten `sandbox.*` values; looser project values are ignored and reported. See [OS sandbox](./sandbox.md) for every `sandbox.*` key, defaults, per-OS requirements and limits.
+
+```yaml
+sandbox:
+   enabled: true
+   mode: workspace-write # or read-only
+   network:
+      mode: allowlist # allowlist | deny | allow
+```
 
 ### Files: editing and reading
 

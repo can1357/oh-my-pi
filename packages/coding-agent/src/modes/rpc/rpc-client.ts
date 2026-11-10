@@ -48,6 +48,10 @@ import type {
 	RpcPromptResultFrame,
 	RpcRemoveQueuedMessageResult,
 	RpcResponse,
+	RpcSandboxFrame,
+	RpcSandboxListId,
+	RpcSandboxSettingId,
+	RpcSandboxState,
 	RpcSessionSettledFrame,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -120,6 +124,7 @@ export type RpcPromptResultListener = (result: RpcPromptResultFrame) => void;
 export type RpcSessionSettledListener = () => void;
 export type RpcLiveListener = (frame: RpcLiveFrame) => void;
 export type RpcDictationListener = (frame: RpcDictationFrame) => void;
+export type RpcSandboxListener = (frame: RpcSandboxFrame) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -265,6 +270,18 @@ function isRpcDictationFrame(value: unknown): value is RpcDictationFrame {
 	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(DICTATION_FRAME_TYPES, value.type);
 }
 
+const SANDBOX_FRAME_TYPES: Record<string, true> = {
+	sandbox_update: true,
+	sandbox_host_request: true,
+	sandbox_host_request_cancelled: true,
+	sandbox_access_request: true,
+	sandbox_access_request_cancelled: true,
+};
+
+function isRpcSandboxFrame(value: unknown): value is RpcSandboxFrame {
+	return isRecord(value) && typeof value.type === "string" && Object.hasOwn(SANDBOX_FRAME_TYPES, value.type);
+}
+
 function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailableCommandsUpdateFrame {
 	if (!isRecord(value)) return false;
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
@@ -352,6 +369,7 @@ export class RpcClient {
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
 	#dictationListeners = new Set<RpcDictationListener>();
+	#sandboxListeners = new Set<RpcSandboxListener>();
 	/** `promptAndWait` completions keyed by request id; registered before the prompt is sent. */
 	#promptResultWaiters = new Map<string, (result: RpcPromptResultFrame) => void>();
 	/** Same-id failures that arrive after the success ack removed the pending request. */
@@ -714,6 +732,17 @@ export class RpcClient {
 	}
 
 	/**
+	 * Subscribe to sandbox frames: `sandbox_update`, `sandbox_host_request`, `sandbox_host_request_cancelled`,
+	 * `sandbox_access_request`, `sandbox_access_request_cancelled`.
+	 */
+	onSandbox(listener: RpcSandboxListener): () => void {
+		this.#sandboxListeners.add(listener);
+		return () => {
+			this.#sandboxListeners.delete(listener);
+		};
+	}
+
+	/**
 	 * Get collected stderr output (useful for debugging).
 	 */
 	getStderr(): string {
@@ -841,6 +870,7 @@ export class RpcClient {
 			slowModeSupported: state.slowModeSupported === true,
 			slowModeEnabled: state.slowModeEnabled === true,
 			goal: state.goal ?? null,
+			sandbox: state.sandbox ?? { state: "off" },
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
 					? state.tokensPerSecond
@@ -1182,6 +1212,84 @@ export class RpcClient {
 	async getBtwHistory(): Promise<readonly RpcBtwHistoryRecord[]> {
 		const response = await this.#send({ type: "get_btw_history" });
 		return this.#getData<{ records: readonly RpcBtwHistoryRecord[] }>(response).records;
+	}
+
+	/** Sandbox state of the session's workspace. Older servers fail with `Unknown command: get_sandbox`. */
+	async getSandbox(): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "get_sandbox" }));
+	}
+
+	/** Write one sandbox setting to the global config; lists and scope replace the whole list. */
+	async setSandboxSetting(setting: RpcSandboxSettingId, value: boolean | string | string[]): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "set_sandbox_setting", setting, value }));
+	}
+
+	/** Remove a sandbox setting from the global config, so another layer or the default applies. */
+	async resetSandboxSetting(setting: RpcSandboxSettingId): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "reset_sandbox_setting", setting }));
+	}
+
+	/** Add, remove, or replace (with `replacement`) one entry of a sandbox list in the global config. */
+	async editSandboxList(
+		list: RpcSandboxListId,
+		op: "add" | "remove" | "replace",
+		entry: string,
+		replacement?: string,
+	): Promise<RpcSandboxState> {
+		return this.#getData(
+			await this.#send({
+				type: "edit_sandbox_list",
+				list,
+				op,
+				entry,
+				...(replacement === undefined ? {} : { replacement }),
+			}),
+		);
+	}
+
+	/** Allow a host for this session, or always (appended to the global allowlist). */
+	async grantSandboxHost(host: string, scope: "session" | "always"): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "grant_sandbox_host", host, scope }));
+	}
+
+	/** Drop a host's session grant. */
+	async revokeSandboxHost(host: string): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "revoke_sandbox_host", host }));
+	}
+
+	/** Opt in to (or out of) `sandbox_host_request` frames; see {@link onSandbox}. Returns the applied setting. */
+	async setSandboxHostPrompts(enabled: boolean): Promise<boolean> {
+		const response = await this.#send({ type: "set_sandbox_host_prompts", enabled });
+		return this.#getData<{ enabled: boolean }>(response).enabled;
+	}
+
+	/** Answer a pending `sandbox_host_request`. */
+	async respondSandboxHost(requestId: string, decision: "once" | "session" | "always" | "deny"): Promise<void> {
+		this.#getData(await this.#send({ type: "respond_sandbox_host", requestId, decision }));
+	}
+
+	/** Allow exactly `path` for this session (`write` implies read). */
+	async grantSandboxPath(kind: "write" | "read", path: string): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "grant_sandbox_path", kind, path }));
+	}
+
+	/** Drop a path's session grant. */
+	async revokeSandboxPath(kind: "write" | "read", path: string): Promise<RpcSandboxState> {
+		return this.#getData(await this.#send({ type: "revoke_sandbox_path", kind, path }));
+	}
+
+	/** Opt in to (or out of) `sandbox_access_request` frames; see {@link onSandbox}. Returns the applied setting. */
+	async setSandboxAccessPrompts(enabled: boolean): Promise<boolean> {
+		const response = await this.#send({ type: "set_sandbox_access_prompts", enabled });
+		return this.#getData<{ enabled: boolean }>(response).enabled;
+	}
+
+	/** Answer a pending `sandbox_access_request`; `instruct` replies with `instructions` and grants nothing. */
+	async respondSandboxAccess(
+		requestId: string,
+		answer: { decision: "session" | "always" | "deny" } | { decision: "instruct"; instructions: string },
+	): Promise<void> {
+		this.#getData(await this.#send({ type: "respond_sandbox_access", requestId, ...answer }));
 	}
 
 	/**
@@ -1624,6 +1732,11 @@ export class RpcClient {
 			for (const listener of this.#dictationListeners) {
 				listener(data);
 			}
+			return;
+		}
+
+		if (isRpcSandboxFrame(data)) {
+			for (const listener of this.#sandboxListeners) listener(data);
 			return;
 		}
 

@@ -31,6 +31,7 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import type { SandboxNetworkMode } from "../sandbox/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -182,6 +183,23 @@ export function parseBoolean(value: unknown): boolean | undefined {
 export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undefined {
 	if (value === "string" || value === "number") return value;
 	return undefined;
+}
+
+/**
+ * Parse the MCP stdio sandbox opt-in (`sandbox`, `sandboxNetwork`). Invalid values are dropped
+ * (the server then runs uncontained / with the `"allow"` default) and reported through `warn`.
+ */
+export function parseMCPSandboxOptions(
+	raw: { sandbox?: unknown; sandboxNetwork?: unknown },
+	warn: (field: "sandbox" | "sandboxNetwork", value: unknown) => void,
+): { sandbox?: boolean; sandboxNetwork?: SandboxNetworkMode } {
+	const result: { sandbox?: boolean; sandboxNetwork?: SandboxNetworkMode } = {};
+	if (typeof raw.sandbox === "boolean") result.sandbox = raw.sandbox;
+	else if (raw.sandbox != null) warn("sandbox", raw.sandbox);
+	const network = raw.sandboxNetwork;
+	if (network === "allowlist" || network === "deny" || network === "allow") result.sandboxNetwork = network;
+	else if (network != null) warn("sandboxNetwork", network);
+	return result;
 }
 
 /**
