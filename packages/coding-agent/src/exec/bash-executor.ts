@@ -353,15 +353,15 @@ function quarantineShellSession(
 		.catch(() => undefined);
 }
 
-/** A surface label as it appears in a namespaced shell key (`eval`, `loop-condition`). */
+/** A surface label as it appears in a namespaced shell key (`loop-condition`). */
 const SHELL_SESSION_LABEL = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 /**
  * Whether a shell cache key belongs to `agentSessionKey`, matching the session
  * key the shell was cached under: the id itself (the bash tool's own shells) or
- * one namespace of it, `<label>:<id>` (the eval `sh` helper uses `eval:<id>`, a
- * `/loop` condition uses `loop-condition:<id>`). A per-job `<id>:async:<jobId>`
- * key names no session, and a label must read like one, so a key whose prefix is
+ * one namespace of it, `<label>:<id>` (a `/loop` condition uses
+ * `loop-condition:<id>`). A per-job `<id>:async:<jobId>` key names no session,
+ * and a label must read like one, so a key whose prefix is
  * a path (`/work/repo:main`) is another session's, not a namespace.
  * The id itself is matched before any colon is read, so a session whose own id
  * contains one (a cwd-derived `/work/repo:main`) still releases its shells.
@@ -381,7 +381,7 @@ function isShellSessionOwnedBy(key: string, agentSessionKey: string): boolean {
  * is process-global, so without this each disposed session keeps its native
  * shell for the life of the process. A Shell with live background jobs is
  * retained until they exit, matching the `:async:` teardown; an in-flight run
- * keeps its own reference and drops the Shell when it settles.
+ * keeps its own reference and retains live background jobs when it settles.
  */
 export function releaseShellSessions(agentSessionKey: string | undefined): void {
 	if (!agentSessionKey) return;
@@ -987,16 +987,27 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		}
 		if (ownsPersistentSession) {
 			shellSessionsInUse.delete(sessionKey);
-			if (resetSession || options?.sessionKey?.includes(":async:") || options?.isSessionCurrent?.() === false) {
+			const releasedWhileInUse = shellSessions.get(sessionKey) !== shellSession;
+			if (
+				resetSession ||
+				releasedWhileInUse ||
+				options?.sessionKey?.includes(":async:") ||
+				options?.isSessionCurrent?.() === false
+			) {
 				// `:async:` keys are per-job (jobId is unique), and a left session is
 				// never asked for again, so the Shell would otherwise stay in the
-				// process-global map forever after completion.
-				shellSessions.delete(sessionKey);
-				// Dropping the only reference to a per-call `:async:` Shell SIGKILLs
-				// any `nohup`/`&` children (kill-on-drop). If the command left a live
-				// background job, retain the Shell so the process survives across
-				// turns; it is reaped once its last job exits and still dies with the
-				// harness. Skip on resetSession (cancel/error) — those tear down.
+				// process-global map forever after completion. A session removed by
+				// `releaseShellSessions()` while in use deferred background-job
+				// retention until its in-flight command settled here.
+				if (!releasedWhileInUse) {
+					shellSessions.delete(sessionKey);
+				}
+				// Dropping the only reference to a per-call `:async:` or released
+				// Shell SIGKILLs any `nohup`/`&` children (kill-on-drop). If the
+				// command left a live background job, retain the Shell so the process
+				// survives across turns; it is reaped once its last job exits and
+				// still dies with the harness. Skip on resetSession (cancel/error) —
+				// those tear down.
 				if (!resetSession && shellSession) {
 					await retainShellWithLiveBackgroundJobs(shellSession);
 				}
