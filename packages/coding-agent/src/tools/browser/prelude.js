@@ -34,7 +34,8 @@
 	};
 	// A printed `tab.observe()` result, or one left as a cell's last value, shows every element, one line each,
 	// through util.inspect's custom hook; the object, `.elements` and every field stay as they are for code.
-	// Nested in another value (a smaller `depth` than the top level's), it prints as inspect always did.
+	// Nested in another value (a smaller `depth` than the top level's), the same lines sit inside brackets, so
+	// the outer value's keys stay apart; with `elements` replaced by a non-array it prints as plain inspect.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
 	const showField = value =>
@@ -62,19 +63,24 @@
 		}
 		const elements = observation.elements;
 		Object.defineProperty(elements, inspectCustom, {
-			value: (depth, options) =>
-				depth < options.depth ? elements : elements.length > 0 ? elements.map(elementLine).join("\n") : "[]",
+			value: (depth, options) => {
+				if (elements.length === 0) return "[]";
+				const lines = elements.map(elementLine);
+				return depth < options.depth ? ["[", ...lines.map(line => `  ${line}`), "]"].join("\n") : lines.join("\n");
+			},
 		});
 		Object.defineProperty(observation, inspectCustom, {
 			value: (depth, options) => {
-				if (depth < options.depth || !Array.isArray(observation.elements)) return observation;
+				if (!Array.isArray(observation.elements)) return observation;
 				const lines = [];
 				for (const [key, value] of Object.entries(observation)) {
 					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value)}`);
 				}
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
 				for (const element of observation.elements) lines.push(elementLine(element));
-				return lines.join("\n");
+				return depth < options.depth
+					? ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n")
+					: lines.join("\n");
 			},
 		});
 		return observation;

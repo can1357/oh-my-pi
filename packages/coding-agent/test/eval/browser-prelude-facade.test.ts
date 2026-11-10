@@ -371,9 +371,21 @@ describe("browser facade in real Eval runtimes", () => {
 			element: ["id", "role", "name", "value", "description", "keyshortcuts", "states"],
 			length: 150,
 		});
-		const nested = await run("print({ o: await tab.observe() });");
-		expect(nested).toContain("elements: [");
-		expect(nested).not.toContain("o: url:");
+		expect((await run("print({ o: await tab.observe(), n: 1 });")).split("\n")).toEqual([
+			"{",
+			"  o: Observation {",
+			...lines.map(line => `    ${line}`),
+			"  },",
+			"  n: 1",
+			"}",
+		]);
+		expect((await run("print([(await tab.observe()).elements]);")).split("\n")).toEqual([
+			"[",
+			"  [",
+			...lines.slice(5).map(line => `    ${line}`),
+			"  ]",
+			"]",
+		]);
 		expect(await run("const p = await tab.observe(); delete p.elements; print(p);")).toContain(
 			"url: 'https://example.test/list'",
 		);
