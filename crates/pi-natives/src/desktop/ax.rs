@@ -948,10 +948,13 @@ const FIND_MAX_NODES: u32 = 5_000;
 /// recursion, deep enough for the levels Electron nests its content in.
 const FIND_MAX_DEPTH: u32 = 64;
 
+/// Accepts printed substrings, compact printed substrings, exact compact native
+/// roles and aliases. Empty compact queries cannot add matches: separator-only
+/// queries must stay empty.
 fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
 	let printed = props.role.to_lowercase();
 	printed.contains(query)
-		|| !compact.is_empty()
+		|| (!compact.is_empty()
 			&& ((compact.len() != query.len() && printed.contains(compact))
 				|| props
 					.native_role
@@ -959,7 +962,9 @@ fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
 					.filter(|c| !matches!(c, ' ' | '_' | '-'))
 					.flat_map(char::to_lowercase)
 					.eq(compact.chars())
-				|| (compact == "radiobutton" && printed == "radio"))
+				|| ROLE_ALIASES
+					.iter()
+					.any(|&(alias, role)| compact == alias && printed == role)))
 }
 
 pub fn query(
@@ -1234,6 +1239,10 @@ pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	result.push('…');
 	result
 }
+
+/// Query aliases extend the vocabulary without changing printed roles or their
+/// substring matches.
+const ROLE_ALIASES: &[(&str, &str)] = &[("radiobutton", "radio")];
 
 /// Maps a raw `AX*` macOS accessibility role onto the cross-platform role
 /// vocabulary. Compiled only where it has a caller (macOS backend + tests).
