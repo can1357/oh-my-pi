@@ -3,6 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { requireBunVersion } from "./require-bun";
 
 type Mode =
 	| "all"
@@ -105,10 +106,21 @@ const nativeAndIntegrationPackages = [
 	"packages/typescript-edit-benchmark",
 ];
 
+// Every child this runner spawns runs under the same Bun executable that
+// started it (process.execPath), never a PATH-resolved "bun": the runner can
+// be started with an explicit binary (CI matrix, ~/.bun/bin vs /usr/local),
+// and a bare "bun" would silently switch tools under every chunk. Under a
+// 1.3.x Bun on PATH that also hit INF-2: the missing `check` built-in recursed
+// into the package `check` script and died at exit 23. The version guard at
+// startup (see import.meta.main) keeps those children on a supported runtime.
+export function buildBunCommand(args: string[]): string[] {
+	return [process.execPath, ...args];
+}
+
 const projectToolTestCommand: TestCommand = {
 	label: ".omp/tests (project-local TUI debug tool)",
 	cwd: ".",
-	command: ["bun", "test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"],
+	command: buildBunCommand(["test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"]),
 	parallel: 1,
 };
 
@@ -207,12 +219,16 @@ function shellQuote(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function workspaceTestCommand(pkg: string, parallel: number, options: { extraArgs?: string[] } = {}): TestCommand {
+export function workspaceTestCommand(
+	pkg: string,
+	parallel: number,
+	options: { extraArgs?: string[] } = {},
+): TestCommand {
 	const { extraArgs = [] } = options;
 	return {
 		label: pkg,
 		cwd: pkg,
-		command: ["bun", "test", ...extraArgs],
+		command: buildBunCommand(["test", ...extraArgs]),
 		parallel,
 	};
 }
@@ -222,11 +238,11 @@ function workspaceTestCommand(pkg: string, parallel: number, options: { extraArg
 // run-rs-task.ts, which self-skips when the branch changed no Rust-affecting file
 // since its merge base with main, committed or not (printing a one-line notice),
 // and resolves the cargo/nextest invocation.
-function rustTestCommand(): TestCommand {
+export function rustTestCommand(): TestCommand {
 	return {
 		label: "rust (cargo nextest; skipped if no Rust changes)",
 		cwd: ".",
-		command: ["bun", "scripts/run-rs-task.ts", "test:rs"],
+		command: buildBunCommand(["scripts/run-rs-task.ts", "test:rs"]),
 	};
 }
 
@@ -323,7 +339,7 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 		commands.push({
 			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
 			cwd: "packages/coding-agent",
-			command: ["bun", "test", ...onlyFailuresArgs, ...chunk],
+			command: buildBunCommand(["test", ...onlyFailuresArgs, ...chunk]),
 			parallel: plan.parallel,
 		});
 	}
@@ -1022,6 +1038,9 @@ function selectShard<T>(commands: T[], spec: string | undefined): T[] {
 }
 
 if (import.meta.main) {
+	// INF-2: one Bun for the whole run — refuse to start under an older Bun
+	// before any child chunk spawns under it.
+	requireBunVersion();
 	if (!(requestedMode in validModes)) {
 		throw new Error(
 			`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`,
