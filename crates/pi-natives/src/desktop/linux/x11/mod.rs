@@ -1,3 +1,4 @@
+mod activity;
 mod capture;
 mod input;
 mod keymap;
@@ -33,7 +34,7 @@ pub struct X11Backend {
 impl X11Backend {
 	pub(crate) fn new(display: DisplaySelector) -> CoreResult<Self> {
 		let capture = X11Capture::new(display)?;
-		let input = X11Input::new(capture.connection(), capture.root())?;
+		let input = X11Input::new(capture.connection(), capture.root(), None)?;
 		let ax = AtSpiAx::new()
 			.ok()
 			.map(|ax| ax.with_native_windows(Box::new(capture.clone())));
@@ -94,6 +95,7 @@ impl Backend for X11Backend {
 		_caps: &CaptureCaps,
 		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
+		self.input.watch_user();
 		self.capture.capture(target, selector)
 	}
 

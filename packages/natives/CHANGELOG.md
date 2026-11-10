@@ -70,6 +70,10 @@
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input and takeover refusing every call, with nothing sent, while Finder is in front with its focus on the desktop and a Finder window open; Finder gets its front status back with its focus left on the desktop ([#18680](https://github.com/can1357/oh-my-pi/pull/18680) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed X11 takeover taking a typing user's keys: a window or element takeover now waits until you have pressed no key or button for 5 s (failing `UserIntervened` if you are still at it near the run's timeout), and stops with `UserIntervened` at your first key or click once it has activated its target
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed

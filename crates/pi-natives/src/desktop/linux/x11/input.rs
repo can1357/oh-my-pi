@@ -33,6 +33,7 @@ use x11rb::{
 };
 
 use super::{
+	activity::UserActivity,
 	keymap::{self, KeyStep, Keymap},
 	mpx::Mpx,
 	toolkit, uinput,
@@ -72,6 +73,15 @@ pub struct X11Input {
 	keymap:           Keymap,
 	takeover_target:  Option<Window>,
 	takeover_pointer: Cell<Option<(i16, i16)>>,
+	/// The user's press count a takeover in progress started from.
+	takeover_presses: Option<u64>,
+	/// The user's own presses, watched from the session's first capture or
+	/// takeover ([`Self::watch_user`]).
+	activity:         Option<UserActivity>,
+	/// The display `activity` listens on; `None` is `DISPLAY`'s.
+	display:          Option<String>,
+	/// XI2 could not report the user's presses; not asked again.
+	activity_failed:  bool,
 	/// Session-lived virtual master pair, created on first background use.
 	mpx:              Option<Mpx>,
 	/// Why the XI2-MPX route is unusable. Set once, so a host that cannot
@@ -113,7 +123,11 @@ impl Keys<'_> {
 }
 
 impl X11Input {
-	pub(crate) fn new(conn: Arc<RustConnection>, root: Window) -> CoreResult<Self> {
+	pub(crate) fn new(
+		conn: Arc<RustConnection>,
+		root: Window,
+		display: Option<String>,
+	) -> CoreResult<Self> {
 		conn
 			.xtest_get_version(2, 2)
 			.map_err(input_failed)?
@@ -131,6 +145,10 @@ impl X11Input {
 			keymap,
 			takeover_target: None,
 			takeover_pointer: Cell::new(None),
+			takeover_presses: None,
+			activity: None,
+			display,
+			activity_failed: false,
 			mpx: None,
 			mpx_unavailable,
 		})
@@ -267,6 +285,15 @@ impl X11Input {
 		wm.request_activation(window, wm.active_window())
 	}
 
+	/// Starts watching the user's presses, so the session's first takeover
+	/// knows whether they were just typing.
+	pub(crate) fn watch_user(&mut self) {
+		if self.activity.is_none() && !self.activity_failed {
+			self.activity = UserActivity::start(self.display.as_deref()).ok();
+			self.activity_failed = self.activity.is_none();
+		}
+	}
+
 	fn wm(&self) -> Wm<'_> {
 		Wm { conn: &self.conn, root: self.root, atoms: &self.atoms }
 	}
@@ -364,16 +391,23 @@ impl X11Input {
 		self.send_key_steps(window, &steps, keys.duration())
 	}
 
-	/// Activates `window`, confirms the WM made it the active window holding
-	/// the core focus, runs `body`, then restores the user's pointer position
-	/// and previously active window. Fails without sending input when the
-	/// activation is never confirmed.
+	/// Waits for the user to pause ([`UserActivity::admit`]), activates
+	/// `window`, confirms the WM made it the active window holding the core
+	/// focus, runs `body` until the user presses a key or button, then restores
+	/// the user's pointer position and previously active window. Fails without
+	/// sending input when the activation is never confirmed.
 	fn with_foreground<T>(
 		&mut self,
 		window: Window,
 		budget: Duration,
 		body: impl FnOnce(&mut Self) -> CoreResult<T>,
 	) -> CoreResult<T> {
+		self.watch_user();
+		let presses = self
+			.activity
+			.as_ref()
+			.map(UserActivity::admit)
+			.transpose()?;
 		// The activation's core `FocusIn` reaches the target and its window
 		// manager only when no other keyboard focuses it.
 		if let Some(mpx) = &self.mpx {
@@ -384,7 +418,9 @@ impl X11Input {
 		let previous_active = wm.active_window();
 		let previous_focus = wm.input_focus();
 		let pointer = self.core_pointer();
+		self.takeover_presses = presses;
 		if let Err(error) = self.activate_confirmed(window, ewmh, previous_active, budget) {
+			self.takeover_presses = None;
 			control::cleanup(|| {
 				self.restore_activation(window, ewmh, previous_active, previous_focus);
 			});
@@ -394,6 +430,7 @@ impl X11Input {
 		self.takeover_pointer.set(None);
 		let result = body(self);
 		self.takeover_target = None;
+		self.takeover_presses = None;
 		let pointer_after = self.takeover_pointer.take();
 		control::settle(FOREGROUND_RESTORE_SETTLE);
 		control::cleanup(|| {
@@ -418,6 +455,7 @@ impl X11Input {
 		budget: Duration,
 	) -> CoreResult<()> {
 		control::check()?;
+		self.check_user()?;
 		let wm = self.wm();
 		// Already active and focused: re-activating pops open menus down.
 		if wm.is_focused(window, ewmh) {
@@ -429,6 +467,7 @@ impl X11Input {
 		let mut retried = false;
 		loop {
 			control::check()?;
+			self.check_user()?;
 			if wm.is_focused(window, ewmh) {
 				return Ok(());
 			}
@@ -746,24 +785,42 @@ impl X11Input {
 			control::check()?;
 			self.check_takeover_focus()?;
 		}
-		self
-			.conn
-			.xtest_fake_input(
-				if press {
-					KEY_PRESS_EVENT
-				} else {
-					KEY_RELEASE_EVENT
-				},
-				keycode,
-				CURRENT_TIME,
-				self.root,
-				0,
-				0,
-				0,
-			)
-			.map_err(input_failed)?
-			.check()
-			.map_err(input_failed)
+		self.send_xtest(press, || {
+			self
+				.conn
+				.xtest_fake_input(
+					if press {
+						KEY_PRESS_EVENT
+					} else {
+						KEY_RELEASE_EVENT
+					},
+					keycode,
+					CURRENT_TIME,
+					self.root,
+					0,
+					0,
+					0,
+				)
+				.map_err(input_failed)?
+				.check()
+				.map_err(input_failed)
+		})
+	}
+
+	/// Sends one XTEST event, counting a press as this session's own before
+	/// it can reach the user-activity listener.
+	fn send_xtest(&self, press: bool, send: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+		let activity = self.activity.as_ref().filter(|_| press);
+		if let Some(activity) = activity {
+			activity.sending(false);
+		}
+		let result = send();
+		if result.is_err()
+			&& let Some(activity) = activity
+		{
+			activity.sending(true);
+		}
+		result
 	}
 
 	fn send_key(
@@ -984,24 +1041,26 @@ impl X11Input {
 				self.wm().check_pointer_target(window, x, y, true)?;
 			}
 		}
-		self
-			.conn
-			.xtest_fake_input(
-				if press {
-					BUTTON_PRESS_EVENT
-				} else {
-					BUTTON_RELEASE_EVENT
-				},
-				detail,
-				CURRENT_TIME,
-				self.root,
-				0,
-				0,
-				0,
-			)
-			.map_err(input_failed)?
-			.check()
-			.map_err(input_failed)
+		self.send_xtest(press, || {
+			self
+				.conn
+				.xtest_fake_input(
+					if press {
+						BUTTON_PRESS_EVENT
+					} else {
+						BUTTON_RELEASE_EVENT
+					},
+					detail,
+					CURRENT_TIME,
+					self.root,
+					0,
+					0,
+					0,
+				)
+				.map_err(input_failed)?
+				.check()
+				.map_err(input_failed)
+		})
 	}
 
 	fn check_released_keys(&self, keycodes: impl IntoIterator<Item = u8>) -> CoreResult<()> {
@@ -1023,6 +1082,7 @@ impl X11Input {
 	}
 
 	fn check_takeover_focus(&self) -> CoreResult<()> {
+		self.check_user()?;
 		if let Some(window) = self.takeover_target {
 			let wm = self.wm();
 			if !wm.is_focused(window, wm.tracks_active_window()) {
@@ -1032,6 +1092,15 @@ impl X11Input {
 			}
 		}
 		Ok(())
+	}
+
+	/// Refuses the rest of a takeover once the user has pressed a key or
+	/// button since it was admitted: the target holds the keyboard.
+	fn check_user(&self) -> CoreResult<()> {
+		match (&self.activity, self.takeover_presses) {
+			(Some(activity), Some(baseline)) => activity.check(baseline),
+			_ => Ok(()),
+		}
 	}
 
 	/// Whether `window`'s process takes keys only as core events
@@ -1312,5 +1381,97 @@ mod tests {
 		let failed = isolated(Err(DesktopError::input_failed("lost")), disturbed()).unwrap_err();
 		assert_eq!(failed.message, "lost");
 		assert_eq!(isolated(Ok(()), disturbed()).unwrap_err().message, "focus moved");
+	}
+
+	/// Starts its own `Xvfb`: `cargo test -p pi-natives -- --ignored
+	/// typing_user`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_takeover_refuses_a_typing_user_but_not_its_own_keys() {
+		use std::{
+			io::{BufRead, BufReader},
+			process::{Command, Stdio},
+		};
+
+		use x11rb::{
+			protocol::xproto::{CreateWindowAux, WindowClass},
+			wrapper::ConnectionExt as _,
+		};
+
+		use crate::desktop::{control::CancellationSource, keys::parse_key};
+
+		let mut server = Command::new("Xvfb")
+			.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+			.stdout(Stdio::piped())
+			.stderr(Stdio::null())
+			.spawn()
+			.expect("Xvfb starts");
+		let mut number = String::new();
+		BufReader::new(server.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		let display = format!(":{}", number.trim());
+		let connect = || x11rb::connect(Some(&display)).expect("connect").0;
+		// The target app, which counts the key presses it gets.
+		let app = connect();
+		let root = app.setup().roots[0].root;
+		let target = app.generate_id().expect("id");
+		app.create_window(
+			x11rb::COPY_DEPTH_FROM_PARENT,
+			target,
+			root,
+			0,
+			0,
+			100,
+			100,
+			0,
+			WindowClass::INPUT_OUTPUT,
+			x11rb::COPY_FROM_PARENT,
+			&CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+		)
+		.expect("window");
+		app.map_window(target).expect("map");
+		app.sync().expect("sync");
+		let keys_received = || {
+			app.sync().expect("sync");
+			std::iter::from_fn(|| app.poll_for_event().expect("event"))
+				.filter(|event| matches!(event, x11rb::protocol::Event::KeyPress(_)))
+				.count()
+		};
+		let conn = Arc::new(connect());
+		let mut input = X11Input::new(Arc::clone(&conn), root, Some(display.clone())).expect("input");
+		input.watch_user();
+		let id = Target::Window(target.to_string());
+		let key = [parse_key("a").expect("key")];
+
+		input
+			.key_chord(&id, &key, DeliveryMode::Foreground)
+			.expect("takeover, user idle");
+		assert!(keys_received() >= 1, "the takeover's key reached the target");
+		// The user types through another XTEST client, as x11vnc does.
+		let user = connect();
+		let code = input.keymap.plan_chord(&key).expect("plan")[0].keycode;
+		for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+			user
+				.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+				.expect("type");
+		}
+		user.sync().expect("sync");
+		let activity = input.activity.as_ref().expect("watching");
+		activity.wait_for_presses(1);
+		keys_received();
+
+		let source = CancellationSource::default();
+		source.set_deadline(Some(Instant::now()));
+		let error = control::with_token_for_test(&source.token(), || {
+			input.key_chord(&id, &key, DeliveryMode::Foreground)
+		})
+		.expect_err("the user is typing");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(keys_received(), 0, "nothing reached the target");
+		// Read in order after the session's own press, which did not count.
+		assert_eq!(input.activity.as_ref().expect("watching").presses(), 1);
+		let _ = server.kill();
+		let _ = server.wait();
 	}
 }
