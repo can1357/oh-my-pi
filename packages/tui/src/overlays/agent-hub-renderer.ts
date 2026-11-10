@@ -266,53 +266,59 @@ export function formatCost(cost: number): string {
 }
 
 export function formatMetrics(metrics: AgentMetrics): string {
-	return formatMetricRow(
-		[
-			{ value: formatCost(metrics.cost) },
-			{ value: formatMetricDuration(metrics) ?? "time —" },
-			{ value: `${formatNumber(metrics.requests)} req` },
-			{ value: `${formatNumber(metrics.tools)} tools` },
-			{ value: `${formatNumber(metrics.tokens)} tok` },
-		],
-		{ separator: theme.sep.dot },
-	);
+	const items = [
+		{ value: formatCost(metrics.cost) },
+		{ value: formatMetricDuration(metrics) ?? "time —" },
+		{ value: `${formatNumber(metrics.requests)} req` },
+		{ value: `${formatNumber(metrics.tools)} tools` },
+		{ value: `${formatNumber(metrics.tokens)} tok` },
+	];
+	if (metrics.tokensPerSecond !== undefined) {
+		items.push({ value: `${metrics.tokensPerSecond.toFixed(1)} tok/s` });
+	}
+	return formatMetricRow(items, { separator: theme.sep.dot });
 }
 
 /** Plain-text {@link formatMetrics} for native spans. */
 export function metricsText(metrics: AgentMetrics): string {
-	return [
+	const parts = [
 		formatCost(metrics.cost),
 		formatMetricDuration(metrics) ?? "time —",
 		`${formatNumber(metrics.requests)} req`,
 		`${formatNumber(metrics.tools)} tools`,
 		`${formatNumber(metrics.tokens)} tok`,
-	].join(theme.sep.dot);
+	];
+	if (metrics.tokensPerSecond !== undefined) {
+		parts.push(`${metrics.tokensPerSecond.toFixed(1)} tok/s`);
+	}
+	return parts.join(theme.sep.dot);
 }
 
 /** Row-grid variant of {@link formatMetrics}: fixed-width cells so every agent's metadata
  * line shares one column layout instead of flowing after wrapped text. Cost is left-aligned
  * so the line starts flush; the numeric cells are right-aligned so units line up. */
-export function formatMetricColumns(metrics: AgentMetrics, age: string): string {
-	return renderTableRow(
-		[
-			{ text: formatCost(metrics.cost) },
-			{ text: formatMetricDuration(metrics) ?? "—" },
-			{ text: `${formatNumber(metrics.requests)} req` },
-			{ text: `${formatNumber(metrics.tools)} tools` },
-			{ text: `${formatNumber(metrics.tokens)} tok` },
-			{ text: age },
-		],
-		[
-			{ width: 8, align: "left", overflow: "allow" },
-			{ width: 13, align: "right", overflow: "truncate" },
-			{ width: 8, align: "right", overflow: "truncate" },
-			{ width: 9, align: "right", overflow: "truncate" },
-			{ width: 8, align: "right", overflow: "truncate" },
-			{ width: 8, align: "right", overflow: "truncate" },
-		],
-		undefined,
-		{ gap: " ", fit: false },
-	);
+export function formatMetricColumns(metrics: AgentMetrics, age: string, showTokenRate = false): string {
+	const texts = [
+		{ text: formatCost(metrics.cost) },
+		{ text: formatMetricDuration(metrics) ?? "—" },
+		{ text: `${formatNumber(metrics.requests)} req` },
+		{ text: `${formatNumber(metrics.tools)} tools` },
+		{ text: `${formatNumber(metrics.tokens)} tok` },
+	];
+	const widths = [
+		{ width: 8, align: "left" as const, overflow: "allow" as const },
+		{ width: 13, align: "right" as const, overflow: "truncate" as const },
+		{ width: 8, align: "right" as const, overflow: "truncate" as const },
+		{ width: 9, align: "right" as const, overflow: "truncate" as const },
+		{ width: 8, align: "right" as const, overflow: "truncate" as const },
+	];
+	if (showTokenRate) {
+		texts.push({ text: metrics.tokensPerSecond !== undefined ? `${metrics.tokensPerSecond.toFixed(1)}/s` : "—" });
+		widths.push({ width: 9, align: "right" as const, overflow: "truncate" as const });
+	}
+	texts.push({ text: age });
+	widths.push({ width: 8, align: "right" as const, overflow: "truncate" as const });
+	return renderTableRow(texts, widths, undefined, { gap: " ", fit: false });
 }
 
 export function contextGauge(tokens: number, window: number): string {

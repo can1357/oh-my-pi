@@ -262,3 +262,69 @@ describe("aggregateCost", () => {
 		expect(aggregateCost(args)).toBeCloseTo(0.6);
 	});
 });
+
+describe("hubRowMetrics tokensPerSecond", () => {
+	it("reads live rate from streaming session tokenRate meter", () => {
+		const session = {
+			isStreaming: true,
+			tokenRate: { rate: () => 85.5 },
+			getSessionStats: () => ({ tokens: { input: 10, output: 100, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		};
+		const ref = { id: "worker", session } as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		aggregateMetrics({
+			rows: [ref],
+			observedById: new Map(),
+			metricsFor: (row, observed) => hubRowMetrics(row, observed, sessionMetrics),
+			fallbackStatsSession: hubFallbackStatsSession,
+			sessionMetrics,
+			refreshFallback: true,
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(85.5);
+	});
+
+	it("calculates tokensPerSecond from the last completed assistant turn", () => {
+		const messages = [
+			{ role: "assistant", duration: 2000, content: [], usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } } },
+		];
+		const session = {
+			agent: { state: { messages } },
+			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		};
+		const ref = { id: "worker", session } as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		aggregateMetrics({
+			rows: [ref],
+			observedById: new Map(),
+			metricsFor: (row, observed) => hubRowMetrics(row, observed, sessionMetrics),
+			fallbackStatsSession: hubFallbackStatsSession,
+			sessionMetrics,
+			refreshFallback: true,
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(75);
+	});
+
+	it("omits tokensPerSecond when duration is too short to be meaningful", () => {
+		const messages = [
+			{ role: "assistant", duration: 50, content: [], usage: { input: 10, output: 150, cacheWrite: 0, cost: { total: 0.01 } } },
+		];
+		const session = {
+			agent: { state: { messages } },
+			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		};
+		const ref = { id: "worker", session } as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		aggregateMetrics({
+			rows: [ref],
+			observedById: new Map(),
+			metricsFor: (row, observed) => hubRowMetrics(row, observed, sessionMetrics),
+			fallbackStatsSession: hubFallbackStatsSession,
+			sessionMetrics,
+			refreshFallback: true,
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBeUndefined();
+	});
+});

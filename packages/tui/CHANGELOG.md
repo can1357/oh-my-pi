@@ -13,6 +13,9 @@
 - Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
 
 ## [18.18.7] - 2026-11-10
+### Added
+
+- Added `display.subagentTokenRate` setting to display live and completed generation speed (tok/s) for subagents in the Agent Hub.
 
 ### Changed
 
