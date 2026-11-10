@@ -129,7 +129,7 @@ export type AnyUiMetadata = UiBase & {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
 	secret?: boolean;
 	ordered?: boolean;
-	editor?: "json";
+	editor?: "json" | "linkMap";
 };
 
 /** Structural schema entries supplied by the application host. */
@@ -205,6 +205,11 @@ export interface ProviderLimitsSettingDef extends BaseSettingDef {
 	type: "providerLimits";
 }
 
+/** `tui.linkMap`, edited entry by entry (`ui.editor: "linkMap"`). */
+export interface LinkMapSettingDef extends BaseSettingDef {
+	type: "linkMap";
+}
+
 /** Array-of-enum setting edited as a toggle list; `ordered` lists render positions and support reordering. */
 export interface MultiSelectSettingDef extends BaseSettingDef {
 	type: "multiselect";
@@ -218,6 +223,7 @@ export type SettingDef =
 	| SubmenuSettingDef
 	| TextInputSettingDef
 	| ProviderLimitsSettingDef
+	| LinkMapSettingDef
 	| MultiSelectSettingDef;
 
 function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
@@ -287,9 +293,9 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 	}
 
 	if (schemaType === "record") {
-		return path === "providers.maxInFlightRequests"
-			? { ...base, type: "providerLimits" }
-			: { ...base, type: "text", secret: false };
+		if (path === "providers.maxInFlightRequests") return { ...base, type: "providerLimits" };
+		if (ui.editor === "linkMap") return { ...base, type: "linkMap" };
+		return { ...base, type: "text", secret: false };
 	}
 
 	return null;

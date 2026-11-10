@@ -55,6 +55,10 @@ export interface UiString extends UiBase {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
 }
 
+export interface UiRecord extends UiBase {
+	editor?: "linkMap";
+}
+
 export interface UiArray extends UiBase {
 	/** Membership choices. Without options or a JSON editor, the array stays config-file only. */
 	options?: ReadonlyArray<SubmenuOption>;
@@ -165,7 +169,7 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	type: "record";
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
-	ui?: UiBase;
+	ui?: UiRecord;
 }
 
 /** Any setting definition accepted by {@link register}. */

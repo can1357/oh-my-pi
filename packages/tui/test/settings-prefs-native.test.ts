@@ -1,9 +1,10 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { TspPrefsProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { PluginSettingsHost } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
 import type { SettingsDisplayEntry, SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -51,6 +52,12 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		enumValues: ["apply_patch", "hashline", "patch", "replace", "sloppy", "none"],
 		defaultValue: "hashline",
 		ui: { tab: "files", group: "Editing", label: "Edit Mode", description: "" },
+	},
+	{
+		path: "tui.linkMap",
+		type: "record",
+		defaultValue: {},
+		ui: { tab: "shell", label: "Link Map", description: "", editor: "linkMap" },
 	},
 	{
 		path: "providers.order",
@@ -285,6 +292,84 @@ describe("settings as a native prefs page", () => {
 		send(selector, { type: "change", key: "", item: "shell.path", value: "/bin/fish" });
 		expect(values.get("shell.path")).toBe("/bin/fish");
 		expect(prefs(selector).props.editing).toBeNull();
+	});
+
+	describe("tui.linkMap editor", () => {
+		const ESC = "\x1b";
+		const BACKSPACE = "\x7f";
+		const type = (selector: SettingsSelectorComponent, keys: string) => {
+			for (const ch of keys) selector.handleInput(ch);
+		};
+		const screen = (selector: SettingsSelectorComponent) => Bun.stripANSI(selector.render(160).join("\n"));
+
+		afterEach(() => applyLinkMapSetting({}));
+
+		it("adds, refuses and removes entries without leaving the editor, then shows the count on the row", () => {
+			const { selector, values, changes } = harness({ "tui.linkMap": { "~": "file:///Z:/" } });
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			expect(row(prefs(selector).props, "tui.linkMap").control).toEqual({
+				k: "action",
+				label: "Edit…",
+				act: "edit",
+			});
+
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			expect(screen(selector)).toContain("→ file:///Z:/");
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			type(selector, "/mnt/projects");
+			selector.handleInput(ENTER);
+			// A target with a query is refused on save.
+			type(selector, "ftp?");
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+			for (let i = 0; i < 4; i++) selector.handleInput(BACKSPACE);
+			// The sample link follows the target as it is typed, before anything is saved.
+			type(selector, "https://files.contoso.example/projects");
+			expect(screen(selector)).toContain("https://files.contoso.example/projects/example.md");
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+			selector.handleInput(ENTER);
+			const added = { "~": "file:///Z:/", "/mnt/projects": "https://files.contoso.example/projects" };
+			expect(values.get("tui.linkMap")).toEqual(added);
+			expect(changes.at(-1)).toEqual(["tui.linkMap", added]);
+
+			// Still in the editor: the list shows the new entry, and clearing a target removes its entry.
+			expect(screen(selector)).toContain("→ https://files.contoso.example/projects");
+			selector.handleInput(ENTER);
+			selector.handleInput("\x01");
+			selector.handleInput("\x0b");
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+
+			selector.handleInput(ESC);
+			expect(prefs(selector).props.editing).toBeNull();
+			expect(row(prefs(selector).props, "tui.linkMap").control).toEqual({
+				k: "action",
+				label: "Edit…",
+				act: "edit",
+			});
+			expect(screen(selector)).toContain("1 entry: ~");
+		});
+
+		it.skipIf(process.platform === "win32")("tests a path against the map links use, and clears every entry", () => {
+			const map = { "/srv/handbook": "https://git.contoso.example/handbook/blob/main" };
+			const { selector, values } = harness({ "tui.linkMap": map });
+			// The host's setting effect pushes the stored map; this harness has none.
+			applyLinkMapSetting(map);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Rows: the entry, Add entry…, Test a path…, Clear all entries.
+			selector.handleInput(DOWN);
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			type(selector, "/srv/handbook/a b.md");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("https://git.contoso.example/handbook/blob/main/a%20b.md");
+
+			for (let i = 0; i < 3; i++) selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({});
+		});
 	});
 
 	it("masks credential arrays in rows and drafts without saving mask glyphs", () => {

@@ -50,6 +50,7 @@ import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
+import { formatLinkMapValue, LinkMapSubmenu } from "./link-map-editor";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -960,6 +961,7 @@ export class SettingsSelectorComponent implements Component {
 					mono: !def.secret && MONO_TEXT_SETTING.test(def.path) ? true : undefined,
 				};
 			case "providerLimits":
+			case "linkMap":
 				return { k: "action", label: "Edit…", act: "edit" };
 			case "multiselect":
 				return {
@@ -1122,6 +1124,7 @@ export class SettingsSelectorComponent implements Component {
 				return;
 			}
 			case "providerLimits":
+			case "linkMap":
 				return;
 		}
 	}
@@ -1524,6 +1527,13 @@ export class SettingsSelectorComponent implements Component {
 					submenu: (_cv, done) => this.#createProviderLimitsInput(done),
 				};
 
+			case "linkMap":
+				return {
+					...item,
+					currentValue: formatLinkMapValue(currentValue),
+					submenu: (_cv, done) => this.#createLinkMapInput(done),
+				};
+
 			case "multiselect":
 				return {
 					...item,
@@ -1719,6 +1729,19 @@ export class SettingsSelectorComponent implements Component {
 				done(this.#formatProviderLimitsValue(value));
 			},
 			() => done(),
+			this.#context.requestRender,
+		);
+	}
+
+	#createLinkMapInput(done: (value?: string) => void): Container {
+		let saved: Record<string, string> | undefined;
+		return new LinkMapSubmenu(
+			this.#context.settings,
+			value => {
+				saved = value;
+				this.#callbacks.onChange("tui.linkMap", value);
+			},
+			() => done(saved === undefined ? undefined : formatLinkMapValue(saved)),
 			this.#context.requestRender,
 		);
 	}
