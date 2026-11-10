@@ -181,11 +181,11 @@ under `cd <temp> && … > file`). Two decisive findings:
 | Cluster | Tests | macOS | Decision |
 | --- | --- | --- | --- |
 | S1. Corrupted test-string literals — upstream `4f15085863` | 17 | FAIL | fix test: port `4f15085863` (W2) |
-| S2. Expected output is macOS libc's — upstream `251a2fab8e` gates | 15 | PASS | fix test: port the ignore gates (W2) |
+| S2. Expected output is macOS libc's — upstream `251a2fab8e` gates | 16 | PASS | fix test: port the ignore gates (W2) |
 | S3. `cd` into the Windows temp dir fails → probe-output reads NotFound — omp-zsh series | 16 | PASS | port upstream series (W1) |
 | S4. env_cwd short-TEMP expansion (same logical-cd root) | 2 | n/a (cfg(windows)) | port upstream (W1) |
-| S5. Windows-platform engine semantics, no single upstream fix | 5 | PASS | fix locally after W1/W2 (W3) |
-| S6. Encoding / collation misc | 4 | PASS | local test fixes (W2/W3) |
+| S5. Windows-platform engine semantics, no single upstream fix | 6 | PASS | fix locally after W1/W2 (W3) |
+| S6. Encoding / collation misc (2 core; 5 provisional rows counted in S3) | 2 | PASS | local test fixes (W2/W3) |
 | **Total** | **59** | 17 FAIL / 42 PASS | |
 
 ## Cluster S1 — corrupted test-string literals (17 tests, 9 files)
@@ -349,7 +349,7 @@ cannot hold Windows drive roots, so `PWD` never matches.
 `1fdc73bc5f` + `bbf17a4bcc` are the minimal standalone prefix (both touch
 only `dir.rs` + tests + changelog) and could land first.
 
-## Cluster S5 — Windows-platform engine semantics (5 tests, 3 files)
+## Cluster S5 — Windows-platform engine semantics (6 tests, 4 files)
 
 These testkit suites run the engine at `Platform::current()`
 (`bash/engine.rs:58` default) against a POSIX-shaped `MemFs`; on a Windows
@@ -367,9 +367,10 @@ behavior is engine-config, not build-target.
 | `testkit::suites::zsh_mod_files::zsh_mod_files_mv_ln_chmod` | same | — | FAIL (counted S1: corrupted literal) |
 | `testkit::suites::zsh_mod_zprof` (3 tests) | `zsh_mod_zprof.rs` | — | FAIL (counted S1) |
 | `testkit::suites::zsh_parity::expandmb_sorting_follows_lc_collate` | `zsh_parity.rs` | — | PASS (counted S6) |
-
-S5's own membership after S1/S2/S3 are peeled away is: `zsh_mod_files_mkdir`
-plus the four ""-signature utility tests (`uutils_filters_listing_find_grep`,
+| `shell::tests::process_control::ps_builtin_lists_one_line_per_thread_with_m` | `process_control.rs` | `%CPU: "?"` (Windows `ps` engine semantics; not the macOS-host-baseline `ps_builtin_supports_extended_format_specifiers` sibling) [INFERENCE — pending Windows re-run] | n/a (this test not in the macOS 59 run) |
+S5's own membership after S1/S2/S3 are peeled away is: `zsh_mod_files_mkdir`,
+`ps_builtin_lists_one_line_per_thread_with_m`, plus the four ""-signature
+utility tests (`uutils_filters_listing_find_grep`,
 `uutils_find_display_and_actions_split_paths`,
 `uutils_jq_filters_json_and_propagates_exit_status`,
 `uutils_sed_substitutes_streams_and_edits_in_place`) — all macOS-green,
@@ -385,14 +386,19 @@ or add `#[cfg_attr(windows, ignore = "…")]` gates with reasons where the
 premise is POSIX-only (the `251a2fab8e` pattern). No single upstream commit
 fixes these wholesale; do not chase them before the ports land.
 
-## Cluster S6 — encoding / collation misc (4 tests)
+## Cluster S6 — encoding / collation misc (2 core members; 5 more provisionally held)
+
+Core membership is disjoint from S3/S5: the two encoding/collation tests
+below. The three following rows are provisional members kept here for
+traceability only — their counts live in S3 (the 4 `uutils_*` tests) and
+S3 (`grep_quiet`), so the 59 partitions exactly once.
 
 | Test | Root cause | Decision |
 | --- | --- | --- |
 | `output_decode::tests::incomplete_utf8_at_eof_becomes_replacement` | Windows ACP fallback: `OutputDecoder::new()` uses `GetACP()` (`output_decode.rs:59`); on a host whose ANSI page is not 65001 the incomplete UTF-8 lead `0xe4` at EOF re-decodes as ACP — `д` is CP1251's decoding of `0xe4` — instead of U+FFFD (`drain_utf8`'s EOF branch calls `drain_acp`, `output_decode.rs:158-163`). Code is correct (documented one-encoding-per-command fallback); the test must not inherit the host ACP | fix test locally (W3): build the decoder with `OutputDecoder::utf8()` (exists, `output_decode.rs:66`) or `with_fallback_codepage(CP_UTF8)`; one-line change |
 | `testkit::suites::zsh_parity::expandmb_sorting_follows_lc_collate` | UCRT has no en_US.UTF-8 collation → `Collator` byte-compares (Windows falls to the stub `mod native` at `sys/langinfo.rs:344-346`); expected order is en_US's | fix test (W2): port `251a2fab8e`'s early-return guard (`Collator::new(b"en_US.UTF-8").is_none() → return`) |
-| `grep_quiet_and_line_regexp` | `-q match must exit 0`, left "" — [INFERENCE: likely the S3 cd root (fixture under temp); needs Windows re-run] | W1 then W3 |
-| the 4 `uutils_*` ""-signature tests | same family as S3 [INFERENCE] | W1 then W3 (counted in S5 if they survive W1) |
+| `grep_quiet_and_line_regexp` (provisional, counted in S3) | `-q match must exit 0`, left "" — [INFERENCE: likely the S3 cd root (fixture under temp); needs Windows re-run] | W1 then W3 (moves to core S6 only if it survives W1) |
+| the 4 `uutils_*` ""-signature tests (provisional, counted in S3) | same family as S3 [INFERENCE] | W1 then W3 (moves to core S6 only if they survive W1) |
 
 ## Proposed tasks (pi-shell)
 
@@ -418,9 +424,9 @@ and a Windows re-run when host access is granted.
 
 **W2 — port the test-only fixes.** Cherry-pick `4f15085863` (restore split
 string literals; the 17 S1 tests + comp_y*/jvm/mermaid ride-alongs) and the
-`251a2fab8e` test hunks (macOS-only ignore gates for the 15 S2 tests;
+`251a2fab8e` test hunks (macOS-only ignore gates for the 16 S2 tests;
 `expandmb` early return) + its `sys/langinfo.rs` null-locale guard.
-Expected effect on Windows: S1 (17) + S2 (15) + `expandmb` (1) = 33 of the
+Expected effect on Windows: S1 (17) + S2 (16) + `expandmb` (1) = 34 of the
 59. Bonus: on macOS the fork's own 19-test host baseline drops to the 2
 git/ps host failures.
 
@@ -430,11 +436,14 @@ access — same blocker as the coding-agent section). Then per test: port to
 the `windows_platform.rs` `Platform::Windows` engine-config pattern or gate
 with `#[cfg_attr(windows, ignore = "…")]`; fix
 `incomplete_utf8_at_eof_becomes_replacement` with `OutputDecoder::utf8()`.
-Expected effect: the last ~4-6 tests (`zsh_mod_files_mkdir` + whatever of
-the ""-signature family survives W1 + `incomplete_utf8…`).
+Expected effect: the last ~5-7 tests (`zsh_mod_files_mkdir` +
+`ps_builtin_lists_one_line_per_thread_with_m` + whatever of the
+""-signature family survives W1 + `incomplete_utf8…`).
 
-Tally check: W2 33 + W1 ≈ 18-23 + W3 ≈ 4-6 → 59 (W1/W3 boundary is settled
-by the Windows re-run after each wave lands).
+Tally check: W2 34 + W1 ≈ 18-23 + W3 ≈ 5-7 → 59 (W1/W3 boundary is settled
+by the Windows re-run after each wave lands; the 59 partitions exactly once
+across S1-S6 — S2 is 16, S5 is 6, and S6 core is 2, with the provisional
+`uutils_*`/`grep_quiet` rows counted in S3).
 
 ## Windows isolation re-run — pending host access (pi-shell)
 
@@ -481,8 +490,8 @@ Unified list for the repository owner; fix tasks are appended to the plan only a
 | C1 | C-1 C (12) | Replace `"/tmp"` with `os.tmpdir()` in `test/bash-failure-result.test.ts` :19 and `test/fixtures/bash-autobg-exit-probe.ts` :23 | S | C-1 Cluster C |
 | D1 | C-1 D (10) | Pending Windows host: bind `servePage` to `127.0.0.1` / navigate literal IP, or gate on live launch probe | M | C-1 Cluster D |
 | E1 | C-1 E (5) | Isolate ambient prompt leakage in `test/sdk-mcp-instructions.test.ts` (F-3 pattern; identify leaking source on Windows) | M | C-1 Cluster E |
+| — | C-1 B focus-view (1) | No task yet: pending Windows isolation re-run of `test/thread/focus-view.test.ts` (`d488335771` is source+test and does not fix the named test) | — | C-1 Cluster B |
 | — | C-1 E2 (4) | No task yet: pending Windows isolation re-run of `test/skills.test.ts` (3) + `test/usage-cli.test.ts` (1) | — | C-1 Cluster E2 |
-| — | C-1 F (4) | Already fixed by Task 7 (`6ac3ba7d69`) — no new task | — | C-1 Cluster F |
 | W1 | C-2 S3+S4 (+~5 of S5/S6) | Port the "omp zsh on Windows" series (9 commits listed in the pi-shell section; core `df6fcdf98c` +2897/−392) | L | C-2 Proposed tasks |
 | W2 | C-2 S1+S2 (+expandmb) | Port test-only fixes: `4f15085863` (corrupted string literals) + `251a2fab8e` test hunks & langinfo guard | M | C-2 Proposed tasks |
 | W3 | C-2 S5/S6 remainder | Local Windows-expectation fixes after W1/W2 + Windows re-run (`Platform::Windows` config / `#[cfg_attr(windows, ignore)]` / `OutputDecoder::utf8()`) | M | C-2 Proposed tasks |
@@ -490,5 +499,13 @@ Unified list for the repository owner; fix tasks are appended to the plan only a
 | P-C3.2 | C-3 severity gap | Re-baseline Windows clippy gate to upstream severity (`-D clippy::correctness -D clippy::suspicious`); fix doc + record true baseline | S | C-3 above |
 
 Cross-cutting: every Windows verification step in this table is blocked on Windows host access (controller ruling, ledgered; see both "Windows isolation re-run" sections). macOS-verifiable steps (A1, B1–B4, C1, W1 regression, W2, P-C3.1) can land and be verified on this host first.
+
+Out-of-dataset note: `rsync::session::tests::local_copy_byte_totals_are_deterministic`
+(`crates/pi-builtins/src/rsync/session/tests.rs:351`) is a pre-existing
+non-Windows macOS host flake — fails 4–5/5 at the branch base under
+16-way parallel cargo test load (8-byte sent-bytes variance), always passes
+serially. It is outside both the Windows 59 dataset and INF-3's TS scope;
+recorded here so the Task 2 ledger concern is not lost. Candidate for a
+dedicated Rust-side determinism fix (beyond this plan's approved scope).
 
 **STOP — presented to the repository owner for approval.** Fix tasks are appended to `docs/plans/2026-11-09-foundation-infra-windows.md` only after explicit approval.
