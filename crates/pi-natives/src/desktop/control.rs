@@ -546,6 +546,27 @@ impl ControlLease {
 			running: AtomicBool::new(false),
 		})
 	}
+
+	/// The physical-Escape stop a takeover operation arms, armed for `source`
+	/// alone while that operation still waits for control.
+	#[cfg(target_os = "macos")]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<macos::EscapeMonitor> {
+		#[cfg(not(test))]
+		let start = macos::EscapeMonitor::start;
+		#[cfg(test)]
+		let start = test_escape::start;
+		start(EmergencyStop(Arc::downgrade(&source.0)))
+	}
+
+	#[cfg(windows)]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<windows::EscapeMonitor> {
+		windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))
+	}
+
+	#[cfg(target_os = "linux")]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<Option<linux::EscapeMonitor>> {
+		linux::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))
+	}
 }
 
 struct KernelOwner {
@@ -708,22 +729,34 @@ impl InputLease {
 	/// `takeover` arms the physical-Escape stop for this operation; held control
 	/// keeps the stop it armed when it was granted. Control another session
 	/// owns is waited for up to [`LEASE_WAIT`], ending shortly before the
-	/// operation's deadline; cancelling the operation ends the wait.
+	/// operation's deadline; cancelling the operation ends the wait, and so does
+	/// a physical Escape when it waits to take over.
 	pub(crate) fn acquire(token: &OperationToken, takeover: bool) -> CoreResult<Self> {
-		Self::acquire_within(token, takeover, Instant::now, |duration| token.wait(duration))
+		Self::acquire_within(
+			token,
+			takeover,
+			Instant::now,
+			|duration| token.wait(duration),
+			|| ControlLease::escape_monitor(&token.source),
+		)
 	}
 
-	fn acquire_within(
+	/// [`Self::acquire`] on the clock `now`, sleeping through `wait`; a takeover
+	/// operation that has to wait first arms its Escape stop with `arm`, kept
+	/// until the lease has armed its own.
+	fn acquire_within<Stop>(
 		token: &OperationToken,
 		takeover: bool,
 		now: impl Fn() -> Instant,
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
+		mut arm: impl FnMut() -> CoreResult<Stop>,
 	) -> CoreResult<Self> {
 		token.check()?;
 		let limit = now() + LEASE_WAIT;
 		let limit = token.deadline().map_or(limit, |deadline| {
 			limit.min(deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
 		});
+		let mut waiting_stop = None;
 		let owner = loop {
 			let refused = {
 				let state = token.source.0.state.lock();
@@ -741,8 +774,14 @@ impl InputLease {
 			if left.is_zero() {
 				return Err(refused);
 			}
+			// A takeover operation takes the user's input once control frees up,
+			// so an Escape they press while it waits stops it too.
+			if takeover && waiting_stop.is_none() {
+				waiting_stop = Some(arm()?);
+			}
 			wait(left.min(LEASE_POLL))?;
 		};
+		drop(waiting_stop);
 		owner
 			.running
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -1023,6 +1062,7 @@ mod tests {
 				clock.set(clock.get() + duration);
 				Ok(())
 			},
+			|| -> CoreResult<()> { panic!("background input arms no Escape stop") },
 		);
 		(lease, clock.get() - start)
 	}
@@ -1180,9 +1220,45 @@ mod tests {
 				source.cancel();
 				token.wait(duration)
 			},
+			|| -> CoreResult<()> { panic!("background input arms no Escape stop") },
 		);
 		assert_eq!(cancelled.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
 		assert_eq!(waits, 1);
+		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn physical_escape_stops_takeover_input_waiting_for_control() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let other = KernelLease::acquire().expect("another host's lease");
+		let token = source.token();
+		let clock = Cell::new(Instant::now());
+		let armed = RefCell::new(Vec::new());
+		let mut waits = 0;
+		let stopped = InputLease::acquire_within(
+			&token,
+			true,
+			|| clock.get(),
+			|duration| {
+				waits += 1;
+				// The user presses Escape in their own app during the first wait.
+				for stop in armed.borrow().iter() {
+					EmergencyStop::escape(stop);
+				}
+				clock.set(clock.get() + duration);
+				token.wait(duration)
+			},
+			|| {
+				armed
+					.borrow_mut()
+					.push(EmergencyStop(Arc::downgrade(&source.0)));
+				Ok(())
+			},
+		);
+		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!((waits, armed.borrow().len(), source.escape_stops()), (1, 1, 1));
 		drop(other);
 		remove_test_lock();
 	}
