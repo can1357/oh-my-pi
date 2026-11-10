@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A grep with no matches renders as one line with `0 matches` in yellow, dropping the separate `No matches found` warning row
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
