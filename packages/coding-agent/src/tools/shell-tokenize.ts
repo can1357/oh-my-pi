@@ -127,8 +127,8 @@ export interface AndChainSegment {
 }
 const SHELL_STATEFUL_COMMANDS = new Set([
 	"!",
+	":",
 	".",
-	// Bash test -v evaluates array subscripts, including command substitutions.
 	"test",
 	"[",
 	"[[",
@@ -237,7 +237,7 @@ const SHELL_INTERPRETER_COMMANDS: Record<string, true> = {
 	zsh: true,
 };
 
-const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*\+?=/u;
+const SHELL_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/u;
 const SHELL_REINTERPRET_OPTION = /^(?:-[^-]*[ce]|--(?:command|eval)(?:=.*)?)$/u;
 
 /**
@@ -380,7 +380,7 @@ function parseLiteralShellCommandSegment(segmentText: string): LiteralShellComma
 
 function segmentMutatesShellState(segmentText: string, literal: LiteralShellCommandSegment | null): boolean {
 	if (literal !== null) return false;
-	if (/[$`(){}\n\r]/u.test(segmentText)) return true;
+	if (/[$`(){}[\]\n\r]/u.test(segmentText)) return true;
 	const segments = tokenizeShellSegments(segmentText);
 	if (segments.length === 0) return true;
 	for (const words of segments) {
@@ -388,6 +388,7 @@ function segmentMutatesShellState(segmentText: string, literal: LiteralShellComm
 		while (index < words.length) {
 			const word = words[index]!;
 			if (SHELL_ASSIGNMENT.test(word)) {
+				if (word.includes("[")) return true;
 				index++;
 			} else if (/^[0-9]*[<>]+$/u.test(word)) {
 				index += 2;
@@ -431,6 +432,7 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 	let quote: "'" | '"' | undefined;
 	let parenDepth = 0;
 	let inBacktick = false;
+	let inDoubleBracket = false;
 	let atWordStart = true;
 	let segmentStart = 0;
 
@@ -469,6 +471,35 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 		if (ch === "#" && atWordStart) {
 			break;
 		}
+		if (
+			!inDoubleBracket &&
+			atWordStart &&
+			ch === "[" &&
+			command[i + 1] === "[" &&
+			(command[i + 2] === " " || command[i + 2] === "\t")
+		) {
+			inDoubleBracket = true;
+			i++;
+			atWordStart = false;
+			continue;
+		}
+		if (inDoubleBracket && atWordStart && ch === "]" && command[i + 1] === "]") {
+			const after = command[i + 2];
+			if (
+				after === undefined ||
+				after === " " ||
+				after === "\t" ||
+				after === ";" ||
+				after === "&" ||
+				after === "|" ||
+				after === ")"
+			) {
+				inDoubleBracket = false;
+				i++;
+				atWordStart = false;
+				continue;
+			}
+		}
 		if (ch === "(") {
 			parenDepth++;
 			atWordStart = true;
@@ -480,7 +511,10 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 			atWordStart = false;
 			continue;
 		}
-		if (parenDepth > 0) continue;
+		if (parenDepth > 0 || inDoubleBracket) {
+			atWordStart = ch === " " || ch === "\t" || ch === "&" || ch === "|" || ch === "(" || ch === ")";
+			continue;
+		}
 		if (ch === ";") return null;
 		if (ch === "|" && command[i + 1] === "|") return null;
 		if (ch === "&") {
@@ -504,7 +538,7 @@ export function extractAndChainSegments(command: string): AndChainSegment[] | nu
 		atWordStart = ch === " " || ch === "\t";
 	}
 
-	if (quote || inBacktick || parenDepth !== 0) return null;
+	if (quote || inBacktick || parenDepth !== 0 || inDoubleBracket) return null;
 	const tail = command.slice(segmentStart).trim();
 	if (tail.length === 0) return null;
 	rawSegments.push(tail);

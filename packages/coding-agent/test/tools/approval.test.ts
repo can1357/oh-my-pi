@@ -1192,6 +1192,9 @@ describe("tool-owned dynamic approval declarations", () => {
 			"cd /tmp && git status",
 			">/dev/null cd /tmp && git status",
 			"> /dev/null cd /tmp && git status",
+			"BASH_CMDS[git]=/tmp/evil && git status",
+			"'BASH_CMDS[git]'=/tmp/evil && git status",
+			"PATH=/tmp : && git status",
 		]) {
 			expect(formatApprovalPrompt(bash, { command }).split("\n")).toEqual([
 				"Allow tool: bash",
@@ -1200,6 +1203,32 @@ describe("tool-owned dynamic approval declarations", () => {
 				"  ? git status (requires approval)",
 			]);
 		}
+
+		// `&&` inside `[[ ... ]]` stays within the conditional clause instead of splitting into false command rows.
+		expect(
+			formatApprovalPrompt(bash, { command: "git status && [[ -f a && -f b ]] && git diff" }).split("\n"),
+		).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? [[ -f a && -f b ]] (requires approval)",
+			"  ? git diff (requires approval)",
+		]);
+
+		// Long chains elide excess leading allowed rows in compact view so the first prompted segment is visible.
+		const longChain = [...Array.from({ length: 7 }, (_, i) => `git status -s dir${i}`), "rm -rf /"].join(" && ");
+		await requestApproval(ui, bash, { command: longChain }, { reason: "Critical pattern detected" });
+		expect(prompts[1]!.full.split("\n")).toHaveLength(11);
+		expect(prompts[1]!.compact.split("\n")).toEqual([
+			"Allow tool: bash",
+			"Reason: Critical pattern detected",
+			"Command:",
+			"  ✓ … (4 allowed segments)",
+			"  ✓ git status -s dir4 (allowed: git status*)",
+			"  ✓ git status -s dir5 (allowed: git status*)",
+			"  ✓ git status -s dir6 (allowed: git status*)",
+			"  ? rm -rf / (critical pattern)",
+		]);
 
 		// Critical segment is flagged even if an allow rule would otherwise match.
 		const rmAllowed = createBashTool({

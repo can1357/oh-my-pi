@@ -106,7 +106,7 @@ function promptDetails(lines: string[]): string[] {
 	return details;
 }
 
-const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\(allowed: .*\))$/u;
+const ALLOWED_SEGMENT_RE = /^(\s*)✓(\s+)(.+)(\s+\((?:allowed: .*|\d+ allowed segments?)\))$/u;
 const PROMPTED_SEGMENT_RE = /^(\s*)\?(\s+)(.+)(\s+\((?:requires approval|prompt: .*|critical pattern)\))$/u;
 
 function styleApprovalDetailLine(line: string): { ansi: string; spans?: TspSpan[] } {
@@ -175,6 +175,10 @@ export class ApprovalDialogComponent implements Component {
 		this.#summary = promptDetails(lines);
 		this.#full =
 			options.fullPrompt === undefined ? undefined : promptDetails(sanitizeDisplayLines(options.fullPrompt));
+		const firstPrompted = this.#summary.findIndex(line => PROMPTED_SEGMENT_RE.test(line));
+		if (firstPrompted >= MAX_DETAIL_ROWS) {
+			this.#scrollOffset = firstPrompted - MAX_DETAIL_ROWS + 1;
+		}
 		this.#choices = this.#buildChoices();
 		this.#choice = this.#choices.findIndex(choice => choice.answer === "once");
 		this.#panel = new OverlayPanel(title, "omp.overlay.approval");

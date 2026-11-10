@@ -585,6 +585,17 @@ describe("dialogs under a native surface", () => {
 				truncate: "end",
 			},
 		]);
+		// When a long unelided prompt exceeds MAX_DETAIL_ROWS before the first prompted segment,
+		// initial scroll offset positions the first prompted row inside the visible window on mount.
+		const longPrompt = [
+			"Allow tool: bash",
+			"Command:",
+			...Array.from({ length: 8 }, (_, i) => `  ✓ git status -s dir${i} (allowed: git status*)`),
+			"  ? rm -rf / (critical pattern)",
+		].join("\n");
+		const longDialog = new ApprovalDialogComponent(longPrompt, { onApprove: vi.fn(), onDeny: vi.fn() });
+		const longRendered = stripVTControlCharacters(longDialog.render(80).join("\n"));
+		expect(longRendered).toContain("? rm -rf / (critical pattern)");
 	});
 
 	it("approval: docks in place of the composer with its details, not a card over the transcript", async () => {
