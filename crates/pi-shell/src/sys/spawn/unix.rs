@@ -579,12 +579,27 @@ fn may_need_script_fallback(path: &[u8], cwd: &[u8]) -> bool {
 		return false;
 	};
 	let head = &head[..n];
-	!head.starts_with(b"#!")
-		&& !head
+	let Some(rest) = head.strip_prefix(b"#!") else {
+		return !head
 			.split(|&c| c == b'\n')
 			.next()
 			.unwrap_or_default()
-			.contains(&0)
+			.contains(&0);
+	};
+	// A `#!` line that names NO interpreter — only blanks before its
+	// newline — is refused by the kernel with `ENOEXEC` like a file with no
+	// `#!` at all, and both Bash versions then RUN it as a shell script
+	// (measured on 5.2.21 and 5.3.0: `#!\necho hi` prints `hi` and exits
+	// 0). The forked child cannot run a script after it has returned its
+	// pid, so this file needs the engine as much as a plain text one does.
+	// A carriage return is not a blank: bash names it `^M` and reports a
+	// bad interpreter, which the child does report. Without a newline in
+	// the sample there is no `#!` line to be empty, and bash names the
+	// empty interpreter instead of running the file.
+	let Some(nl) = rest.iter().position(|&c| c == b'\n') else {
+		return false;
+	};
+	rest[..nl].iter().all(|c| matches!(c, b' ' | b'\t'))
 }
 
 pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> {
@@ -1001,20 +1016,118 @@ impl ChildStep {
 }
 
 /// Write `diag`, the description of `errno` and a newline to fd 2 and exit
-/// with `status`: the forked child's report of a failed redirection or
-/// exec. Async-signal-safe.
+/// with `status`: the forked child's report of a failed redirection.
+/// Async-signal-safe.
 fn child_fail(diag: &[u8], errno: i32, status: i32, texts: &[Vec<u8>]) -> ! {
-	let text = usize::try_from(errno)
+	child_say(&[diag, errno_text(errno, texts), b"\n"], status)
+}
+
+/// The description [`ERRNO_TEXT`] holds for `errno`.
+fn errno_text(errno: i32, texts: &[Vec<u8>]) -> &[u8] {
+	usize::try_from(errno)
 		.ok()
 		.and_then(|n| texts.get(n))
-		.map_or(&b"Unknown error"[..], Vec::as_slice);
-	for part in [diag, text, b"\n"] {
+		.map_or(&b"Unknown error"[..], Vec::as_slice)
+}
+
+/// Write `parts` to fd 2 and exit with `status`. Async-signal-safe.
+fn child_say(parts: &[&[u8]], status: i32) -> ! {
+	for part in parts {
 		// SAFETY: write(2) of a valid buffer; a failure is ignored (nowhere
 		// to report it).
 		unsafe { libc::write(2, part.as_ptr().cast(), part.len()) };
 	}
 	// SAFETY: `_exit` ends the forked child without running host code.
 	unsafe { libc::_exit(status) }
+}
+
+/// bash's `shell_execve` report, made in the forked child of
+/// [`fork_redirs`] after `execve` failed: it LOOKS at the program, because
+/// the errno alone does not say why the kernel refused it. The branches
+/// and their statuses are those of `refused` in `bash/vm/command.rs`, which
+/// reports the identical refusal when the spawn was not deferred; see
+/// [`ChildRedirs`] for the contract both uphold.
+///
+/// Async-signal-safe: `stat`, `access`, `open`, `read`, `close`, `write`
+/// and `_exit` on a stack buffer, without allocating.
+///
+/// # Safety
+/// `path` is a NUL-terminated path, and this runs in a forked child with no
+/// other thread.
+unsafe fn exec_refused(
+	diag: &[u8],
+	sys_diag: &[u8],
+	path: *const libc::c_char,
+	errno: i32,
+	texts: &[Vec<u8>],
+) -> ! {
+	let text = errno_text(errno, texts);
+	// The status the kernel's own refusal earned. Only naming an
+	// interpreter overrides it, exactly as bash's `shell_execve` does: a
+	// program replaced between the failed exec and this look still reports
+	// what its own `execve` returned.
+	let status = if errno == libc::ENOENT { 127 } else { 126 };
+	// SAFETY: `st` is writable and `path` is NUL-terminated.
+	let mut st: libc::stat = unsafe { std::mem::zeroed() };
+	// SAFETY: as above.
+	let stat_ok = unsafe { libc::stat(path, &raw mut st) } == 0;
+	// bash names a directory as one, whatever the kernel called it.
+	if stat_ok && st.st_mode & libc::S_IFMT == libc::S_IFDIR {
+		child_say(&[diag, b"Is a directory\n"], status);
+	}
+	// bash's `executable_file`: a program it may not execute, or one that
+	// is not there, keeps the kernel's own words. So do the two errors the
+	// program itself did not cause.
+	// SAFETY: as above.
+	let executable = stat_ok && unsafe { libc::access(path, libc::X_OK) } == 0;
+	if !executable || errno == libc::E2BIG || errno == libc::ENOMEM {
+		child_say(&[diag, text, b"\n"], status);
+	}
+	// SAFETY: as above; the descriptor is closed below.
+	let fd = unsafe { libc::open(path, libc::O_RDONLY | libc::O_CLOEXEC) };
+	let mut buf = [0u8; crate::bash::SAMPLE];
+	// The errno of the sample that could not be taken, 0 when it was: a
+	// file the shell may execute but not read tells this child nothing
+	// about itself, and bash's answer there is that error, not a guess.
+	// `self::errno` because the parameter of the same name shadows it.
+	let (read, sample_err) = if fd < 0 {
+		(0, self::errno())
+	} else {
+		// SAFETY: `buf` is writable for its whole length.
+		let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+		let err = if n < 0 { self::errno() } else { 0 };
+		// SAFETY: our own descriptor; after reading the errno it may have set.
+		unsafe { libc::close(fd) };
+		(usize::try_from(n).unwrap_or(0), err)
+	};
+	if let Some((interp, cr)) = crate::bash::shebang(&buf[..read]) {
+		// bash's `sys_error`: no line number before this one, and 126
+		// whatever the kernel's errno was.
+		let tail: &[u8] = if cr { b"^M" } else { b"" };
+		child_say(&[sys_diag, interp, tail, b": bad interpreter: ", text, b"\n"], 126);
+	}
+	if errno == libc::ENOEXEC {
+		if sample_err != 0 {
+			// bash could not read the file either, so it never reached
+			// `check_binary_file`: it went on to run the file as a shell
+			// script and reported what THAT open returned. Measured on
+			// Bash 5.3.0: a mode-0111 file is `Permission denied` and 126,
+			// whatever its contents, which is what the immediate path
+			// reports through the engine's own script fallback.
+			child_say(&[diag, errno_text(sample_err, texts), b"\n"], status);
+		}
+		// bash's `check_binary_file`: the engine runs a READABLE text file
+		// without `#!` as a script instead of deferring it here, so what
+		// reaches this with a sample is the binary one.
+		child_say(&[diag, b"cannot execute binary file: ", text, b"\n"], 126);
+	}
+	if errno == libc::ENOENT {
+		// The program is there and may be executed, so the `ENOENT` came
+		// from something it names that is not — an interpreter this child
+		// could not read. bash cannot name it either, and says so.
+		child_say(&[diag, b"cannot execute: required file not found\n"], 127);
+	}
+	child_say(&[diag, text, b"\n"], status)
 }
 
 /// The last OS error number. Async-signal-safe.
@@ -1041,6 +1154,7 @@ fn fork_redirs(
 		.map(ChildStep::new)
 		.collect::<io::Result<Vec<_>>>()?;
 	let exec_diag = redirs.exec_diag.to_vec();
+	let exec_sys_diag = redirs.exec_sys_diag.to_vec();
 	let texts: &[Vec<u8>] = &ERRNO_TEXT;
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
@@ -1143,8 +1257,7 @@ fn fork_redirs(
 				}
 			}
 			libc::execve(exec.path(), exec.argv.as_ptr().cast(), exec.env.ptrs.as_ptr().cast());
-			let e = errno();
-			child_fail(&exec_diag, e, if e == libc::ENOENT { 127 } else { 126 }, texts);
+			exec_refused(&exec_diag, &exec_sys_diag, exec.path(), errno(), texts);
 		}
 	}
 	// The parent places the child too, so a signal to its group cannot
