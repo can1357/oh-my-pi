@@ -5,6 +5,8 @@ import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/provid
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { dispatchRpcSkillPrompt } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import {
 	RpcExtensionUserMessageTracker,
@@ -18,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -143,6 +146,49 @@ describe("AgentSession client intent identity", () => {
 		expect(entries).toMatchObject([{ clientMessageId: "intent-same-ms-a" }, { clientMessageId: "intent-same-ms-b" }]);
 		const found = await status(session, ["intent-same-ms-a", "intent-same-ms-b"]);
 		expect(found.persistedClientMessageIds).toEqual(["intent-same-ms-a", "intent-same-ms-b"]);
+	});
+
+	test("resolves a session-switching command's ID in the session that admitted it", async () => {
+		const disk = TempDir.createSync("@client-message-command-switch-");
+		const auth = createInMemoryAuthStorage();
+		cleanup.push(async () => {
+			auth.close();
+			disk.removeSync();
+		});
+		const manager = SessionManager.create(disk.path(), disk.path());
+		const created = Promise.withResolvers<CorrelatedSession>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.registerCommand("fresh", {
+					handler: async () => {
+						await (await created.promise).newSession();
+					},
+				});
+			},
+			disk.path(),
+			new EventBus(),
+			runtime,
+			"fresh-command",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			disk.path(),
+			manager,
+			new ModelRegistry(auth, path.join(disk.path(), "models.yml")),
+		);
+		const { session } = setup({ manager, config: { extensionRunner } });
+		created.resolve(session);
+		const origin = manager.getSessionFile();
+		if (!origin) throw new Error("Expected a persistent origin session");
+		expect(await session.prompt("/fresh", intent("intent-command"))).toBe(false);
+		expect(manager.getSessionFile()).not.toBe(origin);
+		// The destination never saw this ID, so it accepts it as a fresh intent.
+		await session.followUp("fresh in destination", undefined, intent("intent-command"));
+		expect(session.getQueuedMessages().clientMessageIds).toEqual({ steering: [], followUp: ["intent-command"] });
+		const reopened = await SessionManager.open(origin, undefined, undefined, { throwIfMissing: true });
+		expect(reopened.isClientMessageResolved("intent-command")).toBe(true);
 	});
 
 	test("materializes a correlated first user entry before the assistant produces any output", async () => {

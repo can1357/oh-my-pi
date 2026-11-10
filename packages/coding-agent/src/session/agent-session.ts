@@ -1282,6 +1282,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#clientMessageIds = new WeakMap<AgentMessage, string>();
 	#clientMessageAdmissions?: { sessionId: string; ids: Set<string> };
+	/** Correlated inputs a local command is handling, by the session that admitted them. */
+	#localClientMessages = new Map<string, string>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -6377,6 +6379,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Before anything awaits: a reload keeps the session id, so only the transition itself can supersede
 		// a pending idle check or an in-flight recap that belong to the transcript being replaced.
 		this.#idleMaintenance?.invalidate();
+		// A local command switching sessions has consumed its input in the session it is leaving.
+		this.#resolveLocalClientMessagesBeforeTransition();
 		if (this.#sessionTransitionDepth++ === 0) {
 			const settled = Promise.withResolvers<void>();
 			this.#sessionTransitionSettled = settled.promise;
@@ -8852,25 +8856,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			if (options?.runCommands !== false) {
-				const command = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
-				if (command) {
-					// Queued only now, so whatever the command sent runs before them. A failed
-					// command hands them back with itself instead of letting them run without it.
-					if (command === "ran") followUps?.release();
-					else if (followUps) this.#reportDroppedPrompt(typedText, options, followUps);
-					if (options?.clientMessageId !== undefined) this.resolveClientMessages([options.clientMessageId]);
-					return false;
-				}
-
-				// Try custom commands (TypeScript slash commands)
-				const customResult = await this.#tryExecuteCustomCommand(text);
-				if (customResult !== null) {
-					if (customResult === "") {
-						followUps?.release();
-						if (options?.clientMessageId !== undefined) this.resolveClientMessages([options.clientMessageId]);
+				const clientMessageId = options?.clientMessageId;
+				if (clientMessageId !== undefined) this.beginLocalClientMessage(clientMessageId);
+				let consumed = false;
+				try {
+					const command = await this.#tryExecuteExtensionCommand(text, options?.onPromptAdmitted);
+					if (command) {
+						// Queued only now, so whatever the command sent runs before them. A failed
+						// command hands them back with itself instead of letting them run without it.
+						if (command === "ran") followUps?.release();
+						else if (followUps) this.#reportDroppedPrompt(typedText, options, followUps);
+						consumed = true;
 						return false;
 					}
-					text = customResult;
+
+					// Try custom commands (TypeScript slash commands)
+					const customResult = await this.#tryExecuteCustomCommand(text);
+					if (customResult !== null) {
+						if (customResult === "") {
+							followUps?.release();
+							consumed = true;
+							return false;
+						}
+						text = customResult;
+					}
+				} finally {
+					if (clientMessageId !== undefined) this.finishLocalClientMessage(clientMessageId, consumed);
 				}
 			}
 
@@ -11337,6 +11348,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} catch (error) {
 			logger.warn("Failed to journal client message resolution", { ids, error: toError(error).message });
 		}
+	}
+
+	/**
+	 * Mark a correlated input as handled by a local command (extension, custom or builtin command).
+	 * A session transition the command starts journals the ID as resolved in the admitting session
+	 * before leaving it; otherwise {@link finishLocalClientMessage} journals it once the command ends.
+	 */
+	beginLocalClientMessage(id: string): void {
+		this.#localClientMessages.set(id, this.sessionId);
+	}
+
+	/** End {@link beginLocalClientMessage}; `consumed` journals the resolution unless a transition already did. */
+	finishLocalClientMessage(id: string, consumed: boolean): void {
+		const origin = this.#localClientMessages.get(id);
+		if (origin === undefined) return;
+		this.#localClientMessages.delete(id);
+		if (consumed && origin === this.sessionId) this.resolveClientMessages([id]);
+	}
+
+	#resolveLocalClientMessagesBeforeTransition(): void {
+		if (this.#localClientMessages.size === 0) return;
+		const ids: string[] = [];
+		for (const [id, origin] of this.#localClientMessages) {
+			if (origin !== this.sessionId) continue;
+			ids.push(id);
+			this.#localClientMessages.delete(id);
+		}
+		this.resolveClientMessages(ids);
 	}
 
 	#resolveWithdrawnClientMessages(messages: readonly AgentMessage[]): void {

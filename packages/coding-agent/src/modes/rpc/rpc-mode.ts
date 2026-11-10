@@ -2045,6 +2045,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;
+				// A builtin may switch sessions (`/new`, `/resume`): its ID is resolved in the session that admitted it.
+				const clientMessageId = command.clientMessageId;
+				if (clientMessageId !== undefined) session.beginLocalClientMessage(clientMessageId);
 				const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 					session,
 					sessionManager: session.sessionManager,
@@ -2077,14 +2080,21 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					notifyConfigChanged: async () => {
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
+				}).catch((builtinError: unknown) => {
+					if (clientMessageId !== undefined) session.finishLocalClientMessage(clientMessageId, false);
+					throw builtinError;
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
+				if (clientMessageId !== undefined) {
+					session.finishLocalClientMessage(
+						clientMessageId,
+						builtinResult !== false && !("prompt" in builtinResult),
+					);
+				}
 				if (!isCurrent()) return "cancelled";
 				if (builtinResult !== false) {
 					if (!("prompt" in builtinResult)) {
 						if (builtinResult.agentInvoked === true && ticket) {
-							if (command.clientMessageId !== undefined)
-								session.resolveClientMessages([command.clientMessageId]);
 							void session.waitForIdle().then(
 								() => promptResults.settle(ticket),
 								(idleError: unknown) =>
@@ -2095,7 +2105,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 							);
 							return "builtin-agent";
 						}
-						return consumed();
+						return "local";
 					}
 					text = builtinResult.prompt;
 				}
