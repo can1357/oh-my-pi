@@ -6,6 +6,8 @@ import {
 	parseRequest,
 } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { createCodexModel } from "./helpers";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -65,6 +67,41 @@ function emptyAssistant(): AssistantMessage {
 }
 
 describe("auth-gateway openai-chat: parseRequest", () => {
+	for (const strict of [false, true, undefined]) {
+		it(`preserves strict=${strict} through the gateway to Codex`, () => {
+			const parsed = parseRequest({
+				model: "test-model",
+				messages: [{ role: "user", content: "Find the config file" }],
+				tools: [
+					{
+						type: "function",
+						function: {
+							name: "search_files",
+							...(strict !== undefined ? { strict } : {}),
+							parameters: {
+								type: "object",
+								properties: { query: { type: "string" }, path: { type: "string" } },
+								required: ["query"],
+							},
+						},
+					},
+				],
+			});
+			const [wire] = convertOpenAICodexResponsesTools(parsed.context.tools ?? [], createCodexModel("gpt-5.5"));
+			if (wire.type !== "function") throw new Error("Expected function tool");
+			if (strict === undefined) {
+				expect(wire).not.toHaveProperty("strict");
+			} else {
+				expect(wire.strict).toBe(strict);
+			}
+			if (strict === true) {
+				expect(wire.parameters.required).toEqual(["query", "path"]);
+			} else {
+				expect(wire.parameters.required).toEqual(["query"]);
+			}
+		});
+	}
+
 	it("converts a full request into a Context", () => {
 		const parsed = parseRequest({
 			model: "gpt-5.2",

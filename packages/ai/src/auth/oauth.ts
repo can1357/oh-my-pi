@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
-import { assertProviderEnabled, getOAuthProvider } from "../registry/oauth";
+import { assertProviderEnabled, getOAuthProvider, loginRiskWarning } from "../registry/oauth";
 import type { OAuthProviderId } from "../registry/oauth/types";
 import { providerTypeKey } from "./blocks";
 import type { SessionAffinity } from "./affinity";
@@ -79,6 +79,17 @@ export class OAuthAccounts implements OAuthApi {
 			throw new AIError.ConfigurationError(`Unknown OAuth provider: ${provider}`);
 		}
 		assertProviderEnabled(provider);
+		const warning = loginRiskWarning(provider);
+		if (warning !== undefined) {
+			// No answer but an explicit "yes" starts a login the provider's own terms put at risk.
+			const answer = await untilAborted(ctrl.signal, () =>
+				ctrl.onPrompt({
+					message: `⚠ ${def.name}: use at your own risk\n\n${warning}\n\nType "yes" to accept the risk and continue`,
+					placeholder: "yes",
+				}),
+			);
+			if (answer.trim().toLowerCase() !== "yes") throw new AIError.LoginCancelledError();
+		}
 		const result = await def.login({
 			onAuth: ctrl.onAuth,
 			onProgress: ctrl.onProgress,
