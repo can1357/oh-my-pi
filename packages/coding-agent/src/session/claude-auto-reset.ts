@@ -18,6 +18,37 @@ import {
 	type CodexResetTrigger,
 	type ResetWindow,
 } from "./codex-auto-reset";
+import type { ResetAutoRedeemMode } from "./settings";
+
+export type ClaudeResetWindow = ResetWindow | "fable";
+
+export function claudeResetWindowModes(cfg: {
+	autoRedeem5h: ResetAutoRedeemMode;
+	autoRedeemWeekly: ResetAutoRedeemMode;
+	autoRedeemFable: ResetAutoRedeemMode;
+}): Record<ClaudeResetWindow, ResetAutoRedeemMode> {
+	return { "5h": cfg.autoRedeem5h, weekly: cfg.autoRedeemWeekly, fable: cfg.autoRedeemFable };
+}
+
+export function claudeResetPlanSettings(cfg: {
+	autoRedeem5h: ResetAutoRedeemMode;
+	autoRedeemWeekly: ResetAutoRedeemMode;
+	autoRedeemFable: ResetAutoRedeemMode;
+	minBlockedMinutes: number;
+	keepCredits: number;
+	salvageHorizonHours: number;
+}): ClaudeResetPlanInput["settings"] {
+	return {
+		windows: {
+			"5h": cfg.autoRedeem5h !== "no",
+			weekly: cfg.autoRedeemWeekly !== "no",
+			fable: cfg.autoRedeemFable !== "no",
+		},
+		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
+		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
+		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
+	};
+}
 
 const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
@@ -46,6 +77,8 @@ export type ClaudeResetSkipReason =
 	| "no-blocked-window"
 	| "unsupported-window"
 	| "incomplete-coverage"
+	| "fable-only"
+	| "no-fable-usage"
 	| "no-reset-time"
 	| "reset-too-soon"
 	| "reset-implausible"
@@ -63,7 +96,7 @@ export interface ClaudeResetPlanInput {
 	provider: string;
 	modelId: string;
 	settings: {
-		windows: Record<ResetWindow, boolean>;
+		windows: Record<ClaudeResetWindow, boolean>;
 		minBlockedMinutes: number;
 		keepCredits: number;
 		salvageHorizonMs: number;
@@ -87,8 +120,8 @@ export interface ClaudeResetPlanInput {
 /** One server-selected Claude grant to redeem for an exact stored credential. */
 export interface ClaudeResetAction {
 	reason: "blocked-account" | "expiring-credit";
-	window: ResetWindow;
-	restorableWindows: ResetWindow[];
+	window: ClaudeResetWindow;
+	restorableWindows: ClaudeResetWindow[];
 	target: ResetCreditTarget;
 	accountKey: string;
 	attemptKey: string;
@@ -126,6 +159,7 @@ interface ClaudeAccountSnapshot {
 	availableCount: number;
 	credit: UsageResetCredit;
 	limits: UsageLimit[];
+	fableLimit?: UsageLimit;
 }
 
 function normalized(value: unknown): string | undefined {
@@ -283,7 +317,7 @@ function skipForEpisode(
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
-	if (!input.settings.windows["5h"] && !input.settings.windows.weekly) {
+	if (!input.settings.windows["5h"] && !input.settings.windows.weekly && !input.settings.windows.fable) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
@@ -361,6 +395,16 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("stale-report");
 			continue;
 		}
+		// Classify against the full report: model scoping must not turn a Fable
+		// grant into a five-hour grant when an unrelated model is blocked.
+		const fableLimit = claudeCoveredLimits(report.limits, credit).find(limit => limit.scope.tier === "fable");
+		if (fableLimit) {
+			const used = resolveUsedFraction(fableLimit);
+			if (used === undefined || !Number.isFinite(used) || used <= 0) {
+				skip("no-fable-usage");
+				continue;
+			}
+		}
 		// A blocked retry has an exact request-model scope. A background salvage
 		// has no such request context, so consider every reported scope rather
 		// than accidentally treating an unrelated current model as authoritative.
@@ -387,6 +431,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			availableCount: status.availableCount,
 			credit,
 			limits,
+			fableLimit,
 		});
 	}
 
@@ -395,8 +440,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		interface RestoreCandidate {
 			snapshot: ClaudeAccountSnapshot;
 			blockers: string[];
-			window: ResetWindow;
-			restorableWindows: ResetWindow[];
+			window: ClaudeResetWindow;
+			restorableWindows: ClaudeResetWindow[];
 			remainingMs: number;
 			unblockAtMs: number;
 		}
@@ -438,10 +483,24 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip("incomplete-coverage");
 				continue;
 			}
-			const window = blockers.some(id => claudeResetWindow(id) === "weekly") ? "weekly" : "5h";
-			const restorableWindows = [
-				...new Set(claudeCoveredLimits(snapshot.limits, snapshot.credit).map(limit => claudeResetWindow(limit.id))),
-			];
+			if (snapshot.fableLimit && !blockers.includes(snapshot.fableLimit.id)) {
+				skip("fable-only");
+				continue;
+			}
+			const window: ClaudeResetWindow = snapshot.fableLimit
+				? "fable"
+				: blockers.some(id => claudeResetWindow(id) === "weekly")
+					? "weekly"
+					: "5h";
+			const restorableWindows: ClaudeResetWindow[] = snapshot.fableLimit
+				? ["fable"]
+				: [
+						...new Set(
+							claudeCoveredLimits(snapshot.limits, snapshot.credit)
+								.filter(limit => limit.scope.tier !== "fable")
+								.map(limit => claudeResetWindow(limit.id)),
+						),
+					];
 			const expiresAtMs = creditExpiryMs(snapshot.credit);
 			const imminent = expiresAtMs !== undefined && expiresAtMs - input.nowMs <= IMMINENT_RESET_EXPIRY_MS;
 			if (
@@ -581,13 +640,23 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("unsupported-window");
 			continue;
 		}
-		const fullest = fullestClaudeLimit(covered, snapshot.credit);
+		// A Fable grant is judged on the Fable cap alone: its five-hour coverage
+		// must never make ordinary 5h usage look like a salvage-worthy Fable spend.
+		const fullest = snapshot.fableLimit
+			? { limit: snapshot.fableLimit, used: resolveUsedFraction(snapshot.fableLimit) ?? 0 }
+			: fullestClaudeLimit(covered, snapshot.credit);
 		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
 			continue;
 		}
-		const window = claudeResetWindow(fullest.limit.id);
-		const restorableWindows = [...new Set(covered.map(limit => claudeResetWindow(limit.id)))];
+		const window: ClaudeResetWindow = snapshot.fableLimit ? "fable" : claudeResetWindow(fullest.limit.id);
+		const restorableWindows: ClaudeResetWindow[] = snapshot.fableLimit
+			? ["fable"]
+			: [
+					...new Set(
+						covered.filter(limit => limit.scope.tier !== "fable").map(limit => claudeResetWindow(limit.id)),
+					),
+				];
 		if (
 			imminent
 				? !restorableWindows.some(restorable => input.settings.windows[restorable])
@@ -596,7 +665,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("window-disabled");
 			continue;
 		}
-		if (snapshot.credit.requiresLimit === true && serverBlockers.length === 0 && !covered.some(isExhausted)) {
+		if (
+			snapshot.credit.requiresLimit === true &&
+			(snapshot.fableLimit
+				? !exhausted.includes(snapshot.fableLimit.id)
+				: serverBlockers.length === 0 && !covered.some(isExhausted))
+		) {
 			skip("no-blocked-window");
 			continue;
 		}

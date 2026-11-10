@@ -3,12 +3,13 @@
  * will spend them first. Shared by `omp usage` and the TUI status line so both
  * warn about the accounts the salvage planners would act on.
  */
-import type {
-	UsageLimit,
-	UsageReport,
-	UsageResetCredit,
-	UsageResetCreditDetail,
-	UsageResetCredits,
+import {
+	resolveUsedFraction,
+	type UsageLimit,
+	type UsageReport,
+	type UsageResetCredit,
+	type UsageResetCreditDetail,
+	type UsageResetCredits,
 } from "@oh-my-pi/pi-ai";
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { bankedResetCreditExpiryMs } from "@oh-my-pi/pi-tui/overlays/usage-display";
@@ -19,7 +20,10 @@ import { formatResetProviderName } from "../slash-commands/helpers/reset-usage";
 import {
 	type ClaudeResetAction,
 	type ClaudeResetSkip,
+	type ClaudeResetWindow,
 	claudeCoveredLimits,
+	claudeResetPlanSettings,
+	claudeResetWindowModes,
 	fullestClaudeLimit,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
@@ -89,6 +93,14 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 				? { limit: codexWindow.limit, usedFraction: codexWindow.usedFraction }
 				: undefined;
 		}
+		// A Fable grant restores only Fable weekly usage, so only that limit can make it worth salvaging.
+		const fable = fableClaudeLimit(report.limits, credit);
+		if (fable) {
+			const used = resolveUsedFraction(fable);
+			return used !== undefined && Number.isFinite(used) && used >= SALVAGE_MIN_USED_FRACTION
+				? { limit: fable, usedFraction: Math.max(0, used) }
+				: undefined;
+		}
 		const covered = fullestClaudeLimit(claudeCoveredLimits(report.limits, credit), credit);
 		return covered && covered.used >= SALVAGE_MIN_USED_FRACTION
 			? { limit: covered.limit, usedFraction: covered.used }
@@ -142,21 +154,41 @@ function spendableNow(
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
 
 /** The settings key governing each provider window. */
-const RESET_SETTING_KEY: Record<ResetExpiryWarning["provider"], Record<ResetWindow, string>> = {
+const RESET_SETTING_KEY: {
+	"openai-codex": Record<ResetWindow, string>;
+	anthropic: Record<ClaudeResetWindow, string>;
+} = {
 	"openai-codex": { "5h": "codexResets.autoRedeem5h", weekly: "codexResets.autoRedeemWeekly" },
-	anthropic: { "5h": "claudeResets.autoRedeem5h", weekly: "claudeResets.autoRedeemWeekly" },
+	anthropic: {
+		"5h": "claudeResets.autoRedeem5h",
+		weekly: "claudeResets.autoRedeemWeekly",
+		fable: "claudeResets.autoRedeemFable",
+	},
 };
 
+/** The Fable limit a Claude grant clears: its own weekly cap, outside the shared weekly window. */
+function fableClaudeLimit(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit | undefined {
+	return claudeCoveredLimits(limits, credit).find(limit => limit.scope.tier === "fable");
+}
+
 /** Windows a credit restores: a Codex credit restores both, a Claude grant only its covered limits. */
-function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ResetWindow[] {
+function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ClaudeResetWindow[] {
 	if (warning.provider === "openai-codex") return ["5h", "weekly"];
 	const credit = (report.resetCredits?.credits ?? []).find(
 		candidate => bankedResetCreditExpiryMs(candidate) === warning.expiresAtMs,
 	);
+	// A Fable grant also clears the 5h window, but only the Fable key governs spending it.
+	if (credit && fableClaudeLimit(report.limits, credit)) return ["fable"];
 	const covered = credit ? claudeCoveredLimits(report.limits, credit) : [warning.limit];
-	const windows = new Set<ResetWindow>(covered.map(limit => (limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly")));
-	windows.add(warning.limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly");
+	const windows = new Set<ClaudeResetWindow>(covered.map(claudeExpiryWindow));
+	windows.add(claudeExpiryWindow(warning.limit));
 	return [...windows];
+}
+
+/** The window a Claude limit belongs to; the Fable tier is its own window, never the shared weekly one. */
+function claudeExpiryWindow(limit: UsageLimit): ClaudeResetWindow {
+	if (limit.id === FIVE_HOUR_LIMIT_ID) return "5h";
+	return limit.scope.tier === "fable" ? "fable" : "weekly";
 }
 
 /**
@@ -180,8 +212,11 @@ export function resetSpendVerdict(
 	settings: Settings,
 	nowMs: number,
 ): ResetSpendVerdict {
-	const cfg = (warning.provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(settings);
-	const modes = resetWindowModes(cfg);
+	// Codex has no Fable window, so its mode never decides a verdict.
+	const modes: Record<ClaudeResetWindow, ResetAutoRedeemMode> =
+		warning.provider === "anthropic"
+			? claudeResetWindowModes(cfgClaudeResets.get(settings))
+			: { ...resetWindowModes(cfgCodexResets.get(settings)), fable: "no" };
 	const restorable = restorableResetWindows(report, warning);
 	// Last-chance spending happens at expiry, so judge consent by that moment's rule.
 	const mode = resetActionMode(
@@ -190,14 +225,21 @@ export function resetSpendVerdict(
 	);
 	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
 	const deciding = restorable.filter(window => modes[window] === mode);
-	const keys = RESET_SETTING_KEY[warning.provider];
+	const decidingWindows = deciding.length > 0 ? deciding : restorable;
+	const setting =
+		warning.provider === "anthropic"
+			? decidingWindows.map(window => RESET_SETTING_KEY.anthropic[window]).join(" + ")
+			: decidingWindows
+					.filter((window): window is ResetWindow => window !== "fable")
+					.map(window => RESET_SETTING_KEY["openai-codex"][window])
+					.join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
 		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
 	return {
 		kind,
-		setting: (deciding.length > 0 ? deciding : restorable).map(window => keys[window]).join(" + "),
+		setting,
 		mode,
 		eligibleNow,
 	};
@@ -256,10 +298,11 @@ function planAsLastChance(
 		trigger: "sweep",
 		provider: "",
 		modelId: "",
-		settings: resetPlanSettings({
+		settings: claudeResetPlanSettings({
 			...cfgClaudeResets.get(settings),
 			autoRedeem5h: "yes",
 			autoRedeemWeekly: "yes",
+			autoRedeemFable: "yes",
 		}),
 		reports: [lastChance],
 		statuses: [

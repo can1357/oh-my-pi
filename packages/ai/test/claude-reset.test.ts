@@ -137,6 +137,31 @@ describe("listClaudeResetCredits", () => {
 		expect(calls).toHaveLength(1);
 	});
 
+	it("maps a Fable launch grant onto the Fable weekly limit it restores", async () => {
+		const payload = cedarPayload();
+		const fableGrant = {
+			...payload.cedar_ember.grants[0],
+			id: "launch-2610-fable",
+			clears: ["five_hour", "seven_day_overage_included"],
+			percent_used: { five_hour: 46, seven_day_overage_included: 7 },
+			blocking: [],
+		};
+		const { fetch } = recordingFetch(() =>
+			json(200, {
+				...payload,
+				cedar_ember: { ...payload.cedar_ember, next_grant_id: fableGrant.id, grants: [fableGrant] },
+				five_hour: { utilization: 46 },
+				seven_day: { utilization: 37 },
+				limits: [{ kind: "weekly_scoped", percent: 7, scope: { model: { display_name: "Fable" } } }],
+			}),
+		);
+		const result = await listClaudeResetCredits({ accessToken: "token", orgId: "org_1", fetch });
+		const grant = result?.credits[0];
+		expect(grant?.clears).toEqual(["anthropic:5h", "anthropic:7d:fable"]);
+		expect(grant?.usedFractions).toMatchObject({ "anthropic:7d:fable": 0.07 });
+		expect(result?.report?.limits.map(limit => limit.id)).toContain("anthropic:7d:fable");
+	});
+
 	it("falls back to the Juniper reset arm without claiming a weekly reset exists", async () => {
 		const { fetch, calls } = recordingFetch(url => {
 			if (url.searchParams.has("cedar_ember")) {

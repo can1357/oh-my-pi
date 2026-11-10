@@ -46,6 +46,7 @@ import {
 	cfgInlineToolDescriptors,
 	cfgRetryModelFallback,
 	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemFable,
 	cfgClaudeResetsAutoRedeemWeekly,
 	cfgCodexResetsAutoRedeem5h,
 	cfgCodexResetsAutoRedeemWeekly,
@@ -1402,7 +1403,7 @@ describe("Settings", () => {
 			expect(cfgInlineToolDescriptors.get(Settings.isolated())).toBe("auto");
 		});
 
-		it("migrates legacy saved-reset autoRedeem consent into both window keys", () => {
+		it("migrates legacy saved-reset autoRedeem consent into every window key", () => {
 			const codexDotted = Settings.isolated({ "codexResets.autoRedeem": false });
 			expect(cfgCodexResetsAutoRedeem5h.get(codexDotted)).toBe("no");
 			expect(cfgCodexResetsAutoRedeemWeekly.get(codexDotted)).toBe("no");
@@ -1421,14 +1422,30 @@ describe("Settings", () => {
 			});
 			expect(cfgClaudeResetsAutoRedeem5h.get(claudeDotted)).toBe("yes");
 			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeDotted)).toBe("unset");
+			expect(cfgClaudeResetsAutoRedeemFable.get(claudeDotted)).toBe("unset");
 
 			const claudeBoolean = Settings.isolated({ "claudeResets.autoRedeem": true });
 			expect(cfgClaudeResetsAutoRedeem5h.get(claudeBoolean)).toBe("yes");
 			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeBoolean)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeemFable.get(claudeBoolean)).toBe("yes");
 
 			const claudeNested = Settings.isolated({ claudeResets: { autoRedeem: false } });
 			expect(cfgClaudeResetsAutoRedeem5h.get(claudeNested)).toBe("no");
 			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeNested)).toBe("no");
+			expect(cfgClaudeResetsAutoRedeemFable.get(claudeNested)).toBe("no");
+
+			// The Fable key is copied like its siblings but never overwrites an explicit value.
+			const claudeFableSet = Settings.isolated({
+				claudeResets: { autoRedeem: true, autoRedeemFable: "no" },
+			});
+			expect(cfgClaudeResetsAutoRedeem5h.get(claudeFableSet)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeemWeekly.get(claudeFableSet)).toBe("yes");
+			expect(cfgClaudeResetsAutoRedeemFable.get(claudeFableSet)).toBe("no");
+			const claudeFableDotted = Settings.isolated({
+				"claudeResets.autoRedeem": true,
+				"claudeResets.autoRedeemFable": "no",
+			});
+			expect(cfgClaudeResetsAutoRedeemFable.get(claudeFableDotted)).toBe("no");
 		});
 
 		it("persists the migrated saved-reset consent as window keys and drops the old key", async () => {
@@ -1441,6 +1458,7 @@ describe("Settings", () => {
 			expect(cfgCodexResetsAutoRedeemWeekly.get(settings)).toBe("yes");
 			expect(cfgClaudeResetsAutoRedeem5h.get(settings)).toBe("no");
 			expect(cfgClaudeResetsAutoRedeemWeekly.get(settings)).toBe("no");
+			expect(cfgClaudeResetsAutoRedeemFable.get(settings)).toBe("no");
 
 			// The next save writes the migrated layers, so the retired key cannot survive on disk.
 			cfgSetupVersion.set(settings, 1);
@@ -1448,7 +1466,7 @@ describe("Settings", () => {
 
 			const saved = await readSettings();
 			expect(saved.codexResets).toEqual({ autoRedeem5h: "yes", autoRedeemWeekly: "yes" });
-			expect(saved.claudeResets).toEqual({ autoRedeem5h: "no", autoRedeemWeekly: "no" });
+			expect(saved.claudeResets).toEqual({ autoRedeem5h: "no", autoRedeemWeekly: "no", autoRedeemFable: "no" });
 		});
 	});
 

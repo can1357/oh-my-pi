@@ -3288,7 +3288,7 @@ export class Settings {
 			if (migrated !== undefined) providersObj.tinyModel = migrated;
 		}
 
-		// Preserve legacy saved-reset consent while separating 5h and weekly spending.
+		// Preserve legacy saved-reset consent while separating provider windows.
 		// Normalize booleans first; explicit new keys win across nested and dotted forms.
 		for (const provider of ["codexResets", "claudeResets"] as const) {
 			const resets = isRecord(raw[provider]) ? raw[provider] : undefined;
@@ -3307,7 +3307,11 @@ export class Settings {
 						? raw[legacyKey]
 						: undefined;
 			if (legacy !== undefined) {
-				for (const key of ["autoRedeem5h", "autoRedeemWeekly"] as const) {
+				const keys =
+					provider === "claudeResets"
+						? ["autoRedeem5h", "autoRedeemWeekly", "autoRedeemFable"]
+						: ["autoRedeem5h", "autoRedeemWeekly"];
+				for (const key of keys) {
 					if (resets && key in resets) continue;
 					if (`${provider}.${key}` in raw) continue;
 					if (resets) resets[key] = legacy;

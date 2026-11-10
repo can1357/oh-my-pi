@@ -29,6 +29,7 @@ import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import {
 	cfgClaudeResetsAutoRedeem5h,
+	cfgClaudeResetsAutoRedeemFable,
 	cfgClaudeResetsAutoRedeemWeekly,
 	cfgCodexResetsAutoRedeem5h,
 	cfgCodexResetsAutoRedeemWeekly,
@@ -105,6 +106,71 @@ function withInventory(report: UsageReport, status: ResetCreditAccountStatus): U
 	return { ...report, resetCredits: { availableCount, redeemableCount, eligible, nextCreditId, credits } };
 }
 
+/** A Claude account whose Fable weekly cap is used up beside a blocked 5h window. */
+function claudeFableReport(fableUsed: number): UsageReport {
+	const now = Date.now();
+	return {
+		provider: "anthropic",
+		fetchedAt: now,
+		limits: [
+			{
+				id: "anthropic:5h",
+				label: "Claude 5 Hour",
+				scope: { provider: "anthropic", shared: true, windowId: "5h" },
+				window: { id: "5h", label: "5 Hour", durationMs: 5 * HOUR, resetsAt: now + 2 * HOUR },
+				amount: { usedFraction: 1, unit: "percent" },
+			},
+			{
+				id: "anthropic:7d",
+				label: "Claude 7 Day",
+				scope: { provider: "anthropic", shared: true, windowId: "7d" },
+				window: { id: "7d", label: "7 Day", durationMs: 7 * 24 * HOUR, resetsAt: now + 3 * 24 * HOUR },
+				amount: { usedFraction: 0.4, unit: "percent" },
+			},
+			{
+				id: "anthropic:7d:fable",
+				label: "Claude 7 Day (Fable)",
+				scope: { provider: "anthropic", tier: "fable", windowId: "7d" },
+				window: { id: "7d", label: "7 Day", durationMs: 7 * 24 * HOUR, resetsAt: now + 3 * 24 * HOUR },
+				amount: { usedFraction: fableUsed, unit: "percent" },
+			},
+		],
+		metadata: { accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID },
+	};
+}
+
+/** A Fable launch grant: it clears the blocked 5h window and the Fable weekly cap, nothing else. */
+function claudeFableStatus(fableUsed: number): ResetCreditAccountStatus {
+	return {
+		provider: "anthropic",
+		credentialId: CREDENTIAL_ID,
+		report: claudeFableReport(fableUsed),
+		accountId: ACCOUNT_ID,
+		email: EMAIL,
+		orgId: ORG_ID,
+		active: true,
+		availableCount: 1,
+		redeemableCount: 1,
+		eligible: true,
+		nextCreditId: "fable-grant-1",
+		credits: [
+			{
+				id: "fable-grant-1",
+				title: "Fable reset",
+				program: "cedar_ember",
+				remainingCount: 1,
+				usable: true,
+				requiresLimit: true,
+				clears: ["anthropic:5h", "anthropic:7d:fable"],
+				blocking: ["anthropic:5h", "anthropic:7d:fable"],
+				usedFractions: { "anthropic:5h": 1, "anthropic:7d:fable": fableUsed },
+				expiresAt: new Date(Date.now() + 2 * HOUR).toISOString(),
+				status: "available",
+			},
+		],
+	};
+}
+
 describe("Claude saved-reset trigger integration", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -148,10 +214,13 @@ describe("Claude saved-reset trigger integration", () => {
 		listFailures?: number;
 		maxDelayMs?: number;
 		quota?: { restored: boolean };
-		/** Sets both Claude windows; a per-window value below wins. */
+		/** Anthropic model the session uses; only a Fable model's blocked scope includes the Fable cap. */
+		modelId?: string;
+		/** Sets all three Claude windows; a per-window value below wins. */
 		autoRedeem?: "unset" | "yes" | "no";
 		autoRedeem5h?: "unset" | "yes" | "no";
 		autoRedeemWeekly?: "unset" | "yes" | "no";
+		autoRedeemFable?: "unset" | "yes" | "no";
 		salvageHorizonHours?: number;
 		keepCredits?: number;
 		/** Answers the auto-redeem consent prompt; without it the session has no prompt UI. */
@@ -165,8 +234,9 @@ describe("Claude saved-reset trigger integration", () => {
 		modelCalls: () => number;
 		listCalls: () => number;
 	} {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+		const modelId = options.modelId ?? "claude-sonnet-4-5";
+		const model = getBundledModel("anthropic", modelId);
+		if (!model) throw new Error(`Expected bundled anthropic/${modelId} to exist`);
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		vi.spyOn(authStorage.oauth, "identity").mockReturnValue({
 			accountId: ACCOUNT_ID,
@@ -232,6 +302,7 @@ describe("Claude saved-reset trigger integration", () => {
 		cfgCodexResetsAutoRedeemWeekly.set(settings, "no");
 		cfgClaudeResetsAutoRedeem5h.set(settings, options.autoRedeem5h ?? options.autoRedeem ?? "yes");
 		cfgClaudeResetsAutoRedeemWeekly.set(settings, options.autoRedeemWeekly ?? options.autoRedeem ?? "yes");
+		cfgClaudeResetsAutoRedeemFable.set(settings, options.autoRedeemFable ?? options.autoRedeem ?? "yes");
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
@@ -913,6 +984,7 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(coordinator.attemptedKeys.size).toBe(0);
 		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("unset");
 		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("unset");
+		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("unset");
 	});
 
 	it("still asks before spending an imminent reset when a prompt UI is available", async () => {
@@ -976,5 +1048,35 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("no");
 		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
 		expect(targets).toHaveLength(1);
+	});
+
+	it("remembers a consented Fable restore only on the Fable setting", async () => {
+		const { session, targets } = buildSession({
+			modelId: "claude-fable-5",
+			report: null,
+			status: claudeFableStatus(1),
+			streamErrorFirst: true,
+			autoRedeem5h: "no",
+			autoRedeemWeekly: "no",
+			autoRedeemFable: "unset",
+			consent: async () => "Yes",
+		});
+		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		const fable = claudeFableStatus(1);
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [{ ...fable, credentialId: pool.pooledId }]);
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("recover the Fable-blocked account");
+			await session.waitForIdle();
+		} finally {
+			await pool.release();
+		}
+
+		// The grant also clears 5h, but only the Fable key governs spending it.
+		expect(targets).toHaveLength(1);
+		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("no");
+		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("no");
+		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("yes");
 	});
 });

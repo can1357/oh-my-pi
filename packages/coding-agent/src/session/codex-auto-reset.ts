@@ -106,9 +106,9 @@ export function resetWindowModes(cfg: {
 }
 
 /** Consent follows the governing window, except imminent credits use the most permissive restorable window. */
-export function resetActionMode(
-	action: { window: ResetWindow; restorableWindows: readonly ResetWindow[]; expiresInMs?: number },
-	modes: ResetWindowModes,
+export function resetActionMode<W extends string>(
+	action: { window: W; restorableWindows: readonly W[]; expiresInMs?: number },
+	modes: Record<W, ResetAutoRedeemMode>,
 ): ResetAutoRedeemMode {
 	if (action.expiresInMs === undefined || action.expiresInMs > IMMINENT_RESET_EXPIRY_MS) {
 		return modes[action.window];
@@ -123,8 +123,11 @@ export function resetActionMode(
 }
 
 /** Whether at least one window allows planning, including consent prompts for unset modes. */
-export function shouldEvaluateResetAutoRedeem(modes: ResetWindowModes): boolean {
-	return modes["5h"] !== "no" || modes.weekly !== "no";
+export function shouldEvaluateResetAutoRedeem<W extends string>(modes: Record<W, ResetAutoRedeemMode>): boolean {
+	for (const mode of Object.values(modes)) {
+		if (mode !== "no") return true;
+	}
+	return false;
 }
 
 export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {

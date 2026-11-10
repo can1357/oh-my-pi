@@ -1477,7 +1477,7 @@ export const cfgCodexResets = combine({
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */
 export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem5h>;
 
-// Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
+// Claude Cedar/Juniper/Fable rate-limit resets (independent auto-redeem consent)
 export const cfgClaudeResetsAutoRedeem5h = register({
 	id: "claudeResets.autoRedeem5h",
 	type: "enum",
@@ -1488,7 +1488,7 @@ export const cfgClaudeResetsAutoRedeem5h = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Saved Resets (5h)",
 		description:
-			"Govern Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. Independent of the weekly setting. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Juniper never spends when only weekly spending is enabled.",
+			"Govern non-Fable Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. Independent of weekly and Fable settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Juniper never spends when only weekly spending is enabled.",
 		options: [
 			{
 				value: "unset",
@@ -1511,7 +1511,7 @@ export const cfgClaudeResetsAutoRedeemWeekly = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Saved Resets (Weekly)",
 		description:
-			"Govern Claude Cedar resets that clear any weekly or model-scoped block and expiry salvage whose fullest covered limit is not 5h. Independent of the 5h setting. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Provider eligibility and covered-limit requirements still apply.",
+			"Govern non-Fable Claude Cedar resets that clear weekly or model-scoped blocks and expiry salvage whose fullest covered limit is not 5h. Independent of 5h and Fable settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables this window. Provider eligibility and covered-limit requirements still apply.",
 		options: [
 			{
 				value: "unset",
@@ -1520,6 +1520,29 @@ export const cfgClaudeResetsAutoRedeemWeekly = register({
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
 			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
+		],
+	},
+});
+
+export const cfgClaudeResetsAutoRedeemFable = register({
+	id: "claudeResets.autoRedeemFable",
+	type: "enum",
+	values: ["unset", "yes", "no"] as const,
+	default: "unset" as const,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Claude Auto-Redeem Fable Resets",
+		description:
+			"Govern Claude Fable launch resets, which restore Fable weekly usage (capped at 50% of the weekly limit) plus the 5h window. Blocked-account restores use them only when the Fable weekly cap is used up, never for a 5h-only block. Never spend when Fable usage is 0 or unknown, including expiry salvage. Independent of 5h and weekly settings. unset asks first (without prompt UI, only imminent credits are spent), yes spends without prompting, and no disables Fable resets.",
+		options: [
+			{
+				value: "unset",
+				label: "Unset",
+				description: "Ask before spending a Fable reset; without prompt UI, spend only imminent credits.",
+			},
+			{ value: "yes", label: "Yes", description: "Spend eligible Fable resets without prompting." },
+			{ value: "no", label: "No", description: "Disable automatic Fable reset spending." },
 		],
 	},
 });
@@ -1559,7 +1582,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Claude Reset Salvage Horizon",
 		description:
-			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
+			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage (Fable resets measure only Fable usage). 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes ignore usage thresholds and reserve, but Fable resets always require positive Fable usage. Provider limit requirements still apply.",
 	},
 });
 
@@ -1567,6 +1590,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 export const cfgClaudeResets = combine({
 	autoRedeem5h: cfgClaudeResetsAutoRedeem5h,
 	autoRedeemWeekly: cfgClaudeResetsAutoRedeemWeekly,
+	autoRedeemFable: cfgClaudeResetsAutoRedeemFable,
 	minBlockedMinutes: cfgClaudeResetsMinBlockedMinutes,
 	keepCredits: cfgClaudeResetsKeepCredits,
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,
