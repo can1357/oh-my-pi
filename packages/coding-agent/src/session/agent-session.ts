@@ -6893,8 +6893,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
 		// The agent turn can finish before the native shell's delayed KILL wave.
-		// Keep that wave alive through this session's process teardown.
-		await drainAbortedShells(this.sessionManager.getSessionId());
+		// Keep that wave alive through this session's process teardown, including
+		// commands that started under a session id this one has since replaced.
+		await Promise.all([drainAbortedShells(this.sessionManager.getSessionId()), this.#bash.drainCancelled()]);
 		// Forwarding stays connected through the drain above so a tool that
 		// settles inside it still reaches subscribers (issue #18450); detach now
 		// so events past the deadline are neither forwarded nor persisted.

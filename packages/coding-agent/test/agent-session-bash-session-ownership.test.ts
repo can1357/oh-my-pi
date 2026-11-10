@@ -156,9 +156,11 @@ describe("AgentSession bash session ownership", () => {
 		);
 	});
 
-	it("finishes killing an aborted foreground command before session disposal returns", async () => {
-		if (process.platform === "win32") return;
-		createSession();
+	/**
+	 * Aborts a running TERM-ignoring foreground command, disposes the session, then proves the
+	 * process was killed: it writes `survived` only if it is still alive once `release` exists.
+	 */
+	async function expectAbortedCommandKilledByDispose(beforeAbort?: () => Promise<void>): Promise<void> {
 		const pidFile = path.join(tempDir.path(), "child.pid");
 		const release = path.join(tempDir.path(), "release");
 		const marker = path.join(tempDir.path(), "survived");
@@ -171,6 +173,7 @@ describe("AgentSession bash session ownership", () => {
 				if (!pid) await Bun.sleep(10);
 			}
 			expect(pid).toBeGreaterThan(0);
+			await beforeAbort?.();
 			session.abortBash();
 			const result = await running;
 			expect(result.cancelled).toBe(true);
@@ -186,6 +189,22 @@ describe("AgentSession bash session ownership", () => {
 				} catch {}
 			}
 		}
+	}
+
+	it("finishes killing an aborted foreground command before session disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		await expectAbortedCommandKilledByDispose();
+	});
+
+	it("finishes killing a command aborted after its session was replaced before disposal returns", async () => {
+		if (process.platform === "win32") return;
+		createSession();
+		const startedIn = session.sessionId;
+		await expectAbortedCommandKilledByDispose(async () => {
+			await session.newSession();
+			expect(session.sessionId).not.toBe(startedIn);
+		});
 	});
 
 	it("forwards a hook-injected variable even when process.env already mirrors its value", async () => {
