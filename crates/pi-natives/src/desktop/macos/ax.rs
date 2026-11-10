@@ -320,6 +320,18 @@ pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	window_id(&window)
 }
 
+/// `WindowServer` id of `pid`'s `AXFocusedWindow` when it is a sheet
+/// (`AXSheet`), such as an Open panel or Go to Folder on a document window;
+/// `None` for any other window.
+pub(super) fn focused_sheet_id(pid: libc::pid_t) -> Option<u32> {
+	let app = probe_application(pid)?;
+	let window = copy_element(&app, "AXFocusedWindow")?;
+	if copy_string(&window, "AXRole").as_deref() != Some("AXSheet") {
+		return None;
+	}
+	window_id(&window)
+}
+
 /// An application's `AXFocusedWindow`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum FocusedWindow {
@@ -485,7 +497,7 @@ fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement
 /// The first window id `_AXUIElementGetWindow` maps on `element` or, through
 /// a bounded `AXParent` ascent, its nearest ancestor, and whether it is the
 /// element's own.
-fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
+pub(super) fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
 	let mut current = element.retain();
 	for depth in 0..MAX_ANCESTRY_DEPTH {
 		if let Some(id) = window_id(&current) {
