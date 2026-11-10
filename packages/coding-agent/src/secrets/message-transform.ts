@@ -120,14 +120,8 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	// `batch()` joins an outer batch when one is already open.
-	return obfuscator.batch(() => {
-		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
-			string,
-			unknown
-		>;
-	});
+	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -541,7 +535,7 @@ function deobfuscateTextBlocks(
 
 /**
  * Re-obfuscate assistant content before it returns to a provider after session
- * restoration, removing friendly prefixes made unsafe by this batch. A changed
+ * restoration, removing friendly prefixes made unsafe by this request. A changed
  * thinking block loses its byte-bound replay signature, and so does a tool call
  * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
  * attestation over the function call it rides on, so replaying obfuscated
@@ -685,10 +679,6 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
-	return obfuscator.batch(() => obfuscateMessageBatch(obfuscator, messages));
-}
-
-function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {
