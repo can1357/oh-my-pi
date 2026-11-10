@@ -350,13 +350,14 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		expect(hubRowMetrics(ref, undefined, sessionMetrics)?.tokensPerSecond).toBe(92.4);
 	});
 
-	it("preserves retained completed tokensPerSecond when session is parked", () => {
+	it("preserves retained completed tokensPerSecond when session is parked with an observer progress frame", () => {
 		const ref = { id: "worker", session: null } as unknown as AgentRecordLike;
 		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
 		sessionMetrics.set(ref, {
 			metrics: { tokens: 150, requests: 1, tools: 0, cost: 0.01, durationMs: 2000, tokensPerSecond: 75.0 },
 		});
-		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		const observed = liveObserver(0.01);
+		const metrics = hubRowMetrics(ref, observed, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(75.0);
 	});
 });

@@ -418,17 +418,41 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				if (live !== ref || !live.session || live.session !== session) return;
 				if (this.#adopted.get(id)?.ref !== ref) return;
 
-				// Preserve cost before detaching the only live source. The session usage
+				// Preserve cost and completed throughput before detaching the only live source. The session usage
 				// index includes off-transcript model calls; remove completed task-result
 				// billing so child rows remain the sole owners of nested spend.
 				try {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
+					let tokensPerSecond: number | undefined;
+					const messages = session.agent?.state?.messages;
+					if (Array.isArray(messages)) {
+						for (let i = messages.length - 1; i >= 0; i--) {
+							const m = messages[i];
+							if (m?.role === "assistant" && typeof m.duration === "number" && m.duration > 100) {
+								const output = m.usage?.output ?? 0;
+								if (output > 0) {
+									tokensPerSecond = (output / m.duration) * 1000;
+									break;
+								}
+							}
+						}
+					}
+					const historyPatch: { directCost?: number; metrics?: AgentMetricsSummary } = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
-						this.#registry.setHistory(id, { directCost }, ref.sessionFile ?? undefined);
+						historyPatch.directCost = directCost;
+					}
+					if (tokensPerSecond !== undefined) {
+						historyPatch.metrics = {
+							...(ref.history?.metrics ?? { tokens: 0, requests: 0, tools: 0, cost: directCost, durationMs: 0 }),
+							tokensPerSecond,
+						};
+					}
+					if (Object.keys(historyPatch).length > 0) {
+						this.#registry.setHistory(id, historyPatch, ref.sessionFile ?? undefined);
 					}
 				} catch (error) {
-					logger.debug("AgentLifecycleManager.park: cost snapshot failed", { id, error: String(error) });
+					logger.debug("AgentLifecycleManager.park: cost/rate snapshot failed", { id, error: String(error) });
 				}
 
 				// Commit: detach + parked *before* dispose so callers never see a
