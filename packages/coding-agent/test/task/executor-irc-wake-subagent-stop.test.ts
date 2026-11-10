@@ -1022,6 +1022,42 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 
 			expect(run.mock.calls).toHaveLength(1);
 		});
+
+		it("runs it after a structured refusal's continuation yields and the executor stops that settled turn", async () => {
+			const continuationStarted = Promise.withResolvers<void>();
+			const continuationGate = Promise.withResolvers<void>();
+			const run = await setup({
+				responses: [
+					yieldCall("REFUSED-PAYLOAD"),
+					async () => {
+						continuationStarted.resolve();
+						await continuationGate.promise;
+						return yieldCall("REPLACEMENT");
+					},
+					{ content: ["hidden turn ran"] },
+				],
+				onStop: (_event, callIndex) => (callIndex === 1 ? { decision: "block", reason: "keep going" } : undefined),
+			});
+
+			await deliverWake(run.session, "m1");
+			await continuationStarted.promise;
+			// Queued while the refusal's continuation streams: the pass holds the session, so the turn waits for it.
+			await run.session.sendCustomMessage(
+				{ customType: "ext-next", content: "NEXT-TURN-PAYLOAD", display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await scheduler.yield();
+			// The continuation's terminal yield ends the settled turn through an internal session abort.
+			continuationGate.resolve();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+			for (let tick = 0; run.mock.calls.length < 3 && tick < 200; tick++) await scheduler.yield();
+
+			// Judged and published first, then the deferred message ran as its own turn.
+			expect(await Bun.file(run.artifact).text()).toContain("REPLACEMENT");
+			expect(run.mock.calls).toHaveLength(3);
+			expect(JSON.stringify(run.mock.calls[2]?.context.messages)).toContain("NEXT-TURN-PAYLOAD");
+		});
 	});
 
 	describe("a submission that waits out a stop-pass hold and is aborted meanwhile", () => {
@@ -1082,6 +1118,39 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 
 			expect(run.mock.calls).toHaveLength(0);
 			expect(JSON.stringify(run.session.messages)).toContain("AGENT-NOTE");
+		});
+
+		it("still runs an agent prompt when only the internal stop of a settled turn landed during the wait", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["asked"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+			const prompted = run.session.prompt("AGENT-PROMPT", { attribution: "agent", synthetic: true });
+			await scheduler.yield();
+
+			// The executor stops a turn that already yielded: the session goes on, so this is no cancellation.
+			await run.session.abort({ turnStop: true });
+			hold.release();
+			await prompted;
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(1);
+			expect(JSON.stringify(run.mock.calls[0]?.context.messages)).toContain("AGENT-PROMPT");
+		});
+
+		it("still starts a turn-triggering custom message when only the internal stop of a settled turn landed during the wait", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["asked"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+			const sent = run.session.sendCustomMessage(
+				{ customType: "agent-note", content: "AGENT-NOTE", display: false, attribution: "agent" },
+				{ triggerTurn: true },
+			);
+			await scheduler.yield();
+
+			await run.session.abort({ turnStop: true });
+			hold.release();
+			await sent;
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(1);
 		});
 	});
 
