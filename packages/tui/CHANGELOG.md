@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed streamed rows being clipped above the screen before they reached scrollback while the working row was up, so a scrolled-back terminal saw rows jump at the screen's top edge and the whole screen dropped when a run ended ([#12307](https://github.com/can1357/oh-my-pi/issues/12307), [#16117](https://github.com/can1357/oh-my-pi/pull/16117) by [@galtamam-cmyk](https://github.com/galtamam-cmyk)). `Composer.setRuntimeChildren` takes a `billedChrome` option for roots billed at their current height instead of through the floor.
+- Fixed a finished chart disappearing from the screen and scrollback while text kept streaming below it; a streaming reply now sends drawn charts and the finished prose after them to scrollback ([#16472](https://github.com/can1357/oh-my-pi/pull/16472) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 - Fixed rows of a streaming reply, and the top rows of a table taller than the screen, going missing from both the screen and scrollback with `tui.completeScrollback` on; such a table now keeps the column widths it had when it outgrew the screen ([#16355](https://github.com/can1357/oh-my-pi/pull/16355) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 
 ## [18.18.4] - 2026-11-09

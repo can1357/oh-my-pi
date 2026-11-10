@@ -2,7 +2,7 @@ import type { Tokens } from "@oh-my-pi/pi-utils/marked";
 import type { ImageBudget } from "../components/image";
 import { type Markdown, streamingMarkdownSource, type TableLocks } from "../components/markdown";
 import { Spacer } from "../components/spacer";
-import { Container } from "../tui";
+import { type Component, Container } from "../tui";
 import { SvgFigure, svgFigureRendering } from "./svg-figure";
 import { type FigureSegment, splitSvgFences } from "./svg-source";
 import { type ChartSegment, hasChartTable, splitTableCharts, TableChartFigure } from "./table-chart";
@@ -11,10 +11,11 @@ export interface FigureMarkdownOptions {
 	/** Markdown for one prose run (and a failed figure's code fallback); FigureMarkdown drives its transience. */
 	markdown: (text: string) => Markdown;
 	/**
-	 * Table locks for the leading prose run (see {@link Markdown.tableLocks}),
-	 * the only run a transcript publishes stable rows from.
+	 * Table locks for the prose run at part `index` (see
+	 * {@link Markdown.tableLocks}). The owner renders the run's stable prefix
+	 * with the same locks, so both lay a locked table out the same.
 	 */
-	tableLocks?: TableLocks;
+	tableLocks?: (index: number) => TableLocks;
 	/** Draw charts under numeric tables; off for transcripts that are not the main session's. */
 	charts: boolean;
 	/** Shared inline-image budget for the figures. */
@@ -24,6 +25,18 @@ export interface FigureMarkdownOptions {
 	/** A figure's rows changed outside a text update (raster landed, fell back to code). */
 	onChange: () => void;
 }
+
+/** One piece of {@link FigureMarkdown.stablePrefix}, in render order. */
+export type FigureStablePart =
+	/** A prose run (part `index`), in {@link streamingMarkdownSource} form. */
+	| { readonly kind: "markdown"; readonly text: string; readonly index: number }
+	/**
+	 * A drawn figure: its source names it, the live component renders it. Pin
+	 * it once published, so a change of room scales it instead of redrawing it.
+	 */
+	| { readonly kind: "figure"; readonly text: string; readonly component: Component & { pin(): void } }
+	/** The blank row between two parts. */
+	| { readonly kind: "spacer" };
 
 type Part =
 	| { readonly kind: "markdown"; readonly md: Markdown; text: string }
@@ -73,37 +86,55 @@ export class FigureMarkdown extends Container {
 	}
 
 	/**
-	 * The trimmed prose ahead of the first figure, or "" when the block opens
-	 * with one. These are the only rows plain Markdown reproduces byte for
-	 * byte, so they are all a transcript may publish ahead of the figure. While
-	 * that prose is still the streaming tail (no figure follows it yet), only
-	 * its settled prefix ({@link Markdown.getLastRenderStableText}) qualifies:
-	 * the rest is still being written. Both forms are in
-	 * {@link streamingMarkdownSource} form, so the settled prefix stays a byte
-	 * prefix of the whole run once a figure splits it off.
+	 * The parts of the block no later text can change, in render order: every
+	 * closed prose run, every figure whose rows are final (see
+	 * {@link SvgFigure.ready}, {@link TableChartFigure.ready}), the blank rows
+	 * between them, and the settled prefix ({@link Markdown.getLastRenderStableText})
+	 * of a prose run still streaming at the tail. Stops in front of the first
+	 * part that may still change. Prose rendered by a fresh {@link Markdown} and
+	 * figures by their live components reproduce the block's rows byte for
+	 * byte, so the transcript may publish them ahead of the rest. `complete`
+	 * says every part is covered; `openTable` that the last one ends inside a
+	 * locked table still streaming (see {@link Markdown.openTableTail}).
 	 */
-	get leadingProse(): string {
-		const first = this.#parts[0];
-		if (first?.kind !== "markdown") return "";
-		if (this.#transient && this.#parts.length === 1) return first.md.getLastRenderStableText().trim();
-		return streamingMarkdownSource(first.text);
+	stablePrefix(): { parts: FigureStablePart[]; complete: boolean; openTable: boolean } {
+		const parts: FigureStablePart[] = [];
+		let openTable = false;
+		let complete = true;
+		const last = this.#parts.length - 1;
+		for (const [index, part] of this.#parts.entries()) {
+			if (index > 0 && part.kind !== "chart") parts.push({ kind: "spacer" });
+			if (part.kind === "markdown") {
+				if (this.#transient && index === last) {
+					const settled = part.md.getLastRenderStableText().trim();
+					if (settled) {
+						parts.push({ kind: "markdown", text: settled, index });
+						openTable = part.md.lastRenderStableTextEndsInOpenTable();
+					}
+					complete = false;
+					break;
+				}
+				parts.push({ kind: "markdown", text: streamingMarkdownSource(part.text), index });
+				continue;
+			}
+			if (!part.figure.ready) {
+				complete = false;
+				break;
+			}
+			parts.push({
+				kind: "figure",
+				text: part.kind === "svg" ? part.source : part.table.raw,
+				component: part.figure,
+			});
+		}
+		while (parts.at(-1)?.kind === "spacer") parts.pop();
+		return { parts, complete, openTable };
 	}
 
-	/** Whether {@link leadingProse} ends inside a locked table that is still streaming. */
-	get leadingProseEndsInOpenTable(): boolean {
-		const first = this.#parts[0];
-		return (
-			first?.kind === "markdown" &&
-			this.#transient &&
-			this.#parts.length === 1 &&
-			first.md.lastRenderStableTextEndsInOpenTable()
-		);
-	}
-
-	/** Lock a table streaming at the tail of the leading prose; see {@link Markdown.lockOpenTable}. */
+	/** Lock a table streaming at the tail of the last prose run; see {@link Markdown.lockOpenTable}. */
 	lockOpenTable(): boolean {
-		const first = this.#parts[0];
-		return first?.kind === "markdown" && this.#transient && this.#parts.length === 1 && first.md.lockOpenTable();
+		const last = this.#parts.at(-1);
+		return last?.kind === "markdown" && this.#transient && last.md.lockOpenTable();
 	}
 
 	/** Whether a figure's final source still waits for its raster, or a chart for its pick or raster. */
@@ -122,7 +153,7 @@ export class FigureMarkdown extends Container {
 
 	#proseRun(text: string, index: number): Markdown {
 		const md = this.#options.markdown(text);
-		if (index === 0) md.tableLocks = this.#options.tableLocks;
+		md.tableLocks = this.#options.tableLocks?.(index);
 		return md;
 	}
 
@@ -139,7 +170,18 @@ export class FigureMarkdown extends Container {
 				}
 				reshaped = true;
 				const { budget, maxRows, onChange } = this.#options;
-				return { kind: "chart", figure: new TableChartFigure({ budget, maxRows, onChange }), table: segment.table };
+				// A pick that lands declined takes the table's split away: re-split
+				// now, so the empty chart part is gone before any render publishes it,
+				// even in a block no later text update reaches.
+				const changed = (): void => {
+					this.#reconcile();
+					onChange();
+				};
+				return {
+					kind: "chart",
+					figure: new TableChartFigure({ budget, maxRows, onChange: changed }),
+					table: segment.table,
+				};
 			}
 			if (segment.kind === "markdown") {
 				const text = segment.text.trim();
