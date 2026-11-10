@@ -228,18 +228,16 @@ describe("RpcNextMessagePredictor", () => {
 		]);
 	});
 
-	it("rejects an accepted rank outside the offered choices and ignores feedback for a retired prediction", async () => {
+	it("rejects an accepted rank outside the offered choices", async () => {
 		const { predictor, reply } = harness();
 		const id = predictor.request()!;
 		await reply(0, "run the tests\nship it");
 
 		expect(() => predictor.feedback(id, "accepted", 2)).toThrow("out of range");
 		expect(() => predictor.feedback(id, "accepted", undefined)).toThrow("rank");
-		predictor.cancel(id);
-		expect(() => predictor.feedback(id, "accepted", 1)).not.toThrow();
 	});
 
-	it("reports host feedback through the prediction metrics", async () => {
+	it("reports host feedback through the prediction metrics and ignores it once the prediction retired", async () => {
 		const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
 		const reader = new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 3_600_000 });
 		const meterProvider = new MeterProvider({ readers: [reader] });
@@ -255,14 +253,20 @@ describe("RpcNextMessagePredictor", () => {
 		await reply(1, "ship it");
 		predictor.feedback(ignored, "shown", undefined);
 		predictor.cancel();
+		// Late feedback for retired predictions must not count again or change their outcome.
+		predictor.feedback(accepted, "shown", undefined);
+		predictor.feedback(ignored, "accepted", 0);
 
 		await reader.forceFlush();
-		const resolved = exporter
+		const metrics = exporter
 			.getMetrics()
 			.at(-1)!
-			.scopeMetrics.flatMap(scope => scope.metrics)
-			.find(metric => metric.descriptor.name === "omp.composer.prediction.resolved")!
-			.dataPoints as DataPoint<number>[];
+			.scopeMetrics.flatMap(scope => scope.metrics);
+		const points = (name: string) =>
+			metrics.find(metric => metric.descriptor.name === name)!.dataPoints as DataPoint<number>[];
+		expect(points("omp.composer.prediction.shown").reduce((sum, point) => sum + point.value, 0)).toBe(2);
+		const resolved = points("omp.composer.prediction.resolved");
+		expect(resolved).toHaveLength(2);
 		expect(
 			resolved.map(point => ({
 				result: point.attributes["omp.composer.prediction.result"],

@@ -428,8 +428,9 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * (`prompt` and `steer_subagent` are also backgrounded there, but start through
  * the serial tail.) `btw_cancel` and `predict_next_message_cancel` are synchronous
  * and must overtake a `btw` still starting or a long serial command (a paid side
- * turn keeps running until they land); `abort_branch_summary` likewise overtakes
- * the `navigate_tree` whose summary it stops.
+ * turn keeps running until they land); `predict_next_message_feedback` takes the
+ * same path, so feedback pipelined before a cancel still lands first.
+ * `abort_branch_summary` likewise overtakes the `navigate_tree` whose summary it stops.
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
 const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
@@ -438,6 +439,7 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
 	"live_start",
 	"live_connect",
 	"btw_cancel",
+	"predict_next_message_feedback",
 	"predict_next_message_cancel",
 	"abort_branch_summary",
 ]);

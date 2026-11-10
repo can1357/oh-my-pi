@@ -1301,11 +1301,12 @@ retires without an accepted rank counts as ignored. Feedback for a prediction
 that is no longer offered is ignored. An `accepted` event without a rank, or
 with a rank outside `choices`, fails.
 
-`predict_next_message_cancel` bypasses the command queue, so it lands while a
-long command such as `compact` or `login` still runs. It answers
-`cancelled: false` when nothing is pending or offered, when `predictionId`
-names another prediction, or when the `predict_next_message` it targets is
-still queued behind other commands.
+`predict_next_message_feedback` and `predict_next_message_cancel` bypass the
+command queue, so they land while a long command such as `compact` or `login`
+still runs, and in the order sent: feedback pipelined before a cancel counts.
+`predict_next_message_cancel` answers `cancelled: false` when nothing is pending
+or offered, when `predictionId` names another prediction, or when the
+`predict_next_message` it targets is still queued behind other commands.
 
 ## Prompt/Queue Concurrency and Ordering
 
