@@ -491,6 +491,86 @@ describe("OMP-owned browser evaluation", () => {
 		45_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"runs code handed to the run's page evaluation methods in the main world, as tab.evaluate does",
+		async () => {
+			const browser = headless();
+			const name = `run-page-main-world-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			const fixture = `<script>
+				globalThis.__ompPageMarker = 47;
+				customElements.define("x-answer", class extends HTMLElement { get answer() { return 42; } });
+			</script><x-answer id="first"></x-answer><x-answer></x-answer>`;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent(fixture)}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+						const first = await page.$("#first");
+						const marker = await page.evaluateHandle(() => globalThis.__ompPageMarker);
+						const pending = page
+							.waitForFunction(() => globalThis.__ompLater, { timeout: 5_000 })
+							.catch(error => ({ jsonValue: () => String(error), dispose: () => undefined }));
+						await page.evaluate(() => { globalThis.__ompLater = "ready"; });
+						const waited = await pending;
+						const timedOut = await page
+							.waitForFunction(() => false, { timeout: 200 })
+							.then(() => "resolved", error => error.name + ": " + error.message);
+						const seen = {
+							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
+							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
+							evaluateHandle: await marker.jsonValue(),
+							elementArgument: await page.evaluate(element => element.answer, first),
+							$eval: await page.$eval("#first", (element, add) => element.answer + add, 1),
+							$$eval: await page.$$eval("x-answer", elements => elements.map(element => element.answer)),
+							waitForFunction: await waited.jsonValue(),
+							timedOut,
+							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
+							registry: await page.evaluate(() => String(customElements)),
+							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
+							leaked: await tab.evaluate(() => Object.keys(globalThis).filter(key => /puppeteer|QuerySelector/.test(key))),
+						};
+						let missing = "";
+						try {
+							await page.$eval("#absent", element => element.answer);
+						} catch (error) {
+							missing = error instanceof Error ? error.message : String(error);
+						}
+						await Promise.all([first.dispose(), marker.dispose(), waited.dispose()]);
+						return { seen, missing };
+					`,
+					timeoutMs: 15_000,
+					session,
+				});
+				expect(result.returnValue).toEqual({
+					seen: {
+						evaluate: 47,
+						evaluateString: 47,
+						evaluateHandle: 47,
+						elementArgument: 42,
+						$eval: 43,
+						$$eval: [42, 42],
+						waitForFunction: "ready",
+						timedOut: "TimeoutError: Waiting failed: 200ms exceeded",
+						chained: 47,
+						registry: "[object CustomElementRegistry]",
+						leaked: [],
+					},
+					missing: expect.stringContaining('failed to find element matching selector "#absent"'),
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"tells a caller running calls on one tab together to await each one or use one run",
 		async () => {
 			const browser = headless();

@@ -10,6 +10,7 @@ import type {
 	CDPSession,
 	ElementHandle,
 	Frame,
+	FrameWaitForFunctionOptions,
 	HTTPRequest,
 	HTTPResponse,
 	JSHandle,
@@ -69,6 +70,7 @@ import {
 	loadPuppeteerInWorker,
 	loadedKnownDevices,
 	loadedNetworkConditions,
+	puppeteerTimeoutError,
 	readPageViewport,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
@@ -755,6 +757,120 @@ async function adoptElementArgs(
 	}
 
 	return { args: out ?? args, dispose };
+}
+
+type PageFunction = string | ((...args: unknown[]) => unknown);
+
+/**
+ * Evaluate `fn` in `realm` with its element-handle `args` adopted there (see {@link adoptElementArgs}), returning
+ * the value or, with `handle`, a handle to it. Puppeteer evaluates a string as an expression and ignores extra
+ * args; that holds here, without inspecting or adopting otherwise-unused handles.
+ */
+async function evaluateInRealm(
+	realm: Realm,
+	fn: PageFunction,
+	args: unknown[],
+	handle: boolean,
+	signal?: AbortSignal,
+): Promise<unknown> {
+	if (typeof fn === "string") return handle ? realm.evaluateHandle(fn) : realm.evaluate(fn);
+	const { args: adopted, dispose } = await adoptElementArgs(realm, args);
+	try {
+		if (signal) throwIfAborted(signal);
+		return handle ? await realm.evaluateHandle(fn, ...adopted) : await realm.evaluate(fn, ...adopted);
+	} finally {
+		await dispose();
+	}
+}
+
+/**
+ * The `page` that `tab.run` code receives. The stealth patch runs Puppeteer's page evaluations in its isolated
+ * world, where page globals and custom-element members do not exist; this page runs the code handed to
+ * `evaluate`, `evaluateHandle`, `$eval`, `$$eval` and `waitForFunction` in the main world, as `tab.evaluate` does.
+ * Their selectors still resolve in the isolated world, and the matches are adopted for the call. Every other
+ * member is the tab's own page, bound to it so Puppeteer's private fields stay reachable; one that returns the
+ * page (`page.on(…)`) returns this page, so a chained call keeps the main world. `signal` ends the run.
+ */
+function createRunPage(page: Page, signal: AbortSignal): Page {
+	const realm = (): Realm => page.mainFrame().mainRealm();
+	const mainWorld = new Map<PropertyKey, unknown>([
+		["evaluate", (fn: PageFunction, ...args: unknown[]) => evaluateInRealm(realm(), fn, args, false)],
+		["evaluateHandle", (fn: PageFunction, ...args: unknown[]) => evaluateInRealm(realm(), fn, args, true)],
+		[
+			"$eval",
+			async (selector: string, fn: PageFunction, ...args: unknown[]) => {
+				const element = await page.$(selector);
+				// Puppeteer's own message for a `$eval` that matches nothing.
+				if (!element) throw new Error(`Error: failed to find element matching selector "${selector}"`);
+				try {
+					return await evaluateInRealm(realm(), fn, [element, ...args], false);
+				} finally {
+					await element.dispose();
+				}
+			},
+		],
+		[
+			"$$eval",
+			async (selector: string, fn: PageFunction, ...args: unknown[]) => {
+				const elements = await page.$$(selector);
+				try {
+					const target = realm();
+					const adopted = await adoptElementArgs(target, elements);
+					try {
+						const list = await target.evaluateHandle((...nodes: unknown[]) => nodes, ...adopted.args);
+						try {
+							return await evaluateInRealm(target, fn, [list, ...args], false);
+						} finally {
+							await list.dispose();
+						}
+					} finally {
+						await adopted.dispose();
+					}
+				} finally {
+					await Promise.all(elements.map(element => element.dispose()));
+				}
+			},
+		],
+		[
+			"waitForFunction",
+			// Puppeteer's own wait installs its query bindings as globals of the world it polls, which every page
+			// script can see in the main world; poll by evaluating instead, across navigations, as its wait does.
+			async (fn: PageFunction, options: FrameWaitForFunctionOptions = {}, ...args: unknown[]) => {
+				const timeout = options.timeout ?? page.getDefaultTimeout();
+				const interval = typeof options.polling === "number" ? options.polling : 100;
+				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
+				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
+				for (;;) {
+					throwIfAborted(waitSignal);
+					try {
+						const target = realm();
+						const value = (await untilAborted(waitSignal, () =>
+							evaluateInRealm(target, fn, args, true),
+						)) as JSHandle;
+						if (await target.evaluate(held => Boolean(held), value)) return value;
+						await value.dispose();
+					} catch (error) {
+						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;
+					}
+					if (Date.now() + interval > deadline)
+						throw puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
+					await untilAborted(waitSignal, () => Bun.sleep(interval));
+				}
+			},
+		],
+	]);
+	const runPage: Page = new Proxy(page, {
+		get(target, prop) {
+			if (mainWorld.has(prop)) return mainWorld.get(prop);
+			const value = Reflect.get(target, prop, target);
+			if (typeof value !== "function") return value;
+			return (...args: unknown[]) => {
+				const result = Reflect.apply(value, target, args);
+				return result === target ? runPage : result;
+			};
+		},
+	});
+	return runPage;
 }
 
 /**
@@ -2083,7 +2199,12 @@ export class WorkerCore {
 			runtime.setCwd(msg.session.cwd);
 			const onFloatingRejection = (reason: unknown): void => this.#recordFloatingRejection(active, reason);
 			runtime.setRunScope({
-				page: bindRunFacade(runPage.page, signal, active.rejectionOwner, onFloatingRejection),
+				page: bindRunFacade(
+					createRunPage(runPage.page, signal),
+					signal,
+					active.rejectionOwner,
+					onFloatingRejection,
+				),
 				browser: bindRunFacade(browser, signal, active.rejectionOwner, onFloatingRejection),
 				tab: bindRunFacade(tabApi, signal, active.rejectionOwner, onFloatingRejection),
 				assert: (cond: unknown, text?: string): void => {
@@ -2747,19 +2868,9 @@ export class WorkerCore {
 				// User code may have side effects and may throw any message, so it waits for a requested navigation but
 				// never runs again.
 				act("tab.evaluate()", INF, sig =>
-					untilAborted(sig, async () => {
-						const realm = page.mainFrame().mainRealm();
-						// Puppeteer evaluates strings as expressions and ignores extra args; preserve
-						// that behavior without inspecting or adopting otherwise-unused handles.
-						if (typeof fn === "string") return realm.evaluate(fn);
-						const { args: adopted, dispose } = await adoptElementArgs(realm, args);
-						try {
-							throwIfAborted(sig);
-							return await realm.evaluate(fn as (...a: unknown[]) => unknown, ...adopted);
-						} finally {
-							await dispose();
-						}
-					}),
+					untilAborted(sig, () =>
+						evaluateInRealm(page.mainFrame().mainRealm(), fn as PageFunction, args, false, sig),
+					),
 				) as never,
 			scrollIntoView: selector =>
 				act(
