@@ -66,15 +66,15 @@ class "gemini" {
 			}
 		}
 	}
-	// Gemini 3.7+ Flash and Gemini 4 Argon native thinkingLevel does not accept
+	// Gemini 3.7+ Flash and Gemini 4 native thinkingLevel does not accept
 	// `minimal` (400 THINKING_LEVEL_MINIMAL; observed on Flash 3.7 and 3.8, and
-	// documented for Argon and Argon Cyber Permissive). Only the direct
+	// documented as a Gemini 4 change in Google's migration guide). Only the direct
 	// google-level transports emit `thinkingLevel` on the wire, so the tier is
 	// dropped there; budget (anthropic-messages) and reasoning_effort resellers
 	// never send the rejected value and keep the four-tier ladder. The collapsed
 	// google-antigravity / google-gemini-cli variants remap minimal -> LOW and
 	// carry their own explicit ladder, so they are unaffected.
-	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/start/get-started-with-gemini-4
 	// https://ai.google.dev/gemini-api/docs/generate-content/thinking#thinking-levels
 	on "google" "google-vertex" "opencode-zen" {
 		family "flash" {
@@ -83,9 +83,9 @@ class "gemini" {
 			}
 		}
 		// Exact ids: a revision-wide rule would tie with the Pro low/high ladder.
-		// Gemini API discovery has no bundled Argon reference and infers
-		// `reasoning: false` from the id; repair it so the ladder is selectable.
-		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" {
+		// Gemini API discovery infers `reasoning: false` for a Gemini 4 id with no
+		// bundled reference; repair it so the ladder is selectable.
+		models "gemini-4-argon" "gemini-4-argon-cyber-permissive" "gemini-4-carbon" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}

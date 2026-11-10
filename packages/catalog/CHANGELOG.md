@@ -5,6 +5,7 @@
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+- Google Antigravity now lists Gemini 4 Carbon once, with selectable low, medium, and high thinking levels, instead of a separate entry per thinking tier; on the Gemini API, Gemini 4 Carbon now offers the same thinking levels instead of none
 ### Added
 
 - Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
