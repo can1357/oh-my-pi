@@ -44,6 +44,11 @@ export function claudeResetPlanSettings(cfg: {
 			weekly: cfg.autoRedeemWeekly !== "no",
 			fable: cfg.autoRedeemFable !== "no",
 		},
+		approved: {
+			"5h": cfg.autoRedeem5h === "yes",
+			weekly: cfg.autoRedeemWeekly === "yes",
+			fable: cfg.autoRedeemFable === "yes",
+		},
 		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -54,6 +59,8 @@ const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
 const CEDAR_PROGRAM = "cedar_ember";
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
+/** The Fable weekly cap's limit id: a grant clearing it restores only that window. */
+const FABLE_LIMIT_ID = "anthropic:7d:fable";
 const MAX_PLAUSIBLE_FIVE_HOUR_MS = 6 * 3_600_000;
 const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 
@@ -97,6 +104,7 @@ export interface ClaudeResetPlanInput {
 	modelId: string;
 	settings: {
 		windows: Record<ClaudeResetWindow, boolean>;
+		approved: Record<ClaudeResetWindow, boolean>;
 		minBlockedMinutes: number;
 		keepCredits: number;
 		salvageHorizonMs: number;
@@ -159,7 +167,10 @@ interface ClaudeAccountSnapshot {
 	availableCount: number;
 	credit: UsageResetCredit;
 	limits: UsageLimit[];
-	fableLimit?: UsageLimit;
+	/** Whether the grant restores the Fable cap, even while the report omits its row. */
+	fable: boolean;
+	/** The report's measured Fable usage; absent while the row or its used fraction is missing. */
+	fableUsage?: { limit: UsageLimit; used: number };
 }
 
 function normalized(value: unknown): string | undefined {
@@ -254,6 +265,31 @@ export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: Usage
 
 function claudeResetWindow(limitId: string): ResetWindow {
 	return limitId === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly";
+}
+
+/**
+ * Whether a grant restores the Fable cap. The report's row is the primary
+ * signal, but that row is optional — a model without Fable usage reports
+ * none — so the limit ids the grant clears must identify it on their own.
+ * Otherwise a Fable grant looks like an ordinary five-hour grant and spends
+ * the Fable window on five-hour consent.
+ */
+function claudeFableGrant(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): boolean {
+	if (claudeCoveredLimits(limits, credit).some(limit => limit.scope.tier === "fable")) return true;
+	// A Juniper grant only ever restores the five-hour window.
+	if (credit.program === JUNIPER_PROGRAM) return false;
+	return (credit.clears ?? []).includes(FABLE_LIMIT_ID);
+}
+
+/** A grant's measured Fable usage; an omitted row or used fraction never counts as usage. */
+function claudeFableUsage(limits: readonly UsageLimit[]): { limit: UsageLimit; used: number } | undefined {
+	const limit =
+		limits.find(candidate => candidate.id === FABLE_LIMIT_ID) ??
+		limits.find(candidate => candidate.scope.tier === "fable");
+	if (!limit) return undefined;
+	const used = resolveUsedFraction(limit);
+	if (used === undefined || !Number.isFinite(used)) return undefined;
+	return { limit, used: Math.max(0, used) };
 }
 
 /** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
@@ -396,14 +432,15 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		// Classify against the full report: model scoping must not turn a Fable
-		// grant into a five-hour grant when an unrelated model is blocked.
-		const fableLimit = claudeCoveredLimits(report.limits, credit).find(limit => limit.scope.tier === "fable");
-		if (fableLimit) {
-			const used = resolveUsedFraction(fableLimit);
-			if (used === undefined || !Number.isFinite(used) || used <= 0) {
-				skip("no-fable-usage");
-				continue;
-			}
+		// grant into a five-hour grant when an unrelated model is blocked. The
+		// cleared limit ids carry that identity even when the row is missing.
+		const fable = claudeFableGrant(report.limits, credit);
+		const fableUsage = fable ? claudeFableUsage(report.limits) : undefined;
+		// Unmeasured Fable usage (no row, no used fraction) restores nothing a
+		// salvage or restore could point at, so the grant stays unspent.
+		if (fable && (!fableUsage || fableUsage.used <= 0)) {
+			skip("no-fable-usage");
+			continue;
 		}
 		// A blocked retry has an exact request-model scope. A background salvage
 		// has no such request context, so consider every reported scope rather
@@ -431,7 +468,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			availableCount: status.availableCount,
 			credit,
 			limits,
-			fableLimit,
+			fable,
+			fableUsage,
 		});
 	}
 
@@ -444,6 +482,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			restorableWindows: ClaudeResetWindow[];
 			remainingMs: number;
 			unblockAtMs: number;
+			/**
+			 * Whether the settings already consent to this restore, mirroring the
+			 * governing-window rule: the blocked window, or any restorable window
+			 * for an imminent credit.
+			 */
+			approved: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -483,16 +527,16 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip("incomplete-coverage");
 				continue;
 			}
-			if (snapshot.fableLimit && !blockers.includes(snapshot.fableLimit.id)) {
+			if (snapshot.fable && !blockers.includes(snapshot.fableUsage?.limit.id ?? FABLE_LIMIT_ID)) {
 				skip("fable-only");
 				continue;
 			}
-			const window: ClaudeResetWindow = snapshot.fableLimit
+			const window: ClaudeResetWindow = snapshot.fable
 				? "fable"
 				: blockers.some(id => claudeResetWindow(id) === "weekly")
 					? "weekly"
 					: "5h";
-			const restorableWindows: ClaudeResetWindow[] = snapshot.fableLimit
+			const restorableWindows: ClaudeResetWindow[] = snapshot.fable
 				? ["fable"]
 				: [
 						...new Set(
@@ -511,6 +555,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip("window-disabled");
 				continue;
 			}
+			const approved = imminent
+				? restorableWindows.some(restorable => input.settings.approved[restorable])
+				: input.settings.approved[window];
 
 			let unblockAtMs = Number.NEGATIVE_INFINITY;
 			let invalid: ClaudeResetSkipReason | undefined;
@@ -555,9 +602,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip(episodeSkip);
 				continue;
 			}
-			candidates.push({ snapshot, blockers, window, restorableWindows, remainingMs, unblockAtMs });
+			candidates.push({ snapshot, blockers, window, restorableWindows, remainingMs, unblockAtMs, approved });
 		}
 		candidates.sort((left, right) => {
+			// Consent outranks every preference: an unapproved candidate cannot be
+			// restored without a prompt, so it must never shadow an approved one.
+			if (left.approved !== right.approved) return left.approved ? -1 : 1;
 			if (left.snapshot.active !== right.snapshot.active) return left.snapshot.active ? -1 : 1;
 			const leftExpiry = creditExpiryMs(left.snapshot.credit) ?? Number.POSITIVE_INFINITY;
 			const rightExpiry = creditExpiryMs(right.snapshot.credit) ?? Number.POSITIVE_INFINITY;
@@ -641,16 +691,19 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		// A Fable grant is judged on the Fable cap alone: its five-hour coverage
-		// must never make ordinary 5h usage look like a salvage-worthy Fable spend.
-		const fullest = snapshot.fableLimit
-			? { limit: snapshot.fableLimit, used: resolveUsedFraction(snapshot.fableLimit) ?? 0 }
-			: fullestClaudeLimit(covered, snapshot.credit);
-		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
+		// must never make ordinary 5h usage look like a salvage-worthy Fable
+		// spend. Without a reported row there is no measured usage to restore.
+		const fullest = snapshot.fable ? snapshot.fableUsage : fullestClaudeLimit(covered, snapshot.credit);
+		if (!fullest) {
+			skip("no-fable-usage");
+			continue;
+		}
+		if (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION) {
 			skip("window-mostly-free");
 			continue;
 		}
-		const window: ClaudeResetWindow = snapshot.fableLimit ? "fable" : claudeResetWindow(fullest.limit.id);
-		const restorableWindows: ClaudeResetWindow[] = snapshot.fableLimit
+		const window: ClaudeResetWindow = snapshot.fable ? "fable" : claudeResetWindow(fullest.limit.id);
+		const restorableWindows: ClaudeResetWindow[] = snapshot.fable
 			? ["fable"]
 			: [
 					...new Set(
@@ -667,8 +720,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		}
 		if (
 			snapshot.credit.requiresLimit === true &&
-			(snapshot.fableLimit
-				? !exhausted.includes(snapshot.fableLimit.id)
+			(snapshot.fable
+				? !exhausted.includes(fullest.limit.id)
 				: serverBlockers.length === 0 && !covered.some(isExhausted))
 		) {
 			skip("no-blocked-window");
