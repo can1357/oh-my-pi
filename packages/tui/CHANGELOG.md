@@ -5,6 +5,9 @@
 ### Changed
 
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+### Added
+
+- The status line's model chip carries a warning badge naming the served model id when a host provably served different weights than the selected id, using the same classifier as the turn marker; canonicalised echoes (snapshot suffixes, gateway prefixes, checkpoint paths) stay silent ([#18670](https://github.com/can1357/oh-my-pi/pull/18670) by [@l473n79c618e](https://github.com/l473n79c618e))
 
 ## [18.18.6] - 2026-11-09
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- An OpenAI-compatible host's model echo in the stream chunk is recorded as the served model when it differs from the id the request asked for, so local `serve`/llama.cpp instances that loaded another checkpoint can be named instead of assumed ([#18670](https://github.com/can1357/oh-my-pi/pull/18670) by [@l473n79c618e](https://github.com/l473n79c618e))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
