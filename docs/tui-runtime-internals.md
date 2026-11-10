@@ -33,9 +33,7 @@ Input path:
 
 `stdin -> ProcessTerminal -> StdinBuffer -> TUI.#handleInput -> focusedComponent.handleInput`
 
-`StdinBuffer` assembles fragmented CSI/OSC/DCS/APC/SS3 sequences and bracketed paste before dispatch. `TUI.onBeforeInputCapture` is a host-owned, consumption-only preflight before input holding and component capture. Unconsumed keys are checked again on replay against current host state.
-
-Focused components may claim input with `capturesInput()` before ordinary TUI input listeners. Those listeners can consume or transform input at delivery, after any holding; transformations are not repeated. Key releases are filtered unless the focused component opts in.
+`StdinBuffer` assembles fragmented CSI/OSC/DCS/APC/SS3 sequences and bracketed paste before dispatch. TUI input listeners may consume or transform input first. Key releases are filtered unless the focused component opts in.
 
 `setFocus()` updates `Focusable.focused`; focused components emit `CURSOR_MARKER`, which the frame writer strips while recording the physical cursor target.
 

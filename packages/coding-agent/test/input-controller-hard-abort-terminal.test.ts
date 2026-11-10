@@ -38,7 +38,7 @@ describe("InputController hard-abort Ctrl+C", () => {
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
 	});
 
-	it.each([false, true])("restores the terminal before hard exit (awaiting pre-shutdown: %s)", isAwaitingShutdown => {
+	it("pops the kitty keyboard frame before exiting mid-shutdown", () => {
 		const writes: string[] = [];
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
@@ -67,16 +67,13 @@ describe("InputController hard-abort Ctrl+C", () => {
 		});
 		writes.length = 0;
 
-		const flushSync = vi.fn();
 		const ctx = {
-			isShuttingDown: !isAwaitingShutdown,
-			isAwaitingShutdown,
-			sessionManager: { flushSync },
+			isShuttingDown: true,
+			sessionManager: { flushSync: () => {} },
 		} as unknown as InteractiveModeContext;
 		expect(() => new InputController(ctx).handleCtrlC()).toThrow(ExitCalled);
 
 		expect(exitSpy).toHaveBeenCalledWith(130);
-		expect(flushSync).toHaveBeenCalledTimes(1);
 		expect(atExit).toContain("\x1b[<u");
 		expect(atExit).toContain("\x1b[?2004l");
 		expect(terminal.kittyEnableSequence).toBeNull();

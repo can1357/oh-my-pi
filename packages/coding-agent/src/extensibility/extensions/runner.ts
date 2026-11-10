@@ -193,6 +193,31 @@ const SESSION_IDENTITY_EVENTS: Record<string, true> = {
 	session_branch: true,
 };
 
+/**
+ * Cancellable pre-events. Each may veto its operation, so — like `tool_call` —
+ * each is a gate whose handlers may consult the operator: time spent in host
+ * dialogs does not count against the handler budget.
+ */
+const SESSION_BEFORE_EVENTS: Record<string, true> = {
+	session_before_switch: true,
+	session_before_branch: true,
+	session_before_compact: true,
+	session_before_tree: true,
+	session_before_shutdown: true,
+};
+
+/**
+ * Events whose `signal` releases the dispatch: on abort the emitter stops
+ * waiting, pending handler dialogs close, and late results are dropped. Other
+ * events' signals (`session_before_compact`, `session_before_tree`) are
+ * cooperative: handlers should honor them, but their operation still awaits
+ * the handlers so nothing runs alongside a handler that ignores the abort.
+ */
+const RELEASING_SIGNAL_EVENTS: Record<string, true> = {
+	session_stop: true,
+	session_before_shutdown: true,
+};
+
 interface HandlerTimeoutBudget {
 	pause(): void;
 	resume(): void;
@@ -401,20 +426,20 @@ async function raceHandlerWithTimeout<T>(
 
 /**
  * Wait for an extension's earlier deliveries until `deadline` (a
- * `performance.now()` instant). Resolves `false` when the deadline passes
- * first or the caller aborts; an already-settled `ready` wins at a past deadline.
+ * `performance.now()` instant). Resolves `false` when the deadline passes or
+ * `signal` aborts first; an already-settled `ready` wins even at a past deadline.
  */
 async function awaitDeliveryTurn(ready: Promise<void>, deadline: number, signal?: AbortSignal): Promise<boolean> {
 	if (signal?.aborted) return false;
 	const { promise: expired, resolve } = Promise.withResolvers<boolean>();
 	const timer = setTimeout(resolve, Math.max(0, deadline - performance.now()), false);
-	const onAbort = signal ? () => resolve(false) : undefined;
-	if (onAbort) signal?.addEventListener("abort", onAbort, { once: true });
+	const onAbort = () => resolve(false);
+	signal?.addEventListener("abort", onAbort, { once: true });
 	try {
 		return await Promise.race([ready.then(() => true), expired]);
 	} finally {
 		clearTimeout(timer);
-		if (onAbort) signal?.removeEventListener("abort", onAbort);
+		signal?.removeEventListener("abort", onAbort);
 	}
 }
 
@@ -462,19 +487,19 @@ type SessionBeforeEventResult =
 	| SessionBeforeSwitchResult
 	| SessionBeforeBranchResult
 	| SessionBeforeCompactResult
-	| SessionBeforeShutdownResult
-	| SessionBeforeTreeResult;
+	| SessionBeforeTreeResult
+	| SessionBeforeShutdownResult;
 
-type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_shutdown" }
-	? SessionBeforeShutdownResult | undefined
-	: TEvent extends { type: "session_before_switch" }
-		? SessionBeforeSwitchResult | undefined
-		: TEvent extends { type: "session_before_branch" }
-			? SessionBeforeBranchResult | undefined
-			: TEvent extends { type: "session_before_compact" }
-				? SessionBeforeCompactResult | undefined
-				: TEvent extends { type: "session_before_tree" }
-					? SessionBeforeTreeResult | undefined
+type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "session_before_switch" }
+	? SessionBeforeSwitchResult | undefined
+	: TEvent extends { type: "session_before_branch" }
+		? SessionBeforeBranchResult | undefined
+		: TEvent extends { type: "session_before_compact" }
+			? SessionBeforeCompactResult | undefined
+			: TEvent extends { type: "session_before_tree" }
+				? SessionBeforeTreeResult | undefined
+				: TEvent extends { type: "session_before_shutdown" }
+					? SessionBeforeShutdownResult | undefined
 					: TEvent extends { type: "session.compacting" }
 						? SessionCompactingResult | undefined
 						: TEvent extends { type: "session_stop" }
@@ -1900,13 +1925,7 @@ export class ExtensionRunner {
 	}
 
 	#isSessionBeforeEvent(event: RunnerEmitEvent): event is SessionBeforeEvent {
-		return (
-			event.type === "session_before_switch" ||
-			event.type === "session_before_branch" ||
-			event.type === "session_before_compact" ||
-			event.type === "session_before_shutdown" ||
-			event.type === "session_before_tree"
-		);
+		return SESSION_BEFORE_EVENTS[event.type] === true;
 	}
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
@@ -1920,16 +1939,16 @@ export class ExtensionRunner {
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
 	): Promise<R | undefined> {
-		// Settle events carry their own signal; tool_call receives the outer
-		// dispatch signal. Cancellation closes handler dialogs and releases dispatch
-		// even when the handler ignores the signal.
-		const eventSignal =
-			(event.type === "session_stop" || event.type === "session_before_shutdown") &&
-			"signal" in event &&
-			event.signal instanceof AbortSignal
+		// Releasing events (RELEASING_SIGNAL_EVENTS) carry their own signal;
+		// `tool_call` receives the outer dispatch signal (loop request or wrapper
+		// execute). Either way an abort while a handler awaits a human dialog
+		// cancels the dialog and settles the dispatch even when the handler
+		// ignores the signal.
+		const ownSignal =
+			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
 				: undefined;
-		const signals = [outerSignal, eventSignal].filter((s): s is AbortSignal => s !== undefined);
+		const signals = [outerSignal, ownSignal].filter((s): s is AbortSignal => s !== undefined);
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
@@ -1945,7 +1964,7 @@ export class ExtensionRunner {
 							const handlerContext = createHandlerContext(
 								ctx,
 								handlerSignal,
-								event.type === "tool_call" || event.type === "session_before_shutdown" ? budget : undefined,
+								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
 							);
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(event, handlerContext),
@@ -2036,31 +2055,27 @@ export class ExtensionRunner {
 		}
 
 		const timeoutMs = handlerTimeoutForEvent(event.type);
-		const signal = event.type === "session_before_shutdown" ? event.signal : undefined;
-		if (signal?.aborted) return undefined as RunnerEmitResult<TEvent>;
+		const signal =
+			RELEASING_SIGNAL_EVENTS[event.type] && "signal" in event && event.signal instanceof AbortSignal
+				? event.signal
+				: undefined;
 		const turns = this.#reserveDeliveryTurns(extensions, event.type, timeoutMs);
 		try {
 			for (const ext of extensions) {
 				const handlers = ext.handlers.get(event.type);
 				if (!handlers || handlers.length === 0) continue;
 				const turn = turns?.get(ext);
-				if (turn?.ready) {
-					const inOrder = await awaitDeliveryTurn(turn.ready, turn.deadline, signal);
-					if (signal?.aborted) return undefined as RunnerEmitResult<TEvent>;
-					if (!inOrder) {
-						logger.warn("Extension still handling an earlier event; delivering out of order", {
-							extensionPath: ext.path,
-							event: event.type,
-							timeoutMs,
-						});
-					}
+				if (turn?.ready && !(await awaitDeliveryTurn(turn.ready, turn.deadline, signal)) && !signal?.aborted) {
+					logger.warn("Extension still handling an earlier event; delivering out of order", {
+						extensionPath: ext.path,
+						event: event.type,
+						timeoutMs,
+					});
 				}
 				ctx ??= this.createContext();
 
 				for (const handler of handlers) {
-					if (signal?.aborted) return undefined as RunnerEmitResult<TEvent>;
 					const handlerResult = await this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs);
-					if (signal?.aborted) return undefined as RunnerEmitResult<TEvent>;
 
 					if (this.#isSessionBeforeEvent(event) && handlerResult) {
 						result = handlerResult as SessionBeforeEventResult;
@@ -2093,16 +2108,9 @@ export class ExtensionRunner {
 					}
 				}
 				turn?.release();
-				turns?.delete(ext);
 			}
 		} finally {
-			if (turns) {
-				for (const turn of turns.values()) {
-					// A pre-quit short circuit must not let later events overtake unvisited predecessors.
-					if (event.type === "session_before_shutdown" && turn.ready) void turn.ready.then(turn.release);
-					else turn.release();
-				}
-			}
+			if (turns) for (const turn of turns.values()) turn.release();
 		}
 
 		// Handlers for these events export session-scoped environment (a session

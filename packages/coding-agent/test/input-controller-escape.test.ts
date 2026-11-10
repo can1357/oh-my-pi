@@ -3,8 +3,6 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
-import { isKittyProtocolActive, type KeyId, matchesKey, setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
-import { postmortem } from "@oh-my-pi/pi-utils";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
@@ -70,7 +68,6 @@ function createContext(): {
 		addMessageToChat: Spy;
 		cancelPendingSubmission: Spy;
 		clearEditor: Spy;
-		bypassBeforeShutdown: Spy;
 		clearQueue: Spy;
 		flushSync: Spy;
 		getQueuedMessages: Spy;
@@ -258,7 +255,6 @@ function createContext(): {
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
 		shutdown: vi.fn(async () => {}),
-		bypassBeforeShutdown: vi.fn(),
 		clearEditor: vi.fn(),
 		showStatus,
 	} as unknown as InteractiveModeContext;
@@ -275,7 +271,6 @@ function createContext(): {
 			cancelPendingSubmission,
 			clearQueue,
 			clearEditor: ctx.clearEditor as Spy,
-			bypassBeforeShutdown: ctx.bypassBeforeShutdown as Spy,
 			getQueuedMessages,
 			ensureLoadingAnimation,
 			flushSync: ctx.sessionManager.flushSync as Spy,
@@ -331,106 +326,6 @@ beforeEach(async () => {
 afterEach(() => {
 	vi.restoreAllMocks();
 	resetSettingsForTest();
-});
-
-describe("InputController pending pre-shutdown input", () => {
-	function setup(keys: { exit: KeyId; clear: KeyId } = { exit: "ctrl+d", clear: "ctrl+c" }) {
-		const fixture = createContext();
-		const { ctx, inputListeners } = fixture;
-		const dialogInput = vi.fn();
-		const dialog = { render: () => [], handleInput: dialogInput };
-		ctx.ui.getFocused = () => dialog;
-		ctx.ui.hasOverlay = () => true;
-		Object.defineProperty(ctx, "isAwaitingShutdown", { value: true, configurable: true });
-		ctx.keybindings.matches = (data, action) => {
-			if (action === "app.exit") return matchesKey(data, keys.exit);
-			if (action === "app.clear") return matchesKey(data, keys.clear);
-			return false;
-		};
-		const controller = new InputController(ctx);
-		controller.setupKeyHandlers();
-		const listenerCount = inputListeners.length;
-		controller.setupKeyHandlers();
-		expect(inputListeners).toHaveLength(listenerCount);
-		return {
-			...fixture,
-			controller,
-			dialogInput,
-			dispatch(data: string) {
-				if (ctx.ui.onBeforeInputCapture?.(data)) return;
-				for (const listener of inputListeners) {
-					if (listener(data)?.consume) return;
-				}
-				ctx.ui.getFocused()?.handleInput?.(data);
-			},
-		};
-	}
-
-	it("bypasses gracefully on a further Ctrl+D while a dialog owns focus, without a tap window", () => {
-		const { ctx, dispatch, dialogInput, spies } = setup();
-		ctx.lastSigintTime = Date.now();
-		dispatch("\x04");
-		dispatch("\x04");
-		expect(spies.bypassBeforeShutdown).toHaveBeenCalledTimes(2);
-		expect(spies.shutdown).not.toHaveBeenCalled();
-		expect(dialogInput).not.toHaveBeenCalled();
-		expect(spies.flushSync).not.toHaveBeenCalled();
-	});
-
-	it("leaves dialog keys alone when no pre-shutdown hook is pending", () => {
-		const { ctx, dispatch, dialogInput, spies } = setup();
-		Object.defineProperty(ctx, "isAwaitingShutdown", { value: false });
-		dispatch("\x04");
-		dispatch("\x03");
-		expect(dialogInput.mock.calls).toEqual([["\x04"], ["\x03"]]);
-		expect(spies.bypassBeforeShutdown).not.toHaveBeenCalled();
-		expect(spies.shutdown).not.toHaveBeenCalled();
-		expect(spies.clearEditor).not.toHaveBeenCalled();
-	});
-
-	it("honors configured exit keys and ignores held quit repeat and release events", () => {
-		const previousKitty = isKittyProtocolActive();
-		setKittyProtocolActive(true);
-		try {
-			const { dispatch, dialogInput, spies } = setup({ exit: "ctrl+q", clear: "ctrl+x" });
-			dispatch("\x04");
-			dispatch("\x1b[113;5:2u");
-			dispatch("\x1b[113;5:3u");
-			expect(spies.bypassBeforeShutdown).not.toHaveBeenCalled();
-			dispatch("\x11");
-			expect(spies.bypassBeforeShutdown).toHaveBeenCalledTimes(1);
-			expect(dialogInput).toHaveBeenCalledWith("\x04");
-		} finally {
-			setKittyProtocolActive(previousKitty);
-		}
-	});
-
-	it("sync-flushes and emergency-exits on the configured clear key over a focused dialog", () => {
-		const { dispatch, dialogInput, spies } = setup({ exit: "ctrl+q", clear: "ctrl+x" });
-		const exit = vi.spyOn(postmortem, "exitProcess").mockImplementation(() => {
-			expect(spies.flushSync).toHaveBeenCalledTimes(1);
-			throw new Error("emergency exit");
-		});
-		expect(() => dispatch("\x18")).toThrow("emergency exit");
-		expect(exit).toHaveBeenCalledWith(130);
-		expect(dialogInput).not.toHaveBeenCalled();
-		expect(spies.bypassBeforeShutdown).not.toHaveBeenCalled();
-		expect(spies.shutdown).not.toHaveBeenCalled();
-	});
-
-	it("retains main-editor submissions without dispatching while a pre-shutdown hook is pending", async () => {
-		const { controller, editor, spies, dispatch, dialogInput } = setup();
-		controller.setupEditorSubmitHandler();
-		await editor.onSubmit?.("unsent draft");
-		await controller.handleFollowUp();
-		expect(editor.getText()).toBe("unsent draft");
-		expect(spies.startPendingSubmission).not.toHaveBeenCalled();
-		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(spies.onInputCallback).not.toHaveBeenCalled();
-		dispatch("dialog answer");
-		dispatch("\r");
-		expect(dialogInput.mock.calls).toEqual([["dialog answer"], ["\r"]]);
-	});
 });
 
 describe("InputController escape behavior", () => {

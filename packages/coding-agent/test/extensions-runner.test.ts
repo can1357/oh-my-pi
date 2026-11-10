@@ -2207,187 +2207,6 @@ describe("ExtensionRunner", () => {
 			expect(errors).toEqual([]);
 		});
 
-		it("preserves the before-shutdown active budget across standard and custom dialogs and fails open", async () => {
-			const extensionPath = path.join(tempDir.path(), "before-shutdown-dialogs.ts");
-			await Bun.write(
-				extensionPath,
-				`export default function(pi) {
-					pi.on("session_before_shutdown", async (_event, ctx) => {
-						ctx.ui.notify("Started");
-						await Bun.sleep(8);
-						await ctx.ui.confirm("Quit", "Allow quitting?");
-						await ctx.ui.custom(() => ({}));
-						ctx.ui.notify("Resumed");
-						await Promise.withResolvers().promise;
-					});
-					pi.on("session_before_shutdown", () => { throw new Error("shutdown guard failed"); });
-					pi.on("session_before_shutdown", (_event, ctx) => {
-						ctx.ui.notify("Continued");
-						return { cancel: false };
-					});
-				}`,
-			);
-			const loaded = await loadTestExtensions([extensionPath]);
-			const runner = new ExtensionRunner(
-				loaded.extensions,
-				loaded.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			const started = Promise.withResolvers<void>();
-			const confirmationStarted = Promise.withResolvers<void>();
-			const customStarted = Promise.withResolvers<void>();
-			const resumed = Promise.withResolvers<void>();
-			const confirmation = Promise.withResolvers<boolean>();
-			const customDialog = Promise.withResolvers<void>();
-			const messages: string[] = [];
-			const errors: ExtensionError[] = [];
-			runner.onError(error => errors.push(error));
-			let confirmationSignal: AbortSignal | undefined;
-			let customSignal: AbortSignal | undefined;
-			const notify: ExtensionUIContext["notify"] = message => {
-				messages.push(message);
-				if (message === "Started") started.resolve();
-				if (message === "Resumed") resumed.resolve();
-			};
-			const confirm: ExtensionUIContext["confirm"] = async (_title, _message, options) => {
-				confirmationSignal = options?.signal;
-				confirmationStarted.resolve();
-				return await confirmation.promise;
-			};
-			const custom: ExtensionUIContext["custom"] = async <T>(...args: Parameters<ExtensionUIContext["custom"]>) => {
-				customSignal = args[1]?.signal;
-				await args[0](undefined as never, undefined as never, undefined as never, () => {});
-				customStarted.resolve();
-				await customDialog.promise;
-				return undefined as T;
-			};
-			const uiPrototype = Object.create(runner.getUIContext(), {
-				notify: { value: notify },
-				confirm: { value: confirm },
-				custom: { value: custom },
-			});
-			initializeRunner(runner, Object.create(uiPrototype));
-			vi.useFakeTimers();
-			let now = 0;
-			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
-			try {
-				testSetExtensionHandlerTimeoutMs(25);
-				const emission = runner.emit({
-					type: "session_before_shutdown",
-					signal: new AbortController().signal,
-				});
-				await started.promise;
-				now = 8;
-				vi.advanceTimersByTime(8);
-				await confirmationStarted.promise;
-				now = 108;
-				vi.advanceTimersByTime(100);
-				expect(confirmationSignal?.aborted).toBe(false);
-				expect(errors).toEqual([]);
-
-				confirmation.resolve(true);
-				await customStarted.promise;
-				now = 208;
-				vi.advanceTimersByTime(100);
-				expect(customSignal?.aborted).toBe(false);
-				expect(errors).toEqual([]);
-
-				customDialog.resolve();
-				await resumed.promise;
-				now = 224;
-				vi.advanceTimersByTime(16);
-				expect(errors).toEqual([]);
-				expect(messages).not.toContain("Continued");
-				now = 225;
-				vi.advanceTimersByTime(1);
-				await Promise.resolve();
-				await Promise.resolve();
-				vi.advanceTimersByTime(0);
-				await expect(emission).resolves.toEqual({ cancel: false });
-				expect(messages).toContain("Continued");
-				expect(errors.map(error => ({ event: error.event, error: error.error }))).toEqual([
-					{ event: "session_before_shutdown", error: "handler timed out after 25ms" },
-					{ event: "session_before_shutdown", error: "shutdown guard failed" },
-				]);
-			} finally {
-				performanceNow.mockRestore();
-				vi.useRealTimers();
-			}
-		});
-
-		it("aborts before-shutdown dialogs and releases dispatch while ignoring late cancellation results", async () => {
-			const extensionPath = path.join(tempDir.path(), "before-shutdown-abort.ts");
-			await Bun.write(
-				extensionPath,
-				`export default function(pi) {
-					pi.on("session_before_shutdown", async (_event, ctx) => {
-						await ctx.ui.confirm("Quit", "Allow quitting?");
-						ctx.ui.notify("Late cancellation");
-						return { cancel: true };
-					});
-					pi.on("session_before_shutdown", (_event, ctx) => ctx.ui.notify("Later handler"));
-				}`,
-			);
-			const loaded = await loadTestExtensions([extensionPath]);
-			const runner = new ExtensionRunner(
-				loaded.extensions,
-				loaded.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			const confirmationStarted = Promise.withResolvers<void>();
-			const confirmation = Promise.withResolvers<boolean>();
-			const lateResult = Promise.withResolvers<void>();
-			const messages: string[] = [];
-			const errors: ExtensionError[] = [];
-			runner.onError(error => errors.push(error));
-			let dialogClosed = false;
-			let dialogSignal: AbortSignal | undefined;
-			const confirm: ExtensionUIContext["confirm"] = async (_title, _message, options) => {
-				dialogSignal = options?.signal;
-				dialogSignal?.addEventListener(
-					"abort",
-					() => {
-						dialogClosed = true;
-					},
-					{ once: true },
-				);
-				confirmationStarted.resolve();
-				// Deliberately ignore cancellation: dispatch must not depend on this promise settling.
-				return await confirmation.promise;
-			};
-			const notify: ExtensionUIContext["notify"] = message => {
-				messages.push(message);
-				if (message === "Late cancellation") lateResult.resolve();
-			};
-			const uiPrototype = Object.create(runner.getUIContext(), {
-				confirm: { value: confirm },
-				notify: { value: notify },
-			});
-			initializeRunner(runner, Object.create(uiPrototype));
-			const controller = new AbortController();
-			const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
-			await confirmationStarted.promise;
-			expect(dialogSignal?.aborted).toBe(false);
-			controller.abort();
-			await expect(emission).resolves.toBeUndefined();
-			expect(dialogClosed).toBe(true);
-			expect(messages).toEqual([]);
-			confirmation.resolve(true);
-			await lateResult.promise;
-			await expect(emission).resolves.toBeUndefined();
-			expect(messages).toEqual(["Late cancellation"]);
-			expect(errors).toEqual([]);
-
-			await expect(
-				runner.emit({ type: "session_before_shutdown", signal: controller.signal }),
-			).resolves.toBeUndefined();
-			expect(messages).toEqual(["Late cancellation"]);
-		});
-
 		it("pauses a tool_call handler timeout during standard and custom dialogs, then resumes its budget", async () => {
 			const extensionPath = path.join(tempDir.path(), "confirm-tool-call.ts");
 			fs.writeFileSync(
@@ -2568,6 +2387,107 @@ describe("ExtensionRunner", () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+
+		it("keeps a session_before_* handler's dialog answerable past the handler budget, unlike a non-gate event", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-dialog.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_switch", async (_event, ctx) => ({ cancel: await ctx.ui.confirm("Leave?", "") }));
+						pi.on("agent_end", async (_event, ctx) => {
+							await ctx.ui.confirm("Still there?", "");
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const errors: string[] = [];
+			runner.onError(error => errors.push(error.error));
+			let presented = Promise.withResolvers<AbortSignal | undefined>();
+			let answer = Promise.withResolvers<boolean>();
+			const confirm: ExtensionUIContext["confirm"] = async (_title, _message, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			// The runner proxies the UI context, so the overrides sit on its prototype.
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { confirm: { value: confirm } })));
+			vi.useFakeTimers();
+			let now = 0;
+			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			try {
+				testSetExtensionHandlerTimeoutMs(15);
+				// The operator answers well after the handler budget.
+				const gate = runner.emit({ type: "session_before_switch", reason: "new" });
+				await presented.promise;
+				now = 100;
+				vi.advanceTimersByTime(100);
+				answer.resolve(true);
+				expect(await gate).toEqual({ cancel: true });
+				expect(errors).toEqual([]);
+
+				// Real timers from here: the handler's own 15ms budget is what ends the wait.
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				presented = Promise.withResolvers();
+				answer = Promise.withResolvers();
+				const notification = runner.emit({ type: "agent_end", messages: [] });
+				const dialogSignal = await presented.promise;
+				await notification;
+				expect(errors).toHaveLength(1);
+				expect(errors[0]).toContain("timed out after 15ms");
+				expect(dialogSignal?.aborted).toBe(true);
+			} finally {
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("closes a gate handler's pending dialog and drops its late result when the event's signal aborts", async () => {
+			const extensionPath = path.join(tempDir.path(), "gate-abort.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("session_before_shutdown", async (_event, ctx) => {
+							await ctx.ui.select("Outcome", ["done"]);
+							return { cancel: true };
+						});
+					}
+				`,
+			);
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const presented = Promise.withResolvers<AbortSignal | undefined>();
+			const answer = Promise.withResolvers<string | undefined>();
+			// Ignores its signal, like a handler that never checks it.
+			const select: ExtensionUIContext["select"] = async (_title, _options, dialogOptions) => {
+				presented.resolve(dialogOptions?.signal);
+				return answer.promise;
+			};
+			initializeRunner(runner, Object.create(Object.create(runner.getUIContext(), { select: { value: select } })));
+			const controller = new AbortController();
+			const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+			const dialogSignal = await presented.promise;
+			controller.abort();
+			expect(await emission).toBeUndefined();
+			expect(dialogSignal?.aborted).toBe(true);
+			answer.resolve("done");
 		});
 
 		it("cancels a pending confirmation and blocks tool execution when the outer dispatch aborts (#4223)", async () => {
@@ -4471,117 +4391,6 @@ describe("ExtensionRunner", () => {
 			expect(seen).toEqual(["slow:start", "observer:start", "observer:end"]);
 		});
 
-		it("cancels a queued pre-quit event without losing earlier delivery ordering", async () => {
-			const entered = Promise.withResolvers<void>();
-			const release = Promise.withResolvers<void>();
-			const seen: string[] = [];
-			const extension = inlineExtension("queued-prequit", {
-				tool_execution_start: async () => {
-					seen.push("start");
-					entered.resolve();
-					await release.promise;
-					seen.push("start:done");
-				},
-				session_before_shutdown: () => seen.push("prequit"),
-				tool_execution_end: () => seen.push("end"),
-			});
-			const runner = new ExtensionRunner(
-				[extension],
-				new ExtensionRuntime(),
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			const start = runner.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: {} });
-			await entered.promise;
-			const controller = new AbortController();
-			let quitSettled = false;
-			const quitting = runner.emit({ type: "session_before_shutdown", signal: controller.signal }).then(result => {
-				quitSettled = true;
-				return result;
-			});
-			const pending: Promise<unknown>[] = [start, quitting];
-			const nextTurn = async () => {
-				const turn = Promise.withResolvers<void>();
-				setImmediate(turn.resolve);
-				await turn.promise;
-			};
-			try {
-				controller.abort();
-				await nextTurn();
-				expect(quitSettled).toBe(true);
-				expect(await quitting).toBeUndefined();
-				const end = runner.emit({
-					type: "tool_execution_end",
-					toolCallId: "call-1",
-					toolName: "read",
-					result: {},
-					isError: false,
-				});
-				pending.push(end);
-				await nextTurn();
-				expect(seen).toEqual(["start"]);
-				release.resolve();
-				await Promise.all(pending);
-				expect(seen).toEqual(["start", "start:done", "end"]);
-			} finally {
-				release.resolve();
-				await Promise.all(pending);
-			}
-		});
-
-		it("keeps later extensions ordered when an earlier extension cancels quitting", async () => {
-			const entered = Promise.withResolvers<void>();
-			const release = Promise.withResolvers<void>();
-			const seen: string[] = [];
-			const canceller = inlineExtension("cancel-prequit", {
-				session_before_shutdown: () => ({ cancel: true }),
-			});
-			const observer = inlineExtension("pending-observer", {
-				tool_execution_start: async () => {
-					seen.push("start");
-					entered.resolve();
-					await release.promise;
-					seen.push("start:done");
-				},
-				session_before_shutdown: () => seen.push("prequit"),
-				tool_execution_end: () => seen.push("end"),
-			});
-			const runner = new ExtensionRunner(
-				[canceller, observer],
-				new ExtensionRuntime(),
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			const start = runner.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: {} });
-			await entered.promise;
-			const pending: Promise<unknown>[] = [start];
-			try {
-				expect(
-					await runner.emit({ type: "session_before_shutdown", signal: new AbortController().signal }),
-				).toEqual({ cancel: true });
-				const end = runner.emit({
-					type: "tool_execution_end",
-					toolCallId: "call-1",
-					toolName: "read",
-					result: {},
-					isError: false,
-				});
-				pending.push(end);
-				const turn = Promise.withResolvers<void>();
-				setImmediate(turn.resolve);
-				await turn.promise;
-				expect(seen).toEqual(["start"]);
-				release.resolve();
-				await Promise.all(pending);
-				expect(seen).toEqual(["start", "start:done", "end"]);
-			} finally {
-				release.resolve();
-				await Promise.all(pending);
-			}
-		});
-
 		it("delivers an event emitted inside a handler at once instead of queueing it behind that handler", async () => {
 			// Queued behind its own emitter the inner emit would wait out this budget.
 			testSetExtensionHandlerTimeoutMs(1_000);
@@ -4668,6 +4477,37 @@ describe("ExtensionRunner", () => {
 			} finally {
 				stall.resolve();
 				testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+			}
+		});
+
+		it("stops waiting behind an extension's earlier event when the queued event's signal aborts", async () => {
+			const stall = Promise.withResolvers<void>();
+			try {
+				let asked = 0;
+				const busy = inlineExtension("busy", {
+					agent_end: () => stall.promise,
+					session_before_shutdown: () => {
+						asked++;
+					},
+				});
+				const runner = new ExtensionRunner(
+					[busy],
+					new ExtensionRuntime(),
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+				void runner.emit({ type: "agent_end", messages: [] });
+				const controller = new AbortController();
+				const startedAt = performance.now();
+				const emission = runner.emit({ type: "session_before_shutdown", signal: controller.signal });
+				controller.abort();
+				expect(await emission).toBeUndefined();
+				// The default budget would hold the event for 30 seconds behind agent_end.
+				expect(performance.now() - startedAt).toBeLessThan(1_000);
+				expect(asked).toBe(0);
+			} finally {
+				stall.resolve();
 			}
 		});
 	});

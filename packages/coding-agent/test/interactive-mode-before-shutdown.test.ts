@@ -110,7 +110,7 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		resetSettingsForTest();
 	});
 
-	it("keeps the session alive for a metadata prompt and records the answer before shutdown notification", async () => {
+	it("keeps the session open for an operator prompt and records the answer before the shutdown notification", async () => {
 		const entered = Promise.withResolvers<void>();
 		beforeShutdown = async (_event, ctx) => {
 			const answer = ctx.ui.input("Session outcome");
@@ -120,8 +120,6 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		};
 		const quitting = mode.shutdown();
 		await entered.promise;
-		expect(mode.isAwaitingShutdown).toBe(true);
-		expect(mode.isShuttingDown).toBe(false);
 		expect(session.isDisposed).toBe(false);
 		expect(shutdownEvents).toBe(0);
 		expect(postmortem.quit).not.toHaveBeenCalled();
@@ -136,11 +134,32 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
-	it("cancels before disposal and permits a later quit attempt", async () => {
+	it("leaves the prompt's keys to the prompt: Ctrl+D edits its text instead of skipping it", async () => {
+		new InputController(mode).setupKeyHandlers();
+		const entered = Promise.withResolvers<void>();
+		let answer: string | undefined;
+		beforeShutdown = async (_event, ctx) => {
+			const pending = ctx.ui.input("Session outcome");
+			entered.resolve();
+			answer = await pending;
+		};
+		const quitting = mode.shutdown();
+		await entered.promise;
+		for (const key of ["a", "b", "\x1b[D", "\x04"]) mode.ui.injectDebugInput(key);
+		expect(session.isDisposed).toBe(false);
+		mode.ui.injectDebugInput("\r");
+		await quitting;
+		expect(answer).toBe("a");
+		expect(laterHandlers).toBe(1);
+		expect(session.isDisposed).toBe(true);
+		expect(shutdownEvents).toBe(1);
+		expect(postmortem.quit).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels before anything is stopped and asks again on the next quit", async () => {
 		beforeShutdown = () => (attempts === 1 ? { cancel: true } : undefined);
 		await mode.shutdown();
 		expect(session.isDisposed).toBe(false);
-		expect(mode.isAwaitingShutdown).toBe(false);
 		expect(mode.isShuttingDown).toBe(false);
 		expect(laterHandlers).toBe(0);
 		expect(shutdownEvents).toBe(0);
@@ -153,78 +172,10 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not duplicate or bypass an in-flight quit on overlapping shutdown calls", async () => {
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		beforeShutdown = async () => {
-			entered.resolve();
-			await release.promise;
-		};
-		const quitting = mode.shutdown();
-		await entered.promise;
-		await mode.shutdown();
-		expect(attempts).toBe(1);
-		expect(session.isDisposed).toBe(false);
-		expect(postmortem.quit).not.toHaveBeenCalled();
-		release.resolve();
-		await quitting;
-		expect(shutdownEvents).toBe(1);
-		expect(postmortem.quit).toHaveBeenCalledTimes(1);
-	});
-
-	it.each(["bypass", "emergency exit"] as const)(
-		"allows %s before a focused custom component can capture the key",
-		async action => {
-			new InputController(mode).setupKeyHandlers();
-			const presented = Promise.withResolvers<void>();
-			const captured: string[] = [];
-			let disposed = 0;
-			const component = {
-				render: () => ["Custom exit prompt"],
-				capturesInput: () => true,
-				handleInput: (data: string) => captured.push(data),
-				dispose: () => {
-					disposed++;
-				},
-			};
-			beforeShutdown = async (_event, ctx) => {
-				await ctx.ui.custom(() => {
-					presented.resolve();
-					return component;
-				});
-			};
-			const quitting = mode.shutdown();
-			await presented.promise;
-			await Promise.resolve();
-			await Promise.resolve();
-			expect(mode.ui.getFocused()).toBe(component);
-			mode.ui.injectDebugInput("x");
-			expect(captured).toEqual(["x"]);
-
-			if (action === "bypass") {
-				mode.ui.injectDebugInput("\x04");
-				expect(captured).toEqual(["x"]);
-				await quitting;
-				expect(session.isDisposed).toBe(true);
-				expect(shutdownEvents).toBe(1);
-				expect(postmortem.quit).toHaveBeenCalledTimes(1);
-			} else {
-				const exit = vi.spyOn(postmortem, "exitProcess").mockImplementation(() => {
-					throw new Error("emergency exit");
-				});
-				expect(() => mode.ui.injectDebugInput("\x03")).toThrow("emergency exit");
-				expect(exit).toHaveBeenCalledWith(130);
-				expect(captured).toEqual(["x"]);
-				mode.stop();
-				await quitting;
-				expect(shutdownEvents).toBe(0);
-				expect(postmortem.quit).not.toHaveBeenCalled();
-			}
-			expect(disposed).toBe(1);
-		},
-	);
-
-	it("bypasses an uncooperative handler on further Ctrl+D and still performs normal teardown", async () => {
+	it.each([
+		["a further Ctrl+D", (m: InteractiveMode): void => m.handleCtrlD()],
+		["a fatal close", (m: InteractiveMode): void => void m.shutdown({ cancellable: false })],
+	] as const)("skips a pending prompt on %s, ignores its late cancel, and tears down once", async (_name, request) => {
 		const entered = Promise.withResolvers<AbortSignal>();
 		const late = Promise.withResolvers<SessionBeforeShutdownResult>();
 		beforeShutdown = async event => {
@@ -233,29 +184,9 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		};
 		const quitting = mode.shutdown();
 		const signal = await entered.promise;
-		mode.handleCtrlD();
+		request(mode);
 		await quitting;
 		expect(signal.aborted).toBe(true);
-		expect(laterHandlers).toBe(0);
-		expect(session.isDisposed).toBe(true);
-		expect(shutdownEvents).toBe(1);
-		expect(postmortem.quit).toHaveBeenCalledTimes(1);
-		late.resolve({ cancel: true });
-	});
-
-	it("lets fatal shutdown supersede a pending gate and ignore its late cancellation", async () => {
-		const entered = Promise.withResolvers<AbortSignal>();
-		const late = Promise.withResolvers<SessionBeforeShutdownResult>();
-		beforeShutdown = async event => {
-			entered.resolve(event.signal);
-			return late.promise;
-		};
-		const quitting = mode.shutdown();
-		const signal = await entered.promise;
-		await mode.shutdown({ skipBeforeShutdown: true });
-		expect(signal.aborted).toBe(true);
-		await mode.shutdown({ skipBeforeShutdown: true });
-		await quitting;
 		expect(attempts).toBe(1);
 		expect(laterHandlers).toBe(0);
 		expect(session.isDisposed).toBe(true);
@@ -265,7 +196,14 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not prompt for extension-requested shutdown", async () => {
+	it("never asks before a forced close", async () => {
+		await mode.shutdown({ cancellable: false });
+		expect(attempts).toBe(0);
+		expect(session.isDisposed).toBe(true);
+		expect(shutdownEvents).toBe(1);
+	});
+
+	it("does not ask before an extension-requested shutdown", async () => {
 		mode.requestShutdown();
 		await quitCalled.promise;
 		expect(attempts).toBe(0);
@@ -273,7 +211,7 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(shutdownEvents).toBe(1);
 	});
 
-	it("retains an independent extension shutdown after cancellation and waits for the settled boundary", async () => {
+	it("keeps an extension shutdown requested during the prompt after the operator cancels", async () => {
 		const entered = Promise.withResolvers<ExtensionContext>();
 		const answer = Promise.withResolvers<SessionBeforeShutdownResult>();
 		const waiting = Promise.withResolvers<void>();
@@ -290,7 +228,6 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		const ctx = await entered.promise;
 		ctx.shutdown();
 		expect(session.isDisposed).toBe(false);
-		expect(mode.isAwaitingShutdown).toBe(true);
 		answer.resolve({ cancel: true });
 		await quitting;
 		expect(mode.shutdownRequested).toBe(true);
@@ -300,7 +237,6 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		idle.resolve();
 		await quitCalled.promise;
 		expect(attempts).toBe(1);
-		expect(laterHandlers).toBe(0);
 		expect(session.isDisposed).toBe(true);
 		expect(shutdownEvents).toBe(1);
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);

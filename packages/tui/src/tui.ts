@@ -320,9 +320,8 @@ export interface Component {
 	nativeTrailers?(): readonly Component[];
 
 	/**
-	 * Pure preflight for focused input that precedes ordinary TUI-wide listeners
-	 * and debug shortcuts. The host input preflight retains priority.
-	 * A true result routes the event to this component first.
+	 * Pure preflight for focused input that must precede TUI-wide input listeners
+	 * and debug shortcuts. A true result routes the event to this component first.
 	 */
 	capturesInput?(data: string): boolean;
 
@@ -957,11 +956,6 @@ export class TUI extends Container {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
-	/**
-	 * Host escape preflight before holding and component capture, including replay.
-	 * Return true only when input is consumed; unhandled input may be checked again.
-	 */
-	onBeforeInputCapture?: (data: string) => boolean;
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
@@ -3046,8 +3040,6 @@ export class TUI extends Container {
 		// cadence, not the ceiling. Input that triggers no render leaves the latch for the next frame
 		// to consume at the 30 fps floor once; harmless.
 		this.#inputRenderPending = true;
-		// Recheck host escape handling on replay: an earlier key may have opened a quit gate.
-		if (this.onBeforeInputCapture?.(data)) return;
 
 		if (
 			this.#heldInput !== undefined &&

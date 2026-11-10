@@ -59,7 +59,6 @@
 
 ### Added
 
-- Hosts can reserve critical escape keys ahead of input holding and focused-component capture using `TUI.onBeforeInputCapture` ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks)).
 - Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
 - Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
 

@@ -101,10 +101,10 @@ export interface SessionCompactEvent {
 	fromExtension: boolean;
 }
 
-/** Fired before an operator quits the main interactive session (can be cancelled). */
+/** Fired before the operator ends the session through a close the host can still refuse (can be cancelled). */
 export interface SessionBeforeShutdownEvent {
 	type: "session_before_shutdown";
-	/** Aborted when the pending quit is bypassed, disposed by a signal, or its UI stops. */
+	/** Aborted when the close stops waiting: another close request, a signal, or the UI stopping. */
 	signal: AbortSignal;
 }
 
