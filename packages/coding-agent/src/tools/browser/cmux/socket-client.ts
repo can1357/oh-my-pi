@@ -12,6 +12,7 @@ type RequestJob = {
 	method: string;
 	params: Record<string, unknown>;
 	timeoutMs: number;
+	signal?: AbortSignal;
 	resolve: (value: Record<string, unknown>) => void;
 	reject: (error: unknown) => void;
 };
@@ -110,21 +111,34 @@ export class CmuxSocketClient {
 	async request(
 		method: string,
 		params: Record<string, unknown>,
-		opts?: { timeoutMs?: number },
+		opts?: { timeoutMs?: number; signal?: AbortSignal },
 	): Promise<Record<string, unknown>> {
 		if (this.#disposed) {
 			throw new ToolError("cmux socket closed");
 		}
+		opts?.signal?.throwIfAborted();
 		const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
-		this.#queue.push({
+		const job: RequestJob = {
 			method,
 			params,
 			timeoutMs: opts?.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+			signal: opts?.signal,
 			resolve,
 			reject,
-		});
+		};
+		const onAbort = () => {
+			const index = this.#queue.indexOf(job);
+			if (index >= 0) this.#queue.splice(index, 1);
+			reject(opts?.signal?.reason);
+		};
+		opts?.signal?.addEventListener("abort", onAbort, { once: true });
+		this.#queue.push(job);
 		this.#pump();
-		return await promise;
+		try {
+			return await promise;
+		} finally {
+			opts?.signal?.removeEventListener("abort", onAbort);
+		}
 	}
 
 	close(): void {
@@ -302,6 +316,7 @@ export class CmuxSocketClient {
 				this.#activeJob = job;
 				try {
 					await this.connect();
+					job.signal?.throwIfAborted();
 					const request = JSON.stringify({ id: randomUUID(), method: job.method, params: job.params });
 					const line = await this.#sendLine(request, job.timeoutMs);
 					job.resolve(this.#parseResponse(line));

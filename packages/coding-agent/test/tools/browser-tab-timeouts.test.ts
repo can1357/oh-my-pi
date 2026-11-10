@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
+import { BROWSER_PROTOCOL_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { resolveOpTimeouts, resolveWaitTimeout } from "@oh-my-pi/pi-coding-agent/tools/browser/op-timeouts";
 import { dispatchScroll, normalizeSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-scope";
+import { Connection, type ConnectionTransport } from "puppeteer-core";
 
 // Regression coverage for the "weird timeouts" failure mode: interactive `tab.*` helpers
 // used to run with the full cell budget as their internal puppeteer timeout, so a stalled
@@ -10,6 +12,32 @@ import { resolvePredicateTimeout } from "@oh-my-pi/pi-coding-agent/tools/run-sco
 // error. The contracts below pin the fail-fast bounds.
 
 describe("browser per-op fail-fast ceilings", () => {
+	it("keeps an evaluation's CDP request pending beyond 60 seconds within the inherited budget", async () => {
+		vi.useFakeTimers();
+		const sent: string[] = [];
+		const transport: ConnectionTransport = {
+			send: message => {
+				sent.push(message);
+			},
+			close: () => {},
+		};
+		const connection = new Connection("", transport, 0, BROWSER_PROTOCOL_TIMEOUT_MS);
+		try {
+			const pending = connection.send("Runtime.evaluate", { expression: "42", awaitPromise: true });
+			const outcome = pending.then(
+				value => ({ value }),
+				error => ({ error }),
+			);
+			vi.advanceTimersByTime(90_000);
+			const request = JSON.parse(sent[0]!);
+			transport.onmessage?.(JSON.stringify({ id: request.id, result: { result: { type: "number", value: 42 } } }));
+			expect(await outcome).toEqual({ value: { result: { type: "number", value: 42 } } });
+		} finally {
+			connection.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps every per-op deadline strictly under the cell budget so a stall leaves recovery room", () => {
 		for (const cell of [5_000, 30_000, 120_000]) {
 			const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(cell);

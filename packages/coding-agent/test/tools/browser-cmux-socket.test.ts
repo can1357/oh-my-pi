@@ -95,6 +95,46 @@ afterEach(() => {
 });
 
 describe("CmuxSocketClient", () => {
+	it("drops a mutating helper queued behind another request when its run aborts", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		const methods: unknown[] = [];
+		await withSocketServer(
+			(line, socket) => {
+				const request = JSON.parse(line) as RequestLine;
+				methods.push(request.method);
+				if (request.method === "blocking") received.resolve(socket);
+				else socket.write(`${JSON.stringify({ ok: true, result: {} })}\n`);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "queued" });
+				try {
+					const blocking = client.request("blocking", {});
+					const socket = await received.promise;
+					const controller = new AbortController();
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: controller.signal,
+						timeoutMs: 40_000,
+						deadline: Number.POSITIVE_INFINITY,
+					});
+					const cancelled = tab.goto("https://late.example").catch(error => error);
+					controller.abort(new Error("run aborted"));
+					expect(String(await cancelled)).toContain("run aborted");
+					socket.write(`${JSON.stringify({ ok: true, result: {} })}\n`);
+					await blocking;
+					await client.request("sentinel", {});
+					expect(methods).toEqual(["blocking", "sentinel"]);
+				} finally {
+					tab.clearRunContext();
+					client.close();
+				}
+			},
+		);
+	});
+
 	it("lets an evaluate RPC finish beyond the socket default within the active run budget", async () => {
 		const received = Promise.withResolvers<net.Socket>();
 		await withSocketServer(
@@ -160,9 +200,11 @@ describe("CmuxSocketClient", () => {
 					vi.advanceTimersByTime(35_000);
 					now.mockReturnValue(35_000);
 					let error: unknown;
-					const pending = tab.evaluate(() => 42).catch(cause => {
-						error = cause;
-					});
+					const pending = tab
+						.evaluate(() => 42)
+						.catch(cause => {
+							error = cause;
+						});
 					await received.promise;
 					vi.advanceTimersByTime(4_999);
 					await Promise.resolve();
