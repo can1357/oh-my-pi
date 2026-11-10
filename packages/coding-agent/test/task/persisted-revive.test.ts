@@ -13,7 +13,7 @@ import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capabili
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import { A2aAgentBridge, spawnA2aAgent } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
 import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { A2A_ARTIFACT_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -1860,8 +1860,14 @@ describe("persisted subagent revival", () => {
 				url: `http://127.0.0.1:${server.port}/`,
 			});
 			const busSend = vi.spyOn(IrcBus.global(), "send");
-			const note = (messageId: string) =>
-				IncomingRequests.global().note({ to: ref.id, from: "peer", messageId, at: Date.now() });
+			const note = (messageId: string, fromUrl?: string) =>
+				IncomingRequests.global().note({
+					to: ref.id,
+					from: "peer",
+					messageId,
+					at: Date.now(),
+					...(fromUrl !== undefined ? { fromUrl } : {}),
+				});
 			const finish = async (
 				records: CustomMessage[],
 				stop: LastAssistantStop = { stopReason: "stop", content: [{ type: "text", text: "answer" }] },
@@ -2016,6 +2022,84 @@ describe("persisted subagent revival", () => {
 				expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
 					"req-1",
 				]);
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("refuses an ambiguous sender through the subagent relay and keeps it manually answerable", async () => {
+			const h = await externalHarness();
+			try {
+				// A second registration advertises the same skill id from a
+				// different endpoint, and the request carries no fromUrl to
+				// disambiguate: the executor relay must refuse to pick one.
+				h.handle.session.a2aBridge.add({
+					name: "a2a:peer",
+					skillId: "peer",
+					description: "peer twin",
+					cardName: "peer",
+					url: "http://127.0.0.1:1/",
+				});
+				await h.note("req-amb");
+				await h.finish([externalRecord("req-amb")]);
+				await settleA2aReplies();
+				expect(h.calls).toEqual([]);
+				expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
+					"req-amb",
+				]);
+				// The manual escape hatch still works: a deliberately selected
+				// runtime agent (the reachable server registration, whose base
+				// name the twin's suffixing left untouched) closes it once.
+				const lease = await IncomingRequests.global().consume({
+					to: h.ref.id,
+					from: "peer",
+					messageId: "req-amb",
+				});
+				expect(lease?.request.messageId).toBe("req-amb");
+				const manualTarget = h.handle.session.a2aBridge.get("a2a:peer")!;
+				expect(manualTarget.url).toBe(`http://127.0.0.1:${h.server.port}/`);
+				const outcome = await spawnA2aAgent({
+					agent: manualTarget,
+					prompt: "manual twin answer",
+					inReplyTo: "req-amb",
+				});
+				expect(outcome.exitCode).toBe(0);
+				expect(h.calls).toHaveLength(1);
+				expect(h.calls[0]).toMatchObject({
+					params: { metadata: { inReplyTo: "req-amb" }, message: { parts: [{ text: "manual twin answer" }] } },
+				});
+				await IncomingRequests.global().confirm(lease!.leaseId);
+				expect(await IncomingRequests.global().list(h.ref.id)).toEqual([]);
+				await settleA2aReplies();
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
+		it("never contacts an unmatched sender URL through the default transport", async () => {
+			const h = await externalHarness();
+			try {
+				// The executor relay uses the real spawnA2aAgent (no send seam):
+				// a request whose fromUrl matches no registered endpoint must
+				// produce no network call at all — the URL is bookkeeping, never
+				// a destination.
+				const fetches: string[] = [];
+				const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((async (input: unknown) => {
+					fetches.push(String(input));
+					throw new Error("network must not be used");
+				}) as unknown as typeof fetch);
+				try {
+					await h.note("req-unmatched", "http://127.0.0.1:7603/");
+					await h.finish([externalRecord("req-unmatched")]);
+					await settleA2aReplies();
+					expect(h.calls).toEqual([]);
+					expect(fetches).toEqual([]);
+					expect((await IncomingRequests.global().list(h.ref.id)).map(request => request.messageId)).toEqual([
+						"req-unmatched",
+					]);
+				} finally {
+					fetchSpy.mockRestore();
+				}
 			} finally {
 				h.server.stop(true);
 			}

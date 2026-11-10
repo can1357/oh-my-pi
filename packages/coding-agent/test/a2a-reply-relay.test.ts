@@ -4,7 +4,7 @@
  * holds a lease: it is confirmed only on a successful send and released on
  * failure, so a failed attempt leaves the request open for a manual reply.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	A2aAgentBridge,
@@ -18,6 +18,7 @@ import {
 	sendA2aReply,
 } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
 import { TASK_STATE } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 
 const relays: A2aReplyRelayHandle[] = [];
@@ -36,14 +37,30 @@ function assistant(text: string, timestamp: number, stopReason = "stop"): AgentM
 	} as unknown as AgentMessage;
 }
 
-function peer(bridge: A2aAgentBridge, skillId: string): void {
+function peer(bridge: A2aAgentBridge, skillId: string, url = "http://127.0.0.1:1/"): void {
 	bridge.add({
 		name: `a2a:${skillId}`,
 		description: "peer terminal",
-		url: "http://127.0.0.1:1/",
+		url,
 		cardName: skillId,
 		skillId,
 	});
+}
+
+/** Two terminals advertising the same skill id: distinct runtime names and URLs. */
+function peerEndpoints(bridge: A2aAgentBridge, skillId: string, urls: string[]): string[] {
+	const names: string[] = [];
+	for (const url of urls) {
+		const added = bridge.add({
+			name: `a2a:${skillId}`,
+			description: "peer terminal",
+			url,
+			cardName: skillId,
+			skillId,
+		});
+		names.push(added.name);
+	}
+	return names;
 }
 
 function harness(options: { rescan?: (bridge: A2aAgentBridge) => void } = {}) {
@@ -128,6 +145,79 @@ describe("sendA2aReply", () => {
 		});
 		// The successful send confirmed the lease: the request is gone.
 		expect(await IncomingRequests.global().list("Scout")).toEqual([]);
+	});
+
+	it("fromUrl selects the originating endpoint among equal skill ids", async () => {
+		const bridge = new A2aAgentBridge();
+		const names = peerEndpoints(bridge, "builder", ["http://127.0.0.1:7601/", "http://127.0.0.1:7602/"]);
+		expect(names).toEqual(["a2a:builder", "a2a:builder-2"]);
+		const sent: SpawnA2aAgentOptions[] = [];
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-url",
+			to: "Scout",
+			at: 100,
+			fromUrl: "http://127.0.0.1:7602/",
+		});
+		const lease = await IncomingRequests.global().consume({ to: "Scout", messageId: "req-url" });
+		const delivered = await sendA2aReply({
+			bridge,
+			lease: lease!,
+			answer: "endpoint-pinned answer",
+			identity: async () => ({ name: "reviewer" }),
+			rescan: async () => {},
+			send: async options => {
+				sent.push(options);
+				return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
+			},
+		});
+
+		expect(delivered).toBe(true);
+		expect(sent).toHaveLength(1);
+		// Only endpoint B (the registered `a2a:builder-2` entry), never the
+		// first-match `a2a:builder`, and its original inReplyTo correlation.
+		expect(sent[0]).toMatchObject({
+			agent: { name: "a2a:builder-2", skillId: "builder", url: "http://127.0.0.1:7602/" },
+			prompt: "endpoint-pinned answer",
+			inReplyTo: "req-url",
+		});
+		expect(await IncomingRequests.global().list("Scout")).toEqual([]);
+	});
+
+	it("matches the URL by normal serialization, not hostname alias or path-less forms", async () => {
+		const bridge = new A2aAgentBridge();
+		peerEndpoints(bridge, "builder", ["http://127.0.0.1:7601/", "http://127.0.0.1:7602/"]);
+		const sent: SpawnA2aAgentOptions[] = [];
+		const attempt = async (messageId: string, fromUrl: string): Promise<boolean> => {
+			await IncomingRequests.global().note({
+				from: "builder",
+				messageId,
+				to: "Scout",
+				at: 100,
+				fromUrl,
+			});
+			const lease = await IncomingRequests.global().consume({ to: "Scout", messageId });
+			return sendA2aReply({
+				bridge,
+				lease: lease!,
+				answer: "answer",
+				identity: async () => ({ name: "reviewer" }),
+				rescan: async () => {},
+				send: async options => {
+					sent.push(options);
+					return { exitCode: 0, output: "delivered", state: TASK_STATE.WORKING };
+				},
+			});
+		};
+
+		// `localhost` is not `127.0.0.1` (no hostname-alias equivalence) and a
+		// missing trailing `/` normalizes onto the registered endpoint.
+		expect(await attempt("req-alias", "http://localhost:7602/")).toBe(false);
+		expect(await attempt("req-slashless", "http://127.0.0.1:7602")).toBe(true);
+		expect(sent).toHaveLength(1);
+		expect(sent[0]?.agent.url).toBe("http://127.0.0.1:7602/");
+		// The refused alias released its lease: that request stays open.
+		expect((await IncomingRequests.global().list("Scout")).map(request => request.messageId)).toEqual(["req-alias"]);
 	});
 
 	it("does not send when a rescan cannot find the originating peer", async () => {
@@ -298,6 +388,52 @@ describe("A2A reply relay", () => {
 		end([assistant("unrelated follow-up", 200)]);
 		await handle.settled();
 		expect(sent).toHaveLength(1);
+	});
+
+	it("ambiguous sender remains open for a manual reply", async () => {
+		const { bridge, sent, end, handle } = harness();
+		peerEndpoints(bridge, "builder", ["http://127.0.0.1:7601/", "http://127.0.0.1:7602/"]);
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-amb",
+			to: "Main",
+			at: 100,
+		});
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		// No URL: two candidates advertise the skill id, so nothing is sent...
+		end([assistant("ambiguous answer", 110)]);
+		await handle.settled();
+		expect(sent).toEqual([]);
+		// ...both candidate URLs appear in one structured warning...
+		const ambiguity = warn.mock.calls.filter(([message]) => message.includes("ambiguous"));
+		expect(ambiguity).toHaveLength(1);
+		const metadata = ambiguity[0]?.[1] as { candidates?: Array<{ name?: string; url?: string }> };
+		expect((metadata.candidates ?? []).map(candidate => candidate.url).sort()).toEqual([
+			"http://127.0.0.1:7601/",
+			"http://127.0.0.1:7602/",
+		]);
+		expect(JSON.stringify(warn.mock.calls)).not.toContain("ambiguous answer");
+		// ...and the original request is still open for a manual reply.
+		expect((await IncomingRequests.global().list("Main")).map(request => request.messageId)).toEqual(["req-amb"]);
+
+		// A later human turn is not a retry: still zero sends.
+		end([assistant("unrelated follow-up", 200)]);
+		await handle.settled();
+		expect(sent).toEqual([]);
+		expect(warn.mock.calls.filter(([message]) => message.includes("ambiguous"))).toHaveLength(1);
+
+		// Manual escape hatch: the human (or model) claims the request and
+		// addresses a deliberately selected runtime agent by its full
+		// `a2a:<name>` name — here `a2a:builder-2`, the twin endpoint —
+		// which the shared automatic selection never chooses on its own.
+		// Confirming that manual send closes the request exactly once.
+		const lease = await IncomingRequests.global().consume({ to: "Main", messageId: "req-amb" });
+		expect(lease?.request.messageId).toBe("req-amb");
+		expect(bridge.get("a2a:builder-2")?.url).toBe("http://127.0.0.1:7602/");
+		await IncomingRequests.global().confirm(lease!.leaseId);
+		expect(await IncomingRequests.global().list("Main")).toEqual([]);
+		expect(await IncomingRequests.global().consume({ to: "Main" })).toBeUndefined();
 	});
 
 	it("settled waits for selection and detached transport while terminal finalization stays nonblocking", async () => {
@@ -485,6 +621,105 @@ describe("A2A reply relay", () => {
 		expect(sent).toHaveLength(1);
 		expect(sent[0]?.agent.skillId).toBe("late-terminal");
 		expect(sent[0]?.inReplyTo).toBe("req-9");
+	});
+
+	it("unmatched URL never selects a different endpoint", async () => {
+		// URL C matches neither candidate: zero sends after the one rescan,
+		// no selection fallback, and the request stays open.
+		let rescans = 0;
+		const { sent, end, handle } = harness({
+			rescan: bridge => {
+				rescans++;
+				peer(bridge, "builder", "http://127.0.0.1:7601/");
+				peer(bridge, "builder", "http://127.0.0.1:7602/");
+			},
+		});
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-c",
+			to: "Main",
+			at: 100,
+			fromUrl: "http://127.0.0.1:7603/",
+		});
+
+		end([assistant("wrong endpoint answer", 110)]);
+		await handle.settled();
+
+		expect(sent).toEqual([]);
+		expect(rescans).toBe(1);
+		expect((await IncomingRequests.global().list("Main")).map(request => request.messageId)).toEqual(["req-c"]);
+
+		// A later human turn is not a retry.
+		end([assistant("later human text", 200)]);
+		await handle.settled();
+		expect(sent).toEqual([]);
+		expect(rescans).toBe(1);
+	});
+
+	it("a single wrong-endpoint candidate never receives the unmatched URL's reply", async () => {
+		// Only one registration advertises the skill id, but its URL is not the
+		// sender's: still no send, no fallback, request open.
+		const { bridge, sent, end, handle } = harness();
+		peer(bridge, "builder", "http://127.0.0.1:7601/");
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-solo",
+			to: "Main",
+			at: 100,
+			fromUrl: "http://127.0.0.1:7603/",
+		});
+
+		end([assistant("solo wrong endpoint answer", 110)]);
+		await handle.settled();
+
+		expect(sent).toEqual([]);
+		expect((await IncomingRequests.global().list("Main")).map(request => request.messageId)).toEqual(["req-solo"]);
+	});
+
+	it("a single legacy no-URL request still resolves to its only registered candidate", async () => {
+		// Legacy senders carry no fromUrl: with exactly one candidate the
+		// automatic reply keeps working.
+		const { bridge, sent, end, nextDelivery } = harness();
+		peer(bridge, "builder", "http://127.0.0.1:7601/");
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-legacy",
+			to: "Main",
+			at: 100,
+		});
+
+		end([assistant("legacy answer", 110)]);
+		await nextDelivery();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({
+			agent: { name: "a2a:builder", url: "http://127.0.0.1:7601/" },
+			inReplyTo: "req-legacy",
+		});
+	});
+
+	it("a newly discovered URL-matching peer is selected after the rescan", async () => {
+		// The URL-named endpoint is absent until the rescan registers it.
+		const { bridge, sent, end, nextDelivery } = harness({
+			rescan: bridge => peer(bridge, "builder", "http://127.0.0.1:7602/"),
+		});
+		peer(bridge, "builder", "http://127.0.0.1:7601/");
+		await IncomingRequests.global().note({
+			from: "builder",
+			messageId: "req-late-url",
+			to: "Main",
+			at: 100,
+			fromUrl: "http://127.0.0.1:7602/",
+		});
+
+		end([assistant("discovered answer", 110)]);
+		await nextDelivery();
+
+		expect(sent).toHaveLength(1);
+		expect(sent[0]).toMatchObject({
+			agent: { name: "a2a:builder-2", url: "http://127.0.0.1:7602/" },
+			inReplyTo: "req-late-url",
+		});
 	});
 
 	it("keeps a failed relay attempt open for a manual reply without retrying it on a later run", async () => {

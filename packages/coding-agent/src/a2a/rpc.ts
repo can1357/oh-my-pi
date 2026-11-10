@@ -483,6 +483,13 @@ export interface A2aDispatchDeps {
 export interface A2aIncomingRequest {
 	/** Sender's public A2A identity: its `a2a:<from>` agent carries the reply. */
 	from: string;
+	/**
+	 * The sender's bridge URL as it arrived on the wire (`metadata.fromUrl`).
+	 * Retained so an automatic reply can pin the originating endpoint when
+	 * several registrations share `from` as their skill id; never used to
+	 * construct a destination — only registered peers are ever sent to.
+	 */
+	fromUrl?: string;
 	/** The request's A2A `messageId`, echoed back as `inReplyTo`. */
 	messageId: string;
 	/** Local agent id the request was delivered to. */
@@ -755,7 +762,13 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		const from = request.from;
 		const trackIncoming = from !== undefined && request.inReplyTo === undefined;
 		const incomingRecord = trackIncoming
-			? { from, messageId: request.messageId, to: target.id, at: deliveredAt }
+			? {
+					from,
+					messageId: request.messageId,
+					to: target.id,
+					at: deliveredAt,
+					...(request.fromUrl !== undefined ? { fromUrl: request.fromUrl } : {}),
+				}
 			: undefined;
 		if (incomingRecord !== undefined) {
 			try {

@@ -63,7 +63,11 @@ on demand:
    failure is promised. The process-wide incoming ledger covers Main,
    subagents, and worker links; only the addressed agent can claim its request.
    Automatic relays atomically claim before sending detached, so remote
-   transport does not hold up turn settlement.
+   transport does not hold up turn settlement. An automatic relay only sends to
+   the endpoint the request came from: the sender's `fromUrl` must match a
+   registered peer, and a legacy request without one needs exactly one
+   same-skill candidate — otherwise the reply waits for a manual `a2a:<name>`
+   spawn (see below).
 
 Terminals that start later become visible on demand: a bare `read agent://`
 roster, or a task-tool spawn of an unknown `a2a:` name, triggers a debounced
@@ -127,6 +131,25 @@ addressed reply job. There is no exactly-once delivery guarantee across
 network or acknowledgement failure: a worker lost after the peer accepted the
 reply but before the local acknowledgement can leave the request reopened.
 
+**Automatic reply destinations are resolved by endpoint, never by first
+match.** When an automatic relay (Main's final text or a subagent's wake-turn
+output) answers a request, the sender is resolved from the registered roster:
+candidates are registrations whose skill id equals the request's `from`, and
+the request's retained `metadata.fromUrl` (the sender's own bridge URL, carried
+on the wire) must match a candidate's registered endpoint URL by normal URL
+serialization — including the trailing `/` — with no hostname alias or DNS
+equivalence (`localhost` is not `127.0.0.1`). A URL matching no registered
+endpoint never falls back to a different one; the reply is refused. A legacy
+request without `fromUrl` resolves only when exactly one candidate exists:
+two or more registrations sharing that skill id make the destination
+ambiguous, and the relay refuses rather than picking one arbitrarily. In
+every refusal the lease is released and the request stays open at its original
+position for a manual reply — spawn `a2a:<name>-2` (the suffixed twin)
+explicitly to pick a specific endpoint — and a later unrelated human turn is
+never relayed as a retry. Only registered peers and their existing
+credentials are used; an inbound `fromUrl` is disambiguation bookkeeping and
+never constructs a destination or supplies credentials.
+
 An outstanding request does not linger forever. The bridge installs one
 maintenance service on the process-wide incoming ledger: when a recipient is
 `removed` from the agent registry — it can never answer anymore — its whole
@@ -173,6 +196,7 @@ through the bridge, including when Main is addressed by its identity alias.
 | Ingress guard | Inbound A2A deliveries are `external` IRC messages, exempt from the rate/dedup/hop guard applied to in-session traffic. |
 | Output cap | Published task output is inlined as an artifact capped at 100 k characters; files themselves never travel. |
 | Reply deadline | `a2a.replyTimeoutMs` defaults to `1_800_000` ms (30 minutes); `0` means no deadline for an addressed reply. A timeout ends the local wait and expires the recipient's incoming request (open or leased) at its absolute `at + timeout` deadline; it is not a transport timeout and never cancels the remote work. Removing a recipient from the registry discards its whole request queue regardless of the timeout. |
+| Endpoint-pinned replies | An automatic relay only sends to the endpoint the request's `fromUrl` matches (normal URL serialization, trailing `/` included, no hostname-alias equivalence); a URL matching no registered endpoint never falls back to another. A legacy no-URL request with two or more same-skill candidates is refused as ambiguous, the lease is released, and the request stays open for a manual reply. Only registered peers and their existing credentials are used; an inbound `fromUrl` never constructs a destination. |
 | Client budget | `a2a.clientTimeoutMs` (default 0, no total budget) bounds transport for the initial `SendMessage` and any `GetTask` polls, not the separate addressed-reply wait. The per-request connect timeout remains 10 s. |
 | Plan mode | Every `a2a:` dispatch is refused in plan mode: a remote terminal cannot be held read-only. |
 

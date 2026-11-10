@@ -28,6 +28,7 @@ import {
 	spawnA2aAgent,
 } from "./agent-bridge";
 import { IncomingRequests, type IncomingRequestLease } from "./incoming-requests";
+import type { A2aIncomingRequest } from "./rpc";
 
 export interface A2aReplyRelayOptions {
 	bridge: A2aBridgeApi;
@@ -158,8 +159,79 @@ function answerAfter(messages: readonly AgentMessage[], at: number): string | un
 	return ended === "aborted" || ended === "error" ? undefined : answer;
 }
 
-function findPeer(bridge: A2aBridgeApi, from: string): A2aRuntimeAgent | undefined {
-	return bridge.list().find(agent => agent.skillId === from);
+/**
+ * Normalize a URL for endpoint comparison. An invalid URL is returned as-is:
+ * it can never equal a valid registered endpoint, and the refusal path (not a
+ * fallback) is the correct outcome for it.
+ */
+function normalizedUrl(url: string): string {
+	try {
+		return new URL(url).toString();
+	} catch {
+		return url;
+	}
+}
+
+/**
+ * The one peer registration the request's sender resolves to.
+ *
+ * Candidates are registered agents whose `skillId` equals `request.from`. A
+ * supplied `fromUrl` must match a candidate's registered endpoint URL by
+ * normal URL serialization (including a trailing `/`); a mismatch never falls
+ * back to another candidate. With no URL, exactly one candidate must exist —
+ * two or more make the selection ambiguous and it is refused instead of
+ * arbitrary. Duplicate registrations of the same `(url, skillId)` endpoint
+ * collapse to one candidate (the bridge keeps one entry per endpoint).
+ */
+function findPeer(bridge: A2aBridgeApi, request: A2aIncomingRequest): A2aRuntimeAgent | undefined {
+	let candidates = bridge.list().filter(agent => agent.skillId === request.from);
+	if (request.fromUrl !== undefined) {
+		const wanted = normalizedUrl(request.fromUrl);
+		candidates = candidates.filter(agent => normalizedUrl(agent.url) === wanted);
+	}
+	const distinct = new Map<string, A2aRuntimeAgent>();
+	for (const candidate of candidates) {
+		const key = `${normalizedUrl(candidate.url)}\u0000${candidate.skillId}`;
+		// Duplicate registrations of the same endpoint+skill advertise one
+		// destination; the first registration is kept deterministically so
+		// duplicates can never make the selection arbitrary.
+		if (!distinct.has(key)) distinct.set(key, candidate);
+	}
+	if (distinct.size !== 1) return undefined;
+	return distinct.values().next().value;
+}
+
+/**
+ * One structured warning for a sender the roster cannot resolve to exactly
+ * one endpoint: never the reply text, never credentials. Ambiguity (several
+ * candidates, no `fromUrl` to separate them) and an unmatched `fromUrl` are
+ * both named, with every candidate's registered name and URL.
+ */
+function logUnresolvedSender(bridge: A2aBridgeApi, request: A2aIncomingRequest): void {
+	const candidates = bridge
+		.list()
+		.filter(agent => agent.skillId === request.from)
+		.map(agent => ({ name: agent.name, url: agent.url }));
+	if (request.fromUrl !== undefined) {
+		if (candidates.length > 0) {
+			logger.warn("A2A reply relay: sender endpoint does not match any registered peer", {
+				from: request.from,
+				fromUrl: request.fromUrl,
+				candidates,
+			});
+		} else {
+			logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
+		}
+		return;
+	}
+	if (candidates.length > 1) {
+		logger.warn("A2A reply relay: ambiguous automatic reply destination, kept open for a manual reply", {
+			from: request.from,
+			candidates,
+		});
+		return;
+	}
+	logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
 }
 
 /**
@@ -178,13 +250,13 @@ export async function sendA2aReply(options: SendA2aReplyOptions): Promise<boolea
 	const request = lease.request;
 	const tracked = (async (): Promise<boolean> => {
 		try {
-			let peer = findPeer(options.bridge, request.from);
+			let peer = findPeer(options.bridge, request);
 			if (peer === undefined) {
 				await options.rescan();
-				peer = findPeer(options.bridge, request.from);
+				peer = findPeer(options.bridge, request);
 			}
 			if (peer === undefined) {
-				logger.warn("A2A reply relay: sender is not a reachable peer", { from: request.from });
+				logUnresolvedSender(options.bridge, request);
 				await IncomingRequests.global().release(lease.leaseId);
 				return false;
 			}

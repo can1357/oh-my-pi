@@ -1258,6 +1258,70 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 			sender.stop();
 		}
 	});
+
+	it("retains fromUrl through the wire so an equal-skill-id sender is pinned to its endpoint", async () => {
+		using dir = TempDir.createSync("@a2a-reply-url-loop-");
+		const alphaCwd = path.join(dir.path(), "alpha");
+		const betaCwd = path.join(dir.path(), "beta");
+		await fs.mkdir(alphaCwd, { recursive: true });
+		await fs.mkdir(betaCwd, { recursive: true });
+		const senderInbox: Array<{ to: string; body: string; external?: boolean }> = [];
+		const senderIncoming = new IncomingRequests();
+		// B's terminal records A's request with its own ledger.
+		const remoteIncoming = new IncomingRequests();
+		const sender = await startTerminal({
+			agentDir: dir.path(),
+			cwd: alphaCwd,
+			inbox: senderInbox,
+			incoming: senderIncoming,
+			name: "alpha",
+		});
+		const remote = await startTerminal({
+			agentDir: dir.path(),
+			cwd: betaCwd,
+			inbox: [],
+			incoming: remoteIncoming,
+			name: "alpha",
+		});
+		try {
+			// Two live terminals advertise the SAME skill id ("alpha") from
+			// distinct endpoints. B registers both.
+			const builderBridge = new A2aAgentBridge();
+			await addA2aAgentsFromUrl({ bridge: builderBridge, url: sender.url, agentDir: dir.path() });
+			await addA2aAgentsFromUrl({ bridge: builderBridge, url: remote.url, agentDir: dir.path() });
+			const sameSkill = builderBridge.list().filter(agent => agent.skillId === "alpha");
+			expect(sameSkill.map(agent => agent.name).sort()).toEqual(["a2a:alpha", "a2a:alpha-2"]);
+
+			// A's request lands on B carrying fromUrl = A's endpoint.
+			const builderTarget = builderBridge.list().find(agent => agent.url === remote.url)!;
+			const outbound = await spawnA2aAgent({
+				agent: builderTarget,
+				prompt: "what is 17+25?",
+				fromIdentity: { name: "alpha", url: sender.url },
+			});
+			expect(outbound.exitCode).toBe(0);
+
+			// The noted request on B carries A's fromUrl from the actual wire
+			// request, so the shared selection pins A's endpoint, not the twin.
+			const noted = (await remoteIncoming.list("Main"))[0]!;
+			expect(noted).toMatchObject({ from: "alpha", fromUrl: sender.url });
+			const reply = await spawnA2aAgent({
+				agent: builderBridge.get("a2a:alpha")!,
+				prompt: "the answer is 42",
+				fromIdentity: { name: "alpha", url: remote.url },
+				inReplyTo: (await remoteIncoming.consume({ to: "Main", from: "alpha", messageId: noted.messageId }))
+					?.request.messageId,
+			});
+			expect(reply.exitCode).toBe(0);
+			expect(senderInbox).toHaveLength(1);
+			expect(senderInbox[0]!.body).toContain("[A2A reply to your request");
+			// The URL-pinned endpoint is A's bridge, so A received the answer.
+			expect(await senderIncoming.list("Main")).toEqual([]);
+		} finally {
+			remote.stop();
+			sender.stop();
+		}
+	});
 });
 
 describe("/a2a remove", () => {

@@ -2256,6 +2256,57 @@ describe("A2A reply envelope", () => {
 		// The recipient's footer reads this mark: an answer owes no reply.
 		expect(answers).toEqual(["request-17"]);
 	});
+
+	it("retains the wire request's fromUrl on the incoming request record", async () => {
+		const incoming = new IncomingRequests();
+		const handle = createA2aServer({
+			token: "reply-token-4",
+			port: 0,
+			incoming,
+			registry: {
+				list: () => [],
+				get: id => (id === "Main" ? makeRef({ id: "Main", displayName: "Main", status: "running" }) : undefined),
+				onChange: () => () => {},
+				setStatus: () => false,
+			},
+			bus: {
+				send: async (message: { to: string; body: string }) => {
+					expect(message.body).toContain("do the thing");
+					return { to: message.to, outcome: "injected" as const };
+				},
+			} as never,
+			card: async () => buildAgentCard({ url: "http://127.0.0.1:1/", version: "t", skills: [] }),
+		});
+		handles.push(handle);
+		const response = await fetch(handle.url + "/", {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: "Bearer reply-token-4" },
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 4,
+				method: "SendMessage",
+				params: {
+					message: { messageId: "m-url", role: "ROLE_USER", parts: [{ text: "do the thing" }] },
+					metadata: { to: "Main", from: "alpha", fromUrl: "http://127.0.0.1:7531/" },
+				},
+			}),
+		});
+		expect(response.status).toBe(200);
+		// The ledger record carries the actual wire request's fromUrl, so a
+		// later automatic reply can pin the originating endpoint.
+		expect(await incoming.list("Main")).toEqual([
+			{
+				from: "alpha",
+				messageId: "m-url",
+				to: "Main",
+				at: expect.any(Number),
+				fromUrl: "http://127.0.0.1:7531/",
+			},
+		]);
+		// A claim leases that exact record, fromUrl included.
+		const lease = await incoming.consume({ to: "Main", messageId: "m-url" });
+		expect(lease?.request.fromUrl).toBe("http://127.0.0.1:7531/");
+	});
 });
 
 describe("A2A outgoing reply correlation", () => {

@@ -90,6 +90,28 @@ describe("incoming A2A registry across workers", () => {
 		expect(await second.probe.list()).toEqual([]);
 	});
 
+	it("preserves an optional fromUrl across the worker link, note through lease return", async () => {
+		const worker = await startWorker();
+		const main = IncomingRequests.global();
+		const request = {
+			to: "worker-agent",
+			from: "peer",
+			messageId: "url-note",
+			at: 1,
+			fromUrl: "http://127.0.0.1:7602/",
+		};
+		await main.note(request);
+		// The worker sees the full record over the link...
+		expect(await worker.probe.list("worker-agent")).toEqual([request]);
+		// ...and a lease claimed on main returns that same request, fromUrl included.
+		const lease = await main.consume({ to: "worker-agent", messageId: "url-note" });
+		expect(lease?.request).toEqual(request);
+		// A release preserves the record for the next claimant, still with fromUrl.
+		await main.release(lease!.leaseId);
+		const reclaimed = await worker.probe.consume({ to: "worker-agent", messageId: "url-note" });
+		expect(reclaimed?.request.fromUrl).toBe("http://127.0.0.1:7602/");
+	});
+
 	it("allows only one worker or main to consume the same request", async () => {
 		const worker = await startWorker();
 		const main = IncomingRequests.global();
