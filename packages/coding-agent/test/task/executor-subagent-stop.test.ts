@@ -788,6 +788,44 @@ describe("runSubprocess subagent_stop", () => {
 				expect(await Bun.file(path.join(tempDir.path(), `${id}.md`)).text()).not.toContain("UNJUDGED-SECTION");
 			});
 
+			it("does not publish sections a budget-stopped run ended on without a yield", async () => {
+				const id = "SectionsBudgetStopped";
+				const harness = createHarness({
+					hasStopHandlers: true,
+					// Safety valve: past this prompt the child stops answering, so the suite cannot hang.
+					idlePrompt: promptIndex => promptIndex > 40,
+					onPrompt: call => {
+						if (call.promptIndex === 1) {
+							call.yieldSection("findings", "BUDGET-STOPPED-SECTION");
+							// Budget 2 stops the free-running turn at the third request.
+							call.reply("working 1");
+							call.report("working 2");
+							call.report("working 3");
+						} else {
+							call.report("no yield");
+						}
+					},
+				});
+				mockCreateAgentSession(harness.session);
+				registerRunning(id, harness.session);
+
+				const result = await runSubprocess({
+					...baseOptions(id),
+					settings: Settings.isolated({ "task.softRequestBudget": 2 }),
+					modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+				});
+
+				// Only a forced yield answers the stop for a run with a yield tool: sections it never
+				// closed are a budget abort, not a result, and no handler is asked to judge them.
+				expect(harness.events).toHaveLength(0);
+				expect(result.aborted).toBe(true);
+				expect(result.exitCode).not.toBe(0);
+				expect(result.abortReason).toContain("Soft request budget exceeded");
+				expect(result.output).not.toContain("BUDGET-STOPPED-SECTION");
+				expect(result.extractedToolData?.yield).toBeUndefined();
+				expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+			});
+
 			it("keeps a resumed worker's accepted artifact when its turn is cancelled on unjudged sections", async () => {
 				const id = "ResumedSectionsCancelled";
 				const controller = new AbortController();
@@ -1450,7 +1488,7 @@ describe("runSubprocess subagent_stop", () => {
 			expect(result.output).toBe("replacement");
 		});
 
-		it("does not offer the budget wrap-up report that ends a stopped run", async () => {
+		it("offers the budget wrap-up report that ends a stopped run", async () => {
 			const id = "UnstructuredBudgetStop";
 			const harness = createHarness({
 				hasStopHandlers: true,
@@ -1462,6 +1500,39 @@ describe("runSubprocess subagent_stop", () => {
 						call.report("working 3");
 					} else {
 						call.report("budget wrap-up");
+					}
+				},
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({
+				...baseOptions(id),
+				structured: false,
+				settings: Settings.isolated({ "task.softRequestBudget": 2 }),
+				modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			});
+
+			// The wrap-up is the stopped run's result, so handlers judge it like any other report.
+			expect(harness.events.map(event => assistantText(event.last_assistant_message))).toEqual(["budget wrap-up"]);
+			expect(harness.prompts).toHaveLength(2);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("budget wrap-up");
+		});
+
+		it("never publishes a budget wrap-up report that every handler refuses", async () => {
+			const id = "UnstructuredBudgetRefused";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				// Safety valve: without budget accounting the loop never ends.
+				idlePrompt: promptIndex => promptIndex > 40,
+				onPrompt: call => {
+					if (call.promptIndex === 1) {
+						call.report("working 1");
+						call.report("working 2");
+						call.report("working 3");
+					} else {
+						call.report(`REFUSED-WRAP-UP-${call.promptIndex}`);
 					}
 				},
 				onStop: async () => ({ decision: "block", reason: "not done" }),
@@ -1476,12 +1547,50 @@ describe("runSubprocess subagent_stop", () => {
 				modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
 			});
 
-			// The wrap-up is the stopped run's forced answer: handlers are never asked to
-			// refuse it, or an always-blocking handler would burn the grace window.
-			expect(harness.events).toEqual([]);
-			expect(harness.prompts).toHaveLength(2);
+			// The budget bounds an always-blocking handler: the stop's grace window ends the run.
+			const refused = harness.events.map(event => assistantText(event.last_assistant_message) ?? "");
+			expect(refused.length).toBeGreaterThan(0);
+			expect(result.aborted).toBe(true);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.abortReason).toContain("Soft request budget exceeded");
+			// Only the usual cancelled-run salvage: none of the reports the handler refused is the result.
+			expect(result.output).toStartWith("[cancelled after");
+			for (const text of refused) expect(result.output).not.toContain(text);
+			const artifact = await Bun.file(path.join(tempDir.path(), `${id}.md`)).text();
+			for (const text of refused) expect(artifact).not.toContain(text);
+			expect(AgentRegistry.global().get(id)?.lifecycle?.acceptedAt).toBeUndefined();
+		});
+
+		it("offers the wrap-up that follows a refusal which charged the run into its budget stop", async () => {
+			const id = "UnstructuredRefusalBudgetStop";
+			const harness = createHarness({
+				hasStopHandlers: true,
+				// Budget 2 stops the run at its third request: the second refusal's continuation, whose
+				// report the stop's wrap-up then replaces.
+				onPrompt: call => call.report(call.promptIndex <= 3 ? `draft ${call.promptIndex}` : "final"),
+				onStop: async event =>
+					assistantText(event.last_assistant_message) === "final"
+						? undefined
+						: { decision: "block", reason: "not done" },
+			});
+			mockCreateAgentSession(harness.session);
+			registerRunning(id, harness.session);
+
+			const result = await runSubprocess({
+				...baseOptions(id),
+				structured: false,
+				settings: Settings.isolated({ "task.softRequestBudget": 2 }),
+				modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+			});
+
+			// The wrap-up is judged, not published past the handler that refused before it.
+			expect(harness.events.map(event => assistantText(event.last_assistant_message))).toEqual([
+				"draft 1",
+				"draft 2",
+				"final",
+			]);
 			expect(result.exitCode).toBe(0);
-			expect(result.output).toBe("budget wrap-up");
+			expect(result.output).toBe("final");
 		});
 
 		it("re-prompts a resumed worker's final report on a refusal and publishes the replacement", async () => {
