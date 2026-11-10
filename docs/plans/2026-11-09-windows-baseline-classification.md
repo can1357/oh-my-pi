@@ -134,3 +134,314 @@ cd packages/coding-agent && bun test test/<file>   # single file, no OMP_TEST_CO
 ```
 
 priorities: `browser-webmcp` (confirm D1 hypothesis), `skills`, `usage-cli`, `thread/focus-view`, `sdk-mcp-instructions` (capture the leaked prompt lines), then spot-check one file each from clusters A/B/C to confirm the ports took effect.
+
+---
+
+# Windows pi-shell baseline classification (2026-11-09)
+
+Classification of the 59 failing `cargo test -p pi-shell` tests from
+[2026-11-09-windows-baseline-data.md](2026-11-09-windows-baseline-data.md) (Group C, Task 9 / C-2).
+Same references as the coding-agent section: fork HEAD `2e66ccf73e`, upstream
+`refs/remotes/upstream/main` at `f0200abf28`, fork base `96e4d8eb5b`
+(verified: it is HEAD and upstream/main's merge base). Every failing test
+was re-run on the controller's macOS host at fork HEAD
+(`cargo test -p pi-shell --lib -- <filter>`); 17 of the 59 fail identically
+on macOS (test bugs at fork HEAD on every platform), the other 42 pass.
+
+## Method
+
+All 97 upstream commits in `96e4d8eb5b..upstream/main -- crates/pi-shell`
+were mapped to the failing tests via `git log -S <test name>`,
+`git log --oneline -- <file>` per failing file, and
+`git diff HEAD upstream/main -- <file>`. The `Os { code: 2 }` probe
+signatures were traced into the failing tests' own code
+(`crates/pi-shell/src/shell/tests/builtins.rs`: `type.txt`/`help.txt`/
+`err.txt`/`out.txt` are `.expect()` reads of files the test shell writes
+under `cd <temp> && … > file`). Two decisive findings:
+
+1. **The fork's test files carry corrupted string literals.** Upstream
+   `5d770d6b17` (style pass, in `96e4d8eb5b..upstream/main`) let rustfmt's
+   `format_strings` re-wrap `\n`/`\x1b` escapes into
+   `\<newline><indent>n`, changing literal values; upstream fixed the
+   fallout in `4f15085863` ("restored string literals that rustfmt split
+   mid-escape" — "26 pi-shell tests failed"). `4f15085863` is in the range
+   but **not** in the fork, and `git diff HEAD upstream/main` on each
+   affected file shows the fork still has the corrupted spellings. macOS
+   re-runs reproduce the Windows failures byte-for-byte, with the
+   corruption on the `right:` (expected) side.
+2. **Upstream `251a2fab8e`** ("bump version to 18.17.0", 2026-11-06; in the
+   range, not in the fork) gated libc-dependent zsh module tests to macOS-only
+   with `ignore` reasons after the same tests failed on Linux CI ("their
+   premise does not hold on glibc/ncurses"); it also guards a null-locale
+   `freelocale` segfault in `sys/langinfo.rs` and adds an early return to
+   `expandmb_sorting_follows_lc_collate` when `en_US.UTF-8` is not installed.
+
+## Cluster summary
+
+| Cluster | Tests | macOS | Decision |
+| --- | --- | --- | --- |
+| S1. Corrupted test-string literals — upstream `4f15085863` | 17 | FAIL | fix test: port `4f15085863` (W2) |
+| S2. Expected output is macOS libc's — upstream `251a2fab8e` gates | 15 | PASS | fix test: port the ignore gates (W2) |
+| S3. `cd` into the Windows temp dir fails → probe-output reads NotFound — omp-zsh series | 16 | PASS | port upstream series (W1) |
+| S4. env_cwd short-TEMP expansion (same logical-cd root) | 2 | n/a (cfg(windows)) | port upstream (W1) |
+| S5. Windows-platform engine semantics, no single upstream fix | 5 | PASS | fix locally after W1/W2 (W3) |
+| S6. Encoding / collation misc | 4 | PASS | local test fixes (W2/W3) |
+| **Total** | **59** | 17 FAIL / 42 PASS | |
+
+## Cluster S1 — corrupted test-string literals (17 tests, 9 files)
+
+Pure test bugs, fail identically on macOS (verified by running each).
+Representative macOS evidence: `report_lists_callers_and_callees` expected
+side contains `\\\n\t\t\t n 2)` where the actual output has `\n\n 2)`;
+`region_highlight_entries…` expected side contains
+`x1b[39m\\\n\t\t x1b[4mcd` — a `\x1b` split mid-escape by the rustfmt
+continuation; `zsh_mod_zprof_counts_calls_of_one_function` expected
+`\n\\\n\t\t\t n 1)` vs actual `\n\n 1)`.
+
+| Test | File |
+| --- | --- |
+| `bash::vm::builtins::zsh_mod_zprof::tests::report_lists_callers_and_callees` | `src/bash/vm/builtins/zsh_mod_zprof.rs` |
+| `bash::vm::zle::refresh::tests::region_highlight_entries_and_trashed_display` | `src/bash/vm/zle/refresh/tests.rs` |
+| `testkit::suites::zsh_mod_datetime::strftime_reverse` | `src/testkit/suites/zsh_mod_datetime.rs` |
+| `testkit::suites::zsh_mod_datetime::langinfo_in_the_c_locale` | same |
+| `testkit::suites::zsh_mod_example::zsh_mod_example_builtin_shows_and_sets_its_parameters` | `src/testkit/suites/zsh_mod_example.rs` |
+| `testkit::suites::zsh_mod_files::zsh_mod_files_mv_ln_chmod` | `src/testkit/suites/zsh_mod_files.rs` |
+| `testkit::suites::zsh_mod_terminfo::echoti_xterm_values` | `src/testkit/suites/zsh_mod_terminfo.rs` |
+| `testkit::suites::zsh_mod_zmodload::builtins_autoload_their_module` | `src/testkit/suites/zsh_mod_zmodload.rs` |
+| `testkit::suites::zsh_mod_zmodload::module_param_blocked_by_existing_param` | same |
+| `testkit::suites::zsh_mod_zmodload::typeset_h_on_module_special` | same |
+| `testkit::suites::zsh_parity::funcs_commands_lists_every_entry_of_path` | `src/testkit/suites/zsh_parity.rs` |
+| `testkit::suites::zsh_prompt_names::attributes_for_dumb` | `src/testkit/suites/zsh_prompt_names.rs` |
+| `testkit::suites::zsh_prompt_names::attributes_for_xterm_256color` | same |
+| `testkit::suites::zsh_prompt_names::bookmarks_file_registers_named_directories` | same |
+| `testkit::suites::zsh_mod_zprof::zsh_mod_zprof_counts_calls_of_one_function` | `src/testkit/suites/zsh_mod_zprof.rs` |
+| `testkit::suites::zsh_mod_zprof::zsh_mod_zprof_lists_callers_and_callees` | same |
+| `testkit::suites::zsh_mod_zprof::zsh_mod_zprof_names_anonymous_functions_by_file_and_line` | same |
+
+Note: this is the same failure family as the fork's own 19-test macOS host
+baseline (Task 1/2 full-suite runs) — 17 of those 19 are these S1 tests; the
+other 2 (`git::tests::unsupported_invocations_run_the_git_binary`,
+`shell::tests::process_control::ps_builtin_supports_extended_format_specifiers`)
+are macOS-host issues outside the Windows set. `4f15085863` also restores
+the same corruption in `tests/zsh_comp_y01/02/03.rs`, the pi-natives mermaid
+parser and the jvm minimizer filter tests (outside the 59; the hunks ride
+along in the cherry-pick).
+
+**Decision:** fix test — cherry-pick `4f15085863` (test/literal-only).
+Task W2. On macOS this alone should drop the host baseline 19 → 2.
+
+## Cluster S2 — expected output is macOS libc's (15 tests, 4 files)
+
+Upstream `251a2fab8e` gated these tests with
+`#[cfg_attr(not(target_os = "macos"), ignore = "…")]` after they failed on
+Linux CI; Windows (UCRT, no `/usr/share/terminfo` database) is a third libc
+answer, so they fail there for the same reason. The Windows signatures match
+the Linux ones upstream recorded: UCRT `strerror` text ("The operation
+completed successfully.", "The system cannot write to the specified device.",
+"The storage control block address is invalid."), terminfo database contents,
+`%x` locale formatting, libm last digits. All pass on macOS at fork HEAD
+(verified) — no fork regression; the expectations simply assume macOS libc.
+
+| Test | Upstream ignore reason | macOS |
+| --- | --- | --- |
+| `testkit::suites::zsh_mod_datetime::strftime_options` | "expects macOS `%x` and an installed en_US.UTF-8 locale" | PASS |
+| `testkit::suites::zsh_mod_mathfunc::every_function_on_sample_arguments` | "last-digit results are macOS libm's" | PASS |
+| `testkit::suites::zsh_mod_system::zsh_mod_system_bad_fds_set_errno` | strerror family | PASS |
+| `testkit::suites::zsh_mod_system::zsh_mod_system_pipes_do_not_seek` | strerror family | PASS |
+| `testkit::suites::zsh_mod_system::zsh_mod_system_syserror` | "`strerror` text is macOS libc's" | PASS |
+| `testkit::suites::zsh_mod_terminfo::another_term_replaces_the_boot_one` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::capability_errors` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::dumb_terminal` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::echotc_xterm_values` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::held_terminal_from_boot_is_set_up_without_tgetent` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::modules_autoload_on_use` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::scans_list_the_held_terminal` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::termcap_module_boots_first` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::terminfo_termcap_elements` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::tgetent_adjusts_the_held_terminal` | "expects macOS's terminfo database" | PASS |
+| `testkit::suites::zsh_mod_terminfo::tgetent_moves_obsolete_defaults` | "expects macOS's terminfo database" | PASS |
+
+(S1's `langinfo_in_the_c_locale` and `strftime_reverse` fail on macOS for
+the S1 literal; after `4f15085863` restores the literal, `langinfo…` is
+also gated off non-macOS by `251a2fab8e`, and `strftime_reverse`'s Windows
+behavior is strptime-through-`uselocale` on a platform without that path
+[INFERENCE — needs the Windows re-run to confirm it passes after W2].)
+
+Terminfo mechanics: `terminfo_db.rs` searches `/usr/share/terminfo` (const
+`SYSTEM_TERMINFO`, `terminfo_db.rs:644`) plus `$TERMINFO`/`$HOME/.terminfo`;
+none of those hold macOS's database on Windows, so the expected cap lists
+diverge. The fork base also predates upstream's embedded
+`src/bash/vm/zsh/terminfo/xterm-256color` entry (`df6fcdf98c`, with
+`9e0d6a0588` fixing its Bazel `compile_data`) — W1 adds it.
+
+**Decision:** fix test — port the `251a2fab8e` ignore-gate hunks (plus its
+`sys/langinfo.rs` null-locale guard and `zsh_parity.rs` early return). Task W2.
+
+## Cluster S3 — probe-output reads fail: `cd` into the Windows temp dir breaks (16 tests, 1 file)
+
+Signatures: `type.txt: Os { code: 2, kind: NotFound, … }` and the same for
+`out.txt`/`help.txt`/`err.txt`/`sponge output`, plus downstream
+`assertion left == right` with empty `left: ""` where the assertion reads
+files the shell wrote under `cd <temp>`. All pass on macOS (verified: the
+dispatch/registration probes and every sort/mkdir/rm/mv/head/rg/fd/jq/sed
+test in this family are green at fork HEAD).
+
+Root cause chain — the data file names it directly:
+`sort_merge_into_the_file_on_stdin_keeps_all_input` fails with
+`bash: line 1: cd: C:\Users\spgs\AppData\Local\Temp\.tmpPzmpUU: The fi[le…]`.
+These tests `cd` into a Windows temp directory and the shell's **logical cd
+cannot enter it**: the fork's `dir.rs::logical` predates `1fdc73bc5f`
+(no `#[cfg(windows)]` `Component::Prefix` branch), so the drive-rooted
+path breaks. Once the `cd` fails, the session's relative redirections
+(`> type.txt` etc.) write against the unchanged cwd and the tests'
+`.expect("type.txt")` read panics with the recorded `Os code 2 NotFound`.
+The interleaved `---- shell::tests::env_cwd::inherited_short_temp…` stdout
+chunks in these tests' signatures confirm the shared session-level failure.
+
+Upstream coverage (all in `96e4d8eb5b..upstream/main`, none in the fork):
+
+- `1fdc73bc5f` fix(shell): preserve Windows roots during logical cd — adds
+  the `#[cfg(windows)]` `Component::Prefix` branch to `logical()` via
+  `pi_vfs::normalize_lexically`; exactly this code path.
+- `bbf17a4bcc` fix(shell): let a drive-absolute cd target win over a URL cwd.
+- `df6fcdf98c` feat(shell): run omp zsh on Windows — Windows paths in `cd`
+  (`zsh_dir.rs`), MSYS `/tmp` translation and `/dev/null`→`NUL`
+  (`pi-builtins/host.rs` `normalize_shell_path`), `Host::fallback`
+  (builtin utilities as PATH stand-ins, asked after the search fails),
+  `sys/user.rs`, `sys/fs.rs`.
+- `9f8c1ce438` makes the utility fallback Windows-only — on other platforms
+  a missing tool stays missing, preserving the `PATH=` probe semantics.
+
+Tests (16): `cmp_is_registered_as_an_in_process_builtin`,
+`command_v_iterates_all_operands`,
+`every_process_builtin_is_installed_and_dispatches`,
+`every_utility_builtin_is_registered_under_its_own_name`,
+`moreutils_builtins_are_registered_in_process`,
+`sort_merge_into_the_file_on_stdin_keeps_all_input`,
+`uutils_head_help_and_bad_flag_do_not_exit_process`,
+`uutils_mkdir_help_and_bad_flag_do_not_exit_process`,
+`uutils_rm_missing_file_prints_single_diagnostic`,
+`fd_builtin_uses_fd_defaults`, `rg_builtin_uses_ripgrep_defaults`,
+`rg_builtin_defaults_to_cwd_unless_stdin_is_pipeline`,
+`uutils_mkdir_resolves_cwd_and_displays_operand`,
+`uutils_rm_and_mv_operate_on_shell_cwd`,
+`uutils_head_streams_stdin_and_reads_files`,
+`grep_quiet_and_line_regexp`.
+
+**Decision:** port the upstream series as one task — W1. Not piecemeal: the
+fixes interlock (`logical` cd roots + MSYS path normalization + the fallback
+trait threaded through `bash/host.rs`, `process/host.rs`, `pi-builtins`,
+`testkit/host.rs`).
+
+## Cluster S4 — env_cwd short-TEMP expansion (2 tests)
+
+`inherited_short_temp_matches_pwd_after_cd` and
+`session_env_short_temp_matches_pwd_after_cd` (both `#[cfg(windows)]` — they
+do not compile on macOS; cross-checked the cfg markers in
+`shell/tests/env_cwd.rs:71,92`). Windows failure `left: 1` is the `cd` exit
+code: same logical-cd root as S3. The fixture (`short_temp_fixture`,
+`shell/tests/mod.rs:172`) hands the session the 8.3 short spelling and
+asserts `cd "$TEMP"` lands on the `expand_to_long_path` long form with
+`PWD`/`TEMP`/`TMP`/`TMPDIR` all agreeing; the pre-`1fdc73bc5f` logical cd
+cannot hold Windows drive roots, so `PWD` never matches.
+
+**Decision:** port upstream (W1). If the series is ever split,
+`1fdc73bc5f` + `bbf17a4bcc` are the minimal standalone prefix (both touch
+only `dir.rs` + tests + changelog) and could land first.
+
+## Cluster S5 — Windows-platform engine semantics (5 tests, 3 files)
+
+These testkit suites run the engine at `Platform::current()`
+(`bash/engine.rs:58` default) against a POSIX-shaped `MemFs`; on a Windows
+build the engine's platform-dependent behavior diverges from the
+macOS-recorded expectations. All pass on macOS at fork HEAD (verified) —
+no fork regression; the expectations encode POSIX answers. Upstream's
+answer to exactly this problem is the `windows_platform.rs` suite
+`df6fcdf98c` adds: run the zsh dialect on
+`EngineConfig { platform: Platform::Windows }` **on any host** — platform
+behavior is engine-config, not build-target.
+
+| Test | File | Signature | macOS |
+| --- | --- | --- | --- |
+| `testkit::suites::zsh_mod_files::zsh_mod_files_mkdir` | `zsh_mod_files.rs` | mode strings `040700`… (mkdir `-m` mode bits + `zstat` display on Windows) | PASS |
+| `testkit::suites::zsh_mod_files::zsh_mod_files_mv_ln_chmod` | same | — | FAIL (counted S1: corrupted literal) |
+| `testkit::suites::zsh_mod_zprof` (3 tests) | `zsh_mod_zprof.rs` | — | FAIL (counted S1) |
+| `testkit::suites::zsh_parity::expandmb_sorting_follows_lc_collate` | `zsh_parity.rs` | — | PASS (counted S6) |
+
+S5's own membership after S1/S2/S3 are peeled away is: `zsh_mod_files_mkdir`
+plus the four ""-signature utility tests (`uutils_filters_listing_find_grep`,
+`uutils_find_display_and_actions_split_paths`,
+`uutils_jq_filters_json_and_propagates_exit_status`,
+`uutils_sed_substitutes_streams_and_edits_in_place`) — all macOS-green,
+all likely the S3 cd root [INFERENCE — a Windows re-run after W1 splits
+"same root, already fixed" from "separate Windows expectation bug"], leaving
+`zsh_mod_files_mkdir` as the clearest engine-semantics member (mode-bit
+rendering on a platform without POSIX mode bits).
+
+**Decision:** fix locally (W3) after W1/W2 land, using upstream's
+`windows_platform.rs` engine-config pattern as the template: port the
+expectation to a `Platform::Windows` engine-config test (runs on any host)
+or add `#[cfg_attr(windows, ignore = "…")]` gates with reasons where the
+premise is POSIX-only (the `251a2fab8e` pattern). No single upstream commit
+fixes these wholesale; do not chase them before the ports land.
+
+## Cluster S6 — encoding / collation misc (4 tests)
+
+| Test | Root cause | Decision |
+| --- | --- | --- |
+| `output_decode::tests::incomplete_utf8_at_eof_becomes_replacement` | Windows ACP fallback: `OutputDecoder::new()` uses `GetACP()` (`output_decode.rs:59`); on a host whose ANSI page is not 65001 the incomplete UTF-8 lead `0xe4` at EOF re-decodes as ACP — `д` is CP1251's decoding of `0xe4` — instead of U+FFFD (`drain_utf8`'s EOF branch calls `drain_acp`, `output_decode.rs:158-163`). Code is correct (documented one-encoding-per-command fallback); the test must not inherit the host ACP | fix test locally (W3): build the decoder with `OutputDecoder::utf8()` (exists, `output_decode.rs:66`) or `with_fallback_codepage(CP_UTF8)`; one-line change |
+| `testkit::suites::zsh_parity::expandmb_sorting_follows_lc_collate` | UCRT has no en_US.UTF-8 collation → `Collator` byte-compares (Windows falls to the stub `mod native` at `sys/langinfo.rs:344-346`); expected order is en_US's | fix test (W2): port `251a2fab8e`'s early-return guard (`Collator::new(b"en_US.UTF-8").is_none() → return`) |
+| `grep_quiet_and_line_regexp` | `-q match must exit 0`, left "" — [INFERENCE: likely the S3 cd root (fixture under temp); needs Windows re-run] | W1 then W3 |
+| the 4 `uutils_*` ""-signature tests | same family as S3 [INFERENCE] | W1 then W3 (counted in S5 if they survive W1) |
+
+## Proposed tasks (pi-shell)
+
+**W1 — port the "omp zsh on Windows" series (source + behavior).** Large;
+one task, not piecemeal. Commit list (all in `96e4d8eb5b..upstream/main`,
+upstream order):
+
+1. `1fdc73bc5f` fix(shell): preserve Windows roots during logical cd
+2. `bbf17a4bcc` fix(shell): let a drive-absolute cd target win over a URL cwd
+3. `df6fcdf98c` feat(shell): run omp zsh on Windows (core: 44 files, +2897/−392)
+4. `d6e00e0122` fix(shell): address review of omp zsh on Windows
+5. `9f8c1ce438` fix(shell): Windows-only Ctrl-C ignore and utility fallback; /dev/tty, MSYS signal exits, pipeline job lines
+6. `57e28de771` fix(pi-shell): isolate Windows externals from the host console
+7. `d99617eb59` fix(pi-shell): cover console usability and INT on Windows externals
+8. `b6dd5a8da3` fix(pi-shell): close an owned job's pseudoconsole when its last process exits
+9. `9e0d6a0588` fix(build): give bazel pi-shell's Windows console terminfo entry (BUILD.bazel only)
+
+Expected effect: S3 (16) + S4 (2) + the S3-family members of S5/S6 (up to
+5) ≈ 18-23 of the 59. Verification: `cargo test -p pi-shell` on macOS (no
+regression — the Windows code is `#[cfg(windows)]` or engine-config
+platform code), `cargo check -p pi-shell --target aarch64-pc-windows-msvc`,
+and a Windows re-run when host access is granted.
+
+**W2 — port the test-only fixes.** Cherry-pick `4f15085863` (restore split
+string literals; the 17 S1 tests + comp_y*/jvm/mermaid ride-alongs) and the
+`251a2fab8e` test hunks (macOS-only ignore gates for the 15 S2 tests;
+`expandmb` early return) + its `sys/langinfo.rs` null-locale guard.
+Expected effect on Windows: S1 (17) + S2 (15) + `expandmb` (1) = 33 of the
+59. Bonus: on macOS the fork's own 19-test host baseline drops to the 2
+git/ps host failures.
+
+**W3 — local Windows-expectation fixes (S5 remainder + S6 encoding),
+after W1/W2 land.** Re-run the remaining red set on Windows (pending host
+access — same blocker as the coding-agent section). Then per test: port to
+the `windows_platform.rs` `Platform::Windows` engine-config pattern or gate
+with `#[cfg_attr(windows, ignore = "…")]`; fix
+`incomplete_utf8_at_eof_becomes_replacement` with `OutputDecoder::utf8()`.
+Expected effect: the last ~4-6 tests (`zsh_mod_files_mkdir` + whatever of
+the ""-signature family survives W1 + `incomplete_utf8…`).
+
+Tally check: W2 33 + W1 ≈ 18-23 + W3 ≈ 4-6 → 59 (W1/W3 boundary is settled
+by the Windows re-run after each wave lands).
+
+## Windows isolation re-run — pending host access (pi-shell)
+
+Same controller ruling as the coding-agent section: no Windows host is
+available, so classification rests on the committed data file (authoritative)
++ upstream history + macOS re-runs. When access is granted, run the still-red
+set per cluster to confirm the split and resolve the [INFERENCE] markers:
+the ""-signature family split (S3/S5), `grep_quiet_and_line_regexp`'s root
+cause (S6), `strftime_reverse`'s post-W2 Windows behavior (S2), and
+`zsh_mod_files_mkdir`'s exact mode-string diff (S5).
