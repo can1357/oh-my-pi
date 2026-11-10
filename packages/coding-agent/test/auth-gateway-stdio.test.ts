@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { selectorCandidates, stdioModelResolver } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-stdio";
@@ -109,14 +110,51 @@ describe("auth-gateway stdio model selectors", () => {
 		});
 	});
 
-	it("resolves Codex dictation on the transcription route only", () => {
+	describe("on the transcription route", () => {
 		const dictation = getBundledModel("openai-codex", "codex-transcribe")!;
-		const catalog = [...models, dictation];
+		const local = getBundledModel("local", "whisper-small")!;
+		const catalog = [...models, dictation, local];
 		const byKind = (kind: ModelKind | "all" = "chat") =>
 			kind === "all" ? catalog : catalog.filter(model => modelKind(model) === kind);
 		const kinded = { getAll: byKind, getAvailable: byKind };
-		expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded, "stt")).toEqual([dictation]);
-		expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded)).toEqual([]);
+
+		it("resolves Codex dictation on the transcription route only", () => {
+			expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded, "stt")).toEqual([dictation]);
+			expect(selectorCandidates(key(dictation), Settings.isolated({}), kinded)).toEqual([]);
+		});
+
+		it("drops chat models a runner's default fallback chain names, since the runner's route cannot serve them", () => {
+			const settings = Settings.isolated({ "retry.fallbackChains": { default: [key(mini)] } });
+			expect(selectorCandidates(key(dictation), settings, kinded, "stt")).toEqual([dictation]);
+		});
+
+		it("drops on-device runners from a hosted runner's chain, so their 400 never masks the hosted failure", () => {
+			const settings = Settings.isolated({ "retry.fallbackChains": { [key(dictation)]: [key(local)] } });
+			expect(selectorCandidates(key(dictation), settings, kinded, "stt")).toEqual([dictation]);
+		});
+	});
+
+	it("keeps a known provider's prefix locked, so `proxy/foo` never resolves to another provider's `proxy/foo-latest`", () => {
+		const routed = buildModel({
+			id: "proxy/foo-latest",
+			name: "Foo",
+			api: "openai-completions",
+			provider: "custom-gateway",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		// `proxy` is a configured discovery provider whose catalog is still empty.
+		const proxyRegistry = {
+			getAll: () => [routed],
+			getAvailable: () => [routed],
+			hasProvider: (provider: string) => provider === "proxy",
+		};
+		expect(selectorCandidates("proxy/foo", Settings.isolated({}), proxyRegistry)).toEqual([]);
+		expect(selectorCandidates("proxy/foo-latest", Settings.isolated({}), proxyRegistry)).toEqual([routed]);
 	});
 });
 
