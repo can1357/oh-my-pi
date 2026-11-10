@@ -140,9 +140,9 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import { sumSubagentTreeCost } from "./agent-hub-runtime";
+import { liveTaskAgent, sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -2213,8 +2213,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Tern's native view routes link clicks itself, so claimed links stop (or start) being
 		// pickable here: re-run the renderers reading `getLinkClicksAvailable()`.
 		this.#eventBusUnsubscribers.push(
-			onNativeRenderingChange(() => {
+			onNativeRenderingChange(on => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				// Task cards skip agents that run again while the terminal draws; a resumed surface catches up.
+				if (on && this.#refreshLiveTaskCards()) this.ui.requestRender();
 			}),
 		);
 		this.chatContainer = new TranscriptContainer();
@@ -4882,25 +4884,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return changed;
 	}
 
-	/**
-	 * A subagent a settled task card row lists, while it runs again: revived or
-	 * woken by IRC or hub chat, or still running after its call settled. The
-	 * agent registry decides, as for the HUD's agents segment; the run's task
-	 * progress, when the observer registry hears it, adds the current tool.
-	 */
-	readonly liveTaskAgents: LiveTaskAgentSource = id => {
-		const ref = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).get(id);
-		// A ref still `running` after its run handed over the final result is that run's tail, not a new run.
-		if (ref?.kind !== "sub" || ref.status !== "running" || ref.lifecycle?.acceptedAt !== undefined) return undefined;
-		// The registry outlives `/new` and session switches: another session's agent can hold the same id.
-		const root = this.collabGuest ? undefined : this.sessionManager.getSessionFile();
-		if (root && ref.sessionFile && !sessionFileBelongsToRoot(ref.sessionFile, root)) return undefined;
-		const observed = this.#observerRegistry.getSession(id);
-		// A started turn keeps the previous turn's last snapshot but clears `progressAt` until its own first frame.
-		const running =
-			observed?.status === "active" && observed.progressAt !== undefined && observed.progress?.status === "running";
-		return { progress: running ? observed.progress : undefined };
-	};
+	/** {@link liveTaskAgent} over the badge's registry and this session's observed subagents. */
+	readonly liveTaskAgents: LiveTaskAgentSource = id =>
+		liveTaskAgent(
+			getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).get(id),
+			this.#observerRegistry.getSession(id),
+			this.collabGuest ? undefined : (this.sessionManager.getSessionFile() ?? undefined),
+		);
 
 	/**
 	 * Register a resumed session's persisted subagent transcripts (with usage

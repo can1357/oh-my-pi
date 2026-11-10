@@ -216,12 +216,22 @@ describe("settled task card rows follow agents that run again", () => {
 		expect(ansiRow(card, ALPHA)).toContain("aborted");
 
 		// The wake turn's run monitor reports its progress on the session tree's bus.
-		emitProgress(ALPHA, { currentTool: "read", currentToolIntent: "Reading lexer", currentToolStartMs: Date.now() });
+		const readStartMs = Date.now();
+		emitProgress(ALPHA, { currentTool: "read", currentToolIntent: "Reading lexer", currentToolStartMs: readStartMs });
 		vi.advanceTimersByTime(100);
 		expect(agentProps(card, ALPHA)).toMatchObject({
 			status: "running",
 			tool: { name: "read", intent: "Reading lexer" },
 		});
+
+		// The same call's streamed intent settles after its first frame.
+		emitProgress(ALPHA, {
+			currentTool: "read",
+			currentToolIntent: "Reading parser",
+			currentToolStartMs: readStartMs,
+		});
+		vi.advanceTimersByTime(100);
+		expect(agentProps(card, ALPHA).tool).toMatchObject({ name: "read", intent: "Reading parser" });
 
 		registry.setStatus(ALPHA, "idle");
 		vi.advanceTimersByTime(100);
@@ -304,5 +314,17 @@ describe("settled task card rows follow agents that run again", () => {
 		emitProgress(ALPHA, { currentTool: "read", currentToolStartMs: Date.now() });
 		expect(card.refreshLiveTaskAgents()).toBe(false);
 		expect(ansiRow(card, ALPHA)).toContain("aborted");
+	});
+
+	it("catches a card up when native rendering resumes while its agent runs again", () => {
+		const card = cancelledTaskCard();
+		vi.useFakeTimers();
+		// An external editor stops the native surface; agent events meanwhile reach a terminal card.
+		setNativeRendering(false);
+		registerRunning(ALPHA);
+		vi.advanceTimersByTime(100);
+
+		setNativeRendering(true);
+		expect(agentProps(card, ALPHA).status).toBe("running");
 	});
 });

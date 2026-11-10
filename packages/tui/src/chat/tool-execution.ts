@@ -544,11 +544,10 @@ export class ToolExecutionComponent extends Container {
 	readonly #spotlight = new SpotlightNotices();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
-	/** Host source of the agents this task card's settled rows list that run again. */
-	readonly #liveTaskAgentSource: LiveTaskAgentSource | undefined;
-	/** What {@link #liveTaskAgentSource} answered for this card's settled rows, and its change key. */
-	#liveTaskAgents: ReadonlyMap<string, LiveTaskAgent> | undefined;
-	#liveTaskAgentsKey = "";
+	/** A task card's {@link ToolExecutionOptions.liveTaskAgents}, what it last answered for the settled rows, and its change key. */
+	readonly #liveTaskAgents:
+		| { readonly source: LiveTaskAgentSource; agents: ReadonlyMap<string, LiveTaskAgent> | undefined; key: string }
+		| undefined;
 	// Set on each `render()` when the last painted pending shape must be
 	// replayed wholesale when the first result arrives. Reset gates key off
 	// these so a topology-changing update that lands before the shape reaches
@@ -596,7 +595,10 @@ export class ToolExecutionComponent extends Container {
 		this.#showImages = options.showImages ?? true;
 		this.#presented = options.transcriptPresenters ?? true;
 		this.#tool = tool;
-		this.#liveTaskAgentSource = toolName === "task" ? options.liveTaskAgents : undefined;
+		this.#liveTaskAgents =
+			toolName === "task" && options.liveTaskAgents
+				? { source: options.liveTaskAgents, agents: undefined, key: "" }
+				: undefined;
 		this.#ui = ui;
 		this.#args = args;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
@@ -1156,20 +1158,17 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
-	 * Ask the host which agents of this card's settled rows run again; true
-	 * when what the card draws of them changed. Native surfaces only: they edit
-	 * a settled card in place, while a terminal may commit the card to
-	 * scrollback mid-run, where a `running` row could never be repainted.
+	 * Ask the host which agents of this card's settled rows run again; true when
+	 * the card changed. Native only: a terminal may commit the card to scrollback
+	 * mid-run, where a `running` row could never be repainted.
 	 */
 	#syncLiveTaskAgents(): boolean {
-		const source = this.#liveTaskAgentSource;
-		if (!source) return false;
-		const { agents, key } = isNativeRendering()
-			? liveTaskCardAgents(this.#result?.details, source)
-			: { agents: undefined, key: "" };
-		if (key === this.#liveTaskAgentsKey) return false;
-		this.#liveTaskAgents = agents;
-		this.#liveTaskAgentsKey = key;
+		const live = this.#liveTaskAgents;
+		if (!live || !isNativeRendering()) return false;
+		const { agents, key } = liveTaskCardAgents(this.#result?.details, live.source);
+		if (key === live.key) return false;
+		live.agents = agents;
+		live.key = key;
 		return true;
 	}
 
@@ -2256,7 +2255,7 @@ export class ToolExecutionComponent extends Container {
 			context.hasResult = Boolean(this.#result);
 			this.#taskRenderNowMs = Date.now();
 			context.nowMs = this.#taskRenderNowMs;
-			context.liveAgents = this.#liveTaskAgents;
+			context.liveAgents = this.#liveTaskAgents?.agents;
 		} else if (isEditLikeToolName(this.#toolName)) {
 			context.editMode = this.#editMode;
 			const previews = this.#editDiffPreview;

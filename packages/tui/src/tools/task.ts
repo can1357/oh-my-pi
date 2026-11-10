@@ -83,14 +83,26 @@ interface TaskRenderContext {
 }
 type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
 
-/** An agent whose task row settled and that runs again: revived or woken by a message, or still running. */
+/** The call a settled row's agent is in while it runs again, as its node draws it. */
+export interface LiveTaskAgentCall {
+	name: string;
+	intent: string | undefined;
+	startMs: number | undefined;
+}
+
+/** A settled row's agent while it runs again: revived or woken by a message, or still running. */
 export interface LiveTaskAgent {
-	/** The running turn's task progress, when its run monitor reports one. */
+	/** Null between calls, or while its run reports no progress. */
+	tool: LiveTaskAgentCall | null;
+}
+
+/** What the host knows of an agent that runs again: its run's task progress, when reported. */
+export interface LiveTaskAgentRun {
 	progress?: AgentProgress;
 }
 
 /** The host's view of the agent with this id; undefined unless it runs now. */
-export type LiveTaskAgentSource = (id: string) => LiveTaskAgent | undefined;
+export type LiveTaskAgentSource = (id: string) => LiveTaskAgentRun | undefined;
 
 const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 
@@ -1654,11 +1666,9 @@ export function taskCardAgentIds(details: unknown): string[] {
 }
 
 /**
- * The agents a task card's settled top-level rows list that run again
- * (revived or woken by a message, or still running after the call settled),
- * by agent id, and a key that changes whenever what the card draws of them
- * does. Ids are unique per session, so `source` decides which agent an id
- * names; nested rows keep their recorded state.
+ * The agents a task card's settled top-level rows list that run again, by
+ * agent id, and a key that changes with what the card draws of them. Ids are
+ * unique per session, so `source` decides which agent an id names.
  */
 export function liveTaskCardAgents(
 	details: unknown,
@@ -1671,16 +1681,13 @@ export function liveTaskCardAgents(
 		if (agents?.has(id)) return;
 		const agent = source(id);
 		if (!agent) return;
-		(agents ??= new Map()).set(id, agent);
-		// A row draws the running call's tool, intent and clock; a new call starts a new clock.
-		const progress = agent.progress;
-		key += `${id}\0${progress?.currentTool ?? ""}\0${progress?.currentTool ? (progress.currentToolStartMs ?? "") : ""}\n`;
+		const tool = agent.progress ? currentCallOf(agent.progress) : null;
+		(agents ??= new Map()).set(id, { tool });
+		key += `${id}\0${tool?.name ?? ""}\0${tool?.intent ?? ""}\0${tool?.startMs ?? ""}\n`;
 	};
 	for (const result of details.results) add(result.id);
-	if (Array.isArray(details.progress)) {
-		for (const progress of details.progress) {
-			if (progress.status !== "pending" && progress.status !== "running") add(progress.id);
-		}
+	for (const progress of details.progress ?? []) {
+		if (progress.status !== "pending" && progress.status !== "running") add(progress.id);
 	}
 	return { agents, key };
 }
@@ -1877,23 +1884,28 @@ interface AgentDescribeState {
 	readonly background: boolean;
 	/** The host draws the `json` kind. */
 	readonly json: boolean;
-	/**
-	 * Settled top-level rows whose agent runs again (revived or woken), by
-	 * agent id: they draw as running. Nested rows keep their recorded state.
-	 */
-	readonly live?: ReadonlyMap<string, LiveTaskAgent>;
 }
 
-/** The call a running agent is in, with its intent and age; null between calls or without progress. */
-function currentToolOf(progress: AgentProgress | undefined, nowMs: number): TspAgentProps["tool"] {
-	if (!progress?.currentTool) return null;
+/** The call an agent's progress reports it in; null between calls. */
+function currentCallOf(progress: AgentProgress): LiveTaskAgentCall | null {
+	if (!progress.currentTool) return null;
 	return {
 		name: plainText(progress.currentTool),
 		intent:
 			plainText(toolCallDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey)) ||
 			undefined,
-		age: progress.currentToolStartMs ? Math.max(0, nowMs - progress.currentToolStartMs) : undefined,
+		startMs: progress.currentToolStartMs,
 	};
+}
+
+function callTool(call: LiveTaskAgentCall | null, nowMs: number): TspAgentProps["tool"] {
+	return (
+		call && {
+			name: call.name,
+			intent: call.intent,
+			age: call.startMs ? Math.max(0, nowMs - call.startMs) : undefined,
+		}
+	);
 }
 
 /** Settled and in-flight child snapshots a subagent carries, as nested agent nodes. */
@@ -1934,29 +1946,35 @@ function runningAge(progress: { id: string; durationMs: number }, nowMs: number)
 	return Math.max(0, nowMs - anchor);
 }
 
-/** An `agent` node; its row's hover card shows the whole `assignment` the row only summarizes. */
+/**
+ * An `agent` node; its row's hover card shows the whole `assignment` the row only summarizes.
+ * A settled row whose agent runs again (`live`) draws as running, in its current call, without a final duration.
+ */
 function agentNode(
 	p: TspAgentProps,
 	assignment: NativeNode | undefined,
 	children: readonly (NativeNode | undefined)[],
 	key: string,
+	live?: { agent: LiveTaskAgent; nowMs: number },
 ): NativeNode {
-	const props: TspProps<"agent"> = assignment ? { ...p, hovercard: propNode(assignment) } : p;
+	const run: TspAgentProps = live
+		? { ...p, status: "running", tool: callTool(live.agent.tool, live.nowMs), stats: { ...p.stats, took: undefined } }
+		: p;
+	const props: TspProps<"agent"> = assignment ? { ...run, hovercard: propNode(assignment) } : run;
 	return node("agent", props, compact(children), key);
 }
 
-function describeProgressAgent(progress: AgentProgress, state: AgentDescribeState, depth: number): NativeNode {
+function describeProgressAgent(
+	progress: AgentProgress,
+	state: AgentDescribeState,
+	depth: number,
+	live: LiveTaskAgent | undefined,
+): NativeNode {
 	const { nowMs } = state;
 	const running = progress.status === "running";
-	const live = running || progress.status === "pending" || depth > 0 ? undefined : state.live?.get(progress.id);
-	const status: TspAgentProps["status"] = live
-		? "running"
-		: progress.status === "completed"
-			? "done"
-			: progress.status === "failed"
-				? "failed"
-				: progress.status;
-	const tool = currentToolOf(running ? progress : live?.progress, nowMs);
+	const status: TspAgentProps["status"] =
+		progress.status === "completed" ? "done" : progress.status === "failed" ? "failed" : progress.status;
+	const tool = running ? callTool(currentCallOf(progress), nowMs) : null;
 	const summary = taskSummary(progress.description || progress.assignment || progress.task);
 	// The agent's own stage line (from its completion probe) rides beside the task while it runs.
 	const stage = running && progress.stage ? plainText(progress.stage) : "";
@@ -1987,7 +2005,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...contextStats(progress.contextTokens, progress.contextWindow),
 				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
 				cost: progress.cost > 0 ? progress.cost : undefined,
-				...(running ? { age: runningAge(progress, nowMs) } : live ? {} : { took: progress.durationMs }),
+				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
 			badges: agentBadges(state.background, undefined),
@@ -2013,22 +2031,21 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 			...describeNestedTasks(progress, state, depth),
 		],
 		progress.id,
+		live && { agent: live, nowMs },
 	);
 }
 
-function describeResultAgent(result: SingleResult, state: AgentDescribeState, depth: number): NativeNode {
+function describeResultAgent(
+	result: SingleResult,
+	state: AgentDescribeState,
+	depth: number,
+	live: LiveTaskAgent | undefined,
+): NativeNode {
 	const { warning, rest } = extractMissingYieldWarning(result.output);
 	const aborted = result.aborted ?? false;
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
-	const live = depth === 0 ? state.live?.get(result.id) : undefined;
-	const status: TspAgentProps["status"] = live
-		? "running"
-		: aborted
-			? "aborted"
-			: success || mergeFailed
-				? "done"
-				: "failed";
+	const status: TspAgentProps["status"] = aborted ? "aborted" : success || mergeFailed ? "done" : "failed";
 	const structured = result.structuredOutput?.data;
 	const output = sanitizeText(stripGeneratedOutputNotice(rest)).trim();
 	const errorLine = (message: string, token = "error"): NativeNode =>
@@ -2047,13 +2064,13 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			status,
 			model: result.resolvedModelIdentity ?? result.resolvedModel,
 			thinking: thinkingToken(result.resolvedThinkingLevel),
-			tool: currentToolOf(live?.progress, state.nowMs),
+			tool: null,
 			stats: {
 				requests: result.requests || undefined,
 				tokens: result.tokens || undefined,
 				...contextStats(result.contextTokens, result.contextWindow),
 				cost: cost > 0 ? cost : undefined,
-				took: live ? undefined : result.durationMs,
+				took: result.durationMs,
 			},
 			retry: null,
 			badges: badges.length > 0 ? badges : undefined,
@@ -2088,15 +2105,23 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			...describeNestedTasks(result, state, depth),
 		],
 		result.id,
+		live && { agent: live, nowMs: state.nowMs },
 	);
 }
 
 /** Agent nodes for one snapshot: settled results, then progress rows that have no result yet. */
-function describeAgents(details: TaskToolDetails, state: AgentDescribeState, depth: number): NativeNode[] {
+function describeAgents(
+	details: TaskToolDetails,
+	state: AgentDescribeState,
+	depth: number,
+	live?: ReadonlyMap<string, LiveTaskAgent>,
+): NativeNode[] {
 	const results = details.results ?? [];
-	const agents = orderResultsForDisplay(results).map(res => describeResultAgent(res, state, depth));
+	const agents = orderResultsForDisplay(results).map(res => describeResultAgent(res, state, depth, live?.get(res.id)));
 	for (const progress of orderProgressForDisplay(details.progress ?? [])) {
-		if (!results.some(res => res.id === progress.id)) agents.push(describeProgressAgent(progress, state, depth));
+		if (!results.some(res => res.id === progress.id)) {
+			agents.push(describeProgressAgent(progress, state, depth, live?.get(progress.id)));
+		}
 	}
 	return agents;
 }
@@ -2187,9 +2212,9 @@ function describeTaskResult(
 			expanded: options.expanded,
 			background,
 			json: options.json === true,
-			live: options.renderContext?.liveAgents,
 		},
 		0,
+		options.renderContext?.liveAgents,
 	);
 	const count = agents.length;
 	let failed = 0;
