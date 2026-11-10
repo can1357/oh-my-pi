@@ -431,7 +431,7 @@ describe("imageGenTool catalog routing", () => {
 		it("generates with only a Factory login, starting from the CLI's preferred model", async () => {
 			const { urls, result } = await run(factory);
 			expect(urls).toEqual([FACTORY_GENERATE]);
-			expect(result?.details?.model).toBe("gpt-image-2.5-sunburst");
+			expect(result?.details?.model).toBe("gpt-image-2.6-sunburst");
 		});
 
 		it("keeps another default image provider ahead of Factory", async () => {

@@ -198,6 +198,57 @@
 		]
 	},
 	{
+		"model": "kimi-k3.1-pro",
+		"upstream": "fireworks",
+		"effort": "max",
+		"requests": [
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "fireworks",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "kimi-k3.1-pro",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "max",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/o/v1/chat/completions",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "fireworks",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "kimi-k3.1-pro",
+					"stream": true,
+					"stream_options": {
+						"include_usage": true
+					},
+					"max_tokens": 131072,
+					"temperature": 1,
+					"reasoning_effort": "max",
+					"reasoning_history": "preserved",
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
 		"model": "nemotron-3-ultra",
 		"upstream": "baseten",
 		"effort": "high",
@@ -2995,6 +3046,71 @@
 		]
 	},
 	{
+		"model": "claude-fable-5.2",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-fable-5.2",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-fable-5.2",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
 		"model": "claude-fable-5",
 		"upstream": "anthropic",
 		"effort": "high",
@@ -3379,6 +3495,55 @@
 				},
 				"body": {
 					"model": "gemini-4-argon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			}
+		]
+	},
+	{
+		"model": "gemini-4-carbon",
+		"upstream": "google",
+		"effort": "medium",
+		"requests": [
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-carbon",
+					"generationConfig": {
+						"maxOutputTokens": 65536,
+						"thinkingConfig": {
+							"includeThoughts": true,
+							"thinkingLevel": "MEDIUM"
+						}
+					},
+					"<tool-keys>": []
+				}
+			},
+			{
+				"path": "/api/llm/g/v1/generate",
+				"headers": {
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "google",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "gemini-4-carbon",
 					"generationConfig": {
 						"maxOutputTokens": 65536,
 						"thinkingConfig": {
