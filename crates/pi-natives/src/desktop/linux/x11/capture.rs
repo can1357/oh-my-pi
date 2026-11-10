@@ -458,41 +458,36 @@ impl X11Capture {
 		Ok(owner != x11rb::NONE)
 	}
 
-	/// What the server stacks above `client`'s top-level window inside `area`,
-	/// frames and unmanaged windows included. A window of the server's own,
-	/// such as the compositing overlay, covers nothing; an override-redirect
-	/// window `client`'s own process made (a menu, a tooltip) belongs to it.
+	/// What the server stacks above `client` at every level of its ancestry
+	/// inside `area`, frames and virtual-root containers included. A window of
+	/// the server's own, such as the compositing overlay, covers nothing; an
+	/// override-redirect window `client`'s own process made belongs to it.
 	fn above(&self, client: Window, area: Area) -> CoreResult<Above> {
-		let parent = |window| -> CoreResult<Window> {
-			Ok(self
-				.conn
-				.query_tree(window)
-				.map_err(request_failed)?
-				.reply()
-				.map_err(request_failed)?
-				.parent)
-		};
-		let mut top = client;
-		loop {
-			let next = parent(top)?;
-			if next == self.root || next == x11rb::NONE {
-				break;
-			}
-			top = next;
-		}
-		// Bottom to top.
-		let children = self
+		let mut child = client;
+		let mut tree = self
 			.conn
-			.query_tree(self.root)
+			.query_tree(child)
 			.map_err(request_failed)?
 			.reply()
-			.map_err(request_failed)?
-			.children;
-		let start = children
-			.iter()
-			.position(|&window| window == top)
-			.map_or(children.len(), |index| index + 1);
-		let children = &children[start..];
+			.map_err(request_failed)?;
+		let mut children = Vec::new();
+		while tree.parent != x11rb::NONE {
+			let parent = tree.parent;
+			tree = self
+				.conn
+				.query_tree(parent)
+				.map_err(request_failed)?
+				.reply()
+				.map_err(request_failed)?;
+			// QueryTree lists siblings bottom to top, even inside a virtual root.
+			let start = tree
+				.children
+				.iter()
+				.position(|&window| window == child)
+				.map_or(tree.children.len(), |index| index + 1);
+			children.extend_from_slice(&tree.children[start..]);
+			child = parent;
+		}
 		let attributes = children
 			.iter()
 			.map(|&window| self.conn.get_window_attributes(window))
@@ -516,15 +511,23 @@ impl X11Capture {
 			{
 				continue;
 			}
+			let Ok(origin) = self
+				.conn
+				.translate_coordinates(window, self.root, 0, 0)
+				.map_err(request_failed)?
+				.reply()
+			else {
+				continue;
+			};
 			let border = u32::from(geometry.border_width);
 			let outer = (
-				i32::from(geometry.x),
-				i32::from(geometry.y),
+				i32::from(origin.dst_x) - i32::from(geometry.border_width),
+				i32::from(origin.dst_y) - i32::from(geometry.border_width),
 				u32::from(geometry.width) + 2 * border,
 				u32::from(geometry.height) + 2 * border,
 			);
 			if attributes.override_redirect && owner(window) == owner(client) {
-				let origin = (outer.0 + border as i32, outer.1 + border as i32);
+				let origin = (i32::from(origin.dst_x), i32::from(origin.dst_y));
 				let inner = (origin.0, origin.1, u32::from(geometry.width), u32::from(geometry.height));
 				if let Some(part) = intersect(area, inner) {
 					above.popups.push((window, part, origin));
@@ -600,6 +603,12 @@ impl X11Capture {
 			.ok_or_else(|| {
 				DesktopError::capture_failed("X11 setup does not describe the window's visual")
 			})?;
+		if visual.class != VisualClass::TRUE_COLOR {
+			return Err(DesktopError::capture_failed(
+				"X11 window capture requires a TrueColor visual; colormap-based visuals are \
+				 unsupported",
+			));
+		}
 		let color = visual.red_mask | visual.green_mask | visual.blue_mask;
 		let masks = ColorMasks {
 			red:   visual.red_mask,
@@ -837,7 +846,7 @@ mod tests {
 	use x11rb::{
 		CURRENT_TIME,
 		connection::RequestConnection as _,
-		protocol::xproto::{ConfigureWindowAux, CreateWindowAux, PropMode, StackMode},
+		protocol::xproto::{ColormapAlloc, ConfigureWindowAux, CreateWindowAux, PropMode, StackMode},
 		wrapper::ConnectionExt as _,
 	};
 
@@ -959,6 +968,113 @@ mod tests {
 
 	#[test]
 	#[ignore = "starts Xvfb"]
+	fn covered_window_inside_a_virtual_root_is_reported_covered() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let (red, ..) = covered_pair(&wm);
+		let root = wm.setup().roots[0].root;
+		let children = wm
+			.query_tree(root)
+			.expect("root tree")
+			.reply()
+			.expect("root children")
+			.children;
+		let virtual_root =
+			window(&wm, root, (30, 40, 290, 280), &CreateWindowAux::new().background_pixel(0));
+		for child in children {
+			let geometry = wm
+				.get_geometry(child)
+				.expect("geometry")
+				.reply()
+				.expect("child geometry");
+			wm.reparent_window(child, virtual_root, geometry.x, geometry.y)
+				.expect("reparent");
+			wm.map_window(child).expect("remap");
+		}
+		let atom = wm
+			.intern_atom(false, b"_NET_VIRTUAL_ROOTS")
+			.expect("intern")
+			.reply()
+			.expect("atom")
+			.atom;
+		wm.change_property32(PropMode::REPLACE, root, atom, AtomEnum::WINDOW, &[virtual_root])
+			.expect("virtual roots");
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let error = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect_err("a sibling inside the virtual root covers red");
+		assert_eq!(error.code, ErrorCode::CaptureFailed);
+		assert!(error.message.contains("covered"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn covered_window_with_a_directcolor_visual_is_rejected() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let root = wm.setup().roots[0].root;
+		let (depth, visual) = wm.setup().roots[0]
+			.allowed_depths
+			.iter()
+			.find_map(|depth| {
+				depth
+					.visuals
+					.iter()
+					.find(|visual| visual.class == VisualClass::DIRECT_COLOR)
+					.map(|visual| (depth.depth, visual.visual_id))
+			})
+			.expect("Xvfb provides a DirectColor visual");
+		let colormap = wm.generate_id().expect("colormap id");
+		wm.create_colormap(ColormapAlloc::NONE, colormap, root, visual)
+			.expect("create colormap")
+			.check()
+			.expect("colormap accepted");
+		become_compositing_manager(&wm);
+		let target = wm.generate_id().expect("window id");
+		wm.create_window(
+			depth,
+			target,
+			root,
+			0,
+			0,
+			200,
+			150,
+			0,
+			WindowClass::INPUT_OUTPUT,
+			visual,
+			&CreateWindowAux::new()
+				.colormap(colormap)
+				.background_pixel(RED)
+				.border_pixel(0),
+		)
+		.expect("create DirectColor window")
+		.check()
+		.expect("DirectColor window accepted");
+		wm.map_window(target).expect("map target");
+		window(&wm, root, (100, 100, 200, 150), &CreateWindowAux::new().background_pixel(BLUE));
+		let stacking = wm
+			.intern_atom(false, b"_NET_CLIENT_LIST_STACKING")
+			.expect("intern")
+			.reply()
+			.expect("atom")
+			.atom;
+		wm.change_property32(PropMode::REPLACE, root, stacking, AtomEnum::WINDOW, &[target])
+			.expect("list target");
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let error = capture
+			.capture(&Target::Window(target.to_string()), None)
+			.expect_err("DirectColor indexes cannot be decoded as RGB components");
+		assert_eq!(error.code, ErrorCode::CaptureFailed);
+		assert!(error.message.contains("TrueColor"), "{}", error.message);
+		assert!(error.message.contains("colormap"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
 	fn covered_window_follows_the_servers_stacking_and_keeps_its_popups() {
 		let (_server, display) = start_server();
 		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
@@ -1053,11 +1169,15 @@ mod tests {
 		assert!(above.covered);
 		assert_eq!(above.popups.len(), 1);
 		let popup = above.popups[0].0;
-		let mut image = capture.capture_window(red, 0, 0, 200, 150).expect("target pixels");
+		let mut image = capture
+			.capture_window(red, 0, 0, 200, 150)
+			.expect("target pixels");
 
 		wm.unmap_window(popup).expect("unmap popup");
 		wm.sync().expect("popup is unmapped before GetImage");
-		capture.overlay_popups(&mut image, (0, 0), above).expect("capture without vanished popup");
+		capture
+			.overlay_popups(&mut image, (0, 0), above)
+			.expect("capture without vanished popup");
 
 		assert_eq!(image.dimensions(), (200, 150));
 		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
@@ -1065,11 +1185,15 @@ mod tests {
 
 		wm.map_window(popup).expect("remap popup");
 		wm.sync().expect("popup is mapped");
-		let above = capture.above(red, (0, 0, 200, 150)).expect("stacking before destroy");
+		let above = capture
+			.above(red, (0, 0, 200, 150))
+			.expect("stacking before destroy");
 		assert_eq!(above.popups.len(), 1);
 		wm.destroy_window(popup).expect("destroy popup");
 		wm.sync().expect("popup is destroyed before GetImage");
-		capture.overlay_popups(&mut image, (0, 0), above).expect("capture without destroyed popup");
+		capture
+			.overlay_popups(&mut image, (0, 0), above)
+			.expect("capture without destroyed popup");
 		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
 	}
 
