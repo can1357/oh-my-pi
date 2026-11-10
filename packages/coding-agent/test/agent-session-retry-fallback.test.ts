@@ -6993,6 +6993,71 @@ describe("AgentSession retry fallback", () => {
 	});
 
 	it.each([
+		{ label: "promotes onto a model the effort ceiling allows", ceiling: undefined },
+		{ label: "skips a target whose effort floor exceeds its ceiling", ceiling: Effort.Low },
+	])("context promotion under an effort ceiling: $label", async ({ ceiling }) => {
+		const target = getBundledModel("openrouter", "deepseek/deepseek-v4-pro");
+		if (!target) throw new Error("Expected bundled deepseek-v4-pro model to exist");
+		const modelsConfigPath = path.join(tempDir.path(), `promotion-ceiling-${ceiling}.json`);
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					openai: {
+						modelOverrides: {
+							"gpt-4o-mini": { contextWindow: 4000, contextPromotionTarget: `${target.provider}/${target.id}` },
+						},
+					},
+				},
+			}),
+		);
+		modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+		const small = modelRegistry.find("openai", "gpt-4o-mini");
+		if (!small) throw new Error("Expected override model to resolve");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: small, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push({ content: ["ok"] });
+				return mock.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"contextPromotion.enabled": true,
+			}),
+			modelRegistry,
+			thinkingLevelCeiling: () => ceiling,
+		});
+
+		session.agent.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "lorem ipsum ".repeat(5000) }],
+			timestamp: Date.now(),
+		});
+		await session.prompt("continue");
+		await session.waitForIdle();
+
+		const targetId = `${target.provider}/${target.id}`;
+		if (ceiling === undefined) {
+			expect(requestedModels).toContain(targetId);
+		} else {
+			expect(requestedModels).not.toContain(targetId);
+			expect(session.model?.id).toBe(small.id);
+		}
+	});
+
+	it.each([
 		{ label: "switches while model switching is allowed", disableModelFallback: false },
 		{ label: "retries the same model with disableModelFallback", disableModelFallback: true },
 	])("retry fallback: $label", async ({ disableModelFallback }) => {
@@ -7600,7 +7665,7 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}:high`] },
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		// task.maxEffort map: the primary's exact entry is low, the fallback matches a glob at medium.
+		// task.maxEffort map: the primary's exact entry is low, the fallback matches a `*` prefix at medium.
 		const ceilings = { [`${primaryModel.provider}/${primaryModel.id}`]: Effort.Low, "openai-codex/*": Effort.Medium };
 
 		session = new AgentSession({

@@ -3049,6 +3049,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
 			setModelTemporary: (model, thinkingLevel, options) =>
 				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+			thinkingLevelCeiling: model => this.#models.thinkingLevelCeiling?.(model),
 			abort: options => this.abort(options),
 			abortHandoff: () => this.abortHandoff(),
 		};
