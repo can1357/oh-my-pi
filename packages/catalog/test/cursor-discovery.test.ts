@@ -284,7 +284,7 @@ function cursorModelSpec(id: string): ModelSpec<"cursor-agent"> {
 }
 
 describe("fetchCursorUsableModels", () => {
-	it("joins rich model metadata, account defaults, routes, and ZDR eligibility", async () => {
+	it("joins rich model metadata, account defaults, and routes", async () => {
 		const effortValues = [
 			create(ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema, { value: "low" }),
 			create(ModelParameterDefinition_EnumParameterDefinition_EnumParameterValueSchema, { value: "high" }),
@@ -342,7 +342,6 @@ describe("fetchCursorUsableModels", () => {
 				"claude-4.6-opus-high",
 				"claude-4.6-opus-max",
 				"claude-4.6-opus-xhigh",
-				"fable-retention",
 				"legacy-only",
 			].map(modelId => create(ModelDetailsSchema, { modelId })),
 		});
@@ -380,12 +379,6 @@ describe("fetchCursorUsableModels", () => {
 						variant("claude-4.6-opus-xhigh", "xhigh", false),
 						variant("claude-4.6-opus-high", "high", true, false, true, "1m"),
 					],
-				}),
-				create(AvailableModelsResponse_ModelDetailsSchema, {
-					name: "fable",
-					supportsAgent: true,
-					requiresDataRetention: true,
-					legacySlugs: ["fable-retention"],
 				}),
 			],
 		});
@@ -479,7 +472,6 @@ describe("fetchCursorUsableModels", () => {
 		);
 		expect(models?.some(model => model.id === "claude-4.6-opus-medium")).toBe(false);
 		expect(models?.some(model => model.id === "claude-4.6-opus-xhigh")).toBe(false);
-		expect(models?.some(model => model.id === "fable-retention")).toBe(false);
 
 		const collapsed = collapseBuiltVariants((models ?? []).map(model => buildModel(model)));
 		const rebuiltLane = collapsed.find(model => model.id === "claude-4.6-opus");
@@ -488,6 +480,32 @@ describe("fetchCursorUsableModels", () => {
 		expect(rebuiltLane?.supportsTools).toBe(true);
 		expect(rebuiltLane?.cursorModelRoutes).toEqual(lane?.cursorModelRoutes);
 		expect(rebuiltLane?.thinking?.effortRouting).toEqual(lane?.thinking?.effortRouting);
+	});
+
+	it("lists models Cursor flags as requiring data retention", async () => {
+		const usable = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "claude-fable-5-1-high" })],
+		});
+		const available = create(AvailableModelsResponseSchema, {
+			models: [
+				create(AvailableModelsResponse_ModelDetailsSchema, {
+					name: "claude-fable-5-1",
+					clientDisplayName: "Fable 5.1",
+					supportsAgent: true,
+					requiresDataRetention: true,
+					contextTokenLimit: 200_000,
+					legacySlugs: ["claude-fable-5-1-high"],
+					variants: [richVariant("claude-fable-5-1-high", { effort: "high" }, { isDefaultNonMaxConfig: true })],
+				}),
+			],
+		});
+		const rpcBaseUrl = await startCursorDiscoveryRpcServer({
+			"/agent.v1.AgentService/GetUsableModels": toBinary(GetUsableModelsResponseSchema, usable),
+			"/aiserver.v1.AiService/AvailableModels": toBinary(AvailableModelsResponseSchema, available),
+		});
+		const models = await fetchCursorUsableModels({ apiKey: "account-token", baseUrl: rpcBaseUrl, timeoutMs: 1_000 });
+
+		expect(models?.find(model => model.id === "claude-fable-5-1")?.requestModelId).toBe("claude-fable-5-1-high");
 	});
 
 	it("prices rich lanes from the KDL rate card and leaves uncovered lanes unpriced", async () => {
