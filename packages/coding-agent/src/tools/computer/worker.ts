@@ -400,7 +400,8 @@ const FALLBACK: Fallback = { takeover: true, returnFocus: true };
 const BACKGROUND_UNAVAILABLE = "BackgroundUnavailable: ";
 /** A refusal's closing "nothing was sent", true of the refused background attempt only. */
 const UNSENT_CLAUSE = /(?:;|,? so) (?:nothing|no input) was sent$/;
-const RAISE_ROUTE = "Background input and screenshots reach a covered window, so no raise is needed.";
+const RAISE_ROUTE =
+	"Inspect with win.ax() or a display screenshot; use a background input route if one is available.";
 const OPEN_ROUTE = "Use press() on a button that does the same, or tell the user the step needs their screen.";
 /** JSON-escaped characters of a drag's selected text its output line quotes; the returned selection keeps it whole. */
 const DRAG_SELECTION_PREVIEW_CHARS = 24;

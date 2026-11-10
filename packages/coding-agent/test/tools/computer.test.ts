@@ -4460,23 +4460,23 @@ describe("computer background fallback", () => {
 				call: "axKeyChord:true",
 				route: "Call it without takeover",
 			},
-			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "no raise is needed" },
+			{ code: 'await (await desktop.window("42")).raise()', call: "raise:42", route: "win.ax()" },
 			{
 				code: 'await (await desktop.ref("e1")).perform("AXRaise")',
 				call: "perform:AXRaise",
-				route: "no raise is needed",
+				route: "win.ax()",
 			},
 			{
 				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
 				// Off macOS native is sent the name as given: UIA and AT-SPI match their own names.
 				call: "perform: Raise ",
-				route: "no raise is needed",
+				route: "win.ax()",
 			},
 			{
 				// Native runs any spelling of an element's action, so this one raises too.
 				code: 'await (await desktop.ref("e1")).perform("axraise")',
 				call: "perform:axraise",
-				route: "no raise is needed",
+				route: "win.ax()",
 			},
 			{
 				code: 'await desktop.apps.open("test.editor", { activate: true })',
