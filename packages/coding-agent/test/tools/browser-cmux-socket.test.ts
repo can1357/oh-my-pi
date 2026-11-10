@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 type RequestLine = {
@@ -89,9 +91,48 @@ async function withTcpRelayServer(
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 describe("CmuxSocketClient", () => {
+	it("lets an evaluate RPC finish beyond the socket default within the active run budget", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		await withSocketServer(
+			(_line, socket) => {
+				socket.on("error", () => undefined);
+				received.resolve(socket);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "budget" });
+				try {
+					await client.connect();
+					vi.useFakeTimers();
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: new AbortController().signal,
+						timeoutMs: 40_000,
+					});
+					const pending = tab.evaluate(() => 42);
+					const outcome = pending.then(
+						value => ({ value }),
+						error => ({ error }),
+					);
+					const socket = await received.promise;
+					vi.advanceTimersByTime(35_000);
+					socket.write(`${JSON.stringify({ ok: true, result: { value: { __ompOk: 42 } } })}\n`);
+					expect(await outcome).toEqual({ value: 42 });
+				} finally {
+					tab.clearRunContext();
+					client.close();
+					vi.useRealTimers();
+				}
+			},
+		);
+	});
+
 	it("authenticates, frames JSON requests, and returns the result", async () => {
 		const lines: string[] = [];
 		const requests: RequestLine[] = [];

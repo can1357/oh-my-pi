@@ -1690,7 +1690,7 @@ export class CmuxTab implements InProcessRunTab {
 	async #request(
 		method: string,
 		params: Record<string, unknown>,
-		timeoutMs?: number,
+		timeoutMs: number | undefined = this.#runContext?.timeoutMs,
 		signal: AbortSignal | undefined = this.#runContext?.signal,
 	): Promise<Record<string, unknown>> {
 		throwIfAborted(signal);
