@@ -549,7 +549,7 @@ pub(super) fn open_document(
 		},
 		Some(pid) => shown_window(
 			FIRST_WINDOW_WAIT,
-			&path.as_deref().map(item_names).unwrap_or_default(),
+			&path.as_deref().map_or_default(item_names),
 			&before,
 			|| key_capable_windows(pid),
 			poll_window,
@@ -584,14 +584,12 @@ fn showing(windows: Vec<DesktopWindow>, name: Option<&str>) -> Vec<DesktopWindow
 /// The title of every on-screen window by id; empty when the list cannot be
 /// read.
 fn window_titles() -> HashMap<String, String> {
-	onscreen_windows()
-		.map(|windows| {
-			windows
-				.into_iter()
-				.map(|window| (window.id, window.title))
-				.collect()
-		})
-		.unwrap_or_default()
+	onscreen_windows().map_or_default(|windows| {
+		windows
+			.into_iter()
+			.map(|window| (window.id, window.title))
+			.collect()
+	})
 }
 
 /// The names a window showing the file or folder at `path` can be titled
@@ -1135,6 +1133,7 @@ mod tests {
 		.map(|window| (window.id, window.title))
 	}
 
+	#[allow(clippy::unnecessary_wraps, reason = "compared with what `shown_after` returns")]
 	fn shown(id: &str, title: &str) -> Option<(String, String)> {
 		Some((id.into(), title.into()))
 	}
