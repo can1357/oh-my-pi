@@ -35,9 +35,9 @@
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
  *   credits above the reserve, on an account the session may use (its account
- *   pool). One candidate is redeemed — active account first, then the account
- *   whose credit dies soonest — and the redeem clears its credential blocks so
- *   the retry's re-rank picks it up.
+ *   pool). One candidate is redeemed — an approved consent first, then the
+ *   active account, then the account whose credit dies soonest — and the redeem
+ *   clears its credential blocks so the retry's re-rank picks it up.
  * Each action follows its governing window's policy: restores clearing any
  * weekly exhaustion use weekly, otherwise 5h; salvages use the fullest window.
  * Imminent credits may spend when either restorable window permits evaluation.
@@ -165,6 +165,7 @@ export function resetPlanSettings(cfg: {
 }): CodexResetPlanInput["settings"] {
 	return {
 		windows: { "5h": cfg.autoRedeem5h !== "no", weekly: cfg.autoRedeemWeekly !== "no" },
+		approved: { "5h": cfg.autoRedeem5h === "yes", weekly: cfg.autoRedeemWeekly === "yes" },
 		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -206,6 +207,7 @@ export interface CodexResetPlanInput {
 	modelId: string;
 	settings: {
 		windows: Record<ResetWindow, boolean>;
+		approved: Record<ResetWindow, boolean>;
 		/** `blocked-account`: skip when the natural unblock is closer than this. */
 		minBlockedMinutes: number;
 		/** `blocked-account`: never spend below this many remaining credits. */
@@ -473,6 +475,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			unblockAtMs: number;
 			blockedWindows: ResetWindow[];
 			window: ResetWindow;
+			approved: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -571,9 +574,12 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("cooldown");
 				continue;
 			}
-			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows, window });
+			const approved = imminent ? settings.approved["5h"] || settings.approved.weekly : settings.approved[window];
+			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows, window, approved });
 		}
 		candidates.sort((a, b) => {
+			// Prefer a restore that can run without prompting for consent.
+			if (a.approved !== b.approved) return a.approved ? -1 : 1;
 			// Active account first: the sticky session credential stays usable.
 			if (a.snapshot.active !== b.snapshot.active) return a.snapshot.active ? -1 : 1;
 			// Then spend the credit that dies soonest.

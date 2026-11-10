@@ -149,6 +149,7 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		modelId: "gpt-5.3-codex",
 		settings: {
 			windows: { "5h": true, weekly: true },
+			approved: { "5h": true, weekly: true },
 			minBlockedMinutes: 60,
 			keepCredits: 0,
 			salvageHorizonMs: 12 * HOUR,
@@ -348,6 +349,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report()], {
 				settings: {
 					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 1,
 					salvageHorizonMs: 0,
@@ -363,6 +365,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report({ credits: 2 })], {
 				settings: {
 					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 1,
 					salvageHorizonMs: 0,
@@ -520,6 +523,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
 				settings: {
 					windows: { "5h": false, weekly: true },
+					approved: { "5h": false, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -539,6 +543,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report()], {
 				settings: {
 					windows: { "5h": false, weekly: true },
+					approved: { "5h": false, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -553,6 +558,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report()], {
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -572,6 +578,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -586,6 +593,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -602,6 +610,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([report()], {
 				settings: {
 					windows: { "5h": false, weekly: false },
+					approved: { "5h": false, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -650,6 +659,72 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", credits: 3 });
 		const plan = planCodexResetRedemptions(input([active, sibling]));
 		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
+	});
+
+	it("restores an approved sibling before the active account's unapproved weekly block", () => {
+		// Active account blocks on weekly, where auto-redeem is unset: restoring it
+		// would need a consent prompt, so a headless host can never run that plan.
+		const active = report();
+		// The sibling's 5h block is approved; it would lose the active-account
+		// tiebreak yet is the only candidate that can actually restore quota.
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", primaryUsed: 1.0, weeklyUsed: 0.8 });
+		const plan = planCodexResetRedemptions(
+			input([active, sibling], {
+				settings: resetPlanSettings({
+					autoRedeem5h: "yes",
+					autoRedeemWeekly: "unset",
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonHours: 12,
+				}),
+			}),
+		);
+		expect(plan.actions[0]).toMatchObject({
+			reason: "blocked-account",
+			accountKey: "openai-codex|-|2",
+			window: "5h",
+			active: false,
+		});
+	});
+
+	it("keeps the active account first when both candidate windows are approved", () => {
+		const active = report();
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", primaryUsed: 1.0, weeklyUsed: 0.8 });
+		const plan = planCodexResetRedemptions(input([active, sibling]));
+		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, window: "weekly", active: true });
+	});
+
+	it("treats an imminent credit on an unapproved window as approved via the other window", () => {
+		// Sibling A blocks on weekly, where consent is unset: only the last-chance
+		// imminent rule plus the approved 5h window can approve that restore.
+		// Sibling B's 5h window is approved outright, so an approved-consent-only
+		// ranking would always pick B and let A's credit die.
+		const dyingWeekly = report({ accountId: "acct-a", email: "a@example.com", creditExpiries: [60_000] });
+		const dying5h = report({
+			accountId: "acct-b",
+			email: "b@example.com",
+			primaryUsed: 1.0,
+			weeklyUsed: 0.8,
+			creditExpiries: [2 * DAY],
+		});
+		const plan = planCodexResetRedemptions(
+			input([dyingWeekly, dying5h], {
+				identity: undefined,
+				settings: {
+					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: false },
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+				},
+			}),
+		);
+		expect(plan.actions[0]).toMatchObject({
+			reason: "blocked-account",
+			accountKey: "openai-codex|-|3",
+			window: "weekly",
+			expiresInMs: 60_000,
+		});
 	});
 
 	it("does not treat a Team seat sharing the workspace account id as the active account", () => {
@@ -808,6 +883,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 5,
 					salvageHorizonMs: 12 * HOUR,
@@ -852,6 +928,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -867,6 +944,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -887,6 +965,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -902,6 +981,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: false },
+					approved: { "5h": true, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -916,6 +996,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			trigger: "sweep",
 			settings: {
 				windows: { "5h": true, weekly: true },
+				approved: { "5h": true, weekly: true },
 				minBlockedMinutes: 60,
 				keepCredits: 5,
 				salvageHorizonMs: 0,
@@ -963,6 +1044,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": true, weekly: true },
+					approved: { "5h": true, weekly: true },
 					minBlockedMinutes: 60,
 					keepCredits: 5,
 					salvageHorizonMs: 0,
@@ -992,6 +1074,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				trigger: "sweep",
 				settings: {
 					windows: { "5h": false, weekly: false },
+					approved: { "5h": false, weekly: false },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -1125,6 +1208,7 @@ describe("reset window policy helpers", () => {
 			}),
 		).toEqual({
 			windows: { "5h": false, weekly: true },
+			approved: { "5h": false, weekly: false },
 			minBlockedMinutes: 60,
 			keepCredits: 1,
 			salvageHorizonMs: 2 * HOUR,
