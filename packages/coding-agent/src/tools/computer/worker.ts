@@ -372,11 +372,12 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 	const unknown = Object.keys(value).filter(key => !allowed.includes(key));
 	if (unknown.length === 0) return;
+	// Keep normalization in sync with computer.run in prelude.js, which runs in an isolated realm.
 	const hints = unknown.flatMap(key => {
 		const normalized = key.toLowerCase().replace(/[_-]/g, "");
 		const matches = allowed.filter(name => {
 			const candidate = name.toLowerCase().replace(/[_-]/g, "");
-			return candidate.includes(normalized) || normalized.includes(candidate);
+			return normalized.length > 0 && candidate === normalized;
 		});
 		return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
 	});

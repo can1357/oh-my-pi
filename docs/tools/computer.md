@@ -55,7 +55,7 @@ await computer.capabilities();
 await computer.close();
 ```
 
-Unknown option or filter keys are rejected with the helper name, valid keys, and a suggested spelling when there is one close match.
+Unknown option or filter keys are rejected with the helper name and valid keys. A spelling suggestion appears only when exactly one valid key matches after ignoring case, underscores, and hyphens.
 
 Python uses the same helper names; keyword arguments become the trailing options object, and `win.raise_()` stands in for the keyword `raise`:
 

@@ -830,6 +830,13 @@ describe("computer prelude", () => {
 			name: "ToolError",
 			message: expect.stringContaining("readOnly: did you mean read_only"),
 		});
+		for (const key of ["a", "read", "out", ""]) {
+			await expect(runInContext(`computer.run("return 1;", { ${JSON.stringify(key)}: true })`, realm))
+				.rejects.toMatchObject({
+					name: "ToolError",
+					message: expect.not.stringContaining("did you mean"),
+				});
+		}
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
 		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
@@ -1488,16 +1495,19 @@ describe("computer worker round trips", () => {
 					failures.push(name + ": " + error.message);
 				} else {
 					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
-					if (invalid.depth) assert(error.message.includes("did you mean maxDepth"), error.message);
+					if (!invalid.max_depth) assert(!error.message.includes("did you mean"), error.message);
 					if (invalid.max_depth && !error.message.includes("max_depth: did you mean maxDepth")) failures.push("ax missing max_depth spelling hint");
 				}
-				await call(valid);
+				if (valid !== undefined) await call(valid);
 			};
 			await check("ax", o => win.ax(o), { all: true, maxDepth: 3 }, { depth: 3, max_depth: 3 });
 			await check("wait", o => wait(() => true, o), { timeout: 10, interval: 10 }, { timeoutMs: 10 });
 			await check("observe", o => win.observe(o), { silent: true, all: true, maxDepth: 3 });
 			await check("find", o => win.find(o), { role: "button", title: "Save", value: "", limit: 1 });
 			await check("windows", o => desktop.windows(o), { id: "42", app: "Code", title: "Editor", wait: 0 }, { includeOffscreen: true });
+			await check("windows", o => desktop.windows(o), { id: "42" }, { d: true });
+			await check("click", o => win.click(1, 2, o), { button: "left" }, { on: true });
+			await check("control.acquire", o => desktop.control.acquire(o), undefined, { "": true });
 			await check("window", o => desktop.window(o), { id: "42", app: "Code", title: "Editor", wait: 0 });
 			await check("apps.list", o => desktop.apps.list(o), { query: "Editor", runningOnly: true });
 			await check("apps.open", o => desktop.apps.open("test.editor", o), { activate: false, reveal: false, app: "test.editor" });
