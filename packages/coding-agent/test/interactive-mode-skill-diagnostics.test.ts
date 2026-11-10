@@ -86,7 +86,7 @@ describe("startup skill discovery diagnostics", () => {
 		session = created.session;
 		terminal = new VirtualTerminal(120, 48);
 		const composer = new Composer({ terminal });
-		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
+		mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await terminal.waitForRender();
