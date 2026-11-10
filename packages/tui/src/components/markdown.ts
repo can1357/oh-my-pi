@@ -4681,9 +4681,11 @@ export class Markdown implements Component {
 			const lineStart: boolean = trimLeadingWhitespace;
 			trimLeadingWhitespace = false;
 			if (isMathToken(token)) {
+				const identity = this.#mathOccurrences.get(token);
 				markHtmlItemWhenContent(token.text);
 				if (
 					this.#mathMeasurement &&
+					identity &&
 					this.#mathEnabled() &&
 					TERMINAL.imageProtocol === ImageProtocol.Kitty &&
 					getKittyGraphics().unicodePlaceholders
@@ -4699,6 +4701,8 @@ export class Markdown implements Component {
 							pixelsPerEx: cell.heightPx / 2,
 							maxWidthPx: 4096,
 						},
+						this.#mathDocument,
+						identity,
 						this.#invalidateMathPresentation,
 					);
 					if (geometry) {

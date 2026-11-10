@@ -1,199 +1,259 @@
-import { inflateSync } from "node:zlib";
-import { MathJaxTexFont } from "@mathjax/mathjax-tex-font/mjs/svg.js";
-import { liteAdaptor, type LiteAdaptor } from "@mathjax/src/mjs/adaptors/liteAdaptor.js";
-import type { LiteDocument } from "@mathjax/src/mjs/adaptors/lite/Document.js";
-import { LiteElement } from "@mathjax/src/mjs/adaptors/lite/Element.js";
-import type { LiteText } from "@mathjax/src/mjs/adaptors/lite/Text.js";
-import type { MathDocument } from "@mathjax/src/mjs/core/MathDocument.js";
-import { RegisterHTMLHandler } from "@mathjax/src/mjs/handlers/html.js";
-import { TeX } from "@mathjax/src/mjs/input/tex.js";
-import { mathjax } from "@mathjax/src/mjs/mathjax.js";
-import { SVG } from "@mathjax/src/mjs/output/svg.js";
-import "@mathjax/src/mjs/input/tex/base/BaseConfiguration.js";
-import "@mathjax/src/mjs/input/tex/ams/AmsConfiguration.js";
-import "@mathjax/src/mjs/input/tex/newcommand/NewcommandConfiguration.js";
-import "@mathjax/src/mjs/input/tex/configmacros/ConfigMacrosConfiguration.js";
-import "@mathjax/src/mjs/input/tex/mathtools/MathtoolsConfiguration.js";
-import "@mathjax/src/mjs/input/tex/boldsymbol/BoldsymbolConfiguration.js";
-import "@mathjax/src/mjs/input/tex/braket/BraketConfiguration.js";
-import "@mathjax/src/mjs/input/tex/cancel/CancelConfiguration.js";
-import "@mathjax/src/mjs/input/tex/color/ColorConfiguration.js";
-import "@mathjax/src/mjs/input/tex/cases/CasesConfiguration.js";
-import "@mathjax/src/mjs/input/tex/empheq/EmpheqConfiguration.js";
-import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import {
+	getMathImageRenderer,
+	onMathImageRendererChange,
+	setMathImageRenderer,
 	type MathImageRenderer,
 	type MathImageRenderRequest,
 	type MathImageSvg,
-	setMathImageRenderer,
 } from "@oh-my-pi/pi-tui";
+import { TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import { MATH_WORKER_ARG } from "../cli/worker-selectors";
+import {
+	isMathWorkerOutbound,
+	MATH_RENDERER_ID,
+	MATH_WORKER_MAX_PENDING,
+	MATH_WORKER_TIMEOUT_MS,
+	type MathWorkerInbound,
+} from "./math-worker-protocol";
 
-const PACKAGES = [
-	"base",
-	"ams",
-	"newcommand",
-	"configmacros",
-	"mathtools",
-	"boldsymbol",
-	"braket",
-	"cancel",
-	"color",
-	"cases",
-	"empheq",
-];
-let adaptor: LiteAdaptor | undefined;
-let output: SVG<LiteElement, LiteText, LiteDocument> | undefined;
+type State = "idle" | "spawning" | "ready" | "failed" | "exhausted" | "terminated";
+interface Pending {
+	id: number;
+	epoch: number;
+	request: MathImageRenderRequest;
+	resolve: (result: MathImageSvg) => void;
+	reject: (error: Error) => void;
+	promise: Promise<MathImageSvg>;
+}
 
-function render(request: MathImageRenderRequest): MathImageSvg {
-	if (!request.tex.trim() || request.tex.length > 20_000) throw new Error("Math source exceeds input limits");
-	if (!/^#[\da-f]{6}$/i.test(request.inkHex)) throw new Error("Invalid math ink color");
-	for (const value of [request.cellWidthPx, request.cellHeightPx, request.pixelsPerEx, request.maxWidthPx]) {
-		if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid math geometry");
+/** One serial, demand-started transport; conversion never runs in this realm. */
+export class MathImageWorkerClient {
+	#state: State = "idle";
+	#enabled = false;
+	#epoch = 0;
+	#nextId = 0;
+	#restartUsed = false;
+	#worker: Worker | undefined;
+	#queue: Pending[] = [];
+	#active: Pending | undefined;
+	#timer: Timer | undefined;
+	#detach: (() => void) | undefined;
+	#pingId = 0;
+	#ready = false;
+	#pong = false;
+
+	beginLifecycle(): void {
+		if (this.#enabled) return;
+		this.#enabled = true;
+		this.#epoch++;
+		this.#restartUsed = false;
+		this.#state = "idle";
 	}
-	if (!adaptor) {
-		adaptor = liteAdaptor();
-		RegisterHTMLHandler(adaptor);
-		output = new SVG<LiteElement, LiteText, LiteDocument>({
-			fontData: new MathJaxTexFont(),
-			fontCache: "local",
-			linebreaks: { inline: false },
-			displayOverflow: "overflow",
-		});
+
+	render(request: MathImageRenderRequest): Promise<MathImageSvg> {
+		if (!this.#enabled || this.#state === "terminated") return Promise.reject(new Error("Math renderer is disabled"));
+		if (this.#state === "exhausted") return Promise.reject(new Error("Math worker restart allowance exhausted"));
+		if (this.#queue.length + Number(Boolean(this.#active)) >= MATH_WORKER_MAX_PENDING)
+			return Promise.reject(new Error("Math worker queue is full"));
+		const deferred = Promise.withResolvers<MathImageSvg>();
+		this.#queue.push({ ...deferred, id: ++this.#nextId, epoch: this.#epoch, request });
+		if (this.#state === "idle" || this.#state === "failed") {
+			if (this.#state === "failed") this.#restartUsed = true;
+			this.#spawn();
+		} else this.#pump();
+		return deferred.promise;
 	}
-	const input = new TeX<LiteElement, LiteText, LiteDocument>({
-		packages: PACKAGES,
-		tags: "none",
-		maxBuffer: 20_000,
-		maxMacros: 1_000,
-		maxTemplateSubtitutions: 1_000,
-		formatError: (_jax: unknown, error: unknown) => {
-			throw error;
-		},
-	});
-	const document: MathDocument<LiteElement, LiteText, LiteDocument> = mathjax.document("", {
-		InputJax: input,
-		OutputJax: output,
-		compileError: (_document: unknown, _math: unknown, error: unknown) => {
-			throw error;
-		},
-		typesetError: (_document: unknown, _math: unknown, error: unknown) => {
-			throw error;
-		},
-	});
-	try {
-		const node = document.convert(request.tex, {
-			display: request.display,
-			ex: request.pixelsPerEx,
-			em: request.pixelsPerEx / 0.442,
-			containerWidth: request.maxWidthPx,
-		});
-		if (!(node instanceof LiteElement)) throw new Error("Math conversion returned a non-DOM result");
-		const svgs = adaptor
-			.childNodes(node)
-			.filter((child): child is LiteElement => child instanceof LiteElement && adaptor!.kind(child) === "svg");
-		if (svgs.length !== 1 || adaptor.tags(node, "mjx-break").length)
-			throw new Error("Math conversion did not produce one complete SVG");
-		const svg = svgs[0];
-		const dimension = (name: string): number => {
-			const attribute: unknown = adaptor!.getAttribute(svg, name);
-			if (typeof attribute !== "string" || !/^(?:\d+(?:\.\d*)?|\.\d+)ex$/.test(attribute))
-				throw new Error("Invalid math SVG dimension");
-			const value = Number.parseFloat(attribute);
-			if (!Number.isFinite(value) || value <= 0) throw new Error("Invalid math SVG dimension");
-			return value;
+
+	cancelQueued(): void {
+		const queue = this.#queue.splice(0);
+		for (const pending of queue) pending.reject(new Error("Math rendering cancelled"));
+	}
+
+	terminate(): void {
+		this.#enabled = false;
+		this.#cleanup(new Error("Math renderer disabled"));
+		this.#state = "idle";
+	}
+
+	dispose(): void {
+		this.#enabled = false;
+		this.#cleanup(new Error("Math renderer disposed"));
+		this.#state = "terminated";
+	}
+
+	#cleanup(error: Error): void {
+		this.#epoch++;
+		const worker = this.#worker;
+		this.#worker = undefined;
+		this.#detach?.();
+		this.#detach = undefined;
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		const active = this.#active;
+		this.#active = undefined;
+		const queue = this.#queue.splice(0);
+		active?.reject(error);
+		for (const pending of queue) pending.reject(error);
+		worker?.terminate();
+	}
+
+	#fail(error: Error): void {
+		this.#cleanup(error);
+		this.#state = this.#restartUsed ? "exhausted" : "failed";
+	}
+
+	#post(message: MathWorkerInbound): void {
+		try {
+			this.#worker!.postMessage(message);
+		} catch {
+			this.#fail(new Error("Math worker postMessage failed"));
+		}
+	}
+
+	#spawn(): void {
+		this.#state = "spawning";
+		this.#ready = false;
+		this.#pong = false;
+		let worker: Worker;
+		try {
+			const hostEntry = workerHostEntry();
+			worker = hostEntry
+				? new Worker(hostEntry, { type: "module", argv: [MATH_WORKER_ARG] })
+				: new Worker(new URL("./math-worker-entry.ts", import.meta.url).href, { type: "module" });
+		} catch {
+			this.#fail(new Error("Math worker construction failed"));
+			return;
+		}
+		this.#worker = worker;
+		const current = () => this.#worker === worker;
+		const message = (event: MessageEvent<unknown>) => {
+			if (!current()) return;
+			const value = event.data;
+			if (!isMathWorkerOutbound(value)) {
+				this.#fail(new Error("Invalid math worker response"));
+				return;
+			}
+			if (value.type === "ready") {
+				if (this.#state !== "spawning") return;
+				if (value.rendererId !== MATH_RENDERER_ID) {
+					this.#fail(new Error("Math worker renderer mismatch"));
+					return;
+				}
+				if (this.#state === "spawning") this.#ready = true;
+			} else if (value.type === "pong") {
+				if (this.#state === "spawning" && value.id === this.#pingId && value.epoch === this.#epoch)
+					this.#pong = true;
+			} else {
+				const active = this.#active;
+				if (
+					this.#state !== "ready" ||
+					!active ||
+					active.id !== value.id ||
+					active.epoch !== value.epoch ||
+					value.epoch !== this.#epoch
+				)
+					return;
+				this.#active = undefined;
+				clearTimeout(this.#timer);
+				this.#timer = undefined;
+				if (value.type === "result") active.resolve(value.result);
+				else {
+					const error = new Error(value.error.message);
+					error.name = value.error.name;
+					active.reject(error);
+				}
+				this.#pump();
+				return;
+			}
+			if (this.#state === "spawning" && this.#ready && this.#pong) {
+				clearTimeout(this.#timer);
+				this.#timer = undefined;
+				this.#state = "ready";
+				this.#pump();
+			}
 		};
-		const widthEx = dimension("width");
-		const heightEx = dimension("height");
-		const viewBox: unknown = adaptor.getAttribute(svg, "viewBox");
-		if (
-			typeof viewBox !== "string" ||
-			viewBox.trim().split(/\s+/).length !== 4 ||
-			viewBox
-				.trim()
-				.split(/\s+/)
-				.some(value => !Number.isFinite(Number(value)))
-		)
-			throw new Error("Invalid math SVG viewBox");
-		const elements = [node];
-		for (let index = 0; index < elements.length; index++) {
-			const element = elements[index];
-			if (
-				adaptor.hasAttribute(element, "data-mjx-error") ||
-				adaptor.getAttribute(element, "data-mml-node") === "merror"
-			)
-				throw new Error("Math conversion returned an error node");
-			if (["image", "script", "foreignObject", "text"].includes(adaptor.kind(element)))
-				throw new Error("External math SVG resource or unavailable static glyph");
-			for (const attribute of adaptor.allAttributes(element)) {
-				if ((attribute.name === "href" || attribute.name === "xlink:href") && !attribute.value.startsWith("#"))
-					throw new Error("External math SVG reference");
-				if (/url\(\s*[^#]/i.test(attribute.value) || attribute.name.startsWith("on"))
-					throw new Error("External math SVG resource");
-			}
-			for (const child of adaptor.childNodes(element)) {
-				if (child instanceof LiteElement) elements.push(child);
-			}
-		}
-		adaptor.setAttribute(svg, "color", request.inkHex);
-		adaptor.setAttribute(svg, "xmlns", "http://www.w3.org/2000/svg");
-		return { svg: adaptor.serializeXML(svg), widthEx, heightEx };
-	} finally {
-		document.clear();
-		input.parseOptions.clear();
-		input.reset();
+		const failure = () => {
+			if (current()) this.#fail(new Error("Math worker transport failed"));
+		};
+		worker.addEventListener("message", message);
+		worker.addEventListener("error", failure);
+		worker.addEventListener("messageerror", failure);
+		worker.addEventListener("close", failure);
+		this.#detach = () => {
+			worker.removeEventListener("message", message);
+			worker.removeEventListener("error", failure);
+			worker.removeEventListener("messageerror", failure);
+			worker.removeEventListener("close", failure);
+		};
+		this.#timer = setTimeout(() => {
+			if (current() && this.#state === "spawning") this.#fail(new Error("Math worker startup timed out"));
+		}, MATH_WORKER_TIMEOUT_MS);
+		this.#pingId = ++this.#nextId;
+		this.#post({ type: "ping", id: this.#pingId, epoch: this.#epoch });
+	}
+
+	#pump(): void {
+		if (this.#state !== "ready" || this.#active || !this.#queue.length) return;
+		const pending = this.#queue.shift()!;
+		this.#active = pending;
+		const worker = this.#worker;
+		this.#timer = setTimeout(() => {
+			if (this.#worker === worker && this.#active === pending) this.#fail(new Error("Math worker render timed out"));
+		}, MATH_WORKER_TIMEOUT_MS);
+		this.#post({ type: "render", id: pending.id, epoch: pending.epoch, request: pending.request });
 	}
 }
 
-export const codingAgentMathImageRenderer: MathImageRenderer = { id: "mathjax-4.1.3-tex-scientific-1", render };
+export interface MathImageRendererPolicy {
+	renderMath: boolean;
+	showImages: boolean;
+}
+export interface MathImageRendererLifecycle {
+	setPolicy(policy: MathImageRendererPolicy): void;
+	dispose(): void;
+}
+const client = new MathImageWorkerClient();
+let owner: object | undefined;
+let policy: MathImageRendererPolicy = { renderMath: false, showImages: false };
+export const codingAgentMathImageRenderer: MathImageRenderer = {
+	id: MATH_RENDERER_ID,
+	render(request) {
+		if (!owner || !policy.renderMath || !policy.showImages || !TERMINAL.imageProtocol)
+			return Promise.reject(new Error("Math image rendering unavailable"));
+		return client.render(request);
+	},
+};
+onMathImageRendererChange(() => {
+	if (getMathImageRenderer() !== codingAgentMathImageRenderer) {
+		owner = undefined;
+		client.dispose();
+	}
+});
 
-export function registerCodingAgentMathImageRenderer(): void {
+export function registerCodingAgentMathImageRenderer(initial: MathImageRendererPolicy): MathImageRendererLifecycle {
+	client.dispose();
+	const token = {};
+	owner = token;
+	policy = { ...initial };
 	setMathImageRenderer(codingAgentMathImageRenderer);
-}
-
-const SMOKE_FORMULAS = [
-	"x+y=1",
-	String.raw`\frac{a}{b}`,
-	String.raw`\begin{aligned}a&=b+c\\d&=e\end{aligned}`,
-	String.raw`f(x)=\begin{cases}x&x>0\\0&x\le0\end{cases}`,
-	String.raw`\begin{numcases}{f(x)=}x&$x>0$\\0&$x\le0$\end{numcases}`,
-	String.raw`\begin{empheq}[left=\empheqlbrace]{align}a&=b\\c&=d\end{empheq}`,
-	String.raw`\coloneqq\boldsymbol{\alpha}\Braket{x|y}\cancel{x}\color{red}{y}\mathcal{F}\mathbf{A}\Gamma`,
-	String.raw`\newcommand{\localmath}[1]{#1^2}\localmath{x}`,
-];
-
-/** Exercise production conversion and native rasterization independently of terminal preferences. */
-export async function smokeTestMathImageRenderer(): Promise<void> {
-	for (const tex of SMOKE_FORMULAS) {
-		const result = render({
-			tex,
-			display: tex !== "x+y=1",
-			inkHex: "#ffffff",
-			cellWidthPx: 9,
-			cellHeightPx: 18,
-			pixelsPerEx: 9,
-			maxWidthPx: 720,
-		});
-		const svg = result.svg
-			.replace(/width="[^"]+"/, `width="${result.widthEx * 9}"`)
-			.replace(/height="[^"]+"/, `height="${result.heightEx * 9}"`);
-		const png = await rasterizeSvg(new TextEncoder().encode(svg), 720, 4096, 1);
-		if (!Buffer.from(png.subarray(0, 8)).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])))
-			throw new Error("Math smoke produced invalid PNG");
-		const image = new Bun.Image(png);
-		const metadata = await image.metadata();
-		if (metadata.width <= 0 || metadata.height <= 0 || metadata.width > 720 || metadata.height > 4096)
-			throw new Error("Math smoke produced invalid dimensions");
-		// Decode and reduce to one pixel. Its alpha proves visible ink, not just a valid PNG header.
-		const pixel = Buffer.from(await image.resize(1, 1).png().bytes());
-		const chunks: Buffer[] = [];
-		for (let offset = 8; offset + 12 <= pixel.length;) {
-			const length = pixel.readUInt32BE(offset);
-			if (pixel.toString("ascii", offset + 4, offset + 8) === "IDAT")
-				chunks.push(pixel.subarray(offset + 8, offset + 8 + length));
-			offset += 12 + length;
-		}
-		const decoded = inflateSync(Buffer.concat(chunks));
-		if (pixel[25] !== 6 || decoded.length !== 5 || decoded[4] === 0)
-			throw new Error("Math smoke produced transparent output");
-	}
+	if (policy.renderMath) client.beginLifecycle();
+	return {
+		setPolicy(next) {
+			if (owner !== token || (next.renderMath === policy.renderMath && next.showImages === policy.showImages))
+				return;
+			const previous = policy;
+			policy = { ...next };
+			setMathImageRenderer(getMathImageRenderer());
+			if (!next.renderMath) client.terminate();
+			else if (!previous.renderMath) client.beginLifecycle();
+			if (!next.showImages) client.cancelQueued();
+		},
+		dispose() {
+			if (owner !== token) return;
+			owner = undefined;
+			setMathImageRenderer(getMathImageRenderer());
+			client.dispose();
+		},
+	};
 }

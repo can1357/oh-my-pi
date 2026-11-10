@@ -16,7 +16,7 @@ export interface MathImageSvg {
 }
 export interface MathImageRenderer {
 	readonly id: string;
-	render(request: MathImageRenderRequest): MathImageSvg;
+	render(request: MathImageRenderRequest): Promise<MathImageSvg>;
 }
 let renderer: MathImageRenderer | undefined;
 let generation = 0;

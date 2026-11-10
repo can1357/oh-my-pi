@@ -49,7 +49,7 @@ beforeEach(() => {
 	budget = new ImageBudget(16, () => {});
 	TERMINAL.imageProtocol = ImageProtocol.Kitty;
 	setMarkdownMathRendering(true);
-	setMathImageRenderer({ id: "markdown-contract", render: () => svg });
+	setMathImageRenderer({ id: "markdown-contract", render: async () => svg });
 	markdown = new Markdown("before\n\n$$x+y=1$$\n\nafter", 0, 0, defaultMarkdownTheme);
 });
 beforeEach(() => setKittyGraphics({ unicodePlaceholders: true }));
@@ -101,7 +101,7 @@ it("retains failed Unicode without retry and releases the source barrier", async
 	let calls = 0;
 	setMathImageRenderer({
 		id: "failure",
-		render: () => {
+		render: async () => {
 			calls++;
 			throw Error("bad formula");
 		},
@@ -117,7 +117,7 @@ it("component opt-out and code do not schedule work", () => {
 	let calls = 0;
 	setMathImageRenderer({
 		id: "excluded",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -154,7 +154,7 @@ it("inline unsupported transports remain Unicode without conversions", () => {
 	expect(markdown.mathImagesPending).toBe(false);
 });
 it("narrow and tall inline formulas settle to Unicode", async () => {
-	setMathImageRenderer({ id: "tall", render: () => ({ ...svg, heightEx: 4 }) });
+	setMathImageRenderer({ id: "tall", render: async () => ({ ...svg, heightEx: 4 }) });
 	markdown.setText("before $x+y=1$, after");
 	render(12);
 	await completion.promise;
@@ -207,7 +207,7 @@ it("retypesets changed ink and cell geometry instead of replaying stale graphics
 	const requests: { inkHex: string; cellWidthPx: number; maxWidthPx: number }[] = [];
 	setMathImageRenderer({
 		id: "context",
-		render: request => {
+		render: async request => {
 			requests.push(request);
 			return svg;
 		},
@@ -273,7 +273,7 @@ it("tall own-line display after list prose is requested as display", async () =>
 	const modes: boolean[] = [];
 	setMathImageRenderer({
 		id: "list-display",
-		render: request => {
+		render: async request => {
 			modes.push(request.display);
 			return { ...svg, heightEx: 4 };
 		},
@@ -307,7 +307,7 @@ for (const transport of [ImageProtocol.Kitty, ImageProtocol.Iterm2, ImageProtoco
 	it(`direct display transport stays raw through list/quote ${JSON.stringify(transport)}`, async () => {
 		TERMINAL.imageProtocol = transport;
 		setKittyGraphics({ unicodePlaceholders: false });
-		setMathImageRenderer({ id: "direct-tall", render: () => ({ ...svg, heightEx: 4 }) });
+		setMathImageRenderer({ id: "direct-tall", render: async () => ({ ...svg, heightEx: 4 }) });
 		markdown.setText("> - before\n>\n>   $$x$$\n>\n>   after");
 		render();
 		await completion.promise;
@@ -387,7 +387,7 @@ it("document replacement before conversion cancels stale repaint and pending sou
 	let calls = 0;
 	setMathImageRenderer({
 		id: "removed",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -500,7 +500,7 @@ for (const [source, prefix] of [
 	it(`direct suffix has one outer-to-inner prefix ${source}`, async () => {
 		setKittyGraphics({ unicodePlaceholders: false });
 		markdown = new Markdown(source, 1, 0, defaultMarkdownTheme);
-		setMathImageRenderer({ id: "prefix-order", render: () => ({ ...svg, heightEx: 4 }) });
+		setMathImageRenderer({ id: "prefix-order", render: async () => ({ ...svg, heightEx: 4 }) });
 		render();
 		await completion.promise;
 		const rows = render();
@@ -580,7 +580,7 @@ for (const transport of [ImageProtocol.Iterm2, ImageProtocol.Sixel]) {
 		const requests: number[] = [];
 		setMathImageRenderer({
 			id: "panel",
-			render: request => {
+			render: async request => {
 				requests.push(request.backgroundRgb ?? -1);
 				return svg;
 			},
@@ -616,7 +616,7 @@ it("panel background paints every direct image row before payload", () => {
 it("OSC1337 raster corners contain panel RGB while Kitty keeps alpha", async () => {
 	setMathImageRenderer({
 		id: "empty-transparent",
-		render: () => ({
+		render: async () => ({
 			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"></svg>',
 			widthEx: 1,
 			heightEx: 1,

@@ -6,6 +6,10 @@
 
 - Added opt-in `tui.renderMath` (default off, requires `terminal.showImages`): render display LaTeX in place on Kitty, iTerm2, and Sixel and fitting one-row inline formulas on proven Kitty-placeholder clients, with Unicode fallback and live transcript redraws. Math retains up to 512 placements independently of `tui.maxInlineImages`; image visibility changes avoid transcript rebuilds when math is off. Original source, thinking, and native TSP output remain unchanged ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
 
+### Changed
+
+- Isolated optional MathJax typesetting from interactive startup and the UI thread in a demand-started CLI worker. Math disable and mode teardown terminate pending work; image hiding retains the worker, and bounded failures retain Unicode fallback with one later-demand recovery attempt ([#18596](https://github.com/can1357/oh-my-pi/pull/18596) by [@mooncos](https://github.com/mooncos))
+
 ## [18.18.3] - 2026-11-09
 
 ### Breaking Changes

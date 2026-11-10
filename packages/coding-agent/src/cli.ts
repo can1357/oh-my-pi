@@ -42,6 +42,7 @@ import {
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	SUBAGENT_WORKER_ARG,
+	MATH_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
 } from "./cli/worker-selectors";
@@ -161,7 +162,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
 	// Distribution smoke intentionally exercises the lazy module boundary; normal CLI startup must not load MathJax.
-	const { smokeTestMathImageRenderer } = await import("./modes/math-image-renderer");
+	const { smokeTestMathImageRenderer } = await import("./modes/math-worker-smoke");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -300,6 +301,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === STATS_ACTIVITY_WORKER_ARG) {
 		const { startStatsActivityWorker } = await import("./stats/activity-worker");
 		await runIpcSubprocessWorker(startStatsActivityWorker);
+		return true;
+	}
+	if (arg === MATH_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./modes/math-worker-entry");
 		return true;
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {

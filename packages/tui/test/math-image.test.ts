@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
+import { measureMathImage, releaseMathImageDocument, releaseMathImageOccurrence } from "../src/components/math-image";
+import { getMathImageWorkState, waitForMathImageWork } from "../src/components/math-image";
 import {
 	beginMathImageDocument,
 	getMathImageGeneration,
@@ -94,7 +97,7 @@ it("defers, coalesces exact requests and repaints a ready exact-cell image", asy
 	const received: MathImageRenderRequest[] = [];
 	setMathImageRenderer({
 		id: "test",
-		render: value => {
+		render: async value => {
 			received.push(value);
 			return svg;
 		},
@@ -122,7 +125,7 @@ for (const lostMapping of ["reset", "eviction"] as const) {
 			const otherOwner: Component = { render: () => [], invalidate: () => {} };
 			try {
 				setKittyGraphics({ unicodePlaceholders: false });
-				setMathImageRenderer({ id: "lifecycle", render: () => svg });
+				setMathImageRenderer({ id: "lifecycle", render: async () => svg });
 				render();
 				await settled();
 				budget.beginPass();
@@ -182,7 +185,7 @@ for (const imageProtocol of [ImageProtocol.Kitty, ImageProtocol.Iterm2, ImagePro
 		try {
 			setKittyGraphics({ unicodePlaceholders: false });
 			terminal.imageProtocol = imageProtocol;
-			setMathImageRenderer({ id: "cursor", render: () => svg });
+			setMathImageRenderer({ id: "cursor", render: async () => svg });
 			render();
 			await settled();
 			const ready = renderForScrollback(() => render());
@@ -204,7 +207,7 @@ it("retains failed identities without retries and permits changed context", asyn
 	let calls = 0;
 	setMathImageRenderer({
 		id: "fail",
-		render: () => {
+		render: async () => {
 			calls++;
 			throw Error("invalid");
 		},
@@ -221,7 +224,7 @@ it("rejects oversized SVG and tall inline geometry as settled fallback", async (
 	let calls = 0;
 	setMathImageRenderer({
 		id: "huge",
-		render: () => {
+		render: async () => {
 			calls++;
 			return { ...svg, svg: svg.svg + " ".repeat(600000) };
 		},
@@ -230,7 +233,7 @@ it("rejects oversized SVG and tall inline geometry as settled fallback", async (
 	await settled();
 	expect(render().graphic).toBe(false);
 	expect(calls).toBe(1);
-	setMathImageRenderer({ id: "tall", render: () => ({ ...svg, heightEx: 3 }) });
+	setMathImageRenderer({ id: "tall", render: async () => ({ ...svg, heightEx: 3 }) });
 	render({ ...request, display: false });
 	await settled();
 	expect(render({ ...request, display: false }).pending).toBe(false);
@@ -240,7 +243,7 @@ it("replacement advances generation and disposed queued work cannot repaint", as
 	const generation = getMathImageGeneration();
 	setMathImageRenderer({
 		id: "same",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -251,7 +254,7 @@ it("replacement advances generation and disposed queued work cannot repaint", as
 	expect(changed).toBe(0);
 	setMathImageRenderer({
 		id: "same",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -261,7 +264,7 @@ it("replacement advances generation and disposed queued work cannot repaint", as
 	expect(calls).toBe(1);
 });
 it("measurement does not sweep live slots; empty complete render releases owners", async () => {
-	setMathImageRenderer({ id: "test", render: () => svg });
+	setMathImageRenderer({ id: "test", render: async () => svg });
 	render();
 	await settled();
 	budget.beginPass();
@@ -288,7 +291,7 @@ it("negative cache evicts at its entry bound", async () => {
 	let calls = 0;
 	setMathImageRenderer({
 		id: "fail",
-		render: () => {
+		render: async () => {
 			calls++;
 			throw Error("invalid");
 		},
@@ -306,7 +309,7 @@ it("PNG eviction rerasterizes while retaining the shared SVG conversion", async 
 	let calls = 0;
 	setMathImageRenderer({
 		id: "cache",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -325,7 +328,7 @@ it("a conversion failure survives row-limit changes but not renderer replacement
 	let calls = 0;
 	setMathImageRenderer({
 		id: "failed-context",
-		render: () => {
+		render: async () => {
 			calls++;
 			throw Error("bad TeX");
 		},
@@ -343,7 +346,7 @@ it("a conversion failure survives row-limit changes but not renderer replacement
 	expect(calls).toBe(1);
 	setMathImageRenderer({
 		id: "failed-context",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -357,7 +360,7 @@ it("geometry rejects unrepresentable cells without scheduling conversion", () =>
 	let calls = 0;
 	setMathImageRenderer({
 		id: "geometry",
-		render: () => {
+		render: async () => {
 			calls++;
 			return svg;
 		},
@@ -372,7 +375,7 @@ it("SVG aggregate bounds evict successful conversion data", async () => {
 	let calls = 0;
 	setMathImageRenderer({
 		id: "svg-cache",
-		render: () => {
+		render: async () => {
 			calls++;
 			return { ...svg, svg: svg.svg.replace("</svg>", `<!--${" ".repeat(400000)}--></svg>`) };
 		},
@@ -396,7 +399,7 @@ it("SVG aggregate bounds evict successful conversion data", async () => {
 
 it("same-owner nested scopes preserve document order and use custom landing callbacks", async () => {
 	let inner = 0;
-	setMathImageRenderer({ id: "nested", render: () => svg });
+	setMathImageRenderer({ id: "nested", render: async () => svg });
 	withImageRenderContext({ budget, requestRender: () => {} }, () =>
 		withMathImageOwner(
 			owner,
@@ -423,7 +426,7 @@ it("same-owner nested scopes preserve document order and use custom landing call
 });
 
 it("absorbs floating-point overflow at the fitted whole-cell width ceiling", async () => {
-	setMathImageRenderer({ id: "rounding", render: () => ({ ...svg, widthEx: 205.445, heightEx: 1 }) });
+	setMathImageRenderer({ id: "rounding", render: async () => ({ ...svg, widthEx: 205.445, heightEx: 1 }) });
 	const value = { ...request, maxWidthPx: 1700, cellWidthPx: 20 };
 	render(value);
 	await settled();
@@ -433,7 +436,7 @@ it("absorbs floating-point overflow at the fitted whole-cell width ceiling", asy
 });
 
 it("more than cache-sized owner occurrences settle without eviction repaint loops", async () => {
-	setMathImageRenderer({ id: "dense", render: () => svg });
+	setMathImageRenderer({ id: "dense", render: async () => svg });
 	const paint = () =>
 		withImageRenderContext({ budget, requestRender: () => completion.resolve() }, () =>
 			withMathImageOwner(
@@ -461,7 +464,7 @@ it("more than cache-sized owner occurrences settle without eviction repaint loop
 
 it("queued conversions across many owners eventually become graphics", async () => {
 	const documents = Array.from({ length: 30 }, () => ({ render: () => [], invalidate: () => {} }));
-	setMathImageRenderer({ id: "many-owners", render: () => svg });
+	setMathImageRenderer({ id: "many-owners", render: async () => svg });
 	const paint = () =>
 		withImageRenderContext({ budget, requestRender: () => completion.resolve() }, () =>
 			documents.flatMap((document, index) =>
@@ -489,3 +492,214 @@ it("queued conversions across many owners eventually become graphics", async () 
 		for (const document of documents) releaseMathImageOwner(document);
 	}
 });
+
+for (const reject of [false, true]) {
+	it(`retired conversion ${reject ? "rejection" : "resolution"} cannot cache or notify a replacement`, async () => {
+		const deferred = Promise.withResolvers<typeof svg>();
+		const started = Promise.withResolvers<void>();
+		setMathImageRenderer({
+			id: "same",
+			render: () => {
+				started.resolve();
+				return deferred.promise;
+			},
+		});
+		expect(render().pending).toBe(true);
+		await started.promise;
+		setMathImageRenderer({ id: "same", render: async () => svg });
+		const before = changed;
+		const rasterize = natives.rasterizeSvg;
+		const raster = spyOn(natives, "rasterizeSvg");
+		if (reject) deferred.reject(Error("retired"));
+		else deferred.resolve({ ...svg, widthEx: 8 });
+		try {
+			await waitForMathImageWork();
+			expect(changed).toBe(before);
+			expect(getMathImageWorkState()).toEqual({ svg: 0, png: 0, negative: 0, active: 0 });
+			expect(raster).not.toHaveBeenCalled();
+		} finally {
+			raster.mockRestore();
+			expect(natives.rasterizeSvg).toBe(rasterize);
+		}
+	});
+}
+
+it("retirement during normalization skips rasterization", async () => {
+	const started = Promise.withResolvers<void>();
+	const deferred = Promise.withResolvers<typeof svg>();
+	setMathImageRenderer({
+		id: "reentrant",
+		render: () => {
+			started.resolve();
+			return deferred.promise;
+		},
+	});
+	render();
+	await started.promise;
+	let reads = 0;
+	const rasterize = natives.rasterizeSvg;
+	const raster = spyOn(natives, "rasterizeSvg");
+	deferred.resolve({
+		...svg,
+		get svg() {
+			// Size and standalone validation read SVG five times; normalization is the sixth.
+			if (++reads === 6) setMathImageRenderer(undefined);
+			return svg.svg;
+		},
+	});
+	try {
+		await waitForMathImageWork();
+		expect(reads).toBe(6);
+		expect(raster).not.toHaveBeenCalled();
+		expect(getMathImageWorkState()).toEqual({ svg: 0, png: 0, negative: 0, active: 0 });
+	} finally {
+		raster.mockRestore();
+		expect(natives.rasterizeSvg).toBe(rasterize);
+	}
+});
+
+it("retired rasterization cannot notify or replace current PNG work", async () => {
+	const deferred = Promise.withResolvers<Uint8Array>();
+	const started = Promise.withResolvers<void>();
+	const rasterize = natives.rasterizeSvg;
+	const spy = spyOn(natives, "rasterizeSvg").mockImplementationOnce(() => {
+		started.resolve();
+		return deferred.promise;
+	});
+	try {
+		setMathImageRenderer({ id: "same", render: async () => svg });
+		render();
+		await started.promise;
+		setMathImageRenderer({ id: "same", render: async () => svg });
+		const before = changed;
+		deferred.resolve(await rasterize(new TextEncoder().encode(svg.svg), 100, 200, 1, { widthPx: 10, heightPx: 20 }));
+		await waitForMathImageWork();
+		expect(changed).toBe(before);
+		expect(getMathImageWorkState()).toEqual({ svg: 0, png: 0, negative: 0, active: 0 });
+	} finally {
+		spy.mockRestore();
+	}
+});
+
+for (const retirement of ["owner", "document", "occurrence", "sweep"] as const) {
+	it(`measurement-only ${retirement} release detaches its deferred callback`, async () => {
+		const deferred = Promise.withResolvers<typeof svg>();
+		const started = Promise.withResolvers<void>();
+		let notifications = 0;
+		setMathImageRenderer({
+			id: "measure",
+			render: () => {
+				started.resolve();
+				return deferred.promise;
+			},
+		});
+		const measure = () =>
+			withMathImageOwner(
+				owner,
+				() => {},
+				() =>
+					measureMathImage(
+						{ ...request, display: false },
+						beginMathImageDocument(),
+						"token",
+						() => notifications++,
+					),
+			);
+		expect(measureRender(measure)).toEqual({ value: undefined, images: false });
+		await started.promise;
+		const peer: Component = { render: () => [] };
+		const done = Promise.withResolvers<void>();
+		measureRender(() =>
+			withMathImageOwner(
+				peer,
+				() => {},
+				() => measureMathImage({ ...request, display: false }, 0, "peer", () => done.resolve()),
+			),
+		);
+		if (retirement === "owner") releaseMathImageOwner(owner);
+		else if (retirement === "sweep")
+			measureRender(() =>
+				withMathImageOwner(
+					owner,
+					() => {},
+					() => {},
+				),
+			);
+		else
+			measureRender(() =>
+				withMathImageOwner(
+					owner,
+					() => {},
+					() => {
+						// Mark the existing observer seen so only the explicit release can detach it.
+						measure();
+						if (retirement === "document") releaseMathImageDocument(0);
+						else releaseMathImageOccurrence(0, "token");
+					},
+				),
+			);
+		deferred.resolve(svg);
+		await done.promise;
+		expect(notifications).toBe(0);
+		releaseMathImageOwner(peer);
+	});
+}
+
+it("releasing one coalesced owner preserves completion for its live peer", async () => {
+	const deferred = Promise.withResolvers<typeof svg>();
+	const started = Promise.withResolvers<void>();
+	const peer: Component = { render: () => [] };
+	const done = Promise.withResolvers<void>();
+	setMathImageRenderer({
+		id: "shared",
+		render: () => {
+			started.resolve();
+			return deferred.promise;
+		},
+	});
+	render();
+	withImageRenderContext({ budget, requestRender: () => {} }, () =>
+		withMathImageOwner(
+			peer,
+			() => done.resolve(),
+			() => renderMathImage(request, 200, beginMathImageDocument(), "0"),
+		),
+	);
+	await started.promise;
+	releaseMathImageOwner(owner);
+	const before = changed;
+	deferred.resolve(svg);
+	await done.promise;
+	expect(changed).toBe(before);
+	releaseMathImageOwner(peer);
+});
+
+for (const measurement of [false, true]) {
+	it(`dispatch skips retired ${measurement ? "measurement" : "presentation"} owners and completes live peers`, async () => {
+		const peers: Component[] = Array.from({ length: 3 }, () => ({ render: () => [] }));
+		const notifications = [0, 0, 0];
+		const done = Promise.withResolvers<void>();
+		setMathImageRenderer({ id: "dispatch", render: async () => svg });
+		try {
+			for (const [index, peer] of peers.entries()) {
+				const callback = () => {
+					notifications[index]++;
+					if (index === 0) releaseMathImageOwner(peers[1]);
+					if (index === 2) done.resolve();
+				};
+				const paint = () =>
+					withMathImageOwner(peer, callback, () =>
+						measurement
+							? measureMathImage({ ...request, display: false }, 0, "token", callback)
+							: renderMathImage(request, 200, 0, "token"),
+					);
+				if (measurement) measureRender(paint);
+				else withImageRenderContext({ budget, requestRender: callback }, paint);
+			}
+			await done.promise;
+			expect(notifications).toEqual([1, 0, 1]);
+		} finally {
+			for (const peer of peers) releaseMathImageOwner(peer);
+		}
+	});
+}

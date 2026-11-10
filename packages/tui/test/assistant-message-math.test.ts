@@ -45,7 +45,7 @@ it("repaints completed assistant math without changing copied source", async () 
 	component.updateContent(message, { transient: true });
 	setMathImageRenderer({
 		id: "assistant-contract",
-		render: () => ({
+		render: async () => ({
 			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><rect width="10" height="10" fill="white"/></svg>',
 			widthEx: 1,
 			heightEx: 1,

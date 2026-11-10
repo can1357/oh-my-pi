@@ -2,6 +2,8 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { isPidRunning } from "@oh-my-pi/pi-utils/procmgr";
 import { runCli } from "../src/cli";
+import { MATH_WORKER_ARG } from "../src/cli/worker-selectors";
+import { MATH_RENDERER_ID, type MathWorkerOutbound } from "../src/modes/math-worker-protocol";
 
 // The worker-host re-entry seam dispatches any `__omp_worker_*` selector to
 // `runWorkerEntrypoint`. An unrecognized selector must fail loudly rather than
@@ -58,6 +60,30 @@ describe("worker selector dispatch", () => {
 		expect(process.exitCode).toBe(0);
 		expect(stdout).toHaveBeenCalled();
 		expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining("unknown worker selector"));
+	});
+	it("buffers an immediate math ping across the CLI import boundary", async () => {
+		const worker = new Worker(new URL("../src/cli.ts", import.meta.url).href, {
+			type: "module",
+			argv: [MATH_WORKER_ARG],
+		});
+		const completion = Promise.withResolvers<void>();
+		let ready = false;
+		let pong = false;
+		// A real cross-thread module-load handshake cannot share the parent's fake clock; this is only a failure deadline.
+		const timer = setTimeout(() => completion.reject(new Error("Math selector handshake timeout")), 10_000);
+		worker.addEventListener("message", (event: MessageEvent<MathWorkerOutbound>) => {
+			if (event.data.type === "ready") ready = event.data.rendererId === MATH_RENDERER_ID;
+			if (event.data.type === "pong") pong = event.data.id === 123 && event.data.epoch === 7;
+			if (ready && pong) completion.resolve();
+		});
+		worker.addEventListener("error", () => completion.reject(new Error("Math worker failed")));
+		worker.postMessage({ type: "ping", id: 123, epoch: 7 });
+		try {
+			await completion.promise;
+		} finally {
+			clearTimeout(timer);
+			worker.terminate();
+		}
 	});
 
 	it("exits promptly when an IPC worker selector is launched without an IPC channel", async () => {

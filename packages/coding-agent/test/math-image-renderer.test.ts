@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { SVG } from "@mathjax/src/mjs/output/svg.js";
-import { codingAgentMathImageRenderer, smokeTestMathImageRenderer } from "../src/modes/math-image-renderer";
+import { renderMathImageSvg } from "../src/modes/mathjax-renderer";
+import { smokeTestMathImageRenderer } from "../src/modes/math-worker-smoke";
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import {
 	Markdown,
@@ -17,7 +18,7 @@ import { initThemeSync } from "@oh-my-pi/pi-tui/theme/theme";
 import { registerCodingAgentMathImageRenderer } from "../src/modes/math-image-renderer";
 
 const render = (tex: string, display = true) =>
-	codingAgentMathImageRenderer.render({
+	renderMathImageSvg({
 		tex,
 		display,
 		inkHex: "#abcdef",
@@ -86,7 +87,7 @@ describe("scientific math image renderer", () => {
 	});
 	it("rejects nonfinite geometry and colors that could inject SVG resources", () => {
 		expect(() =>
-			codingAgentMathImageRenderer.render({
+			renderMathImageSvg({
 				tex: "x",
 				display: false,
 				inkHex: "url(https://example.com)",
@@ -97,7 +98,7 @@ describe("scientific math image renderer", () => {
 			}),
 		).toThrow();
 		expect(() =>
-			codingAgentMathImageRenderer.render({
+			renderMathImageSvg({
 				tex: "x",
 				display: false,
 				inkHex: "#ffffff",
@@ -187,7 +188,7 @@ it("renders list display, scripted and fraction inline math, and keeps stacked f
 		setKittyGraphics({ unicodePlaceholders: true });
 		setCellDimensions({ widthPx: 20, heightPx: 40 });
 		setMarkdownMathRendering(true);
-		registerCodingAgentMathImageRenderer();
+		registerCodingAgentMathImageRenderer({ renderMath: true, showImages: true });
 		paint();
 		while (markdown.mathImagesPending) {
 			await completion.promise;

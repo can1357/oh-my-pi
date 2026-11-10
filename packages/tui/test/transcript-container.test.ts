@@ -1372,7 +1372,7 @@ it("holds finalized Markdown discovered during measurement until math settles", 
 	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "retirement",
-		render: () => ({
+		render: async () => ({
 			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><rect width="10" height="10" fill="white"/></svg>',
 			widthEx: 1,
 			heightEx: 1,
@@ -1404,7 +1404,7 @@ it("keeps submitted user math mutable while assistant starts streaming", async (
 	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "user-retirement",
-		render: () => ({
+		render: async () => ({
 			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><rect width="10" height="10" fill="white"/></svg>',
 			widthEx: 1,
 			heightEx: 1,
@@ -1447,7 +1447,7 @@ it("waits for newly discovered resized math before acknowledging committed-histo
 	setMarkdownMathRendering(true);
 	setMathImageRenderer({
 		id: "replay",
-		render: () => ({
+		render: async () => ({
 			svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" width="1ex" height="1ex"><path d="M0 0H10V10H0Z"/></svg>',
 			widthEx: 1,
 			heightEx: 1,

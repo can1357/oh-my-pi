@@ -44,7 +44,8 @@ const pngCache = new LRUCache<string, Raster>({
 				activeOwners.delete(reference);
 				continue;
 			}
-			for (const slot of owner.slots.values()) if (slot.key === key && !slot.raster) slot.image = undefined;
+			for (const slot of owner.slots.values())
+				if (slot.kind === "placement" && slot.key === key && !slot.raster) slot.image = undefined;
 		}
 	},
 });
@@ -65,6 +66,11 @@ const pending = new Map<string, Work>();
 const queue: Work[] = [];
 let scheduled = false;
 let activeConversions = 0;
+let idle = Promise.withResolvers<void>();
+/** Test diagnostic: waits for active conversion, rasterization, and listener dispatch. */
+export function waitForMathImageWork(): Promise<void> {
+	return activeConversions ? idle.promise : Promise.resolve();
+}
 function fail(key: string, error: unknown): void {
 	if (negativeCache.has(key)) return;
 	// MathJax's TexError is a plain object with `message`, not an Error subclass.
@@ -82,15 +88,24 @@ function inlineRowFit(svg: MathImageSvg, request: MathImageRenderRequest): numbe
 	if (fit < 0.6 || /data-mml-node="mtable"/.test(svg.svg)) return undefined;
 	return fit;
 }
+function isCurrent(work: Work): boolean {
+	return work.generation === getMathImageGeneration() && pending.get(work.key) === work;
+}
+/** Test diagnostic: cache sizes and active work for deterministic lifecycle assertions. */
+export function getMathImageWorkState() {
+	return { svg: svgCache.size, png: pngCache.size, negative: negativeCache.size, active: activeConversions };
+}
 function drain(): void {
 	scheduled = false;
 	if (activeConversions >= 256) return;
 	const work = queue.shift();
 	if (!work) return;
-	if (work.generation === getMathImageGeneration()) {
+	if (isCurrent(work)) {
+		if (!activeConversions) idle = Promise.withResolvers<void>();
 		activeConversions++;
 		void convert(work).finally(() => {
 			activeConversions--;
+			if (!activeConversions) idle.resolve();
 			if (queue.length) schedule();
 		});
 	}
@@ -111,7 +126,8 @@ async function convert(work: Work): Promise<void> {
 		if (!svg) {
 			const renderer = getMathImageRenderer();
 			if (!renderer) return;
-			svg = renderer.render(request);
+			svg = await renderer.render(request);
+			if (!isCurrent(work)) return;
 			if (128 + 2 * (work.svgKey.length + svg.svg.length) > MiB) throw new Error("SVG exceeds retained size limit");
 			if (
 				!Number.isFinite(svg.widthEx) ||
@@ -163,10 +179,12 @@ async function convert(work: Work): Promise<void> {
 			);
 			normalized = `<svg xmlns="http://www.w3.org/2000/svg" width="${widthPx}" height="${heightPx}" viewBox="0 0 ${widthPx} ${heightPx}"><rect width="${widthPx}" height="${heightPx}" fill="${color}"/>${normalized}</svg>`;
 		}
+		if (!isCurrent(work)) return;
 		const bytes = await rasterizeSvg(encoder.encode(normalized), maxWidthPx, work.maxHeightPx, 1, {
 			widthPx: request.cellWidthPx,
 			heightPx: request.cellHeightPx,
 		});
+		if (!isCurrent(work)) return;
 		const base64 = Buffer.from(bytes).toString("base64");
 		if (128 + 2 * (work.key.length + base64.length) > 4 * MiB) throw new Error("PNG exceeds retained size limit");
 		if (bytes.length < 24 || Buffer.from(bytes.subarray(0, 8)).toString("hex") !== "89504e470d0a1a0a")
@@ -174,17 +192,28 @@ async function convert(work: Work): Promise<void> {
 		const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 		if (header.getUint32(16) !== widthPx || header.getUint32(20) !== heightPx)
 			throw new Error("Unexpected raster geometry");
-		if (work.generation === getMathImageGeneration()) pngCache.set(work.key, { base64, widthPx, heightPx });
+		pngCache.set(work.key, { base64, widthPx, heightPx });
 	} catch (error) {
-		if (work.generation === getMathImageGeneration()) fail(failureKey, error);
+		if (isCurrent(work)) fail(failureKey, error);
 	} finally {
-		if (pending.get(work.key) === work) {
+		if (isCurrent(work)) {
 			pending.delete(work.key);
-			for (const listener of work.listeners) listener();
+			for (const listener of work.listeners) {
+				if (work.generation !== getMathImageGeneration()) break;
+				listener();
+			}
 		}
 	}
 }
-interface Slot {
+interface MeasurementSlot {
+	kind: "measurement";
+	key: string;
+	listener?: () => void;
+	change: () => void;
+	pending: boolean;
+}
+interface PlacementSlot {
+	kind: "placement";
 	key: string;
 	placement: string;
 	budget: ImageBudget;
@@ -199,11 +228,13 @@ interface Slot {
 	svgKey?: string;
 	maxHeightPx?: number;
 }
+type Slot = MeasurementSlot | PlacementSlot;
 interface Owner {
 	id: number;
 	slots: Map<string, Slot>;
 	changed: () => void;
 	seen: Set<string>;
+	measurementSeen: Set<string>;
 	document: number;
 	pending: boolean;
 	reference?: WeakRef<Owner>;
@@ -213,10 +244,13 @@ const activeOwners = new Set<WeakRef<Owner>>();
 let nextOwner = 0;
 let currentOwner: Owner | undefined;
 function release(slot: Slot): void {
-	if (slot.imageId !== undefined) slot.budget.releaseId(slot.imageId);
 	if (slot.listener) pending.get(slot.key)?.listeners.delete(slot.listener);
-	slot.image = undefined;
-	slot.raster = undefined;
+	slot.listener = undefined;
+	if (slot.kind === "placement") {
+		if (slot.imageId !== undefined) slot.budget.releaseId(slot.imageId);
+		slot.image = undefined;
+		slot.raster = undefined;
+	}
 	slot.pending = false;
 }
 export function releaseMathImageOwner(owner: Component): void {
@@ -233,6 +267,7 @@ export function releaseMathImageRenderCaches(owner: Component): void {
 	const record = owners.get(owner);
 	if (!record) return;
 	for (const slot of record.slots.values()) {
+		if (slot.kind !== "placement") continue;
 		slot.image = undefined;
 		slot.raster = undefined;
 	}
@@ -260,7 +295,15 @@ export function withMathImageOwner<T>(owner: Component, onChange: () => void, re
 	let record = owners.get(owner);
 	for (const reference of activeOwners) if (!reference.deref()) activeOwners.delete(reference);
 	if (!record) {
-		record = { id: ++nextOwner, slots: new Map(), changed: onChange, seen: new Set(), document: 0, pending: false };
+		record = {
+			id: ++nextOwner,
+			slots: new Map(),
+			changed: onChange,
+			seen: new Set(),
+			measurementSeen: new Set(),
+			document: 0,
+			pending: false,
+		};
 		owners.set(owner, record);
 	}
 	const previous = currentOwner;
@@ -277,6 +320,7 @@ export function withMathImageOwner<T>(owner: Component, onChange: () => void, re
 	const previousDocument = record.document;
 	record.document = 0;
 	record.changed = onChange;
+	if (measuring) record.measurementSeen.clear();
 	if (!measuring) {
 		record.seen.clear();
 		record.pending = false;
@@ -286,8 +330,14 @@ export function withMathImageOwner<T>(owner: Component, onChange: () => void, re
 		return render();
 	} finally {
 		currentOwner = previous;
-		if (measuring) record.document = previousDocument;
-		else {
+		if (measuring) {
+			record.document = previousDocument;
+			for (const [key, slot] of record.slots)
+				if (slot.kind === "measurement" && !record.measurementSeen.has(key)) {
+					release(slot);
+					record.slots.delete(key);
+				}
+		} else {
 			for (const [key, slot] of record.slots)
 				if (!record.seen.has(key)) {
 					release(slot);
@@ -320,10 +370,12 @@ export function releaseMathImageDocument(document: number): void {
 }
 export function releaseMathImageOccurrence(document: number, occurrence: string): void {
 	const path = `${document}:${occurrence}`;
-	const slot = currentOwner?.slots.get(path);
-	if (slot) {
-		release(slot);
-		currentOwner?.slots.delete(path);
+	for (const key of [path, `${path}:measurement`]) {
+		const slot = currentOwner?.slots.get(key);
+		if (slot) {
+			release(slot);
+			currentOwner?.slots.delete(key);
+		}
 	}
 }
 /** Call once per Markdown render, including a cached-row replay. */
@@ -333,9 +385,13 @@ export function beginMathImageDocument(): number {
 /** Measure cached intrinsic inline geometry without acquiring a placement or observing the budget. */
 export function measureMathImage(
 	request: MathImageRenderRequest,
+	document: number,
+	occurrence: string,
 	onChange: () => void,
 ): { columns: number } | undefined {
 	const renderer = getMathImageRenderer();
+	const owner = currentOwner;
+	// Unowned callers may read shared geometry, but cannot schedule unowned observers.
 	if (!renderer) return undefined;
 	const svgKey = Bun.hash(JSON.stringify([getMathImageGeneration(), renderer.id, request])).toString(16);
 	const svg = svgCache.get(svgKey);
@@ -344,6 +400,7 @@ export function measureMathImage(
 		if (fit === undefined) return undefined;
 		return { columns: Math.ceil((svg.widthEx * request.pixelsPerEx * fit) / request.cellWidthPx) };
 	}
+	if (!owner) return undefined;
 	if (negativeCache.has(svgKey)) return undefined;
 	const key = `${svgKey}:measure`;
 	let work = pending.get(key);
@@ -360,7 +417,31 @@ export function measureMathImage(
 		queue.push(work);
 		schedule();
 	}
-	work?.listeners.add(onChange);
+	const path = `${document}:${occurrence}:measurement`;
+	owner.seen.add(path);
+	owner.measurementSeen.add(path);
+	let slot = owner.slots.get(path);
+	if (slot && (slot.kind !== "measurement" || slot.key !== key)) {
+		release(slot);
+		owner.slots.delete(path);
+		slot = undefined;
+	}
+	if (!slot) {
+		slot = { kind: "measurement", key, change: onChange, pending: true };
+		owner.slots.set(path, slot);
+	}
+	slot.change = onChange;
+	if (!slot.listener) {
+		const retained = slot;
+		const listener = () => {
+			if (owner.slots.get(path) !== retained || retained.listener !== listener) return;
+			retained.listener = undefined;
+			retained.pending = false;
+			retained.change();
+		};
+		slot.listener = listener;
+		work.listeners.add(slot.listener);
+	}
 	return undefined;
 }
 const fallback: ImagePresentation = { lines: [], graphic: false, pending: false };
@@ -388,7 +469,8 @@ export function renderMathImage(
 	maxHeightPx = Math.floor(Math.min(4096, maxHeightPx) / request.cellHeightPx) * request.cellHeightPx;
 	if (!maxWidthPx || !maxHeightPx) return fallback;
 	const logicalPath = `${document}:${occurrence}`;
-	const existing = owner.slots.get(logicalPath);
+	const candidate = owner.slots.get(logicalPath);
+	const existing = candidate?.kind === "placement" ? candidate : undefined;
 	const svgKey =
 		existing?.request === request && existing.svgKey
 			? existing.svgKey
@@ -400,7 +482,8 @@ export function renderMathImage(
 	const path =
 		isImageMeasureRender() && existing && existing.key !== key ? `measure:${logicalPath}:${key}` : logicalPath;
 	owner.seen.add(path);
-	let slot = owner.slots.get(path);
+	const candidateSlot = owner.slots.get(path);
+	let slot = candidateSlot?.kind === "placement" ? candidateSlot : undefined;
 	if (slot && (slot.key !== key || slot.budget !== context.budget)) {
 		release(slot);
 		owner.slots.delete(path);
@@ -408,6 +491,7 @@ export function renderMathImage(
 	}
 	if (!slot) {
 		slot = {
+			kind: "placement",
 			key,
 			placement: `math:${owner.id}:${path}:${key}`,
 			budget: context.budget,
@@ -473,7 +557,8 @@ export function renderMathImage(
 	}
 	if (!slot.listener) {
 		const retained = slot;
-		slot.listener = () => {
+		const listener = () => {
+			if (owner.slots.get(path) !== retained || retained.listener !== listener) return;
 			retained.listener = undefined;
 			retained.pending = false;
 			retained.raster = pngCache.get(key);
@@ -481,6 +566,7 @@ export function renderMathImage(
 			owner.pending = [...owner.slots.values()].some(value => value.pending);
 			retained.change();
 		};
+		slot.listener = listener;
 		work.listeners.add(slot.listener);
 	}
 	slot.pending = true;

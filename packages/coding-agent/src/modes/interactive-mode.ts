@@ -76,7 +76,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { registerCodingAgentMathImageRenderer } from "./math-image-renderer";
+import { registerCodingAgentMathImageRenderer, type MathImageRendererLifecycle } from "./math-image-renderer";
 import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
@@ -553,7 +553,6 @@ const cfgLiveUiSettings = combine({
 	"tier.advisor": cfgTierAdvisor,
 });
 type LiveUiSettings = SettingValueOf<typeof cfgLiveUiSettings>;
-let mathImageRendererRegistered = false;
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 const JUDGMENT_BATCH_PROGRESS_RETAIN_MS = 1_000;
@@ -1419,6 +1418,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	statusLine: StatusLineComponent;
 
 	isInitialized = false;
+	#mathImageRendererLifecycle: MathImageRendererLifecycle | undefined;
 	initialChatRendered = false;
 	isBashMode = false;
 	toolOutputExpanded = false;
@@ -2173,10 +2173,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 
-		if (!mathImageRendererRegistered) {
-			registerCodingAgentMathImageRenderer();
-			mathImageRendererRegistered = true;
-		}
+		this.#mathImageRendererLifecycle = registerCodingAgentMathImageRenderer({
+			renderMath: cfgTuiRenderMath.get(this.settings),
+			showImages: cfgTerminalShowImages.get(this.settings),
+		});
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
@@ -2451,6 +2451,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
 		if (this.isInitialized) return;
+		this.#mathImageRendererLifecycle ??= registerCodingAgentMathImageRenderer({
+			renderMath: cfgTuiRenderMath.get(this.settings),
+			showImages: cfgTerminalShowImages.get(this.settings),
+		});
 		this.#idleMaintenanceActivity.scheduledTurn = target =>
 			target === this.session &&
 			(this.#goalContinuationTimer !== undefined ||
@@ -2483,6 +2487,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#signalTeardown = createSessionTeardown({
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => {
+				this.#mathImageRendererLifecycle?.dispose();
+				this.#mathImageRendererLifecycle = undefined;
 				this.session.beginDispose();
 				this.statusLine.dispose();
 			},
@@ -4310,6 +4316,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			resetDisplay = true;
 		}
 		if (any("terminal.showImages", "tui.renderMath")) {
+			this.#mathImageRendererLifecycle?.setPolicy({
+				renderMath: cfgTuiRenderMath.get(this.settings),
+				showImages: cfgTerminalShowImages.get(this.settings),
+			});
 			setMarkdownMathRendering(cfgTuiRenderMath.get(this.settings) && cfgTerminalShowImages.get(this.settings));
 		}
 		if (any("terminal.showImages")) {
@@ -8184,6 +8194,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#mathImageRendererLifecycle?.dispose();
+		this.#mathImageRendererLifecycle = undefined;
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
