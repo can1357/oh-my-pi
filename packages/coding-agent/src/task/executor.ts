@@ -2786,8 +2786,8 @@ async function driveSessionToResult(
 		outputSchema?: unknown;
 		/**
 		 * Invoked when the initial prompt loses a prompt race (AgentBusyError) before
-		 * retrying. Lets the caller restore a safe contract and detach its monitor
-		 * while backing off. Absent, the busy error keeps the old path.
+		 * retrying. Lets the caller back off and wait out the turn that won, with its
+		 * monitor detached. Absent, the busy error keeps the old path.
 		 */
 		onPromptBusy?: () => Promise<void>;
 		/**
@@ -2795,6 +2795,12 @@ async function driveSessionToResult(
 		 * `detach` when it is handed back unrun. Absent, the caller's monitor is attached for the whole drive.
 		 */
 		promptOwnership?: PromptOwnership;
+		/**
+		 * The pooled yield contract the initial prompt's turn runs under (`[]`: the ordinary contract). The session
+		 * installs it when it admits the prompt and puts it back if the prompt is handed back; with `restore`, it is
+		 * installed before the interrupted turn goes on. Absent, the session's contract is left as it is.
+		 */
+		workPoolYieldItems?: readonly WorkPoolYieldItem[];
 		/** Go on with the interrupted turn instead of sending `task`, which only labels the run. */
 		restore?: boolean;
 		/**
@@ -2805,7 +2811,7 @@ async function driveSessionToResult(
 		steps?: StepProgress;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore, steps, outputSchema, promptOwnership } = options;
+	const { solutionSpace, onPromptBusy, restore, steps, outputSchema, promptOwnership, workPoolYieldItems } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2881,8 +2887,9 @@ async function driveSessionToResult(
 				await awaitAbortable(
 					prompter.prompt(text, {
 						...promptOptions,
-						// The monitor takes the session from the moment the prompt is admitted.
-						...(ownership ? { onPromptAdmitted: ownership.attach } : {}),
+						// The monitor takes the session from the moment the prompt is admitted, and gives it back
+						// inside the session's own bracket if the turn never goes live.
+						...(ownership ? { onPromptAdmitted: ownership.attach, onPromptAbandoned: ownership.detach } : {}),
 						runCommands: false,
 						throwOnDrop: true,
 					}),
@@ -2934,14 +2941,19 @@ async function driveSessionToResult(
 			for (;;) {
 				try {
 					if (restore) {
-						// No prompt to admit: a restored turn is continued by the session itself, so its monitor attaches
-						// first (the interrupted-turn retry cancels any hold, and nothing else runs on a fresh restore).
+						// No prompt to admit: a restored turn is continued by the session itself. Its contract goes in
+						// first (the interrupted-turn retry cancels any hold, as a user's resume does), then its monitor
+						// attaches, and nothing else runs on a fresh restore.
+						if (workPoolYieldItems) await awaitAbortable(session.setWorkPoolYieldItems(workPoolYieldItems));
 						promptOwnership?.attach();
 						await awaitAbortable(session.restoreInterruptedTurn());
 					} else {
-						await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt", {
-							ownership: promptOwnership,
-						});
+						await dispatchPrompt(
+							task,
+							{ attribution: "agent", solutionSpace, ...(workPoolYieldItems ? { workPoolYieldItems } : {}) },
+							"initial prompt",
+							{ ownership: promptOwnership },
+						);
 					}
 					break;
 				} catch (error) {
@@ -4538,18 +4550,17 @@ async function driveFollowUpTurn(
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	let session = live;
-	// Acquire turn ownership before mutating the shared yield contract: installing
-	// pooled items under a running ordinary wake would reject its in-flight tool
-	// calls. The check-to-install section below has no await, so once idle is
-	// observed no wake dispatch can interleave before the synchronous mutation.
-	// Bounded: a worker that never settles fails its batch instead of installing
-	// under the active turn or hanging the pool.
+	// Wait out the turn that runs now before sending the prompt, so it rarely loses the prompt race. This only
+	// narrows the race: nothing the turn needs is changed here. Its yield contract and its yield tool's state go in
+	// when the session admits the prompt, and its monitor attaches then too (see `promptOwnership`), since only from
+	// there does the turn own the session: any wait before it can still let another owner's turn start, a
+	// `subagent_stop` holder's refusal continuation included, and it must run under the contract it held.
+	// Bounded: a worker that never settles fails its batch instead of hanging the pool.
 	let ownershipWaits = 0;
 	const acquireOwnership = async (): Promise<void> => {
 		for (;;) {
-			// A wake turn's `subagent_stop` pass holds the session until it publishes:
-			// attaching this turn's monitor sooner would let it see the holder's turns.
-			// Rechecked after every idle wait: the turn waited out may take a hold as it ends.
+			// A wake turn's `subagent_stop` pass holds the session until it publishes. Rechecked after every
+			// idle wait: the turn waited out may take a hold as it ends.
 			await session.waitForStopPasses(signal);
 			if (!session.isStreaming || ownershipWaits >= 3) break;
 			ownershipWaits++;
@@ -4561,38 +4572,27 @@ async function driveFollowUpTurn(
 		}
 		if (session.isStreaming) {
 			throw new Error(
-				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
+				`Subagent ${id} stayed busy through 3 ownership waits; refusing to start the turn under an active one`,
 			);
 		}
 	};
 	await acquireOwnership();
-	// Revalidate until the worker survives an install round-trip unchanged: the
-	// waits/rebuild above can outlast the idle TTL, letting park() detach this
-	// instance mid-install. Each observed replacement means another full park
-	// cycle, so reinstall on the fresh session (a revival restores only the last persisted contract) and check
-	// again; genuine churn fails fast instead of driving a stale instance, and
-	// a released worker throws instead of driving a corpse. A replacement may
-	// already be streaming a wake, so ownership is reacquired every round.
+	// Revalidate until the worker survives the waits unchanged: they can outlast the idle TTL, letting park()
+	// detach this instance. Each observed replacement means another full park cycle, so check the fresh
+	// session again; genuine churn fails fast instead of driving a stale instance, and a released worker throws
+	// instead of driving a corpse. A replacement may already be streaming a wake, so ownership is reacquired
+	// every round.
 	for (let acquireAttempts = 0; ; acquireAttempts++) {
-		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 		const live = await ensureLocalLive(id);
 		if (live === session) break;
 		if (acquireAttempts >= 2) {
 			throw new Error(
-				`Subagent ${id} was replaced during every install attempt; refusing to drive a stale worker session`,
+				`Subagent ${id} was replaced during every ownership attempt; refusing to drive a stale worker session`,
 			);
 		}
 		session = live;
 		await acquireOwnership();
 	}
-	// The install awaits above can outlast a wake taking its `subagent_stop` hold after the ownership
-	// check: wait it out again before this turn's contract is armed. (The monitor itself attaches only
-	// when the prompt is admitted, so it is never attached across a wait that lets another turn run.)
-	await session.waitForStopPasses(signal);
-	// A kept-alive session reuses its YieldTool across turns; clear the prior
-	// run's incremental-section flag and retry counters so this turn's guards
-	// evaluate against its own state, not stale accumulators.
-	resetYieldTurnState(session.getToolByName("yield"));
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 	const softRequestBudget = options.softRequestBudget ?? 0;
@@ -4633,16 +4633,21 @@ async function driveFollowUpTurn(
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 	monitor.setActiveSession(session);
-	// The batch monitor attaches when the initial prompt is admitted and detaches whenever that prompt is
-	// handed back or loses a race, so it never observes a turn it does not own while the prompt waits (for a
-	// hold, maintenance, a backoff). The teardown always releases whatever is attached — including when the
-	// drive rejects before any attempt was admitted.
+	// What the batch turn takes of the session it takes when the initial prompt is admitted, once it owns the
+	// turn, and gives back whenever that prompt is handed back or loses a race: its monitor, and its yield
+	// tool's state (the session installs the yield contract itself, see `workPoolYieldItems`). None of it is
+	// touched while the prompt waits (for a hold, maintenance, a backoff), so it never sits under, or observes,
+	// a turn it does not own. The teardown always releases whatever is attached, including when the drive
+	// rejects before any attempt was admitted.
 	let outcome: DriveOutcome;
 	let attemptUnsubscribe: () => void = () => {};
 	const promptOwnership: PromptOwnership = {
 		attach: () => {
 			attemptUnsubscribe();
 			attemptUnsubscribe = monitor.attach(session);
+			// A kept-alive session reuses its YieldTool across turns; clear the prior run's incremental-section
+			// flag and retry counters so this turn's guards evaluate against its own state, not stale accumulators.
+			resetYieldTurnState(session.getToolByName("yield"));
 		},
 		detach: () => {
 			attemptUnsubscribe();
@@ -4672,23 +4677,16 @@ async function driveFollowUpTurn(
 				steps: options.steps,
 				outputSchema: options.outputSchema,
 				promptOwnership,
+				workPoolYieldItems: options.workPoolYieldItems ?? [],
 				onPromptBusy: async () => {
 					promptOwnership.detach();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
-					await session.setWorkPoolYieldItems([]);
-					if (signal) {
-						await untilAborted(signal, () => session.waitForIdle());
-					} else {
-						await session.waitForIdle();
-					}
 					// The wake that won the race can be idle while its observer still holds the session for a
-					// `subagent_stop` pass, which waitForIdle does not cover: wait out the pass and any turn that
-					// follows it before the contract is reinstalled. Each lost race is bounded by its own ownership
-					// waits. The retry's own admission reattaches the monitor.
+					// `subagent_stop` pass, which waiting for idle alone does not cover: wait out the pass and any
+					// turn that follows it. Each lost race is bounded by its own ownership waits. Nothing was
+					// installed for the lost attempt, and the retry's own admission arms the turn again.
 					ownershipWaits = 0;
 					await acquireOwnership();
-					resetYieldTurnState(session.getToolByName("yield"));
-					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 				},
 			});
 			releaseStopPass = outcome.releaseStopPass;

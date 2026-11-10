@@ -1587,12 +1587,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#inFlightEpoch;
 	}
 
+	/** Settles, once, the next time an in-flight bracket ends or is reset: a holder waiting out other prompts' setup rechecks then. */
+	#inFlightChanged = Promise.withResolvers<void>();
+
+	#notifyInFlightChanged(): void {
+		const changed = this.#inFlightChanged;
+		this.#inFlightChanged = Promise.withResolvers<void>();
+		changed.resolve();
+	}
+
 	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		// Abort has already taken an earlier epoch's bracket out of the count, so its late finalizer leaves the
 		// count to a newer turn; with none in flight it still settles, since a turn begun while abort() was
 		// finishing has its bracket reset by it and ends here.
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		this.#notifyInFlightChanged();
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -2117,6 +2127,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
 		this.#clientPromptInFlightCount = 0;
+		this.#notifyInFlightChanged();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
@@ -9013,8 +9024,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 
-		// If streaming, queue via steer()/followUp()/aside based on option
-		if (this.isStreaming) {
+		// If streaming, queue via steer()/followUp()/aside based on option. A holder's own continuation does
+		// neither: it waits for the running work below, once it is past its preprocessing.
+		if (this.isStreaming && !(holder && !options?.streamingBehavior)) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) {
 				// Busy because the agent owns a turn: that turn supersedes the interrupted
@@ -9100,6 +9112,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// which is no cancellation.
 		if (holder) {
 			holder.cancel.signal.throwIfAborted();
+			// The holder's continuation outranks other prompts, so it does not lose to one as busy: a prompt that is
+			// still in its setup (it is in flight, though the agent runs nothing yet) is a non-owner that hands itself
+			// back at its own hold check, and a turn that started before the hold ends on its own. Wait for either,
+			// abortably (the pass's cancellation, a user's prompt included, ends the wait), with the busy check below
+			// reached straight from the last look at the session.
+			const waitGeneration = this.#promptGeneration;
+			while (this.isStreaming) {
+				await untilAborted(holder.cancel.signal, () =>
+					this.agent.state.isStreaming ? this.agent.waitForIdle() : this.#inFlightChanged.promise,
+				);
+			}
+			if (this.#promptGeneration !== waitGeneration) {
+				outcome.sessionClaimed = false;
+				this.#reportDroppedPrompt(typedText, options, followUps);
+				if (options?.throwOnDrop) throw new PromptDroppedError();
+				return true;
+			}
 		} else if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
 			const waitGeneration = this.#cancellationGeneration();
@@ -9668,7 +9697,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		expandedText: string,
 		options?: Pick<
 			PromptOptions,
-			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted" | "userInitiated"
+			| "toolChoice"
+			| "images"
+			| "skipCompactionCheck"
+			| "solutionSpace"
+			| "onPromptAdmitted"
+			| "userInitiated"
+			| "workPoolYieldItems"
+			| "onPromptAbandoned"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -9694,8 +9730,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		// The yield contract to put back if this prompt's turn never goes live, and whether it did.
+		let restoreWorkPoolItems: readonly WorkPoolYieldItem[] | undefined;
+		let turnLive = false;
 		try {
 			options?.onPromptAdmitted?.();
+			// The caller's yield contract goes in once this prompt is admitted, not before: until then another turn,
+			// a stop-pass holder's refusal continuation included, may still run, and it must not run under a contract
+			// that is not its own. The holder's continuation waits for this setup, which puts the contract back if
+			// it hands the prompt back. Awaited, so the turn builds from the rebuilt provider prompt.
+			const poolItems = options?.workPoolYieldItems;
+			if (poolItems) {
+				const before = this.#workPoolYieldItems;
+				const installing = this.setWorkPoolYieldItems(poolItems);
+				if (this.#workPoolYieldItems !== before) restoreWorkPoolItems = before;
+				await installing;
+			}
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			// Auto-prewalk: return from the previous task's handoff before the usage preflight checks the model,
 			// then judge this task alongside the rest of setup; the decision is applied right before dispatch.
@@ -9992,6 +10042,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							// client-owned run goes live (never on a busy-retry that
 							// waits behind an autonomous run) — wake steers parked on
 							// the dispatch so they admit into the run they targeted.
+							turnLive = true;
 							this.#wakeDispatchLiveWaiters();
 							options?.followUpBatch?.release();
 						},
@@ -10011,6 +10062,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} finally {
+			// A turn that never went live (handed back, dropped, failed in setup) gives back what its caller took at
+			// admission and the yield contract it installed, both before the bracket releases, so whoever the hold
+			// lets run next finds the session as it held it. Once the turn ran, the contract is the caller's to clear.
+			if (!turnLive) {
+				try {
+					options?.onPromptAbandoned?.();
+				} catch (error) {
+					logger.warn("onPromptAbandoned callback failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				if (restoreWorkPoolItems) {
+					try {
+						await this.setWorkPoolYieldItems(restoreWorkPoolItems);
+					} catch (error) {
+						logger.warn("Failed to put back the pooled yield contract of an undispatched prompt", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+			}
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;

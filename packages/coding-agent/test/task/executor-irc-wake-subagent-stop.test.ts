@@ -1459,6 +1459,138 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(result.output).toContain("FOLLOW-UP-YIELD");
 		});
 	});
+
+	describe("a follow-up that does not own the session yet", () => {
+		const followUpOptions = () => ({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do more",
+			artifactsDir: tempDir.path(),
+		});
+		const item = { id: "batch#1", index: 0 };
+		const healthy = { state: "healthy" as const, accounts: [] };
+
+		/** A mock response that records how many pooled yield items the session holds when the model is called. */
+		const recordingItems = (seen: number[], response: MockResponse): MockHandler => {
+			return () => {
+				seen.push(session?.getWorkPoolYieldItems().length ?? -1);
+				return response;
+			};
+		};
+
+		/** Parks the first usage preflight (the follow-up's prompt setup) until `gate` opens; the holder's passes through. */
+		const parkFirstPreflight = (entered: PromiseWithResolvers<void>, gate: PromiseWithResolvers<void>): void => {
+			vi.spyOn(authStorage.health, "model")
+				.mockImplementationOnce(async () => {
+					entered.resolve();
+					await gate.promise;
+					return healthy;
+				})
+				.mockResolvedValue(healthy);
+		};
+
+		it("does not install its pooled yield contract before its prompt is admitted past a hold", async () => {
+			const seen: number[] = [];
+			const run = await setup({
+				driven: true,
+				responses: [
+					recordingItems(seen, yieldCall("HOLDER-YIELD")),
+					recordingItems(seen, yieldCall("FOLLOW-UP-YIELD")),
+				],
+				onStop: () => undefined,
+			});
+			const holdTaken = Promise.withResolvers<StopPassHold>();
+			const prompt = run.session.prompt.bind(run.session);
+			vi.spyOn(run.session, "prompt").mockImplementation(async (text, options) => {
+				// A wake's observation takes its hold after the follow-up passed its ownership waits, on its way
+				// into the session: the prompt waits the hold out.
+				if (text === "do more") holdTaken.resolve(run.session.holdForStopPass());
+				return prompt(text, options);
+			});
+
+			const followUp = runSubagentFollowUpTurn({ ...followUpOptions(), workPoolYieldItems: [item] });
+			const hold = await holdTaken.promise;
+			// The holder's refusal continuation runs while the follow-up is parked behind the hold.
+			await hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			hold.release();
+			const result = await followUp;
+
+			// The continuation ran under the contract it held; the follow-up's turn under its own.
+			expect(seen).toEqual([0, 1]);
+			expect(result.error).toBeUndefined();
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
+			expect(result.output).not.toContain("HOLDER-YIELD");
+		});
+
+		it("runs a holder's continuation that overlaps its prompt setup instead of failing it as busy", async () => {
+			const preflightEntered = Promise.withResolvers<void>();
+			const preflightGate = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [yieldCall("HOLDER-YIELD"), yieldCall("FOLLOW-UP-YIELD")],
+				onStop: () => undefined,
+			});
+			parkFirstPreflight(preflightEntered, preflightGate);
+
+			const followUp = runSubagentFollowUpTurn(followUpOptions());
+			await preflightEntered.promise;
+			// The prompt is in its setup, in flight though the agent runs nothing, when a wake's observation takes its
+			// hold and a fast verdict sends the refusal's continuation in.
+			const hold = run.session.holdForStopPass();
+			const continuation = hold.prompt("continue", {
+				attribution: "agent",
+				synthetic: true,
+				runCommands: false,
+				throwOnDrop: true,
+			});
+			preflightGate.resolve();
+			// The overlapping setup is the one handed back: the holder's continuation waits for it and runs.
+			await expect(continuation).resolves.toBe(true);
+			hold.release();
+			const result = await followUp;
+
+			expect(run.mock.calls).toHaveLength(2);
+			expect(result.error).toBeUndefined();
+			expect(result.extractedToolData?.yield).toHaveLength(1);
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
+			expect(result.output).not.toContain("HOLDER-YIELD");
+		});
+
+		it("puts its pooled yield contract back when a hold hands its prompt back, before the holder's continuation runs", async () => {
+			const seen: number[] = [];
+			const preflightEntered = Promise.withResolvers<void>();
+			const preflightGate = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [
+					recordingItems(seen, yieldCall("HOLDER-YIELD")),
+					recordingItems(seen, yieldCall("FOLLOW-UP-YIELD")),
+				],
+				onStop: () => undefined,
+			});
+			parkFirstPreflight(preflightEntered, preflightGate);
+
+			const followUp = runSubagentFollowUpTurn({ ...followUpOptions(), workPoolYieldItems: [item] });
+			await preflightEntered.promise;
+			// Admitted, the prompt owns the turn: its contract is in.
+			expect(run.session.getWorkPoolYieldItems()).toHaveLength(1);
+			const hold = run.session.holdForStopPass();
+			const continuation = hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			preflightGate.resolve();
+			await continuation;
+			hold.release();
+			const result = await followUp;
+
+			// Handed back, the prompt left the session as it found it, so the continuation ran under the contract it
+			// held; the retried prompt then ran under its own.
+			expect(seen).toEqual([0, 1]);
+			expect(result.error).toBeUndefined();
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
+			expect(result.output).not.toContain("HOLDER-YIELD");
+		});
+	});
 	describe("a stop-pass holder whose run is cancelled", () => {
 		it("refuses a continuation once the run's abort signal fires", async () => {
 			const run = await setup({ driven: true, responses: [{ content: ["UNWANTED"] }], onStop: () => undefined });
