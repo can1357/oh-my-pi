@@ -951,14 +951,15 @@ const FIND_MAX_DEPTH: u32 = 64;
 fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
 	let printed = props.role.to_lowercase();
 	printed.contains(query)
-		|| printed.contains(compact)
-		|| props
-			.native_role
-			.chars()
-			.filter(|c| !matches!(c, ' ' | '_' | '-'))
-			.flat_map(char::to_lowercase)
-			.eq(compact.chars())
-		|| matches!((compact, printed.as_str()), ("radiobutton", "radio") | ("radio", "radiobutton"))
+		|| !compact.is_empty()
+			&& ((compact.len() != query.len() && printed.contains(compact))
+				|| props
+					.native_role
+					.chars()
+					.filter(|c| !matches!(c, ' ' | '_' | '-'))
+					.flat_map(char::to_lowercase)
+					.eq(compact.chars())
+				|| (compact == "radiobutton" && printed == "radio"))
 }
 
 pub fn query(
@@ -976,7 +977,9 @@ pub fn query(
 	};
 	let identities = ReadIdentities::new(&root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
-	let compact_role = role.as_deref().map(|role| role.replace([' ', '_', '-'], ""));
+	let compact_role = role
+		.as_deref()
+		.map(|role| role.replace([' ', '_', '-'], ""));
 	let title = query.title.as_deref().map(str::to_lowercase);
 	let value = query.value.as_deref().map(str::to_lowercase);
 	let limit = query.limit.unwrap_or(100).min(5_000) as usize;
@@ -991,8 +994,7 @@ pub fn query(
 		};
 		if role.as_deref().is_none_or(|role| {
 			matches_role(&node.props, role, compact_role.as_deref().unwrap_or(role))
-		})
-			&& contains(label(&node.props), title.as_ref())
+		}) && contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
 			let uniqueness = identities.of(&node.props);
@@ -2243,6 +2245,7 @@ mod tests {
 		assert_eq!(nodes[0].title, None);
 		assert_eq!(nodes[0].description.as_deref(), Some("Reload"));
 	}
+
 	#[test]
 	fn query_accepts_role_aliases_without_widening_printed_substrings() {
 		let mut radio = p(&normalize_role_macos("AXRadioButton"), Some("Choice"));
@@ -2250,11 +2253,17 @@ mod tests {
 		let mut field = p(&normalize_role_macos("AXTextField"), Some("Name"));
 		field.native_role = "AXTextField".into();
 		let mut m = Mock {
-			props: [(1, p("window", None)), (2, radio), (3, field)].into(),
-			children: [(1, vec![2, 3])].into(),
+			props: [
+				(1, p("window", None)),
+				(2, radio),
+				(3, field),
+				(4, p("tabgroup", Some("Tabs"))),
+			]
+			.into(),
+			children: [(1, vec![2, 3, 4])].into(),
 			..Default::default()
 		};
-		for role in ["radiobutton", "AXRadioButton"] {
+		for role in ["radiobutton", "AXRadioButton", "AX_radio-button"] {
 			let nodes = find(&mut m, Some(role), None);
 			assert_eq!(nodes.len(), 1, "{role}");
 			assert_eq!(nodes[0].role, "radio");
@@ -2263,6 +2272,11 @@ mod tests {
 		let nodes = find(&mut m, Some("text field"), None);
 		assert_eq!(nodes.len(), 1);
 		assert_eq!(nodes[0].role, "textfield");
+		assert!(find(&mut m, Some("unknown-role"), None).is_empty());
+		assert!(find(&mut m, Some("-"), None).is_empty());
+		let nodes = find(&mut m, Some("tab"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "tabgroup");
 	}
 
 	fn tree(m: &mut Mock) -> String {
