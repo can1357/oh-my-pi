@@ -3096,6 +3096,8 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		// The cache holds the journal array itself; dropping it lets the released transcript be collected.
+		this.#clientMessageIdIndex = undefined;
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;

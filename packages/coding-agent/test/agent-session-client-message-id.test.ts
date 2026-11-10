@@ -192,6 +192,63 @@ describe("AgentSession client intent identity", () => {
 		expect(reopened.isClientMessageResolved("intent-command")).toBe(true);
 	});
 
+	test("resolves a command's ID when it only rotates the provider session (/fresh)", async () => {
+		const disk = TempDir.createSync("@client-message-command-fresh-");
+		const auth = createInMemoryAuthStorage();
+		cleanup.push(async () => {
+			auth.close();
+			disk.removeSync();
+		});
+		const manager = SessionManager.inMemory(disk.path());
+		const created = Promise.withResolvers<CorrelatedSession>();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.registerCommand("rotate", {
+					handler: async () => {
+						(await created.promise).freshSession();
+					},
+				});
+			},
+			disk.path(),
+			new EventBus(),
+			runtime,
+			"rotate-command",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			runtime,
+			disk.path(),
+			manager,
+			new ModelRegistry(auth, path.join(disk.path(), "models.yml")),
+		);
+		const { session } = setup({ manager, config: { extensionRunner } });
+		created.resolve(session);
+		const providerSessionId = session.sessionId;
+		expect(await session.prompt("/rotate", intent("intent-fresh"))).toBe(false);
+		expect(session.sessionId).not.toBe(providerSessionId);
+		const found = await status(session, ["intent-fresh"]);
+		expect(found.resolvedClientMessageIds).toEqual(["intent-fresh"]);
+		expect(found.unresolvedClientMessageIds).toEqual([]);
+	});
+
+	test("lets a released journal be collected after its client message IDs were indexed", async () => {
+		const manager = SessionManager.inMemory("/cwd");
+		const entry = (() => {
+			manager.appendMessage(
+				{ role: "user", content: "x".repeat(64 * 1024), attribution: "user", timestamp: Date.now() },
+				{ clientMessageId: "intent-released" },
+			);
+			expect(manager.hasClientMessageEntry("intent-released")).toBe(true);
+			return new WeakRef(manager.getEntries()[0]!);
+		})();
+		manager.releaseRetainedEntries();
+		// Not a timing guess: a WeakRef target stays alive until the current task ends, so yield one task.
+		await Bun.sleep(0);
+		Bun.gc(true);
+		expect(entry.deref()).toBeUndefined();
+	});
+
 	test("materializes a correlated first user entry before the assistant produces any output", async () => {
 		const disk = TempDir.createSync("@client-message-first-entry-");
 		cleanup.push(async () => disk.removeSync());

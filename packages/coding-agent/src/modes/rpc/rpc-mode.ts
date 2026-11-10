@@ -1936,7 +1936,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const dispatchedUserInput = new WeakSet<RpcCommand>();
 	const pendingSessionChanges = new Set<RpcCommand>();
 	let sessionChangeEpoch = 0;
-	const sessionClientMessageKey = (id: string): string => `session:${session.sessionId}\u0000${id}`;
+	// The journal's identity, not the provider-facing sessionId that `/fresh` rotates within one journal.
+	const sessionClientMessageKey = (id: string): string =>
+		`session:${session.sessionManager.getSessionId()}\u0000${id}`;
 	const assertClientMessageAvailableInSession = (id: string): void => {
 		session.assertClientMessageAvailable(id);
 		if (clientMessageIdsInFlight.has(sessionClientMessageKey(id))) {
@@ -1953,7 +1955,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		const id = correlatedClientMessageId(command);
 		if (id === undefined) return true;
 		const acceptKey = `epoch:${sessionChangeEpoch}\u0000${id}`;
-		const checkedSessionId = pendingSessionChanges.size === 0 ? session.sessionId : undefined;
+		const checkedSessionId = pendingSessionChanges.size === 0 ? session.sessionManager.getSessionId() : undefined;
 		try {
 			assertClientMessageId(id);
 			if (clientMessageIdsInFlight.has(acceptKey)) throw new Error(`clientMessageId already submitted: ${id}`);
@@ -1972,7 +1974,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		if (!clientMessageAdmissions.has(command)) acceptClientMessageId(command);
 		const admission = clientMessageAdmissions.get(command)!;
 		if (admission instanceof Error) throw admission;
-		if (admission.checkedSessionId !== session.sessionId) {
+		if (admission.checkedSessionId !== session.sessionManager.getSessionId()) {
 			assertClientMessageAvailableInSession(admission.id);
 			// Accepted with its check deferred, an abort invalidates earlier input only now that it validated.
 			if (admission.checkedSessionId === undefined && command.type === "abort_and_prompt") {

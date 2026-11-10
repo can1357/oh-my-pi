@@ -11305,7 +11305,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Reject identity reuse, without inventing idempotent replay or matching payloads. */
 	assertClientMessageAvailable(id: string): void {
 		assertClientMessageId(id);
-		if (this.#clientMessageAdmissions?.sessionId === this.sessionId && this.#clientMessageAdmissions.ids.has(id)) {
+		// Keyed on the journal's identity: `/fresh` rotates the provider-facing sessionId but keeps the journal.
+		const journalId = this.sessionManager.getSessionId();
+		if (this.#clientMessageAdmissions?.sessionId === journalId && this.#clientMessageAdmissions.ids.has(id)) {
 			throw new Error(`clientMessageId already submitted: ${id}`);
 		}
 		if (this.sessionManager.hasClientMessageEntry(id)) throw new Error(`clientMessageId already submitted: ${id}`);
@@ -11315,8 +11317,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#reserveClientMessageId(id: string | undefined): void {
 		if (id === undefined) return;
 		this.assertClientMessageAvailable(id);
-		if (this.#clientMessageAdmissions?.sessionId !== this.sessionId) {
-			this.#clientMessageAdmissions = { sessionId: this.sessionId, ids: new Set() };
+		const journalId = this.sessionManager.getSessionId();
+		if (this.#clientMessageAdmissions?.sessionId !== journalId) {
+			this.#clientMessageAdmissions = { sessionId: journalId, ids: new Set() };
 		}
 		this.#clientMessageAdmissions.ids.add(id);
 	}
@@ -11352,11 +11355,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Mark a correlated input as handled by a local command (extension, custom or builtin command).
-	 * A session transition the command starts journals the ID as resolved in the admitting session
+	 * A session transition the command starts journals the ID as resolved in the admitting journal
 	 * before leaving it; otherwise {@link finishLocalClientMessage} journals it once the command ends.
 	 */
 	beginLocalClientMessage(id: string): void {
-		this.#localClientMessages.set(id, this.sessionId);
+		this.#localClientMessages.set(id, this.sessionManager.getSessionId());
 	}
 
 	/** End {@link beginLocalClientMessage}; `consumed` journals the resolution unless a transition already did. */
@@ -11364,14 +11367,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const origin = this.#localClientMessages.get(id);
 		if (origin === undefined) return;
 		this.#localClientMessages.delete(id);
-		if (consumed && origin === this.sessionId) this.resolveClientMessages([id]);
+		if (consumed && origin === this.sessionManager.getSessionId()) this.resolveClientMessages([id]);
 	}
 
 	#resolveLocalClientMessagesBeforeTransition(): void {
 		if (this.#localClientMessages.size === 0) return;
 		const ids: string[] = [];
 		for (const [id, origin] of this.#localClientMessages) {
-			if (origin !== this.sessionId) continue;
+			if (origin !== this.sessionManager.getSessionId()) continue;
 			ids.push(id);
 			this.#localClientMessages.delete(id);
 		}
@@ -11394,7 +11397,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async getClientMessageStatus(ids: readonly string[], maxBytes: number): Promise<ClientMessageStatus> {
 		assertClientMessageIds(ids);
-		const sessionId = this.sessionId;
+		const journalId = this.sessionManager.getSessionId();
 		await this.settleInFlightMessagePersistence();
 		await this.#messageEndPersistenceTail;
 		// Only entries journaled before this flush are confirmed by it: one appended while it awaits
@@ -11402,7 +11405,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const persisted = ids.filter(id => this.sessionManager.hasClientMessageEntry(id));
 		const resolved = ids.filter(id => this.sessionManager.isClientMessageResolved(id));
 		await this.sessionManager.flush();
-		if (this.sessionId !== sessionId) throw new Error("Session changed during client message reconciliation");
+		if (this.sessionManager.getSessionId() !== journalId) {
+			throw new Error("Session changed during client message reconciliation");
+		}
 		const requested = new Set(ids);
 		const candidates: ClientMessageStatus["messages"] = [];
 		for (const message of this.messages) {
