@@ -58,6 +58,10 @@
 - Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
 - Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false` ([#18672](https://github.com/can1357/oh-my-pi/pull/18672) by [@0xeb](https://github.com/0xeb)).
 
+### Added
+
+- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` now accept the `openai-codex/codex-transcribe` model and transcribe with an existing `openai-codex` login (WAV, MP3, M4A, FLAC, WebM and Ogg/Opus; uploads are renamed to match their container, since the backend rejects mismatched extensions) ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
@@ -152,9 +156,6 @@
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `dropsForeignReasoningPayload(turn, model)`, which tells whether `transformMessages` certainly strips a turn's thinking signatures and redacted thinking on the way to `model`, and, for Factory Droid's Gemini wire, `isFactoryDroidGeminiWire(model)` and `keepsFactoryGeminiReasoning(turn)` ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Factory Droid Beam 1.0 requests accept tool-call turns that arrive without reasoning ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` now accept the `openai-codex/codex-transcribe` model and transcribe with an existing `openai-codex` login (WAV, MP3, M4A, FLAC, WebM and Ogg/Opus; uploads are renamed to match their container, since the backend rejects mismatched extensions) ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
@@ -163,9 +164,6 @@
 ### Fixed
 
 - Fixed Factory Droid Fable requests offering Opus 5 as the refusal fallback when your organization's model policy excludes Opus 5; Claude requests now offer only fallback models your account can use, and a request served by another organization's login than the one your model list came from offers none ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
-
-- `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
-- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` accept `openai-codex/codex-transcribe` with an existing `openai-codex` login ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.15.0] - 2026-11-01
 
