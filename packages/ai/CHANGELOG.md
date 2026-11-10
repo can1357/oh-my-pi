@@ -5,6 +5,9 @@
 ### Fixed
 
 - Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+### Changed
+
+- Providers with a `login-warning` auth rule show their account risk before a new login and start it only after the user answers `yes`; any other answer or a cancel stores nothing, and their login-list entry is marked "(at your own risk)" ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
 
 ## [18.18.4] - 2026-11-09
 
