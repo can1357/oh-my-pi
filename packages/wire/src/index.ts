@@ -245,6 +245,12 @@ export interface AgentSnapshot {
 	hasSessionFile: boolean;
 	createdAt: number;
 	lastActivity: number;
+	/**
+	 * When the host accepted the current run's final result; scoped to that run like the host
+	 * registry's `lifecycle.acceptedAt`. A `running` agent that carries it is the run's tail, not a
+	 * new run. Absent otherwise, and from older hosts.
+	 */
+	acceptedAt?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

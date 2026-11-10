@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AgentSnapshot.acceptedAt`: when the host accepted the current run's final result, so a guest can tell a `running` agent's tail from a new run. Older hosts omit it ([#18724](https://github.com/can1357/oh-my-pi/pull/18724) by [@matteoantoci](https://github.com/matteoantoci))
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

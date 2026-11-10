@@ -842,6 +842,11 @@ export class CollabGuestLink {
 				ref.createdAt = snap.createdAt;
 				ref.lastActivity = snap.lastActivity;
 				ref.displayName = snap.displayName;
+				// Run-scoped like the host's: a snapshot without it (a new run, or an
+				// older host) clears it, since `setStatus` keeps a running ref's lifecycle.
+				if (ref.lifecycle?.acceptedAt !== snap.acceptedAt) {
+					ref.lifecycle = { ...ref.lifecycle, acceptedAt: snap.acceptedAt };
+				}
 			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
 		}

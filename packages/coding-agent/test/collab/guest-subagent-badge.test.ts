@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
+import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import {
 	type AgentSnapshot,
 	COLLAB_PROTO,
@@ -14,8 +15,12 @@ import {
 	getRunningSubagentBadgeAgentIds,
 	getRunningSubagentBadgeRegistry,
 } from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
+import { liveTaskAgent } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -180,4 +185,83 @@ describe("collab guest running-subagents badge", () => {
 			await guest.leave("test cleanup").catch(() => {});
 		}
 	});
+});
+
+function makeHostContext(): InteractiveModeContext {
+	return {
+		settings: Settings.isolated(),
+		sessionManager: SessionManager.inMemory(),
+		session: {
+			isStreaming: false,
+			isAborting: false,
+			queuedMessageCount: 0,
+			sessionName: "host session",
+			model: undefined,
+			thinkingLevel: undefined,
+			subscribe: () => () => {},
+			emitNotice: () => {},
+			promptCustomMessage: () => Promise.resolve(),
+			abort: () => Promise.resolve(),
+		},
+		eventBus: new EventBus(),
+		statusLine: {
+			setCollabStatus: () => {},
+			invalidate: () => {},
+			getCachedContextBreakdown: () => ({ usedTokens: 0, contextWindow: 0 }),
+		},
+		ui: { requestRender: () => {} },
+		showStatus: () => {},
+		collabHost: undefined,
+	} as unknown as InteractiveModeContext;
+}
+
+/**
+ * Frames cross real WebCrypto sealing, which resolves on the event loop rather than
+ * a clock fake timers control, so poll until `predicate` holds, bounded by wall time.
+ */
+async function settle(predicate: () => boolean): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (!predicate() && Date.now() < deadline) await Bun.sleep(5);
+}
+
+describe("collab guest task-card liveness", () => {
+	it("mirrors the host's accepted result so a running tail never draws as a live run", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
+		const hostRegistry = AgentRegistry.global();
+		// A streaming session keeps the ref `running` after its result is accepted.
+		hostRegistry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			session: { isStreaming: true } as unknown as AgentSessionHandle,
+		});
+		const host = new CollabHost(makeHostContext());
+		await host.start("ws://localhost:8788");
+		const guest = new CollabGuestLink(makeGuestContext());
+		const mirrored = () => guest.agentRegistry.get("Worker");
+
+		try {
+			await guest.join(host.link);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+
+			expect(hostRegistry.markResultAccepted("Worker")).toBe(true);
+			await settle(() => mirrored()?.lifecycle?.acceptedAt !== undefined);
+			expect(mirrored()?.status).toBe("running");
+			expect(mirrored()?.lifecycle?.acceptedAt).toBe(hostRegistry.get("Worker")?.lifecycle?.acceptedAt);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toBeUndefined();
+
+			// A new run inside one debounce window reaches the guest as `running` → `running`.
+			hostRegistry.setStatus("Worker", "idle");
+			hostRegistry.setStatus("Worker", "running");
+			await settle(() => mirrored()?.lifecycle?.acceptedAt === undefined);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+		} finally {
+			await guest.leave("test cleanup").catch(() => {});
+			await host.stop("test cleanup").catch(() => {});
+			writeSpy.mockRestore();
+			renameSpy.mockRestore();
+		}
+	}, 20000);
 });

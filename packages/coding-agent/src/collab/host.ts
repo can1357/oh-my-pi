@@ -1159,6 +1159,7 @@ export class CollabHost {
 					hasSessionFile: !!ref.sessionFile,
 					createdAt: ref.createdAt,
 					lastActivity: ref.lastActivity,
+					acceptedAt: ref.lifecycle?.acceptedAt,
 				}))
 		);
 	}
