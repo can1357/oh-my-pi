@@ -187,6 +187,7 @@ afterEach(() => {
 	while (handles.length > 0) handles.pop()?.stop();
 	vi.useRealTimers();
 	IncomingRequests.resetGlobalForTests();
+	OutgoingRequests.resetGlobalForTests();
 });
 
 function startServer(options: {
