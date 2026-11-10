@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- LiteLLM usage adapter (`@oh-my-pi/pi-ai/usage/litellm`) reporting a gateway's key and user USD budgets ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `UsageApi.replaceConfiguredProviders` registers configuration-sourced usage providers between runtime overrides and the built-in resolver, and `UsageProvider.usesRequestKey` makes aggregate usage probe only the key inference would send ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+
 ### Fixed
 
 - Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))

@@ -1116,7 +1116,7 @@ async function loadUsageSources(
 	settings: Settings,
 	authStorage: AuthStorage,
 ): Promise<ModelRegistry> {
-	const modelRegistry = new ModelRegistry(authStorage);
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 	// Extensions contribute usage providers via `registerProvider(name, { usage })`;
 	// without loading them their accounts land in `accountsWithoutUsage`.
 	await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
