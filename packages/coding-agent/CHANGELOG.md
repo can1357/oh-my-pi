@@ -145,6 +145,7 @@
 ### Fixed
 
 - In Chromium browser tabs, `tab.hover` and element-handle `hover()` now wait for a hidden target and refuse a covered one with the reason, as clicks do, instead of failing with Puppeteer's "Node is either not clickable or not an Element"
+- In Chromium browser tabs, `tab.hover` and element-handle `hover()` now wait for a hidden target and refuse a covered one with the reason, as clicks do, instead of failing with Puppeteer's "Node is either not clickable or not an Element" ([#18750](https://github.com/can1357/oh-my-pi/pull/18750) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
 - On Windows, the bash tool's shell resolves MSYS drive paths (`/c/Users/...`, `/mnt/c/...`) everywhere, so running `/c/.../tool.exe`, `cd /c/...`, `[ -f /c/... ]` and `< /c/...` reach drive C: like they already did for `ls` and other built-in utilities
