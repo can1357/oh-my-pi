@@ -4,8 +4,8 @@
 
 ### Changed
 
-- `task.maxEffort` is now a per-model map (exact `provider/modelId`, glob, or `"*"` keys) so each model, including retry-fallback models, gets its own cap; an existing `task.maxEffort: medium` still works as the `"*"` entry (also when another config layer sets a map), and the setting leaves the settings panel ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
-- An invalid `task.maxEffort` or `task.maxActualEffort` value (e.g. `turbo`) now stops startup with an error naming the setting, instead of logging a warning and using the default ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+- `task.maxEffort` is now a per-model map (exact `provider/modelId`, a prefix ending in `*`, or `"*"` keys) so each model, including retry-fallback models, gets its own cap, and context promotion skips a target whose lowest effort is above its cap; an existing `task.maxEffort: medium` still works as the `"*"` entry, a map in a higher config layer merges over it, and a string in a higher layer replaces a lower map, and the setting leaves the settings panel ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
+- An invalid `task.maxEffort` or `task.maxActualEffort` value (e.g. `turbo`, a list, or a malformed model key) now stops startup with an error naming the setting, instead of logging a warning and using the default ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
 
 ### Added
 
