@@ -384,6 +384,11 @@ const FIXTURE_CONFIGS: readonly ClientModelConfig[] = [
 		label: "SWE-1.6",
 		features: { supportsThinking: true, supportsToolCalls: true, supportsImages: true },
 	}),
+	config({
+		uid: "swe-1-6-fast",
+		label: "SWE-1.6 Fast",
+		features: { supportsToolCalls: true, supportsImages: true },
+	}),
 ];
 
 let models: ModelSpec<"devin-agent">[];
@@ -704,8 +709,9 @@ describe("devin server metadata normalization", () => {
 		expect(model("legacy-plain").reasoning).toBe(false);
 	});
 
-	it("strips the image modality from SWE-1.6 despite the server flag", () => {
+	it("strips the image modality from the SWE-1.6 lanes despite the server flag", () => {
 		expect(model("swe-1-6").input).toEqual(["text"]);
+		expect(model("swe-1-6-fast").input).toEqual(["text"]);
 	});
 
 	it("keeps the server's blurb and badges, and leaves them unset otherwise", () => {
@@ -898,6 +904,42 @@ describe("devin catalog seed", () => {
 			const upgraded = await resolveProviderModels({ ...options, cacheDbPath }, "online-if-uncached");
 			expect(fetches).toBe(1);
 			expect(upgraded.models.find(model => model.id === "info-context")?.contextWindow).toBe(1_048_576);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("drops a retired seed row from a cache written before the seed changed when discovery fails", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-devin-retired-cache-"));
+		const scratchDbPath = path.join(tempDir, "scratch.db");
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			const payload = toBinary(
+				GetCliModelConfigsResponseSchema,
+				create(GetCliModelConfigsResponseSchema, {
+					clientModelConfigs: [config({ uid: "swe-1-6-fast" }), config({ uid: "swe-2-high" })],
+				}),
+			);
+			let reachable = true;
+			const options = devinModelManagerOptions({
+				apiKey: "fixture-token",
+				fetch: async () => {
+					if (!reachable) throw new Error("Devin unreachable");
+					return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
+				},
+			});
+			const cacheProviderId = options.cacheProviderId;
+			if (!cacheProviderId) throw new Error("Devin cache provider id is missing");
+			const online = await resolveProviderModels({ ...options, cacheDbPath: scratchDbPath }, "online");
+			// The authoritative cache a release that still seeded SWE-1.6 Fast left
+			// behind: its static fingerprint no longer matches the seed.
+			writeModelCache(cacheProviderId, Date.now(), online.models, true, "seed-with-swe-1-6-fast", cacheDbPath);
+			reachable = false;
+
+			const offline = await resolveProviderModels({ ...options, cacheDbPath }, "online");
+			const ids = offline.models.map(model => model.id);
+			expect(ids).toContain("swe-2-high");
+			expect(ids).not.toContain("swe-1-6-fast");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
