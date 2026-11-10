@@ -63,6 +63,7 @@ import { AgentRegistry, isResumable, MAIN_AGENT_ID } from "../registry/agent-reg
 import { emitSubagentFrame } from "../utils/event-bus";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
@@ -555,6 +556,19 @@ interface SyncSpawnRef {
 	 * (mixed calls). A refusal reports its telemetry through this row's frame.
 	 */
 	progress?: AgentProgress;
+}
+
+/**
+ * The subset of a call's resolved kernel-defined tools one item requested.
+ * The kernels are queried once per call for the union of every item's names;
+ * each child still receives exactly its own item's tools.
+ */
+function evalToolsForItem(
+	evalCustomTools: CustomTool[] | undefined,
+	names: readonly string[] | undefined,
+): CustomTool[] | undefined {
+	if (!evalCustomTools?.length || !names?.length) return undefined;
+	return evalCustomTools.filter(tool => names.includes(tool.name));
 }
 
 /**
@@ -1061,13 +1075,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return manager;
 	}
 
-	/** Start one spawn's subagent run behind the session semaphore. */
+	/**
+	 * Start one spawn's subagent run behind the session semaphore. The spawn's
+	 * kernel-defined tools arrive either already resolved for it (a speculative
+	 * launch) or as the call's union (`callEvalCustomTools`), narrowed here to
+	 * this spawn's own item.
+	 */
 	#launch(spawn: {
 		toolCallId: string;
 		params: SpawnParams;
 		index: number;
 		agentId?: string;
 		detached: boolean;
+		/** This spawn's own resolved kernel-defined tools, when already narrowed. */
+		evalCustomTools?: CustomTool[];
+		/** Every name the call resolved, for items that did not narrow their own. */
+		callEvalCustomTools?: CustomTool[];
 	}): SpawnRun {
 		return new SpawnRun(
 			this.#permit,
@@ -1083,6 +1106,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					run.timing,
 					spawn.detached ? run.onArtifactsRetained : undefined,
 					run.tools,
+					spawn.evalCustomTools ?? evalToolsForItem(spawn.callEvalCustomTools, spawn.params.tools),
 				),
 			{ agentId: spawn.agentId, detached: spawn.detached },
 		);
@@ -1102,9 +1126,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// File bytes must be captured at dispatch, not while arguments stream.
 		if (spawn.taskFile !== undefined) return undefined;
 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
+		// A speculative launch runs before the call it belongs to exists, so
+		// it cannot share dispatch's resolve; it resolves its own descriptors
+		// once and threads them to preflight and the run, mirroring dispatch.
+		let evalCustomTools: CustomTool[] | undefined;
+		if (spawn.tools?.length) {
+			try {
+				evalCustomTools = createEvalCustomTools(
+					this.session,
+					await describeEvalTools(this.session, spawn.tools, signal),
+				);
+			} catch {
+				return undefined;
+			}
+		}
 		let blocking: boolean;
 		try {
-			blocking = (await this.#resolveSpawnPreflight(spawn, signal)).effectiveAgent.blocking === true;
+			blocking = (await this.#resolveSpawnPreflight(spawn, evalCustomTools)).effectiveAgent.blocking === true;
 		} catch {
 			return undefined;
 		}
@@ -1112,7 +1150,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
-		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
+		return this.#launch({ toolCallId, params: spawn, index, agentId, detached, evalCustomTools });
 	}
 
 	/**
@@ -1149,12 +1187,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Resolve the shared policy before detached work exists. The resulting
 	 * policy intentionally stays local: executor dispatch resolves again from
 	 * normalized task params rather than smuggling internal policy over the
-	 * task wire contract.
+	 * task wire contract. `evalCustomTools` is the call's already-resolved
+	 * kernel-defined tools (see {@link #dispatch}); a caller without a call
+	 * scope passes `undefined` and must not carry `params.tools`.
 	 */
-	async #resolveSpawnPreflight(params: TaskParams, signal?: AbortSignal) {
-		const customTools = params.tools?.length
-			? createEvalCustomTools(this.session, await describeEvalTools(this.session, params.tools, signal))
-			: undefined;
+	async #resolveSpawnPreflight(params: TaskParams, evalCustomTools?: CustomTool[]) {
 		return resolveEffectiveSubagentPolicy({
 			session: this.session,
 			invocationKind: "task",
@@ -1170,7 +1207,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
-			...(customTools ? { customTools } : {}),
+			...(evalCustomTools?.length ? { customTools: evalCustomTools } : {}),
 		});
 	}
 
@@ -1229,13 +1266,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return createTaskModeError(error instanceof Error ? error.message : String(error));
 		}
 		const normalizedSpawnParams = spawnItems.map(item => spawnParamsFor(params, item, defaultAgent));
-		const evalToolNames = spawnItems.flatMap(item => item.tools ?? []);
+		// Kernel-defined tool descriptors resolve exactly once per task call:
+		// the kernels hold mutable user definitions (a later eval cell can
+		// redefine or undefine a tool), so nothing here may be cached across
+		// calls, and no phase below re-queries per item. The resolved CustomTool
+		// objects flow (narrowed to each item's own names) to preflight, the
+		// sync fan-out, and every background job body.
+		const evalToolNames = [...new Set(spawnItems.flatMap(item => item.tools ?? []))];
+		let evalCustomTools: CustomTool[] | undefined;
 		if (evalToolNames.length > 0) {
 			if (this.session.getPlanModeState?.()?.enabled === true) {
 				return createTaskModeError("Task execution failed: Eval-defined tools are unavailable in plan mode.");
 			}
 			try {
-				await describeEvalTools(this.session, evalToolNames, signal);
+				evalCustomTools = createEvalCustomTools(
+					this.session,
+					await describeEvalTools(this.session, evalToolNames, signal),
+				);
 			} catch (error) {
 				return createTaskModeError(
 					`Task execution failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1258,7 +1305,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const preflights = await Promise.all(
 			normalizedSpawnParams.map(async spawn => {
 				try {
-					return { policy: await this.#resolveSpawnPreflight(spawn, signal) };
+					return {
+						policy: await this.#resolveSpawnPreflight(spawn, evalToolsForItem(evalCustomTools, spawn.tools)),
+					};
 				} catch (error) {
 					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
 				}
@@ -1332,6 +1381,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				defaultAgent,
 				signal,
 				onUpdate,
+				evalCustomTools,
 			);
 			if (!advisory) return result;
 			let appended = false;
@@ -1472,6 +1522,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						settledCount += 1;
 						if (failed) failedCount += 1;
 					},
+					evalCustomTools,
 				});
 				if (started.length === 0) primaryJobId = jobId;
 				started.push({ agentId: spawn.agentId, jobId });
@@ -1640,6 +1691,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
+		/** The call's resolved kernel-defined tools; dispatched without re-querying. */
+		evalCustomTools?: CustomTool[];
 	}): string {
 		const {
 			manager,
@@ -1652,6 +1705,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			buildDetails,
 			onUpdate,
 			onSettled,
+			evalCustomTools,
 		} = options;
 		// A queued job launches (or adopts) its run when it starts; until then
 		// its widget has no tool tap to read.
@@ -1725,6 +1779,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: progress.index,
 					agentId,
 					detached: true,
+					callEvalCustomTools: evalCustomTools,
 				}));
 				activeRun.attach({
 					signal: runSignal,
@@ -1878,6 +1933,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		defaultAgent: string,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		evalCustomTools?: CustomTool[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		if (spawns.length === 1) {
 			const spawn = spawns[0]!;
@@ -1889,6 +1945,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					index: spawn.index,
 					agentId: spawn.preAllocatedId,
 					detached: false,
+					callEvalCustomTools: evalCustomTools,
 				});
 			run.attach({ signal, onUpdate });
 			try {
@@ -1930,6 +1987,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						emitCombined();
 					}
 				: undefined,
+			evalCustomTools,
 		});
 
 		const merged = mergeSyncPayloads(spawns, payloads);
@@ -1961,8 +2019,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawns: SyncSpawnRef[];
 		signal?: AbortSignal;
 		onItemProgress?: (index: number, progress: AgentProgress) => void;
+		/** The call's resolved kernel-defined tools; dispatched without re-querying. */
+		evalCustomTools?: CustomTool[];
 	}): Promise<(AgentToolResult<TaskToolDetails> | undefined)[]> {
-		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress } = args;
+		const { toolCallId, params, defaultAgent, spawns, signal, onItemProgress, evalCustomTools } = args;
 		const { results } = await mapWithConcurrencyLimitAllSettled(
 			spawns,
 			spawns.length,
@@ -1975,6 +2035,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						index: spawn.index,
 						agentId: spawn.preAllocatedId,
 						detached: false,
+						callEvalCustomTools: evalCustomTools,
 					});
 				run.attach({
 					signal: workerSignal,
@@ -2034,6 +2095,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		launchTiming?: { invokedAt: number; acquiredAt: number },
 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
 		tools?: TextTap,
+		evalCustomTools?: CustomTool[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -2082,12 +2144,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...this.#resultParams(params),
 				...this.#effortParams(params),
 				solutionSpace: params.solutionSpace,
-				...(params.tools?.length
+				...(evalCustomTools?.length
 					? {
-							customTools: createEvalCustomTools(
-								this.session,
-								await describeEvalTools(this.session, params.tools, signal),
-							),
+							customTools: evalCustomTools,
 						}
 					: {}),
 				// `name` is the spawn handle: keep it for id allocation when this
