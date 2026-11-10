@@ -127,9 +127,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	let packageWorkComplete = false;
 	let runtimeEntered = false;
 	const filename = options.filename ?? `js-cell-${crypto.randomUUID()}.js`;
+	const cwd = options.cwd ?? options.session.cwd;
 
 	try {
-		const cwd = options.cwd ?? options.session.cwd;
 		const installOptions = {
 			cwd,
 			packages,
@@ -235,9 +235,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			};
 		}
 		const message =
-			error instanceof Error
-				? formatCellError(error.stack ?? error.message, { filename, cwd: options.cwd ?? options.session.cwd })
-				: String(error);
+			error instanceof Error ? formatCellError(error.stack ?? error.message, { filename, cwd }) : String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

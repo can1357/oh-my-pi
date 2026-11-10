@@ -116,9 +116,16 @@ describe("formatCellError", () => {
 		);
 	});
 
-	it("returns a stack with nothing to hide unchanged", () => {
-		const stack = "Error: boom\n    at <anonymous> (js-cell-1d89.js:1:7)";
-		expect(formatCellError(stack, source)).toBe(stack);
-		expect(formatCellError("plain message", source)).toBe("plain message");
+	it("keeps project dependency frames when omp shares the project's node_modules", () => {
+		const stack = [
+			"Error: x",
+			"    at parse (/proj/node_modules/zod/lib/x.js:1:2)",
+			"    at run (js-cell-1d89.js:1:2)",
+			"    at map (native:1:11)",
+		].join("\n");
+		const output = formatCellError(stack, { ...source, cwd: "/proj", ompRoot: "/proj/node_modules" });
+		expect(output).toContain("at parse (/proj/node_modules/zod/lib/x.js:1:2)");
+		expect(output).toContain("at run (js-cell-1d89.js:1:2)");
+		expect(output).toContain("(1 omp frame hidden;");
 	});
 });

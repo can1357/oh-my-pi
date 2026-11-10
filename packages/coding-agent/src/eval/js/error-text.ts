@@ -18,7 +18,7 @@ const FRAME_LINE = /^\s+at (?:.*\((.*)\)|(.*))$/;
 export interface CellErrorSource {
 	/** The cell's file name as its frames show it. */
 	filename: string;
-	/** The cell's working directory; when it lies inside omp's own tree, frames under it are the user's code. */
+	/** The cell's working directory; frames under it include the user's project dependencies. */
 	cwd: string;
 	/** Defaults to the tree this omp runs from. */
 	ompRoot?: string;
@@ -33,9 +33,8 @@ export interface CellErrorSource {
 export function formatCellError(stack: string, source: CellErrorSource): string {
 	const ompRoot = "ompRoot" in source ? source.ompRoot : OMP_ROOT;
 	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
-	const cwdPrefix = path.join(source.cwd, path.sep);
-	// Someone working inside an omp checkout: their files share its root, so the cwd marks which are theirs.
-	const userPrefix = rootPrefix !== undefined && cwdPrefix.startsWith(rootPrefix) ? cwdPrefix : undefined;
+	// A project-local omp shares node_modules with the cell's own dependencies. Keep that project's frames.
+	const userPrefix = path.join(source.cwd, path.sep);
 	const kept: string[] = [];
 	let hidden = 0;
 	for (const line of stack.split("\n")) {
@@ -45,9 +44,7 @@ export function formatCellError(stack: string, source: CellErrorSource): string 
 			location !== undefined &&
 			!location.startsWith(source.filename) &&
 			(HOST_LOCATION.test(location) ||
-				(rootPrefix !== undefined &&
-					location.startsWith(rootPrefix) &&
-					!(userPrefix !== undefined && location.startsWith(userPrefix))))
+				(rootPrefix !== undefined && location.startsWith(rootPrefix) && !location.startsWith(userPrefix)))
 		) {
 			hidden++;
 			continue;
