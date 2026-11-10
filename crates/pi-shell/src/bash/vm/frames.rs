@@ -42,7 +42,7 @@ use crate::bash::{
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::FileKind,
 	host::{Host, StdFd},
-	ids::{CallId, ModeId, RunId, UnitId, Vpid},
+	ids::{CallId, CmdTag, ModeId, RunId, UnitId, Vpid},
 	ir::{
 		AssignVal, CondIr, IR_VERSION, Op, OpIr, Opcode, Part, RedirTargetIr, SpawnKind, SubIr, Unit,
 		materialize,
@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 31;
+pub const FRAMES_VERSION: u32 = 32;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -109,6 +109,14 @@ enum FdObjImage {
 	Lost(FdOrigin),
 	/// Closed.
 	Closed,
+}
+
+/// A queued write's pin in the image: the fd object it is bound to and
+/// the command tag the handle carried when it was pinned.
+#[derive(Serialize, Deserialize)]
+struct PinImage {
+	obj: u32,
+	tag: Option<CmdTag>,
 }
 
 /// Numbers the fd and memory objects of an image, once each.
@@ -245,8 +253,8 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
-	/// Fd object index each queued write is bound to ([`PendingWrite::pin`]).
-	out_pins:      Vec<Option<u32>>,
+	/// Each queued write's pin: the fd object index and command tag.
+	out_pins:      Vec<Option<PinImage>>,
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -616,7 +624,12 @@ impl Shell {
 				out_pins: p
 					.out
 					.iter()
-					.map(|w| w.pin.as_ref().map(|h| fds.fd(h)))
+					.map(|w| {
+						w.pin.as_ref().map(|h| PinImage {
+							obj: fds.fd(h),
+							tag: h.command_tag(),
+						})
+					})
 					.collect(),
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
@@ -846,12 +859,18 @@ impl Shell {
 			};
 			vp.out = p.out.into();
 			for (w, pin) in vp.out.iter_mut().zip(p.out_pins) {
-				if let Some(obj) = pin
-					&& let Some(kind) = objs.host_kind(obj)
+				if let Some(pi) = &pin
+					&& let Some(kind) = objs.host_kind(pi.obj)
 				{
 					report.lost.push(Lost::Fd { vpid, fd: w.fd, kind });
 				}
-				w.pin = pin.map(|i| objs.fd(cx.host, i));
+				w.pin = pin.map(|pi| {
+					let h = objs.fd(cx.host, pi.obj);
+					match pi.tag {
+						Some(tag) => h.with_tag(tag),
+						None => h,
+					}
+				});
 			}
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
@@ -1369,7 +1388,7 @@ fn valid(u: &Unit) -> bool {
 mod tests {
 	use std::task::{Context, Poll, Waker};
 
-	use super::{FdImager, FdRebuild};
+	use super::{FdImager, FdRebuild, PinImage};
 	use crate::bash::{fd::FdRef, mem::MemObj};
 
 	#[test]
@@ -1410,14 +1429,11 @@ mod tests {
 		assert!(matches!(r.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(0))), "then EOF");
 	}
 
-	/// The finding "Preserve command tags for pinned writes" (PR #17684,
-	/// thread `PRRT_kwDOQxs0bc61iYZT`): `FdImager::fd` uses `FdRef::key()`,
-	/// which deliberately collapses a `TaggedOutput` to its base, so a
-	/// tagged and an untagged handle for the same object share one
-	/// `FdObjImage` — and `FdObjImage` carries no tag.  After an
-	/// externalize → restore round-trip the rebuilt pin is always untagged.
+	/// A tagged pin keeps its command tag through the frame image:
+	/// `PinImage` stores the tag alongside the fd object index, and
+	/// restore re-wraps the rebuilt handle with it.
 	#[test]
-	fn a_tagged_pin_loses_its_command_tag_through_the_frame_image() {
+	fn a_tagged_pin_keeps_its_command_tag_through_the_frame_image() {
 		use std::io;
 		use std::sync::{Arc, Mutex};
 
@@ -1429,8 +1445,7 @@ mod tests {
 		};
 
 		/// A file that observes output and records the tag each write
-		/// receives.  Both `poll_write` and `poll_write_tagged` push
-		/// onto the shared log so a caller can tell tagged from plain.
+		/// receives.
 		struct TagRecorder(Arc<Mutex<Vec<Option<CmdTag>>>>);
 
 		impl File for TagRecorder {
@@ -1506,16 +1521,19 @@ mod tests {
 			"before imaging, a write through the tagged handle passes the tag",
 		);
 
-		// ---- image: both handles map to one FdObjImage ----
+		// ---- image: both handles share one FdObjImage, but the pin
+		//      carries the tag in its own PinImage ----
 		let mut img = FdImager::default();
 		let base_idx = img.fd(&base);
 		let tagged_idx = img.fd(&tagged);
 		assert_eq!(
 			base_idx, tagged_idx,
-			"FdImager collapses tagged and base to the same index — tag is lost",
+			"FdImager still collapses tagged and base to the same fd object",
 		);
+		let pin = PinImage { obj: tagged_idx, tag: tagged.command_tag() };
+		assert_eq!(pin.tag, Some(cmd_tag), "PinImage captures the command tag");
 
-		// ---- rebuild: the restored handle is always untagged ----
+		// ---- rebuild: the pin's tag re-wraps the restored handle ----
 		let tags_post = Arc::new(Mutex::new(Vec::new()));
 		let mut stdio = [None, None, None];
 		let mut rebuild = FdRebuild {
@@ -1524,17 +1542,21 @@ mod tests {
 			mems:  vec![],
 			stdio: &mut stdio,
 		};
-		let restored = rebuild.build(tagged_idx, |_| {
+		let base_handle = rebuild.build(pin.obj, |_| {
 			Some(Box::new(TagRecorder(Arc::clone(&tags_post))))
 		});
 		drop(rebuild);
+		let restored = match pin.tag {
+			Some(tag) => base_handle.with_tag(tag),
+			None => base_handle,
+		};
 
-		// ---- post-restore: the same write now arrives with tag=None ----
+		// ---- post-restore: the tag survives ----
 		assert!(matches!(restored.poll_write(&mut cx, b"diag"), Poll::Ready(Ok(4))));
 		assert_eq!(
 			*tags_post.lock().unwrap(),
-			vec![None],
-			"after restore, the write carries tag=None — the command attribution is lost",
+			vec![Some(cmd_tag)],
+			"after restore, the write still carries the command tag",
 		);
 	}
 }

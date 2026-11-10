@@ -43,6 +43,35 @@ fn restore_rejects_the_upstream_version_30_frame_layout() {
 }
 
 #[test]
+fn restore_rejects_the_version_31_frame_layout() {
+	// The upstream version-30 blob with byte 5 (the frames-version varint)
+	// changed from 30 to 31, matching the layout this branch used before
+	// the tag-preserving pin fix bumped it to 32.  The build id (bytes
+	// 6..38) also differs, so `check()` rejects on both `h.frames` and
+	// `h.build`.
+	const FRAMES_31: &[u8] = &[
+		79, 66, 70, 49, 17, 31, 227, 114, 110, 55, 159, 22, 47, 12, 8, 97, 238, 223, 248, 150, 20,
+		133, 174, 55, 174, 212, 240, 112, 117, 1, 191, 245, 130, 43, 177, 109, 14, 237, 0, 0, 1, 1,
+		1, 0, 135, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 1, 128, 128, 128, 128,
+		4, 0, 0, 0, 3, 1, 0, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		3, 0, 0, 0, 1, 0, 2, 0, 0, 0,
+	];
+	let mut r = rig();
+	let (_, host, store) = r.parts();
+	store
+		.put_blob(BlobSlot::Frames, FRAMES_31)
+		.expect("frames");
+	let engine = Engine::new(EngineConfig::default());
+	let err = Shell::restore(&engine, &mut Cx { host, store }, RestoreOpts::default())
+		.err()
+		.expect("the version-31 layout must be rejected after the tag fix");
+	assert!(
+		matches!(err, RestoreError::Incompatible { why: Incompatibility::Build, .. }),
+		"{err:?}"
+	);
+}
+
+#[test]
 fn a_current_frame_snapshot_resumes_the_pending_run() {
 	let mut r = rig();
 	let id = r
