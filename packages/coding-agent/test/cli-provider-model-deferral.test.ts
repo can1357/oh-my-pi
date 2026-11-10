@@ -5,11 +5,18 @@ import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
+import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import { buildSessionOptions, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
+/** Thrown by the mocked `process.exit` so `runRootCommand`'s exits are observable in-process. */
+class ProcessExitSignal extends Error {
+	constructor(readonly code: number) {
+		super(`process.exit(${code})`);
+	}
+}
 // An id the startup catalog lacks may still come from an extension or account
 // discovery, so `--provider p --model id` defers like `--model p/id` instead of
 // exiting before either has run.
@@ -71,49 +78,61 @@ describe("--provider with a model the startup catalog lacks", () => {
 
 describe("print-mode suggestions for a provider-qualified miss", () => {
 	test("never lists other providers' models", async () => {
+		// Drives the in-process entry (`runRootCommand`) the CLI dispatches to,
+		// not a `bun src/cli.ts` subprocess: the cold-start cost of a second
+		// process made this test exceed its 60s ceiling under 16-way parallel
+		// load, while the exit path it asserts (the no-model diagnostics in
+		// `main.ts`) is fully reachable in-process.
+		const stderrLines: string[] = [];
+		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+			stderrLines.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		});
+		const exitCalls: Array<number | string | null | undefined> = [];
+		vi.spyOn(process, "exit").mockImplementation(((code?: number | string | null) => {
+			exitCalls.push(code);
+			throw new ProcessExitSignal(typeof code === "number" ? code : 0);
+		}) as typeof process.exit);
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openai", "test-key");
 		const home = path.join(os.tmpdir(), `pi-cli-qualified-hint-${Snowflake.next()}`);
 		fs.mkdirSync(home, { recursive: true });
+		const parsed = parseArgs([
+			"--no-title",
+			"--no-lsp",
+			"--no-extensions",
+			"--no-tools",
+			"--no-session",
+			"-p",
+			"--provider",
+			"anthropic",
+			"--model",
+			"gpt-4o",
+			"hi",
+		]);
+		parsed.noSkills = true;
+		parsed.noRules = true;
+		parsed.noContextFiles = true;
 		try {
-			const proc = Bun.spawn(
-				[
-					process.execPath,
-					path.resolve(import.meta.dir, "../src/cli.ts"),
-					"--no-title",
-					"--no-lsp",
-					"--no-extensions",
-					"--no-tools",
-					"--no-session",
-					"-p",
-					"--provider",
-					"anthropic",
-					"--model",
-					"gpt-4o",
-					"hi",
-				],
-				{
-					cwd: home,
-					env: {
-						PATH: process.env.PATH,
-						HOME: home,
-						USERPROFILE: home,
-						TMPDIR: process.env.TMPDIR,
-						NO_COLOR: "1",
-						ANTHROPIC_API_KEY: "test-key",
-						OPENAI_API_KEY: "test-key",
-					},
-					stdin: "ignore",
-					stdout: "pipe",
-					stderr: "pipe",
-				},
-			);
-			const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-			expect(exitCode).toBe(1);
-			expect(stderr).toContain('Model "anthropic/gpt-4o" not found');
-			expect(stderr).not.toContain("openai/");
+			await runRootCommand(parsed, ["-p", "--provider", "anthropic", "--model", "gpt-4o", "hi"], {
+				settings: Settings.isolated({ "marketplace.autoUpdate": "off" }),
+				discoverAuthStorage: async () => authStorage,
+			});
+			throw new Error("Expected the provider-qualified miss to exit nonzero");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ProcessExitSignal);
 		} finally {
+			vi.restoreAllMocks();
+			authStorage.close();
+			clearOmpExtensionCliRoots();
 			removeSyncWithRetries(home);
 		}
-	}, 60_000);
+		const stderr = stderrLines.join("");
+		expect(exitCalls).toContain(1);
+		expect(stderr).toContain('Model "anthropic/gpt-4o" not found');
+		expect(stderr).not.toContain("openai/");
+	}, 30_000);
 });
 
 describe("print mode with a stale configured default", () => {

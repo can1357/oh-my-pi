@@ -18,13 +18,18 @@ import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
+	gracefulKillTreeOnce,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable, loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	ensureChromiumExecutable,
+	loadPuppeteer,
+	removeUserDataDir,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -32,6 +37,7 @@ import {
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	type Browser,
@@ -45,6 +51,29 @@ import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
+
+/**
+ * The shared headless browser's first page, or undefined. A timed-out sibling
+ * test can leave the shared CDP connection mid-reconnect, so poll to a
+ * deadline for the page target instead of reading `pages()` exactly once.
+ * Real-clock polling (not fake timers): the condition comes from a live
+ * Chromium process, like `waitForCdp`'s production poll.
+ */
+async function firstSharedPage(handle: BrowserHandle): Promise<Page | undefined> {
+	if (!("browser" in handle)) return undefined;
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		try {
+			const page = (await handle.browser.pages().catch(() => [] as Page[]))[0];
+			if (page) return page;
+		} catch {
+			// keep polling to the deadline
+		}
+		await Bun.sleep(100);
+	}
+	return undefined;
+}
+
 let sharedHeadless: BrowserHandle | undefined;
 
 function makeSession(): ToolSession {
@@ -169,9 +198,11 @@ async function spawnDisposableExecutable(args: string[] = []): Promise<Disposabl
 		path: executable,
 		pid: child.pid,
 		async close() {
-			child.kill();
+			// A hard kill can leave the temp dir held by a dying child on
+			// Windows; terminate the tree, then remove with retries.
+			if (child.pid !== undefined) await gracefulKillTreeOnce(child.pid, 500);
 			await child.exited;
-			await fs.rm(tempDir, { recursive: true, force: true });
+			await removeWithRetries(tempDir);
 		},
 	};
 }
@@ -291,9 +322,9 @@ describe("pickElectronTarget", () => {
 				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
-				child.kill();
+				await gracefulKillTreeOnce(child.pid!, 2000);
 				await child.exited;
-				await fs.rm(root, { recursive: true, force: true });
+				await removeUserDataDir(root);
 			}
 		},
 		30_000,
@@ -488,10 +519,10 @@ describe("pickElectronTarget", () => {
 				pid: child.pid,
 			});
 		} finally {
-			child.kill();
+			if (child.pid !== undefined) await gracefulKillTreeOnce(child.pid, 2000);
 			await child.exited;
 			cdp.stop(true);
-			await fs.rm(root, { recursive: true, force: true });
+			await removeUserDataDir(root);
 		}
 	});
 
@@ -562,12 +593,15 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid!, 2000);
 				await child.exited;
-				await fs.rm(root, { recursive: true, force: true });
+				await removeUserDataDir(root);
 			}
 		},
-		30_000,
+		// Two prelude opens (each budgeted at the browser tool's 30s default) plus
+		// two live Chromium spawns: the test deadline must cover the budgets the
+		// calls themselves already have, or a loaded run kills the test mid-open.
+		90_000,
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
@@ -610,7 +644,7 @@ describe("pickElectronTarget", () => {
 				});
 			} finally {
 				await invoke({ action: "close", name, kill: true }).catch(() => {});
-				await fs.rm(root, { recursive: true, force: true });
+				await removeUserDataDir(root);
 			}
 		},
 		30_000,
@@ -691,9 +725,9 @@ describe("pickElectronTarget", () => {
 				});
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid!, 2000);
 				await child.exited;
-				await fs.rm(root, { recursive: true, force: true });
+				await removeUserDataDir(root);
 			}
 		},
 		30_000,
@@ -713,7 +747,7 @@ describe("pickElectronTarget", () => {
 			let opened = false;
 			const tabName = `attach-navigation-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			const requested = "data:text/html,<title>attached-navigation-target</title>";
-			const targetPage = (await launched.browser.pages())[0];
+			const targetPage = await firstSharedPage(launched);
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
@@ -751,7 +785,7 @@ describe("pickElectronTarget", () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
 			const endpoint = new URL(launched.wsEndpoint);
-			const targetPage = (await launched.browser.pages())[0];
+			const targetPage = await firstSharedPage(launched);
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			// Count navigations only: after the abort Chrome renders its error page,

@@ -13,6 +13,7 @@ import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session
 import { getRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { cfgRetryUsageReservePct } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { replaceFileAtomically } from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -42,7 +43,7 @@ async function retargetDirLink(link: string, target: string): Promise<void> {
 		return;
 	}
 	await fs.symlink(target, `${link}.next`, "dir");
-	await fs.rename(`${link}.next`, link);
+	await replaceFileAtomically(`${link}.next`, link);
 }
 
 function selection(settings: Settings) {
@@ -121,7 +122,7 @@ describe("live routing config files", () => {
 		const next = routing("second", 30, 7);
 		next.task.agentModelOverrides.worker = "@slow";
 		await Bun.write(`${file}.next`, YAML.stringify(next));
-		await fs.rename(`${file}.next`, file);
+		await replaceFileAtomically(`${file}.next`, file);
 		await waitFor(() => settings.getModelRole("smol") === "anthropic/second");
 		await sync.settled();
 
@@ -173,7 +174,7 @@ describe("live routing config files", () => {
 		await fs.symlink(managed, file, "file");
 		await start(file);
 		await fs.symlink(second, `${managed}.next`, "file");
-		await fs.rename(`${managed}.next`, managed);
+		await replaceFileAtomically(`${managed}.next`, managed);
 		await waitFor(() => settings.getModelRole("smol") === "anthropic/second");
 		expect(selection(settings).patterns).toEqual(["anthropic/second"]);
 		await Bun.write(second, YAML.stringify(routing("third")));
@@ -219,7 +220,7 @@ describe("live routing config files", () => {
 		cleanups.push(stop);
 
 		await fs.symlink(second, `${managed}.next`, "file");
-		await fs.rename(`${managed}.next`, managed);
+		await replaceFileAtomically(`${managed}.next`, managed);
 		const onManagedEvent = callbacks.get(managedDir);
 		expect(onManagedEvent).toBeDefined();
 		expect(callbacks.has(targetDir)).toBe(true);

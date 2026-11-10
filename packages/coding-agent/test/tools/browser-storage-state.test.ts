@@ -142,5 +142,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser cookie and storage state helpers",
 		} finally {
 			await invoke({ action: "close", name: "bad-cookie" });
 		}
-	}, 15_000);
+		// The open at the top carries the browser tool's 30s default budget (the
+		// session sets tools.maxTimeout: 0, i.e. no cap); the test ceiling must
+		// cover that budget or a loaded run kills the test mid-open.
+	}, 30_000);
 });
