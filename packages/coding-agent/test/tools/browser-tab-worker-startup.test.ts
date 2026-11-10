@@ -631,6 +631,32 @@ describe("OMP-owned browser evaluation", () => {
 								realm.evaluate = originalEvaluate;
 							}
 						}
+						await page.evaluate(() => {
+							globalThis.__ompOriginalPromise = Promise;
+							globalThis.__ompOriginalBoolean = Boolean;
+							class LegacyPromise extends Promise {}
+							Object.defineProperty(LegacyPromise, "withResolvers", { value: undefined });
+							globalThis.Promise = LegacyPromise;
+							globalThis.Boolean = () => false;
+						});
+						const shimmed = [];
+						try {
+							for (const polling of [100, "raf", "mutation"]) {
+								shimmed.push(await page.waitForFunction(() => 47, { polling, timeout: 100 })
+									.then(async handle => {
+										const value = await handle.jsonValue();
+										await handle.dispose();
+										return value;
+									}, error => error.name));
+							}
+						} finally {
+							await page.evaluate(() => {
+								globalThis.Promise = globalThis.__ompOriginalPromise;
+								globalThis.Boolean = globalThis.__ompOriginalBoolean;
+								delete globalThis.__ompOriginalPromise;
+								delete globalThis.__ompOriginalBoolean;
+							});
+						}
 						const seen = {
 							evaluate: await page.evaluate(() => globalThis.__ompPageMarker),
 							evaluateString: await page.evaluate("globalThis.__ompPageMarker"),
@@ -647,6 +673,7 @@ describe("OMP-owned browser evaluation", () => {
 							late,
 							lateDisposals,
 							truthiness,
+							shimmed,
 							chained: await page.on("console", () => {}).evaluate(() => globalThis.__ompPageMarker),
 							registry: await page.evaluate(() => String(customElements)),
 							// Puppeteer's own wait would have left its query bindings here for page scripts to see.
@@ -685,6 +712,7 @@ describe("OMP-owned browser evaluation", () => {
 						lateDisposals: 1,
 						truthiness: ["TimeoutError", "AbortError"],
 						chained: 47,
+						shimmed: [47, 47, 47],
 						registry: "[object CustomElementRegistry]",
 						leaked: [],
 					},

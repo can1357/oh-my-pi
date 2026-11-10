@@ -805,7 +805,13 @@ function waitInPage(
 		clearTimeout(id: number): void;
 		MutationObserver: new (callback: () => void) => Observer;
 	};
-	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+	// Page-owned Promise shims may implement only the constructor, not the newer static withResolvers.
+	let resolve!: (value: unknown) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<unknown>((fulfill, fail) => {
+		resolve = fulfill;
+		reject = fail;
+	});
 	let settled = false;
 	let observer: Observer | undefined;
 	let frame: number | undefined;
@@ -958,7 +964,7 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 						const value = await untilAborted(evalSignal, () => pending);
 						let returned = false;
 						try {
-							if (await untilAborted(evalSignal, () => target.evaluate(held => Boolean(held), value))) {
+							if (await untilAborted(evalSignal, () => target.evaluate(held => !!held, value))) {
 								throwIfAborted(evalSignal);
 								returned = true;
 								return value;
