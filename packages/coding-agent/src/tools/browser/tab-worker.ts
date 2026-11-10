@@ -786,13 +786,13 @@ async function evaluateInRealm(
 type PagePoller = { promise: Promise<unknown>; stop(): void };
 
 /**
- * Page-side half of the run page's `waitForFunction` for `"raf"` and `"mutation"` polling: its promise resolves
- * with the first truthy value of `predicate(...args)`, checked at once and then on every animation frame, or DOM
- * mutation, or with `undefined` after `ms` (never when `null`). `stop` releases the poller on host cancellation.
+ * Page-side half of the run page's `waitForFunction`: its promise resolves with the first truthy value of
+ * `predicate(...args)`, checked at once and then on every animation frame, DOM mutation, or numeric interval,
+ * or with `undefined` after `ms` (never when `null`). `stop` releases the poller on host cancellation.
  */
 function waitInPage(
 	predicate: (...args: unknown[]) => unknown,
-	mode: string,
+	mode: string | number,
 	ms: number | null,
 	...args: unknown[]
 ): PagePoller {
@@ -803,6 +803,8 @@ function waitInPage(
 		cancelAnimationFrame(id: number): void;
 		setTimeout(callback: () => void, ms: number): number;
 		clearTimeout(id: number): void;
+		setInterval(callback: () => void, ms: number): number;
+		clearInterval(id: number): void;
 		MutationObserver: new (callback: () => void) => Observer;
 	};
 	// Async functions use the realm's intrinsic Promise even when the page replaces the global constructor.
@@ -813,12 +815,14 @@ function waitInPage(
 	let settled = false;
 	let observer: Observer | undefined;
 	let frame: number | undefined;
+	let interval: number | undefined;
 	let timer: number | undefined;
 	const finish = (failed: boolean, value: unknown) => {
 		if (settled) return;
 		settled = true;
 		observer?.disconnect();
 		if (frame !== undefined) pageGlobal.cancelAnimationFrame(frame);
+		if (interval !== undefined) pageGlobal.clearInterval(interval);
 		if (timer !== undefined) pageGlobal.clearTimeout(timer);
 		if (failed) reject(value);
 		else resolve(value);
@@ -832,6 +836,9 @@ function waitInPage(
 			finish(true, error);
 		}
 		if (!settled && mode === "raf") frame = pageGlobal.requestAnimationFrame(() => void check());
+		if (!settled && typeof mode === "number" && interval === undefined) {
+			interval = pageGlobal.setInterval(() => void check(), mode);
+		}
 	};
 	if (ms !== null) timer = pageGlobal.setTimeout(() => finish(false, undefined), ms);
 	if (mode === "mutation") {
@@ -902,17 +909,18 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 			"waitForFunction",
 			// Puppeteer's own wait installs its query bindings as globals of the world it polls, which every page
 			// script can see in the main world. This evaluates instead, retrying across navigations as its wait does:
-			// "raf" and "mutation" polling wait in the page (see `waitInPage`), and a number or no `polling` polls on a
-			// timer every that many ms (100 by default, not Puppeteer's "raf": a hidden tab runs no animation frames).
+			// All polling stays in the page so protocol latency does not stretch numeric intervals.
 			async (fn: PageFunction, options: FrameWaitForFunctionOptions = {}, ...args: unknown[]) => {
 				const timeout = options.timeout ?? page.getDefaultTimeout();
-				const inPage = typeof options.polling === "string";
-				const interval = typeof options.polling === "number" ? options.polling : 100;
+				const polling = options.polling ?? 100;
+				if (typeof polling === "string" && polling !== "raf" && polling !== "mutation") {
+					throw new Error(`Unknown polling option: ${polling}`);
+				}
 				const deadline = timeout > 0 ? Date.now() + timeout : Number.POSITIVE_INFINITY;
 				const waitSignal = options.signal ? AbortSignal.any([signal, options.signal]) : signal;
 				const timedOut = () => puppeteerTimeoutError(`Waiting failed: ${timeout}ms exceeded`);
 				const attempt = async (target: Realm, left: number, evalSignal: AbortSignal): Promise<JSHandle> => {
-					if (!inPage) return (await evaluateInRealm(target, fn, args, true, evalSignal)) as JSHandle;
+					if (waitSignal.aborted) throw waitSignal.reason;
 					const predicate = await target.evaluateHandle(
 						typeof fn === "string" ? `() => (${fn})` : `(${stringifyFunction(fn)})`,
 					);
@@ -923,7 +931,7 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 					try {
 						throwIfAborted(evalSignal);
 						const ms = Number.isFinite(left) ? left : null;
-						const waitArgs = [predicate, options.polling, ms, ...args];
+						const waitArgs = [predicate, polling, ms, ...args];
 						poller = (await evaluateInRealm(
 							target,
 							waitInPage as PageFunction,
@@ -944,7 +952,7 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 					}
 				};
 				for (;;) {
-					throwIfAborted(waitSignal);
+					if (waitSignal.aborted) throw waitSignal.reason;
 					const left = Math.max(0, deadline - Date.now());
 					// The deadline also bounds a predicate that never settles, not only the polls between attempts.
 					const evalSignal = Number.isFinite(left)
@@ -975,13 +983,13 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 							}
 						}
 					} catch (error) {
+						if (waitSignal.aborted) throw waitSignal.reason;
 						if (!waitSignal.aborted && evalSignal.aborted) throw timedOut();
 						if (waitSignal.aborted || !isNavigatedContextError(error)) throw error;
 						if (Date.now() >= deadline) throw timedOut();
 						continue;
 					}
-					if (inPage ? Date.now() >= deadline : Date.now() + interval > deadline) throw timedOut();
-					if (!inPage) await untilAborted(waitSignal, () => Bun.sleep(interval));
+					if (Date.now() >= deadline) throw timedOut();
 				}
 			},
 		],

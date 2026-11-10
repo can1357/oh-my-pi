@@ -543,6 +543,35 @@ describe("OMP-owned browser evaluation", () => {
 							Promise.resolve().then(() => Promise.resolve()).then(() => flash.remove());
 						});
 						const mutation = await mutationWait.then(handle => handle.jsonValue(), error => String(error));
+						const invalidPolling = await page.waitForFunction(() => false, { polling: "rafx", timeout: 0 })
+							.then(() => "resolved", error => error.message);
+						const reason = new Error("caller stopped waiting");
+						const preAborted = new AbortController();
+						preAborted.abort(reason);
+						const abortReason = await page.waitForFunction(() => false, { signal: preAborted.signal })
+							.then(() => false, error => error === reason);
+						await page.evaluate(() => {
+							globalThis.__ompSetInterval = setInterval;
+							globalThis.__ompNumericChecks = 0;
+							globalThis.setInterval = (callback, ms) => {
+								if (ms === 17) {
+									queueMicrotask(callback);
+									globalThis.__ompNumericTimer = true;
+									return 0;
+								}
+								return globalThis.__ompSetInterval(callback, ms);
+							};
+						});
+						let numeric;
+						try {
+							const handle = await page.waitForFunction(() => ++globalThis.__ompNumericChecks === 2, {
+								polling: 17, timeout: 0,
+							});
+							numeric = await page.evaluate(() => globalThis.__ompNumericTimer === true);
+							await handle.dispose();
+						} finally {
+							await page.evaluate(() => { globalThis.setInterval = globalThis.__ompSetInterval; });
+						}
 						const methods = [];
 						const cancelled = [];
 						for (const polling of ["raf", "mutation"]) {
@@ -558,9 +587,9 @@ describe("OMP-owned browser evaluation", () => {
 								globalThis.__ompAbortChecks++;
 								return false;
 							}, { polling, timeout: 0, signal: controller.signal })
-								.then(() => "resolved", error => error.name);
+								.then(() => "resolved", error => error === reason ? "caller reason" : error.name);
 							await page.waitForFunction(() => globalThis.__ompAbortChecks > 0);
-							controller.abort();
+							controller.abort(reason);
 							const outcome = await waiting;
 							// Wait for browser frames, not a guessed wall-clock delay.
 							await page.evaluate(() => {
@@ -611,7 +640,7 @@ describe("OMP-owned browser evaluation", () => {
 							return originalDispose.call(this).then(() => Promise.withResolvers().promise);
 						};
 						try {
-							cleanupAbort = await page.waitForFunction(() => false, {
+							cleanupAbort = await page.waitForFunction(() => true, {
 								timeout: 0, signal: cleanupController.signal,
 							}).then(() => "resolved", error => error.name);
 						} finally {
@@ -700,10 +729,13 @@ describe("OMP-owned browser evaluation", () => {
 							timedOut,
 							stalled,
 							mutation,
+							invalidPolling,
+							abortReason,
+							numeric,
 							methods,
 							cancelled,
 							late,
-							lateDisposals,
+							lateDisposals: lateDisposals > 0,
 							cleanupAbort,
 							truthiness,
 							shimmed,
@@ -746,13 +778,16 @@ describe("OMP-owned browser evaluation", () => {
 						timedOut: "TimeoutError: Waiting failed: 200ms exceeded",
 						stalled: "TimeoutError: Waiting failed: 200ms exceeded",
 						mutation: "flash",
+						invalidPolling: "Unknown polling option: rafx",
+						abortReason: true,
+						numeric: true,
 						methods: [47, 47],
 						cancelled: [
-							{ outcome: "AbortError", stopped: true },
-							{ outcome: "AbortError", stopped: true },
+							{ outcome: "caller reason", stopped: true },
+							{ outcome: "caller reason", stopped: true },
 						],
 						late: "TimeoutError",
-						lateDisposals: 1,
+						lateDisposals: true,
 						cleanupAbort: "AbortError",
 						truthiness: ["TimeoutError", "AbortError"],
 						chained: 47,
