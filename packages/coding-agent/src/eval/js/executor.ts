@@ -236,7 +236,11 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		}
 		const message =
 			error instanceof Error
-				? formatCellError(error.stack ?? error.message, { filename, cwd, message: error.message })
+				? formatCellError(error.stack ?? error.message, {
+						filename,
+						cwd,
+						header: Error.prototype.toString.call(error),
+					})
 				: String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();

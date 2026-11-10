@@ -66,6 +66,17 @@ describe("uncaught JavaScript cell errors", () => {
 		expect(result.output).toContain("omp frames hidden;");
 	});
 
+	it("keeps cached multiline diagnostics after the error message changes", async () => {
+		const message = "first\n    at map (native:1:11)\nlast";
+		const result = await executeJs(
+			`const error = new Error(${JSON.stringify(message)}); void error.stack; error.message = "changed"; throw error;`,
+			options,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain(`Error: ${message}\n`);
+		expect(result.output).not.toContain("omp frames hidden");
+	});
+
 	it("keeps multiline diagnostics when folding an unawaited rejection", async () => {
 		const message = "first $& $$\n    at map (native:1:11)\nlast";
 		const result = await executeJs(

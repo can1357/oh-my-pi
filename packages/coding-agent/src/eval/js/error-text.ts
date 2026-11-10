@@ -18,8 +18,8 @@ const FRAME_LINE = /^\s+at (?:.*? \((.*)\)|(.*))$/;
 export interface CellErrorSource {
 	/** The cell's file name as its frames show it. */
 	filename: string;
-	/** The original message, whose lines must not be mistaken for stack frames. */
-	message?: string;
+	/** The current error header; a cached stack may still contain an older message. */
+	header?: string;
 	/** The cell's working directory; frames under it include the user's project dependencies. */
 	cwd: string;
 	/** Defaults to the tree this omp runs from. */
@@ -33,6 +33,9 @@ export interface CellErrorSource {
  * frames; the error's own `stack` is left whole, so a cell that catches it can print them.
  */
 export function formatCellError(stack: string, source: CellErrorSource): string {
+	if (source.header !== undefined && stack !== source.header && !stack.startsWith(`${source.header}\n`)) {
+		return stack;
+	}
 	const ompRoot = "ompRoot" in source ? source.ompRoot : OMP_ROOT;
 	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
 	const cwdPrefix = path.join(source.cwd, path.sep);
@@ -46,8 +49,7 @@ export function formatCellError(stack: string, source: CellErrorSource): string 
 		ompRoot !== undefined && path.basename(ompRoot) === "node_modules"
 			? path.join(ompRoot, "@oh-my-pi", path.sep)
 			: undefined;
-	const messageStart = source.message ? stack.indexOf(source.message) : -1;
-	const messageEnd = messageStart < 0 ? 0 : messageStart + (source.message?.length ?? 0);
+	const messageEnd = source.header?.length ?? 0;
 	const kept: string[] = [];
 	let hidden = 0;
 	let offset = 0;
