@@ -798,8 +798,11 @@ fn undecodable_delete_staged(
 ///
 /// A seen-line rejection does not end the walk: later sections are still
 /// checked, so one reply reveals the unseen lines of every file and the
-/// identical resend applies. The first other failure after it ends the walk
-/// and joins that reply, so every reply that recorded provenance is shown.
+/// identical resend applies. The reply keeps the `unseen_lines` kind and also
+/// carries any other rejection a later section gets, since that reply may have
+/// recorded provenance too. Other failures after it are left for the resend
+/// to report: a paste fails when its cut sits in a rejected section, which
+/// never reached the clipboard.
 pub fn stage_patch(
 	patch: &Patch,
 	raw_input: &str,
@@ -808,61 +811,64 @@ pub fn stage_patch(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Vec<StagedFile>, EditError> {
+	let seen_line_guard = enforce_seen_lines.then_some(max_columns);
 	let mut clipboard = store.start_clipboard_batch();
 	let mut staged = Vec::with_capacity(patch.sections.len());
 	let mut canonical_paths = HashMap::<std::path::PathBuf, String>::new();
-	let mut unseen = Vec::new();
+	let mut replies = Vec::new();
 	for original in &patch.sections {
 		match stage_section(
 			original,
-			patch.sections.len() == 1,
-			raw_input,
-			enforce_seen_lines,
-			max_columns,
+			seen_line_guard,
 			files,
 			store,
 			&mut clipboard,
 			&mut canonical_paths,
 		) {
 			Ok(item) => staged.push(item),
-			Err(err @ EditError::Rejected { reason: Rejection::UnseenLines, .. }) => {
-				unseen.push(err.to_string());
+			Err(EditError::Rejected { reason: Rejection::UnseenLines, message }) => {
+				replies.push(message);
 			},
-			Err(err) if unseen.is_empty() => return Err(err),
-			Err(err) => {
-				unseen.push(format!("[{}]: {err}", original.path));
-				break;
+			Err(err) if replies.is_empty() => return Err(err),
+			// Unseen-line replies name their file; `InFile` would repeat its
+			// atomicity trailer once per file.
+			Err(err @ EditError::Rejected { .. }) => {
+				replies.push(format!("[{}]: {err}", original.path));
 			},
+			Err(_) => {},
 		}
 	}
-	if !unseen.is_empty() {
-		return Err(EditError::rejected(Rejection::UnseenLines, unseen.join("\n\n")));
+	if !replies.is_empty() {
+		return Err(EditError::rejected(Rejection::UnseenLines, replies.join("\n\n")));
 	}
-	if staged.len() > 1
-		&& let Some(item) = staged.iter().find(|item| item.op == EngineFileOp::Noop)
-	{
+	if let Some(item) = staged.iter_mut().find(|item| item.op == EngineFileOp::Noop) {
 		let canonical = crate::path_policy::canonical_key(&item.absolute);
 		let (count, escalate) = store.record_noop(&canonical, payload_hash(raw_input));
-		return Err(EditError::rejected(
-			Rejection::NoChange,
-			if escalate {
-				no_change_loop_diagnostic(&item.display, count)
-			} else {
-				no_change_diagnostic(&item.display)
-			},
-		));
+		let [only] = patch.sections.as_slice() else {
+			return Err(EditError::rejected(
+				Rejection::NoChange,
+				if escalate {
+					no_change_loop_diagnostic(&item.display, count)
+				} else {
+					no_change_diagnostic(&item.display)
+				},
+			));
+		};
+		if escalate {
+			return Err(EditError::rejected(
+				Rejection::NoChange,
+				no_change_loop_diagnostic(&only.path, count),
+			));
+		}
+		item.text_override = Some(no_change_diagnostic(&only.path));
 	}
 	Ok(staged)
 }
 
-/// Stage one section of [`stage_patch`]; `only_section` marks a patch with no
-/// other section, whose no-op reply is a note rather than a rejection.
+/// Stage one section of [`stage_patch`].
 fn stage_section(
 	original: &PatchSection,
-	only_section: bool,
-	raw_input: &str,
-	enforce_seen_lines: bool,
-	max_columns: usize,
+	seen_line_guard: Option<usize>,
 	files: &mut dyn FileSource,
 	store: &EditStore,
 	clipboard: &mut Clipboard,
@@ -907,9 +913,6 @@ fn stage_section(
 	let Some(tag) = tag else {
 		return Err(mismatch(section, &read.canonical, &read.text, "", store));
 	};
-	if section.path != original.path {
-		// Warning is attached below once parser/apply warnings are collected.
-	}
 	if let Some(previous) = canonical_paths.insert(read.canonical.clone(), original.path.clone()) {
 		return Err(EditError::apply(format!(
 			"Multiple hashline sections resolve to the same file ({previous} and {}). Merge their \
@@ -935,7 +938,7 @@ fn stage_section(
 		edits,
 		clipboard,
 		store,
-		enforce_seen_lines.then_some(max_columns),
+		seen_line_guard,
 	)?;
 	let mut warnings = parsed.warnings.clone();
 	if section.path != original.path {
@@ -979,16 +982,6 @@ fn stage_section(
 	item.warnings = warnings;
 	item.record_snapshot = true;
 	item.clipboard_after = Some(clipboard.fork());
-	if engine_op == EngineFileOp::Noop && only_section {
-		let (count, escalate) = store.record_noop(&read.canonical, payload_hash(raw_input));
-		if escalate {
-			return Err(EditError::rejected(
-				Rejection::NoChange,
-				no_change_loop_diagnostic(&original.path, count),
-			));
-		}
-		item.text_override = Some(no_change_diagnostic(&original.path));
-	}
 	Ok(item)
 }
 
@@ -1496,8 +1489,8 @@ mod lifecycle {
 
 	/// A multi-file patch whose files each anchor an unseen line gets one
 	/// rejection that reveals both, and nothing is written; the identical
-	/// resend then applies. A line neither the reads nor that reply displayed
-	/// is still rejected.
+	/// resend then applies. An anchor on `two.ts:26`, which neither the reads
+	/// nor that reply displayed, is still rejected.
 	#[tokio::test]
 	async fn multi_file_reveal_lets_the_identical_resend_apply() {
 		let ctx = Lifecycle::new("one.ts", 30);
@@ -1525,6 +1518,47 @@ mod lifecycle {
 		ctx.edit(&patch).await.unwrap();
 		assert_eq!(ctx.text("one.ts").lines().nth(19), Some("let v0020 = 200;"));
 		assert_eq!(ctx.text("two.ts").lines().nth(24), Some("var v0025 = 250;"));
+	}
+
+	/// After a seen-line rejection, a later file's tag rejection joins the same
+	/// reply under its path, and nothing is written.
+	#[tokio::test]
+	async fn multi_file_reveal_carries_a_later_tag_rejection() {
+		let ctx = Lifecycle::new("one.ts", 30);
+		ctx.write_text("two.ts", &ctx.text("one.ts").replace("let ", "var "));
+		let one = ctx.read("one.ts", &(1..=10).collect::<Vec<_>>());
+		let before = (ctx.text("one.ts"), ctx.text("two.ts"));
+		let err = ctx
+			.edit(&format!(
+				"[one.ts#{one}]\nPUT 20.=20:\n+let v0020 = 200;\n[two.ts#BAD0]\nPUT 5.=5:\n+var v0005 \
+				 = 50;\n"
+			))
+			.await
+			.unwrap_err();
+		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
+		assert!(err.contains("[two.ts]: "), "two.ts rejection missing: {err}");
+		assert_eq!((ctx.text("one.ts"), ctx.text("two.ts")), before);
+	}
+
+	/// A paste whose cut sits in a section the guard rejected fails only because
+	/// that cut never ran. The reply reveals the cut lines without an
+	/// empty-paste error about the valid paste, and the identical resend moves
+	/// the line.
+	#[tokio::test]
+	async fn multi_file_reveal_omits_a_paste_of_a_rejected_cut() {
+		let ctx = Lifecycle::new("one.ts", 30);
+		ctx.write_text("two.ts", &ctx.text("one.ts").replace("let ", "var "));
+		let seen: Vec<u32> = (1..=10).collect();
+		let one = ctx.read("one.ts", &seen);
+		let two = ctx.read("two.ts", &seen);
+		let patch = format!("[one.ts#{one}]\nCUT 20.=20\n[two.ts#{two}]\nPUT <1\n");
+		let err = ctx.edit(&patch).await.unwrap_err();
+		assert!(err.contains("  20:let v0020 = 20;"), "one.ts not revealed: {err}");
+		assert!(!err.contains(super::super::messages::EMPTY_PASTE), "bogus paste error: {err}");
+
+		ctx.edit(&patch).await.unwrap();
+		assert_eq!(ctx.text("one.ts").lines().nth(19), Some("let v0021 = 21;"));
+		assert_eq!(ctx.text("two.ts").lines().next(), Some("let v0020 = 20;"));
 	}
 
 	/// The column-cut form: the read cut line 1, so it is not seen, and an edit
