@@ -18,6 +18,8 @@ const FRAME_LINE = /^\s+at (?:.*\((.*)\)|(.*))$/;
 export interface CellErrorSource {
 	/** The cell's file name as its frames show it. */
 	filename: string;
+	/** The original message, whose lines must not be mistaken for stack frames. */
+	message?: string;
 	/** The cell's working directory; frames under it include the user's project dependencies. */
 	cwd: string;
 	/** Defaults to the tree this omp runs from. */
@@ -35,16 +37,27 @@ export function formatCellError(stack: string, source: CellErrorSource): string 
 	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
 	// A project-local omp shares node_modules with the cell's own dependencies. Keep that project's frames.
 	const userPrefix = path.join(source.cwd, path.sep);
+	const packagePrefix =
+		ompRoot !== undefined && path.basename(ompRoot) === "node_modules"
+			? path.join(ompRoot, "@oh-my-pi", path.sep)
+			: undefined;
+	const messageStart = source.message ? stack.indexOf(source.message) : -1;
+	const messageEnd = messageStart < 0 ? 0 : messageStart + (source.message?.length ?? 0);
 	const kept: string[] = [];
 	let hidden = 0;
+	let offset = 0;
 	for (const line of stack.split("\n")) {
-		const frame = FRAME_LINE.exec(line);
+		const frame = offset >= messageEnd ? FRAME_LINE.exec(line) : null;
+		offset += line.length + 1;
 		const location = frame ? (frame[1] ?? frame[2]).trim() : undefined;
 		if (
 			location !== undefined &&
 			!location.startsWith(source.filename) &&
 			(HOST_LOCATION.test(location) ||
-				(rootPrefix !== undefined && location.startsWith(rootPrefix) && !location.startsWith(userPrefix)))
+				(rootPrefix !== undefined &&
+					location.startsWith(rootPrefix) &&
+					(!location.startsWith(userPrefix) ||
+						(packagePrefix !== undefined && location.startsWith(packagePrefix)))))
 		) {
 			hidden++;
 			continue;

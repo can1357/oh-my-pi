@@ -57,6 +57,15 @@ describe("uncaught JavaScript cell errors", () => {
 		expect(result.output).not.toContain("catch the error");
 	});
 
+	it("keeps frame-looking lines inside a multiline error message", async () => {
+		const message = "first\n    at map (native:1:11)\nlast";
+		const result = await executeJs(`throw new Error(${JSON.stringify(message)});`, options);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain(`Error: ${message}\n`);
+		expect(result.output).not.toContain(REPO_ROOT);
+		expect(result.output).toContain("omp frames hidden;");
+	});
+
 	it("take omp's tree from its own code, not from PI_PACKAGE_DIR", async () => {
 		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
 console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)", { filename: "js-cell-1.js", cwd: "/tmp" }));`;
@@ -122,10 +131,12 @@ describe("formatCellError", () => {
 			"    at parse (/proj/node_modules/zod/lib/x.js:1:2)",
 			"    at run (js-cell-1d89.js:1:2)",
 			"    at map (native:1:11)",
+			"    at execute (/proj/node_modules/@oh-my-pi/pi-coding-agent/src/eval/js/executor.ts:1:2)",
 		].join("\n");
 		const output = formatCellError(stack, { ...source, cwd: "/proj", ompRoot: "/proj/node_modules" });
 		expect(output).toContain("at parse (/proj/node_modules/zod/lib/x.js:1:2)");
 		expect(output).toContain("at run (js-cell-1d89.js:1:2)");
-		expect(output).toContain("(1 omp frame hidden;");
+		expect(output).not.toContain("@oh-my-pi/pi-coding-agent");
+		expect(output).toContain("(2 omp frames hidden;");
 	});
 });
