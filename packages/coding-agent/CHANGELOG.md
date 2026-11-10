@@ -11,6 +11,9 @@
 - Extension prompts shown from `session_before_*` handlers no longer time out after 30 seconds while the operator is still answering ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 - A second exit request now skips pending `worktree.onExit` prompts and keeps those worktrees instead of waiting for an answer ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
+- `/advisor on`, `/advisor off` and the bare toggle now flip the advisor of the focused subagent you are viewing instead of the main session's, and its autocomplete line describes that agent's advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
@@ -184,7 +187,6 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
-- `/advisor on`, `/advisor off` and the bare toggle now flip the advisor of the focused subagent you are viewing instead of the main session's, and its autocomplete line describes that agent's advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
