@@ -528,6 +528,8 @@ describe("RelayBridge child targets", () => {
 		expect(otherCdp.messages.find(message => message.id === evaluateId)).toMatchObject({
 			error: { message: "Unknown session id CHILD1" },
 		});
+		await armAutoAttach(bridge, ext, conn, "CHILD1");
+		emit(bridge, ext, NESTED_ATTACH);
 		await armAutoAttach(bridge, ext, conn, page);
 		await armAutoAttach(bridge, ext, other, otherPage);
 		emit(bridge, ext, {
@@ -556,8 +558,16 @@ describe("RelayBridge child targets", () => {
 		expect(cdp.messages.find(message => message.id === afterOptOut)).toMatchObject({
 			result: { result: { type: "number", value: 1 } },
 		});
+		const descendantId = ++msgSeq;
+		bridge.cdpMessage(conn, JSON.stringify({ ...evaluate, id: descendantId, sessionId: "CHILD2" }));
+		ack(bridge, ext, "send", { result: { type: "number", value: 1 } });
+		await flush();
+		expect(cdp.messages.find(message => message.id === descendantId)).toMatchObject({
+			result: { result: { type: "number", value: 1 } },
+		});
 		emit(bridge, ext, NAVIGATE, DETACH);
 		expect(childTraffic(cdp).filter(([method]) => method !== undefined)).toEqual([
+			["Target.attachedToTarget", "CHILD1"],
 			["Page.frameNavigated", "CHILD1"],
 			["Target.detachedFromTarget", page],
 		]);
@@ -602,6 +612,50 @@ describe("RelayBridge child targets", () => {
 		emit(bridge, ext, NAVIGATE, DETACH);
 
 		expect(childTraffic(cdp)).toEqual(lifecycleOn(first));
+	});
+
+	it("revokes automatic children when the last local page is released while another connection remains armed", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const page = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, page);
+		const otherCdp = new FakeCdpSocket();
+		const other = bridge.cdpConnected(otherCdp);
+		const otherPage = await attachPage(bridge, ext, otherCdp, other, 1);
+		await armAutoAttach(bridge, ext, other, otherPage);
+		emit(bridge, ext, ATTACH);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: page } }),
+		);
+		await flush();
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: commandId,
+				sessionId: "CHILD1",
+				method: "Runtime.evaluate",
+				params: { expression: "1" },
+			}),
+		);
+		await flush();
+		expect(cdp.messages.find(message => message.id === commandId)).toMatchObject({
+			error: { message: "Unknown session id CHILD1" },
+		});
+		expect(ext.pending("send")).toEqual([]);
+		emit(bridge, ext, NAVIGATE);
+		expect(childTraffic(cdp).filter(([method]) => method !== undefined)).toEqual([
+			["Target.attachedToTarget", page],
+			["Target.detachedFromTarget", page],
+		]);
+		expect(childTraffic(otherCdp)).toEqual([
+			["Target.attachedToTarget", otherPage],
+			["Page.frameNavigated", "CHILD1"],
+		]);
 	});
 
 	it.each(["disconnect", "release"])(

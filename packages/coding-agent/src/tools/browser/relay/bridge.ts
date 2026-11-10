@@ -1940,6 +1940,10 @@ export class RelayBridge {
 		conn.sessions.delete(sessionId);
 		this.#releaseSwitches(ref);
 		if (ref.autoAttach) this.#releaseAutoAttach(ref.tabKey);
+		if (ref.kind === "page" && !conn.childTargetSessionForTab(ref.tabKey)) {
+			const tab = this.#tabs.get(ref.tabKey);
+			if (tab) this.#forgetConnectionChildren(conn, tab, true);
+		}
 		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
@@ -2011,7 +2015,16 @@ export class RelayBridge {
 	#forgetConnectionChildren(conn: CdpConnection, tab: TabState, automaticOnly = false): void {
 		for (const child of [...tab.realSessions.keys()].reverse()) {
 			const ownership = conn.childParents.get(child);
-			if (!ownership || (automaticOnly && ownership.explicit)) continue;
+			if (!ownership) continue;
+			if (automaticOnly) {
+				let ancestor = ownership;
+				while (!ancestor.explicit) {
+					const parent = conn.childParents.get(ancestor.parent);
+					if (!parent) break;
+					ancestor = parent;
+				}
+				if (ancestor.explicit) continue;
+			}
 			conn.childParents.delete(child);
 			this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, ownership.parent);
 		}
