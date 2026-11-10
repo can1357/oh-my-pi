@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `freeformText` to the generated Cursor `AskQuestionSuccess_Answer`, carrying typed answers to a native `AskQuestion` ([#18696](https://github.com/can1357/oh-my-pi/pull/18696) by [@morali](https://github.com/morali))
+
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))

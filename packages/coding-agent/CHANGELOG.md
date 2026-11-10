@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Cursor models failing to ask questions: their native `AskQuestion` now opens the `ask` form instead of being rejected with "Interactive questions are not implemented by this client", one question at a time, and closes it when the turn is aborted or the stream ends. Sessions without `ask` (subagents, headless) still reject it ([#18696](https://github.com/can1357/oh-my-pi/pull/18696) by [@morali](https://github.com/morali))
 - Extension prompts shown from `session_before_*` handlers no longer time out after 30 seconds while the operator is still answering ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 - A second exit request now skips pending `worktree.onExit` prompts and keeps those worktrees instead of waiting for an answer ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 ### Fixed

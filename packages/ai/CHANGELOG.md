@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CursorExecHandlers.askQuestion`: Cursor's native `AskQuestion` is answered through the host instead of being rejected, with option ids kept as form values and typed answers sent as `freeform_text`. Hosts without the handler, and async questions, are still rejected ([#18696](https://github.com/can1357/oh-my-pi/pull/18696) by [@morali](https://github.com/morali))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
