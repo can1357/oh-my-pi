@@ -11,6 +11,7 @@
  * ends when stdin does.
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
@@ -24,20 +25,45 @@ import { expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 const STDIO_PEER = "stdio";
 
 /**
+ * The model kind each body-carrying route serves. A selector resolves only
+ * among models of its route's kind, so `typesafe/jev-latest` or `@judge` on
+ * `/v1/systemone` finds the judge runner instead of nothing, or a chat model
+ * the route then rejects. Paths not listed are chat routes.
+ */
+const ROUTE_KINDS: Record<string, ModelKind> = {
+	"/v1/systemone": "judge",
+	"/alpha/decisions": "judge",
+	"/v1/images/generations": "image",
+	"/v1/images": "image",
+	"/v1/images/edits": "image",
+	"/v1/audio/speech": "tts",
+	"/v1/audio/transcriptions": "stt",
+	"/v1/embeddings": "embedding",
+	"/v1/rerank": "rerank",
+	"/v1/videos": "video",
+};
+
+/**
  * The models a request naming `selector` may run on, in order: the model
- * `--model` would pick (the first entry of a comma list that resolves), then
- * that model's configured `retry.fallbackChains` (its role's chain when the
- * entry named a role; never the role's built-in priority list). Empty when no
- * entry resolves.
+ * `--model` would pick among models of `kind` (the first entry of a comma
+ * list that resolves), then that model's configured `retry.fallbackChains`
+ * (its role's chain when the entry named a role; never the role's built-in
+ * priority list). Empty when no entry resolves.
  */
 export function selectorCandidates(
 	selector: string,
 	settings: Settings,
-	registry: Pick<ModelRegistry, "getAll" | "getAvailable">,
+	registry: Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "hasProvider">>,
+	kind: ModelKind = "chat",
 ): Model<Api>[] {
-	const available = registry.getAvailable();
+	const available = registry.getAvailable(kind);
+	const scoped = {
+		getAll: () => registry.getAll(kind),
+		getAvailable: () => available,
+		hasProvider: registry.hasProvider?.bind(registry),
+	};
 	for (const pattern of normalizeModelPatternList(selector)) {
-		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: registry, settings });
+		const { model, configuredRole } = resolveCliModel({ cliModel: pattern, modelRegistry: scoped, settings });
 		if (!model) continue;
 		const chain = expandOnlineTinyModelFallbacks(model, settings, available, configuredRole);
 		const seen = new Set<string>();
@@ -68,7 +94,8 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const router = createAuthGatewayRouter({
 		storage,
 		resolveModel: id => routed.get(id),
-		listModels: () => registry.getAvailable(),
+		// Every kind, so judge, image and other runner models are listed beside chat ones.
+		listModels: () => registry.getAvailable("all"),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
@@ -80,7 +107,8 @@ export async function runAuthGatewayStdio(): Promise<void> {
 			: undefined;
 		if (!isRecord(body) || typeof body.model !== "string") return router.route(req, STDIO_PEER);
 		const selector = body.model;
-		const candidates = selectorCandidates(selector, settings, registry);
+		const kind = ROUTE_KINDS[new URL(req.url).pathname] ?? "chat";
+		const candidates = selectorCandidates(selector, settings, registry, kind);
 		let response = Response.json(
 			{ error: { message: `No available model matches "${selector}"`, type: "invalid_request_error" } },
 			{ status: 404 },
@@ -101,11 +129,25 @@ export async function runAuthGatewayStdio(): Promise<void> {
 		return response;
 	};
 
+	// `process.stdout.write` into a pipe returns before the bytes leave, and nothing it offers
+	// (callback, `drain`) waits for all of them, so quitting cut long responses off at 128 KiB.
+	// A sink can be flushed: each line is sent as soon as it is answered, and the last flush
+	// is awaited before quitting.
+	const stdout = Bun.stdout.writer();
 	try {
-		await serveAuthGatewayStdio({ input, write: line => process.stdout.write(line), route, version: VERSION });
+		await serveAuthGatewayStdio({
+			input,
+			write: line => {
+				stdout.write(line);
+				void stdout.flush();
+			},
+			route,
+			version: VERSION,
+		});
 	} finally {
 		router.close();
 		storage.close();
+		await stdout.flush();
 	}
 	// Idle provider sockets and settings timers would otherwise keep the process alive past stdin's end.
 	await postmortem.quit(0);

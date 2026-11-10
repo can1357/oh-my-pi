@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { selectorCandidates } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-stdio";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -84,5 +85,25 @@ describe("auth-gateway stdio model selectors", () => {
 
 	it("offers nothing when no entry resolves", () => {
 		expect(selectorCandidates("@commit", Settings.isolated({}), registry)).toEqual([]);
+	});
+
+	// `/v1/systemone` resolved selectors among chat models only: a judge id answered
+	// 404 and `@judge` landed on a chat model the route then refused.
+	describe("on a judge route", () => {
+		const jev = getBundledModel("typesafe", "jev-1.14.0")!;
+		const catalog = [...models, jev];
+		const byKind = (kind: ModelKind | "all" = "chat") =>
+			kind === "all" ? catalog : catalog.filter(model => modelKind(model) === kind);
+		const kinded = { getAll: byKind, getAvailable: byKind };
+
+		it("resolves a judge model id and the judge role to the judge runner", () => {
+			const settings = Settings.isolated({});
+			expect(selectorCandidates(key(jev), settings, kinded, "judge")).toEqual([jev]);
+			expect(selectorCandidates("@judge", settings, kinded, "judge")).toEqual([jev]);
+		});
+
+		it("keeps judge models out of chat routes", () => {
+			expect(selectorCandidates(key(jev), Settings.isolated({}), kinded)).toEqual([]);
+		});
 	});
 });
