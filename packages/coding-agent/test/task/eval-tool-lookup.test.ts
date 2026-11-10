@@ -111,161 +111,137 @@ afterAll(async () => {
 });
 
 describe("task eval tool descriptor lookups", () => {
-	it(
-		"queries the kernels once for a sync batch call whose items share one eval tool",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-task-eval-lookup-sync-");
-			const session = createSession(tempDir.path(), { "task.batch": true });
-			await defineKernelTool(tempDir.path(), "Count words");
-			const run = vi
-				.spyOn(executorModule, "runSubprocess")
-				.mockImplementation(async options => makeResult(options.id ?? "?"));
-			const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
-			const pySpy = vi.spyOn(pyExecutor, "describePythonTools");
+	it("queries the kernels once for a sync batch call whose items share one eval tool", async () => {
+		using tempDir = TempDir.createSync("@omp-task-eval-lookup-sync-");
+		const session = createSession(tempDir.path(), { "task.batch": true });
+		await defineKernelTool(tempDir.path(), "Count words");
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
+		const pySpy = vi.spyOn(pyExecutor, "describePythonTools");
 
-			const tool = await TaskTool.create(session);
-			const result = await tool.execute("tc-sync-dedup", threeItemBatch());
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-sync-dedup", threeItemBatch());
 
-			expect(result.isError).not.toBe(true);
-			expect(run).toHaveBeenCalledTimes(3);
-			for (const call of run.mock.calls) {
-				expect(call[0]?.customTools?.map(custom => custom.name)).toEqual(["word_count"]);
-			}
-			const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
-			expect(jsDescribes).toHaveLength(1);
-			expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
-			expect(pySpy).toHaveBeenCalledTimes(1);
-		},
-		60_000,
-	);
+		expect(result.isError).not.toBe(true);
+		expect(run).toHaveBeenCalledTimes(3);
+		for (const call of run.mock.calls) {
+			expect(call[0]?.customTools?.map(custom => custom.name)).toEqual(["word_count"]);
+		}
+		const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
+		expect(jsDescribes).toHaveLength(1);
+		expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
+		expect(pySpy).toHaveBeenCalledTimes(1);
+	}, 60_000);
 
-	it(
-		"queries the kernels once when the batch items run as background jobs",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-task-eval-lookup-async-");
-			const manager = new AsyncJobManager({ retentionMs: 0 });
-			managers.add(manager);
-			const session = {
-				...createSession(tempDir.path(), { "task.batch": true, "async.enabled": true }),
-				asyncJobManager: manager,
-			} as unknown as ToolSession;
-			await defineKernelTool(tempDir.path(), "Count words");
-			const run = vi
-				.spyOn(executorModule, "runSubprocess")
-				.mockImplementation(async options => makeResult(options.id ?? "?"));
-			const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
-			const pySpy = vi.spyOn(pyExecutor, "describePythonTools");
+	it("queries the kernels once when the batch items run as background jobs", async () => {
+		using tempDir = TempDir.createSync("@omp-task-eval-lookup-async-");
+		const manager = new AsyncJobManager({ retentionMs: 0 });
+		managers.add(manager);
+		const session = {
+			...createSession(tempDir.path(), { "task.batch": true, "async.enabled": true }),
+			asyncJobManager: manager,
+		} as unknown as ToolSession;
+		await defineKernelTool(tempDir.path(), "Count words");
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
+		const pySpy = vi.spyOn(pyExecutor, "describePythonTools");
 
-			const tool = await TaskTool.create(session);
-			const result = await tool.execute("tc-async-dedup", threeItemBatch());
-			await manager.waitForAll();
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-async-dedup", threeItemBatch());
+		await manager.waitForAll();
 
-			expect(result.isError).not.toBe(true);
-			expect(run).toHaveBeenCalledTimes(3);
-			for (const call of run.mock.calls) {
-				expect(call[0]?.customTools?.map(custom => custom.name)).toEqual(["word_count"]);
-			}
-			const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
-			expect(jsDescribes).toHaveLength(1);
-			expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
-			expect(pySpy).toHaveBeenCalledTimes(1);
-		},
-		60_000,
-	);
+		expect(result.isError).not.toBe(true);
+		expect(run).toHaveBeenCalledTimes(3);
+		for (const call of run.mock.calls) {
+			expect(call[0]?.customTools?.map(custom => custom.name)).toEqual(["word_count"]);
+		}
+		const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
+		expect(jsDescribes).toHaveLength(1);
+		expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
+		expect(pySpy).toHaveBeenCalledTimes(1);
+	}, 60_000);
 
-	it(
-		"sees a redefined tool description on the next task call",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-task-eval-lookup-stale-");
-			const session = createSession(tempDir.path());
-			await defineKernelTool(tempDir.path(), "Count words");
-			const run = vi
-				.spyOn(executorModule, "runSubprocess")
-				.mockImplementation(async options => makeResult(options.id ?? "?"));
-			const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
-			const tool = await TaskTool.create(session);
+	it("sees a redefined tool description on the next task call", async () => {
+		using tempDir = TempDir.createSync("@omp-task-eval-lookup-stale-");
+		const session = createSession(tempDir.path());
+		await defineKernelTool(tempDir.path(), "Count words");
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
+		const tool = await TaskTool.create(session);
 
-			const first = await tool.execute("tc-stale-first", { task: "count", tools: ["word_count"] } as TaskParams);
-			expect(first.isError).not.toBe(true);
-			expect(run.mock.calls[0]?.[0].customTools?.[0]?.description).toBe("Count words");
+		const first = await tool.execute("tc-stale-first", { task: "count", tools: ["word_count"] } as TaskParams);
+		expect(first.isError).not.toBe(true);
+		expect(run.mock.calls[0]?.[0].customTools?.[0]?.description).toBe("Count words");
 
-			await defineKernelTool(tempDir.path(), "Count characters");
+		await defineKernelTool(tempDir.path(), "Count characters");
 
-			const second = await tool.execute("tc-stale-second", {
-				task: "count again",
-				tools: ["word_count"],
-			} as TaskParams);
-			expect(second.isError).not.toBe(true);
-			expect(run.mock.calls[1]?.[0].customTools?.[0]?.description).toBe("Count characters");
+		const second = await tool.execute("tc-stale-second", {
+			task: "count again",
+			tools: ["word_count"],
+		} as TaskParams);
+		expect(second.isError).not.toBe(true);
+		expect(run.mock.calls[1]?.[0].customTools?.[0]?.description).toBe("Count characters");
 
-			// One describe per task call: the resolved descriptors never survive
-			// the call that produced them.
-			const wordCountDescribes = jsSpy.mock.calls.filter(
-				([request]) => request.op === "describe" && request.names.includes("word_count"),
-			);
-			expect(wordCountDescribes).toHaveLength(2);
-		},
-		60_000,
-	);
+		// One describe per task call: the resolved descriptors never survive
+		// the call that produced them.
+		const wordCountDescribes = jsSpy.mock.calls.filter(
+			([request]) => request.op === "describe" && request.names.includes("word_count"),
+		);
+		expect(wordCountDescribes).toHaveLength(2);
+	}, 60_000);
 
-	it(
-		"reports unknown eval tools once per call",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-task-eval-lookup-unknown-");
-			const session = createSession(tempDir.path());
-			await defineKernelTool(tempDir.path(), "Count words");
-			const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => makeResult(options.id));
-			const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
+	it("reports unknown eval tools once per call", async () => {
+		using tempDir = TempDir.createSync("@omp-task-eval-lookup-unknown-");
+		const session = createSession(tempDir.path());
+		await defineKernelTool(tempDir.path(), "Count words");
+		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => makeResult(options.id));
+		const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
 
-			const tool = await TaskTool.create(session);
-			const result = await tool.execute("tc-unknown-tool", {
-				task: "count",
-				tools: ["no_such_tool"],
-			} as TaskParams);
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-unknown-tool", {
+			task: "count",
+			tools: ["no_such_tool"],
+		} as TaskParams);
 
-			expect(result.isError).toBe(true);
-			const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
-			expect(text).toContain("Unknown eval tool(s): no_such_tool");
-			expect(text.split("Unknown eval tool(s)").length - 1).toBe(1);
-			expect(run).not.toHaveBeenCalled();
-			const unknownDescribes = jsSpy.mock.calls.filter(
-				([request]) => request.op === "describe" && request.names.includes("no_such_tool"),
-			);
-			expect(unknownDescribes).toHaveLength(1);
-		},
-		60_000,
-	);
-	it(
-		"gives each item only its own tools when a batch mixes items with and without tools",
-		async () => {
-			using tempDir = TempDir.createSync("@omp-task-eval-lookup-mixed-");
-			const session = createSession(tempDir.path(), { "task.batch": true });
-			await defineKernelTool(tempDir.path(), "Count words");
-			const run = vi
-				.spyOn(executorModule, "runSubprocess")
-				.mockImplementation(async options => makeResult(options.id ?? "?"));
-			const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
+		expect(result.isError).toBe(true);
+		const text = result.content.map(part => (part.type === "text" ? part.text : "")).join("\n");
+		expect(text).toContain("Unknown eval tool(s): no_such_tool");
+		expect(text.split("Unknown eval tool(s)").length - 1).toBe(1);
+		expect(run).not.toHaveBeenCalled();
+		const unknownDescribes = jsSpy.mock.calls.filter(
+			([request]) => request.op === "describe" && request.names.includes("no_such_tool"),
+		);
+		expect(unknownDescribes).toHaveLength(1);
+	}, 60_000);
+	it("gives each item only its own tools when a batch mixes items with and without tools", async () => {
+		using tempDir = TempDir.createSync("@omp-task-eval-lookup-mixed-");
+		const session = createSession(tempDir.path(), { "task.batch": true });
+		await defineKernelTool(tempDir.path(), "Count words");
+		const run = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id ?? "?"));
+		const jsSpy = vi.spyOn(jsContext, "invokeJsTool");
 
-			const tool = await TaskTool.create(session);
-			const result = await tool.execute("tc-mixed-items", {
-				context: "Shared background for the batch.",
-				tasks: [
-					{ task: "one", tools: ["word_count"] },
-					{ task: "two" },
-					{ task: "three", tools: ["word_count"] },
-				],
-			} as TaskParams);
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-mixed-items", {
+			context: "Shared background for the batch.",
+			tasks: [{ task: "one", tools: ["word_count"] }, { task: "two" }, { task: "three", tools: ["word_count"] }],
+		} as TaskParams);
 
-			expect(result.isError).not.toBe(true);
-			expect(run).toHaveBeenCalledTimes(3);
-			const toolNamesPerChild = run.mock.calls
-				.map(call => call[0]?.customTools?.map(custom => custom.name)?.join(",") ?? "")
-				.sort();
-			expect(toolNamesPerChild).toEqual(["", "word_count", "word_count"]);
-			const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
-			expect(jsDescribes).toHaveLength(1);
-			expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
-		},
-		60_000,
-	);
+		expect(result.isError).not.toBe(true);
+		expect(run).toHaveBeenCalledTimes(3);
+		const toolNamesPerChild = run.mock.calls
+			.map(call => call[0]?.customTools?.map(custom => custom.name)?.join(",") ?? "")
+			.sort();
+		expect(toolNamesPerChild).toEqual(["", "word_count", "word_count"]);
+		const jsDescribes = jsSpy.mock.calls.filter(([request]) => request.op === "describe");
+		expect(jsDescribes).toHaveLength(1);
+		expect(jsDescribes[0]?.[0]).toMatchObject({ names: ["word_count"] });
+	}, 60_000);
 });
