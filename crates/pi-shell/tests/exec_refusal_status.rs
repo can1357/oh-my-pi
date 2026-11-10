@@ -165,6 +165,22 @@ fn unreadable_missing_interpreter(dir: &std::path::Path) {
 	write(&dir.join("s"), "#!/does/not/exist\necho hi\n", 0o111);
 }
 
+/// A script the shell may execute but not read, with no `#!` line at all.
+/// The kernel answers `ENOEXEC`, so bash goes on to run the file as a
+/// shell script and reports THAT open's error: `Permission denied`, 126.
+/// It never calls `check_binary_file`, because it has no sample to call it
+/// on, so `cannot execute binary file` is the one thing it does not say.
+fn unreadable_text_without_shebang(dir: &std::path::Path) {
+	write(&dir.join("s"), "echo hi\n", 0o111);
+}
+
+/// The same, with contents that really are binary: unreadable is
+/// unreadable, so Bash 5.3.0 reports `Permission denied` here too and the
+/// file's contents never come into it.
+fn unreadable_binary_without_shebang(dir: &std::path::Path) {
+	write(&dir.join("s"), "\u{0}\u{1}\u{2}BAD\n", 0o111);
+}
+
 /// Immediate spawns. Upstream main already probes the refused file for all
 /// of these and answers as Bash 5.3.0 does; they are here so a change to the
 /// deferred path cannot quietly break them.
@@ -345,6 +361,22 @@ const IMMEDIATE: &[Row] = &[
 		status: 126,
 		wants:  &["/s: /does/not/exist: bad interpreter: No such file or directory"],
 	},
+	Row {
+		name:   "unreadable-text-without-shebang",
+		setup:  unreadable_text_without_shebang,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["Permission denied", "!cannot execute binary file"],
+	},
+	Row {
+		name:   "unreadable-binary-without-shebang",
+		setup:  unreadable_binary_without_shebang,
+		fifo:   false,
+		script: "./s",
+		status: 126,
+		wants:  &["Permission denied", "!cannot execute binary file"],
+	},
 ];
 
 /// Deferred spawns: `f` is a FIFO the refused command writes to and another
@@ -521,13 +553,31 @@ const DEFERRED: &[Row] = &[
 		status: 0,
 		wants:  &["/s: /does/not/exist: bad interpreter: No such file or directory", "status=126"],
 	},
+	Row {
+		name:   "deferred-unreadable-text-without-shebang",
+		setup:  unreadable_text_without_shebang,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["Permission denied", "status=126", "!cannot execute binary file"],
+	},
+	Row {
+		name:   "deferred-unreadable-binary-without-shebang",
+		setup:  unreadable_binary_without_shebang,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
+		status: 0,
+		wants:  &["Permission denied", "status=126", "!cannot execute binary file"],
+	},
 ];
 
 /// Root's DAC bypass lets `open(O_RDONLY)` succeed on a mode-0111 file, so
-/// both Bash 5.3.0 and this engine read the shebang and report "bad
-/// interpreter" (126) instead of "required file not found" (127).  When
-/// `geteuid() == 0`, these override the non-root expectation for the
-/// `unreadable_missing_interpreter` rows.
+/// both Bash 5.3.0 and this engine read the file and answer from its
+/// contents instead of from the refused read.  When `geteuid() == 0`,
+/// these override the non-root expectation for the mode-0111 rows: the
+/// shebang is found and named (126 `bad interpreter` rather than 127
+/// `required file not found`), the text file runs as the script it is, and
+/// the binary one is recognised as binary.
 const ROOT_OVERRIDES: &[(&str, i32, &[&str])] = &[
 	(
 		"unreadable-missing-interpreter",
@@ -538,6 +588,14 @@ const ROOT_OVERRIDES: &[(&str, i32, &[&str])] = &[
 		"deferred-unreadable-missing-interpreter",
 		0,
 		&["/does/not/exist: bad interpreter: No such file or directory", "status=126"],
+	),
+	("unreadable-text-without-shebang", 0, &["hi"]),
+	("deferred-unreadable-text-without-shebang", 0, &["status=0"]),
+	("unreadable-binary-without-shebang", 126, &["cannot execute binary file"]),
+	(
+		"deferred-unreadable-binary-without-shebang",
+		0,
+		&["cannot execute binary file", "status=126"],
 	),
 ];
 
