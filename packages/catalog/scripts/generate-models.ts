@@ -43,6 +43,7 @@ import {
 	kimiCodeMaxTokens,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	NANO_GPT_THINKING_SUFFIX_RE,
 	openCodeGoBaseUrlForApi,
 	projectOpenAIProReasoningAliases,
 	stripFireworksDeepSeekThinkingToggle,
@@ -272,8 +273,22 @@ async function loadModelsDevData(): Promise<ModelSpec[]> {
 }
 
 function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]): Map<string, ModelSpec> {
-	const references = new Map<string, ModelSpec>();
+	// NanoGPT publishes a model's thinking route as a separate `<id>:thinking`
+	// row, so its base row carries `reasoning: false`. The base is still
+	// reasoning-capable when that sibling exists; without this the sibling's
+	// larger limits make the non-thinking row the cross-provider reference and
+	// its `reasoning: false` overwrites every same-id row (#18673).
+	const thinkingBaseKeys = new Set<string>();
 	for (const model of modelsDevModels) {
+		const match = NANO_GPT_THINKING_SUFFIX_RE.exec(model.id);
+		if (match && model.reasoning) {
+			thinkingBaseKeys.add(`${model.provider}/${model.id.slice(0, match.index)}`);
+		}
+	}
+	const references = new Map<string, ModelSpec>();
+	for (const row of modelsDevModels) {
+		const model =
+			!row.reasoning && thinkingBaseKeys.has(`${row.provider}/${row.id}`) ? { ...row, reasoning: true } : row;
 		const existing = references.get(model.id);
 		if (!existing) {
 			references.set(model.id, model);
@@ -293,7 +308,7 @@ function createGlobalModelsDevReferenceMap(modelsDevModels: readonly ModelSpec[]
 	return references;
 }
 
-function applyGlobalModelsDevFallback(
+export function applyGlobalModelsDevFallback(
 	models: readonly ModelSpec[],
 	modelsDevModels: readonly ModelSpec[],
 ): ModelSpec[] {
