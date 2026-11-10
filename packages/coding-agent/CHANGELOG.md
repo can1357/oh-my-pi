@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Revisit completed replies with `/summary` or `/summary last`, with age/agent labels and bounded Markdown previews; Ctrl+Alt+R adds a quoted reference above your unsent draft ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
 
-- Revisit completed replies with `/summary` or `/summary last`, with age/agent labels and bounded Markdown previews; Ctrl+Alt+R adds a quoted reference above your unsent draft ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
