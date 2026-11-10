@@ -103,7 +103,8 @@ fn dropping_frames_cannot_read_a_foreign_ir_record_schema() {
 fn suspended_image() -> MemStore {
 	let mut rig = Rig::new(FakeHost::new(), skeleton_init(&[]));
 	assert_eq!(rig.run(Script::command(&b"saved=kept"[..]), Fault::None), 0);
-	rig.shell().submit(Script::command(&b"while :; do :; done"[..]));
+	rig.shell()
+		.submit(Script::command(&b"while :; do :; done"[..]));
 	let (shell, host, store) = rig.parts();
 	let mut cx = Cx { host, store };
 	assert!(matches!(shell.step(&mut cx, Budget { max_ops: 32, max_ns: u64::MAX }), Step::Yield));

@@ -6,9 +6,7 @@
 use pi_shell::{
 	bash::{
 		Budget, Cx, Engine, EngineConfig, Incompatibility, MemStore, RestoreError, RestoreOpts,
-		RunId, Script, Shell, StateStore, Step,
-		ir::IR_VERSION,
-		store::BlobSlot,
+		RunId, Script, Shell, StateStore, Step, ir::IR_VERSION, store::BlobSlot,
 	},
 	testkit::{
 		FakeHost, Rig,
@@ -33,11 +31,7 @@ fn older_frames_are_refused_without_changing_the_store() {
 			panic!("a released image of another IR record schema must be refused as such");
 		};
 		assert_eq!((found, expected), (15, IR_VERSION), "upstream 88a69582 wrote IR 15");
-		assert_eq!(
-			store.to_bytes(),
-			before,
-			"refusal must not perform recovery or erase the image"
-		);
+		assert_eq!(store.to_bytes(), before, "refusal must not perform recovery or erase the image");
 	}
 }
 

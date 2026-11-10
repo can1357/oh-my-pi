@@ -48,13 +48,9 @@ fn write_ticker(dir: &std::path::Path) -> std::path::PathBuf {
 	let script = dir.join("ticker.py");
 	std::fs::write(
 		&script,
-		"import os,signal,sys,time\n\
-		 signal.signal(signal.SIGTERM,signal.SIG_IGN)\n\
-		 t=open(sys.argv[1]+'.ticks','ab',buffering=0)\n\
-		 open(sys.argv[1],'w').write(str(os.getpid()))\n\
-		 while True:\n\
-		 \x20t.write(b'x')\n\
-		 \x20time.sleep(0.01)\n",
+		"import os,signal,sys,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nt=open(sys.\
+		 argv[1]+'.ticks','ab',buffering=0)\nopen(sys.argv[1],'w').write(str(os.getpid()))\nwhile \
+		 True:\n\x20t.write(b'x')\n\x20time.sleep(0.01)\n",
 	)
 	.unwrap();
 	script
@@ -143,10 +139,9 @@ impl NativeShell {
 	/// Run `cmd` in a subshell of its own, wait until it has written its pid
 	/// into `pid_file`, and name the virtual process that owns it.
 	async fn start_cmd(&mut self, pid_file: &std::path::Path, cmd: String) -> Program {
-		let run = self.shell.submit(Script {
-			vproc: VprocSel::NewSubshell,
-			..Script::command(cmd.into_bytes())
-		});
+		let run = self
+			.shell
+			.submit(Script { vproc: VprocSel::NewSubshell, ..Script::command(cmd.into_bytes()) });
 		let until = tokio::time::Instant::now() + Duration::from_secs(15);
 		while !pid_file.exists() {
 			assert!(tokio::time::Instant::now() < until, "native child did not become ready");
@@ -288,15 +283,10 @@ async fn shell_cancellation_leaves_a_retained_detached_native_running() {
 	let terms_file = dir.path().join("pid.terms");
 	std::fs::write(
 		&script_file,
-		"import os,signal,time,sys\n\
-		 seen=0\n\
-		 def term(s,f):\n\
-		 \x20global seen\n\
-		 \x20seen+=1\n\
-		 \x20open(sys.argv[1]+'.terms','w').write(str(seen))\n\
-		 signal.signal(signal.SIGTERM,term)\n\
-		 open(sys.argv[1],'w').write(str(os.getpid()))\n\
-		 time.sleep(120)\n",
+		"import os,signal,time,sys\nseen=0\ndef term(s,f):\n\x20global \
+		 seen\n\x20seen+=1\n\x20open(sys.argv[1]+'.terms','w').write(str(seen))\nsignal.\
+		 signal(signal.SIGTERM,term)\nopen(sys.argv[1],'w').write(str(os.getpid()))\ntime.\
+		 sleep(120)\n",
 	)
 	.unwrap();
 	let mut session = Session::new(SessionConfig {
@@ -327,8 +317,8 @@ async fn shell_cancellation_leaves_a_retained_detached_native_running() {
 	};
 	let script = format!(
 		"worker(){{ /usr/bin/python3 '{script}' '{pid}' >/dev/null 2>&1; echo UNREACHABLE; }}; \
-		 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; \
-		 kill -TERM %1; wait %1; while :; do sleep 0.1; done",
+		 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; kill -TERM %1; \
+		 wait %1; while :; do sleep 0.1; done",
 		script = script_file.display(),
 		pid = pid_file.display()
 	);
@@ -460,11 +450,8 @@ async fn shell_pause_stops_a_retained_native_and_resume_continues_it() {
 	let script = write_ticker(dir.path());
 	let pid_file = dir.path().join("retained");
 	let mut native = NativeShell::new();
-	let cmd = format!(
-		"/usr/bin/python3 '{}' '{}'; echo unreachable",
-		script.display(),
-		pid_file.display()
-	);
+	let cmd =
+		format!("/usr/bin/python3 '{}' '{}'; echo unreachable", script.display(), pid_file.display());
 	let retained = native.start_cmd(&pid_file, cmd).await;
 	native
 		.shell
@@ -494,8 +481,8 @@ async fn shell_pause_stops_a_retained_detached_native_and_resume_continues_it() 
 	let run = native.shell.submit(Script::command(
 		format!(
 			"worker(){{ /usr/bin/python3 '{script}' '{pid}' >/dev/null 2>&1; echo UNREACHABLE; }}; \
-			 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; \
-			 kill -TERM %1; wait %1",
+			 nohup worker >/dev/null 2>&1 & while [ ! -s '{pid}' ]; do sleep 0.01; done; kill -TERM \
+			 %1; wait %1",
 			script = script.display(),
 			pid = pid_file.display()
 		)
