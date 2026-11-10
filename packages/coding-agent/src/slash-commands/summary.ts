@@ -8,7 +8,7 @@ import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 import { formatAge, prompt } from "@oh-my-pi/pi-utils";
 import summaryReferencePrompt from "../prompts/system/summary-reference.md" with { type: "text" };
 import { extractTextContent } from "../commit/utils";
-import { AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRef, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { isLocalAgentSession } from "../session/agent-session-handle";
 import { isTerminalTextAssistantAnswer } from "../session/queued-messages";
@@ -26,10 +26,22 @@ export interface SessionSummary {
 	text: string;
 }
 
+function ownedBy(ref: Pick<AgentRef, "parentId">, ownerId: string, registry: AgentRegistryApi): boolean {
+	const seen = new Set<string>();
+	let parent = ref.parentId;
+	while (parent && !seen.has(parent)) {
+		if (parent === ownerId) return true;
+		seen.add(parent);
+		parent = registry.get(parent)?.parentId;
+	}
+	return false;
+}
+
 export async function listSessionSummaries(
 	manager: Pick<SessionManager, "getEntries" | "getSessionFile" | "getSessionId">,
 	registry: AgentRegistryApi,
 	shouldContinue: () => boolean = () => true,
+	ownerId?: string,
 ): Promise<SessionSummary[]> {
 	const entries = manager.getEntries();
 	const rootFile = manager.getSessionFile();
@@ -54,6 +66,40 @@ export async function listSessionSummaries(
 	};
 	if (!shouldContinue()) return [];
 	entries.forEach((entry, index) => collect(entry, index, rootSource, "main"));
+	const seen = new Set([rootSource]);
+	const visitAgent = async (ref: AgentRef, source: string): Promise<boolean> => {
+		if (!shouldContinue()) return false;
+		const agentName = ref.displayName || ref.id;
+		const live = ref.session && isLocalAgentSession(ref.session) ? ref.session.sessionManager : undefined;
+		let inherited = Boolean(live?.getHeader()?.seanceSource);
+		let index = 0;
+		const visit = (entry: FileEntry): void => {
+			if (entry.type === "session") {
+				inherited = Boolean(entry.seanceSource);
+				return;
+			}
+			// Consult forks neutralize inherited init entries; their own init starts authored replies.
+			if (entry.type === "session_init") inherited = false;
+			if (!inherited) collect(entry, index, source, agentName);
+			index++;
+		};
+		if (live) live.getEntries().forEach(visit);
+		else await visitEntriesFromFileStream(source, visit, { shouldContinue });
+		return shouldContinue();
+	};
+	// Live children do not need a root JSONL path. Persisted discovery still does.
+	for (const ref of registry.list()) {
+		if (!shouldContinue()) return [];
+		if (ref.kind !== "sub" || !ref.session || !isLocalAgentSession(ref.session)) continue;
+		const childFile = ref.sessionFile ?? ref.session.sessionManager.getSessionFile();
+		const fileOwned = Boolean(rootFile && childFile && sessionFileBelongsToRoot(childFile, rootFile));
+		if (rootFile && childFile && !fileOwned) continue;
+		if (!fileOwned && !(ownerId && ownedBy(ref, ownerId, registry))) continue;
+		const source = childFile ? path.resolve(childFile) : ref.session.sessionManager.getSessionId();
+		if (seen.has(source)) continue;
+		seen.add(source);
+		if (!(await visitAgent(ref, source))) return [];
+	}
 	if (rootFile) {
 		// Discovery must not publish parked refs into the live roster.
 		const localRegistry = new AgentRegistry();
@@ -63,29 +109,13 @@ export async function listSessionSummaries(
 			}
 		}
 		await registerPersistedSubagents(localRegistry, rootFile, { hydrateHistory: false, shouldContinue });
-		const seen = new Set([rootSource]);
 		for (const ref of localRegistry.list()) {
 			if (!shouldContinue()) return [];
 			if (ref.kind !== "sub" || !ref.sessionFile) continue;
 			const source = path.resolve(ref.sessionFile);
 			if (seen.has(source)) continue;
 			seen.add(source);
-			const agentName = ref.displayName || ref.id;
-			const live = ref.session && isLocalAgentSession(ref.session) ? ref.session.sessionManager : undefined;
-			let inherited = Boolean(live?.getHeader()?.seanceSource);
-			let index = 0;
-			const visit = (entry: FileEntry): void => {
-				if (entry.type === "session") {
-					inherited = Boolean(entry.seanceSource);
-					return;
-				}
-				// Consult forks neutralize inherited init entries; their own init starts authored replies.
-				if (entry.type === "session_init") inherited = false;
-				if (!inherited) collect(entry, index, source, agentName);
-				index++;
-			};
-			if (live) live.getEntries().forEach(visit);
-			else await visitEntriesFromFileStream(source, visit, { shouldContinue });
+			if (!(await visitAgent(ref, source))) return [];
 		}
 	}
 	return summaries.sort(
@@ -122,7 +152,12 @@ export const SUMMARY_SLASH_COMMAND: SlashCommandSpec = {
 			manager.getSessionId() === id &&
 			manager.getSessionFile() === file;
 		try {
-			const items = await listSessionSummaries(manager, AgentRegistry.global(), shouldContinue);
+			const items = await listSessionSummaries(
+				manager,
+				AgentRegistry.global(),
+				shouldContinue,
+				session.getAgentId?.() ?? MAIN_AGENT_ID,
+			);
 			if (!shouldContinue()) return;
 			if (!items.length) {
 				ctx.showStatus("No past summaries in this session's agent tree.", { dim: true });

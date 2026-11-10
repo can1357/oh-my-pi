@@ -180,6 +180,61 @@ describe("/summary", () => {
 		expect(result.at(-1)?.entryIndex).toBe(entries.indexOf(legacy));
 		expect(await fs.readdir(dir.path())).toEqual([]);
 	});
+	it("collects live children of an unsaved root without reading other trees", async () => {
+		const child = SessionManager.inMemory();
+		const nested = SessionManager.inMemory();
+		const foreign = SessionManager.inMemory();
+		managers.push(child, nested, foreign);
+		child.appendMessage(answer("newest child", 500).message);
+		nested.appendMessage(answer("nested child", 400).message);
+		foreign.appendMessage(answer("other tree", 900).message);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "mid",
+			displayName: "mid",
+			kind: "sub",
+			parentId: "memory-root",
+			session: null,
+			sessionFile: null,
+			status: "parked",
+		});
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			parentId: "memory-root",
+			session: createSessionStub(child, Settings.isolated()),
+			sessionFile: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "nested",
+			displayName: "nested",
+			kind: "sub",
+			parentId: "mid",
+			session: createSessionStub(nested, Settings.isolated()),
+			sessionFile: null,
+			status: "idle",
+		});
+		registry.register({
+			id: "foreign",
+			displayName: "foreign",
+			kind: "sub",
+			parentId: "other-root",
+			session: createSessionStub(foreign, Settings.isolated()),
+			sessionFile: null,
+			status: "idle",
+		});
+		const before = structuredClone(registry.list().map(ref => ({ ...ref, session: null })));
+		const result = await listSessionSummaries(root([answer("older main", 100)]), registry, () => true, "memory-root");
+		expect(result.map(item => [item.agentName, item.text])).toEqual([
+			["child", "newest child"],
+			["nested", "nested child"],
+			["main", "older main"],
+		]);
+		expect(registry.list().map(ref => ({ ...ref, session: null }))).toEqual(before);
+		expect(await fs.readdir(dir.path())).toEqual([]);
+	});
 
 	it("skips malformed and vanished children but surfaces real read errors instead of an empty report", async () => {
 		const main = path.join(dir.path(), "root.jsonl");
