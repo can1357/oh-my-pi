@@ -31,6 +31,7 @@ import {
 	registeredPluginRootOf,
 	scanSkillsFromDir,
 } from "../discovery/helpers";
+import { maskBlockquotes } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
 import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
@@ -813,13 +814,13 @@ export interface ParsedSkillInvocation {
 /**
  * Detect a `/skill:<name>` invocation in a user draft.
  *
- * Returns `undefined` when the text contains no skill token. Otherwise:
+ * Returns `undefined` when the text contains no unquoted skill token. Otherwise:
  *   - Leading form (`/skill:foo bar baz`): name=`foo`, args=`bar baz`.
  *   - Mid-prompt form (`fix the bug /skill:foo focus on auth`): name=`foo`,
  *     args=`fix the bug focus on auth` — the surrounding prose collapsed
  *     into a single args string.
  *
- * Mid-prompt detection is gated by {@link allowsSkillTokens}.
+ * Mid-prompt detection is gated by {@link allowsSkillTokens}; quoted reference boundaries are retained.
  */
 export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
 	const trimmedStart = text.trimStart();
@@ -834,16 +835,17 @@ export function parseSkillInvocation(text: string): ParsedSkillInvocation | unde
 	}
 	if (!allowsSkillTokens(trimmedStart)) return undefined;
 	SKILL_TOKEN_RE.lastIndex = 0;
-	const match = SKILL_TOKEN_RE.exec(text);
+	const match = SKILL_TOKEN_RE.exec(maskBlockquotes(text));
 	if (!match) return undefined;
 	const tokenStart = match.index + match[1].length;
 	const tokenEnd = match.index + match[0].length;
 	const name = match[2];
 	const before = text.slice(0, tokenStart).trimEnd();
 	const after = text.slice(tokenEnd).trimStart();
+	const gap = text.slice(before.length, tokenStart);
 	const args = [before, after]
 		.filter(part => part.length > 0)
-		.join(" ")
+		.join(/[\r\n]/.test(gap) ? gap : " ")
 		.trim();
 	return { name, args, prompt };
 }

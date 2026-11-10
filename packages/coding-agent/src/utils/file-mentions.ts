@@ -28,6 +28,7 @@ import { formatDimensionNote, resizeImage } from "./image-resize";
 import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "./markit";
 import { createVideoPreviewImage, isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { maskBlockquotes } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
 
 /** Regex to match @filepath patterns in text */
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;
@@ -166,14 +167,15 @@ async function buildDirectoryListing(absolutePath: string): Promise<{ output: st
 	return { output, lineCount: output.split("\n").length };
 }
 
-/** Extract all @filepath mentions from text */
+/** Extract unquoted @filepath mentions from text. */
 export function extractFileMentions(text: string): string[] {
+	const authored = maskBlockquotes(text);
 	const matches = [...text.matchAll(FILE_MENTION_REGEX)];
 	const mentions: string[] = [];
 
 	for (const match of matches) {
 		const index = match.index ?? 0;
-		if (!isMentionBoundary(text, index)) continue;
+		if (authored[index] !== "@" || !isMentionBoundary(text, index)) continue;
 
 		const rawPath = match[1] ?? match[2] ?? match[3];
 		if (!rawPath) continue;

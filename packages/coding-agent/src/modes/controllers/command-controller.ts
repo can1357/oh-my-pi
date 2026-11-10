@@ -55,8 +55,7 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { continuesConversation } from "../utils/conversation-position";
 import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
-import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
-import type { TspText } from "@oh-my-pi/pi-wire";
+import { ReportPanel, type CommandReportOptions } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
@@ -219,6 +218,14 @@ export class CommandController {
 		return this.#clearReport();
 	}
 
+	/** Trigger the primary action on the visible report, if it has one. */
+	handleCommandReportAction(): boolean {
+		const sheet = this.#reportSheet?.component;
+		if (sheet instanceof ReportPanel) return sheet.handleAction();
+		const docked = this.ctx.reportContainer.children[0];
+		return docked instanceof ReportPanel ? docked.handleAction() : false;
+	}
+
 	/**
 	 * Drop any report — the one above the editor, or a focused sheet/page —
 	 * because the transcript or session under it was reset, and its contents
@@ -272,7 +279,7 @@ export class CommandController {
 	 * `/usage`, its body scrolled by the terminal once it is long, closed by
 	 * Esc or Close.
 	 */
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: CommandReportOptions): void {
 		this.#clearReport();
 		this.#closeReportSheet();
 		const terminal = this.ctx.ui.terminal;

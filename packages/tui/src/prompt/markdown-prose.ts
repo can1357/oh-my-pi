@@ -150,14 +150,20 @@ function maskTagAt(text: string, i: number, n: number, masked: Uint8Array): numb
 	return close;
 }
 
+/** Blank explicitly prefixed Markdown blockquote lines while preserving indices and line endings. */
+export function maskBlockquotes(text: string): string {
+	return text.replace(/^[\t ]*>[^\r\n]*/gm, line => " ".repeat(line.length));
+}
+
 /**
  * Return a copy of `text` with identical length (indices map 1:1) where every
  * character inside a non-prose region is replaced by a space. Non-prose regions
- * are markdown fenced code blocks, inline code spans, and HTML/XML tags together
+ * are markdown blockquotes, fenced code blocks, inline code spans, and HTML/XML tags together
  * with the content they enclose. Newlines are preserved. Text with no construct
  * that could open such a region is returned unchanged.
  */
 export function maskNonProse(text: string): string {
+	text = maskBlockquotes(text);
 	if (!text.includes("`") && !text.includes("<") && !text.includes("~~~")) {
 		return text;
 	}

@@ -1,3 +1,5 @@
+import { maskBlockquotes } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
+
 /**
  * "+Nk" turn token-budget directive.
  *
@@ -8,7 +10,6 @@
  * turn's spend reaches it. Matching is anchored to token boundaries so it does
  * not fire on prices or version strings embedded in prose.
  */
-
 // Number, optional k/m multiplier, optional `!` hard marker, bounded by whitespace/string edges.
 const TURN_BUDGET = /(?:^|\s)\+(\d+(?:\.\d+)?)([km])?(!)?(?=\s|$)/i;
 
@@ -19,9 +20,9 @@ export interface TurnBudget {
 	hard: boolean;
 }
 
-/** Parse a `+Nk`/`+N`/`+Nm`(`!`) turn-budget directive from `text`, or null when absent. */
+/** Parse the first `+Nk`/`+N`/`+Nm`(`!`) directive outside blockquoted references. */
 export function parseTurnBudget(text: string): TurnBudget | null {
-	const match = TURN_BUDGET.exec(text);
+	const match = TURN_BUDGET.exec(maskBlockquotes(text));
 	if (!match) return null;
 	const value = Number(match[1]);
 	if (!Number.isFinite(value) || value <= 0) return null;

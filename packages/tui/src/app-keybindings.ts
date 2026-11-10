@@ -46,6 +46,7 @@ interface AppKeybindings {
 	"app.retry": true;
 	"app.message.dequeue": true;
 	"app.btw.inject": true;
+	"app.summary.inject": true;
 	"app.clipboard.pasteImage": true;
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
@@ -192,6 +193,10 @@ export const KEYBINDINGS = {
 	"app.btw.inject": {
 		defaultKeys: "alt+i",
 		description: "Send a /btw answer's steering prompt to the main session",
+	},
+	"app.summary.inject": {
+		defaultKeys: "ctrl+alt+r",
+		description: "Insert the viewed summary as a quoted reference above the draft",
 	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: getDefaultPasteImageKeys(),

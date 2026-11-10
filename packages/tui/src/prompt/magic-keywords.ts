@@ -85,8 +85,8 @@ export function isMagicKeyword(word: string): boolean {
 
 /**
  * Whether `text` contains `word` as standalone lowercase prose — never inside
- * a code block, inline code span, or XML/HTML section. Pure: does not require
- * `word` to be registered.
+ * a blockquote, code block, inline code span, or XML/HTML section. Pure: does
+ * not require `word` to be registered.
  */
 export function containsMagicKeyword(text: string, word: string): boolean {
 	return keywordInProse(text, matcherFor(word));
@@ -94,11 +94,9 @@ export function containsMagicKeyword(text: string, word: string): boolean {
 
 /**
  * Gradient-highlight every registered keyword that appears as standalone
- * prose, skipping any occurrence inside a code block, inline code span, or
- * XML/HTML section. Each pass paints one word with its own gradient, so order
- * is irrelevant — earlier passes only inject zero-width SGR escapes (no
- * backticks or angle brackets), which never confuse later passes' markdown
- * masking.
+ * prose, excluding blockquotes, code, and XML/HTML sections. Each pass paints
+ * one word with its own gradient. Earlier passes only inject zero-width SGR
+ * escapes (no backticks or angle brackets), so they do not affect later masking.
  *
  * `resetTo` is the SGR foreground sequence restored after each painted keyword;
  * pass the surrounding text color when decorating already-colored content (e.g.
@@ -118,7 +116,7 @@ export function highlightMagicKeywords(text: string, resetTo?: string, phase?: n
 
 /**
  * UTF-16 ranges of every registered keyword standing as prose in `text`
- * (never inside code or XML/HTML sections), for decorating the keywords
+ * (never inside blockquotes, code, or XML/HTML sections), for decorating the keywords
  * without painting them: a TSP terminal draws the gradient sweep itself.
  */
 export function magicKeywordRanges(text: string): { from: number; to: number }[] {

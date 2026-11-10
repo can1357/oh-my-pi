@@ -37,11 +37,13 @@ export function isAdvisorCard(message: AgentMessage): message is CustomMessage {
 
 /** Whether a message is a terminal assistant answer containing text and no tools. */
 export function isTerminalTextAssistantAnswer(message: AgentMessage | undefined): message is AssistantMessage {
-	if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
+	if (message?.role !== "assistant" || message.stopReason !== "stop" || !Array.isArray(message.content)) return false;
 	let hasText = false;
 	for (const part of message.content) {
+		if (!part || typeof part !== "object") return false;
 		if (part.type === "toolCall") return false;
 		if (part.type === "text") {
+			if (typeof part.text !== "string") return false;
 			if (part.text.trim().length > 0) hasText = true;
 			continue;
 		}

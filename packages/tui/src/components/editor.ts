@@ -3492,9 +3492,10 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1;
 	}
 
-	/** Insert text at the current cursor position */
-	insertText(text: string): void {
+	/** Insert text at the current cursor, or at the start of the draft. */
+	insertText(text: string, options?: { at: "start" }): void {
 		this.#exitHistoryForEditing();
+		if (options?.at === "start") this.#moveToMessageStart();
 		this.#insertTextAtCursor(text);
 	}
 

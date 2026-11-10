@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { keywordInProse, maskNonProse } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
+import { keywordInProse, maskBlockquotes, maskNonProse } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
 
 const ORCHESTRATE = /\borchestrate\b/i;
 
@@ -24,6 +24,19 @@ describe("maskNonProse", () => {
 });
 
 describe("keywordInProse", () => {
+	it("masks prefixed blockquotes while preserving indices and line endings", () => {
+		const text = "before\r\n  > > ultrathink\r\n\t> chillax\n\nafter orchestrate";
+		const masked = maskBlockquotes(text);
+		expect(masked).toHaveLength(text.length);
+		expect(masked.match(/[\r\n]+/g)).toEqual(text.match(/[\r\n]+/g));
+		expect(masked.includes("ultrathink")).toBe(false);
+		expect(masked.includes("chillax")).toBe(false);
+	});
+
+	it("ignores quoted magic keywords but matches authored prose after the quote", () => {
+		expect(keywordInProse("> chillax ultrathink orchestrate\n\nPlease orchestrate this", ORCHESTRATE)).toBe(true);
+		expect(keywordInProse("> chillax ultrathink orchestrate", ORCHESTRATE)).toBe(false);
+	});
 	it("matches a standalone keyword in prose", () => {
 		expect(keywordInProse("please orchestrate this", ORCHESTRATE)).toBe(true);
 		expect(keywordInProse("orchestrate", ORCHESTRATE)).toBe(true);

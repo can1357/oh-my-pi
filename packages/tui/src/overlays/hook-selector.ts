@@ -6,6 +6,7 @@ import {
 	Container,
 	Ellipsis,
 	extractPrintableText,
+	Markdown,
 	type MarkdownTheme,
 	matchesKey,
 	padding,
@@ -33,12 +34,13 @@ import { renderSegmentTrack } from "../chrome/segment-track";
 import { Input } from "../components/input";
 import { MenuSelection, getMenuWindow } from "../components/menu-selection";
 import type { KeyName } from "../key-hint-format";
-import { node, span } from "../native/describe";
+import { md, node, span } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, hintsRow, overlayCard } from "../native/overlay";
 import { plainText } from "../native/spans";
 import { CLOSE_ACTION, dockedPicker, PICKER_KEY, pickerAction, pickerEvent, pickerQuery } from "../native/picker";
 import type { TspPickerItem } from "@oh-my-pi/pi-wire";
+import { PREVIEW_LIMITS } from "../render/render-utils";
 
 /** One segment of a {@link HookSelectorSlider} — a label and an optional
  *  detail line (e.g. the resolved model name) shown beneath the track while
@@ -103,16 +105,18 @@ export interface HookSelectorOptions {
 export interface HookSelectorOption {
 	label: string;
 	description?: string;
+	preview?: string;
 }
 
 export type HookSelectorOptionInput = string | HookSelectorOption;
 
 function normalizeHookSelectorOption(option: HookSelectorOptionInput): HookSelectorOption {
 	if (typeof option === "string") return { label: option };
-	if (option.description?.trim()) {
-		return { label: option.label, description: option.description.trim() };
-	}
-	return { label: option.label };
+	return {
+		label: option.label,
+		...(option.description?.trim() ? { description: option.description.trim() } : {}),
+		...(option.preview ? { preview: replaceTabs(option.preview.slice(0, PREVIEW_LIMITS.PICKER_CHARS)) } : {}),
+	};
 }
 
 function splitLeadingSpacesForWrap(line: string, width: number): { indent: string; body: string } {
@@ -169,15 +173,20 @@ class OutlinedList extends Container {
 	}
 }
 
-/** A filtered option paired with its index into the original options array, so
- *  disabled-index lookups survive fuzzy filtering and reordering. */
-type FilteredOption = { option: HookSelectorOption; index: number };
-
+type FilteredOption = { option: HookSelectorOption; index: number; searchText: string };
 /** Plain text of an extension-supplied inline-markdown string: markers rendered away, no ANSI. */
 function plainInline(source: string, mdTheme: MarkdownTheme): string {
 	return plainText(renderInlineMarkdown(source, mdTheme));
 }
 
+function renderPreview(source: string, rows: number, width = 80): string[] {
+	const markdown = new Markdown(source, 0, 0, getMarkdownTheme());
+	return markdown.render(Math.max(1, width)).slice(0, rows);
+}
+
+function describePreview(source: string): NativeNode {
+	return md(source, { max: { h: `${PREVIEW_LIMITS.PICKER_LINES}lines` } });
+}
 const ENTER_KEYS: readonly KeyName[] = ["enter"];
 
 interface HookSelectorNativeMemo {
@@ -199,6 +208,11 @@ export class HookSelectorComponent extends OverlayPanel {
 	#checkedIndices: Set<number>;
 	#markableCount: number;
 	#maxVisible: number;
+	readonly #hasPreview: boolean;
+	#preview: Text | undefined;
+	#previewSourceIndex: number | undefined;
+	#previewRenderWidth: number | undefined;
+	readonly #previewRows: number;
 	#listContainer: Container | undefined;
 	#outlinedList: OutlinedList | undefined;
 	#onSelectCallback: (option: string) => void;
@@ -248,10 +262,14 @@ export class HookSelectorComponent extends OverlayPanel {
 			),
 		);
 		this.#menu = new MenuSelection<FilteredOption>(
-			this.#options.map((option, index) => ({ option, index })),
+			this.#options.map((option, index) => ({
+				option,
+				index,
+				searchText: `${option.label} ${option.description ?? ""} ${option.preview ?? ""}`,
+			})),
 			{
 				getKey: filtered => String(filtered.index),
-				getSearchText: filtered => `${filtered.option.label} ${filtered.option.description ?? ""}`,
+				getSearchText: filtered => filtered.searchText,
 				isDisabled: filtered => this.#disabledIndices.has(filtered.index),
 			},
 		);
@@ -263,7 +281,10 @@ export class HookSelectorComponent extends OverlayPanel {
 			),
 		);
 		this.#markableCount = Math.max(0, Math.min(opts?.markableCount ?? this.#options.length, this.#options.length));
-		this.#maxVisible = Math.max(3, opts?.maxVisible ?? 12);
+		const baseMaxVisible = opts?.maxVisible ?? 12;
+		this.#hasPreview = this.#options.some(option => option.preview);
+		this.#previewRows = this.#hasPreview ? Math.min(PREVIEW_LIMITS.PICKER_LINES, Math.max(0, baseMaxVisible - 5)) : 0;
+		this.#maxVisible = Math.max(3, baseMaxVisible - (this.#previewRows > 0 ? this.#previewRows + 2 : 0));
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
 		this.#baseTitle = this.title;
@@ -316,6 +337,11 @@ export class HookSelectorComponent extends OverlayPanel {
 		} else {
 			this.#listContainer = new Container();
 			this.addChild(this.#listContainer);
+		}
+		if (this.#previewRows > 0) {
+			this.addChild(new Spacer(1));
+			this.#preview = new Text("", 0, 0);
+			this.addChild(this.#preview);
 		}
 		this.addChild(new Spacer(1));
 		const controlsHint =
@@ -525,8 +551,21 @@ export class HookSelectorComponent extends OverlayPanel {
 			rows.push({ text: theme.fg("dim", "  No matching options"), highlight: false });
 		}
 
-		if (startIndex > 0 || endIndex < total || this.#shouldRenderSearchStatus(renderWidth, mdTheme)) {
+		if (this.#shouldRenderSearchStatus(renderWidth, mdTheme)) {
 			rows.push({ text: this.#renderStatusLine(total), highlight: false });
+		}
+
+		if (this.#preview) {
+			const selectedItem = this.#menu.selectedItem;
+			const source = selectedItem?.option.preview;
+			if (source === undefined || !selectedItem) {
+				this.#previewSourceIndex = undefined;
+				this.#preview.setText("");
+			} else if (this.#previewSourceIndex !== selectedItem.index || this.#previewRenderWidth !== renderWidth) {
+				this.#previewSourceIndex = selectedItem.index;
+				this.#previewRenderWidth = renderWidth;
+				this.#preview.setText(renderPreview(source, this.#previewRows, renderWidth).join("\n"));
+			}
 		}
 		if (this.#outlinedList) {
 			this.#outlinedList.setLines(rows);
@@ -538,7 +577,6 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.#listContainer?.addChild(new Text(row.text, 1, 0, bgFn));
 		}
 	}
-
 	/** Render the slider block in the style of the status line: each option is a
 	 *  distinctly colored segment, the active one filled as a powerline chip
 	 *  (its accent as the background, a luminance-matched label, flanked by
@@ -575,7 +613,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	}
 
 	#isSearchEnabled(renderWidth = this.#lastRenderWidth, mdTheme?: MarkdownTheme): boolean {
-		return this.#totalOptionRows(this.#options, renderWidth, mdTheme) > this.#maxVisible;
+		return this.#hasPreview || this.#totalOptionRows(this.#options, renderWidth, mdTheme) > this.#maxVisible;
 	}
 
 	#shouldRenderSearchStatus(renderWidth = this.#lastRenderWidth, mdTheme?: MarkdownTheme): boolean {
@@ -621,7 +659,8 @@ export class HookSelectorComponent extends OverlayPanel {
 	 *  type-to-search is active, digits stay searchable. Checkbox menus only
 	 *  move the cursor — confirmation stays on `enter`. */
 	#handleQuickSelect(keyData: string): boolean {
-		if (this.#menu.query.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9") return false;
+		if (this.#hasPreview || this.#menu.query.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9")
+			return false;
 		const targetIndex = this.#menu.visibleItems.findIndex(({ option }) => option.label.startsWith(`${keyData}. `));
 		if (targetIndex < 0) return false;
 		const target = this.#menu.visibleItems[targetIndex];
@@ -682,11 +721,17 @@ export class HookSelectorComponent extends OverlayPanel {
 		return super.render(width);
 	}
 
+	override invalidate(): void {
+		this.#previewSourceIndex = undefined;
+		this.#lastRenderWidth = undefined;
+		super.invalidate();
+	}
+
 	override dispose(): void {
 		this.#countdown?.dispose();
 	}
 
-	/** The options as a `picker md` sheet: every option by original index, filtering sends only `order`. */
+	/** The options as a picker sheet: filtering sends only the visible order. */
 	#describePicker(): NativeNode {
 		const items = this.#menu.visibleItems;
 		const selected = this.#menu.selectedKey;
@@ -711,22 +756,26 @@ export class HookSelectorComponent extends OverlayPanel {
 			...(this.#isDisabled(index) ? { disabled: true as const } : {}),
 		}));
 		const checkbox = this.#selectionMarker === "checkbox";
-		const result = dockedPicker({
-			title: fixed.title,
-			...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join("\n")) } : {}),
-			noun: "options",
-			size: "md",
-			layout: "rows",
-			preview: "none",
-			...pickerQuery(this.#isSearchEnabled() || query.length > 0 ? this.#search : null),
-			items: this.#pickerItems,
-			...(query.length > 0 ? { order: items.map(filtered => String(filtered.index)) } : {}),
-			selected: selected ?? null,
-			...(checkbox ? { current: [...this.#checkedIndices].map(String) } : {}),
-			total: this.#options.length,
-			empty: "No matching options",
-			actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
-		});
+		const preview = this.#menu.selectedItem?.option.preview;
+		const result = dockedPicker(
+			{
+				title: fixed.title,
+				...(this.#detailLines.length > 0 ? { subtitle: plainText(this.#detailLines.join("\n")) } : {}),
+				noun: "options",
+				size: "md",
+				layout: "rows",
+				preview: preview ? "below" : "none",
+				...pickerQuery(this.#isSearchEnabled() || query.length > 0 ? this.#search : null),
+				items: this.#pickerItems,
+				...(query.length > 0 ? { order: items.map(filtered => String(filtered.index)) } : {}),
+				selected: selected ?? null,
+				...(checkbox ? { current: [...this.#checkedIndices].map(String) } : {}),
+				total: this.#options.length,
+				empty: "No matching options",
+				actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
+			},
+			preview ? [describePreview(preview)] : [],
+		);
 		this.#pickerMemo = { items, selected, query, cursor, node: result };
 		return result;
 	}
@@ -769,9 +818,7 @@ export class HookSelectorComponent extends OverlayPanel {
 
 		const selectedItem = this.#menu.selectedItem;
 		const rows: NativeNode[] = [];
-		for (const filtered of items) {
-			rows.push(this.#describeOption(filtered, filtered === selectedItem, mdTheme));
-		}
+		for (const filtered of items) rows.push(this.#describeOption(filtered, filtered === selectedItem, mdTheme));
 		children.push(
 			node(
 				"list",
@@ -785,13 +832,14 @@ export class HookSelectorComponent extends OverlayPanel {
 				"list",
 			),
 		);
-		if (query) {
+		if (selectedItem?.option.preview) {
+			children.push(describePreview(selectedItem.option.preview));
+		}
+		if (query)
 			children.push(
 				node("text", { spans: [span("Search: ", "dim"), span(query)], wrap: "none" }, undefined, "search"),
 			);
-		}
 		children.push(fixed.hints);
-
 		const root = overlayCard(this.nativeRole, countdown ? undefined : fixed.title, children);
 		this.#nativeMemo = { items, selected, query, slider: this.#sliderIndex, countdown, node: root };
 		return root;

@@ -1,7 +1,30 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
+const pickerCx: DescribeContext = {
+	cols: 80,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+
+function isNode(child: NativeChild): child is NativeNode {
+	return "k" in child && typeof child.k === "string";
+}
+
+function markdownNodes(root: NativeNode): Extract<NativeNode, { k: "md" }>[] {
+	const nodes: Extract<NativeNode, { k: "md" }>[] = [];
+	const stack = [root];
+	while (stack.length > 0) {
+		const current = stack.pop()!;
+		if (current.k === "md") nodes.push(current);
+		for (const child of current.c ?? []) if (isNode(child)) stack.push(child);
+	}
+	return nodes;
+}
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
 const KITTY_H = "\x1b[104;1u";
@@ -161,5 +184,74 @@ describe("HookSelectorComponent model slider", () => {
 
 		component.handleInput("\n");
 		expect(selected).toEqual(["OpenCode Go"]);
+	});
+
+	it.each([4, 8])("keeps previews within the same row budget as a plain picker at %s rows", maxVisible => {
+		const labels = Array.from({ length: 20 }, (_, index) => `Option ${index}`);
+		const plain = new HookSelectorComponent(
+			"Browse",
+			labels,
+			() => {},
+			() => {},
+			{ maxVisible },
+		);
+		const previewed = new HookSelectorComponent(
+			"Browse",
+			labels.map(label => ({ label, preview: "preview line\n".repeat(80) })),
+			() => {},
+			() => {},
+			{ maxVisible },
+		);
+		expect(previewed.render(60).length).toBeLessThanOrEqual(plain.render(60).length);
+	});
+
+	it("searches numeric preview text instead of confirming a numbered option", () => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Browse",
+			[
+				{ label: "1. main", preview: "Unrelated reply" },
+				{ label: "2. worker", preview: "Task 18757" },
+			],
+			value => selected.push(value),
+			() => {},
+		);
+		for (const key of "18757") component.handleInput(key);
+		expect(selected).toEqual([]);
+		component.handleInput("\n");
+		expect(selected).toEqual(["2. worker"]);
+	});
+
+	it("excludes text beyond the bounded preview from search and clears a no-match preview", () => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Browse",
+			[{ label: "main", preview: `Visible reply\n${"x".repeat(10_000)}\nFAR_ONLY_MATCH` }],
+			value => selected.push(value),
+			() => {},
+		);
+		for (const key of "FAR_ONLY_MATCH") component.handleInput(key);
+		expect(markdownNodes(component.describe(pickerCx))).toEqual([]);
+		component.handleInput("\n");
+		expect(selected).toEqual([]);
+	});
+
+	it.each([true, false])("updates a bounded native preview with picker support=%s", supportsPicker => {
+		const longParagraph = "unbroken ".repeat(400);
+		const component = new HookSelectorComponent(
+			"Browse",
+			[
+				{ label: "first", preview: "# First preview" },
+				{ label: "second", preview: longParagraph },
+			],
+			() => {},
+			() => {},
+		);
+		const cx = { ...pickerCx, supports: () => supportsPicker };
+		expect(markdownNodes(component.describe(cx)).map(node => node.p?.text)).toContain("# First preview");
+		component.handleNativeEvent({ type: "select", key: supportsPicker ? "^picker" : "list", item: "1" });
+		const [preview] = markdownNodes(component.describe(cx));
+		expect(preview?.p?.text).toBe(longParagraph);
+		expect(preview?.p?.max).toEqual({ h: "6lines" });
 	});
 });

@@ -2,7 +2,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, KeyId, Loader, TUI } from "@oh-my-pi/pi-tui";
-import type { TspText } from "@oh-my-pi/pi-wire";
 import type { StatusNotice, StatusNoticeAction } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
@@ -65,6 +64,7 @@ import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { CommandReportOptions } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
 export type CompactionQueuedMessage = {
@@ -701,6 +701,7 @@ export interface InteractiveModeContext {
 	handleBtwCopyKey(): Promise<boolean>;
 	canFollowUpBtw(): boolean;
 	handleBtwFollowUpKey(): boolean;
+	handleCommandReportAction(): boolean;
 	/** The inject key (`app.btw.inject`, Alt+I): steer the main session with the completed /btw answer's `<inject>` block (`btw.inject`). */
 	handleBtwInjectKey(): boolean;
 	handleBtwBranch(
@@ -721,7 +722,7 @@ export interface InteractiveModeContext {
 	 * like `/btw` (a full-screen page when taller) in text mode, a `/usage`-style
 	 * sheet natively. Replaces the report already shown.
 	 */
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
+	showCommandReport(options: CommandReportOptions): void;
 	/** The live background-jobs sheet (the jobs pill's). */
 	showJobsSheet(): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */

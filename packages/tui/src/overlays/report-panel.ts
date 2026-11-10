@@ -12,7 +12,8 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { matchesKey } from "../keys";
+import { formatKeyHints } from "../app-keybindings";
+import { type KeyId, matchesKey } from "../keys";
 import { routeSgrMouseInput } from "../mouse";
 import { actionBar, actionButton } from "../native/overlay";
 import { col } from "../native/describe";
@@ -28,6 +29,12 @@ export interface ReportPanelOptions {
 	readonly head?: TspText;
 	/** The read-only report; it draws no frame or title of its own. */
 	readonly body: Component;
+	/** Optional primary action available from the focused report. */
+	readonly action?: {
+		readonly label: string;
+		readonly keys: readonly KeyId[];
+		readonly onAction: () => void;
+	};
 	/**
 	 * Display form of the key that dismisses the report while it sits above the
 	 * editor (the editor's interrupt key, which routes to it). Once the panel
@@ -44,6 +51,9 @@ export interface ReportPanelOptions {
 	 */
 	readonly maxRows?: () => number | undefined;
 }
+
+/** Options shared by command reports. */
+export type CommandReportOptions = Pick<ReportPanelOptions, "title" | "head" | "body" | "action">;
 
 /** Text-mode rows around the scrolled body: the borders, two spacers and the footer. */
 const TEXT_CHROME_ROWS = 5;
@@ -64,6 +74,7 @@ export class ReportPanel extends OverlayPanel {
 	readonly #body: Component;
 	readonly #onClose: () => void;
 	readonly #maxRows: (() => number | undefined) | undefined;
+	readonly #action: ReportPanelOptions["action"];
 	readonly #view: ScrollView;
 	readonly #footer: Text;
 	#closeHint: string;
@@ -82,6 +93,7 @@ export class ReportPanel extends OverlayPanel {
 		this.#body = options.body;
 		this.#onClose = options.onClose;
 		this.#maxRows = options.maxRows;
+		this.#action = options.action;
 		this.#closeHint = `${options.closeKey} to close`;
 		this.#view = new ScrollView(options.body, {
 			height: 0,
@@ -89,11 +101,18 @@ export class ReportPanel extends OverlayPanel {
 			ellipsis: Ellipsis.Omit,
 			theme: { track: text => theme.fg("dim", text), thumb: text => theme.fg("accent", text) },
 		});
-		this.#footer = new Text(theme.fg("muted", this.#closeHint), 0, 0);
+		this.#footer = new Text(theme.fg("muted", this.#footerHint()), 0, 0);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#view);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#footer);
+	}
+
+	#footerHint(): string {
+		const action = this.#action;
+		return action?.keys.length
+			? `${this.#closeHint} · ${formatKeyHints(action.keys)} ${action.label}`
+			: this.#closeHint;
 	}
 
 	/**
@@ -102,6 +121,14 @@ export class ReportPanel extends OverlayPanel {
 	 */
 	holdFocus(): void {
 		this.#closeHint = `${editorKey("tui.select.cancel")} to close`;
+	}
+
+	/** Invoke the optional primary action; returns whether an action was handled. */
+	handleAction(): boolean {
+		if (!this.#action) return false;
+		this.#action.onAction();
+		this.#onClose();
+		return true;
 	}
 
 	/**
@@ -119,7 +146,8 @@ export class ReportPanel extends OverlayPanel {
 		this.#bodyRows = Math.min(rows, bodyMax);
 		this.#view.setHeight(this.#bodyRows);
 		const scrollHint = `${editorKey("tui.select.pageUp")}/${editorKey("tui.select.pageDown")} scroll · `;
-		this.#footer.setText(theme.fg("muted", overflows ? scrollHint + this.#closeHint : this.#closeHint));
+		const footer = this.#footerHint();
+		this.#footer.setText(theme.fg("muted", overflows ? scrollHint + footer : footer));
 		const lines = super.render(width);
 		return cap !== undefined && lines.length > cap ? lines.slice(0, Math.max(0, cap)) : lines;
 	}
@@ -138,7 +166,18 @@ export class ReportPanel extends OverlayPanel {
 		const scroll = this.#scroll;
 		if (this.#native && this.#native.scroll === scroll) return this.#native.node;
 		const body: NativeNode = { ...col([this.#body], { role: "omp.report.body" }), key: "body", scroll };
-		const node = col([body, actionBar([null, actionButton("Close", "close", { keys: "escape" })])], { gap: "md" });
+		const action = this.#action;
+		const node = col(
+			[
+				body,
+				actionBar([
+					null,
+					...(action ? [actionButton(action.label, "primary", { keys: action.keys[0], tone: "accent" })] : []),
+					actionButton("Close", "close", { keys: "escape" }),
+				]),
+			],
+			{ gap: "md" },
+		);
 		this.#native = { scroll, node };
 		return node;
 	}
@@ -160,6 +199,10 @@ export class ReportPanel extends OverlayPanel {
 				return true;
 			})
 		) {
+			return;
+		}
+		if (this.#action?.keys.some(key => matchesKey(data, key))) {
+			this.handleAction();
 			return;
 		}
 		if (matchesSelectCancel(data)) {
@@ -190,6 +233,7 @@ export class ReportPanel extends OverlayPanel {
 
 	/** Close runs what Esc runs. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "close") this.#onClose();
+		if (event.type === "action" && event.act === "primary") this.handleAction();
+		else if (event.type === "action" && event.act === "close") this.#onClose();
 	}
 }

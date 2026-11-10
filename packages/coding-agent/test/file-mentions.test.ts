@@ -131,6 +131,18 @@ describe("generateFileMentionMessages path resolution", () => {
 		expect(message.files).toHaveLength(1);
 		expect(message.files[0]?.path).toBe("My Folder/my file.png");
 	});
+	test("ignores quoted file mentions and still reads an authored path", async () => {
+		const cwd = await createTempDir();
+		await fs.mkdir(path.join(cwd, "src"), { recursive: true });
+		await Bun.write(path.join(cwd, "src", "config.ts"), "quoted");
+		await Bun.write(path.join(cwd, "src", "new.ts"), "authored");
+		const reference = "> @src/config.ts\n\n";
+		expect(extractFileMentions(`${reference}Follow up`)).toEqual([]);
+		expect(extractFileMentions(`${reference}See @src/new.ts`)).toEqual(["src/new.ts"]);
+		const messages = await generateFileMentionMessages(extractFileMentions(`${reference}See @src/new.ts`), cwd);
+		expect(messages[0]?.files.map(file => file.path)).toEqual(["src/new.ts"]);
+		expect(messages[0]?.files[0]?.content).toContain("authored");
+	});
 
 	test("skips auto-reading a binary file instead of injecting raw bytes", async () => {
 		const cwd = await createTempDir();
