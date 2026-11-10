@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A browser call on a tab that is not open now says to open it with `await browser.open({ name })` (Python: `await browser.open(name=…)`) and the url and app it was opened with, instead of pointing at the removed `action:"open"` ([#18739](https://github.com/can1357/oh-my-pi/pull/18739) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
