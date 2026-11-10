@@ -121,6 +121,7 @@ describe("TranscriptContainer live-entry wrapper cache", () => {
 		// the start index would keep serving the old block's rows.
 		const transcript = new TranscriptContainer();
 		const old = new Block(["old rows"]);
+		transcript.addChild(old);
 		primeAndRerender(transcript, 80, 10);
 
 		transcript.children[0] = new Block(["new rows"]);
