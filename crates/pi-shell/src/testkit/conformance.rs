@@ -1088,13 +1088,18 @@ fn a_local_is_visible_while_its_function_runs<S: StateStore>(store: &mut S) {
 /// the op that made them, one change at a time.
 fn cd_set_o_and_alias_are_visible_after_each_op<S: StateStore>(store: &mut S) {
 	let mut host = FakeHost::new();
-	for d in ["/a", "/b", "/c"] {
+	for d in ["/one", "/two", "/three"] {
 		host.fs.add_dir(d);
 	}
 	let mut shell = create(&mut host, store);
-	let cwd =
-		distinct_values(&mut shell, &mut host, store, "cd /a; cd /b; cd /c", Key::Misc(MiscKey::Cwd));
-	let want: Vec<Option<Record>> = ["/a", "/b", "/c"]
+	let cwd = distinct_values(
+		&mut shell,
+		&mut host,
+		store,
+		"cd /one; cd /two; cd /three",
+		Key::Misc(MiscKey::Cwd),
+	);
+	let want: Vec<Option<Record>> = ["/one", "/two", "/three"]
 		.iter()
 		.map(|d| Some(Record::Misc(BString::from(*d))))
 		.collect();
@@ -1199,10 +1204,10 @@ fn a_host_option_write_reaches_the_next_glob<S: StateStore>(
 	bump: &mut impl FnMut(&mut S),
 ) {
 	let mut host = FakeHost::new();
-	host.fs.add_file("/d/a", b"", 0o644);
+	host.fs.add_file("/dir/a", b"", 0o644);
 	let mut shell = create(&mut host, store);
-	let src = "n=0; set -- /d/*; while [ \"$1\" != '/d/*' ]; do n=$((n+1)); set -- /d/*; done; \
-	           echo \"$1 $n\"";
+	let src = "n=0; set -- /dir/*; while [ \"$1\" != '/dir/*' ]; do n=$((n+1)); set -- /dir/*; \
+	           done; echo \"$1 $n\"";
 	let run = shell.submit(Script::command(src.as_bytes()));
 	for _ in 0..200 {
 		let done = one_op(&mut shell, &mut host, store, run, &mut |_| {});
@@ -1216,7 +1221,7 @@ fn a_host_option_write_reaches_the_next_glob<S: StateStore>(
 	assert_eq!(status, 0);
 	let n = read_number(store, b"n");
 	assert!(n == n0 || n == n0 + 1, "the next glob saw noglob: {n0} then {n}");
-	assert_eq!(host.stdout.bytes(), format!("/d/* {n}\n").as_bytes());
+	assert_eq!(host.stdout.bytes(), format!("/dir/* {n}\n").as_bytes());
 }
 
 /// A working directory the host writes (`MiscKey::Cwd` + epoch bump)
@@ -1226,14 +1231,14 @@ fn a_host_cwd_write_reaches_the_next_command<S: StateStore>(
 	bump: &mut impl FnMut(&mut S),
 ) {
 	let mut host = FakeHost::new();
-	host.fs.add_dir("/a");
-	host.fs.add_dir("/b");
+	host.fs.add_dir("/one");
+	host.fs.add_dir("/two");
 	let mut shell = create(&mut host, store);
-	assert_eq!(run(&mut shell, &mut host, store, "cd /a"), 0);
-	apply(store, Change::Put(Key::Misc(MiscKey::Cwd), Record::Misc(bytes(b"/b"))));
+	assert_eq!(run(&mut shell, &mut host, store, "cd /one"), 0);
+	apply(store, Change::Put(Key::Misc(MiscKey::Cwd), Record::Misc(bytes(b"/two"))));
 	bump(&mut *store);
 	let ran = run_settled(&mut shell, &mut host, store, "pwd");
-	assert_eq!(ran.stdout, "/b\n", "pwd prints the cwd the host wrote");
+	assert_eq!(ran.stdout, "/two\n", "pwd prints the cwd the host wrote");
 }
 
 /// The session of [`a_copy_between_commands_restores_in_a_fresh_shell`]:

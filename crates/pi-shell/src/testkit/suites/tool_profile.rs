@@ -18,7 +18,7 @@ struct Ran {
 	status: i32,
 }
 
-/// Run `src` in a shell of `mode` and `profile` over `fs` (`HOME=/h`):
+/// Run `src` in a shell of `mode` and `profile` over `fs` (`HOME=/home`):
 /// read from standard input by an interactive shell when `interactive`,
 /// else as `-c`.
 fn run(mode: ModeId, profile: Profile, fs: &MemFs, interactive: bool, src: &str) -> Ran {
@@ -30,7 +30,7 @@ fn run(mode: ModeId, profile: Profile, fs: &MemFs, interactive: bool, src: &str)
 		profile,
 		env: vec![
 			("PATH".into(), "/usr/bin:/bin".into()),
-			("HOME".into(), "/h".into()),
+			("HOME".into(), "/home".into()),
 			("PS1".into(), "".into()),
 		],
 		options: if zsh {
@@ -61,7 +61,7 @@ fn run(mode: ModeId, profile: Profile, fs: &MemFs, interactive: bool, src: &str)
 /// A history file and a home directory.
 fn home() -> MemFs {
 	let fs = MemFs::new();
-	fs.add_file("/h/hist", b": 1600000000:5;echo old\n", 0o600);
+	fs.add_file("/home/hist", b": 1600000000:5;echo old\n", 0o600);
 	fs
 }
 
@@ -71,13 +71,13 @@ fn home() -> MemFs {
 /// (no file, no `.LOCK`) and does not save at exit.
 #[test]
 fn zsh_history_files_and_recording() {
-	let src = "HISTFILE=/h/hist; SAVEHIST=10; unsetopt histsavebycopy\nfc -R\necho one\nprint -r \
-	           -- ${#history}\nprint -s pushed\nfc -W /h/out\n";
+	let src = "HISTFILE=/home/hist; SAVEHIST=10; unsetopt histsavebycopy\nfc -R\necho one\nprint \
+	           -r -- ${#history}\nprint -s pushed\nfc -W /home/out\n";
 	let user = home();
 	let ran = run(ModeId::Zsh, Profile::User, &user, true, src);
 	assert_ne!(ran.out.lines().last(), Some("0"), "user shell keeps history: {}", ran.out);
-	assert!(user.read("/h/out").is_some());
-	assert_ne!(user.read("/h/hist").unwrap(), b": 1600000000:5;echo old\n");
+	assert!(user.read("/home/out").is_some());
+	assert_ne!(user.read("/home/hist").unwrap(), b": 1600000000:5;echo old\n");
 
 	let tool = home();
 	let ran = run(ModeId::Zsh, Profile::Tool, &tool, true, src);
@@ -91,9 +91,9 @@ fn zsh_history_files_and_recording() {
 		"{}",
 		ran.err
 	);
-	assert!(tool.read("/h/out").is_none());
-	assert!(tool.read("/h/out.LOCK").is_none());
-	assert_eq!(tool.read("/h/hist").unwrap(), b": 1600000000:5;echo old\n");
+	assert!(tool.read("/home/out").is_none());
+	assert!(tool.read("/home/out.LOCK").is_none());
+	assert_eq!(tool.read("/home/hist").unwrap(), b": 1600000000:5;echo old\n");
 }
 
 /// An interactive bash: the tool's records nothing, `history -r/-w` fail,
@@ -101,18 +101,18 @@ fn zsh_history_files_and_recording() {
 /// readline bindings (`bind`), as a bash built without readline.
 #[test]
 fn bash_history_and_completion() {
-	let src = "set -o history\necho a\nhistory -w /h/b; echo st=$?\nhistory -r /h/hist; echo \
+	let src = "set -o history\necho a\nhistory -w /home/b; echo st=$?\nhistory -r /home/hist; echo \
 	           st=$?\nhistory\ncompgen -W xy x; complete -F f g; bind -l >/dev/null; echo st=$?\n";
 	let user = home();
 	let ran = run(ModeId::Bash, Profile::User, &user, true, src);
 	assert!(ran.out.contains("st=0\nst=0\n"), "{}", ran.out);
 	assert!(ran.out.contains("echo a") && ran.out.contains("\nxy\nst=0\n"), "{}", ran.out);
-	assert!(user.read("/h/b").is_some());
+	assert!(user.read("/home/b").is_some());
 
 	let tool = home();
 	let ran = run(ModeId::Bash, Profile::Tool, &tool, true, src);
 	assert_eq!(ran.out, "a\nst=1\nst=1\nst=127\n");
-	assert!(tool.read("/h/b").is_none());
+	assert!(tool.read("/home/b").is_none());
 	for cmd in ["compgen", "complete", "bind"] {
 		assert!(ran.err.contains(&format!("{cmd}: command not found")), "{}", ran.err);
 	}
@@ -141,9 +141,9 @@ fn no_line_editor_or_completion_modules() {
 #[test]
 fn nested_interactive_shells_skip_rc_files() {
 	let fs = MemFs::new();
-	fs.add_file("/h/.zshenv", b"echo zshenv\n", 0o644);
-	fs.add_file("/h/.zshrc", b"echo zshrc\n", 0o644);
-	fs.add_file("/h/.bashrc", b"echo bashrc\n", 0o644);
+	fs.add_file("/home/.zshenv", b"echo zshenv\n", 0o644);
+	fs.add_file("/home/.zshrc", b"echo zshrc\n", 0o644);
+	fs.add_file("/home/.bashrc", b"echo bashrc\n", 0o644);
 	let src = "zsh -i -c 'echo zcmd'; bash -i -c 'echo bcmd'";
 	let ran = run(ModeId::Bash, Profile::User, &fs, false, src);
 	for line in ["zshenv", "zshrc", "zcmd", "bashrc", "bcmd"] {

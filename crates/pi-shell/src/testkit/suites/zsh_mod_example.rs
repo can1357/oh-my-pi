@@ -132,15 +132,15 @@ fn zsh_mod_example_math_functions() {
 #[test]
 fn zsh_mod_example_wrapper_sets_globdots_for_example_functions() {
 	let host = FakeHost::new();
-	host.fs.add_dir("/w");
-	host.fs.add_file("/w/.a", b"", 0o644);
-	host.fs.add_file("/w/b", b"", 0o644);
+	host.fs.add_dir("/work");
+	host.fs.add_file("/work/.a", b"", 0o644);
+	host.fs.add_file("/work/b", b"", 0o644);
 	let (out, err, st) = zsh_on(
 		host,
-		"zmodload zsh/example; f(){ echo /w/*; }; examplef(){ echo /w/*; }; f; examplef; f; [[ -o \
-		 globdots ]] || echo off",
+		"zmodload zsh/example; f(){ echo /work/*; }; examplef(){ echo /work/*; }; f; examplef; f; \
+		 [[ -o globdots ]] || echo off",
 	);
 	assert_eq!(err, "");
-	assert_eq!(out, format!("{SETUP}/w/b\n/w/.a /w/b\n/w/b\noff\n"));
+	assert_eq!(out, format!("{SETUP}/work/b\n/work/.a /work/b\n/work/b\noff\n"));
 	assert_eq!(st, 0);
 }
