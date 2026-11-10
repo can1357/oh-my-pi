@@ -6,6 +6,7 @@
 
 - Command reports can expose a primary action with a keyboard shortcut and native button.
 - Selectors can show a bounded Markdown preview of the selected item and search its content.
+- Added a separately configurable shortcut for quoting a viewed summary into the draft (Ctrl+Alt+R).
 
 ### Changed
 

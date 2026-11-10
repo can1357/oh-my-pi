@@ -1,4 +1,5 @@
 import { SEANCE_SLASH_COMMAND } from "./seance";
+import { SUMMARY_SLASH_COMMAND } from "./summary";
 import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -503,6 +504,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			);
 		},
 	},
+	SUMMARY_SLASH_COMMAND,
 	{
 		name: "tan",
 		icon: "rocket",
