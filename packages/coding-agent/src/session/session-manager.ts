@@ -133,6 +133,7 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 import { recordSessionRecap, recordSessionTitle } from "./session-index";
+import { purgeSessionRecords } from "./session-purge";
 
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
@@ -2509,14 +2510,26 @@ export class SessionManager {
 		return sessionFile;
 	}
 
-	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
+	/**
+	 * Delete a session file, its artifact directory, and its history/stats
+	 * records. ENOENT is treated as success. Prompts, title, recaps, and pre-move
+	 * stats paths come from this session's header, so they are purged only when
+	 * `sessionPath` is this session's file.
+	 */
 	async dropSession(sessionPath: string): Promise<void> {
+		const own = sessionPath === this.#sessionFile;
+		const record = {
+			path: sessionPath,
+			id: own ? this.#sessionId : undefined,
+			previousSessionFiles: own ? this.#header.previousSessionFiles : undefined,
+		};
 		await this.#drainAndCloseWriter();
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
 		} catch (err) {
 			if (!isEnoent(err)) throw err;
 		}
+		await purgeSessionRecords(record);
 	}
 
 	/**

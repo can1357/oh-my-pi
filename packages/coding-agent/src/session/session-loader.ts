@@ -10,6 +10,7 @@ import {
 	jsonContainerEnd,
 	parseJsonlLenient,
 	peekFile,
+	readLines,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -241,6 +242,99 @@ function sessionHeaderIdFromPrefix(prefix: Uint8Array, final: boolean): string |
 	if (end === -1) return final ? undefined : HEADER_INCOMPLETE;
 	const entry = tryParseJson<FileEntry>(text.slice(0, end)) ?? undefined;
 	return isValidSessionHeader(entry) ? entry.id : undefined;
+}
+
+/** Header fields that tie a transcript to its fork parent and its pre-move locations. */
+export interface SessionLineageHeader {
+	id: string;
+	parentSession?: string;
+	previousSessionFiles: string[];
+}
+
+/**
+ * Incremental header parser fed one line at a time, past the optional title
+ * slot. `done` turns true at the first record; `header` stays undefined when
+ * that record is not a valid session header. gc drives it over gzip streams.
+ */
+export class SessionLineageHeaderReader {
+	header: SessionLineageHeader | undefined;
+	done = false;
+	#sawTitleSlot = false;
+
+	read(line: string): void {
+		if (this.done) return;
+		line = line.trim();
+		if (!line) return;
+		try {
+			const record = JSON.parse(line) as {
+				type?: unknown;
+				id?: unknown;
+				parentSession?: unknown;
+				previousSessionFiles?: unknown;
+			};
+			if (!this.#sawTitleSlot && record.type === "title") {
+				this.#sawTitleSlot = true;
+				return;
+			}
+			this.done = true;
+			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
+			this.header = {
+				id: record.id,
+				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
+				previousSessionFiles: Array.isArray(record.previousSessionFiles)
+					? record.previousSessionFiles.filter(
+							(previousSessionFile): previousSessionFile is string =>
+								typeof previousSessionFile === "string" && previousSessionFile.length > 0,
+						)
+					: [],
+			};
+		} catch {
+			this.done = true;
+		}
+	}
+}
+
+/** Lineage header of the JSONL transcript at `file`, or undefined when its first record is not a session header. */
+export async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
+	const decoder = new TextDecoder();
+	const reader = new SessionLineageHeaderReader();
+	for await (const line of readLines(Bun.file(file).stream())) {
+		reader.read(decoder.decode(line));
+		if (reader.done) break;
+	}
+	return reader.header;
+}
+
+/**
+ * The `previousSessionFiles` that name this transcript's own earlier locations
+ * under `sessionsRoot` (same filename, `.jsonl`, inside the managed root).
+ * Stats rows stay keyed by those paths after `/move`, so gc and session delete
+ * purge them alongside the current path.
+ */
+export function managedHistoricalSessionPaths(
+	previousSessionFiles: readonly string[],
+	currentSessionPath: string,
+	sessionsRoot: string,
+): string[] {
+	const root = path.resolve(sessionsRoot);
+	const filename = path.basename(currentSessionPath);
+	const paths = new Set<string>();
+	for (const previousSessionFile of previousSessionFiles) {
+		if (!path.isAbsolute(previousSessionFile) || path.basename(previousSessionFile) !== filename) continue;
+		const resolved = path.resolve(previousSessionFile);
+		const relative = path.relative(root, resolved);
+		if (
+			!relative ||
+			relative === ".." ||
+			relative.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(relative) ||
+			!resolved.endsWith(".jsonl")
+		) {
+			continue;
+		}
+		paths.add(resolved);
+	}
+	return [...paths];
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */

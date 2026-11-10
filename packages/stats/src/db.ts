@@ -10,7 +10,7 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getStatsDbPath, tableExists, tableHasColumn, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -1093,9 +1093,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 				setFileOffset(sessionFile, result.newOffset, result.parserState.mtimeMs, result.parserState);
 			}
 		}
-		if (reconcile) {
-			database.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')").run();
-		}
+		if (reconcile) requestSessionReconciliation(database);
 		return { processed, files, reconcile, changes };
 	})();
 }
@@ -1116,6 +1114,38 @@ export function prepareSessionSync(): boolean {
 
 export function completeSessionSync(reconcile: boolean): void {
 	if (!reconcile) db?.query("DELETE FROM meta WHERE key = 'session_reconciliation'").run();
+}
+
+/** Queue a full replay on the next sync so surviving forks re-own entries whose owning rows were removed. */
+function requestSessionReconciliation(database: Database): void {
+	database.query("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')").run();
+}
+
+/** Tables whose rows a transcript's entries own; a fork's copied entries are stored once, under the first file ingested. */
+const ENTRY_TABLES: readonly string[] = ["messages", "user_messages", "tool_calls"];
+
+/**
+ * Delete every row ingested from `sessionFile` and from transcripts whose path
+ * starts with `nestedPrefix` (its subagents), on a caller-owned connection.
+ * Removing owned entry rows queues a reconciliation replay so a surviving fork
+ * re-owns the entries it copied. Tables an older release never created are
+ * skipped. Returns the number of rows deleted.
+ */
+export function deleteSessionFileRows(database: Database, sessionFile: string, nestedPrefix: string): number {
+	return database.transaction(() => {
+		let deleted = 0;
+		let entriesDeleted = false;
+		for (const table of [...ENTRY_TABLES, "file_offsets", ...SPOTLIGHT_TABLES]) {
+			if (!tableHasColumn(database, table, "session_file")) continue;
+			const { changes } = database
+				.query(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`)
+				.run(sessionFile, nestedPrefix);
+			deleted += changes;
+			if (changes > 0 && ENTRY_TABLES.includes(table)) entriesDeleted = true;
+		}
+		if (entriesDeleted && tableExists(database, "meta")) requestSessionReconciliation(database);
+		return deleted;
+	})();
 }
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tableExists` and `tableHasColumn` SQLite schema probes
+
 ## [18.18.2] - 2026-11-08
 
 ### Added

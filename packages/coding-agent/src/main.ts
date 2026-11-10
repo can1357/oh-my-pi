@@ -129,6 +129,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { deleteSession } from "./session/session-purge";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -236,7 +237,7 @@ async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionP
 				return query => history.matchingSessionIds(query);
 			},
 			deleteSession: async session => {
-				await storage.deleteSessionWithArtifacts(session.path);
+				await deleteSession(storage, session);
 				return true;
 			},
 			// Foreign import pickers list source-owned sessions, so rename and

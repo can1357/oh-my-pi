@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
+import { purgeSessionStats, syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import * as parser from "@oh-my-pi/omp-stats/parser";
@@ -273,5 +273,62 @@ describe("stats sync deduplicates forked-session entries", () => {
 		const requests = getRecentRequests(10).filter(r => r.entryId === "asst01ab");
 		expect(requests).toHaveLength(1);
 		expect(requests[0].usage.premiumRequests).toBe(1);
+	});
+
+	it("purging a deleted parent drops its and its subagents' rows, then the fork re-owns the copied entries", async () => {
+		const ts = new Date("2026-06-24T10:00:00.000Z").toISOString();
+		const userEntry = buildUserEntry("user01ab", ts, "delete-me-marker");
+		const assistantEntry = buildAssistantEntry({ entryId: "asst01ab", parentId: "user01ab", timestamp: ts });
+		const parentFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"01_parent.jsonl",
+			{ id: "parent00", cwd: "/tmp/project" },
+			[userEntry, assistantEntry],
+		);
+		const subagentFile = path.join(parentFile.slice(0, -".jsonl".length), "0-explore.jsonl");
+		const subTs = new Date("2026-06-24T10:01:00.000Z").toISOString();
+		await Bun.write(
+			subagentFile,
+			`${[
+				{ type: "session", version: 3, id: "sub00000", timestamp: subTs, cwd: "/tmp/project" },
+				buildAssistantEntry({ entryId: "asst03ef", timestamp: subTs }),
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		// Ingest the parent before the fork exists, so the parent owns the turn both files share.
+		await syncAllSessions({ workers: 1, files: [parentFile, subagentFile] });
+		const forkFile = await writeSessionFile(
+			"--tmp--fork-dedup",
+			"02_fork.jsonl",
+			{ id: "fork0000", cwd: "/tmp/project", parentSession: parentFile },
+			[userEntry, assistantEntry],
+		);
+		await syncAllSessions({ workers: 1 });
+		expect(new Set(getRecentRequests(10).map(r => `${r.entryId} ${r.sessionFile}`))).toEqual(
+			new Set([`asst01ab ${parentFile}`, `asst03ef ${subagentFile}`]),
+		);
+
+		// The session is deleted: its transcript and artifacts go first, then its rows.
+		await fs.rm(parentFile);
+		await fs.rm(parentFile.slice(0, -".jsonl".length), { recursive: true });
+		expect(await purgeSessionStats([parentFile])).toBeGreaterThan(0);
+		const raw = new Database(getStatsDbPath(), { readonly: true });
+		try {
+			for (const table of ["messages", "user_messages", "file_offsets"]) {
+				const row = raw
+					.prepare(`SELECT count(*) AS n FROM ${table} WHERE session_file IN (?, ?)`)
+					.get(parentFile, subagentFile);
+				expect({ table, row }).toEqual({ table, row: { n: 0 } });
+			}
+		} finally {
+			raw.close();
+		}
+
+		// The fork still holds the copied turn, so the next sync must restore it under the fork.
+		await syncAllSessions({ workers: 1 });
+		const requests = getRecentRequests(10);
+		expect(requests.map(r => [r.entryId, r.sessionFile])).toEqual([["asst01ab", forkFile]]);
+		expect(getOverallStats().totalRequests).toBe(1);
 	});
 });

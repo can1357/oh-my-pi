@@ -73,6 +73,7 @@ import type { SessionEntry, SessionTreeNode } from "../../session/session-entrie
 import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
+import { deleteSession } from "../../session/session-purge";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
@@ -1940,9 +1941,8 @@ export class SelectorController {
 								if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
 									return false;
 								}
-								const storage = new FileSessionStorage();
 								try {
-									await storage.deleteSessionWithArtifacts(session.path);
+									await deleteSession(new FileSessionStorage(), session);
 									return true;
 								} catch (error) {
 									throw new Error(
@@ -2191,6 +2191,8 @@ export class SelectorController {
 
 	async handleSessionDeleteCommand(): Promise<void> {
 		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		// Read before detaching: detaching starts a new session with a new id.
+		const sessionId = this.ctx.sessionManager.getSessionId();
 		if (!sessionFile) {
 			this.ctx.showError("No session file to delete (in-memory session)");
 			return;
@@ -2219,8 +2221,8 @@ export class SelectorController {
 			return;
 		}
 
-		// Delete the session file and artifacts directory
-		await storage.deleteSessionWithArtifacts(sessionFile);
+		// Delete the session file, artifacts directory, and its history/stats records
+		await deleteSession(storage, { path: sessionFile, id: sessionId });
 
 		// Show session selector
 		this.ctx.showStatus("Session deleted");

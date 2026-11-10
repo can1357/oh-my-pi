@@ -22,6 +22,8 @@ import {
 	isPidAlive,
 	normalizePathForComparison,
 	readLines,
+	tableExists,
+	tableHasColumn,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -30,7 +32,14 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
-import { readSessionHeaderId } from "../session/session-loader";
+import {
+	managedHistoricalSessionPaths,
+	readSessionHeaderId,
+	readSessionLineageHeader,
+	type SessionLineageHeader,
+	SessionLineageHeaderReader,
+} from "../session/session-loader";
+import { purgeSessionHistory } from "../session/session-purge";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
@@ -987,60 +996,6 @@ function sessionArtifactsPath(sessionPath: string): string {
 	return sessionPath.slice(0, -SESSION_SUFFIX.length);
 }
 
-interface SessionLineageHeader {
-	id: string;
-	parentSession?: string;
-	previousSessionFiles: string[];
-}
-
-class SessionLineageHeaderReader {
-	header: SessionLineageHeader | undefined;
-	done = false;
-	#sawTitleSlot = false;
-
-	read(line: string): void {
-		if (this.done) return;
-		line = line.trim();
-		if (!line) return;
-		try {
-			const record = JSON.parse(line) as {
-				type?: unknown;
-				id?: unknown;
-				parentSession?: unknown;
-				previousSessionFiles?: unknown;
-			};
-			if (!this.#sawTitleSlot && record.type === "title") {
-				this.#sawTitleSlot = true;
-				return;
-			}
-			this.done = true;
-			if (record.type !== "session" || typeof record.id !== "string" || record.id.length === 0) return;
-			this.header = {
-				id: record.id,
-				parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
-				previousSessionFiles: Array.isArray(record.previousSessionFiles)
-					? record.previousSessionFiles.filter(
-							(previousSessionFile): previousSessionFile is string =>
-								typeof previousSessionFile === "string" && previousSessionFile.length > 0,
-						)
-					: [],
-			};
-		} catch {
-			this.done = true;
-		}
-	}
-}
-
-async function readSessionLineageHeader(file: string): Promise<SessionLineageHeader | undefined> {
-	const decoder = new TextDecoder();
-	const reader = new SessionLineageHeaderReader();
-	for await (const line of readLines(Bun.file(file).stream())) {
-		reader.read(decoder.decode(line));
-		if (reader.done) break;
-	}
-	return reader.header;
-}
-
 async function scanArchivedSession(
 	file: string,
 	identities?: Record<StatsEntryTable, StatsEntryIdentity[]>,
@@ -1135,44 +1090,6 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 // Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
 // connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
 // to delete or replace a file that is still open.
-function tableExists(db: Database, table: string): boolean {
-	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
-	const row = stmt.get(table) as { present?: number } | null;
-	return row?.present === 1;
-}
-
-function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
-	if (sessionIds.length === 0) return { deleted: 0, ftsRebuilt: false };
-	const db = new Database(dbPath);
-	try {
-		db.run("PRAGMA busy_timeout = 5000");
-		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
-		const hasRecaps = tableExists(db, "session_recaps");
-		const hasTitles = tableExists(db, "session_titles");
-		if (!hasHistory && !hasRecaps && !hasTitles) return { deleted: 0, ftsRebuilt: false };
-		const hasFts = hasHistory && tableExists(db, "history_fts");
-		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
-		// Recaps and titles are session-scoped side output with no life beyond their session.
-		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
-		using deleteTitlesStmt = hasTitles ? db.prepare("DELETE FROM session_titles WHERE session_id = ?") : undefined;
-		let deleted = 0;
-		const tx = db.transaction((ids: string[]) => {
-			for (const id of ids) {
-				deleteRecapsStmt?.run(id);
-				deleteTitlesStmt?.run(id);
-				if (!deleteStmt) continue;
-				const result = deleteStmt.run(id) as SqliteRunResult;
-				deleted += sqliteNumber(result.changes);
-			}
-			if (deleted > 0 && hasFts) db.run("INSERT INTO history_fts(history_fts) VALUES('rebuild')");
-		});
-		tx(sessionIds);
-		return { deleted, ftsRebuilt: deleted > 0 && hasFts };
-	} finally {
-		db.close();
-	}
-}
-
 async function collectArchivedSessionIds(archiveRoot: string, track: ProgressTracker): Promise<string[]> {
 	const ids = new Set<string>();
 	for (const file of track.each("Scanning archive for history ids", await collectCompressedJsonlFiles(archiveRoot))) {
@@ -1199,7 +1116,7 @@ async function cleanupHistoryRowsForArchivedSessions(
 	}
 
 	try {
-		const cleanup = deleteHistoryRowsForSessions(dbPath, [...cleanupIds]);
+		const cleanup = purgeSessionHistory(dbPath, [...cleanupIds]);
 		result.historyRowsDeleted = cleanup.deleted;
 		result.ftsRebuilt = cleanup.ftsRebuilt;
 	} catch (error) {
@@ -1274,12 +1191,6 @@ function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentit
 	return keys;
 }
 
-function tableHasColumn(db: Database, table: string, column: string): boolean {
-	using stmt = db.prepare(`PRAGMA table_info(${table})`);
-	const rows = stmt.all() as Array<{ name?: string | null }>;
-	return rows.some(row => row.name === column);
-}
-
 function collectStoredStatsSessionPaths(db: Database): string[] {
 	const sessionPaths = new Set<string>();
 	for (const table of STATS_SESSION_TABLES) {
@@ -1317,32 +1228,6 @@ function logicalSessionRootForStatsPath(statsPath: string, sessionPath: string):
 function sessionPathEncodesId(sessionPath: string, sessionId: string): boolean {
 	const stem = path.basename(sessionPath, SESSION_SUFFIX);
 	return stem === sessionId || stem.endsWith(`_${sessionId}`);
-}
-
-function managedHistoricalSessionPaths(
-	header: SessionLineageHeader,
-	currentSessionPath: string,
-	sessionsRoot: string,
-): string[] {
-	const root = path.resolve(sessionsRoot);
-	const filename = path.basename(currentSessionPath);
-	const paths = new Set<string>();
-	for (const previousSessionFile of header.previousSessionFiles) {
-		if (!path.isAbsolute(previousSessionFile) || path.basename(previousSessionFile) !== filename) continue;
-		const resolved = path.resolve(previousSessionFile);
-		const relative = path.relative(root, resolved);
-		if (
-			!relative ||
-			relative === ".." ||
-			relative.startsWith(`..${path.sep}`) ||
-			path.isAbsolute(relative) ||
-			!resolved.endsWith(SESSION_SUFFIX)
-		) {
-			continue;
-		}
-		paths.add(resolved);
-	}
-	return [...paths];
 }
 
 function resolveLogicalSessionMatch(
@@ -1725,7 +1610,7 @@ async function collectArchivedStatsSessions(
 				path: sourcePath,
 				id: header.id,
 				parentSession: header.parentSession,
-				historicalPaths: managedHistoricalSessionPaths(header, sourcePath, sessionsRoot),
+				historicalPaths: managedHistoricalSessionPaths(header.previousSessionFiles, sourcePath, sessionsRoot),
 				identities,
 			});
 		} catch (error) {
@@ -1796,7 +1681,11 @@ async function cleanupStatsRowsForArchivedSessions(
 						path: session.path,
 						id: session.id,
 						parentSession: header.parentSession,
-						historicalPaths: managedHistoricalSessionPaths(header, session.path, sessionsRoot),
+						historicalPaths: managedHistoricalSessionPaths(
+							header.previousSessionFiles,
+							session.path,
+							sessionsRoot,
+						),
 						identities: createStatsIdentities(),
 					};
 				}),
