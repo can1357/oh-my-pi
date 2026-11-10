@@ -6,6 +6,7 @@ import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { computerApproval, createComputerPrelude } from "@oh-my-pi/pi-coding-agent/tools/computer";
@@ -483,6 +484,47 @@ afterAll(async () => {
 });
 
 describe("computer prelude", () => {
+	it("keeps partial failure evidence through JavaScript Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(session, () => liveWorker(new FakeNativeSession()), undefined, undefined, { read: () => 0, forget: () => {} });
+		const prelude = createComputerPrelude(session, () => supervisor);
+		definitions = [prelude];
+		const statuses: unknown[] = [];
+		try {
+			const result = await executeJs(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')");`,
+				{ session, sessionId: crypto.randomUUID(), cwd: process.cwd(), onStatus: event => { statuses.push(event); } },
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("TypeError: stop after act");
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+			expect(statuses).toContainEqual(expect.objectContaining({ op: "computer", error: "stop after act" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
+	it("keeps partial failure evidence through Python Eval", async () => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
+		const supervisor = new ComputerSupervisor(session, () => liveWorker(new FakeNativeSession()), undefined, undefined, { read: () => 0, forget: () => {} });
+		definitions = [createComputerPrelude(session, () => supervisor)];
+		try {
+			const result = await executePython(
+				`await computer.run("console.log('MARK'); await desktop.screenshot(); throw new TypeError('stop after act')")`,
+				{ toolSession: session, sessionId: crypto.randomUUID(), cwd: process.cwd(), kernelMode: "per-call" },
+			);
+			expect(result.exitCode).not.toBe(0);
+			expect(result.output).toContain("MARK");
+			expect(result.output).toContain("TypeError: stop after act");
+			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("validates action shapes and maps explicitly read-only runs to read approval", async () => {
 		const prelude = createComputerPrelude(toolSession(), () => ({
 			async run() {
@@ -1591,6 +1633,21 @@ describe("computer worker round trips", () => {
 		);
 		if (!result.ok) throw new Error(result.error.message);
 		expect(native.draggedButtons).toEqual(["middle", "middle", "middle"]);
+	});
+
+	it("keeps partial failure evidence in a worker result", async () => {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => new FakeNativeSession());
+		const result = await runWorker(transport, "partial-failure", "console.log('MARK'); await desktop.screenshot(); throw new Error('stop after act')");
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error("Expected failed run");
+		expect(result.error.message).toBe("stop after act");
+		expect(result).toMatchObject({
+			output: {
+				displays: expect.arrayContaining([{ type: "text", text: expect.stringContaining("MARK") }, expect.objectContaining({ type: "image" })]),
+				screenshots: [expect.objectContaining({ width: 64, height: 32 })],
+			},
+		});
 	});
 
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {

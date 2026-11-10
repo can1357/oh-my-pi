@@ -50,6 +50,11 @@ def _make_computer():
         if isinstance(text, str) and text:
             print(text)
         details = response.get("details")
+        if response.get("hasError"):
+            error = details.get("error", {}) if isinstance(details, dict) else {}
+            name = error.get("name", "RuntimeError")
+            error_type = TypeError if name == "TypeError" else RuntimeError
+            raise error_type(error.get("message", text))
         return details if isinstance(details, dict) else {}
 
     async def _call(chain):
