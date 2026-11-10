@@ -4,7 +4,7 @@
 
 ### Changed
 
-- A grep with no matches renders as one line with `0 matches` in yellow, dropping the separate `No matches found` warning row
+- A grep with no matches renders as one line with `0 matches` in yellow, dropping the separate `No matches found` warning row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ## [18.18.6] - 2026-11-09
 
