@@ -57,6 +57,8 @@ export class MnemosyneOssWorkerClient {
 	#pending = new Map<string, PendingRequest<unknown>>();
 	#queue: Promise<void> = Promise.resolve();
 	#startup?: Promise<void>;
+	/** Tail of every teardown so far; a replacement worker starts only after its predecessor released the bank and its config dir. */
+	#disposal: Promise<void> = Promise.resolve();
 	#shutdownPromise?: Promise<void>;
 	#stderrTail = "";
 	#closed = false;
@@ -180,6 +182,7 @@ export class MnemosyneOssWorkerClient {
 	}
 
 	async #start(): Promise<void> {
+		await this.#disposal;
 		const temporaryConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mnemosyne-oss-config-"));
 		this.#temporaryConfigDir = temporaryConfigDir;
 		// A fatal exit skips shutdown(); still stop the worker and drop its private config dir.
@@ -312,30 +315,37 @@ export class MnemosyneOssWorkerClient {
 		void this.#disposeProcess();
 	}
 
-	async #disposeProcess(): Promise<void> {
+	#disposeProcess(): Promise<void> {
+		// Bind the teardown to this child's resources now: a replacement may register its own before the awaits below finish.
 		const child = this.#process;
 		const writer = this.#writer;
+		const temporaryConfigDir = this.#temporaryConfigDir;
+		const cancelExitCleanup = this.#cancelExitCleanup;
 		this.#process = undefined;
 		this.#writer = undefined;
-		try {
-			await writer?.end();
-		} catch {}
-		if (child && child.exitCode === null) {
-			try {
-				child.kill();
-			} catch {}
-			await Promise.race([child.exited, Bun.sleep(this.#options.shutdownTimeoutMs)]);
-			if (child.exitCode === null) {
-				try {
-					child.kill("SIGKILL");
-				} catch {}
-			}
-		}
-		const temporaryConfigDir = this.#temporaryConfigDir;
 		this.#temporaryConfigDir = undefined;
-		this.#cancelExitCleanup?.();
 		this.#cancelExitCleanup = undefined;
-		if (temporaryConfigDir) await fs.rm(temporaryConfigDir, { recursive: true, force: true });
+		const run = async (): Promise<void> => {
+			try {
+				await writer?.end();
+			} catch {}
+			if (child && child.exitCode === null) {
+				try {
+					child.kill();
+				} catch {}
+				await Promise.race([child.exited, Bun.sleep(this.#options.shutdownTimeoutMs)]);
+				if (child.exitCode === null) {
+					try {
+						child.kill("SIGKILL");
+					} catch {}
+				}
+			}
+			cancelExitCleanup?.();
+			if (temporaryConfigDir) await fs.rm(temporaryConfigDir, { recursive: true, force: true });
+		};
+		const done = this.#disposal.then(run);
+		this.#disposal = done.catch(() => undefined);
+		return done;
 	}
 }
 

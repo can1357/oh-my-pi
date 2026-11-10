@@ -42,6 +42,10 @@ interface FakeWorkerOptions {
 	malformedStatus?: boolean;
 	statusDelayMs?: number;
 	rememberDelayMs?: number;
+	/** The first status request sleeps long enough to be cancelled. */
+	hangFirstStatus?: boolean;
+	/** The child survives SIGTERM, so its teardown waits for the SIGKILL escalation. */
+	ignoreSigterm?: boolean;
 }
 
 interface FakeWorker {
@@ -59,6 +63,8 @@ async function fakeWorker(options: FakeWorkerOptions = {}): Promise<FakeWorker> 
 	const callsFile = path.join(root, "calls.log");
 	const mutationFile = path.join(root, "mutations.log");
 	const markerFile = path.join(root, "crashed.once");
+	const hungFile = path.join(root, "hung.once");
+	const dirsFile = path.join(root, "dirs.log");
 	const executable = path.join(root, "fake-python");
 	const operations = options.missingMethods ? ["initialize", "capabilities"] : MNEMOSYNE_OSS_REQUIRED_METHODS;
 	const pythonOptions = JSON.stringify(options)
@@ -67,12 +73,16 @@ async function fakeWorker(options: FakeWorkerOptions = {}): Promise<FakeWorker> 
 	await Bun.write(
 		executable,
 		`#!/usr/bin/env python3
-import json, os, pathlib, sys, time
+import json, os, pathlib, signal, sys, time
 ROOT = pathlib.Path(${JSON.stringify(root)})
 CALLS = pathlib.Path(${JSON.stringify(callsFile)})
 MUTATIONS = pathlib.Path(${JSON.stringify(mutationFile)})
 MARKER = pathlib.Path(${JSON.stringify(markerFile)})
+HUNG = pathlib.Path(${JSON.stringify(hungFile)})
+DIRS = pathlib.Path(${JSON.stringify(dirsFile)})
 OPTIONS = ${pythonOptions}
+if OPTIONS.get("ignoreSigterm"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
 def record(value):
     with CALLS.open("a") as stream:
@@ -87,6 +97,9 @@ for line in sys.stdin:
     if method == "$/cancelRequest":
         continue
     record(method)
+    if method == "initialize":
+        with DIRS.open("a") as stream:
+            stream.write(os.environ.get("MNEMOSYNE_DATA_DIR", "") + "\\n")
     if method == "capabilities":
         result = {"protocol": ${MNEMOSYNE_OSS_PROTOCOL_VERSION}, "sdk_version": OPTIONS.get("sdkVersion", "4.0.0"), "python_version": OPTIONS.get("pythonVersion", "3.11.0"), "operations": ${JSON.stringify(operations)}, "embedding_mode": "lexical", "consolidation_mode": "heuristic", "clear_mode": "bank-manager"}
     elif method == "status":
@@ -94,6 +107,9 @@ for line in sys.stdin:
             MARKER.write_text("crashed")
             print("fake worker diagnostic", file=sys.stderr, flush=True)
             os._exit(17)
+        if OPTIONS.get("hangFirstStatus") and not HUNG.exists():
+            HUNG.write_text("hung")
+            time.sleep(5)
         if OPTIONS.get("malformedStatus"):
             print("not-json", flush=True)
             continue
@@ -352,18 +368,16 @@ class Mnemosyne:
                 "episodic_memory": {"total": 0}, "triples": {"total": 0}}}
 `;
 
-it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () => {
+/** Runs the bundled worker with `memoryPy`/`banksPy` standing in for the SDK's `mnemosyne.core.memory`/`banks`. */
+async function stubSdkClient(memoryPy: string, banksPy: string): Promise<MnemosyneOssWorkerClient> {
 	const directory = TempDir.createSync("@mnemosyne-oss-stub-sdk-");
 	temporaryDirectories.push(directory);
 	const root = path.resolve(directory.path());
 	const site = path.join(root, "site");
 	await Bun.write(path.join(site, "mnemosyne", "__init__.py"), "");
 	await Bun.write(path.join(site, "mnemosyne", "core", "__init__.py"), "");
-	await Bun.write(path.join(site, "mnemosyne", "core", "memory.py"), STUB_MEMORY_PY);
-	await Bun.write(
-		path.join(site, "mnemosyne", "core", "banks.py"),
-		"class BankManager:\n    def __init__(self, data_dir=None):\n        pass\n",
-	);
+	await Bun.write(path.join(site, "mnemosyne", "core", "memory.py"), memoryPy);
+	await Bun.write(path.join(site, "mnemosyne", "core", "banks.py"), banksPy);
 	await Bun.write(
 		path.join(site, "mnemosyne_memory-4.0.0.dist-info", "METADATA"),
 		"Metadata-Version: 2.1\nName: mnemosyne-memory\nVersion: 4.0.0\n",
@@ -371,13 +385,20 @@ it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () =>
 	const python = path.join(root, "python");
 	await Bun.write(python, `#!/bin/sh\nPYTHONPATH=${JSON.stringify(site)} exec python3 "$@"\n`);
 	await fs.chmod(python, 0o755);
-	const client = new MnemosyneOssWorkerClient({
+	return new MnemosyneOssWorkerClient({
 		context: workerContext(path.join(root, "store")),
 		cwd: root,
 		executable: python,
 		requestTimeoutMs: 5_000,
 		shutdownTimeoutMs: 250,
 	});
+}
+
+it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () => {
+	const client = await stubSdkClient(
+		STUB_MEMORY_PY,
+		"class BankManager:\n    def __init__(self, data_dir=None):\n        pass\n",
+	);
 	try {
 		const { id } = await client.request<{ id: string }>(
 			"remember",
@@ -401,4 +422,74 @@ it("drives the bundled worker against Mnemosyne 4.0 SDK signatures", async () =>
 	} finally {
 		await client.shutdown();
 	}
+});
+
+/** Mirrors the 4.0 SDK: no `Mnemosyne.close()`, and a bank whose database is still open cannot be deleted (as on Windows). */
+const OPEN_HANDLE_MEMORY_PY = `import sqlite3
+from pathlib import Path
+OPEN = []
+
+class Mnemosyne:
+    def __init__(self, session_id="default", db_path=None, bank=None, author_id=None, author_type=None, channel_id=None):
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(db_path))
+        OPEN.append(self.conn)
+
+    def remember(self, content, **options):
+        return "m1"
+`;
+
+const OPEN_HANDLE_BANKS_PY = `import sqlite3
+from mnemosyne.core import memory
+
+class BankManager:
+    def __init__(self, data_dir=None):
+        pass
+
+    def delete_bank(self, name, force=False):
+        for conn in memory.OPEN:
+            try:
+                conn.execute("SELECT 1")
+            except sqlite3.ProgrammingError:
+                continue
+            raise PermissionError(f"{name} database is still open")
+        return True
+`;
+
+it("closes the SDK's SQLite handles before deleting a cleared bank", async () => {
+	const client = await stubSdkClient(OPEN_HANDLE_MEMORY_PY, OPEN_HANDLE_BANKS_PY);
+	try {
+		await client.request("remember", { content: "fact", options: {} }, { mutation: true });
+		await expect(client.request("clear", {}, { mutation: true })).resolves.toEqual({
+			bank: "project-bank",
+			deleted: true,
+		});
+	} finally {
+		await client.shutdown();
+	}
+});
+
+async function exists(target: string): Promise<boolean> {
+	return await fs.access(target).then(
+		() => true,
+		() => false,
+	);
+}
+
+it("keeps the replacement worker's runtime config when the cancelled worker is still being torn down", async () => {
+	const fake = await fakeWorker({ hangFirstStatus: true, ignoreSigterm: true });
+	const client = clientFor(fake, 2_000);
+	const cancelled = client.request("status", {}, { timeoutMs: 100 });
+	const replacement = client.request<{ runtime_data_dir: string }>("status");
+	await expect(cancelled).rejects.toThrow("timed out");
+	const { runtime_data_dir: replacementDir } = await replacement;
+	// Real wait: the cancelled child ignores SIGTERM, so its teardown ends at the client's own SIGKILL escalation
+	// timer (250ms) against a live process; fake timers cannot advance it and no event reports when it is done.
+	await Bun.sleep(600);
+	const [cancelledDir, startedDir] = await lines(path.join(path.resolve(fake.directory.path()), "dirs.log"));
+	expect(startedDir).toBe(replacementDir);
+	expect(await exists(replacementDir)).toBe(true);
+	expect(await exists(cancelledDir)).toBe(false);
+	await client.shutdown();
+	expect(await exists(replacementDir)).toBe(false);
 });
