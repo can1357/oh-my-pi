@@ -3702,7 +3702,7 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 			const withUnrelated = expectedFor(unrelated);
 			expect(withColliding).not.toContain("TOKABC123_");
 			expect(withUnrelated).toContain("TOKABC123_");
-			return { obf, text, withColliding, withUnrelated };
+			return { obf, text, expectedFor, withColliding, withUnrelated };
 		};
 		const sequence = [colliding, colliding, unrelated, unrelated, colliding];
 
@@ -3725,6 +3725,21 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 				for (const value of values) shared.add(value);
 				expect(obf.obfuscate(text, shared)).toBe(values === colliding ? withColliding : withUnrelated);
 			}
+		});
+
+		it("recomputes when two sets differ only in where a NUL splits their values", () => {
+			// Sorted and joined with "\0", both sets read `tok_abc123\0tok_m1\0tok_q1`,
+			// yet only the second holds the regex secret `tok_abc123` as a value.
+			const nulAfterSecret = ["tok_abc123\0tok_m1", "tok_q1"];
+			const nulBeforeLast = ["tok_abc123", "tok_m1\0tok_q1"];
+			const { obf, text, expectedFor } = setup();
+			const withNulAfterSecret = expectedFor(nulAfterSecret);
+			const withNulBeforeLast = expectedFor(nulBeforeLast);
+			expect(withNulAfterSecret).toContain("TOKABC123_");
+			expect(withNulBeforeLast).not.toContain("TOKABC123_");
+
+			expect(obf.obfuscate(text, new SecretValueSet(nulAfterSecret))).toBe(withNulAfterSecret);
+			expect(obf.obfuscate(text, new SecretValueSet(nulBeforeLast))).toBe(withNulBeforeLast);
 		});
 	});
 });

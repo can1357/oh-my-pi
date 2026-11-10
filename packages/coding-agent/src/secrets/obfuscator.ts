@@ -91,20 +91,40 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
 /**
- * How long a {@link TextCache} entry survives unused. There is no size cap:
- * provider context is re-redacted on every request, so text in the live
- * context is touched every turn and never evicted; only text that left it
- * (compacted history, superseded prompts) ages out.
+ * Hard cap on the text (UTF-16 units: keys plus retained result strings) one
+ * {@link TextCache} holds. Provider context is re-redacted on every request
+ * and walks the whole history in order, so a cap below the live context would
+ * evict every entry before its next use. The largest provider windows are
+ * ~2M tokens (~8M chars); this leaves room for several such contexts at once.
+ */
+const MAX_TEXT_CACHE_CHARS = 64 * 1024 * 1024;
+
+/**
+ * How long a {@link TextCache} entry survives unused. Text in the live context
+ * is touched every turn, so only text that left it (compacted history,
+ * superseded prompts) ages out, well before the size cap is reached.
  */
 const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
 
 /** Minimum time between idle sweeps of one {@link TextCache}. */
 const TEXT_CACHE_SWEEP_INTERVAL_MS = 60 * 1000;
 
-/** Text-keyed cache whose entries expire only after {@link TEXT_CACHE_IDLE_MS} unused. */
+interface TextCacheEntry<V> {
+	value: V;
+	/** Characters this entry retains beyond its key (e.g. a distinct result string). */
+	extraChars: number;
+	usedAt: number;
+}
+
+/**
+ * Text-keyed LRU. Entries expire after {@link TEXT_CACHE_IDLE_MS} unused, and
+ * least recently used entries are evicted whenever retained text exceeds
+ * {@link MAX_TEXT_CACHE_CHARS}; a text larger than the cap is never cached.
+ */
 class TextCache<V> {
-	/** Least recently used first, so a sweep stops at the first live entry. */
-	readonly #map = new Map<string, { value: V; usedAt: number }>();
+	/** Least recently used first, so eviction and sweeps stop at the first entry to keep. */
+	readonly #map = new Map<string, TextCacheEntry<V>>();
+	#chars = 0;
 	#sweptAt = 0;
 
 	get(text: string): V | undefined {
@@ -116,16 +136,28 @@ class TextCache<V> {
 		return entry.value;
 	}
 
-	set(text: string, value: V): void {
+	set(text: string, value: V, extraChars = 0): void {
+		this.#delete(text);
+		const size = text.length + extraChars;
+		if (size > MAX_TEXT_CACHE_CHARS) return;
 		const now = Date.now();
-		this.#map.delete(text);
-		this.#map.set(text, { value, usedAt: now });
-		if (now - this.#sweptAt < TEXT_CACHE_SWEEP_INTERVAL_MS) return;
-		this.#sweptAt = now;
+		this.#map.set(text, { value, extraChars, usedAt: now });
+		this.#chars += size;
+		const sweep = now - this.#sweptAt >= TEXT_CACHE_SWEEP_INTERVAL_MS;
+		if (sweep) this.#sweptAt = now;
 		for (const [key, entry] of this.#map) {
-			if (now - entry.usedAt < TEXT_CACHE_IDLE_MS) break;
+			const idle = sweep && now - entry.usedAt >= TEXT_CACHE_IDLE_MS;
+			if (!idle && this.#chars <= MAX_TEXT_CACHE_CHARS) break;
 			this.#map.delete(key);
+			this.#chars -= key.length + entry.extraChars;
 		}
+	}
+
+	#delete(text: string): void {
+		const entry = this.#map.get(text);
+		if (entry === undefined) return;
+		this.#map.delete(text);
+		this.#chars -= text.length + entry.extraChars;
 	}
 }
 
@@ -613,12 +645,16 @@ export class SecretObfuscator {
 		const memo = this.#obfuscateMemo.get(text);
 		if (memo !== undefined && memo.revision === revision && memo.sharedKey === sharedKey) return memo.result;
 		const result = this.#obfuscateUncached(text, sharedValues);
-		if (this.#revision.value === revision) this.#obfuscateMemo.set(text, { revision, sharedKey, result });
+		if (this.#revision.value === revision) {
+			this.#obfuscateMemo.set(text, { revision, sharedKey, result }, result === text ? 0 : result.length);
+		}
 		return result;
 	}
 
 	/**
-	 * Content key of `shared`: its sorted values. Callers build a fresh set per
+	 * Content key of `shared`: its sorted values as a JSON array, which is
+	 * injective (a separator-joined key is not: values may contain the
+	 * separator). Callers build a fresh set per
 	 * request, so equal content must give an equal key; a set mutated since its
 	 * key was computed fails the snapshot check (same size and every snapshot
 	 * value still present means equal sets) and is re-keyed.
@@ -637,7 +673,7 @@ export class SecretObfuscator {
 			if (same) return cached.key;
 		}
 		const snapshot = new Set(shared);
-		const key = [...snapshot].sort().join("\0");
+		const key = JSON.stringify([...snapshot].sort());
 		this.#sharedValuesKeys.set(shared, { snapshot, key });
 		return key;
 	}
