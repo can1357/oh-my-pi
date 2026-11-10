@@ -13517,8 +13517,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#recovery.hasAbortedToolCallTail;
 	}
 
-	/** Retry the last failed assistant turn when the session is idle. */
+	/**
+	 * Retry the last failed assistant turn when the session is idle. A user retry
+	 * cancels a held `subagent_stop` pass, like a typed prompt or {@link resume}:
+	 * the retry rewrites context and starts a turn, so the candidate the handlers
+	 * were judging could no longer be the one published.
+	 */
 	async retry(): Promise<boolean> {
+		await this.#waitOutStopPasses(true);
 		const didRetry = await this.#recovery.retry();
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.

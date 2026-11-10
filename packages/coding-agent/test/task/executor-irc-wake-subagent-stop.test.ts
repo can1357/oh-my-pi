@@ -119,6 +119,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		structured?: boolean;
 		/** Output schema; with it the session uses the real `YieldTool` instead of the stand-in. */
 		outputSchema?: Record<string, unknown>;
+		/** Turn automatic retry off, so a provider error leaves the turn for a manual retry. */
+		disableAutoRetry?: boolean;
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -168,7 +170,11 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				throw new Error("post-yield turn failure");
 			};
 		}
-		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			...(args.disableAutoRetry ? { "retry.enabled": false } : {}),
+		});
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
@@ -642,6 +648,41 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.lifecycle.map(frame => frame.status)).not.toContain("failed");
 		expect(run.mock.calls).toHaveLength(2);
 		expect(JSON.stringify(run.mock.calls[1]?.context.messages)).toContain("user says hi");
+	});
+
+	it("cancels a held stop pass when the user retries the turn, instead of letting its verdict cover the retry", async () => {
+		const stopEntered = Promise.withResolvers<void>();
+		const releaseStop = Promise.withResolvers<void>();
+		const run = await setup({
+			disableAutoRetry: true,
+			responses: [
+				// A section, then a provider error: the idle turn is retryable while its sections are judged.
+				sectionCall("findings", "OLD-SECTION"),
+				{ content: [], stopReason: "error", errorMessage: "provider exploded" },
+				yieldCall("REPLACEMENT"),
+			],
+			onStop: async (event, callIndex) => {
+				if (callIndex !== 1) return undefined;
+				stopEntered.resolve();
+				// Pending until the user's retry cancels the pass, or the test releases it.
+				const cancelled = Promise.withResolvers<void>();
+				event.signal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+				await Promise.race([releaseStop.promise, cancelled.promise]);
+				return undefined;
+			},
+		});
+
+		await deliverWake(run.session, "m1");
+		await stopEntered.promise;
+		expect(await run.session.retry()).toBe(true);
+		await run.session.waitForIdle();
+		releaseStop.resolve();
+		await run.session.waitForIrcReplies();
+		await run.session.waitForIdle();
+
+		// The first verdict judged the old sections only: the retry's yield is a new candidate with its own pass.
+		expect(run.stopEvents).toHaveLength(2);
+		expect(await Bun.file(run.artifact).text()).toContain("REPLACEMENT");
 	});
 
 	it("cancels, unjudged, a wake that a newer wake superseded while its owner work settled", async () => {
