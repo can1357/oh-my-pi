@@ -13,6 +13,7 @@
  */
 
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { nearestRank } from "@oh-my-pi/pi-utils";
 import { Settings } from "../src/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -57,12 +58,6 @@ function makeTextMessage(text: string): AssistantMessage {
 	};
 }
 
-function percentile(sorted: number[], p: number): number {
-	if (sorted.length === 0) return 0;
-	const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-	return sorted[idx]!;
-}
-
 /** Build N committed finalized blocks + a live tail, return per-tick render medians/p95. */
 function measure(n: number): { median: number; p95: number; replayMs: number } {
 	const histText = makeMarkdownCorpus(240);
@@ -101,7 +96,7 @@ function measure(n: number): { median: number; p95: number; replayMs: number } {
 	if (!replay || replay.rows.length !== history.rows.length) throw new Error("Replay lost committed rows");
 	const replayMs = (Bun.nanoseconds() - started) / 1e6;
 	container.acknowledgeFinalizedBatch(replay.id);
-	return { median: percentile(samples, 50), p95: percentile(samples, 95), replayMs };
+	return { median: nearestRank(samples, 0.5), p95: nearestRank(samples, 0.95), replayMs };
 }
 
 await Settings.init({ inMemory: true });
