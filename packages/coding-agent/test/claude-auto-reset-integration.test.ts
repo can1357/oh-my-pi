@@ -1079,4 +1079,52 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("no");
 		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("yes");
 	});
+
+	it("spends an approved reset before an unrelated consent prompt is answered", async () => {
+		// Account A's ordinary grant is approved by the weekly setting; account B's Fable grant waits on consent.
+		const ordinary = claudeStatus(false);
+		const fableOrg = "22222222-2222-4222-8222-222222222222";
+		const fableIdentity = { accountId: "claude-fable-account", email: "fable@example.com", orgId: fableOrg };
+		const fableStatus = claudeFableStatus(0.6);
+		const fable: ResetCreditAccountStatus = {
+			...fableStatus,
+			...fableIdentity,
+			credentialId: CREDENTIAL_ID + 1,
+			active: false,
+			report: { ...claudeFableReport(0.6), metadata: fableIdentity },
+			credits: fableStatus.credits.map(credit => ({ ...credit, requiresLimit: false, blocking: [] })),
+		};
+		const prompted = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<string | undefined>();
+		const { session, coordinator, targets } = buildSession({
+			report: withInventory(claudeReport(0.5), ordinary),
+			status: ordinary,
+			autoRedeem5h: "yes",
+			autoRedeemWeekly: "yes",
+			autoRedeemFable: "unset",
+			consent: () => {
+				prompted.resolve();
+				return answer.promise;
+			},
+		});
+		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+			{ position: 0, credentialId: CREDENTIAL_ID, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
+			{ position: 1, credentialId: CREDENTIAL_ID + 1, ...fableIdentity, active: false },
+		]);
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => [
+			withInventory(claudeReport(0.5), ordinary),
+			withInventory(fable.report!, fable),
+		]);
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => [ordinary, fable]);
+
+		await session.fetchUsageReports();
+		await prompted.promise;
+		// The Fable question is still open, yet the approved grant has already been spent.
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+
+		answer.resolve("No");
+		await coordinator.sweepPromise;
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("no");
+	});
 });

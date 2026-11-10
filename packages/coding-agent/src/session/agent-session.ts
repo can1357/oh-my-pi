@@ -15457,8 +15457,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Spend the actions their governing window allows outright, prompt for the
-	 * rest, and spend only the confirmed ones.
+	 * Spend the actions their governing window allows outright, then prompt for
+	 * the rest and spend only the confirmed ones. Approved spends never wait on
+	 * an unrelated prompt: an unanswered question must not let them expire.
 	 */
 	async #redeemConsentedResets(
 		provider: ResetProvider,
@@ -15466,18 +15467,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
-		const allowed = actions.filter(action => resetActionMode(action, modes) !== "no");
-		const prompted = allowed.filter(action => resetActionMode(action, modes) === "unset");
-		const confirmed =
-			prompted.length > 0 ? await this.#confirmAutoRedeem(provider, prompted, coordinator, modes) : [];
+		const approved = actions.filter(action => resetActionMode(action, modes) === "yes");
+		const prompted = actions.filter(action => resetActionMode(action, modes) === "unset");
+		const spent = await this.#executeResetActions(provider, approved, coordinator);
+		if (prompted.length === 0) return spent;
 		// Keep confirmed objects: headless approval pins the exact credit in its target.
-		const confirmedByKey = new Map(confirmed.map(action => [action.attemptKey, action]));
-		const approved = allowed.flatMap(action => {
-			if (resetActionMode(action, modes) === "yes") return [action];
-			const confirmedAction = confirmedByKey.get(action.attemptKey);
-			return confirmedAction ? [confirmedAction] : [];
-		});
-		return this.#executeResetActions(provider, approved, coordinator);
+		const confirmed = await this.#confirmAutoRedeem(provider, prompted, coordinator, modes);
+		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
+		return {
+			restoredCredentialIds: [...spent.restoredCredentialIds, ...consented.restoredCredentialIds],
+			poolLimited: spent.poolLimited || consented.poolLimited,
+		};
 	}
 
 	#planCodexResets(
