@@ -355,13 +355,18 @@ describe("OMP-owned browser input", () => {
 				settings: Settings.isolated(),
 				getSessionFile: () => null,
 			} as unknown as ToolSession;
-			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's action shows only on hover.
-			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }</style>
+			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's actions show only on hover.
+			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }
+				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }</style>
 				<a class="menu" href="#" style="display:none">Menu</a>
 				<a class="menu" id="mobile" href="#" onmouseover="this.dataset.hovered = 'yes'">Menu</a>
 				<div class="row">Row <button class="del" onmouseover="this.dataset.hovered = 'yes'">Delete</button></div>
 				<button id="covered" style="position:absolute;left:0;top:80px;width:120px;height:40px">Covered</button>
-				<div id="overlay" style="position:fixed;left:0;top:80px;width:120px;height:40px;z-index:1"></div>`;
+				<div id="overlay" style="position:fixed;left:0;top:80px;width:120px;height:40px;z-index:1"></div>
+				<div id="edit-row" style="position:absolute;left:0;top:160px">Row <button class="edit">Edit</button></div>
+				<span id="icon-host" style="position:absolute;left:0;top:200px" onmouseover="this.dataset.hovered = 'yes'"><svg id="icon" width="20" height="20" style="pointer-events:none"><rect width="20" height="20"/></svg></span>
+				<input id="box" type="checkbox" style="position:absolute;left:0;top:240px;margin:0">
+				<label for="box" style="position:absolute;left:0;top:240px;width:40px;height:40px;z-index:1">Box</label>`;
 			try {
 				await acquireTab(name, browser, {
 					url: `data:text/html,${encodeURIComponent(fixture)}`,
@@ -397,6 +402,21 @@ describe("OMP-owned browser input", () => {
 						10_000,
 					),
 				).toBe("hovered");
+				// A `visibility:hidden` or `pointer-events:none` target is hovered through the ancestor the pointer lands on.
+				expect(
+					await message(
+						`await tab.hover(".edit"); if (!(await tab.isVisible(".edit"))) throw new Error("not revealed");`,
+						10_000,
+					),
+				).toBe("hovered");
+				expect(
+					await message(
+						`await tab.hover("#icon"); if ((await tab.attr("#icon-host", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
+						10_000,
+					),
+				).toBe("hovered");
+				// A label forwards a click to its control, not the pointer.
+				expect(await message(`await tab.hover("#box");`, 10_000)).toContain("covered by <label>");
 			} finally {
 				await releaseTab(name, { kill: true });
 			}
