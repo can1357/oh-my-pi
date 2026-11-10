@@ -2506,6 +2506,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						model: message.model,
 						usage: message.usage,
 						stopReason: message.stopReason,
+						errorMessage: message.errorMessage,
 					},
 					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
 				);

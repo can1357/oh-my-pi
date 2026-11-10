@@ -12,6 +12,7 @@
 - An `omp -p` or other omp that your session's bash tool or eval cell starts inside Tern or cmux no longer picks Tern or cmux from the pane it inherited, so its browser tabs stop floating over your pane ([#18773](https://github.com/can1357/oh-my-pi/pull/18773) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser relay connections sharing a tab no longer lose cross-site frames when another connection disables auto-attachment on its page; automatic children detach locally when their last armed page leaves, while explicitly attached frame subtrees remain usable after opting out ([#18657](https://github.com/can1357/oh-my-pi/pull/18657) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser agents now say when a step can't be done through the page, instead of patching the page with scripts and reporting the step as done ([#18761](https://github.com/can1357/oh-my-pi/pull/18761) by [@will-bogusz](https://github.com/will-bogusz))
+- Failed job-widget, job-caption, cache-warm, composer-prediction, and subagent completion-probe calls now keep the provider's error message in their session usage records ([#18792](https://github.com/can1357/oh-my-pi/issues/18792))
 ### Changed
 
 - `curl -fsSL https://omp.sh/install | sh` and `install.ps1` now install the standalone binary by default, even when bun is present, so installs get delta updates; pass `--source`/`-Source` for a bun package install

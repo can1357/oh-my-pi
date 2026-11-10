@@ -279,6 +279,7 @@ export class ComposerPredictionController {
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
 				},
 				{ sessionId: source.sessionId, parentId: source.leafId },
 			);

@@ -218,6 +218,7 @@ export function startCompletionProbe(options: CompletionProbeOptions): void {
 						model: assistantMessage.model,
 						usage: assistantMessage.usage,
 						stopReason: assistantMessage.stopReason,
+						errorMessage: assistantMessage.errorMessage,
 					},
 					usageOwner,
 				);
