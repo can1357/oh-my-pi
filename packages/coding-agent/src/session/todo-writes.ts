@@ -71,8 +71,9 @@ export class TodoWrites {
 	/**
 	 * Call at the first prompt admission, after the deferred load, or at the first queued write: these
 	 * all run after the mode subscribed its event listeners, so a fallback notice reaches the client.
-	 * A disabled or re-enabled extension is noticed at the next queued write, which compares the
-	 * registry with {@link #requested}; native sessions never touch the runner.
+	 * A disabled or re-enabled extension is noticed at the next queued write or reset, which compares
+	 * the registry with {@link #requested}; a change undone by then goes unnoticed. Native sessions
+	 * never touch the runner.
 	 */
 	allowBackendResolution(): void {
 		if (
@@ -95,7 +96,7 @@ export class TodoWrites {
 		return isBackendId(id) && this.#target(id) !== this.#requested;
 	}
 
-	/** What a resolution for `id` would resolve: see {@link #requested}. */
+	/** The value {@link #requested} takes for `id`: its enabled definition, else `id`. */
 	#target(id: string): TodoBackendDefinition | string {
 		return (isBackendId(id) && this.#host.extensionRunner()?.getTodoBackend(id)) || id;
 	}
@@ -165,10 +166,11 @@ export class TodoWrites {
 		return this.#host.todo.phases;
 	}
 
-	async #sync(active: ActiveTodoBackend | undefined): Promise<void> {
+	/** `resend` sends the committed list even when the backend is thought to have it already. */
+	async #sync(active: ActiveTodoBackend | undefined, resend = false): Promise<void> {
 		if (!active) return;
 		try {
-			await active.sync();
+			await (resend ? active.replace(this.#host.todo.phases) : active.sync());
 		} catch (error) {
 			this.#host.warn(
 				`Todo backend "${active.label}" did not take the todo list: ${sanitizeTodoBackendText(error)}`,
@@ -212,7 +214,10 @@ export class TodoWrites {
 	 */
 	#syncAfterReset(): void {
 		if (this.#requested === undefined || !this.queued) return;
-		this.run(active => this.#sync(active)).catch((error: unknown) => {
+		// A backend this run creates (its extension was re-enabled since the last write) starts after
+		// the list changed, where `create` would take it to have the list, so send it the list.
+		const before = this.#active;
+		this.run(active => this.#sync(active, active !== before)).catch((error: unknown) => {
 			// A later reset invalidated this one and queued its own sync.
 			if (!(error instanceof TodoListChangedError))
 				logger.warn("Todo backend sync after a reset failed", { error: String(error) });

@@ -506,9 +506,28 @@ export default function(pi) {
 		await flushTodoWrites(session);
 
 		expect(recorder.created).toBe(1);
-		expect(recorder.calls.filter(call => call.method === "replace").map(call => call.phases)).toEqual([[]]);
 		expect(idsDuringReplace).toEqual([session.sessionManager.getSessionId()]);
 		expect(idsDuringReplace[0]).not.toBe(oldId);
+	});
+
+	test("a backend whose extension was re-enabled since the last write gets the list from the next /new", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		await todo(session, { op: "init", items: ["old"] });
+		runner.setSuspendedExtensions(() => true);
+		await flushTodoWrites(session);
+		runner.setSuspendedExtensions(() => false);
+
+		await session.newSession();
+		await flushTodoWrites(session);
+
+		expect(recorder.created).toBe(2);
+		expect(recorder.calls.map(call => `${call.method}:${contentsOf(call.phases).join("|")}`)).toEqual([
+			"apply:old",
+			"replace:",
+		]);
 	});
 
 	test("an edit whose replace settles while switchSession is swapping files never lands in the target session", async () => {
