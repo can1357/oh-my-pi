@@ -9005,10 +9005,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A `subagent_stop` pass holds this session until its verdict is published.
 		// Only the holder's own turns run meanwhile: an explicit user prompt cancels
 		// the pass (stopping a continuation the holder is running), any other prompt
-		// waits it out. Checked after preprocessing and after the abort check above,
-		// since cancelling the pass aborts the holder's turn, with no await between
-		// here and dispatch.
-		if (!holder && this.#stopPassHolds.size > 0) {
+		// waits it out. A holder whose pass was cancelled during prompt setup (its
+		// abort found no turn to stop, and the generation check above only sees an
+		// abort that landed after its capture) must not start the continuation.
+		// Checked after preprocessing and after the abort check above, since
+		// cancelling the pass aborts the holder's turn, with no await between here
+		// and dispatch.
+		if (holder) {
+			holder.cancel.signal.throwIfAborted();
+		} else if (this.#stopPassHolds.size > 0) {
 			await this.#waitOutStopPasses(options?.userInitiated === true || promptAttribution === "user");
 		}
 
