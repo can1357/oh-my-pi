@@ -769,16 +769,21 @@ impl InputLease {
 		token: &OperationToken,
 		admit: impl FnMut(Admit) -> CoreResult<bool>,
 	) -> CoreResult<Self> {
-		Self::admit_within(token, admit, || ControlLease::escape_monitor(&token.source), |armed| {
-			Self::acquire_within(
-				token,
-				true,
-				Instant::now,
-				|duration| token.wait(duration),
-				|| ControlLease::escape_monitor(&token.source),
-				armed,
-			)
-		})
+		Self::admit_within(
+			token,
+			admit,
+			|| ControlLease::escape_monitor(&token.source),
+			|armed| {
+				Self::acquire_within(
+					token,
+					true,
+					Instant::now,
+					|duration| token.wait(duration),
+					|| ControlLease::escape_monitor(&token.source),
+					armed,
+				)
+			},
+		)
 	}
 
 	/// [`Self::acquire_admitted`], arming the stop with `arm` and taking the
@@ -791,7 +796,11 @@ impl InputLease {
 	) -> CoreResult<Self> {
 		loop {
 			// Held control armed its stop when it was granted.
-			let stop = if token.source.control_active() { None } else { Some(arm()?) };
+			let stop = if token.source.control_active() {
+				None
+			} else {
+				Some(arm()?)
+			};
 			admit(Admit::Wait)?;
 			let lease = acquire(stop)?;
 			if admit(Admit::Recheck)? {

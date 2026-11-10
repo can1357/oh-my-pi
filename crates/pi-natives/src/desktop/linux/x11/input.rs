@@ -467,18 +467,30 @@ impl X11Input {
 		let result = body(self);
 		self.takeover_target = None;
 		let pointer_after = self.takeover_pointer.take();
-		control::settle(FOREGROUND_RESTORE_SETTLE);
-		control::cleanup(|| {
-			// A physical motion during the action is the user's new position.
-			// Keyboard-only actions never warp the pointer, even during restore.
-			if let Some(pointer) = pointer
-				&& pointer_after.is_some()
-				&& self.core_pointer() == pointer_after
-			{
-				self.restore_core_pointer(pointer);
-			}
-			self.restore_activation(window, ewmh, previous_active, previous_focus);
-		});
+		self.finish_takeover(result, |this| {
+			control::settle(FOREGROUND_RESTORE_SETTLE);
+			control::cleanup(|| {
+				// A physical motion during the action is the user's new position.
+				// Keyboard-only actions never warp the pointer, even during
+				// restore.
+				if let Some(pointer) = pointer
+					&& pointer_after.is_some()
+					&& this.core_pointer() == pointer_after
+				{
+					this.restore_core_pointer(pointer);
+				}
+				this.restore_activation(window, ewmh, previous_active, previous_focus);
+			});
+		})
+	}
+
+	/// The successful body is not final until focus has been handed back.
+	fn finish_takeover<T>(
+		&mut self,
+		result: CoreResult<T>,
+		hand_back: impl FnOnce(&Self),
+	) -> CoreResult<T> {
+		hand_back(self);
 		let intervened = self.check_user();
 		self.takeover_presses = None;
 		result.and_then(|value| intervened.map(|()| value))
@@ -1540,6 +1552,26 @@ mod tests {
 		// Read in order after the session's own press, which did not count.
 		assert_eq!(input.activity.as_ref().expect("watching").presses(), 1);
 
+		// The body has already succeeded when the user resumes during hand-back.
+		input.takeover_presses = Some(1);
+		let completed = Ok(());
+		let error = input
+			.finish_takeover(completed, |input| {
+				for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
+					user
+						.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
+						.expect("user resumes after body");
+				}
+				user.sync().expect("user press reached the server");
+				input
+					.activity
+					.as_ref()
+					.expect("watching")
+					.wait_for_presses(2);
+			})
+			.expect_err("hand-back intervention cannot report success");
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		keys_received();
 		// Lost observation refuses further input, even without user presses.
 		input.activity = None;
 		input.watch_user().expect("fresh listener");

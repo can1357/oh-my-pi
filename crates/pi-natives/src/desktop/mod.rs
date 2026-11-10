@@ -493,7 +493,9 @@ impl Request {
 				self,
 				Self::RaiseWindow { .. } | Self::OpenApplication { .. } | Self::AxPerform { .. }
 			)
-			&& self.target().is_none_or(|target| matches!(target, Target::Window(_)))
+			&& self
+				.target()
+				.is_none_or(|target| matches!(target, Target::Window(_)))
 	}
 
 	const fn frame_target(&self) -> Option<&Target> {
@@ -5296,9 +5298,9 @@ mod capture_tests {
 		};
 		let element = |takeover| Request::AxInput {
 			reference: "e1".to_string(),
-			input: ElementInput::Text("hi".to_string()),
-			takeover: Takeover::new(takeover, None),
-			reply: reply(),
+			input:     ElementInput::Text("hi".to_string()),
+			takeover:  Takeover::new(takeover, None),
+			reply:     reply(),
 		};
 		assert!(typing(&window, Some(true)).takes_over_a_window());
 		assert!(element(Some(true)).takes_over_a_window());
