@@ -181,6 +181,21 @@ fn unreadable_binary_without_shebang(dir: &std::path::Path) {
 	write(&dir.join("s"), "\u{0}\u{1}\u{2}BAD\n", 0o111);
 }
 
+/// A `#!` line that names NO interpreter, with a newline after it. The
+/// kernel refuses it with `ENOEXEC` exactly as it refuses a file with no
+/// `#!` at all, and both Bash versions then RUN the file as a shell
+/// script: `hi`, status 0. It is not a bad interpreter.
+fn hash_bang_then_newline(dir: &std::path::Path) {
+	write(&dir.join("s"), "#!\necho hi\n", 0o755);
+}
+
+/// The same with blanks after the `#!`: bash skips them, finds no name,
+/// and runs the file. A carriage return is not a blank, which is what
+/// [`carriage_return_interpreter_with_a_newline`] measures.
+fn hash_bang_blanks_then_newline(dir: &std::path::Path) {
+	write(&dir.join("s"), "#! \t \necho hi\n", 0o755);
+}
+
 /// Immediate spawns. Upstream main already probes the refused file for all
 /// of these and answers as Bash 5.3.0 does; they are here so a change to the
 /// deferred path cannot quietly break them.
@@ -377,6 +392,22 @@ const IMMEDIATE: &[Row] = &[
 		status: 126,
 		wants:  &["Permission denied", "!cannot execute binary file"],
 	},
+	Row {
+		name:   "hash-bang-then-newline",
+		setup:  hash_bang_then_newline,
+		fifo:   false,
+		script: "./s",
+		status: 0,
+		wants:  &["hi", "!bad interpreter"],
+	},
+	Row {
+		name:   "hash-bang-blanks-then-newline",
+		setup:  hash_bang_blanks_then_newline,
+		fifo:   false,
+		script: "./s",
+		status: 0,
+		wants:  &["hi", "!bad interpreter"],
+	},
 ];
 
 /// Deferred spawns: `f` is a FIFO the refused command writes to and another
@@ -568,6 +599,22 @@ const DEFERRED: &[Row] = &[
 		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p",
 		status: 0,
 		wants:  &["Permission denied", "status=126", "!cannot execute binary file"],
+	},
+	Row {
+		name:   "deferred-hash-bang-then-newline",
+		setup:  hash_bang_then_newline,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p; cat out",
+		status: 0,
+		wants:  &["status=0", "hi", "!bad interpreter"],
+	},
+	Row {
+		name:   "deferred-hash-bang-blanks-then-newline",
+		setup:  hash_bang_blanks_then_newline,
+		fifo:   true,
+		script: "/bin/cat f >out & p=$!; ./s >f & q=$!; wait $q; echo status=$?; wait $p; cat out",
+		status: 0,
+		wants:  &["status=0", "hi", "!bad interpreter"],
 	},
 ];
 
