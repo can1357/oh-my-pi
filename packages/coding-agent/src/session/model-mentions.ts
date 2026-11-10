@@ -13,6 +13,7 @@ import {
 	modelMentionName,
 	modelMentionTag,
 } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { maskBlockquotes } from "@oh-my-pi/pi-tui/prompt/markdown-prose";
 import { AUTO_THINKING, parseEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -123,10 +124,12 @@ export class ModelMentionRegistry {
 		};
 	}
 
-	/** Register user-tagged models and replace their tokens with persisted agent tags. */
+	/** Register unquoted user-tagged models and replace their tokens with persisted agent tags. */
 	expandMentions(text: string): string {
 		if (!text.includes("^")) return text;
-		return text.replace(MODEL_MENTION_RE, (token, delimiter: string, selector: string) => {
+		const authored = maskBlockquotes(text);
+		return text.replace(MODEL_MENTION_RE, (token, delimiter: string, selector: string, index: number) => {
+			if (authored[index + delimiter.length] !== "^") return token;
 			let mention = this.#bySelector.get(selector);
 			if (!mention) {
 				const resolved = this.resolve(selector);

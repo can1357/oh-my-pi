@@ -312,6 +312,15 @@ describe("model mentions", () => {
 		}
 	});
 
+	test("quoted model selectors neither authorize agents nor override authored selectors", () => {
+		const reference = "> ^a/x ^b/y\n\n";
+		expect(mentions.expandMentions(`${reference}Follow up`)).toBe(`${reference}Follow up`);
+		expect(readModelMentions(session.getBranch())).toEqual([]);
+		expect(mentions.expandMentions(`${reference}Ask ^b/y`)).toBe(`${reference}Ask <model agent="m1" name="Y"/>`);
+		expect(readModelMentions(session.getBranch())).toEqual([{ agent: "m1", selector: "b/y", name: "Y" }]);
+		expect(mentions.sessionAgents().map(agent => [agent.name, agent.model])).toEqual([["m1", ["b/y"]]]);
+	});
+
 	test("registers only exact available selectors and reuses their pseudonyms", () => {
 		expect(mentions.expandMentions("ask ^a/x and ^b/y ignore ^nope/z")).toBe(
 			'ask <model agent="m1" name="X One"/> and <model agent="m2" name="Y"/> ignore ^nope/z',

@@ -1055,6 +1055,15 @@ describe("parseSkillInvocation", () => {
 	});
 
 	describe("mid-prompt `/skill:<name>` form (issue #3913)", () => {
+		it("keeps quoted skill references inert while preserving an authored invocation and its context", () => {
+			const reference = "> /skill:old\n\n";
+			expect(parseSkillInvocation(`${reference}Follow up`)).toBeUndefined();
+			expect(parseSkillInvocation(`${reference}/skill:new focus`)).toMatchObject({
+				name: "new",
+				args: `${reference}focus`,
+			});
+		});
+
 		it("threads surrounding prose through as args when the skill token appears after typed text", () => {
 			expect(parseSkillInvocation("fix the auth bug /skill:security-scan ")).toEqual({
 				name: "security-scan",

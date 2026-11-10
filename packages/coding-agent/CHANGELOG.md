@@ -6,6 +6,10 @@
 
 - Browse completed replies from the current agent tree with `/summary` or `/summary last`, with bounded previews; Ctrl+Alt+R adds a quoted reference above your unsent draft ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 
+### Fixed
+
+- Quoted prompt references no longer invoke skills or authorize delegation models ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+
 ## [18.18.7] - 2026-11-10
 
 ### Added
