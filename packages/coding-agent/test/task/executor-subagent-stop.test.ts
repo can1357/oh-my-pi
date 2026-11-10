@@ -507,7 +507,7 @@ describe("runSubprocess subagent_stop", () => {
 
 		expect(harness.events).toHaveLength(1);
 		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toContain("user prompt cancelled the subagent_stop pass");
+		expect(result.abortReason).toContain("cancelled the subagent_stop pass");
 		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
 		expect(result.output).not.toContain("REFUSED");
 		expect(harness.holds[0]?.released).toBe(true);
@@ -532,7 +532,7 @@ describe("runSubprocess subagent_stop", () => {
 
 		expect(harness.prompts).toHaveLength(1);
 		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toContain("user prompt cancelled the subagent_stop pass");
+		expect(result.abortReason).toContain("cancelled the subagent_stop pass");
 		expect(result.error).not.toBe(SUBAGENT_STOP_REFUSAL_UNRESOLVED);
 		expect(result.output).not.toContain("UNJUDGED-PAYLOAD");
 		expect(result.extractedToolData?.yield).toBeUndefined();
