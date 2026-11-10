@@ -81,6 +81,16 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 	return session;
 }
 
+/** Retention cursors recorded in a transcript, as `[transcriptId, turn]`. */
+function cursors(session: { sessionManager: { getEntries(): SessionEntry[] } }): Array<[unknown, unknown]> {
+	return session.sessionManager.getEntries().flatMap(entry => {
+		if (entry.type !== "custom" || entry.customType !== "supermemory_retention") return [];
+		const data = entry.data;
+		if (!data || typeof data !== "object" || !("transcriptId" in data) || !("turn" in data)) return [];
+		return [[data.transcriptId, data.turn] as [unknown, unknown]];
+	});
+}
+
 async function start(session: { settings: Settings }, taskDepth = 0) {
 	await supermemoryBackend.start({
 		session: session as never,
@@ -494,6 +504,25 @@ describe("supermemoryBackend", () => {
 		const docs = create.mock.calls.map(call => call[0]);
 		expect(docs.map(doc => doc?.metadata)).toMatchObject([{ sessionId: "t2", turnStart: 1, turnEnd: 2 }]);
 		expect(docs[0]?.content).toContain("three");
+	});
+
+	it("a window that completes after the session moves to a new transcript records no cursor there", async () => {
+		const reply = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+			sent.resolve();
+			return reply.promise;
+		});
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		const ended = session.endTurn();
+		await sent.promise;
+		// `/new` while the upload is still in flight (e.g. after the state was detached).
+		session.transcriptId = "t2";
+		reply.resolve({ id: "d", status: "queued" });
+		await ended;
+		expect(cursors(session).filter(([transcriptId]) => transcriptId === "t2")).toEqual([]);
 	});
 
 	it("recall lists editable memory ids and marks document chunks", async () => {

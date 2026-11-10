@@ -3,6 +3,7 @@
  * endpoints. Redirects are refused so the bearer token never follows one. Error messages carry only the endpoint outcome (HTTP status, timeout,
  * cancellation) — never the API key, request body, or response body.
  */
+import { asRecord } from "@oh-my-pi/pi-utils";
 import type { SupermemorySearchMode } from "./config";
 
 export interface SupermemoryDocument {
@@ -52,12 +53,6 @@ export interface SupermemorySearchInput {
 	searchMode: SupermemorySearchMode;
 	limit: number;
 	threshold: number;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value !== null && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: undefined;
 }
 
 function asStringArray(value: unknown): string[] {

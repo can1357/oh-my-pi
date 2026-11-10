@@ -454,6 +454,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		endTurn: number,
 	): Promise<boolean> {
 		const generation = this.#transcriptGeneration;
+		// A late reply from a disposed state must not record its window against the session's next transcript.
+		const transcriptId = this.transcriptId;
 		const window = messages.slice(userStarts[startTurn], userStarts[endTurn] ?? messages.length);
 		const { transcript } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
 		if (transcript) {
@@ -489,7 +491,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				);
 			}
 		}
-		if (generation !== this.#transcriptGeneration) return false;
+		if (generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) return false;
 		this.lastRetainedTurn = endTurn;
 		// A `/memory enqueue` tail is an open window: a resume re-sends it complete under the same customId.
 		if (endTurn - startTurn === this.#config.retainEveryNTurns) this.#appendCursor(endTurn);
