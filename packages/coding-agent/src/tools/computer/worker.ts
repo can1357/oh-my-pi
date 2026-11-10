@@ -1761,7 +1761,8 @@ export class ComputerWorkerCore {
 					if (!filter) return true;
 					return (
 						(filter.id === undefined || window.id === String(filter.id)) &&
-						(!app || (exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
+						(!app ||
+							(exactApp ? window.app.toLocaleLowerCase() === app : matchesWindowApp(window, app, appPids))) &&
 						(!title || window.title.toLocaleLowerCase().includes(title))
 					);
 				}),

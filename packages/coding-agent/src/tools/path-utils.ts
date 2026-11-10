@@ -734,8 +734,10 @@ export async function splitDelimitedPathEntry(
 		// part is not itself an internal URL. `splitMixedUrlPathList` declines
 		// unless every non-URL part is an existing literal path, so a URL whose
 		// own path contains `;` (`local://report;`) stays one resource.
-		const mixed = await splitMixedUrlPathList(normalizedEntry, cwd, part =>
-			isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
+		const mixed = await splitMixedUrlPathList(
+			normalizedEntry,
+			cwd,
+			part => isInternalUrlPath(part) || (options.exclusionParts === true && isExclusionPart(part)),
 		);
 		if (mixed && mixed.length > 1) return mixed;
 	}
