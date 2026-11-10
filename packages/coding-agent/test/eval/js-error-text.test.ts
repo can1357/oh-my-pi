@@ -150,4 +150,20 @@ describe("formatCellError", () => {
 		expect(output).not.toContain("@oh-my-pi/pi-coding-agent");
 		expect(output).toContain("(2 omp frames hidden;");
 	});
+
+	it("hides a global install below the working directory rather than treating it as project-local", () => {
+		const stack = [
+			"Error: x",
+			"    at helper (/home/me/project/lib.ts:1:2)",
+			"    at run (/home/me/.bun/install/global/node_modules/puppeteer-core/lib/b.js:3:4)",
+		].join("\n");
+		const output = formatCellError(stack, {
+			...source,
+			cwd: "/home/me",
+			ompRoot: "/home/me/.bun/install/global/node_modules",
+		});
+		expect(output).toContain("at helper (/home/me/project/lib.ts:1:2)");
+		expect(output).not.toContain("puppeteer-core");
+		expect(output).toContain("(1 omp frame hidden)");
+	});
 });

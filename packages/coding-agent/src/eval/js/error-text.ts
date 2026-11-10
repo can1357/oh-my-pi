@@ -35,8 +35,13 @@ export interface CellErrorSource {
 export function formatCellError(stack: string, source: CellErrorSource): string {
 	const ompRoot = "ompRoot" in source ? source.ompRoot : OMP_ROOT;
 	const rootPrefix = ompRoot === undefined ? undefined : path.join(ompRoot, path.sep);
-	// A project-local omp shares node_modules with the cell's own dependencies. Keep that project's frames.
-	const userPrefix = path.join(source.cwd, path.sep);
+	const cwdPrefix = path.join(source.cwd, path.sep);
+	// Only a project-local install or work inside omp's tree shares the cell's dependency ownership.
+	const userPrefix =
+		rootPrefix !== undefined &&
+		(cwdPrefix.startsWith(rootPrefix) || rootPrefix === path.join(source.cwd, "node_modules", path.sep))
+			? cwdPrefix
+			: undefined;
 	const packagePrefix =
 		ompRoot !== undefined && path.basename(ompRoot) === "node_modules"
 			? path.join(ompRoot, "@oh-my-pi", path.sep)
@@ -56,7 +61,7 @@ export function formatCellError(stack: string, source: CellErrorSource): string 
 			(HOST_LOCATION.test(location) ||
 				(rootPrefix !== undefined &&
 					location.startsWith(rootPrefix) &&
-					(!location.startsWith(userPrefix) ||
+					(!(userPrefix !== undefined && location.startsWith(userPrefix)) ||
 						(packagePrefix !== undefined && location.startsWith(packagePrefix)))))
 		) {
 			hidden++;
