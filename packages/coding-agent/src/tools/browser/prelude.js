@@ -205,6 +205,22 @@
 		"concat",
 		"indexOf",
 		"findIndex",
+		"copyWithin",
+		"fill",
+		"findLastIndex",
+		"flat",
+		"keys",
+		"lastIndexOf",
+		"pop",
+		"push",
+		"reduceRight",
+		"shift",
+		"splice",
+		"toReversed",
+		"toSpliced",
+		"unshift",
+		"values",
+		"with",
 	];
 	const captureResult = (method, result) => {
 		if (result === null || typeof result !== "object" || !Array.isArray(result.entries)) return result;

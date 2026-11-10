@@ -253,6 +253,7 @@ describe("browser JavaScript facade", () => {
 
 		for (const use of [
 			"(await tab.console()).slice(-20)",
+			"(await tab.console()).pop()",
 			"(await tab.console()).length",
 			"[...(await tab.console())]",
 		]) {
