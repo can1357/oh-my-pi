@@ -5,6 +5,7 @@
 ### Added
 
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
+- Compound bash approval prompts (`bash.allowCompoundCommands: true`) list each `&&` segment on its own line, marking segments covered by `bash.patterns` allow rules (`✓ … (allowed: <pattern>)`) separately from segments being prompted for (`? … (requires approval | prompt: <pattern> | critical pattern)`) ([#18749](https://github.com/can1357/oh-my-pi/pull/18749) by [@asuffield](https://github.com/asuffield))
 
 ### Fixed
 

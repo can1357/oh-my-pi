@@ -51,6 +51,7 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta, resolveInlineByteCapBudget } from "./output-meta";
 import { resolveShellDirectory, resolveToCwd } from "./path-utils";
 import {
+	extractAndChainSegments,
 	extractLeadingCdTarget,
 	extractLiteralAndChainSegments,
 	type LiteralShellCommandSegment,
@@ -679,9 +680,86 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	};
+	#formatCompoundApprovalDetails(command: string): string[] | null {
+		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
+			? this.session.settings.getShellConfig().shell
+			: undefined;
+		if (!shell || !isPosixShell(shell)) return null;
+		const segments = extractAndChainSegments(command);
+		if (!segments) return null;
+		const rawPatterns = cfgBashPatterns.get(this.session.settings);
+		const patternRules = getBashApprovalPatternRules(rawPatterns);
+		const authoritySettings = this.session.settings.grantAuthority?.();
+		const rawAuthorityPatterns = authoritySettings ? cfgBashPatterns.get(authoritySettings) : rawPatterns;
+		const authorityRules =
+			rawAuthorityPatterns === rawPatterns ? patternRules : getBashApprovalPatternRules(rawAuthorityPatterns);
+		// Whole-chain restrictions apply to the complete chain rather than individual segments.
+		for (const rules of authorityRules === patternRules ? [patternRules] : [authorityRules, patternRules]) {
+			for (const rule of rules) {
+				if (
+					rule.approval !== "allow" &&
+					commandMatchesBashApprovalPattern(command, rule.match) &&
+					!segments.some(segment => commandSegmentMatchesBashApprovalPattern(segment.text, rule.match))
+				) {
+					return null;
+				}
+			}
+		}
+		const segmentCritical = segments.map(segment => {
+			const literalCommand = segment.literal?.argv.join(" ");
+			return CRITICAL_BASH_PATTERNS.some(
+				pattern => pattern.test(segment.text) || (literalCommand !== undefined && pattern.test(literalCommand)),
+			);
+		});
+		const wholeChainOnlyCritical =
+			command !== "" &&
+			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
+			!segmentCritical.some(Boolean);
+		if (wholeChainOnlyCritical) return null;
+
+		let chainUntainted = true;
+		const rows: string[] = [];
+		for (let i = 0; i < segments.length; i++) {
+			const segment = segments[i]!;
+			const isCritical = segmentCritical[i]!;
+			const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+			const authorityRule =
+				authorityRules === patternRules ? segmentRule : findBashApprovalPatternRule(segment.text, authorityRules);
+			const promptRule =
+				authorityRule?.approval === "prompt"
+					? authorityRule
+					: segmentRule?.approval === "prompt"
+						? segmentRule
+						: undefined;
+			const covered =
+				chainUntainted &&
+				segment.literal !== null &&
+				!isCritical &&
+				!promptRule &&
+				authorityRule?.approval !== "deny" &&
+				segmentRule?.approval === "allow";
+			if (segment.mutatesShellState) chainUntainted = false;
+			if (covered && segmentRule) {
+				rows.push(`  ✓ ${truncateForPrompt(segment.text)} (allowed: ${segmentRule.match})`);
+			} else {
+				const reason = promptRule
+					? `prompt: ${promptRule.match}`
+					: isCritical
+						? "critical pattern"
+						: "requires approval";
+				rows.push(`  ? ${truncateForPrompt(segment.text)} (${reason})`);
+			}
+		}
+		return ["Command:", ...rows];
+	}
+
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "(missing)";
+		if (typeof rawCommand === "string") {
+			const compound = this.#formatCompoundApprovalDetails(command);
+			if (compound) return compound;
+		}
 		return [`Command: ${truncateForPrompt(command)}`];
 	};
 	readonly label = "Bash";

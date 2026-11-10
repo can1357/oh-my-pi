@@ -540,6 +540,53 @@ describe("dialogs under a native surface", () => {
 		expect(find(plain.describe(), node => node.key === "expand")).toBeUndefined();
 	});
 
+	it("approval: styles covered and prompted compound bash segments distinctly in terminal and native views", () => {
+		const prompt = [
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? bun test (requires approval)",
+		].join("\n");
+		const dialog = new ApprovalDialogComponent(
+			prompt,
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ fullPrompt: prompt },
+		);
+		const rendered = dialog.render(80);
+		const coveredLine = rendered.find(line => stripVTControlCharacters(line).includes("git status"))!;
+		const promptedLine = rendered.find(line => stripVTControlCharacters(line).includes("bun test"))!;
+		expect(coveredLine).toBeDefined();
+		expect(promptedLine).toBeDefined();
+		// Covered segment uses dim styling and a success checkmark, distinct from the bold accent prompted segment.
+		expect(coveredLine).not.toEqual(
+			promptedLine.replace("? bun test (requires approval)", "✓ git status (allowed: git status*)"),
+		);
+
+		const details = find(dialog.describe(), node => node.p?.role === "omp.approval.details")!;
+		expect(details.node.c?.map(child => (child as NativeNode).p)).toEqual([
+			{ text: "Command:", truncate: "end" },
+			{
+				spans: [
+					{ t: "  " },
+					{ t: "✓", s: "success" },
+					{ t: " " },
+					{ t: "git status (allowed: git status*)", s: "dim" },
+				],
+				truncate: "end",
+			},
+			{
+				spans: [
+					{ t: "  " },
+					{ t: "?", s: "warning" },
+					{ t: " " },
+					{ t: "bun test", s: "accent strong" },
+					{ t: " (requires approval)", s: "warning" },
+				],
+				truncate: "end",
+			},
+		]);
+	});
+
 	it("approval: docks in place of the composer with its details, not a card over the transcript", async () => {
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this write") };
 		const dialog = new ApprovalDialogComponent("Allow tool: write\nPath: /tmp/out.txt", {

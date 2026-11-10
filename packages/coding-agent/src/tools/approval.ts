@@ -750,10 +750,14 @@ export function formatApprovalPrompt(tool: ApprovalSubject, args: unknown, reaso
 /**
  * The details as one row for a prompt that must stay small: each detail's first line, joined
  * by ` · `, ending in `…` when any detail has more lines. A label alone (`Code:`, its body on
- * the following lines) takes the body's first line after it.
+ * the following lines) takes the body's first line after it. Compound bash `Command:` segment
+ * rows stay on their own lines so every covered and prompted segment is visible on mount.
  */
 function approvalSummary(details: readonly string[]): string | undefined {
 	if (details.length === 0) return undefined;
+	if (details[0] === "Command:" && details.length > 1) {
+		return details.join("\n");
+	}
 	let omitted = false;
 	const heads = details.map(detail => {
 		const lines = detail.split("\n", 3);

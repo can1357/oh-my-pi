@@ -1144,6 +1144,87 @@ describe("tool-owned dynamic approval declarations", () => {
 			source: "mode",
 		});
 	});
+
+	it("indicates covered and prompted segments in compound bash approval prompts", async () => {
+		const bash = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "git diff*", approval: "allow" },
+				{ match: "go get*", approval: "prompt" },
+			],
+		});
+
+		const prompts: { full: string; compact: string }[] = [];
+		const ui = {
+			select: async () => undefined,
+			approve: async (prompt: { full: string; compact: string }) => {
+				prompts.push(prompt);
+				return "once" as const;
+			},
+		};
+
+		await requestApproval(ui, bash, {
+			command: "git status && git diff --stat && bun test && go get example.com/mod",
+		});
+		const expectedLines = [
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ✓ git diff --stat (allowed: git diff*)",
+			"  ? bun test (requires approval)",
+			"  ? go get example.com/mod (prompt: go get*)",
+		];
+		expect(prompts[0]!.full.split("\n")).toEqual(expectedLines);
+		expect(prompts[0]!.compact.split("\n")).toEqual(expectedLines);
+
+		// Non-stateful non-literal segment prompts for itself without tainting a following allowed segment.
+		expect(formatApprovalPrompt(bash, { command: "echo hi > /tmp/out && git status" }).split("\n")).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ? echo hi > /tmp/out (requires approval)",
+			"  ✓ git status (allowed: git status*)",
+		]);
+
+		// Stateful segment taints subsequent segments because shell state can change before they run,
+		// including when a leading redirection precedes the stateful builtin.
+		for (const command of [
+			"cd /tmp && git status",
+			">/dev/null cd /tmp && git status",
+			"> /dev/null cd /tmp && git status",
+		]) {
+			expect(formatApprovalPrompt(bash, { command }).split("\n")).toEqual([
+				"Allow tool: bash",
+				"Command:",
+				`  ? ${command.split(" && ")[0]} (requires approval)`,
+				"  ? git status (requires approval)",
+			]);
+		}
+
+		// Critical segment is flagged even if an allow rule would otherwise match.
+		const rmAllowed = createBashTool({
+			"bash.allowCompoundCommands": true,
+			"bash.patterns": [
+				{ match: "git status*", approval: "allow" },
+				{ match: "rm *", approval: "allow" },
+			],
+		});
+		expect(formatApprovalPrompt(rmAllowed, { command: "git status && rm -rf /" }).split("\n")).toEqual([
+			"Allow tool: bash",
+			"Command:",
+			"  ✓ git status (allowed: git status*)",
+			"  ? rm -rf / (critical pattern)",
+		]);
+
+		// With allowCompoundCommands disabled, the command stays a single unsegmented line.
+		const compoundDisabled = createBashTool({
+			"bash.allowCompoundCommands": false,
+			"bash.patterns": [{ match: "git status*", approval: "allow" }],
+		});
+		expect(formatApprovalPrompt(compoundDisabled, { command: "git status && bun test" })).toBe(
+			"Allow tool: bash\nCommand: git status && bun test",
+		);
+	});
 });
 
 describe("resolveApprovalFromContext fail-closed default", () => {
