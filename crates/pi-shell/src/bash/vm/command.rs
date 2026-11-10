@@ -4784,20 +4784,16 @@ fn is_enoexec(err: &std::io::Error) -> bool {
 	err.raw_os_error() == Some(code)
 }
 
-/// A reader's measured binary sample and file-kind policy.
+/// A reader's measured binary sample policy. Which file kinds are sniffed at
+/// all is the caller's gate, applied before this predicate is asked.
 #[derive(Clone, Copy)]
 pub(crate) struct BinaryCheck {
-	pub sample_len:      usize,
-	pub elf_magic:       bool,
-	/// The caller selects the file kinds it sniffs, before reading bytes.
-	pub sniff_file_kind: bool,
+	pub(crate) sample_len: usize,
+	pub(crate) elf_magic:  bool,
 }
 
 /// Bash `check_binary_file`: ELF magic or a NUL before the first newline.
 pub(crate) fn looks_binary(text: &[u8], policy: BinaryCheck) -> bool {
-	if !policy.sniff_file_kind {
-		return false;
-	}
 	let head = &text[..text.len().min(policy.sample_len)];
 	if policy.elf_magic && head.starts_with(b"\x7fELF") {
 		return true;
@@ -4843,9 +4839,8 @@ fn run_script_file(
 	// Bash 5.2.21/5.3.0 ENOEXEC: NUL at 127 is refused, at 128 runs;
 	// four ELF magic bytes suffice. FIFOs fail execution before this reader.
 	if looks_binary(&text, BinaryCheck {
-		sample_len:      128,
-		elf_magic:       vp.mode.dialect() != crate::bash::ids::Dialect::Zsh,
-		sniff_file_kind: true,
+		sample_len: 128,
+		elf_magic:  vp.mode.dialect() != crate::bash::ids::Dialect::Zsh,
 	}) {
 		let name = st(vp).argv[0].clone();
 		k.diag(cx, vp, line, Diag::BinaryFile { name });
@@ -5275,14 +5270,13 @@ mod tests {
 	// the ELF magic check is bash-only.
 	#[test]
 	fn binary_check_looks_at_the_first_line_only() {
-		let bash = BinaryCheck { sample_len: 128, elf_magic: true, sniff_file_kind: true };
+		let bash = BinaryCheck { sample_len: 128, elf_magic: true };
 		assert!(!looks_binary(b"(echo \"$1\")\n", bash));
 		assert!(looks_binary(b"\x7fELF\x02\x01\x01\0\0", bash));
 		assert!(!looks_binary(b"echo hi\n\0binary after the first line", bash));
 		assert!(!looks_binary(b"", bash));
 		assert!(looks_binary(b"\x7fELF text\n", bash));
 		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { elf_magic: false, ..bash }));
-		assert!(!looks_binary(b"\x7fELF text\n", BinaryCheck { sniff_file_kind: false, ..bash }));
 		assert!(!looks_binary(b"\x7fEL", bash));
 		let mut text = [b' '; 129];
 		text[127] = 0;

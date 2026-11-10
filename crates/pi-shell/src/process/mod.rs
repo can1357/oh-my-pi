@@ -190,11 +190,11 @@ pub fn read_script(
 	// Bash 5.2.21/5.3.0 script operands: NUL at 79 is refused, at 80
 	// (and 127) runs. ELF magic is refused only in regular files; FIFO
 	// input beginning with the same four bytes runs as shell text.
-	if crate::bash::looks_binary(&text, crate::bash::BinaryCheck {
-		sample_len:      80,
-		elf_magic:       args.mode.dialect() != Dialect::Zsh,
-		sniff_file_kind: metadata.as_ref().is_some_and(|m| m.is_file()),
-	}) {
+	if metadata.as_ref().is_some_and(|m| m.is_file())
+		&& crate::bash::looks_binary(&text, crate::bash::BinaryCheck {
+			sample_len: 80,
+			elf_magic:  args.mode.dialect() != Dialect::Zsh,
+		}) {
 		return Err(ScriptError::new(dollar0, &path, "cannot execute binary file", 126));
 	}
 	Ok((path, text))

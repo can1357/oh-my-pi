@@ -133,11 +133,11 @@ pub fn start(
 					// Bash 5.2.21/5.3.0 nested script operands use the
 					// same measured 79/80 boundary and regular-file-only
 					// ELF refusal as a top-level operand (including FIFOs).
-					if super::looks_binary(&text, super::BinaryCheck {
-						sample_len:      80,
-						elf_magic:       args.mode.dialect() != crate::bash::Dialect::Zsh,
-						sniff_file_kind: regular,
-					}) {
+					if regular
+						&& super::looks_binary(&text, super::BinaryCheck {
+							sample_len: 80,
+							elf_magic:  args.mode.dialect() != crate::bash::Dialect::Zsh,
+						}) {
 						let text = message(&dollar0, name, b"cannot execute binary file");
 						return reply(vp, 2, text, 126);
 					}
