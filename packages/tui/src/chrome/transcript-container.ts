@@ -399,6 +399,18 @@ export class TranscriptContainer extends Container {
 	#historyEnd: RowsAbove;
 	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
 	#nativeRuns: ReadonlyMap<Component, CompactRun> = NO_RUNS;
+	/**
+	 * Live-entry wrapper list for the per-frame walk, rebuilt only when the
+	 * live tail's identity changes (new blocks, commits advancing the
+	 * frontier, an offered commit, or an entry sync). The per-frame readers
+	 * (`liveRowCount`, `#composeViewport`, `#peekBatch`) each iterate the
+	 * live tail, so without this each one allocates one wrapper object per
+	 * live block — up to 3 × 256 short-lived objects plus arrays per frame
+	 * at 30 fps. Wrapper entries stay reference-stable across readers, and
+	 * indexes stay valid because entries are never spliced mid-frame.
+	 */
+	#liveWrappers: Array<{ entry: TranscriptEntry; index: number }> = [];
+	#liveWrappersStart = -1;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -449,6 +461,8 @@ export class TranscriptContainer extends Container {
 		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		// The live tail shifted: wrapper indexes cached by #liveEntries are stale.
+		this.#liveWrappersStart = -1;
 	}
 
 	override clear(): void {
@@ -462,8 +476,10 @@ export class TranscriptContainer extends Container {
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
 		this.#historyEnd = undefined;
+		// No entries remain, so no cached wrapper is valid.
+		this.#liveWrappers = [];
+		this.#liveWrappersStart = -1;
 	}
-
 	setToolActivityVisible(visible: boolean): void {
 		if (this.#toolActivityVisible === visible) return;
 		this.#toolActivityVisible = visible;
@@ -1230,6 +1246,8 @@ export class TranscriptContainer extends Container {
 			if (streaming !== undefined && streamingEnd !== undefined && streamingEnd > streaming.emitted) {
 				streaming.emitted = streamingEnd;
 			}
+			// Commits advance the live tail's start: cached wrappers point at retired blocks.
+			this.#liveWrappersStart = -1;
 		} else {
 			this.#releaseCommittedRenderCaches();
 			this.#historyEnd = offered.historyEnd;
@@ -1730,6 +1748,8 @@ export class TranscriptContainer extends Container {
 			}
 			this.#retireEntry(entry);
 			this.#frontier++;
+			// The live tail's start moved under the cached wrappers.
+			this.#liveWrappersStart = -1;
 		}
 	}
 
@@ -1903,9 +1923,23 @@ export class TranscriptContainer extends Container {
 
 	#liveEntries(): Array<{ entry: TranscriptEntry; index: number }> {
 		const start = this.#offered?.kind === "commit" ? this.#offered.end : this.#frontier;
+		if (start === this.#liveWrappersStart && this.#liveEntriesMatch()) return this.#liveWrappers;
 		const live: Array<{ entry: TranscriptEntry; index: number }> = [];
 		for (let index = start; index < this.#entries.length; index++) live.push({ entry: this.#entries[index]!, index });
+		this.#liveWrappers = live;
+		this.#liveWrappersStart = start;
 		return live;
+	}
+
+	/** Whether the cached wrappers still mirror `#entries` from the cached start. */
+	#liveEntriesMatch(): boolean {
+		const wrappers = this.#liveWrappers;
+		const entries = this.#entries;
+		if (wrappers.length !== entries.length - this.#liveWrappersStart) return false;
+		for (let offset = 0; offset < wrappers.length; offset++) {
+			if (wrappers[offset]!.entry !== entries[this.#liveWrappersStart + offset]) return false;
+		}
+		return true;
 	}
 
 	#liveCount(): number {
@@ -1950,6 +1984,8 @@ export class TranscriptContainer extends Container {
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");
 		if (this.#frontier < 0) this.#frontier = this.#entries.length;
+		// Entry identities moved: cached wrappers may point at dropped entries.
+		this.#liveWrappersStart = -1;
 	}
 
 	/** Whether `#entries` has `children`'s length and components from `start` on. */
