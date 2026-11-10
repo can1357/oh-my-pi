@@ -9,6 +9,7 @@ import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-tim
 import { DisplayOutputCollector } from "../executor-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext } from "./context-manager";
+import { formatCellError } from "./error-text";
 import { installJsPackages } from "./package-installer";
 import type { JsPackageEnvironmentMode } from "./package-installer";
 import type { JsStatusEvent } from "./shared/types";
@@ -232,7 +233,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		const message = error instanceof Error ? formatCellError(error.stack ?? error.message) : String(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {
