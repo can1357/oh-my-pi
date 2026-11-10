@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
+import { describe, expect, it } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, FetchImpl, Model, ThinkingBudgets } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -47,10 +46,6 @@ async function captureGenerationConfig(
 }
 
 describe("Google thinking headroom in maxOutputTokens", () => {
-	// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
-	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
-	afterEach(() => vi.restoreAllMocks());
-
 	it.each([
 		["google-generative-ai level", bundled("google", "gemini-3.1-pro-preview"), "k"],
 		["google-vertex level", bundled("google-vertex", "gemini-3.1-pro-preview"), "k"],

@@ -25,6 +25,8 @@ const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 	seven_day: "anthropic:7d",
 	seven_day_opus: "anthropic:7d:opus",
 	seven_day_sonnet: "anthropic:7d:sonnet",
+	// Fable launch resets clear the Fable weekly cap, reported as `seven_day_overage_included`.
+	seven_day_overage_included: "anthropic:7d:fable",
 };
 
 /** Return the block scopes healed by a partial Claude reset, without mutating stored blocks. */

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [18.18.7] - 2026-11-10
+
+### Added
+
+- Added Muse Ember (`muse-ember-1.0`) on Meta Model API and Muse Code with the `minimal`–`max` reasoning effort ladder and its >200K long-context pricing
+- Added the `login-warning "<text>"` auth rule, which makes a new login accept the stated account risk first ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
+
+### Changed
+
+- Resumed Google Antigravity behind a login warning instead of pausing it ([#18499](https://github.com/can1357/oh-my-pi/issues/18499))
+
+### Fixed
+
+- Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed
