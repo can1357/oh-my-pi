@@ -44,6 +44,7 @@
 
 - The legacy Pi virtual module now builds in an npm install that keeps the bundled Pi packages nested: it is anchored to the installed package, so its imports resolve through that package's own dependency graph ([#15208](https://github.com/can1357/oh-my-pi/issues/15208), [#18733](https://github.com/can1357/oh-my-pi/pull/18733) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+- User-level agents, commands, and other `~/.omp/agent` config (including agents saved from the agents hub) now follow `PI_CODING_AGENT_DIR`, matching where `omp agents unpack` writes ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))
 
 ## [18.18.6] - 2026-11-09
 
