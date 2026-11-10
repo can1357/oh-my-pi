@@ -532,7 +532,7 @@ async function runOnce(
 		runState: options.runState,
 		toolSession: options.session,
 		shadowCell: getActiveEvalShadowCell(),
-		cellTimeoutMs: options.timeoutMs,
+		cellTimeoutMs: options.timeoutMs ?? 0,
 		resolve,
 		reject,
 		toolCalls: new Map(),

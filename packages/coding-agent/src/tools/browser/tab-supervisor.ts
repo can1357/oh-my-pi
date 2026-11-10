@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
@@ -291,9 +292,11 @@ const WORKER_RESETS =
 	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
-// How to give a call that ran out of time a longer budget.
-const LONGER_BUDGET_HINT =
-	"To give long page work more time, raise the Eval cell's `timeout` or pass `tab.run(fn, { timeout })` (seconds, at most 300).";
+// How to give a call that ran out of time a longer budget; nothing once it had the browser tool's maximum.
+function longerBudgetHint(timeoutMs: number): string {
+	if (timeoutMs >= TOOL_TIMEOUTS.browser.max * 1000) return "";
+	return ` To give long page work more time, raise the Eval cell's \`timeout\` or pass \`timeout\` to \`tab.run\` (seconds, at most ${TOOL_TIMEOUTS.browser.max}).`;
+}
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
@@ -1263,11 +1266,12 @@ async function runInTabWithSnapshot(
 				`Tab ${JSON.stringify(name)}'s worker exited before this call reached it; omp reattaches the tab to a new worker, so retry the call.`,
 			);
 		}
+		const hungReason = `Browser code execution hung past its ${opts.timeoutMs}ms budget`;
 		try {
 			const result = await raceWithTimeout(
 				promise,
 				opts.timeoutMs + GRACE_MS,
-				`Browser code execution hung past its ${opts.timeoutMs}ms budget, so omp released tab ${JSON.stringify(name)} (closing its page if omp opened it); open it again with browser.open(). ${LONGER_BUDGET_HINT}`,
+				hungReason,
 				async reason => await forceKillTab(name, reason),
 			);
 			if (result.recoverTab) {
@@ -1286,6 +1290,11 @@ async function runInTabWithSnapshot(
 			}
 			return result;
 		} catch (error) {
+			if (error instanceof ToolError && error.message === hungReason) {
+				throw new ToolError(
+					`${hungReason}, so omp released tab ${JSON.stringify(name)} (closing its page if omp opened it); open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
+				);
+			}
 			if (error instanceof RendererCrashedError) {
 				const reattached = await recoverWorkerTab(
 					tab,
@@ -1372,8 +1381,8 @@ async function runInTabWithSnapshot(
 				if (runTimedOut) {
 					throw new ToolError(
 						reattached
-							? `${error.message}. omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS} ${LONGER_BUDGET_HINT}`
-							: `${error.message}. The tab could not be reattached and was released; open it again with browser.open(). ${LONGER_BUDGET_HINT}`,
+							? `${error.message}. omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS}${longerBudgetHint(opts.timeoutMs)}`
+							: `${error.message}. The tab could not be reattached and was released; open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
 					);
 				}
 			}

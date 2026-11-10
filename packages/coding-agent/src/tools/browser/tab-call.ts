@@ -245,15 +245,16 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
  * Tool budget in seconds for a `run` or `call` that passes no `timeout` of its own, or `undefined` for the
  * tool default. The eval cell's timeout (`cellTimeoutMs`) counts, since the cell's watchdog is suspended while
  * the call runs; so does a call chain's trailing `{ timeout }` (ms), which wait helpers clamp to the budget
- * less {@link CELL_BUDGET_SLACK_MS}, with disable sentinels taking the browser tool's maximum bounded budget.
- * The larger applies, never below the tool default.
+ * less {@link CELL_BUDGET_SLACK_MS}. A cell without a timeout (`0`) and the disable sentinels take the browser
+ * tool's maximum bounded budget. The larger applies, never below the tool default.
  */
 export function tabCallBudgetSeconds(
 	chain: readonly TabCallStep[] | undefined,
 	cellTimeoutMs?: number,
 ): number | undefined {
 	const budgets: number[] = [];
-	if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budgets.push(Math.ceil(cellTimeoutMs / 1000));
+	if (cellTimeoutMs === 0) budgets.push(TOOL_TIMEOUTS.browser.max);
+	else if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budgets.push(Math.ceil(cellTimeoutMs / 1000));
 	const options = chain?.at(-1)?.args.at(-1);
 	const timeout = isRecord(options) ? options.timeout : undefined;
 	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) budgets.push(TOOL_TIMEOUTS.browser.max);

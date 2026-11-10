@@ -153,6 +153,8 @@ describe("eval prelude runtime", () => {
 			"{ text: 'host-v1', details: { version: 'v1' }, images: '(1 image displayed)' }",
 		);
 		expect(calls).toHaveLength(1);
+		// A cell without a timeout says so with 0.
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 
 		const retained = await executeJs("fixture.invoke === globalThis.savedFixtureInvoke", options);
 		expect(retained.output.trim()).toBe("true");
@@ -197,6 +199,7 @@ describe("eval prelude runtime", () => {
 		expect(first.output.trim()).toBe("v1");
 		expect(first.displayOutputs).toContainEqual({ type: "image", mimeType: "image/png", data: IMAGE_DATA });
 		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 		const retained = await executePython("print(fixture is saved_fixture)", options);
 		expect(retained.output.trim()).toBe("True");
 
