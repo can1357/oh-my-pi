@@ -384,6 +384,19 @@ describe("omp plugin doctor --analyze", () => {
 		expect(exclusions()).toEqual({});
 	});
 
+	test("--apply is refused before the model is paid when the manifest loads a file outside the directory", async () => {
+		await Bun.write(path.join(tmpRoot, "shared", "entry.ts"), "export default function (pi) { /* shared */ }\n");
+		const outside = await plugin("outside-tools", "export default function (pi) { /* outside */ }\n");
+		await Bun.write(
+			path.join(outside, "package.json"),
+			JSON.stringify({ name: "outside-tools", omp: { extensions: ["../shared/entry.ts"] } }),
+		);
+		tty = true;
+		await refused({ analyze: true, yes: true, apply: true }, [outside, second]);
+		expect(modelCall).not.toHaveBeenCalled();
+		expect(exclusions()).toEqual({});
+	});
+
 	test("invalid selections stop before the catalog, a prompt or a model call", async () => {
 		await refused({ analyze: true, yes: true }, [first]);
 		await refused({ analyze: true, yes: true }, [first, first]);

@@ -6,6 +6,7 @@ import { builtinModules } from "node:module";
 import * as path from "node:path";
 import { pathIsWithin } from "@oh-my-pi/pi-utils";
 import { redactMemorySecrets } from "../memory-backend/redact";
+import { resolveExtensionDirectory } from "./extensions/directory-resolution";
 
 const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -166,6 +167,15 @@ function redactSnapshotSecrets(text: string): string {
 
 const CODE_FILE = /\.(?:[cm]?[jt]sx?|sh|bash|zsh|py|rb|pl|ps1|bat|cmd|lua|go|rs|php)$/i;
 const MANIFEST_FILE = /^(?:skill\.md|package\.json|plugin\.json|hooks\.json)$/i;
+
+/**
+ * What omp may load from an extension directory (manifest entries, index, one-level scan). Looser than
+ * the loaders' own filters on purpose: a wider match only makes coverage stricter.
+ */
+const EXTENSION_ENTRY_RESOLUTION = {
+	indexNames: ["index.ts", "index.js", "index.mjs", "index.cjs"],
+	isScanFile: (name: string): boolean => /\.[cm]?[jt]s$/.test(name),
+};
 
 const UNSEEN_OUTSIDE = "imports code outside the resource root";
 const UNSEEN_PACKAGE = "depends on a package that was not inspected";
@@ -418,6 +428,22 @@ async function readBoundedFile(abs: string, rel: string, root: string): Promise<
 	}
 }
 
+/** At most `limit` entry names of `dir`; the directory is never listed past that. */
+async function readNames(dir: string, limit: number): Promise<string[]> {
+	const handle = await fs.opendir(dir);
+	const names: string[] = [];
+	try {
+		for await (const entry of handle) {
+			names.push(entry.name);
+			if (names.length >= limit) break;
+		}
+	} finally {
+		// Leaving the loop early already closed the handle.
+		await handle.close().catch(() => {});
+	}
+	return names;
+}
+
 /**
  * Snapshot a resource without executing it or leaving its root.
  *
@@ -440,6 +466,8 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 		incomplete = true;
 	};
 	const files: { path: string; content: string; sha: string; exec: boolean }[] = [];
+	// Everything that is meant to run and must therefore be in the snapshot: the caller's entrypoint, plus what an extension directory resolves to.
+	const entrypoints: string[] = candidate.entrypoint === undefined ? [] : [candidate.entrypoint];
 
 	let realRoot: string | undefined;
 	let rootIsFile = false;
@@ -460,7 +488,8 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 		const walk = async (absDir: string, relDir: string, depth: number): Promise<void> => {
 			let names: string[];
 			try {
-				names = (await fs.readdir(absDir)).sort(byCodeUnit);
+				// shortcut: a directory past the scan limit keeps the entries the filesystem lists first rather than the sorted first; the snapshot is incomplete either way.
+				names = (await readNames(absDir, MAX_SCAN_ENTRIES - scanned + 1)).sort(byCodeUnit);
 			} catch {
 				omit(`directory not readable: ${relDir || "."}/`);
 				return;
@@ -498,7 +527,9 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 				if (stat.isSymbolicLink()) {
 					omit(`symlink not followed: ${rel}`);
 				} else if (stat.isDirectory()) {
-					if (depth >= MAX_DEPTH) omit(`depth limit (${MAX_DEPTH}) reached: ${rel}/ not inspected`);
+					// A credential-shaped directory is skipped whole; its children need not look like secrets themselves.
+					if (CREDENTIAL_FILE.test(name)) omit("credential-like directory not read");
+					else if (depth >= MAX_DEPTH) omit(`depth limit (${MAX_DEPTH}) reached: ${rel}/ not inspected`);
 					else await walk(abs, rel, depth + 1);
 					if (stopped) return;
 				} else if (!stat.isFile()) {
@@ -513,6 +544,10 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 			if (redactSnapshotSecrets(fileName) !== fileName) omit("entry with a secret-like name not inspected");
 			else found.push({ rel: fileName, abs: realRoot, size: rootSize });
 		} else await walk(realRoot, "", 0);
+		// A resolver that lists the directory is only safe once the scan above has proven it small.
+		if (candidate.kind === "extension" && !rootIsFile && !stopped) {
+			entrypoints.push(...resolveExtensionDirectory(realRoot, EXTENSION_ENTRY_RESOLUTION).files);
+		}
 
 		// Only actual Python module/package paths count; documentation stems and unrelated directories do not.
 		const localModules = new Set(found.map(({ rel }) => rel));
@@ -557,21 +592,25 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 		)
 		.digest("hex");
 
-	// The entrypoint is a hint about what to run. It must resolve inside the root to a captured file;
+	// An entrypoint is a hint about what to run. It must resolve inside the root to a captured file;
 	// otherwise coverage is not established. Reported but kept out of the fingerprint above.
-	const entrypointNotes: string[] = [];
-	if (candidate.entrypoint !== undefined && realRoot !== undefined) {
+	const entrypointNotes = new Set<string>();
+	if (realRoot !== undefined) {
 		const base = rootIsFile ? path.dirname(candidate.root) : candidate.root;
-		try {
-			const entry = await fs.realpath(path.resolve(base, candidate.entrypoint));
-			if (!pathIsWithin(realRoot, entry)) {
-				entrypointNotes.push("entrypoint resolves outside the resource root");
-			} else if ((await fs.stat(entry)).isFile()) {
-				const rel = rootIsFile ? path.basename(realRoot) : path.relative(realRoot, entry).split(path.sep).join("/");
-				if (!files.some(f => f.path === rel)) entrypointNotes.push("entrypoint file was not captured");
+		for (const entrypoint of entrypoints) {
+			try {
+				const entry = await fs.realpath(path.resolve(base, entrypoint));
+				if (!pathIsWithin(realRoot, entry)) {
+					entrypointNotes.add("entrypoint resolves outside the resource root");
+				} else if ((await fs.stat(entry)).isFile()) {
+					const rel = rootIsFile
+						? path.basename(realRoot)
+						: path.relative(realRoot, entry).split(path.sep).join("/");
+					if (!files.some(f => f.path === rel)) entrypointNotes.add("entrypoint file was not captured");
+				}
+			} catch {
+				entrypointNotes.add("entrypoint is not readable");
 			}
-		} catch {
-			entrypointNotes.push("entrypoint is not readable");
 		}
 	}
 
@@ -583,6 +622,6 @@ export async function snapshotResource(candidate: ResourceCandidate): Promise<Re
 		fingerprint,
 		files: files.map(({ path: filePath, content }) => ({ path: filePath, content })),
 		omissions: shown,
-		complete: !incomplete && entrypointNotes.length === 0,
+		complete: !incomplete && entrypointNotes.size === 0,
 	};
 }
