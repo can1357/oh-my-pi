@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { handleSkillList, runSkillsCommand } from "../../src/cli/skill-list";
@@ -70,6 +71,94 @@ async function writeSkill(directory: string, name: string, description: string):
 	return filePath;
 }
 
+/** Ambient-poison fixture state: what setup created and how to undo it. */
+interface PoisonFixture {
+	/** Directories setup created because they did not exist, parents before children. */
+	createdDirectories: string[];
+	/** Poison leaf directories (always removed by cleanup, created or not). */
+	claudePoisonDir: string;
+	agentsPoisonDir: string;
+	/** Directory existence snapshot keyed by absolute path, taken before setup ran. */
+	preExisting: Map<string, boolean>;
+}
+
+/** File writer seam so a test can fail the setup midway through its second write. */
+type PoisonWriter = (filePath: string, contents: string) => Promise<void>;
+
+const bunPoisonWriter: PoisonWriter = async (filePath, contents) => {
+	await Bun.write(filePath, contents);
+};
+
+/**
+ * Install the ambient poison pair the isolation assertions prove are excluded.
+ *
+ * Every directory the installation creates — only those that did not exist
+ * before — is recorded in {@link PoisonFixture.createdDirectories}, and the
+ * cleanup is registered before each creation: `trackAncestry` records the
+ * missing directories before `mkdir` runs, and a throw from `mkdir` or the
+ * writer (e.g. an injected failing writer) unwinds everything recorded so
+ * far, deepest first, while pre-existing parents stay untouched. A
+ * successful install returns the cleanup for the caller to run on teardown;
+ * re-running it is a no-op because every removal targets an already-gone
+ * path (`force: true`).
+ */
+async function installAmbientPoison(options: { writer?: PoisonWriter } = {}): Promise<
+	PoisonFixture & {
+		cleanup: () => Promise<void>;
+	}
+> {
+	const writer = options.writer ?? bunPoisonWriter;
+	const createdDirectories: string[] = [];
+	const preExisting = new Map<string, boolean>();
+	const exists = (directory: string): boolean => preExisting.get(directory) ?? fsSync.existsSync(directory);
+	const track = (directory: string): boolean => {
+		const present = exists(directory);
+		preExisting.set(directory, present);
+		return present;
+	};
+	/** Record every missing directory from `skillDir` up to its nearest existing ancestor. */
+	const trackAncestry = (skillDir: string): void => {
+		const missing: string[] = [];
+		let current = skillDir;
+		while (!track(current)) {
+			missing.push(current);
+			const parent = path.dirname(current);
+			if (parent === current) break;
+			current = parent;
+		}
+		createdDirectories.push(...missing);
+	};
+	const cleanup = async (): Promise<void> => {
+		// Deepest first: a created parent cannot be removed while a created
+		// child still lives inside it. Removals of already-gone paths are
+		// no-ops (force: true), so re-running cleanup is safe.
+		for (const directory of [...createdDirectories].reverse()) {
+			if (!fsSync.existsSync(directory)) continue;
+			await removeWithRetries(directory);
+		}
+	};
+	const writePoison = async (skillDir: string, description: string): Promise<void> => {
+		// Registration happens BEFORE the creation (trackAncestry records the
+		// missing directories first), so a throw from mkdir or the writer is
+		// already covered by the recorded set when it unwinds here.
+		trackAncestry(skillDir);
+		try {
+			await fs.mkdir(skillDir, { recursive: true });
+			await writer(path.join(skillDir, "SKILL.md"), skillMarkdown(path.basename(skillDir), description));
+		} catch (error) {
+			// A mid-setup throw must still clean everything recorded so far.
+			await cleanup();
+			throw error;
+		}
+	};
+	const claudePoisonDir = path.join(ambientClaudeDir, "skills", CLAUDE_POISON);
+	const localAgentsPoisonDir = path.join(ambientHome, ".agents", "skills", AGENTS_POISON);
+	await writePoison(claudePoisonDir, "Ambient Claude poison.");
+	await writePoison(localAgentsPoisonDir, "Ambient agents poison.");
+	agentsPoisonDir = localAgentsPoisonDir;
+	return { createdDirectories, claudePoisonDir, agentsPoisonDir: localAgentsPoisonDir, preExisting, cleanup };
+}
+
 function listingEvidence(skills: { name: string; source: string; filePath: string }[]): string {
 	const rows = skills.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`);
 	return [
@@ -85,6 +174,8 @@ function listingEvidence(skills: { name: string; source: string; filePath: strin
 	].join("\n");
 }
 
+let poisonFixtureCleanup: (() => Promise<void>) | undefined;
+
 beforeAll(async () => {
 	ambientHome = os.homedir();
 	originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
@@ -97,16 +188,15 @@ beforeAll(async () => {
 		process.env.CLAUDE_CONFIG_DIR = ambientClaudeDir;
 		Bun.env.CLAUDE_CONFIG_DIR = ambientClaudeDir;
 	}
-	await writeSkill(path.join(ambientClaudeDir, "skills"), CLAUDE_POISON, "Ambient Claude poison.");
-	agentsPoisonDir = path.join(ambientHome, ".agents", "skills", AGENTS_POISON);
-	await fs.mkdir(agentsPoisonDir, { recursive: true });
-	await Bun.write(path.join(agentsPoisonDir, "SKILL.md"), skillMarkdown(AGENTS_POISON, "Ambient agents poison."));
+	const fixture = await installAmbientPoison();
+	poisonFixtureCleanup = fixture.cleanup;
 });
 
 afterAll(async () => {
 	await removeWithRetries(path.join(ambientClaudeDir, "skills", CLAUDE_POISON));
 	if (ownedClaudeDir) await removeWithRetries(ambientClaudeDir);
 	await removeWithRetries(agentsPoisonDir);
+	await poisonFixtureCleanup?.();
 	restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 });
 
@@ -411,6 +501,111 @@ describe("ambient skill isolation", () => {
 		expect(AGENTS_POISON).toMatch(/^omp-foundation-w6-agents-poison-[0-9a-f]{16}$/);
 		expect(process.listeners("exit").some(listener => listener.name === "removeAmbientPoisonOnExit")).toBe(true);
 	});
+
+	test("removes every directory setup created when the writer fails mid-setup", async () => {
+		// Point the fixture at a throwaway tree so the created parents stand in
+		// for `.agents/skills` and `.claude/skills` without touching the real
+		// home. The writer succeeds for the first (Claude) poison and throws
+		// on the second (`.agents`) write, simulating a partial setup.
+		const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-poison-partial-"));
+		const preExistingParent = path.join(fixtureRoot, "pre-existing", "parent");
+		await fs.mkdir(preExistingParent, { recursive: true });
+		const throwingWriter: PoisonWriter = async (filePath, _contents) => {
+			if (filePath.endsWith(path.join(CLAUDE_POISON, "SKILL.md"))) {
+				await Bun.write(filePath, "partial");
+				return;
+			}
+			throw new Error("injected: writer failed mid-setup");
+		};
+		const savedAmbientHome = ambientHome;
+		const savedAmbientClaudeDir = ambientClaudeDir;
+		const savedOwnedClaudeDir = ownedClaudeDir;
+		const savedAgentsPoisonDir = agentsPoisonDir;
+		ambientHome = fixtureRoot;
+		ambientClaudeDir = path.join(fixtureRoot, "claude-config");
+		ownedClaudeDir = false;
+		try {
+			let caught: unknown;
+			try {
+				await installAmbientPoison({ writer: throwingWriter });
+			} catch (error) {
+				caught = error;
+			}
+			expect((caught as Error).message).toBe("injected: writer failed mid-setup");
+			const claudeParent = path.join(fixtureRoot, "claude-config", "skills");
+			const claudePoison = path.join(claudeParent, CLAUDE_POISON);
+			const agentsSkills = path.join(fixtureRoot, ".agents", "skills");
+			// RED: today's cleanup removes only the poison leaves, so the
+			// parents setup created (claude-config/skills, .agents/skills)
+			// survive a partial setup.
+			expect(fsSync.existsSync(claudePoison)).toBe(false);
+			expect(fsSync.existsSync(claudeParent)).toBe(false);
+			expect(fsSync.existsSync(agentsSkills)).toBe(false);
+			expect(fsSync.existsSync(path.join(fixtureRoot, ".agents"))).toBe(false);
+			// Pre-existing parents must be untouched by the cleanup.
+			expect(fsSync.existsSync(preExistingParent)).toBe(true);
+			expect(fsSync.existsSync(fixtureRoot)).toBe(true);
+		} finally {
+			ambientHome = savedAmbientHome;
+			ambientClaudeDir = savedAmbientClaudeDir;
+			ownedClaudeDir = savedOwnedClaudeDir;
+			agentsPoisonDir = savedAgentsPoisonDir;
+			await removeWithRetries(fixtureRoot);
+		}
+	});
+
+	// Reachability precondition: the poison assertions above only mean
+	// something if the poison would be discovered without isolation. The test
+	// cwd (os.tmpdir()) is under the real home on some Linux setups, letting
+	// the project ancestor walk reach <home>/.agents; on macOS CI tmp is
+	// outside the home and that walk cannot reach it.
+	//
+	// `skipIf` reads its condition when the test is registered — before any
+	// beforeAll runs — so this computes the real home directly from the
+	// environment (HOME, falling back to os.homedir()) instead of the
+	// `ambientHome` variable the beforeAll assigns later.
+	const REAL_HOME = process.env.HOME?.trim() || os.homedir();
+	const ANCESTOR_REACHABLE = (() => {
+		let current = path.resolve(os.tmpdir());
+		while (true) {
+			if (current === path.resolve(REAL_HOME)) return true;
+			const parent = path.dirname(current);
+			if (parent === current) return false;
+			current = parent;
+		}
+	})();
+	const UNREACHABLE_REASON = `test tmpdir (${os.tmpdir()}) is not under the real home (${REAL_HOME}), so the project ancestor walk cannot reach <home>/.agents`;
+
+	// `skipIf` at runtime accepts (condition, reason); bun-types declares only
+	// the single-argument form, so widen a bound reference for this one call.
+	const skipIfWithReason = test.skipIf.bind(test) as (
+		condition: boolean,
+		reason?: string,
+	) => ReturnType<typeof test.skipIf>;
+	skipIfWithReason(!ANCESTOR_REACHABLE, UNREACHABLE_REASON)(
+		"discovers the ambient .agents poison when discovery can reach the real home",
+		async () => {
+			// Control: with the real home visible to discovery, the .agents
+			// poison must appear, proving the isolated run's empty poisonHits
+			// is a real isolation result and not an unreachable fixture.
+			const directory = await isolatedDirectory("omp-skills-reach-");
+			const realHomeSpy = spyOn(os, "homedir").mockReturnValue(ambientHome);
+			try {
+				const result = await runSkillsCommand({
+					cwd: directory,
+					skillsSettings: { customDirectories: [] },
+				});
+				const poisonHits = result.skills.filter(skill => skill.name === AGENTS_POISON);
+				expect(
+					poisonHits.map(skill => `${skill.name}\t${skill.source}\t${skill.filePath}`),
+					listingEvidence(result.skills),
+				).not.toEqual([]);
+			} finally {
+				realHomeSpy.mockReturnValue(tempHome);
+				await removeWithRetries(directory);
+			}
+		},
+	);
 
 	test("lists only the requested fixture skill, not ambient Claude or .agents poison", async () => {
 		const directory = await isolatedDirectory("omp-skills-poison-");
