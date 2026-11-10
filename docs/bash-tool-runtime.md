@@ -145,6 +145,8 @@ Concurrent calls never share one `Shell`: the native session runs one command at
 
 A call keeps the session ID it started with, even if the session changes before its shell starts. Leaving a session (new, fork, switch, branch) releases its shells, and a command still running or pending from a left session drops its shell when it settles (`isSessionCurrent`), so returning to a session starts a fresh shell.
 
+A session can own more than one shell cache entry: surfaces that need their own shell state pass a namespaced key, `<label>:<session id>` (a `/loop` condition uses `loop-condition:<id>`), while the bash tool uses the bare session id. Releasing a session drops every one of them, and a shell released while a command is still running retains any live background jobs once that command settles. Only an identifier-shaped label directly followed by the released session id counts as a namespace, so per-job `<session>:async:<jobId>` keys and cwd-scoped keys are unaffected.
+
 ## Native shell visualization
 
 `pi-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
