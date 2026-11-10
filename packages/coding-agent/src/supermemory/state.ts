@@ -429,7 +429,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 		const [profile, memories] = await Promise.allSettled([
 			this.#local().client.profile(this.containerTag, signal),
-			this.search(query.slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal),
+			// Redact before cutting, as for retention: a cut inside a token defeats the redactor.
+			this.search(this.#redact(query).slice(0, MAX_RECALL_QUERY_CHARS), undefined, signal),
 		]);
 		if (signal?.aborted || generation !== this.#recallGeneration) return undefined;
 		if (profile.status === "rejected" && memories.status === "rejected") {

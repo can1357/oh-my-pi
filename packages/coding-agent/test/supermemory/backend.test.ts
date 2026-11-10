@@ -471,6 +471,17 @@ describe("supermemoryBackend", () => {
 		expect(create.mock.calls[0]?.[0]?.content).not.toContain(suffix);
 	});
 
+	it("redacts the recall query before cutting it to the query limit", async () => {
+		const { search } = spyRecall();
+		const session = makeSession();
+		await start(session);
+		// The 1,000-character query cut lands inside the token, past the redactor's minimum length.
+		const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+		await supermemoryBackend.beforeAgentStartPrompt!(session as never, `${"q".repeat(980)}${secret}`, undefined);
+		const sent = search.mock.calls[0]?.[0]?.q ?? "";
+		expect(sent).not.toContain("ghp_abcdefghijklmnop");
+	});
+
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),
