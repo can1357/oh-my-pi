@@ -156,6 +156,23 @@ type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
 type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
+const inputOptionsKeys: Record<keyof InputOptions, true> = { takeover: true };
+const screenshotOptionsKeys: Record<keyof ScreenshotOptions, true> = { silent: true };
+const menuOptionsKeys: Record<keyof MenuOptions, true> = { menu: true };
+const clickOptionsKeys: Record<keyof ClickOptions, true> = { takeover: true, menu: true, button: true, count: true, modifiers: true };
+const dragOptionsKeys: Record<keyof DragOptions, true> = { takeover: true, modifiers: true, keys: true };
+const scrollOptionsKeys: Record<keyof ScrollOptions, true> = { takeover: true, dx: true, dy: true };
+const axOptionsKeys: Record<keyof AxOptions, true> = { all: true, maxDepth: true };
+const holdOptionsKeys: Record<keyof HoldOptions, true> = { duration: true, takeover: true };
+const holdMouseOptionsKeys: Record<keyof HoldMouseOptions, true> = { duration: true, button: true, keys: true, takeover: true };
+const windowFilterKeys: Record<keyof WindowFilter, true> = { id: true, app: true, title: true, wait: true };
+const applicationQueryKeys: Record<keyof ApplicationQuery, true> = { query: true, runningOnly: true };
+const applicationOpenOptionsKeys: Record<keyof ApplicationOpenOptions, true> = { activate: true, reveal: true, app: true };
+const axQueryKeys: Record<keyof AxQuery, true> = { role: true, title: true, value: true, limit: true };
+const axSelectTextOptionsKeys: Record<keyof AxSelectTextOptions, true> = { prefix: true, suffix: true, select: true };
+const doubleClickKeys: Record<keyof Omit<ClickOptions, "count">, true> = { takeover: true, menu: true, button: true, modifiers: true };
+const observeKeys: Record<keyof (ScreenshotOptions & AxOptions), true> = { silent: true, all: true, maxDepth: true };
+
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
@@ -327,14 +344,20 @@ function validateHold(options: HoldOptions): void {
 }
 
 function strictObject(value: unknown, allowed: string[], label: string): asserts value is Record<string, unknown> {
-	if (
-		!value ||
-		typeof value !== "object" ||
-		Array.isArray(value) ||
-		Object.keys(value).some(key => !allowed.includes(key))
-	) {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new ToolError(`${label} must be an object with only: ${allowed.join(", ")}`);
 	}
+	const unknown = Object.keys(value).filter(key => !allowed.includes(key));
+	if (unknown.length === 0) return;
+	const hints = unknown.flatMap(key => {
+		const matches = allowed.filter(name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()));
+		return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
+	});
+	throw new ToolError(`${label}: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`);
+}
+
+function strictOptions(value: unknown, keys: object, label: string): void {
+	if (value != null) strictObject(value, Object.keys(keys), label);
 }
 
 function windowWait(wait: unknown): number {
@@ -638,6 +661,7 @@ async function captureScreenshot(
 	options?: ScreenshotOptions,
 	region?: CaptureRegion,
 ): Promise<ScreenshotResult> {
+	strictOptions(options, screenshotOptionsKeys, "screenshot");
 	const context = getContext();
 	const caps = {
 		maxWidth: context.snapshot.captureMaxWidth,
@@ -734,6 +758,7 @@ class El {
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
+		strictOptions(options, axSelectTextOptionsKeys, "selectText");
 		const context = this.#getContext();
 		guardRun(context, "selectText");
 		validateString(text, "selectText(text)");
@@ -759,6 +784,7 @@ class El {
 	}
 
 	async perform(action: string, options?: MenuOptions): Promise<void> {
+		strictOptions(options, menuOptionsKeys, "perform");
 		const context = this.#getContext();
 		guardRun(context, "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
@@ -816,6 +842,8 @@ class El {
 	 * with one, that chord typed into the element.
 	 */
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "press");
+		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		const context = this.#getContext();
 		guardRun(context, "press");
 		if (chord === undefined || isMenuOptions(chord)) {
@@ -834,6 +862,7 @@ class El {
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		const context = this.#getContext();
 		guardRun(context, "type");
 		validateString(text, "type(text)");
@@ -844,6 +873,7 @@ class El {
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		const context = this.#getContext();
 		guardRun(context, "click");
 		const native = pointerOptions(options);
@@ -855,6 +885,7 @@ class El {
 	}
 
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		const context = this.#getContext();
 		guardRun(context, "doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
@@ -968,6 +999,7 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async selectText(text: string, options?: AxSelectTextOptions): Promise<AxTextSelection> {
+		strictOptions(options, axSelectTextOptionsKeys, "selectText");
 		guardRun(this.#getContext(), "selectText");
 		validateString(text, "selectText(text)");
 		return (await this.#resolve()).selectText(text, options);
@@ -986,28 +1018,34 @@ class ElRef implements PromiseLike<El> {
 	}
 
 	async perform(action: string, options?: MenuOptions): Promise<void> {
+		strictOptions(options, menuOptionsKeys, "perform");
 		guardRun(this.#getContext(), "perform");
 		validateString(action, "perform(action)", { nonEmpty: true });
 		await (await this.#resolve()).perform(action, options);
 	}
 
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "press");
+		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		guardRun(this.#getContext(), "press");
 		if (chord !== undefined && !isMenuOptions(chord)) chordKeys(chord);
 		await (await this.#resolve()).press(chord, options);
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		guardRun(this.#getContext(), "type");
 		validateString(text, "type(text)");
 		await (await this.#resolve()).type(text, options);
 	}
 
 	async click(options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		await (await this.#resolve()).click(options);
 	}
 
 	async doubleClick(options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		await (await this.#resolve()).doubleClick(options);
 	}
 
@@ -1050,6 +1088,7 @@ class Win {
 	}
 
 	zoom(region: CaptureRegion, options?: ScreenshotOptions): Promise<ScreenshotResult> {
+		strictOptions(options, screenshotOptionsKeys, "zoom");
 		if (!region || typeof region !== "object" || Array.isArray(region)) {
 			throw new ToolError("zoom requires a region { x, y, width, height } in the last full screenshot's pixels");
 		}
@@ -1075,6 +1114,7 @@ class Win {
 	}
 
 	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
+		strictOptions(options, clickOptionsKeys, "click");
 		const context = this.#guardInput("click");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "click", native, `window ${this.id}`);
@@ -1090,6 +1130,7 @@ class Win {
 	}
 
 	async doubleClick(x: number, y: number, options?: Omit<ClickOptions, "count">): Promise<void> {
+		strictOptions(options, doubleClickKeys, "doubleClick");
 		const context = this.#guardInput("doubleClick");
 		const native = { ...pointerOptions(options), count: 2 };
 		refusePointerMenu(this.#session, context, "doubleClick", native, `window ${this.id}`);
@@ -1105,6 +1146,7 @@ class Win {
 	}
 
 	async move(x: number, y: number, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "move");
 		const context = this.#guardInput("move");
 		const native = pointerOptions(options);
 		await sendInput(
@@ -1118,6 +1160,7 @@ class Win {
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
+		strictOptions(options, dragOptionsKeys, "drag");
 		const context = this.#guardInput("drag");
 		const native = pointerOptions(options);
 		refusePointerMenu(this.#session, context, "drag", native, `window ${this.id}`);
@@ -1150,6 +1193,7 @@ class Win {
 	}
 
 	async scroll(x: number, y: number, options: ScrollOptions = {}): Promise<void> {
+		strictOptions(options, scrollOptionsKeys, "scroll");
 		const context = this.#guardInput("scroll");
 		const dx = options.dx ?? 0;
 		const dy = options.dy ?? 0;
@@ -1165,6 +1209,7 @@ class Win {
 	}
 
 	async type(text: string, options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "type");
 		const context = this.#guardInput("type");
 		validateString(text, "type(text)");
 		const native = pointerOptions(options);
@@ -1179,6 +1224,7 @@ class Win {
 	}
 
 	async press(chord: string | string[], options?: InputOptions): Promise<void> {
+		strictOptions(options, inputOptionsKeys, "press");
 		const context = this.#guardInput("press");
 		const keys = chordKeys(chord);
 		const native = pointerOptions(options);
@@ -1193,6 +1239,7 @@ class Win {
 	}
 
 	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
+		strictOptions(options, holdOptionsKeys, "holdKeys");
 		const context = this.#guardInput("holdKeys");
 		// One read of each option, so the `refuse` check and the native call agree.
 		const { duration, takeover } = { ...options };
@@ -1209,6 +1256,7 @@ class Win {
 	}
 
 	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
+		strictOptions(options, holdMouseOptionsKeys, "holdMouse");
 		const context = this.#guardInput("holdMouse");
 		const { duration, button, keys, takeover } = { ...options };
 		validateHold({ duration, takeover });
@@ -1227,6 +1275,7 @@ class Win {
 	}
 
 	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
+		strictOptions(options, observeKeys, "observe");
 		const context = this.#getContext();
 		const result = await nativeCall(context.signal, () =>
 			this.#session.observe(
@@ -1290,11 +1339,13 @@ class Win {
 	}
 
 	async ax(options?: AxOptions): Promise<string> {
+		strictOptions(options, axOptionsKeys, "ax");
 		const { signal } = this.#getContext();
 		return (await nativeCall(signal, () => this.#session.axSnapshot(this.id, options))).text;
 	}
 
 	async find(query: AxQuery): Promise<El[]> {
+		strictOptions(query, axQueryKeys, "find");
 		const { signal } = this.#getContext();
 		return foundElements(
 			(await nativeCall(signal, () => this.#session.axQuery(this.id, query))).map(
@@ -1828,6 +1879,7 @@ export class ComputerWorkerCore {
 			},
 			apps: {
 				list: async (options?: ApplicationQuery): Promise<Application[]> => {
+					strictOptions(options, applicationQueryKeys, "apps.list");
 					const { signal } = getContext();
 					return await nativeCall(signal, () => session.listApplications(options));
 				},
@@ -1835,6 +1887,7 @@ export class ComputerWorkerCore {
 					id: string,
 					options?: ApplicationOpenOptions,
 				): Promise<Application & { window: Win | null }> => {
+					strictOptions(options, applicationOpenOptionsKeys, "apps.open");
 					const context = getContext();
 					guardRun(context, "apps.open");
 					validateString(id, "apps.open(id)", { nonEmpty: true });
@@ -1902,11 +1955,13 @@ export class ComputerWorkerCore {
 				},
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
+				strictOptions(filter, windowFilterKeys, "windows");
 				const { signal } = getContext();
 				const { matches } = await listWindows(filter, signal);
 				return matches.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
+				if (typeof selector === "object") strictOptions(selector, windowFilterKeys, "window");
 				const { signal } = getContext();
 				const id = typeof selector === "string" || typeof selector === "number" ? String(selector) : undefined;
 				const wait = typeof selector === "object" && selector !== null ? windowWait(selector.wait) : 0;

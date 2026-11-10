@@ -829,6 +829,10 @@ describe("computer prelude", () => {
 		});
 		runInContext(prelude.javascript, realm);
 
+		await expect(runInContext('computer.run("return 1;", { timeouts: 3 })', realm)).rejects.toMatchObject({
+			name: "ToolError",
+			message: expect.stringContaining("timeouts"),
+		});
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
 		).rejects.toThrow("computer.run() args must be an array of the function's arguments after its scope");
@@ -1480,9 +1484,9 @@ describe("computer worker round trips", () => {
 				try { await call(invalid); } catch (caught) { error = caught; }
 				if (!error) {
 					failures.push(name + " accepted " + Object.keys(invalid).join(", "));
+				} else if (error.name !== "ToolError" || !error.message.includes(name) || !error.message.includes("Valid names:")) {
+					failures.push(name + ": " + error.message);
 				} else {
-					assert(error.name === "ToolError", name + ": " + error.message);
-					assert(error.message.includes(name) && error.message.includes("Valid names:"), error.message);
 					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
 					if (invalid.depth) assert(error.message.includes("did you mean maxDepth"), error.message);
 				}
@@ -1513,14 +1517,13 @@ describe("computer worker round trips", () => {
 				await check("type", o => target.type("Save", o), { takeover: false });
 				await check("press", o => target.press("enter", o), { takeover: false });
 				await check("holdKeys", o => target.holdKeys(["shift"], o), { duration: 0, takeover: false });
-				await check("holdMouse", o => target.holdMouse(1, 2, o), { duration: 0, button: "left", keys: [], takeover: false });
+				await check("holdMouse", o => target.holdMouse(1, 2, o), { duration: 0, button: "left", keys: ["shift"], takeover: false });
 			}
 			await win.ax(null);
 			await desktop.windows(null);
 			assert(failures.length === 0, failures.join("; "));
 			return true;
 		`);
-		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error(result.error.message);
 		expect(result.payload.returnValue).toBe(true);
 	});

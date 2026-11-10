@@ -234,6 +234,17 @@
 			throw new TypeError("computer.run() expects a function or code string");
 		}
 		const opts = validateOptions("computer.run", options);
+		const allowed = ["args", "read_only", "timeout"];
+		const unknown = Object.keys(opts).filter(key => !allowed.includes(key));
+		if (unknown.length > 0) {
+			const hints = unknown.flatMap(key => {
+				const matches = allowed.filter(name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()));
+				return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
+			});
+			const error = new Error(`computer.run: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`);
+			error.name = "ToolError";
+			throw error;
+		}
 		const args = opts.args ?? [];
 		if (typeof fnOrCode === "string" && (!Array.isArray(args) || args.length > 0)) {
 			throw new TypeError("computer.run() passes args only to a function; a code string receives none");
