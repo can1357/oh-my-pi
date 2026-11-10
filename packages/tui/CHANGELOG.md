@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw limit id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+- Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
 
 ## [18.18.6] - 2026-11-09
 

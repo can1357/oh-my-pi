@@ -6,54 +6,26 @@ import {
 	type UsageLimit,
 	type UsageReport,
 	type UsageResetCredit,
+	type UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	DEBOUNCE_BUCKET_MS,
+	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
+	resetWindowMode,
+	resetWindowsEnabled,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
 } from "./codex-auto-reset";
-import {
-	FABLE_RESET_LIMIT_ID,
-	IMMINENT_RESET_EXPIRY_MS,
-	type ResetConsentWindow,
-	type ResetGrant,
-	type ResetPlanSettings,
-	type ResetWindow,
-	actionConsent,
-	classifyResetGrant,
-	resetPlannerSettings,
-	shouldEvaluateResetAutoRedeem,
-} from "./reset-consent";
-import type { ResetAutoRedeemMode } from "./settings";
-
-export type ClaudeResetWindow = ResetConsentWindow;
-
-export function claudeResetWindowModes(cfg: {
-	autoRedeem5h: ResetAutoRedeemMode;
-	autoRedeemWeekly: ResetAutoRedeemMode;
-	autoRedeemFable: ResetAutoRedeemMode;
-}): Record<ClaudeResetWindow, ResetAutoRedeemMode> {
-	return { "5h": cfg.autoRedeem5h, weekly: cfg.autoRedeemWeekly, fable: cfg.autoRedeemFable };
-}
-
-export function claudeResetPlanSettings(cfg: {
-	autoRedeem5h: ResetAutoRedeemMode;
-	autoRedeemWeekly: ResetAutoRedeemMode;
-	autoRedeemFable: ResetAutoRedeemMode;
-	minBlockedMinutes: number;
-	keepCredits: number;
-	salvageHorizonHours: number;
-}): ClaudeResetPlanInput["settings"] {
-	return resetPlannerSettings(claudeResetWindowModes(cfg), cfg);
-}
+import type { ResetWindow, ResetWindowModes } from "./settings";
 
 const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
 const CEDAR_PROGRAM = "cedar_ember";
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
+const FABLE_LIMIT_ID = "anthropic:7d:fable";
 const MAX_PLAUSIBLE_FIVE_HOUR_MS = 6 * 3_600_000;
 const MAX_PLAUSIBLE_WEEKLY_MS = 8 * 24 * 3_600_000;
 
@@ -77,8 +49,6 @@ export type ClaudeResetSkipReason =
 	| "no-blocked-window"
 	| "unsupported-window"
 	| "incomplete-coverage"
-	| "fable-only"
-	| "no-fable-usage"
 	| "no-reset-time"
 	| "reset-too-soon"
 	| "reset-implausible"
@@ -95,7 +65,13 @@ export interface ClaudeResetPlanInput {
 	trigger: CodexResetTrigger;
 	provider: string;
 	modelId: string;
-	settings: ResetPlanSettings<ClaudeResetWindow>;
+	settings: {
+		/** Per-window consent; a planned spend whose window is `no` is skipped. */
+		modes: ResetWindowModes;
+		minBlockedMinutes: number;
+		keepCredits: number;
+		salvageHorizonMs: number;
+	};
 	/** Fresh usage for every stored Claude account. */
 	reports: UsageReport[] | null;
 	/**
@@ -115,8 +91,8 @@ export interface ClaudeResetPlanInput {
 /** One server-selected Claude grant to redeem for an exact stored credential. */
 export interface ClaudeResetAction {
 	reason: "blocked-account" | "expiring-credit";
-	window: ClaudeResetWindow;
-	restorableWindows: ClaudeResetWindow[];
+	/** Window whose consent governs this spend. */
+	window: ResetWindow;
 	target: ResetCreditTarget;
 	accountKey: string;
 	attemptKey: string;
@@ -154,8 +130,6 @@ interface ClaudeAccountSnapshot {
 	availableCount: number;
 	credit: UsageResetCredit;
 	limits: UsageLimit[];
-	/** Grant identity, cleared windows, and measured usage, classified from the grant itself. */
-	grant: ResetGrant;
 }
 
 function normalized(value: unknown): string | undefined {
@@ -240,8 +214,28 @@ function maxPlausibleRemainingMs(limitId: string, limit: UsageLimit | undefined)
 	return limitId === FIVE_HOUR_LIMIT_ID ? MAX_PLAUSIBLE_FIVE_HOUR_MS : MAX_PLAUSIBLE_WEEKLY_MS;
 }
 
-function claudeResetWindow(limitId: string): ResetWindow {
-	return limitId === FIVE_HOUR_LIMIT_ID ? "5h" : "weekly";
+/** Limits a grant restores: the ones it clears, and only the 5h window for a Juniper grant. */
+export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit[] {
+	const clears = new Set(credit.clears ?? []);
+	return limits.filter(
+		limit => clears.has(limit.id) && (credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
+	);
+}
+
+/** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
+export function fullestClaudeLimit(
+	covered: readonly UsageLimit[],
+	credit: UsageResetCreditDetail,
+): { limit: UsageLimit; used: number } | undefined {
+	let fullest: { limit: UsageLimit; used: number } | undefined;
+	for (const limit of covered) {
+		const resolved = resolveUsedFraction(limit);
+		const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
+		const server = credit.usedFractions?.[limit.id];
+		const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
+		if (!fullest || used > fullest.used) fullest = { limit, used };
+	}
+	return fullest;
 }
 
 function claudeBlockedAttemptKey(
@@ -289,7 +283,7 @@ function skipForEpisode(
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
-	if (!shouldEvaluateResetAutoRedeem(input.settings.modes)) {
+	if (!resetWindowsEnabled(input.settings.modes)) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
@@ -374,13 +368,6 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			input.trigger === "blocked"
 				? (claudeRankingStrategy.scopeLimitsForReserve?.(report, { modelId: input.modelId }) ?? report.limits)
 				: report.limits;
-		const grant = classifyResetGrant(credit, report, limits);
-		// A Fable grant with no measured Fable usage (no row, used fraction or
-		// server blocker) restores nothing worth a spend, so it stays unspent.
-		if (grant.kind === "fable" && (!grant.fullest || grant.fullest.used <= 0)) {
-			skip("no-fable-usage");
-			continue;
-		}
 		const baseLabel = status.email ?? status.accountId ?? status.orgId ?? accountKey;
 		const organizationLabel = status.orgName ?? status.orgId;
 		const label =
@@ -400,7 +387,6 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			availableCount: status.availableCount,
 			credit,
 			limits,
-			grant,
 		});
 	}
 
@@ -409,16 +395,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		interface RestoreCandidate {
 			snapshot: ClaudeAccountSnapshot;
 			blockers: string[];
-			window: ClaudeResetWindow;
-			restorableWindows: ClaudeResetWindow[];
 			remainingMs: number;
 			unblockAtMs: number;
-			/**
-			 * Whether the settings already consent to this restore, mirroring the
-			 * governing-window rule: the blocked window, or any restorable window
-			 * for an imminent credit.
-			 */
-			approved: boolean;
+			window: ResetWindow;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -443,7 +422,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip("no-blocked-window");
 				continue;
 			}
-			if (blockers.some(id => id !== FABLE_RESET_LIMIT_ID && !snapshot.limits.some(limit => limit.id === id))) {
+			if (blockers.some(id => !snapshot.limits.some(limit => limit.id === id))) {
 				skip("unsupported-window");
 				continue;
 			}
@@ -458,32 +437,11 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip("incomplete-coverage");
 				continue;
 			}
-			if (snapshot.grant.kind === "fable" && !blockers.includes(FABLE_RESET_LIMIT_ID)) {
-				skip("fable-only");
-				continue;
-			}
-			const window: ClaudeResetWindow =
-				snapshot.grant.kind === "fable"
-					? "fable"
-					: blockers.some(id => claudeResetWindow(id) === "weekly")
-						? "weekly"
-						: "5h";
-			const expiresAtMs = creditExpiryMs(snapshot.credit);
-			const consent = actionConsent(
-				{
-					target: snapshot.target,
-					window,
-					restorableWindows: snapshot.grant.restorableWindows,
-					expiresInMs: expiresAtMs === undefined ? undefined : expiresAtMs - input.nowMs,
-				},
-				input.settings.modes,
-			);
-			if (consent.mode === "no") {
+			const window = claudeResetWindow(snapshot.credit, blockers);
+			if (resetWindowMode(input.settings.modes, window) === "no") {
 				skip("window-disabled");
 				continue;
 			}
-			const approved = consent.mode === "yes";
-
 			let unblockAtMs = Number.NEGATIVE_INFINITY;
 			let invalid: ClaudeResetSkipReason | undefined;
 			for (const blocker of blockers) {
@@ -527,20 +485,9 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip(episodeSkip);
 				continue;
 			}
-			candidates.push({
-				snapshot,
-				blockers,
-				window,
-				restorableWindows: snapshot.grant.restorableWindows,
-				remainingMs,
-				unblockAtMs,
-				approved,
-			});
+			candidates.push({ snapshot, blockers, remainingMs, unblockAtMs, window });
 		}
 		candidates.sort((left, right) => {
-			// Consent outranks every preference: an unapproved candidate cannot be
-			// restored without a prompt, so it must never shadow an approved one.
-			if (left.approved !== right.approved) return left.approved ? -1 : 1;
 			if (left.snapshot.active !== right.snapshot.active) return left.snapshot.active ? -1 : 1;
 			const leftExpiry = creditExpiryMs(left.snapshot.credit) ?? Number.POSITIVE_INFINITY;
 			const rightExpiry = creditExpiryMs(right.snapshot.credit) ?? Number.POSITIVE_INFINITY;
@@ -553,7 +500,6 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			restore = {
 				reason: "blocked-account",
 				window: best.window,
-				restorableWindows: best.restorableWindows,
 				target: best.snapshot.target,
 				accountKey: best.snapshot.accountKey,
 				attemptKey: claudeBlockedAttemptKey(
@@ -604,7 +550,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		}
 		const clears = new Set(snapshot.credit.clears ?? []);
 		const serverBlockers = snapshot.credit.blocking ?? [];
-		if (serverBlockers.some(id => id !== FABLE_RESET_LIMIT_ID && !snapshot.limits.some(limit => limit.id === id))) {
+		if (serverBlockers.some(id => !snapshot.limits.some(limit => limit.id === id))) {
 			skip("unsupported-window");
 			continue;
 		}
@@ -618,36 +564,22 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("incomplete-coverage");
 			continue;
 		}
-		// What a salvage restores: a Fable grant's Fable cap, else its fullest covered limit.
-		const fullest = snapshot.grant.fullest;
-		if (!fullest) {
+		const covered = claudeCoveredLimits(snapshot.limits, snapshot.credit);
+		if (covered.length === 0) {
 			skip("unsupported-window");
 			continue;
 		}
-		if (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION) {
+		const fullest = fullestClaudeLimit(covered, snapshot.credit);
+		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
 			skip("window-mostly-free");
 			continue;
 		}
-		const window = fullest.window;
-		const consent = actionConsent(
-			{
-				target: snapshot.target,
-				window,
-				restorableWindows: snapshot.grant.restorableWindows,
-				expiresInMs: expiresAtMs - input.nowMs,
-			},
-			input.settings.modes,
-		);
-		if (consent.mode === "no") {
+		const window = claudeResetWindow(snapshot.credit, [fullest.limit.id]);
+		if (resetWindowMode(input.settings.modes, window) === "no") {
 			skip("window-disabled");
 			continue;
 		}
-		if (
-			snapshot.credit.requiresLimit === true &&
-			(snapshot.grant.kind === "fable"
-				? !exhausted.includes(fullest.limit.id)
-				: serverBlockers.length === 0 && !snapshot.grant.coveredLimits.some(isExhausted))
-		) {
+		if (snapshot.credit.requiresLimit === true && serverBlockers.length === 0 && !covered.some(isExhausted)) {
 			skip("no-blocked-window");
 			continue;
 		}
@@ -665,7 +597,6 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		salvages.push({
 			reason: "expiring-credit",
 			window,
-			restorableWindows: snapshot.grant.restorableWindows,
 			target: snapshot.target,
 			accountKey: snapshot.accountKey,
 			attemptKey,
@@ -683,4 +614,14 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	salvages.sort((left, right) => (left.expiresInMs ?? 0) - (right.expiresInMs ?? 0));
 
 	return { actions: restore ? [restore, ...salvages] : salvages, skipped };
+}
+
+/**
+ * The window whose consent governs spending `credit` on `limitIds`: a Fable
+ * launch grant is governed by the Fable key alone; otherwise any weekly or
+ * model-scoped limit makes it weekly, and only a 5h-only spend is 5h.
+ */
+export function claudeResetWindow(credit: UsageResetCreditDetail, limitIds: readonly string[]): ResetWindow {
+	if (credit.clears?.includes(FABLE_LIMIT_ID)) return "fable";
+	return limitIds.some(id => id !== FIVE_HOUR_LIMIT_ID) ? "weekly" : "5h";
 }

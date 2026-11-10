@@ -27,11 +27,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-import {
-	cfgClaudeResetsAutoRedeem5h,
-	cfgClaudeResetsAutoRedeemFable,
-	cfgClaudeResetsAutoRedeemWeekly,
-} from "@oh-my-pi/pi-coding-agent/session/settings";
+import { resetWindowModes } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 const ACCOUNT_ID = "claude-account";
 const EMAIL = "claude@example.com";
@@ -220,19 +216,11 @@ describe("Claude saved-reset trigger integration", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": options.maxDelayMs ?? 100,
 			"retry.maxRetries": 1,
-			"codexResets.autoRedeem5h": "no",
-			"codexResets.autoRedeemWeekly": "no",
+			"codexResets.autoRedeem": "no",
+			"claudeResets.autoRedeem": options.autoRedeem ?? "yes",
 			"claudeResets.salvageHorizonHours": options.salvageHorizonHours ?? 12,
 			"claudeResets.keepCredits": options.keepCredits ?? 0,
 		});
-		// Set through the handles so a consented answer can overwrite them (override-layer values win over set()).
-		for (const handle of [
-			cfgClaudeResetsAutoRedeem5h,
-			cfgClaudeResetsAutoRedeemWeekly,
-			cfgClaudeResetsAutoRedeemFable,
-		]) {
-			handle.set(settings, options.autoRedeem ?? "yes");
-		}
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
@@ -912,9 +900,11 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(0);
 		expect(coordinator.attemptedKeys.size).toBe(0);
-		expect(cfgClaudeResetsAutoRedeem5h.get(session.settings)).toBe("unset");
-		expect(cfgClaudeResetsAutoRedeemWeekly.get(session.settings)).toBe("unset");
-		expect(cfgClaudeResetsAutoRedeemFable.get(session.settings)).toBe("unset");
+		expect(resetWindowModes("anthropic", session.settings)).toEqual({
+			"5h": "unset",
+			weekly: "unset",
+			fable: "unset",
+		});
 	});
 
 	it("still asks before spending an imminent reset when a prompt UI is available", async () => {

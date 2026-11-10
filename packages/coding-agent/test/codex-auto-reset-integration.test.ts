@@ -16,7 +16,6 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { cfgCodexResetsAutoRedeem5h, cfgCodexResetsAutoRedeemWeekly } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, CreateElicitationRequest } from "@oh-my-pi/pi-utils/acp";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -119,8 +118,6 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		streamErrorFirst?: boolean;
 		/** Builds the session the way ACP does for a client with or without form elicitation. */
 		acpForm?: boolean;
-		/** Answers the auto-redeem consent prompt; implies a prompt UI. */
-		consent?: () => Promise<string | undefined>;
 	}): {
 		session: AgentSession;
 		coordinator: CodexAutoRedeemCoordinator;
@@ -158,37 +155,25 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
 			"retry.maxRetries": 1,
-			"claudeResets.autoRedeem5h": "no",
-			"claudeResets.autoRedeemWeekly": "no",
+			"codexResets.autoRedeem": "unset",
+			"claudeResets.autoRedeem": "no",
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
 		coordinator.resetLockPath = `${tempDir.path()}/agent.db`;
-		const interactivePrompts = options.consent !== undefined ? true : options.acpForm;
-		let extensionRunner: ExtensionRunner | undefined;
-		if (options.acpForm !== undefined || options.consent !== undefined) {
-			extensionRunner = new ExtensionRunner(
-				[],
-				new ExtensionRuntime(),
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-			if (options.consent) {
-				vi.spyOn(extensionRunner, "hasUI").mockReturnValue(true);
-				vi.spyOn(extensionRunner.getUIContext(), "select").mockImplementation(options.consent);
-			}
-		}
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,
 			modelRegistry,
 			codexResetCoordinator: coordinator,
-			extensionRunner,
-			interactivePrompts,
+			extensionRunner:
+				options.acpForm === undefined
+					? undefined
+					: new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry),
+			interactivePrompts: options.acpForm,
 		});
 		sessions.push(session);
 		const notices: string[] = [];
@@ -220,24 +205,21 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		return elicitations;
 	}
 
-	it("never spends a reset about to expire while auto-redeem is unset", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 4 * MINUTE,
-		};
-		const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
-		mockSchedulerWaitWithClock();
+	it.each([4 * MINUTE, 6 * HOUR])(
+		"never spends a reset expiring in %i ms without a prompt UI while auto-redeem is unset",
+		async creditExpiresInMs => {
+			const account = { accountId: "acct-a", credentialId: 1, weeklyUsed: 1, limitReached: true, creditExpiresInMs };
+			const { session, targets, notices } = buildSession({ accounts: [account], streamErrorFirst: true });
+			mockSchedulerWaitWithClock();
 
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
+			await session.prompt("trigger a codex usage limit");
+			await session.waitForIdle();
 
-		expect(targets).toEqual([]);
-		expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-	});
+			expect(targets).toEqual([]);
+			expect(notices).toContainEqual(expect.stringContaining("auto-redeem is unset and no prompt UI is available"));
+			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		},
+	);
 
 	it("never spends for an ACP client without form elicitation while auto-redeem is unset", async () => {
 		const account = {
@@ -283,53 +265,5 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(elicitations).toEqual([expect.stringContaining("Spend a saved Codex rate-limit reset?")]);
 		expect(targets).toEqual([]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
-	});
-
-	it("keeps a one-off imminent salvage from enabling both windows", async () => {
-		const account = {
-			accountId: "acct-a",
-			credentialId: 1,
-			weeklyUsed: 1,
-			limitReached: true,
-			creditExpiresInMs: 4 * MINUTE,
-		};
-		const { session, targets } = buildSession({
-			accounts: [account],
-			streamErrorFirst: true,
-			consent: async () => "Yes",
-		});
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-
-		// The credit also restores 5h, but only the governing weekly key records the answer.
-		expect(targets).toHaveLength(1);
-		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
-		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("unset");
-		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
-	});
-
-	it("does not ask again about an imminent credit the user declined", async () => {
-		const consent = vi.fn(async () => "No");
-		const { session, coordinator, targets } = buildSession({
-			accounts: [
-				{ accountId: "acct-a", credentialId: 1, weeklyUsed: 1, limitReached: true, creditExpiresInMs: 4 * MINUTE },
-			],
-			streamErrorFirst: true,
-			consent,
-		});
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("trigger a codex usage limit");
-		await session.waitForIdle();
-		// No saves only the governing weekly key; 5h stays unset and would keep the credit askable.
-		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("no");
-		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("unset");
-
-		await session.fetchUsageReports();
-		await coordinator.sweepPromise;
-		expect(consent).toHaveBeenCalledTimes(1);
-		expect(targets).toEqual([]);
 	});
 });

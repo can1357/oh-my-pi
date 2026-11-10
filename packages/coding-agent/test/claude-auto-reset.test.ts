@@ -5,13 +5,12 @@ import {
 	planClaudeResetRedemptions,
 	type ClaudeResetPlanInput,
 	type ClaudeResetSkipReason,
-	type ClaudeResetWindow,
 } from "@oh-my-pi/pi-coding-agent/session/claude-auto-reset";
 
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
 const WEEK = 7 * 24 * HOUR;
-const WINDOWS_BOTH = { "5h": true, weekly: true, fable: true };
+const ALL = { "5h": "yes", weekly: "yes", fable: "yes" } as const;
 
 interface ReportOptions {
 	orgId?: string;
@@ -19,8 +18,6 @@ interface ReportOptions {
 	fiveHourUsed?: number;
 	weeklyUsed?: number;
 	sonnetUsed?: number;
-	/** `null` models a reported Fable cap with no used fraction at all. */
-	fableUsed?: number | null;
 }
 
 function report(options: ReportOptions = {}): UsageReport {
@@ -50,16 +47,6 @@ function report(options: ReportOptions = {}): UsageReport {
 				scope: { provider: "anthropic", tier: "sonnet", windowId: "7d" },
 				window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 4 * 24 * HOUR },
 				amount: { usedFraction: options.sonnetUsed ?? 0.2, unit: "percent" },
-			},
-			{
-				id: "anthropic:7d:fable",
-				label: "Claude 7 Day (Fable)",
-				scope: { provider: "anthropic", tier: "fable", windowId: "7d" },
-				window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 5 * 24 * HOUR },
-				amount:
-					options.fableUsed === null
-						? { unit: "percent" }
-						: { usedFraction: options.fableUsed ?? 0, unit: "percent" },
 			},
 		],
 		metadata: { email, orgId },
@@ -116,29 +103,12 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 		trigger: "blocked",
 		provider: "anthropic",
 		modelId: "claude-sonnet-4-6",
-		settings: windowSettings(WINDOWS_BOTH),
+		settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
 		reports: [report()],
 		statuses: [status()],
 		attemptedKeys: new Set(),
 		deferredUntilByKey: new Map(),
 		lastAttemptAtByAccount: new Map(),
-		...overrides,
-	};
-}
-
-function windowSettings(
-	windows: Record<ClaudeResetWindow, boolean>,
-	overrides: Partial<ClaudeResetPlanInput["settings"]> = {},
-): ClaudeResetPlanInput["settings"] {
-	return {
-		modes: {
-			"5h": windows["5h"] ? "yes" : "no",
-			weekly: windows.weekly ? "yes" : "no",
-			fable: windows.fable ? "yes" : "no",
-		},
-		minBlockedMinutes: 60,
-		keepCredits: 0,
-		salvageHorizonMs: 12 * HOUR,
 		...overrides,
 	};
 }
@@ -283,9 +253,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		expect(cooling.skipped[0]?.reason).toBe("provider-cooldown");
 
 		const reserved = planClaudeResetRedemptions(
-			input({
-				settings: windowSettings(WINDOWS_BOTH, { keepCredits: 1 }),
-			}),
+			input({ settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR } }),
 		);
 		expect(reserved.actions).toEqual([]);
 		expect(reserved.skipped[0]?.reason).toBe("reserve");
@@ -313,7 +281,7 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 		});
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: windowSettings(WINDOWS_BOTH, { keepCredits: 1 }),
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 12 * HOUR },
 				reports: [report(), report({ orgId: "org-b" })],
 				statuses: [status(), excluded],
 				permitsCredential: credentialId => credentialId === 11,
@@ -329,63 +297,36 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 });
 
 describe("planClaudeResetRedemptions: window consent", () => {
-	const fiveHourBlock = { fiveHourUsed: 1, weeklyUsed: 0.5 };
+	const settings = (modes: ClaudeResetPlanInput["settings"]["modes"]) => ({
+		modes,
+		minBlockedMinutes: 60,
+		keepCredits: 0,
+		salvageHorizonMs: 12 * HOUR,
+	});
+	const fiveHourBlock = { reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })] };
 	const fiveHourCredit = { blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1 } };
-	const fable = { id: "fable-1", clears: ["anthropic:5h", "anthropic:7d:fable"], usedFractions: {} };
-	it.each<{
-		name: string;
-		windows: Record<ClaudeResetWindow, boolean>;
-		usage: ReportOptions;
-		credit: Partial<UsageResetCredit>;
-		expected: ClaudeResetWindow | ClaudeResetSkipReason;
-	}>([
+
+	it.each([
+		{ name: "a weekly block by the weekly key", modes: { "5h": "yes", weekly: "no" }, overrides: {} },
 		{
-			name: "a weekly block is governed by the weekly key",
-			windows: { "5h": true, weekly: false, fable: true },
-			usage: {},
-			credit: {},
-			expected: "window-disabled",
+			name: "a 5h-only block by the 5h key",
+			modes: { "5h": "no", weekly: "yes" },
+			overrides: { ...fiveHourBlock, statuses: [status({ credit: fiveHourCredit })] },
 		},
 		{
-			name: "a 5h-only block is governed by the 5h key",
-			windows: { "5h": false, weekly: true, fable: true },
-			usage: fiveHourBlock,
-			credit: fiveHourCredit,
-			expected: "window-disabled",
+			name: "a Fable launch grant by the Fable key alone",
+			modes: { "5h": "yes", weekly: "yes", fable: "no" },
+			overrides: {
+				...fiveHourBlock,
+				statuses: [status({ credit: { ...fiveHourCredit, clears: ["anthropic:5h", "anthropic:7d:fable"] } })],
+			},
 		},
-		{
-			name: "a Fable grant never restores a 5h-only block",
-			windows: WINDOWS_BOTH,
-			usage: { ...fiveHourBlock, fableUsed: 0.6 },
-			credit: { ...fable, ...fiveHourCredit },
-			expected: "fable-only",
-		},
-		{
-			name: "a Fable grant restores a Fable cap block under the Fable key alone",
-			windows: { "5h": false, weekly: false, fable: true },
-			usage: { weeklyUsed: 0.5, fableUsed: 1 },
-			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
-			expected: "fable",
-		},
-		{
-			name: "a Fable grant with no Fable usage is never spent",
-			windows: WINDOWS_BOTH,
-			usage: { weeklyUsed: 0.5, fableUsed: 0 },
-			credit: { ...fable, blocking: [] },
-			expected: "no-fable-usage",
-		},
-	])("$name", ({ windows, usage, credit, expected }) => {
-		const plan = planClaudeResetRedemptions(
-			input({
-				modelId: "claude-fable-5",
-				settings: windowSettings(windows),
-				reports: [report(usage)],
-				statuses: [status({ credit })],
-			}),
+	] as const)("governs $name", ({ modes, overrides }) => {
+		const plan = planClaudeResetRedemptions(input({ settings: settings(modes), ...overrides }));
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual(
+			expect.objectContaining({ rule: "blocked-account", reason: "window-disabled" }),
 		);
-		const outcome: string | undefined =
-			plan.actions[0]?.window ?? plan.skipped.find(skip => skip.rule !== "expiring-credit")?.reason;
-		expect(outcome).toBe(expected);
 	});
 });
 
@@ -393,7 +334,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
 		const urgentInput = input({
 			trigger: "sweep",
-			settings: windowSettings(WINDOWS_BOTH, { keepCredits: 1, salvageHorizonMs: 0 }),
+			settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 			reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
 			statuses: [
 				status({
@@ -416,10 +357,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 			},
 		]);
 		expect(
-			planClaudeResetRedemptions({
-				...urgentInput,
-				settings: { ...urgentInput.settings, modes: { "5h": "no", weekly: "no", fable: "no" } },
-			}).actions,
+			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, modes: {} } }).actions,
 		).toEqual([]);
 		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
 			expect(
@@ -480,7 +418,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 	it("uses urgent salvage rather than bypassing the blocked-recovery reserve", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
-				settings: windowSettings(WINDOWS_BOTH, { keepCredits: 1, salvageHorizonMs: 0 }),
+				settings: { modes: ALL, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
 				statuses: [status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } })],
 			}),
 		);

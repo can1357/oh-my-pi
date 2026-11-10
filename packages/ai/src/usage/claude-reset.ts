@@ -20,15 +20,12 @@ const REDEEM_REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const ORGANIZATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const WINDOW_ID = /^[a-z0-9_-]{1,80}$/;
 
-const CLAUDE_TIER_LIMIT_ID = /^[a-z0-9_-]+:[a-z0-9_-]+:(fable|mythos)$/;
-
 const CLAUDE_RESET_WINDOW_IDS: Readonly<Record<string, string>> = {
 	five_hour: "anthropic:5h",
 	seven_day: "anthropic:7d",
 	seven_day_opus: "anthropic:7d:opus",
 	seven_day_sonnet: "anthropic:7d:sonnet",
-	// Fable launch resets clear the Fable weekly cap, which usage reports as
-	// `seven_day_overage_included` and headers as `7d_oi`.
+	// Fable launch resets clear the Fable weekly cap, reported as `seven_day_overage_included`.
 	seven_day_overage_included: "anthropic:7d:fable",
 };
 
@@ -51,25 +48,10 @@ export function claudeResetClearedBlockScopes(cleared: readonly string[], report
 		{ blockScope: undefined, limits: unscoped },
 		...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []).filter(scope => scope.blockScope.length > 0),
 	];
-	const healed = scopes
+	return scopes
 		.filter(scope => scope.limits.some(limit => cleared.includes(limit.id)))
 		.filter(scope => !isUsageLimitReached(scope.limits.filter(limit => !cleared.includes(limit.id))))
 		.map(scope => scope.blockScope);
-	// A reset can cover a Fable/Mythos tier the report never rendered a weekly
-	// row for, and the tier scope above is only derived from reported rows. The
-	// grant still names that tier, so clear it under the same health rule: the
-	// shared gates the reset leaves behind must not be exhausted.
-	for (const id of cleared) {
-		const match = CLAUDE_TIER_LIMIT_ID.exec(id);
-		if (!match) continue;
-		const tier = match[1];
-		if (report.limits.some(limit => limit.scope.tier === tier)) continue;
-		const blockScope = `tier:${tier}`;
-		if (healed.includes(blockScope)) continue;
-		if (isUsageLimitReached(shared.filter(limit => !cleared.includes(limit.id)))) continue;
-		healed.push(blockScope);
-	}
-	return healed;
 }
 
 /** OAuth credential and transport used for an account's Claude reset operations. */

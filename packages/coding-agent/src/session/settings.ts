@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -1379,52 +1379,41 @@ export const cfgProvidersFetch = register({
 	},
 });
 
-// Codex saved rate-limit resets (auto-redeem)
-export const cfgCodexResetsAutoRedeem5h = register({
-	id: "codexResets.autoRedeem5h",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Auto-Redeem Saved Resets (5h)",
-		description:
-			"Govern saved Codex resets for 5-hour-only blocks and expiry salvage whose fullest chat window is 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. A credit expiring within 5 minutes may spend when either window is yes.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description: "Ask before spending for this window; without a prompt UI, never spend.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
-			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
-		],
-	},
-});
+/** A saved-reset window with its own auto-redeem consent. */
+export type ResetWindow = "5h" | "weekly" | "fable";
 
-export const cfgCodexResetsAutoRedeemWeekly = register({
-	id: "codexResets.autoRedeemWeekly",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Auto-Redeem Saved Resets (Weekly)",
-		description:
-			"Govern saved Codex resets that clear any weekly block and expiry salvage whose fullest chat window is weekly. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. A credit expiring within 5 minutes may spend when either window is yes.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description: "Ask before spending for this window; without a prompt UI, never spend.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible saved resets for this window without prompting." },
-			{ value: "no", label: "No", description: "Disable automatic saved-reset spending for this window." },
-		],
-	},
-});
+function resetWindowSetting<const Id extends string>(id: Id, label: string, description: string) {
+	return register({
+		id,
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label,
+			description: `${description} unset asks before spending and never spends without a prompt; yes spends without asking; no never spends.`,
+			options: [
+				{ value: "unset", label: "Unset", description: "Ask before spending; never spend without a prompt." },
+				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without asking." },
+				{ value: "no", label: "No", description: "Never spend saved resets for this window." },
+			],
+		},
+	});
+}
+
+// Codex saved rate-limit resets (auto-redeem)
+export const cfgCodexResetsAutoRedeem5h = resetWindowSetting(
+	"codexResets.autoRedeem5h",
+	"Codex Auto-Redeem Saved Resets (5h)",
+	"Spend saved Codex resets on 5-hour-only blocks and on expiring credits whose fullest chat window is 5h.",
+);
+
+export const cfgCodexResetsAutoRedeemWeekly = resetWindowSetting(
+	"codexResets.autoRedeemWeekly",
+	"Codex Auto-Redeem Saved Resets (Weekly)",
+	"Spend saved Codex resets on weekly blocks and on expiring credits whose fullest chat window is weekly. A block known only from a short 429 wait needs both Codex windows.",
+);
 
 export const cfgCodexResetsMinBlockedMinutes = register({
 	id: "codexResets.minBlockedMinutes",
@@ -1478,74 +1467,23 @@ export const cfgCodexResets = combine({
 export type ResetAutoRedeemMode = SettingValueOf<typeof cfgCodexResetsAutoRedeem5h>;
 
 // Claude Cedar/Juniper/Fable rate-limit resets (independent auto-redeem consent)
-export const cfgClaudeResetsAutoRedeem5h = register({
-	id: "claudeResets.autoRedeem5h",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Claude Auto-Redeem Saved Resets (5h)",
-		description:
-			"Govern non-Fable Claude Cedar or Juniper resets for 5-hour-only blocks and expiry salvage whose fullest covered limit is 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window. Juniper never spends when only weekly spending is enabled.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description: "Ask before spending for this window; without a prompt UI, never spend.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
-			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
-		],
-	},
-});
+export const cfgClaudeResetsAutoRedeem5h = resetWindowSetting(
+	"claudeResets.autoRedeem5h",
+	"Claude Auto-Redeem Saved Resets (5h)",
+	"Spend Claude Cedar or Juniper resets on 5-hour-only blocks and on expiring grants whose fullest covered limit is 5h.",
+);
 
-export const cfgClaudeResetsAutoRedeemWeekly = register({
-	id: "claudeResets.autoRedeemWeekly",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Claude Auto-Redeem Saved Resets (Weekly)",
-		description:
-			"Govern non-Fable Claude Cedar resets that clear weekly or model-scoped blocks and expiry salvage whose fullest covered limit is not 5h. unset asks first and never spends without a prompt, yes spends without asking, no disables this window.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description: "Ask before spending for this window; without a prompt UI, never spend.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets for this window without prompting." },
-			{ value: "no", label: "No", description: "Disable automatic Claude reset spending for this window." },
-		],
-	},
-});
+export const cfgClaudeResetsAutoRedeemWeekly = resetWindowSetting(
+	"claudeResets.autoRedeemWeekly",
+	"Claude Auto-Redeem Saved Resets (Weekly)",
+	"Spend Claude Cedar resets on weekly or model-scoped blocks and on expiring grants whose fullest covered limit is weekly.",
+);
 
-export const cfgClaudeResetsAutoRedeemFable = register({
-	id: "claudeResets.autoRedeemFable",
-	type: "enum",
-	values: ["unset", "yes", "no"] as const,
-	default: "unset" as const,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Claude Auto-Redeem Fable Resets",
-		description:
-			"Govern Claude Fable launch resets, which restore Fable weekly usage (capped at 50% of the weekly limit) plus the 5h window. Spent only for a block that includes the Fable weekly cap, and never while Fable usage is 0 or unknown. unset asks first and never spends without a prompt, yes spends without asking, no disables Fable resets.",
-		options: [
-			{
-				value: "unset",
-				label: "Unset",
-				description: "Ask before spending a Fable reset; without a prompt UI, never spend.",
-			},
-			{ value: "yes", label: "Yes", description: "Spend eligible Fable resets without prompting." },
-			{ value: "no", label: "No", description: "Disable automatic Fable reset spending." },
-		],
-	},
-});
+export const cfgClaudeResetsAutoRedeemFable = resetWindowSetting(
+	"claudeResets.autoRedeemFable",
+	"Claude Auto-Redeem Fable Resets",
+	"Spend Claude Fable launch resets, which restore Fable weekly usage plus the 5h window. Only this setting governs them.",
+);
 
 export const cfgClaudeResetsMinBlockedMinutes = register({
 	id: "claudeResets.minBlockedMinutes",
@@ -1582,7 +1520,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Claude Reset Salvage Horizon",
 		description:
-			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage (Fable resets measure only Fable usage). 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes ignore usage thresholds and reserve, but Fable resets always require positive Fable usage. Provider limit requirements still apply.",
+			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
 	},
 });
 
@@ -1595,6 +1533,31 @@ export const cfgClaudeResets = combine({
 	keepCredits: cfgClaudeResetsKeepCredits,
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,
 });
+
+/** Each provider's saved-reset window settings: the only keys a consent answer is saved to. */
+export const resetWindowSettings: Record<
+	"openai-codex" | "anthropic",
+	Partial<Record<ResetWindow, Setting<ResetAutoRedeemMode>>>
+> = {
+	"openai-codex": { "5h": cfgCodexResetsAutoRedeem5h, weekly: cfgCodexResetsAutoRedeemWeekly },
+	anthropic: {
+		"5h": cfgClaudeResetsAutoRedeem5h,
+		weekly: cfgClaudeResetsAutoRedeemWeekly,
+		fable: cfgClaudeResetsAutoRedeemFable,
+	},
+};
+
+/** Each saved-reset window's consent; a window a provider lacks reads as `no`. */
+export type ResetWindowModes = Partial<Record<ResetWindow, ResetAutoRedeemMode>>;
+
+/** The current consent of every saved-reset window `provider` has. */
+export function resetWindowModes(provider: "openai-codex" | "anthropic", scope: ScopeLike): ResetWindowModes {
+	const modes: ResetWindowModes = {};
+	for (const [window, setting] of Object.entries(resetWindowSettings[provider])) {
+		modes[window as ResetWindow] = setting.get(scope);
+	}
+	return modes;
+}
 
 export const cfgProviderAppendOnlyContext = register({
 	id: "provider.appendOnlyContext",

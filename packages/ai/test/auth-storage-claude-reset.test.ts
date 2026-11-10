@@ -23,7 +23,6 @@ interface ResetFixture {
 		weeklyUsed: number;
 		discoveryStatus?: number;
 		genericUsageEnabled?: boolean;
-		fableResetWithoutUsageRow?: boolean;
 		response: unknown;
 		responseStatus: number;
 		/** Plain `/usage` leaves the programs unevaluated and every reset probe is rate-limited. */
@@ -81,16 +80,17 @@ async function fixture(): Promise<ResetFixture> {
 					});
 				}
 				const hour = 3_600_000;
-				const fableLimit = {
-					kind: "weekly_scoped",
-					percent: 100,
-					resets_at: new Date(Date.now() + 72 * hour).toISOString(),
-					scope: { model: { display_name: "Fable" } },
-				};
 				return Response.json({
 					five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * hour).toISOString() },
 					seven_day: { utilization: state.weeklyUsed, resets_at: new Date(Date.now() + 72 * hour).toISOString() },
-					limits: state.fableResetWithoutUsageRow ? [] : [fableLimit],
+					limits: [
+						{
+							kind: "weekly_scoped",
+							percent: 100,
+							resets_at: new Date(Date.now() + 72 * hour).toISOString(),
+							scope: { model: { display_name: "Fable" } },
+						},
+					],
 					cedar_ember: {
 						eligible: state.program === "cedar_ember",
 						at_limit: true,
@@ -106,16 +106,12 @@ async function fixture(): Promise<ResetFixture> {
 											resets_left: state.remaining,
 											starts_at: new Date(Date.now() - hour).toISOString(),
 											ends_at: new Date(Date.now() + 24 * hour).toISOString(),
-											clears: state.fableResetWithoutUsageRow
-												? ["five_hour", "seven_day_overage_included"]
-												: ["five_hour"],
+											clears: ["five_hour"],
 											paused: false,
 											usable_now: state.usable,
 											use_requires_limit: true,
-											percent_used: state.fableResetWithoutUsageRow
-												? { five_hour: 100, seven_day_overage_included: 100 }
-												: { five_hour: 100 },
-											blocking: state.fableResetWithoutUsageRow ? ["seven_day_overage_included"] : [],
+											percent_used: { five_hour: 100 },
+											blocking: [],
 										},
 									]
 								: [],
@@ -349,29 +345,6 @@ describe("Claude saved reset account safety", () => {
 				.sort(),
 		).toEqual(["account-policy", "auth", "tier:fable"]);
 		expect(f.usageRequests).toEqual(["?cedar_ember=1&skip_spend=1"]);
-	});
-
-	it("clears a stored Fable block after a successful redeem without a Fable usage row", async () => {
-		const f = await fixture();
-		f.state.fableResetWithoutUsageRow = true;
-		f.state.response = {
-			result: "reset",
-			resets_left: 1,
-			cleared: ["five_hour", "seven_day_overage_included"],
-		};
-		for (const blockScope of ["tier:fable", "auth"]) {
-			f.storage.blocks.upsert({
-				credentialId: f.target.credentialId,
-				providerKey: "anthropic:oauth",
-				blockScope,
-				blockedUntilMs: Date.now() + 3_600_000,
-			});
-		}
-
-		const outcome = await f.storage.resets.redeem({ target: f.target, baseUrlResolver: f.baseUrlResolver });
-
-		expect(outcome.ok).toBe(true);
-		expect(f.storage.blocks.list([f.target.credentialId]).map(block => block.blockScope)).toEqual(["auth"]);
 	});
 
 	it("preserves an uncovered tier wall even when only a legacy global block existed", async () => {

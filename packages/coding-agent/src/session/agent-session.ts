@@ -359,9 +359,7 @@ import type { ClientBridge } from "./client-bridge";
 import {
 	type ClaudeResetAction,
 	type ClaudeResetPlan,
-	claudeResetPlanSettings,
 	claudeResetStatusesFromReports,
-	claudeResetWindowModes,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
 import {
@@ -378,18 +376,13 @@ import {
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
 	resetPlanSettings,
-	resetWindowModes,
+	resetWindowMode,
+	resetWindowsEnabled,
 	SWEEP_MIN_INTERVAL_MS,
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
-import {
-	actionConsent,
-	type ResetProvider,
-	type ResetSettingKey,
-	shouldEvaluateResetAutoRedeem,
-} from "./reset-consent";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -541,12 +534,7 @@ import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/setti
 import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
-	cfgClaudeResetsAutoRedeem5h,
-	cfgClaudeResetsAutoRedeemFable,
-	cfgClaudeResetsAutoRedeemWeekly,
 	cfgCodexResets,
-	cfgCodexResetsAutoRedeem5h,
-	cfgCodexResetsAutoRedeemWeekly,
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
 	cfgPowerSleepPrevention,
@@ -566,7 +554,8 @@ import {
 	cfgTierGoogle,
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
-	type ResetAutoRedeemMode,
+	resetWindowModes,
+	resetWindowSettings,
 } from "./settings";
 import { type AnthropicSlowModeLane, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
 import type { UsageLimitState } from "./usage-limit";
@@ -1009,27 +998,6 @@ function isEvalActivity(message: AgentMessage): boolean {
 		message.role === "assistant" && message.content.some(block => block.type === "toolCall" && block.name === "eval")
 	);
 }
-
-/** The consent handle governing one saved-reset window, whatever its setting id. */
-interface ResetWindowSetting {
-	id: string;
-	get(scope: Settings): ResetAutoRedeemMode;
-	set(scope: Settings, value: ResetAutoRedeemMode): void;
-}
-
-/** The credit a planned spend would use, so a refusal covers it whichever rule plans it next. */
-function declinedCreditKey(action: CodexResetAction | ClaudeResetAction): string {
-	return `${action.accountKey}|${action.target.creditId ?? action.attemptKey}`;
-}
-
-/** Saved-reset consent handles by the setting id that governs them. */
-const resetAutoRedeemSettings: Record<ResetSettingKey, ResetWindowSetting> = {
-	"codexResets.autoRedeem5h": cfgCodexResetsAutoRedeem5h,
-	"codexResets.autoRedeemWeekly": cfgCodexResetsAutoRedeemWeekly,
-	"claudeResets.autoRedeem5h": cfgClaudeResetsAutoRedeem5h,
-	"claudeResets.autoRedeemWeekly": cfgClaudeResetsAutoRedeemWeekly,
-	"claudeResets.autoRedeemFable": cfgClaudeResetsAutoRedeemFable,
-};
 
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
@@ -15345,31 +15313,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [...codex, ...claude];
 	}
 	/**
-	 * Ask before a provider's first automatic spend and return the approved
-	 * actions. Consent is persisted per governing window in that provider's
-	 * settings keys. A host that cannot prompt (no extension UI, or one whose
-	 * prompts cannot reach a human) spends nothing under `unset` and gets a
-	 * one-shot notice instead: only an explicit `yes` spends unasked. A No is
-	 * also remembered per credit: saved to the governing key only, it can leave
-	 * a sibling window `unset` that would otherwise ask about the same credit again.
+	 * Ask before spending resets whose governing window is unset and return the
+	 * confirmed actions. The answer is saved to every governing window key still
+	 * unset (both chat windows when the window is unknown). A host that cannot
+	 * prompt (no extension UI, or one whose prompts cannot reach a human) spends
+	 * nothing and gets a one-shot notice instead.
 	 */
 	async #confirmAutoRedeem(
-		provider: ResetProvider,
+		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
-		modes: Record<string, ResetAutoRedeemMode>,
 	): Promise<readonly (CodexResetAction | ClaudeResetAction)[]> {
 		if (actions.length === 0) return [];
 		const providerLabel = provider === "anthropic" ? "Claude" : "Codex";
 		const source = provider === "anthropic" ? "claude-auto-reset" : "codex-auto-reset";
+		const windowSettings = resetWindowSettings[provider];
+		const keys = [
+			...new Set(
+				actions.flatMap(action =>
+					(action.window ? [action.window] : (["5h", "weekly"] as const)).flatMap(
+						window => windowSettings[window] ?? [],
+					),
+				),
+			),
+		];
+		const keyList = keys.map(key => key.id).join(", ");
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI() || !this.#interactivePrompts) {
-			const waiting = actions[0];
-			if (!coordinator.notifiedKeys.has(waiting.attemptKey)) {
-				coordinator.notifiedKeys.add(waiting.attemptKey);
+			if (!coordinator.notifiedKeys.has(actions[0].attemptKey)) {
+				coordinator.notifiedKeys.add(actions[0].attemptKey);
 				this.emitNotice(
 					"warning",
-					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${actionConsent(waiting, modes).keys.join(" or ")}.`,
+					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${keyList}.`,
 					source,
 				);
 			}
@@ -15396,27 +15371,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			actions.length === 1
 				? `Spend a saved ${providerLabel} rate-limit reset?\n${lines[0]}`
 				: `Spend ${actions.length} saved ${providerLabel} rate-limit resets?\n${lines.join("\n")}`;
-		// An answer is remembered on the windows that govern each spend (both Codex windows
-		// when the blocked one is unknown); restorable siblings stay untouched so one
-		// salvage cannot enable every window for good.
-		const saveKeys = [...new Set(actions.flatMap(action => actionConsent(action, modes).saveKeys))].filter(
-			key => resetAutoRedeemSettings[key].get(this.settings) === "unset",
-		);
-		const remember = (answer: ResetAutoRedeemMode): string =>
-			saveKeys.length > 0 ? ` and set ${saveKeys.join(", ")} to ${answer}` : "";
 		try {
 			const choice = await runner.getUIContext().select(question, [
-				{ label: "Yes", description: `Redeem now${remember("yes")}.` },
-				{ label: "No", description: `Do not redeem${remember("no")}.` },
+				{ label: "Yes", description: `Redeem now and set ${keyList} to yes.` },
+				{ label: "No", description: `Do not redeem, and set ${keyList} to no.` },
 			]);
 			if (choice === "Yes" || choice === "No") {
-				const answer = choice === "Yes" ? "yes" : "no";
-				for (const key of saveKeys) {
-					const handle = resetAutoRedeemSettings[key];
-					if (handle.get(this.settings) === "unset") handle.set(this.settings, answer);
+				for (const key of keys) {
+					if (key.get(this.settings) === "unset") key.set(this.settings, choice === "Yes" ? "yes" : "no");
 				}
 				if (choice === "Yes") return actions;
-				for (const action of actions) coordinator.declinedCredits.add(declinedCreditKey(action));
 			}
 		} catch (error) {
 			logger.warn(`${source} prompt failed`, { error: String(error) });
@@ -15424,21 +15388,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [];
 	}
 
-	/** Spend what each governing window allows outright first, then ask about the rest. */
+	/** Spend what each governing window allows outright, then ask about the unset ones. */
 	async #redeemConsentedResets(
-		provider: ResetProvider,
-		modes: Record<string, ResetAutoRedeemMode>,
+		provider: "openai-codex" | "anthropic",
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
-		const approved = actions.filter(action => actionConsent(action, modes).mode === "yes");
-		const prompted = actions.filter(
-			action =>
-				actionConsent(action, modes).mode === "unset" &&
-				!coordinator.declinedCredits.has(declinedCreditKey(action)),
-		);
+		const modes = resetWindowModes(provider, this.settings);
+		const approved = actions.filter(action => resetWindowMode(modes, action.window) === "yes");
 		const spent = await this.#executeResetActions(provider, approved, coordinator);
-		const confirmed = await this.#confirmAutoRedeem(provider, prompted, coordinator, modes);
+		const unset = actions.filter(action => resetWindowMode(modes, action.window) === "unset");
+		const confirmed = await this.#confirmAutoRedeem(provider, unset, coordinator);
+		if (confirmed.length === 0) return spent;
 		const consented = await this.#executeResetActions(provider, confirmed, coordinator);
 		return {
 			restoredCredentialIds: [...spent.restoredCredentialIds, ...consented.restoredCredentialIds],
@@ -15460,7 +15421,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			trigger,
 			provider: model?.provider ?? "",
 			modelId: model?.id ?? "",
-			settings: resetPlanSettings(cfg),
+			settings: resetPlanSettings(resetWindowModes("openai-codex", this.settings), cfg),
 			identity,
 			permitsCredential: credentialId =>
 				this.#modelRegistry.authStorage.sessions.permits("openai-codex", this.sessionId, credentialId),
@@ -15490,7 +15451,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			trigger,
 			provider: model?.provider ?? "",
 			modelId: model?.provider === "anthropic" ? model.id : "",
-			settings: claudeResetPlanSettings(cfg),
+			settings: resetPlanSettings(resetWindowModes("anthropic", this.settings), cfg),
 			reports,
 			statuses,
 			permitsCredential: credentialId =>
@@ -15711,11 +15672,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult> {
 		const provider = this.model?.provider;
 		if (provider !== "anthropic" && provider !== "openai-codex") return { restored: false };
-		const modes =
-			provider === "anthropic"
-				? claudeResetWindowModes(cfgClaudeResets.get(this.settings))
-				: resetWindowModes(cfgCodexResets.get(this.settings));
-		if (!shouldEvaluateResetAutoRedeem(modes)) return { restored: false };
+		const modes = resetWindowModes(provider, this.settings);
+		if (!resetWindowsEnabled(modes)) return { restored: false };
 		const coordinator = this.#resetCoordinator;
 		const authStorage = this.#modelRegistry.authStorage;
 		const identity = authStorage.oauth.identity(provider, this.sessionId);
@@ -15769,7 +15727,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				return { restored: false, retryAfterMs, poolLimited };
 			}
-			const executed = await this.#redeemConsentedResets(provider, modes, plan.actions, coordinator);
+			const executed = await this.#redeemConsentedResets(provider, plan.actions, coordinator);
 			return {
 				restored: executed.restoredCredentialIds.length > 0,
 				restoredCredentialIds: executed.restoredCredentialIds,
@@ -15795,14 +15753,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	#maybeScheduleResetSweep(reports: UsageReport[]): void {
 		const coordinator = this.#resetCoordinator;
-		const codexCfg = cfgCodexResets.get(this.settings);
-		const claudeCfg = cfgClaudeResets.get(this.settings);
-		const codexModes = resetWindowModes(codexCfg);
-		const claudeModes = claudeResetWindowModes(claudeCfg);
 		const codexEnabled =
-			shouldEvaluateResetAutoRedeem(codexModes) && reports.some(report => report.provider === "openai-codex");
+			resetWindowsEnabled(resetWindowModes("openai-codex", this.settings)) &&
+			reports.some(report => report.provider === "openai-codex");
 		const claudeEnabled =
-			shouldEvaluateResetAutoRedeem(claudeModes) && reports.some(report => report.provider === "anthropic");
+			resetWindowsEnabled(resetWindowModes("anthropic", this.settings)) &&
+			reports.some(report => report.provider === "anthropic");
 		if (!codexEnabled && !claudeEnabled) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
 		const now = Date.now();
@@ -15816,7 +15772,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					const effectiveReports = overlayLiveResetCredits(reports, statuses);
 					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
 					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					await this.#redeemConsentedResets("openai-codex", codexModes, plan.actions, coordinator);
+					await this.#redeemConsentedResets("openai-codex", plan.actions, coordinator);
 				} catch (error) {
 					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
@@ -15840,7 +15796,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 								)
 							: candidates;
 					if (plan.actions.length > 0) {
-						await this.#redeemConsentedResets("anthropic", claudeModes, plan.actions, coordinator);
+						await this.#redeemConsentedResets("anthropic", plan.actions, coordinator);
 					}
 				} catch (error) {
 					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });

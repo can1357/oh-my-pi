@@ -3288,35 +3288,21 @@ export class Settings {
 			if (migrated !== undefined) providersObj.tinyModel = migrated;
 		}
 
-		// Preserve legacy saved-reset consent while separating provider windows.
-		// Normalize booleans first; explicit new keys win across nested and dotted forms.
-		// The Fable window is new and stays `unset`: Fable resets need their own opt-in.
-		for (const provider of ["codexResets", "claudeResets"] as const) {
-			const resets = isRecord(raw[provider]) ? raw[provider] : undefined;
-			const legacyKey = `${provider}.autoRedeem`;
-			if (resets && typeof resets.autoRedeem === "boolean") {
-				resets.autoRedeem = resets.autoRedeem ? "yes" : "no";
+		// Legacy single saved-reset `autoRedeem` (boolean or tri-state) -> the 5h and
+		// weekly window keys not set yet. The Fable window is new and stays `unset`.
+		for (const group of ["codexResets", "claudeResets"] as const) {
+			const nested = isRecord(raw[group]) ? raw[group] : undefined;
+			const dotted = `${group}.autoRedeem`;
+			const legacy = nested?.autoRedeem ?? raw[dotted];
+			if (nested) delete nested.autoRedeem;
+			delete raw[dotted];
+			if (legacy === undefined) continue;
+			const mode = typeof legacy === "boolean" ? (legacy ? "yes" : "no") : legacy;
+			for (const key of ["autoRedeem5h", "autoRedeemWeekly"]) {
+				if (nested?.[key] !== undefined || raw[`${group}.${key}`] !== undefined) continue;
+				if (nested) nested[key] = mode;
+				else raw[`${group}.${key}`] = mode;
 			}
-			if (typeof raw[legacyKey] === "boolean") {
-				raw[legacyKey] = raw[legacyKey] ? "yes" : "no";
-			}
-			const nestedLegacy = resets?.autoRedeem;
-			const legacy =
-				typeof nestedLegacy === "string"
-					? nestedLegacy
-					: typeof raw[legacyKey] === "string"
-						? raw[legacyKey]
-						: undefined;
-			if (legacy !== undefined) {
-				for (const key of ["autoRedeem5h", "autoRedeemWeekly"]) {
-					if (resets && key in resets) continue;
-					if (`${provider}.${key}` in raw) continue;
-					if (resets) resets[key] = legacy;
-					else raw[`${provider}.${key}`] = legacy;
-				}
-			}
-			if (resets) delete resets.autoRedeem;
-			delete raw[legacyKey];
 		}
 
 		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`

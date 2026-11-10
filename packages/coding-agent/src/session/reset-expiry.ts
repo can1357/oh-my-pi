@@ -19,9 +19,9 @@ import { formatResetProviderName } from "../slash-commands/helpers/reset-usage";
 import {
 	type ClaudeResetAction,
 	type ClaudeResetSkip,
-	type ClaudeResetWindow,
-	claudeResetPlanSettings,
-	claudeResetWindowModes,
+	claudeCoveredLimits,
+	claudeResetWindow,
+	fullestClaudeLimit,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
 import {
@@ -29,14 +29,21 @@ import {
 	type CodexResetSkip,
 	DEBOUNCE_BUCKET_MS,
 	fullestCodexChatWindow,
+	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
 	resetAccountLockKey,
 	resetPlanSettings,
-	resetWindowModes,
+	resetWindowMode,
 	SALVAGE_MIN_USED_FRACTION,
 } from "./codex-auto-reset";
-import { CODEX_RESET_WINDOWS, IMMINENT_RESET_EXPIRY_MS, actionConsent, classifyResetGrant } from "./reset-consent";
-import { cfgClaudeResets, cfgCodexResets, type ResetAutoRedeemMode } from "./settings";
+import {
+	cfgClaudeResets,
+	cfgCodexResets,
+	type ResetAutoRedeemMode,
+	type ResetWindow,
+	resetWindowModes,
+	resetWindowSettings,
+} from "./settings";
 
 const SOON_MS = 7 * 24 * 3_600_000;
 const IMMINENT_MS = 24 * 3_600_000;
@@ -53,17 +60,13 @@ export interface ResetExpiryWarning {
 	count: number;
 	/** Soonest expiry among them (epoch ms). */
 	expiresAtMs: number;
-	/**
-	 * Provider id of the warned grant. Several grants can expire at the same moment;
-	 * the verdict reads this grant, never whichever one an expiry lookup finds first.
-	 * Absent when the provider reports no ids (Codex), whose verdict needs none.
-	 */
-	creditId?: string;
 	/** Whether the provider lets the soonest one be spent now. */
 	usableNow: boolean;
 	/** The chat window the salvage planner measures for this account. */
 	limit: UsageLimit;
 	usedFraction: number;
+	/** Window whose consent governs spending the warned reset; absent when either chat window could. */
+	window: ResetWindow | undefined;
 }
 
 /**
@@ -92,10 +95,9 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 				? { limit: codexWindow.limit, usedFraction: codexWindow.usedFraction }
 				: undefined;
 		}
-		// A Fable grant is worth salvaging only by its own measured Fable usage.
-		const grant = classifyResetGrant(credit, report);
-		return grant.fullest && grant.fullest.used >= SALVAGE_MIN_USED_FRACTION
-			? { limit: grant.fullest.limit, usedFraction: grant.fullest.used }
+		const covered = fullestClaudeLimit(claudeCoveredLimits(report.limits, credit), credit);
+		return covered && covered.used >= SALVAGE_MIN_USED_FRACTION
+			? { limit: covered.limit, usedFraction: covered.used }
 			: undefined;
 	};
 	let warned: { credit: UsageResetCreditDetail; expiresAtMs: number } | undefined;
@@ -122,9 +124,9 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 		tier,
 		count,
 		expiresAtMs: warned.expiresAtMs,
-		...(warned.credit.id === undefined ? {} : { creditId: warned.credit.id }),
 		usableNow: spendableNow(provider, report.resetCredits, warned.credit),
 		...fullest,
+		window: provider === "openai-codex" ? codexWindow?.window : claudeResetWindow(warned.credit, [fullest.limit.id]),
 	};
 }
 
@@ -144,32 +146,16 @@ function spendableNow(
 	return provider !== "anthropic" || (inventory.nextCreditId !== undefined && inventory.nextCreditId === credit.id);
 }
 
-const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
-
-/** Windows a credit restores, classified from the grant the warning identifies. */
-function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ClaudeResetWindow[] {
-	if (warning.provider === "openai-codex") return CODEX_RESET_WINDOWS;
-	// Several grants can share an expiry, so the warned grant is the one its id names, never an expiry match.
-	const credit =
-		warning.creditId === undefined
-			? undefined
-			: (report.resetCredits?.credits ?? []).find(candidate => candidate.id === warning.creditId);
-	if (credit) return classifyResetGrant(credit, report).restorableWindows;
-	const window: ClaudeResetWindow =
-		warning.limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : warning.limit.scope.tier === "fable" ? "fable" : "weekly";
-	return [window];
-}
-
 /**
  * What an open interactive omp session does with an account's soonest expiring saved
- * reset once it reaches its last five minutes: `auto` spends it, `ask` prompts
- * first, `off` leaves it. `kind` follows the most permissive mode among the
- * windows the credit restores, and `setting` names the key or keys that decide
- * it. `eligibleNow` is the salvage planner's answer for this report today;
- * usage can change it before the reset expires.
+ * reset, from the consent of the window that governs it: `auto` spends it by its
+ * last five minutes if the provider still allows it then, `ask` prompts first,
+ * `off` leaves it. `eligibleNow` is the salvage planner's answer for this report
+ * today; usage can change it before the reset expires.
  */
 export interface ResetSpendVerdict {
 	kind: "auto" | "ask" | "off";
+	/** The setting key or keys that decide it. */
 	setting: string;
 	mode: ResetAutoRedeemMode;
 	eligibleNow: boolean;
@@ -181,29 +167,15 @@ export function resetSpendVerdict(
 	settings: Settings,
 	nowMs: number,
 ): ResetSpendVerdict {
-	// Codex has no Fable window, so its mode never decides a verdict.
-	const modes: Record<ClaudeResetWindow, ResetAutoRedeemMode> =
-		warning.provider === "anthropic"
-			? claudeResetWindowModes(cfgClaudeResets.get(settings))
-			: { ...resetWindowModes(cfgCodexResets.get(settings)), fable: "no" };
-	const restorable = restorableResetWindows(report, warning);
-	// Last-chance spending happens at expiry, so judge consent by that moment's rule.
-	const consent = actionConsent(
-		{ target: { provider: warning.provider }, restorableWindows: restorable, expiresInMs: 0 },
-		modes,
-	);
-	const kind = consent.mode === "no" ? "off" : consent.mode === "unset" ? "ask" : "auto";
-	const setting = consent.keys.join(" + ");
+	const mode = resetWindowMode(resetWindowModes(warning.provider, settings), warning.window);
+	const kind = mode === "no" ? "off" : mode === "unset" ? "ask" : "auto";
+	const windows: readonly ResetWindow[] = warning.window ? [warning.window] : ["5h", "weekly"];
+	const setting = windows.map(window => resetWindowSettings[warning.provider][window]?.id).join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
 		plan.actions[0]?.expiresInMs === IMMINENT_RESET_EXPIRY_MS || plan.skipped[0]?.reason === "stale-report";
-	return {
-		kind,
-		setting,
-		mode: consent.mode,
-		eligibleNow,
-	};
+	return { kind, setting, mode, eligibleNow };
 }
 
 /**
@@ -243,11 +215,7 @@ function planAsLastChance(
 			trigger: "sweep",
 			provider: "",
 			modelId: "",
-			settings: resetPlanSettings({
-				...cfgCodexResets.get(settings),
-				autoRedeem5h: "yes",
-				autoRedeemWeekly: "yes",
-			}),
+			settings: resetPlanSettings({ "5h": "yes", weekly: "yes" }, cfgCodexResets.get(settings)),
 			identity: undefined,
 			reports: [{ ...lastChance, metadata: { ...report.metadata, resetCreditCredentialId: credentialId } }],
 			...episodes,
@@ -259,12 +227,7 @@ function planAsLastChance(
 		trigger: "sweep",
 		provider: "",
 		modelId: "",
-		settings: claudeResetPlanSettings({
-			...cfgClaudeResets.get(settings),
-			autoRedeem5h: "yes",
-			autoRedeemWeekly: "yes",
-			autoRedeemFable: "yes",
-		}),
+		settings: resetPlanSettings({ "5h": "yes", weekly: "yes", fable: "yes" }, cfgClaudeResets.get(settings)),
 		reports: [lastChance],
 		statuses: [
 			{

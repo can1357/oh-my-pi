@@ -777,9 +777,8 @@ function formatResetSpendVerdict(verdict: ResetSpendVerdict): string {
 
 /**
  * Saved resets expiring within 24 hours on accounts worth restoring: what the
- * provider's 5h and weekly saved-reset settings do with each one, whether it is
- * eligible now, and the `/usage reset` target that spends it now when the
- * provider allows.
+ * governing window's auto-redeem setting does with each one, whether it is
+ * eligible now, and the `/usage reset` target that spends it now when the provider allows.
  */
 function formatResetExpiryBanner(
 	expiring: readonly { report: UsageReport; warning: ResetExpiryWarning }[],

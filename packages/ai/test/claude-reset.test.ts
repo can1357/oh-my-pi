@@ -1,9 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { consumeClaudeResetCredit, listClaudeResetCredits, type UsageResetCredit } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import type { UsageFetchContext, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageFetchContext } from "@oh-my-pi/pi-ai/usage";
 import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
-import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-reset";
 
 interface CapturedCall {
 	url: string;
@@ -76,36 +75,6 @@ function cedarPayload() {
 	};
 }
 
-describe("claudeResetClearedBlockScopes", () => {
-	function sharedReport(fiveHourUsed: number, weeklyUsed: number): UsageReport {
-		return {
-			provider: "anthropic",
-			fetchedAt: Date.now(),
-			limits: [
-				{ windowId: "5h", usedFraction: fiveHourUsed },
-				{ windowId: "7d", usedFraction: weeklyUsed },
-			].map(({ windowId, usedFraction }) => ({
-				id: `anthropic:${windowId}`,
-				label: windowId,
-				scope: { provider: "anthropic", windowId, shared: true },
-				amount: { unit: "percent", usedFraction },
-			})),
-		};
-	}
-
-	it("retains a row-less Fable block when an uncleared shared weekly window is exhausted", () => {
-		const scopes = claudeResetClearedBlockScopes(["anthropic:5h", "anthropic:7d:fable"], sharedReport(1, 1));
-
-		expect(scopes).not.toContain("tier:fable");
-	});
-
-	it("clears a row-less Mythos block from a tier-only reset with healthy shared windows", () => {
-		const scopes = claudeResetClearedBlockScopes(["anthropic:5h", "anthropic:7d:mythos"], sharedReport(0.2, 0.4));
-
-		expect(scopes).toContain("tier:mythos");
-	});
-});
-
 describe("listClaudeResetCredits", () => {
 	it("prefers Cedar and normalizes counts, eligibility, expiry, and covered windows", async () => {
 		const { fetch, calls } = recordingFetch(() => json(200, cedarPayload()));
@@ -139,6 +108,14 @@ describe("listClaudeResetCredits", () => {
 		});
 	});
 
+	it("maps a Fable launch grant onto the Fable weekly limit it clears", async () => {
+		const payload = cedarPayload();
+		payload.cedar_ember.grants[0].clears = ["five_hour", "seven_day_overage_included"];
+		const { fetch } = recordingFetch(() => json(200, payload));
+		const result = await listClaudeResetCredits({ accessToken: "token", orgId: "org_1", fetch });
+		expect(result?.credits[0]?.clears).toEqual(["anthropic:5h", "anthropic:7d:fable"]);
+	});
+
 	it("parses discovery quota evidence with the same normalized model windows as ordinary usage", async () => {
 		const { fetch, calls } = recordingFetch(() =>
 			json(200, {
@@ -166,31 +143,6 @@ describe("listClaudeResetCredits", () => {
 			orgId: "org_1",
 		});
 		expect(calls).toHaveLength(1);
-	});
-
-	it("maps a Fable launch grant onto the Fable weekly limit it restores", async () => {
-		const payload = cedarPayload();
-		const fableGrant = {
-			...payload.cedar_ember.grants[0],
-			id: "launch-2610-fable",
-			clears: ["five_hour", "seven_day_overage_included"],
-			percent_used: { five_hour: 46, seven_day_overage_included: 7 },
-			blocking: [],
-		};
-		const { fetch } = recordingFetch(() =>
-			json(200, {
-				...payload,
-				cedar_ember: { ...payload.cedar_ember, next_grant_id: fableGrant.id, grants: [fableGrant] },
-				five_hour: { utilization: 46 },
-				seven_day: { utilization: 37 },
-				limits: [{ kind: "weekly_scoped", percent: 7, scope: { model: { display_name: "Fable" } } }],
-			}),
-		);
-		const result = await listClaudeResetCredits({ accessToken: "token", orgId: "org_1", fetch });
-		const grant = result?.credits[0];
-		expect(grant?.clears).toEqual(["anthropic:5h", "anthropic:7d:fable"]);
-		expect(grant?.usedFractions).toMatchObject({ "anthropic:7d:fable": 0.07 });
-		expect(result?.report?.limits.map(limit => limit.id)).toContain("anthropic:7d:fable");
 	});
 
 	it("falls back to the Juniper reset arm without claiming a weekly reset exists", async () => {
