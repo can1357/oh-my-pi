@@ -524,15 +524,18 @@ describe("OMP-owned browser evaluation", () => {
 							.then(() => "resolved", error => error.name + ": " + error.message);
 						// A predicate that never settles still times out at its deadline.
 						const stalled = await page
-							.waitForFunction(() => new Promise(() => {}), { timeout: 200 })
+							.waitForFunction(() => Promise.withResolvers().promise, { timeout: 200 })
 							.then(() => "resolved", error => error.name + ": " + error.message);
 						// "mutation" polling sees a node that exists only until the task that added it ends.
-						const mutationWait = page.waitForFunction(() => document.querySelector("#flash")?.id, {
-							polling: "mutation",
-							timeout: 5_000,
-						});
-						// Give the wait time to install its observer; a timer poll would still miss the flash.
-						await new Promise(resolve => setTimeout(resolve, 500));
+						const mutationWait = page.waitForFunction(
+							() => {
+								globalThis.__ompChecks = (globalThis.__ompChecks ?? 0) + 1;
+								return document.querySelector("#flash")?.id;
+							},
+							{ polling: "mutation", timeout: 5_000 },
+						);
+						// The first check runs once the wait's observer is installed; a timer poll would still miss the flash.
+						await page.waitForFunction(() => globalThis.__ompChecks >= 1, { timeout: 5_000 });
 						await page.evaluate(() => {
 							const flash = document.createElement("i");
 							flash.id = "flash";
