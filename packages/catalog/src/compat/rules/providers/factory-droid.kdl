@@ -954,7 +954,21 @@ provider "factory-droid" {
 		routing-family "google"
 		upstream-rotation "google"
 		region-upstreams-us
-		credit-rates { input 1.6; output 5; cache-read 0.05 }
+		credit-rates {
+			input 1.6
+			output 5
+			cache-read 0.05
+			effective-rates {
+				promotion {
+					effective-from "2026-10-13T16:00:00Z"
+					input 0.8
+				}
+				standard {
+					effective-from "2026-12-01T08:00:00Z"
+					input 1.6
+				}
+			}
+		}
 		list-price-from "google"
 		thinking-efforts "low" "medium" "high"
 		thinking-requires-effort #true
