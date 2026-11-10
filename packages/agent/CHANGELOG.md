@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.setTurnGate()`: an embedder that admits turns itself can refuse every `prompt()` and `continue()` that bypasses its admission, which then rejects with `TurnGateRefusedError` and leaves the agent idle ([#15500](https://github.com/can1357/oh-my-pi/pull/15500) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.20.0] - 2026-11-12
 
 ### Changed

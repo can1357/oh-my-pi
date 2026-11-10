@@ -10,9 +10,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { cfgRetryBaseDelayMs } from "@oh-my-pi/pi-coding-agent/session/settings";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, TurnGateRefusedError } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1917,5 +1918,50 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(run.stopEvents).toHaveLength(1);
 		// Released after publishing, the parked wake got its own turn.
 		expect(run.mock.calls).toHaveLength(2);
+	});
+
+	describe("a turn that would change a held candidate under the verdict", () => {
+		it("refuses an un-gated agent.continue() while a stop pass holds the session", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["UNGATED"] }], onStop: () => undefined });
+			run.session.agent.appendMessage({ role: "user", content: "earlier", timestamp: Date.now() });
+			const hold = run.session.holdForStopPass();
+
+			await expect(run.session.agent.continue()).rejects.toBeInstanceOf(TurnGateRefusedError);
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+		});
+
+		it("holds the automatic retry of a failed turn until the handlers judging the session return a verdict", async () => {
+			let hold: StopPassHold | undefined;
+			const run = await setup({
+				driven: true,
+				responses: [
+					() => {
+						// Handlers start judging the session while the turn that will be retried still streams.
+						hold = run.session.holdForStopPass();
+						hold.consult();
+						return { content: [], stopReason: "error", errorMessage: "503 service unavailable" };
+					},
+					{ content: ["retried"] },
+				],
+				onStop: () => undefined,
+			});
+			// Backoff of 1 ms: without the hold the retry reaches the model within the polling below.
+			cfgRetryBaseDelayMs.set(run.session.settings, 1);
+			const retryScheduled = Promise.withResolvers<void>();
+			run.session.subscribe(event => {
+				if (event.type === "auto_retry_start") retryScheduled.resolve();
+			});
+
+			const prompted = run.session.prompt("first", { attribution: "agent" });
+			await retryScheduled.promise;
+			for (let tick = 0; run.mock.calls.length < 2 && tick < 200; tick++) await scheduler.yield();
+			expect(run.mock.calls).toHaveLength(1);
+			hold?.release();
+			await prompted;
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(2);
+		});
 	});
 });

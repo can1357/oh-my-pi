@@ -1,5 +1,4 @@
 import {
-	type Agent,
 	type AgentEvent,
 	type AgentMessage,
 	type AgentTurnEndContext,
@@ -19,6 +18,7 @@ import {
 	TOOL_CALL_LOOP_REDIRECT_TYPE,
 	toolCallLoopRedirectDetails,
 } from "./tool-call-loop-redirect";
+import type { TurnlessAgent } from "./turn-gate";
 
 import { cfgEditStreamingAbort } from "../edit/settings";
 import { writeDeviceName } from "../tools/resolve";
@@ -52,7 +52,7 @@ const NO_CHANGES_PREVIEW_PREFIX = "No changes would be made";
 
 /** Capabilities borrowed by the session's streaming and loop guards. */
 export interface StreamGuardsHost {
-	agent: Agent;
+	agent: TurnlessAgent;
 	settings: Settings;
 	sessionManager: SessionManager;
 	model(): Model | undefined;
@@ -63,6 +63,13 @@ export interface StreamGuardsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
 	discardAssistantTurn(message: AssistantMessage): void;
+	/**
+	 * Continues the run as the running work's own recovery, through the session's turn gate: `onAdmitted` runs
+	 * synchronously right before the continuation starts. `undefined` when the gate refused it (a `subagent_stop`
+	 * pass is judging the session): it parked `park`, which requests the recovery again once it may run. Throws
+	 * `AgentBusyError` while a turn runs.
+	 */
+	startRecoveryTurn(onAdmitted: () => void, park: () => void): Promise<void> | undefined;
 }
 
 /** Guards streamed edit calls against invalid final previews. */
@@ -167,33 +174,40 @@ export class StreamingEditGuard {
 		const diagnostic = opts.diagnostic;
 		const attempt = this.#recoveryCount;
 		const generation = this.#host.promptGeneration();
-		this.#host.schedulePostPromptTask(async signal => {
+		const recover = async (signal: AbortSignal): Promise<void> => {
 			if (signal.aborted || this.#host.isDisposed()) return;
 			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
 			await this.#host.agent.waitForIdle();
 			if (signal.aborted || this.#host.isDisposed()) return;
 			if (this.#host.promptGeneration() !== generation || this.#host.promptSequence() !== sequence) return;
-			const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
-			this.#host.agent.appendMessage({
-				role: "custom",
-				customType: STREAMING_EDIT_RECOVERY_TYPE,
-				content,
-				display: false,
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
-			this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
-			this.#host.emitNotice(
-				"info",
-				`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
-				STREAMING_EDIT_NOTICE_SOURCE,
-			);
 			try {
-				await this.#host.agent.continue();
+				// The diagnostic goes into the transcript only with the admitted continuation: a refused one is
+				// requested again, unchanged, once it may run.
+				await this.#host.startRecoveryTurn(
+					() => {
+						const content = prompt.render(streamingEditRecoveryTemplate, { diagnostic });
+						this.#host.agent.appendMessage({
+							role: "custom",
+							customType: STREAMING_EDIT_RECOVERY_TYPE,
+							content,
+							display: false,
+							attribution: "agent",
+							timestamp: Date.now(),
+						});
+						this.#host.sessionManager.appendCustomMessageEntry(STREAMING_EDIT_RECOVERY_TYPE, content, false);
+						this.#host.emitNotice(
+							"info",
+							`Streaming edit preview failed; retrying with the error context (attempt ${attempt}/${STREAMING_EDIT_RECOVERY_LIMIT}).`,
+							STREAMING_EDIT_NOTICE_SOURCE,
+						);
+					},
+					() => this.#host.schedulePostPromptTask(recover),
+				);
 			} catch (error) {
 				logger.warn("streaming edit recovery continue failed", { error: String(error) });
 			}
-		});
+		};
+		this.#host.schedulePostPromptTask(recover);
 	}
 }
 
@@ -300,38 +314,44 @@ export class LoopGuards {
 		);
 		this.#host.agent.abort(GEMINI_HEADER_INTERRUPT_REASON);
 		const generation = this.#host.promptGeneration();
-		this.#host.schedulePostPromptTask(async signal => {
+		const remind = async (signal: AbortSignal): Promise<void> => {
 			if (signal.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) return;
 			await this.#host.agent.waitForIdle();
 			if (signal.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) return;
-			const aborted = this.#host.agent.state.messages.findLast(
-				(message): message is AssistantMessage =>
-					message.role === "assistant" && message.timestamp === targetTimestamp,
-			);
-			if (aborted) this.#host.discardAssistantTurn(aborted);
-			const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
-			const details = { headers: headerCount };
-			this.#host.agent.appendMessage({
-				role: "custom",
-				customType: GEMINI_TOOL_REMINDER_TYPE,
-				content,
-				display: false,
-				details,
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
-			this.#host.sessionManager.appendCustomMessageEntry(
-				GEMINI_TOOL_REMINDER_TYPE,
-				content,
-				false,
-				details,
-				"agent",
-			);
 			try {
-				await this.#host.agent.continue();
+				// The aborted turn is dropped and the reminder appended only with the admitted continuation.
+				await this.#host.startRecoveryTurn(
+					() => {
+						const aborted = this.#host.agent.state.messages.findLast(
+							(message): message is AssistantMessage =>
+								message.role === "assistant" && message.timestamp === targetTimestamp,
+						);
+						if (aborted) this.#host.discardAssistantTurn(aborted);
+						const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
+						const details = { headers: headerCount };
+						this.#host.agent.appendMessage({
+							role: "custom",
+							customType: GEMINI_TOOL_REMINDER_TYPE,
+							content,
+							display: false,
+							details,
+							attribution: "agent",
+							timestamp: Date.now(),
+						});
+						this.#host.sessionManager.appendCustomMessageEntry(
+							GEMINI_TOOL_REMINDER_TYPE,
+							content,
+							false,
+							details,
+							"agent",
+						);
+					},
+					() => this.#host.schedulePostPromptTask(remind),
+				);
 			} catch (error) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(error) });
 			}
-		});
+		};
+		this.#host.schedulePostPromptTask(remind);
 	}
 }

@@ -110,6 +110,16 @@ export class AgentBusyError extends Error {
 		this.name = "AgentBusyError";
 	}
 }
+/**
+ * A turn start the embedder's turn gate refused ({@link Agent.setTurnGate}). Not an {@link AgentBusyError}: the agent
+ * is idle, so waiting for it and retrying would only refuse again.
+ */
+export class TurnGateRefusedError extends Error {
+	constructor(message: string = "The turn gate refused this turn start: the session's turns are held.") {
+		super(message);
+		this.name = "TurnGateRefusedError";
+	}
+}
 export interface AgentOptions {
 	initialState?: Partial<AgentState>;
 
@@ -714,6 +724,18 @@ export class Agent {
 	 */
 	setMetadataResolver(resolver: ((provider: string) => Record<string, unknown> | undefined) | undefined): void {
 		this.#metadataResolver = resolver;
+	}
+
+	#turnGate: (() => boolean) | undefined;
+
+	/**
+	 * Install a check that every {@link prompt} and {@link continue} must pass before claiming the run; a refusal
+	 * rejects with {@link TurnGateRefusedError} and leaves the agent idle. An embedder that starts its turns through
+	 * its own admission (a session holding turns for a verdict) uses it to refuse any start that bypasses it.
+	 * Pass `undefined` to remove it.
+	 */
+	setTurnGate(gate: (() => boolean) | undefined): void {
+		this.#turnGate = gate;
 	}
 
 	/**
@@ -1743,6 +1765,7 @@ export class Agent {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
+		if (this.#turnGate && !this.#turnGate()) throw new TurnGateRefusedError();
 
 		const model = this.#state.model;
 		if (!model) throw new Error("No model configured");
@@ -1810,6 +1833,7 @@ export class Agent {
 		if (this.#state.isStreaming) {
 			throw new AgentBusyError();
 		}
+		if (this.#turnGate && !this.#turnGate()) throw new TurnGateRefusedError();
 
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#runningPrompt = promise;

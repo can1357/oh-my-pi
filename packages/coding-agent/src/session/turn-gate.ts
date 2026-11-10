@@ -10,7 +10,8 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 
 /**
  * What a turn is to the holds, decided where the turn is created:
- * - `holder`: a hold's own continuation; runs once no other claim's reservation is open.
+ * - `holder`: a hold's own continuation; runs once no non-holder claim's reservation is open (holders serialize on
+ *   the agent's own busy check instead, so two holds' continuations never wait on each other).
  * - `recovery`: the running work's own follow-through (retries, stream guards, idle deliveries); waits only while a
  *   hold's handlers consult.
  * - `background`: anything else that would start a turn on its own (wakes, asides, queued drains, compaction
@@ -31,8 +32,10 @@ export interface TurnClaim {
 	/** `holder` only: the hold this turn continues. */
 	readonly hold?: HoldState;
 	/**
-	 * Refused non-user claims: start the work again once admissible. Called at most once per park, by the gate's
-	 * replay; the same function parked again before its replay is one replay, stamped with the later park.
+	 * Refused non-user claims: request the work again once admissible. Called at most once per park, by the gate's
+	 * replay; the same function parked again before its replay is one replay, stamped with the later park. It must
+	 * only re-request (schedule) the work, never start a turn synchronously: a replay can run inside another claim's
+	 * admission.
 	 */
 	readonly park?: () => void;
 }
@@ -44,7 +47,7 @@ export interface TurnGateHost {
 	whenAdmittedSubmissionsSettled(): Promise<void> | undefined;
 }
 
-/** A claim's in-flight bracket, from its setup to its settle: a holder waits until every foreign one ends. */
+/** A claim's in-flight bracket, from its setup to its settle: a holder waits until every non-holder one ends. */
 export interface TurnReservation {
 	/** The reserved turn went live: its undo no longer runs. */
 	started(): void;
@@ -60,7 +63,7 @@ type ParkedClaim = { park: () => void; stamp: number; kind: TurnClaimKind };
 export class TurnGate {
 	readonly #host: TurnGateHost;
 	readonly #holds = new Map<HoldState, (() => void) | undefined>();
-	readonly #reservations = new Set<TurnClaim>();
+	readonly #reservations = new Set<{ readonly kind: TurnClaimKind }>();
 	#parked: ParkedClaim[] = [];
 	#changed = Promise.withResolvers<void>();
 	#dispatching = false;
@@ -82,6 +85,11 @@ export class TurnGate {
 	/** Why the holds are being cancelled, read by their abort listeners during {@link cancelAll}. */
 	get cancelling(): "interrupt" | "user" | undefined {
 		return this.#cancelling;
+	}
+
+	/** Settles on the next change of the holds, their consulting, or the open reservations. */
+	get changed(): Promise<void> {
+		return this.#changed.promise;
 	}
 
 	/** Takes a hold; `runSignal`, the run's own cancellation, cancels it until its release. */
@@ -142,7 +150,7 @@ export class TurnGate {
 			case "holder": {
 				const hold = claim.hold;
 				if (!hold || !this.#holds.has(hold) || hold.cancel.signal.aborted) return false;
-				for (const reservation of this.#reservations) if (reservation.hold !== hold) return false;
+				for (const reservation of this.#reservations) if (reservation.kind !== "holder") return false;
 				return true;
 			}
 			case "recovery":
@@ -195,11 +203,14 @@ export class TurnGate {
 
 	/** Opens `claim`'s in-flight bracket; `undo` puts back what its setup installed if its turn never goes live. */
 	reserve(claim: TurnClaim, undo?: () => void | Promise<void>): TurnReservation {
-		// One entry per reservation, even for a claim object reserved twice.
-		const entry: TurnClaim = { ...claim };
+		// One entry per reservation, even for a claim reserved twice.
+		const entry = { kind: claim.kind };
 		this.#reservations.add(entry);
 		let live = false;
 		let ended = false;
+		const close = (): void => {
+			if (this.#reservations.delete(entry)) this.#notify();
+		};
 		return {
 			started: () => {
 				live = true;
@@ -207,10 +218,15 @@ export class TurnGate {
 			end: async () => {
 				if (ended) return;
 				ended = true;
+				if (live || !undo) {
+					// Synchronous, so a bracket without an undo closes in the caller's tick.
+					close();
+					return;
+				}
 				try {
-					if (!live) await undo?.();
+					await undo();
 				} finally {
-					if (this.#reservations.delete(entry)) this.#notify();
+					close();
 				}
 			},
 		};

@@ -103,6 +103,7 @@ function createHost(
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {},
+		startTurn: () => undefined,
 		waitForSessionMessagePersistence: async () => {},
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
