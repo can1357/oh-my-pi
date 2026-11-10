@@ -568,12 +568,16 @@ describe("pickElectronTarget", () => {
 					name: borrowedName,
 					url: "data:text/html,<title>Borrowed</title>",
 					app: { path: exe, args: [...flags, "--user-data-dir", borrowedProfile] },
+					// Both opens share the 90s deadline below; give each tool call
+					// the same budget so a loaded run cannot cut an open mid-flight.
+					timeout: 90,
 				});
 				await invoke({
 					action: "open",
 					name: ownedName,
 					url: "data:text/html,<title>Owned</title>",
 					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
+					timeout: 90,
 				});
 				const borrowedTab = getTab(borrowedName);
 				const ownedTab = getTab(ownedName);
