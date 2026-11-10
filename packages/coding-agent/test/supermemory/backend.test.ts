@@ -584,6 +584,54 @@ describe("supermemoryBackend", () => {
 		expect(create.mock.calls[0]?.[0]?.content).toContain("continuation answer");
 	});
 
+	it("a job queued behind a slow upload retains only turns settled when it was queued", async () => {
+		// Only the first upload is slow; later ones answer at once.
+		const first = Promise.withResolvers<{ id: string; status: string }>();
+		const sent = Promise.withResolvers<void>();
+		const create = vi.spyOn(SupermemoryClient.prototype, "createDocument").mockImplementation(() => {
+			if (create.mock.calls.length > 1) return Promise.resolve({ id: "d", status: "queued" });
+			sent.resolve();
+			return first.promise;
+		});
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		session.emitEnd();
+		await sent.promise;
+		session.addTurn("two");
+		session.emitEnd();
+		// Turn three has started (user message only) while turn one's upload is still pending.
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "u3",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "three", timestamp: 0 },
+		} as never);
+		first.resolve({ id: "d", status: "queued" });
+		await session.getSupermemorySessionState()?.flush();
+		expect(create.mock.calls.map(call => call[0]?.metadata?.turnStart)).toEqual([0, 1]);
+		expect(cursors(session).at(-1)?.[1]).toBe(2);
+	});
+
+	it("repeated /memory enqueue tails upsert one open window instead of adding documents", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 3 } });
+		await start(session);
+		const memory = { agentDir: temp.path(), cwd: "/tmp", session: session as never };
+		session.addTurn("one");
+		await supermemoryBackend.enqueue!(memory.agentDir, memory.cwd, memory.session);
+		session.addTurn("two");
+		await supermemoryBackend.enqueue!(memory.agentDir, memory.cwd, memory.session);
+		session.addTurn("three");
+		await session.endTurn();
+		const ids = new Set(create.mock.calls.map(call => call[0]?.customId));
+		expect(create).toHaveBeenCalledTimes(3);
+		expect(ids.size).toBe(1);
+	});
+
 	it("recall lists editable memory ids and marks document chunks", async () => {
 		serve(200, {
 			results: [

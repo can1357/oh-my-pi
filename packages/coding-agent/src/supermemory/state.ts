@@ -264,7 +264,13 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			// A non-terminal settle is followed by the agent's own continuation; closing the window now
 			// would leave that continuation's answer out of every window.
 			if (this.#config.autoRetain && event.isTerminal !== false) {
-				void this.#enqueueRetention(() => this.#retainDue());
+				// Snapshot the settled history now: a job queued behind a slow upload must not read a
+				// turn that started afterwards and close its window before the answer exists.
+				const settled =
+					countUserTurns(this.session.sessionManager) - this.lastRetainedTurn >= this.#config.retainEveryNTurns
+						? extractMessages(this.session.sessionManager)
+						: undefined;
+				if (settled) void this.#enqueueRetention(() => this.#retainDue(settled));
 			}
 			void this.drainOutbox();
 		});
@@ -431,7 +437,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	/** `/memory enqueue`: retain every due window, then the unretained tail. */
 	async forceRetainCurrentSession(): Promise<void> {
 		await this.#enqueueRetention(async () => {
-			await this.#retainDue();
+			await this.#retainDue(extractMessages(this.session.sessionManager));
 			const messages = extractMessages(this.session.sessionManager);
 			const userStarts = userTurnStarts(messages);
 			if (userStarts.length > this.lastRetainedTurn) {
@@ -440,12 +446,10 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		});
 	}
 
-	/** Every complete `retainEveryNTurns` window not stored yet, oldest first. */
-	async #retainDue(): Promise<void> {
+	/** Every complete `retainEveryNTurns` window of `messages` not stored yet, oldest first. */
+	async #retainDue(messages: HindsightMessage[]): Promise<void> {
 		if (this.#disposed) return;
 		const every = this.#config.retainEveryNTurns;
-		if (countUserTurns(this.session.sessionManager) - this.lastRetainedTurn < every) return;
-		const messages = extractMessages(this.session.sessionManager);
 		const userStarts = userTurnStarts(messages);
 		while (userStarts.length - this.lastRetainedTurn >= every) {
 			const start = this.lastRetainedTurn;
@@ -501,9 +505,11 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		if (this.#disposed || generation !== this.#transcriptGeneration || transcriptId !== this.transcriptId) {
 			return false;
 		}
+		// A `/memory enqueue` tail is an open window: it stays the next window's start, so a later
+		// enqueue or the completed window upserts over it under the same customId.
+		if (endTurn - startTurn < this.#config.retainEveryNTurns) return true;
 		this.lastRetainedTurn = endTurn;
-		// A `/memory enqueue` tail is an open window: a resume re-sends it complete under the same customId.
-		if (endTurn - startTurn === this.#config.retainEveryNTurns) this.#appendCursor(endTurn);
+		this.#appendCursor(endTurn);
 		return true;
 	}
 
