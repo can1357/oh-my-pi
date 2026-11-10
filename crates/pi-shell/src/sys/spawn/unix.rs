@@ -863,16 +863,18 @@ impl Exec {
 /// script in-engine, like bash.
 fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Result<(i32, Place)> {
 	let exec = Exec::new(prog)?;
-	// Nothing this spawn closes may be a descriptor the spawn itself
+	// No descriptor this spawn installs may be one the spawn itself
 	// needs. `Command` takes the lowest free numbers for the descriptors
 	// it makes — the pipe the child reports a failed `execve` on, and the
-	// duplicate of every `Stdio` below — and a host whose own standard
-	// streams are closed leaves exactly the numbers this child closes
-	// vacant. Holding one descriptor in each of them, from before the
-	// first of those allocations until after the spawn, keeps the spawn's
-	// own out of the child's way; the child closes the placeholder with
-	// the slot, and the parent at the end of this function.
-	let held = occupy_vacant_closed(fds);
+	// duplicate of every `Stdio` below — and those are exactly the
+	// numbers the child then closes or duplicates onto: the vacant ones
+	// among the command's own targets. A host whose standard streams are
+	// closed leaves 0, 1 and 2 vacant; a `9>file` leaves 9. Holding one
+	// descriptor in each of them, from before the first of those
+	// allocations until after the spawn, keeps the spawn's own out of the
+	// child's way; the child closes or replaces the placeholder with the
+	// slot, and the parent drops the rest at the end of this function.
+	let held = occupy_vacant_targets(fds);
 	let mut cmd = Command::new(OsStr::from_bytes(prog.path));
 	cmd.current_dir(OsStr::from_bytes(prog.cwd));
 	let stdio = |target: i32| -> io::Result<Stdio> {
@@ -966,41 +968,46 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 	spawned
 }
 
-/// Hold one close-on-exec descriptor in each number this spawn's child
-/// will close that the parent leaves vacant, until the returned
-/// descriptors are dropped. A number the parent already holds is one the
-/// spawn cannot be given, so it needs no placeholder; a number nobody
-/// holds is the next one `pipe2` or `dup` returns.
+/// Hold one close-on-exec descriptor in each of this spawn's target
+/// numbers that the parent leaves vacant, until the returned
+/// descriptors are dropped: the child closes or duplicates onto every
+/// one of them, so none may be a number the spawn is given for itself.
+/// A number the parent already holds is one the spawn cannot be given,
+/// so it needs no placeholder; a vacant one is the next number `pipe2`
+/// or `dup` returns.
 ///
 /// Best effort: a system out of descriptors gets the spawn it had
 /// before, which is better than failing it here.
-fn occupy_vacant_closed(fds: &[(i32, Source)]) -> Vec<OwnedFd> {
-	let mut targets: Vec<i32> = fds
+fn occupy_vacant_targets(fds: &[(i32, Source)]) -> Vec<OwnedFd> {
+	let mut vacant: Vec<i32> = fds
 		.iter()
-		.filter(|(target, src)| *target >= 0 && matches!(src, Source::Closed))
 		.map(|(target, _)| *target)
-		.collect();
-	targets.sort_unstable();
-	targets.dedup();
-	let mut held = Vec::new();
-	for target in targets {
 		// SAFETY: a plain descriptor query; it writes nothing.
+		.filter(|target| *target >= 0 && unsafe { libc::fcntl(*target, libc::F_GETFD) } < 0)
+		.collect();
+	vacant.sort_unstable();
+	vacant.dedup();
+	if vacant.is_empty() {
+		return Vec::new();
+	}
+	// One open for the whole spawn: every placeholder is a duplicate of
+	// it, and it is held with them, wherever it landed.
+	let Ok(null) = fs::File::open("/dev/null") else {
+		return Vec::new();
+	};
+	let null = OwnedFd::from(null);
+	let mut held = vec![null];
+	for target in vacant {
+		// SAFETY: a plain descriptor query; it writes nothing. The open
+		// above may have taken this number, and then it is held already.
 		if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
-			continue;
-		}
-		let Ok(null) = fs::File::open("/dev/null") else {
-			break;
-		};
-		let null = OwnedFd::from(null);
-		if null.as_raw_fd() == target {
-			held.push(null);
 			continue;
 		}
 		// `F_DUPFD_CLOEXEC` gives the lowest free number at or above the
 		// one asked for, which is this vacant one, and it is close-on-exec
 		// from the start, so no other thread's exec can carry it.
 		// SAFETY: a plain descriptor call on a descriptor this function owns.
-		let placeholder = unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD_CLOEXEC, target) };
+		let placeholder = unsafe { libc::fcntl(held[0].as_raw_fd(), libc::F_DUPFD_CLOEXEC, target) };
 		if placeholder == target {
 			// SAFETY: a fresh descriptor nothing else owns.
 			held.push(unsafe { OwnedFd::from_raw_fd(placeholder) });
@@ -1295,9 +1302,12 @@ const _: () = assert!(
 /// each family they share a mechanism with. None of them may reach the
 /// per-number last resort by construction.
 ///
-/// Fuchsia and Redox are tier 2 without host tools, publish none of
-/// these calls and run no shell of ours; they are left out knowingly and
-/// take the last resort.
+/// Left out knowingly, and so taking the last resort: Fuchsia and
+/// Redox, tier 2 without host tools, which publish none of these calls;
+/// and AIX, tier 3, whose bulk close is `fcntl(F_CLOSEM)`, a call no
+/// other family here has and one nobody can build or run for from this
+/// host. A target of any of the three that is to host this shell gets
+/// its own arm and a line in the table first.
 const TIER_UNIX: [&str; 13] = [
 	"linux",
 	"android",

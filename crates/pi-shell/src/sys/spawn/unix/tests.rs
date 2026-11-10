@@ -52,11 +52,8 @@ fn a_session_is_signalled_before_its_leader_ran_setsid() {
 /// reach it. Runs in a forked child, since the limits are process-wide.
 #[test]
 fn the_descriptor_closer_reaches_above_both_lowered_limits() {
-	assert_eq!(
-		closer_reaches_600(false),
-		0,
-		"descriptor 600 stayed open (1) or setup failed (2, 3)"
-	);
+	let status = closer_reaches_high(false);
+	assert!(matches!(status, 0 | 3), "the descriptor stayed open (1) or the setup failed (2)");
 }
 
 /// The last arm, the check of each descriptor below
@@ -64,19 +61,27 @@ fn the_descriptor_closer_reaches_above_both_lowered_limits() {
 /// kernel can neither close a range nor list the descriptors it has.
 #[test]
 fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
-	assert_eq!(closer_reaches_600(true), 0, "descriptor 600 stayed open (1) or setup failed (2, 3)");
+	let status = closer_reaches_high(true);
+	assert!(matches!(status, 0 | 3), "the descriptor stayed open (1) or the setup failed (2)");
 }
 
-/// In a forked child: open a descriptor at 600, lower both open-file
-/// limits to 64, close the host's descriptors (`bounded_only`: through the
-/// bounded check alone, else through `close_descriptors_except`), and exit
-/// 0 when 600 is closed, 1 when it is not, 2 or 3 when the setup failed.
+/// In a forked child: open a descriptor well above the lowered limits,
+/// lower both open-file limits to 64, close the host's descriptors
+/// (`bounded_only`: through the bounded check alone, else through
+/// `close_descriptors_except`), and exit 0 when that descriptor is
+/// closed, 1 when it is not, 2 when the setup failed and 3 when this
+/// host's own hard limit leaves no room above the lowered ones, so
+/// there is nothing here to measure.
+///
+/// The number is taken from that hard limit rather than fixed at 600,
+/// which a host whose hard limit is lower cannot reach at all; what the
+/// guard needs is a descriptor above the limits it then lowers.
 ///
 /// The bound is taken again in the child, from the limits as lowered and
 /// the ceiling the parent read, because that is the host this guards:
 /// one whose limits were already this low when the spawn read them. Only
 /// the reading of the ceiling, which opens a file, stays in the parent.
-fn closer_reaches_600(bounded_only: bool) -> i32 {
+fn closer_reaches_high(bounded_only: bool) -> i32 {
 	let file = std::fs::File::open("/dev/null").unwrap();
 	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
 	// Before the fork, as the spawn path reads it.
@@ -92,15 +97,20 @@ fn closer_reaches_600(bounded_only: bool) -> i32 {
 		unsafe {
 			let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
 			libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim);
-			if lim.rlim_max < 1024 {
+			let want = if lim.rlim_max >= 1024 {
+				600
+			} else {
+				i32::try_from(lim.rlim_max / 2).unwrap_or(i32::MAX)
+			};
+			if want <= 64 {
 				libc::_exit(3);
 			}
-			let high = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 600);
+			let high = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, want);
 			// Both limits, not the soft one alone: a lowered hard limit
-			// bounded the check and left 600 open.
+			// bounded the check and left the descriptor open.
 			lim.rlim_cur = 64;
 			lim.rlim_max = 64;
-			if high < 600 || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
+			if high < want || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
 				libc::_exit(2);
 			}
 			plan.bound = super::sweep_bound(ceiling, Some(64), Some(64));
@@ -572,6 +582,39 @@ fn an_exec_error_reaches_a_host_whose_standard_slots_are_closed() {
 	let mut forked = spec(&a, &env, NEW);
 	forked.stdio = [StdioSpec::Closed, StdioSpec::Closed, StdioSpec::Closed];
 	// A umask of its own keeps this spawn off the `posix_spawn` path,
+	// which has no error pipe to lose.
+	forked.umask = if forked.umask == 0o077 { 0o027 } else { 0o077 };
+	let saved = take_slots(&[0, 1, 2]);
+	let spawned = s.spawn(forked);
+	give_back_slots(saved);
+	let err = spawned
+		.err()
+		.unwrap_or_else(|| panic!("the fork path reported a clean spawn of a shebang-less script"));
+	assert_eq!(err.raw_os_error(), Some(libc::ENOEXEC), "{err}");
+	std::fs::remove_file(&path).unwrap();
+}
+
+/// The same host, with the command's standard streams open rather than
+/// closed: the spawn duplicates them onto 0, 1 and 2 in the child, and
+/// those are the vacant numbers its own exec-error pipe was given, so a
+/// duplication destroys the pipe exactly as a close did. Every target
+/// the child installs must be held in the parent, not only the ones it
+/// closes.
+#[test]
+fn an_exec_error_reaches_a_host_whose_standard_slots_are_free() {
+	if !in_a_process_of_its_own("an_exec_error_reaches_a_host_whose_standard_slots_are_free") {
+		return;
+	}
+	use std::os::unix::fs::PermissionsExt;
+
+	let path = temp_path("free-slots-enoexec");
+	std::fs::write(&path, b"echo inscript\n").unwrap();
+	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = vec![BString::from(path.as_os_str().as_encoded_bytes())];
+	let mut forked = spec(&a, &env, NEW);
+	// An umask of its own keeps this spawn off the `posix_spawn` path,
 	// which has no error pipe to lose.
 	forked.umask = if forked.umask == 0o077 { 0o027 } else { 0o077 };
 	let saved = take_slots(&[0, 1, 2]);
