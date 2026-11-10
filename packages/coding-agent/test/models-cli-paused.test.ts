@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
-import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelsListingSource } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { renderProviderModels } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
@@ -44,7 +44,7 @@ const chatModel: Model<Api> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128_000,
 	maxTokens: 8_192,
-} as ModelSpec);
+});
 
 const mixed: ModelsListingSource = {
 	getAvailable: () => [chatModel],
@@ -60,15 +60,22 @@ describe("paused providers in `omp models`", () => {
 		expect(output).not.toContain('No models matching "google-antigravity"');
 	});
 
-	it("keeps the no-match message for unknown providers and still reports the pause", () => {
+	it("keeps the no-match message for unknown providers, without an unrelated pause footer", () => {
 		const output = stripAnsi(render(mixed, "no-such-provider"));
 		expect(output).toContain('No models matching "no-such-provider"');
-		expect(output).toContain("Paused providers");
-		expect(output).toContain(REASON);
+		expect(output).not.toContain("Paused providers");
 	});
 
-	it("lists paused providers when nothing is filtered", () => {
-		const output = stripAnsi(render(pausedOnly, undefined));
+	it("keeps a filtered live listing free of movement from other providers", () => {
+		const output = stripAnsi(render(mixed, "myproxy"));
+		expect(output).toContain("chat-model");
+		expect(output).not.toContain("Paused providers");
+		expect(output).not.toContain(REASON);
+	});
+
+	it("lists paused providers, and live tables, when nothing is filtered", () => {
+		const output = stripAnsi(render(mixed, undefined));
+		expect(output).toContain("chat-model");
 		expect(output).toContain("Paused providers");
 		expect(output).toContain(REASON);
 	});

@@ -250,8 +250,10 @@ export function renderProviderModels(
 	}
 
 	const configError = source.getError();
-	const paused = source.getPausedProviders?.() ?? [];
-	const pausedMatches = needle ? paused.filter(entry => entry.provider.toLowerCase().includes(needle)) : paused;
+	// A filter narrows the pause footer too: `omp models anthropic` must not end
+	// with an unrelated provider's pause notice.
+	const allPaused = source.getPausedProviders?.() ?? [];
+	const paused = needle ? allPaused.filter(entry => entry.provider.toLowerCase().includes(needle)) : allPaused;
 
 	if (json) {
 		if (configError) {
@@ -261,7 +263,7 @@ export function renderProviderModels(
 		}
 		const output: ModelsJson = {
 			models: filtered.slice().sort(byProviderThenId).map(toModelJson),
-			...(pausedMatches.length > 0 ? { paused: pausedMatches } : {}),
+			...(paused.length > 0 ? { paused } : {}),
 		};
 		writeLine(JSON.stringify(output));
 		return;
@@ -274,8 +276,8 @@ export function renderProviderModels(
 	if (filtered.length === 0) {
 		// A paused provider is configured and signed in, so "no models matching"
 		// would read as if it had never existed (#18697).
-		if (needle !== undefined && pausedMatches.length > 0) {
-			writePausedProviders(pausedMatches);
+		if (needle !== undefined && paused.length > 0) {
+			writePausedProviders(paused);
 			return;
 		}
 		writeLine(
