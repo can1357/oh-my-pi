@@ -21,6 +21,10 @@
 
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 
+### Fixed
+
+- A JavaScript eval cell ending in an assignment such as `globalThis.items = items` no longer prints the assigned value, which could fill the result and push the cell's own prints past the output cap; as in Python, only a trailing expression or top-level `return` is the cell's result (a parenthesized assignment still prints), and the same holds for the value a `tab.run` or `computer.run` code string returns
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

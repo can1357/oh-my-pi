@@ -96,6 +96,22 @@ describe("JS console output", () => {
 		expect(nothing.displays).toEqual([]);
 	});
 
+	it.each([
+		["a trailing assignment", "const found = [1, 2, 3]; globalThis.ompEchoItems = found;"],
+		["a trailing block statement", "if (true) { 42; }"],
+		["a destructuring assignment in its required parentheses", "let ompA; ({ a: ompA } = { a: 1, b: 2 });"],
+	])("returns nothing for %s", async (_label, code) => {
+		const { hooks } = collect();
+		expect(await runtime.run(code, undefined, hooks)).toBeUndefined();
+	});
+
+	it("still returns a parenthesized assignment, a string-only cell and a top-level return before the end", async () => {
+		const { hooks } = collect();
+		expect(await runtime.run("(globalThis.ompEchoParen = 9)", undefined, hooks)).toBe(9);
+		expect(await runtime.run('"hello"', undefined, hooks)).toBe("hello");
+		expect(await runtime.run("await 0; if (true) return 7; const ompEchoAfter = 1;", undefined, hooks)).toBe(7);
+	});
+
 	it("prints an image record as a placeholder and emits the image with its metadata", async () => {
 		const { hooks, displays, texts } = collect();
 		runtime.echo({ ...PNG_IMAGE, detail: "high", url: "https://images.example/a.png" }, hooks);

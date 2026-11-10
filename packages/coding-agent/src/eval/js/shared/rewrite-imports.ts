@@ -67,7 +67,7 @@ type BabelExpressionStatement = {
 	type: "ExpressionStatement";
 	start: number;
 	end: number;
-	expression?: { type?: string };
+	expression?: { type?: string; extra?: { parenthesized?: boolean }; left?: { type?: string } };
 	directive?: string;
 };
 
@@ -104,7 +104,9 @@ export async function loadBabelParser(): Promise<typeof BabelParser> {
 	return babelParser;
 }
 
-type ParsedProgram = { program: { body: ReadonlyArray<BabelProgramNode> } };
+type ParsedProgram = {
+	program: { body: ReadonlyArray<BabelProgramNode>; directives?: ReadonlyArray<{ start: number; end: number }> };
+};
 
 async function tryParseProgram(
 	code: string,
@@ -1070,19 +1072,37 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 
 async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {
 	const ast = await parseProgram(code);
-	const body = ast?.program.body;
-	if (!body) return { source: code, returned: false };
+	const program = ast?.program;
+	if (!program) return { source: code, returned: false };
+	const body = program.body;
+	const asCellResult = (node: { start: number; end: number }) => {
+		const statement = code.slice(node.start, node.end);
+		const semicolonMatch = statement.match(/;\s*$/);
+		const trimmedStatement = semicolonMatch ? statement.slice(0, semicolonMatch.index) : statement;
+		return {
+			source: `${code.slice(0, node.start)}__omp_set_final_expr__((${trimmedStatement}));${code.slice(node.end)}`,
+			returned: true,
+		};
+	};
 	let lastIndex = body.length - 1;
 	while (lastIndex >= 0 && body[lastIndex]?.type === "EmptyStatement") lastIndex--;
 	const last = lastIndex >= 0 ? body[lastIndex] : undefined;
+	// A cell of only string literals (`"hello"`) parses as directives with an empty body.
+	const directive = program.directives?.at(-1);
+	if (!last && directive) return asCellResult(directive);
 	if (last?.type === "ExpressionStatement") {
 		const expression = last as BabelExpressionStatement;
-		const prefix = code.slice(0, expression.start);
-		const statement = code.slice(expression.start, expression.end);
-		const suffix = code.slice(expression.end);
-		const semicolonMatch = statement.match(/;\s*$/);
-		const trimmedStatement = semicolonMatch ? statement.slice(0, semicolonMatch.index) : statement;
-		return { source: `${prefix}__omp_set_final_expr__((${trimmedStatement}));${suffix}`, returned: true };
+		// `x = value` is a statement, as in Python: only a bare or parenthesized expression is the
+		// cell's result, so a trailing `globalThis.items = items` does not print the whole array.
+		// `({ a, b } = obj)` needs its parentheses to parse, so they do not ask for the value.
+		const assigned = expression.expression;
+		if (
+			assigned?.type === "AssignmentExpression" &&
+			(!assigned.extra?.parenthesized || assigned.left?.type === "ObjectPattern")
+		) {
+			return { source: code, returned: false };
+		}
+		return asCellResult(expression);
 	}
 	if (last?.type === "ReturnStatement") {
 		// Top-level `return value;` is otherwise swallowed: it forces the cell into an async IIFE
