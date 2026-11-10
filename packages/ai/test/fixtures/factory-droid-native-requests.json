@@ -2855,6 +2855,146 @@
 		]
 	},
 	{
+		"model": "claude-sonnet-5-5",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-sonnet-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fine-grained-tool-streaming-2025-05-14,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-sonnet-5-5",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
+		"model": "claude-fable-5.1",
+		"upstream": "anthropic",
+		"effort": "high",
+		"requests": [
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "configured_order"
+				},
+				"body": {
+					"model": "claude-fable-5.1",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			},
+			{
+				"path": "/api/llm/a/v1/messages",
+				"headers": {
+					"anthropic-beta": "fallback-credit-2026-06-01,fine-grained-tool-streaming-2025-05-14,server-side-fallback-2026-06-01,thinking-binding-controls-2026-08-01",
+					"user-agent": "factory-cli/1.7.1",
+					"x-api-provider": "anthropic",
+					"x-client-version": "1.7.1",
+					"x-factory-client": "cli",
+					"x-provider-routing-source": "session_lock"
+				},
+				"body": {
+					"model": "claude-fable-5.1",
+					"max_tokens": 128000,
+					"thinking": {
+						"type": "adaptive",
+						"display": "summarized",
+						"block_binding": {
+							"prefix_mismatch_behavior": "drop_block"
+						}
+					},
+					"output_config": {
+						"effort": "high"
+					},
+					"fallbacks": [
+						{
+							"model": "claude-opus-5"
+						}
+					],
+					"stream": true,
+					"<tool-keys>": [
+						"eager_input_streaming"
+					]
+				}
+			}
+		]
+	},
+	{
 		"model": "claude-fable-5",
 		"upstream": "anthropic",
 		"effort": "high",

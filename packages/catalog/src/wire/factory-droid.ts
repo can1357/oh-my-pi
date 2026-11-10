@@ -87,9 +87,13 @@ export function factoryDroidWireBaseUrl(wire: FactoryDroidWire, region: string |
 
 /**
  * Client identity headers shared by discovery, usage and inference requests.
- * `X-Factory-Request-Surface` attributes usage to the interactive CLI, the
- * surface the CLI's terminal UI reports. Callers add their own auth, `Accept`,
- * routing and SDK headers.
+ * Callers add their own auth, `Accept`, routing and SDK headers.
+ *
+ * `X-Factory-Request-Surface: cli_tui` is the usage-attribution surface droid
+ * 1.7.1's interactive terminal UI sends (seen through a pass-through proxy on
+ * its feature-flag, billing and connector calls); `droid exec` sends
+ * `cli_exec` instead. The native parity corpus is captured with `droid exec`,
+ * so it does not cover this header (see `DIALECT_HEADERS`).
  */
 export function factoryDroidClientHeaders(orgId: string | undefined): Record<string, string> {
 	return {

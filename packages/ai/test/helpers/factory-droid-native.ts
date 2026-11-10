@@ -96,6 +96,8 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "claude-opus-5-5", upstream: "azure_anthropic", effort: "high" },
 	{ model: "claude-opus-5-5", upstream: "anthropic", effort: "high" },
 	{ model: "claude-haiku-5-5", upstream: "anthropic", effort: "high" },
+	{ model: "claude-sonnet-5-5", upstream: "anthropic", effort: "high" },
+	{ model: "claude-fable-5.1", upstream: "anthropic", effort: "high" },
 	// Not capturable on the capture account, so unit tests own them
 	// (factory-droid-anthropic.test.ts):
 	// - claude-sonnet-5-5@vertex_anthropic off: "Requested model was not found
@@ -132,6 +134,10 @@ const SESSION_KEYS = new Set(["prompt_cache_key", "safety_identifier"]);
  * headers droid never sends: since 0.248 it strips the SDK's `X-Stainless-*`
  * telemetry and `x-api-key`, and it never sends Claude Code's app headers, so
  * their presence on an OMP request is an identity leak.
+ *
+ * `x-factory-request-surface` is deliberately not projected: the capture runs
+ * `droid exec`, which reports `cli_exec`, while omp reports the interactive
+ * CLI's `cli_tui` (`factoryDroidClientHeaders`).
  */
 const DIALECT_HEADERS = new Set([
 	"x-api-provider",
