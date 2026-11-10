@@ -3096,7 +3096,7 @@ async function driveSessionToResult(
 						if (
 							!hasLaterSteps &&
 							settledResult &&
-							!monitor.budgetStopRequested() &&
+							(!structured || !monitor.budgetStopRequested()) &&
 							finalTurn !== undefined &&
 							finalTurn.stopReason !== "error" &&
 							finalTurn.stopReason !== "aborted" &&

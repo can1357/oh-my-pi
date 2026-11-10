@@ -114,6 +114,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		parentId?: string;
 		/** Wall-clock cap on the wake turn, ms. */
 		maxRuntimeMs?: number;
+		/** Soft request budget of the wake turn (0 = none): stops its free-running turn at 1.5x. */
+		softRequestBudget?: number;
 		/** Agent definition name reported as `agent_type`, when it differs from `wakeAgent.name`. */
 		agentType?: string;
 		/** Register the session live and leave it to `runSubagentFollowUpTurn` instead of observing it as a wake. */
@@ -222,6 +224,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				parentSessionFile: "/parent/session.jsonl",
 				artifactsDir: tempDir.path(),
 				maxRuntimeMs: args.maxRuntimeMs,
+				softRequestBudget: args.softRequestBudget,
 				agentType: args.agentType,
 				structured: args.structured,
 				outputSchema: args.outputSchema,
@@ -462,6 +465,26 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			const artifact = await Bun.file(run.artifact).text();
 			expect(artifact).toContain("replacement reply");
 			expect(artifact).not.toContain("REFUSED-REPLY");
+		});
+
+		it("fails, publishing nothing, an owner wake whose refusal charged it into its request budget stop", async () => {
+			const run = await setup({
+				structured: false,
+				parentId: "Parent",
+				// Budget 1 stops the turn at 1.5 requests, which the refused reply's own cost reaches.
+				softRequestBudget: 1,
+				responses: [{ content: ["REFUSED-REPLY"] }, { content: ["UNOFFERED-REPLY"] }],
+				onStop: () => ({ decision: "block", reason: "not done" }),
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			// A refusal cannot be continued once the budget stop fired, so the turn fails instead of publishing it.
+			expect(run.stopEvents).toHaveLength(1);
+			expect(run.lifecycle.at(-1)?.status).not.toBe("completed");
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
 		});
 
 		it("does not offer an owner wake's reply that ended on a provider error", async () => {
