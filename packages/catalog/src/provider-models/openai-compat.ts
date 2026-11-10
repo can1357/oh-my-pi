@@ -47,6 +47,7 @@ import {
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
+import { normalizeModalBaseUrl } from "../wire/modal";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
@@ -8450,6 +8451,126 @@ export function otariModelManagerOptions(config?: OtariModelManagerConfig): Mode
 							},
 							contextWindow: toPositiveNumber(entry.context_window, defaults.contextWindow),
 							maxTokens: toPositiveNumber(entry.max_output_tokens, defaults.maxTokens),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 25. Modal
+// ---------------------------------------------------------------------------
+
+/**
+ * Modal discovery configuration: the proxy token plus optional base-URL and
+ * fetch overrides. Consumed by {@link modalModelManagerOptions}.
+ */
+export interface ModalModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+const MODAL_EFFORT_VALUES: Readonly<Record<string, Effort>> = {
+	minimal: Effort.Minimal,
+	low: Effort.Low,
+	medium: Effort.Medium,
+	high: Effort.High,
+	xhigh: Effort.XHigh,
+	max: Effort.Max,
+};
+
+/**
+ * `/v1/models` rows carry `reasoning_options: [{type: "effort", values}]` per
+ * endpoint. `none` is the wire's off value, not an Effort tier; endpoints that
+ * omit it run thinking always-on.
+ */
+function modalThinkingConfig(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
+	if (!Array.isArray(entry.reasoning_options)) return undefined;
+	for (const option of entry.reasoning_options) {
+		if (!isRecord(option) || option.type !== "effort" || !Array.isArray(option.values)) continue;
+		const efforts = option.values
+			.filter((value): value is string => typeof value === "string" && value in MODAL_EFFORT_VALUES)
+			.map(value => MODAL_EFFORT_VALUES[value]);
+		if (efforts.length === 0) continue;
+		const thinking: ThinkingConfig = { mode: "effort", efforts };
+		if (!option.values.includes("none")) thinking.requiresEffort = true;
+		return thinking;
+	}
+	return undefined;
+}
+
+/**
+ * Modal model manager: the deployment's `/v1/models` roster is the whole
+ * catalog, so nothing is bundled and every field comes from the row. Rows
+ * carry `context_length`, `max_output_length`, `input_modalities`,
+ * `supported_features` (`tools`, `reasoning`, …) and the effort ladder in
+ * `reasoning_options`; the gateway prices nothing, so costs stay unknown.
+ * Discovery runs only with a proxy token or a dedicated endpoint
+ * (`MODAL_BASE_URL`): the shared gateway rejects unauthenticated requests.
+ */
+export function modalModelManagerOptions(config?: ModalModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const configuredBaseUrl = config?.baseUrl ?? Bun.env.MODAL_BASE_URL;
+	const baseUrl = normalizeModalBaseUrl(configuredBaseUrl);
+	return {
+		providerId: "modal",
+		cacheProviderId: resolveModelCacheProviderId("modal", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...((apiKey || configuredBaseUrl) && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "modal",
+					baseUrl,
+					apiKey,
+					filterModel: (entry, model) => {
+						// `output_modalities` without `text` is not a chat model;
+						// `input_modalities` without `text` cannot accept chat input.
+						if (Array.isArray(entry.output_modalities) && !entry.output_modalities.includes("text")) return false;
+						if (Array.isArray(entry.input_modalities) && !entry.input_modalities.includes("text")) return false;
+						return !isExcludedModel("modal", model.id);
+					},
+					mapModel: (entry, defaults) => {
+						const features = Array.isArray(entry.supported_features) ? entry.supported_features : undefined;
+						const thinking = modalThinkingConfig(entry);
+						// Endpoint ids are deployment slugs, so the row's `interleaved.field`
+						// carries what policy resolution cannot infer: the reasoning replay
+						// field. Interleaved thinking must round-trip on assistant
+						// tool-call turns.
+						const reasoningContentField =
+							isRecord(entry.interleaved) &&
+							(entry.interleaved.field === "reasoning_content" ||
+								entry.interleaved.field === "reasoning" ||
+								entry.interleaved.field === "reasoning_text")
+								? entry.interleaved.field
+								: undefined;
+						const compat: OpenAICompat = {};
+						if (reasoningContentField !== undefined) {
+							compat.reasoningContentField = reasoningContentField;
+							compat.requiresReasoningContentForToolCalls = true;
+						}
+						// `requiresEffort` is set exactly when the advertised ladder omits
+						// `none`; its presence means `reasoning_effort: "none"` is a real
+						// off switch on the wire.
+						if (thinking !== undefined && thinking.requiresEffort !== true) {
+							compat.reasoningDisableMode = "none-effort";
+						}
+						return {
+							...defaults,
+							...(Object.keys(compat).length > 0 && { compat }),
+							name: toModelName(entry.name, defaults.name),
+							reasoning: thinking !== undefined || (features?.includes("reasoning") ?? false),
+							...(thinking ? { thinking } : {}),
+							// An explicitly empty feature list means no tool calling; an
+							// absent field leaves the default.
+							...(features !== undefined && !features.includes("tools") ? { supportsTools: false } : {}),
+							input: toInputCapabilities(entry.input_modalities),
+							pricingStatus: "unknown",
+							contextWindow: toPositiveNumber(entry.context_length, defaults.contextWindow),
+							maxTokens: toPositiveNumber(entry.max_output_length, defaults.maxTokens),
 						};
 					},
 					fetch: config?.fetch,
