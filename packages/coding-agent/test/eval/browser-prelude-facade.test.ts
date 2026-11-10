@@ -293,20 +293,26 @@ describe("browser facade in real Eval runtimes", () => {
 				'print(await tab.id(5).fill("Grace"));',
 				'print(await tab.evaluate(value => value.length, "abc", /a/i));',
 				"print(await tab.run((_scope, count) => count + 1, { args: [7] }));",
-				"print(await tab.console());",
+				"print(JSON.stringify(await tab.console()));",
 			].join("\n"),
 			{ cwd: process.cwd(), sessionId: `browser-facade-js-${crypto.randomUUID()}`, session },
 		);
 
 		expect(result.exitCode).toBe(0);
-		expect(result.output.trim().split("\n")).toEqual([
+		const output = result.output.trim().split("\n");
+		const consoleResult = JSON.parse(output.pop() ?? "");
+		expect(consoleResult).toEqual({
+			entries: [{ seq: 1, type: "console", level: "warn", text: "low disk" }],
+			nextSeq: 2,
+			dropped: 0,
+		});
+		expect(output).toEqual([
 			"opened display text",
 			"page title",
 			'{"elements":[{"id":5,"role":"button","name":"Save"}]}',
 			"true",
 			"9",
 			"8",
-			"{ entries: [ { seq: 1, type: 'console', level: 'warn', text: 'low disk' } ], nextSeq: 2, dropped: 0 }",
 		]);
 		expect(calls).toContainEqual({
 			action: "call",
