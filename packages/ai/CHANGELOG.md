@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `UsageApi.replaceDisabledProviders` removes a provider's usage concept while it is disabled: it is not probed with any credential, its cached snapshot is kept for re-enabling, and broker-backed polls ask the broker to skip it (`GET /v1/usage?exclude=`); `UsageApi.reports` accepts a per-call `exclude` set ([#18759](https://github.com/can1357/oh-my-pi/pull/18759) by [@maykonmichel](https://github.com/maykonmichel))
+
 ### Fixed
 
 - Claude Fable launch resets now report the Fable weekly limit they clear instead of an unknown window ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))

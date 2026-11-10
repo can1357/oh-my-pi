@@ -6,6 +6,7 @@ import {
 	AuthStorage,
 	type OAuthCredential,
 	SqliteAuthCredentialStore,
+	type UsageProvider,
 	type UsageReport,
 	type UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
@@ -1903,6 +1904,70 @@ describe("omp usage --json account policy", () => {
 		expect(codex).toBeDefined();
 		expect(codex).not.toHaveProperty("policy");
 		expect(stdout.includes("main@example.test")).toBe(!redact);
+	});
+});
+
+describe("omp usage disabledProviders", () => {
+	let tempDir: TempDir;
+
+	beforeEach(() => {
+		tempDir = TempDir.createSync("@omp-usage-disabled-");
+		setAgentDir(tempDir.path());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		__resetDirsFromEnvForTests();
+		closeModelCache();
+		tempDir.removeSync();
+	});
+
+	it("never probes a provider the command's settings disable, with any stored key", async () => {
+		const probed: string[] = [];
+		const gatewayUsage = (id: string): UsageProvider => ({
+			id,
+			async fetchUsage(params) {
+				probed.push(`${params.provider} ${params.credential.apiKey}`);
+				return {
+					provider: params.provider,
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: `${params.provider}:budget`,
+							label: "Budget",
+							scope: { provider: params.provider },
+							amount: { used: 1, limit: 10, unit: "usd" },
+						},
+					],
+				};
+			},
+		});
+		const adapters = new Map([
+			["gateway-on", gatewayUsage("gateway-on")],
+			["gateway-off", gatewayUsage("gateway-off")],
+		]);
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider => adapters.get(provider),
+		});
+		await authStorage.credentials.set("gateway-on", { type: "api_key", key: "key-on" });
+		await authStorage.credentials.set("gateway-off", { type: "api_key", key: "key-off" });
+		vi.spyOn(Settings, "loadReadOnly").mockResolvedValue(Settings.isolated({ disabledProviders: ["gateway-off"] }));
+		vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(authStorage);
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+
+		try {
+			await runUsageCommand({ json: true, noExtensions: true });
+		} finally {
+			authStorage.close();
+		}
+
+		const payload = JSON.parse(stdout) as { reports: Array<{ provider: string }> };
+		expect(payload.reports.map(report => report.provider)).toEqual(["gateway-on"]);
+		expect(probed).toEqual(["gateway-on key-on"]);
 	});
 });
 

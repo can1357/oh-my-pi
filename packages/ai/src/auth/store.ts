@@ -203,9 +203,14 @@ export interface CredentialUpstream {
 	 *
 	 * Precedence: `AuthStorageOptions.fetchUsageReports` > this hook > local fan-out.
 	 *
-	 * `signal` propagates the agent's cancel down to the broker fetch.
+	 * `signal` propagates the agent's cancel down to the broker fetch. `exclude`
+	 * lists providers the caller has disabled, so an unscoped fetch skips them.
 	 */
-	fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null>;
+	fetchUsageReports(
+		signal?: AbortSignal,
+		provider?: Provider,
+		exclude?: readonly Provider[],
+	): Promise<UsageReport[] | null>;
 	/**
 	 * Optional store-supplied per-credential usage report lookup. When present,
 	 * `AuthStorage` consults this before its own per-credential upstream fetch

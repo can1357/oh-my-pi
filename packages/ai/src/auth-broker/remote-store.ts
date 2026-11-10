@@ -98,6 +98,14 @@ function isCredentialInAccountPool(
 	return entry.identityKey !== null && rule.accounts.has(entry.identityKey);
 }
 
+const NO_PROVIDERS: ReadonlySet<Provider> = new Set();
+
+function sameProviders(a: ReadonlySet<Provider>, b: ReadonlySet<Provider>): boolean {
+	if (a.size !== b.size) return false;
+	for (const provider of a) if (!b.has(provider)) return false;
+	return true;
+}
+
 /**
  * Client-side TTL for the aggregate `/v1/usage` response. The broker dedups
  * upstream `/usage` hits via AuthStorage's 5-minute per-credential cache plus
@@ -208,6 +216,13 @@ interface UsageCacheEntry {
 	 */
 	reports: UsageReport[] | null;
 	fetchedAt: number;
+	/** Providers an aggregate fetch asked the broker to skip; empty for provider scopes. */
+	exclude: ReadonlySet<Provider>;
+}
+
+interface UsageInflightEntry {
+	promise: Promise<UsageReport[] | null>;
+	exclude: ReadonlySet<Provider>;
 }
 
 /** Identity of one credential block row: credential, provider key, and scope. */
@@ -338,7 +353,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#cacheCharacters = 0;
 	/** `undefined` is the aggregate scope; provider scopes never stand in for it. */
 	#usageCache = new Map<Provider | undefined, UsageCacheEntry>();
-	#usageInflight = new Map<Provider | undefined, Promise<UsageReport[] | null>>();
+	#usageInflight = new Map<Provider | undefined, UsageInflightEntry>();
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	/** Exact deleted rows suppressed until their old deadline, including snapshots racing the DELETE acknowledgement. */
 	#deletedCredentialBlocks: Map<string, CredentialBlockSnapshot> = new Map();
@@ -1358,9 +1373,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 	 * cooldowns keep separate clients from multiplying provider probes.
 	 */
-	async fetchUsageReports(signal?: AbortSignal, provider?: Provider): Promise<UsageReport[] | null> {
+	async fetchUsageReports(
+		signal?: AbortSignal,
+		provider?: Provider,
+		exclude?: readonly Provider[],
+	): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(provider), signal, "auth-broker request aborted");
+		const skipped = provider === undefined && exclude && exclude.length > 0 ? new Set(exclude) : NO_PROVIDERS;
+		const reports = await raceSignal(
+			this.#loadUsageReports(provider, skipped),
+			signal,
+			"auth-broker request aborted",
+		);
 		if (!reports) return null;
 		const visible = this.#filterUsageReports(this.#applyUsageOverlays(reports));
 		return provider === undefined ? visible : visible.filter(report => report.provider === provider);
@@ -1500,16 +1524,24 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return maximum;
 	}
 
-	#loadUsageReports(provider?: Provider): Promise<UsageReport[] | null> {
-		// An existing aggregate result covers a provider lookup too. The reverse
-		// is not true: a partial cache must never hide other providers from /usage.
+	#loadUsageReports(
+		provider?: Provider,
+		exclude: ReadonlySet<Provider> = NO_PROVIDERS,
+	): Promise<UsageReport[] | null> {
+		// An existing aggregate result covers a provider lookup too, unless it
+		// excluded that provider. The reverse is not true: a partial cache must
+		// never hide other providers from /usage, and an aggregate answers only
+		// polls with the same exclusions.
+		const covers = (entry: { exclude: ReadonlySet<Provider> }): boolean =>
+			provider === undefined ? sameProviders(entry.exclude, exclude) : !entry.exclude.has(provider);
 		const now = Date.now();
 		let cached = this.#usageCache.get(provider);
-		if (cached && now - cached.fetchedAt >= USAGE_CACHE_TTL_MS) cached = undefined;
+		if (cached && (now - cached.fetchedAt >= USAGE_CACHE_TTL_MS || !covers(cached))) cached = undefined;
 		const aggregate = provider === undefined ? undefined : this.#usageCache.get(undefined);
 		// Prefer the newest successful coverage over a failed fetch in another scope.
 		if (
 			aggregate &&
+			covers(aggregate) &&
 			now - aggregate.fetchedAt < USAGE_CACHE_TTL_MS &&
 			(!cached ||
 				(aggregate.reports !== null && (cached.reports === null || aggregate.fetchedAt >= cached.fetchedAt)))
@@ -1517,34 +1549,43 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			cached = aggregate;
 		}
 		if (cached) return Promise.resolve(cached.reports);
-		const existing = this.#usageInflight.get(provider) ?? this.#usageInflight.get(undefined);
-		if (existing) return existing;
+		const own = this.#usageInflight.get(provider);
+		const shared = provider === undefined ? undefined : this.#usageInflight.get(undefined);
+		const existing = own && covers(own) ? own : shared && covers(shared) ? shared : undefined;
+		if (existing) return existing.promise;
 		const epoch = this.#usageCacheEpoch;
-		const inflight = this.#client
-			.fetchUsage({ provider, maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider) })
+		const inflight: Promise<UsageReport[] | null> = this.#client
+			.fetchUsage({
+				provider,
+				exclude: exclude.size > 0 ? [...exclude].sort() : undefined,
+				maxAccountsPerProvider: this.#maxBrokerUsageAccounts(provider),
+			})
 			.then(body => {
 				if (epoch !== this.#usageCacheEpoch) {
-					if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
-					return this.#loadUsageReports(provider);
+					if (this.#usageInflight.get(provider)?.promise === inflight) this.#usageInflight.delete(provider);
+					return this.#loadUsageReports(provider, exclude);
 				}
-				// Older brokers ignore the query and still return an aggregate.
-				// Keep it scoped locally; a scoped response is never an aggregate cache.
+				// Older brokers ignore the query and still return an unfiltered
+				// aggregate. Keep it scoped locally; a scoped response is never an
+				// aggregate cache, and an aggregate never carries excluded providers.
 				const reports =
-					provider === undefined ? body.reports : body.reports.filter(report => report.provider === provider);
-				this.#usageCache.set(provider, { reports, fetchedAt: Date.now() });
+					provider === undefined
+						? body.reports.filter(report => !exclude.has(report.provider))
+						: body.reports.filter(report => report.provider === provider);
+				this.#usageCache.set(provider, { reports, fetchedAt: Date.now(), exclude });
 				return reports;
 			})
 			.catch(error => {
 				logger.warn("auth-broker usage fetch failed", { error: String(error) });
 				// Documented 15s TTL fallback, isolated to the requested scope.
 				// Invalidation preserves this cooldown, as it does for aggregate polls.
-				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now() });
+				this.#usageCache.set(provider, { reports: null, fetchedAt: Date.now(), exclude });
 				return null;
 			})
 			.finally(() => {
-				if (this.#usageInflight.get(provider) === inflight) this.#usageInflight.delete(provider);
+				if (this.#usageInflight.get(provider)?.promise === inflight) this.#usageInflight.delete(provider);
 			});
-		this.#usageInflight.set(provider, inflight);
+		this.#usageInflight.set(provider, { promise: inflight, exclude });
 		return inflight;
 	}
 

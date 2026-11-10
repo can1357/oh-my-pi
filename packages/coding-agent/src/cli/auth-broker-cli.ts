@@ -38,9 +38,10 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, logger, VERSION } f
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { cfgDisabledProviders } from "../config/model-settings";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
-import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { resolveAuthBrokerConfig, resolveEffectiveSettings } from "../session/auth-broker-config";
 import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
@@ -147,6 +148,8 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = createBrokerAuthStorage(store);
+	// The broker host's own `disabledProviders`: never probed for any client.
+	storage.usage.replaceDisabledProviders(new Set(cfgDisabledProviders.get(await resolveEffectiveSettings())));
 	await storage.credentials.reload();
 	const handle = startAuthBroker({
 		storage,

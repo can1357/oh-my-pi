@@ -263,7 +263,13 @@ export class AuthBrokerClient {
 	 * for serialized same-provider account probes.
 	 */
 	fetchUsage(
-		options: { signal?: AbortSignal; maxAccountsPerProvider?: number; provider?: string } = {},
+		options: {
+			signal?: AbortSignal;
+			maxAccountsPerProvider?: number;
+			provider?: string;
+			/** Providers to leave out of an unscoped aggregate (the caller's disabled set). */
+			exclude?: readonly string[];
+		} = {},
 	): Promise<UsageResponse> {
 		const requestedAccountCount = options.maxAccountsPerProvider;
 		const accountCount =
@@ -272,7 +278,10 @@ export class AuthBrokerClient {
 				: 1;
 		const perAccountTimeoutMs = Math.max(DEFAULT_TIMEOUT_MS, this.#timeoutMs);
 		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
-		const query = options.provider !== undefined ? `?${new URLSearchParams({ provider: options.provider })}` : "";
+		const params = new URLSearchParams();
+		if (options.provider !== undefined) params.set("provider", options.provider);
+		for (const provider of options.exclude ?? []) params.append("exclude", provider);
+		const query = params.size > 0 ? `?${params.toString()}` : "";
 		return this.#request<UsageResponse>("GET", `/v1/usage${query}`, {
 			schema: "usageResponseSchema",
 			signal: options.signal,

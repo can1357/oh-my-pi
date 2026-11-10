@@ -271,6 +271,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"usage.reports": (storage, options) =>
 			storage.usage.reports({
 				provider: options?.provider,
+				exclude: options?.exclude ? new Set(options.exclude) : undefined,
 				signal: options?.signal,
 				baseUrlResolver: tableResolver(options?.baseUrls),
 			}),
@@ -290,6 +291,8 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"usage.setProvider": (storage, provider, usageProvider, apiKey) =>
 			storage.usage.setProvider(provider, usageProvider, apiKey),
 		"usage.removeProvider": (storage, provider) => storage.usage.removeProvider(provider),
+		"usage.replaceDisabledProviders": (storage, providers) =>
+			storage.usage.replaceDisabledProviders(new Set(providers)),
 
 		"health.model": (storage, provider, options) => storage.health.model(provider, options),
 		"health.check": (storage, options) => {
