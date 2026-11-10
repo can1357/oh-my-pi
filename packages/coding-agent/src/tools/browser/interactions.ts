@@ -306,7 +306,8 @@ function checkClickActionable(
 	if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
 	const x = Math.floor((left + right) / 2);
 	const y = Math.floor((top + bottom) / 2);
-	if (hover) return { ok: true as const, x: x - rect.left, y: y - rect.top };
+	// The exact centre: a floored one can fall outside a target under 2px wide, onto its parent.
+	if (hover) return { ok: true as const, x: (left + right) / 2 - rect.left, y: (top + bottom) / 2 - rect.top };
 	let topElement = page.document.elementFromPoint(x, y);
 	for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
 		const nested = topElement.shadowRoot.elementFromPoint(x, y);
