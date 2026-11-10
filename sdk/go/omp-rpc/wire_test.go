@@ -327,7 +327,7 @@ func TestResultDecoding(t *testing.T) {
 }
 
 const skillAnalysisRecord = `{"id":"analysis-1","name":"review","status":"complete","model":"fake/fake-model","bytes":120,` +
-	`"candidates":[{"id":"skill-1","name":"review","filePath":"/a/review/SKILL.md","root":"/a/review","fingerprint":"ff","complete":true,"files":1,"omissions":[]}],` +
+	`"candidates":[{"id":"skill-1","name":"review","filePath":"/a/review/SKILL.md","root":"/a/review","fingerprint":"ff","complete":true,"files":["SKILL.md"],"omissions":[]}],` +
 	`"disclosure":"d","createdAt":1700000000000,"applied":false,` +
 	`"result":{"relationship":"adaptation","evidence":[{"candidateId":"skill-1","file":"SKILL.md","quote":"Review changes carefully.","explanation":"same"}],` +
 	`"differences":["x"],"recommendation":{"action":"prefer","preferredId":"skill-1","reason":"r"},"limitations":[]}}`

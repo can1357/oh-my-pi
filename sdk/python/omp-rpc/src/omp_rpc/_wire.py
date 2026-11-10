@@ -741,8 +741,8 @@ class SkillAnalysisCandidate:
     fingerprint: str
     complete: bool
     """False when part of the skill directory was left out of the snapshot."""
-    files: int
-    """Files included in the snapshot."""
+    files: tuple[str, ...]
+    """Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt."""
     omissions: tuple[str, ...]
     """What was left out and why."""
 
@@ -2280,7 +2280,7 @@ def parse_skill_analysis_candidate(value: object, path: str = "SkillAnalysisCand
         root=required(payload, "root", decode_str, path),
         fingerprint=required(payload, "fingerprint", decode_str, path),
         complete=required(payload, "complete", decode_bool, path),
-        files=required(payload, "files", decode_int, path),
+        files=required(payload, "files", array(decode_str), path),
         omissions=required(payload, "omissions", array(decode_str), path),
     )
 

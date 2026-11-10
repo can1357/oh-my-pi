@@ -176,7 +176,10 @@ export const stateDefs = {
 			root: "string",
 			fingerprint: "string",
 			complete: doc("boolean", "False when part of the skill directory was left out of the snapshot."),
-			files: doc("number.integer", "Files included in the snapshot."),
+			files: doc(
+				"string[]",
+				"Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt.",
+			),
 			omissions: doc("string[]", "What was left out and why."),
 		},
 		"One skill variant an analysis would send: where it lives and how completely it is covered.",

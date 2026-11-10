@@ -206,7 +206,7 @@ fn skill_analysis_record() -> Value {
 		"id": "analysis-1", "name": "review", "status": "complete", "model": "fake/fake-model", "bytes": 120,
 		"candidates": [{
 			"id": "skill-1", "name": "review", "filePath": "/a/review/SKILL.md", "root": "/a/review",
-			"fingerprint": "ff", "complete": true, "files": 1, "omissions": [],
+			"fingerprint": "ff", "complete": true, "files": ["SKILL.md"], "omissions": [],
 		}],
 		"disclosure": "d", "createdAt": 1_700_000_000_000_i64, "applied": false,
 		"result": {

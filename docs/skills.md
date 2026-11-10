@@ -232,8 +232,10 @@ sending and immediately before a preference is saved. Changed contents invalidat
 the analysis record; any completed result stays visible but cannot be applied.
 
 Known credential files and secret patterns are filtered, but a resource may still
-contain private information that detection cannot identify. Review the selected
-files before agreeing to send them to a model provider.
+contain private information that detection cannot identify. The consent prompt
+lists every file that would be sent by path; review that list before agreeing to
+send them to a model provider. Directories with credential-shaped names are
+skipped whole.
 
 Applying a preference requires a **second confirmation**. A confirmed choice
 hides the other reviewed copies in OMP only; nothing is uninstalled and other

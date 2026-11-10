@@ -1159,7 +1159,9 @@ result back.
 2. Show the user what would leave the machine: the record's `model`,
    `candidates` (`filePath`, `root`, `files`, `complete`, `omissions`), `bytes`,
    and `disclosure` (files are data, known secret patterns are filtered but that
-   is best-effort, the conversation is excluded, charges may apply). Incomplete
+   is best-effort, the conversation is excluded, charges may apply). `files` is
+   the relative path of every file that would be sent; list those names in the
+   consent prompt rather than a count. Incomplete
    coverage (`complete: false`) makes the result advisory and unusable for
    hiding a copy.
 3. `{ id?, type: "analyze_skill_diagnostics", analysisId: string, consent: boolean }`

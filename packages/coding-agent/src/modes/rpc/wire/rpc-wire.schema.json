@@ -2921,8 +2921,11 @@
 					"description": "False when part of the skill directory was left out of the snapshot."
 				},
 				"files": {
-					"type": "integer",
-					"description": "Files included in the snapshot."
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt."
 				},
 				"omissions": {
 					"type": "array",

@@ -297,6 +297,8 @@ describe("startup skill discovery diagnostics", () => {
 			const disclosed = asked.replace(/[│\s]/g, "");
 			expect(disclosed).toContain(path.join(first, "brainstorming").replace(/\s/g, ""));
 			expect(disclosed).toContain(path.join(older, "brainstorming").replace(/\s/g, ""));
+			// Each file is named, so the person consenting can see what is included beyond a count.
+			expect(disclosed).toContain("SKILL.md");
 			expect(asked).toContain("KiB");
 			expect(asked).toMatch(/secret/i);
 			// The native consent replaces the panel; nothing is sent while it is open.

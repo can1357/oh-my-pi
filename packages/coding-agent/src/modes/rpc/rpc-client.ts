@@ -363,7 +363,7 @@ function parseSkillAnalysisCandidate(value: unknown, field: string): SkillAnalys
 		root: requireSkillDiagnosticsString(value, "root", field),
 		fingerprint: requireSkillDiagnosticsString(value, "fingerprint", field),
 		complete: requireSkillDiagnosticsBoolean(value, "complete", field),
-		files: requireSkillDiagnosticsInteger(value, "files", field),
+		files: requireSkillDiagnosticsStrings(value, "files", field),
 		omissions: requireSkillDiagnosticsStrings(value, "omissions", field),
 	};
 }
