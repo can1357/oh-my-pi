@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false`.
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
