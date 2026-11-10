@@ -156,6 +156,7 @@ type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
 type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" | "takeover">;
+type ControlAcquireOptions = { reason: string };
 const inputOptionsKeys: Record<keyof InputOptions, true> = { takeover: true };
 const screenshotOptionsKeys: Record<keyof ScreenshotOptions, true> = { silent: true };
 const menuOptionsKeys: Record<keyof MenuOptions, true> = { menu: true };
@@ -192,6 +193,8 @@ const doubleClickKeys: Record<keyof Omit<ClickOptions, "count">, true> = {
 	modifiers: true,
 };
 const observeKeys: Record<keyof (ScreenshotOptions & AxOptions), true> = { silent: true, all: true, maxDepth: true };
+const waitPredicateOptionsKeys: Record<keyof WaitPredicateOptions, true> = { timeout: true, interval: true };
+const controlAcquireOptionsKeys: Record<keyof ControlAcquireOptions, true> = { reason: true };
 
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
@@ -370,9 +373,11 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	const unknown = Object.keys(value).filter(key => !allowed.includes(key));
 	if (unknown.length === 0) return;
 	const hints = unknown.flatMap(key => {
-		const matches = allowed.filter(
-			name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()),
-		);
+		const normalized = key.toLowerCase().replace(/[_-]/g, "");
+		const matches = allowed.filter(name => {
+			const candidate = name.toLowerCase().replace(/[_-]/g, "");
+			return candidate.includes(normalized) || normalized.includes(candidate);
+		});
 		return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
 	});
 	throw new ToolError(
@@ -1574,6 +1579,7 @@ export class ComputerWorkerCore {
 					if (!condition) throw new ToolError(text ?? "Assertion failed");
 				},
 				wait: (msOrPredicate: number | (() => unknown), options?: WaitPredicateOptions): Promise<unknown> => {
+					strictOptions(options, waitPredicateOptionsKeys, "wait");
 					const resolved =
 						typeof msOrPredicate === "number"
 							? undefined
@@ -1949,9 +1955,9 @@ export class ComputerWorkerCore {
 				},
 			},
 			control: {
-				acquire: async (options: {
-					reason: string;
-				}): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved"> }> => {
+				acquire: async (
+					options: ControlAcquireOptions,
+				): Promise<{ active: boolean; reason?: Exclude<ControlVerdict, "approved"> }> => {
 					const context = getContext();
 					guardRun(context, "control.acquire");
 					refuseForeground(
@@ -1960,7 +1966,7 @@ export class ComputerWorkerCore {
 						"hand the agent foreground control of the desktop",
 						"Window input needs no control; it runs in the background.",
 					);
-					strictObject(options, ["reason"], "control.acquire");
+					strictObject(options, Object.keys(controlAcquireOptionsKeys), "control.acquire");
 					if (typeof options.reason !== "string" || !options.reason.trim())
 						throw new ToolError("control.acquire requires a non-empty reason");
 					if (session.controlState().active) return { active: true };

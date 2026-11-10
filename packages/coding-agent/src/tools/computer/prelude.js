@@ -238,9 +238,11 @@
 		const unknown = Object.keys(opts).filter(key => !allowed.includes(key));
 		if (unknown.length > 0) {
 			const hints = unknown.flatMap(key => {
-				const matches = allowed.filter(
-					name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()),
-				);
+				const normalized = key.toLowerCase().replace(/[_-]/g, "");
+				const matches = allowed.filter(name => {
+					const candidate = name.toLowerCase().replace(/[_-]/g, "");
+					return candidate.includes(normalized) || normalized.includes(candidate);
+				});
 				return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
 			});
 			const error = new Error(

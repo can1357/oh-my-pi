@@ -824,9 +824,11 @@ describe("computer prelude", () => {
 		});
 		runInContext(prelude.javascript, realm);
 
-		await expect(runInContext('computer.run("return 1;", { timeouts: 3 })', realm)).rejects.toMatchObject({
+		await expect(
+			runInContext('computer.run("return 1;", { timeouts: 3, readOnly: true })', realm),
+		).rejects.toMatchObject({
 			name: "ToolError",
-			message: expect.stringContaining("timeouts"),
+			message: expect.stringContaining("readOnly: did you mean read_only"),
 		});
 		await expect(
 			runInContext('computer.run(async (_scope, path) => path, { args: { path: "/tmp" } })', realm),
@@ -1487,10 +1489,12 @@ describe("computer worker round trips", () => {
 				} else {
 					for (const key of Object.keys(invalid)) assert(error.message.includes(key), error.message);
 					if (invalid.depth) assert(error.message.includes("did you mean maxDepth"), error.message);
+					if (invalid.max_depth && !error.message.includes("max_depth: did you mean maxDepth")) failures.push("ax missing max_depth spelling hint");
 				}
 				await call(valid);
 			};
-			await check("ax", o => win.ax(o), { all: true, maxDepth: 3 }, { depth: 3 });
+			await check("ax", o => win.ax(o), { all: true, maxDepth: 3 }, { depth: 3, max_depth: 3 });
+			await check("wait", o => wait(() => true, o), { timeout: 10, interval: 10 }, { timeoutMs: 10 });
 			await check("observe", o => win.observe(o), { silent: true, all: true, maxDepth: 3 });
 			await check("find", o => win.find(o), { role: "button", title: "Save", value: "", limit: 1 });
 			await check("windows", o => desktop.windows(o), { id: "42", app: "Code", title: "Editor", wait: 0 }, { includeOffscreen: true });
