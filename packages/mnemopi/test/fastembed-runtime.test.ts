@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import packageManifest from "../package.json" with { type: "json" };
-import { fastembedRuntimeInstallPlan, prepareWindowsFastembedRuntime } from "../src/core/fastembed-runtime";
+import {
+	fastembedRuntimeInstallPlan,
+	loadedFastembedVersions,
+	prepareWindowsFastembedRuntime,
+} from "../src/core/fastembed-runtime";
 
 // The fastembed peer is pinned as an exact version (not `catalog:`) because
 // `core/fastembed-runtime.ts` reads it to `bun install` the on-demand embedding
@@ -51,5 +55,14 @@ describe("fastembed runtime version pins", () => {
 		expect(ortEntry.startsWith(`${ortPackageDir}${path.sep}`)).toBe(true);
 		expect(await Bun.file(path.join(dllDir, "onnxruntime.dll")).exists()).toBe(true);
 		expect(env.PATH).toBe(`${dllDir}${path.delimiter}${inheritedPath}`);
+	});
+});
+
+describe("loadedFastembedVersions", () => {
+	test("names the loaded fastembed, ORT and tokenizer installations", async () => {
+		const versions = await loadedFastembedVersions();
+		expect(versions.fastembed).toBe(packageManifest.peerDependencies.fastembed);
+		expect(versions.onnxruntime).toBe(packageManifest.peerDependencies["onnxruntime-node"]);
+		expect(versions.tokenizers).toMatch(/^\d+\.\d+\.\d+$/);
 	});
 });

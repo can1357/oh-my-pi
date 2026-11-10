@@ -266,7 +266,7 @@ const fmt = (b: BootstrapResult): string => {
 const describeConfig = (label: string, c: RunConfig): string => {
 	const embedder = c.engineInfo.embedder ? ` embedder ${c.engineInfo.embedder}` : "";
 	// The numerical runtime behind the vectors can reorder near-ties; printed so differing runtimes are visible.
-	const runtime = ["fastembed_version", "onnxruntime_version"]
+	const runtime = ["fastembed_version", "onnxruntime_version", "tokenizers_version"]
 		.filter(key => c.engineInfo[key])
 		.map(key => ` ${key.replace("_version", "")} ${c.engineInfo[key]}`)
 		.join("");
