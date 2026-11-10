@@ -725,7 +725,7 @@ export async function registerPersistedSubagents(
 			if (stamp !== undefined && historyStamps.get(ref) === stamp) continue;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
-			if (registry.setHistory(transcript.id, history, transcript.sessionFile) && stamp !== undefined) {
+			if (registry.setHistory(transcript.id, history, transcript.sessionFile, { isScan: true }) && stamp !== undefined) {
 				historyStamps.set(ref, stamp);
 			}
 		}

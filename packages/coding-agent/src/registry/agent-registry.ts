@@ -144,7 +144,12 @@ export interface AgentRegistryApi {
 	/** Start a fresh `parked` generation for the killed ref `expected`. */
 	reopen(id: string, expected: AgentRef): AgentRef | undefined;
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean;
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		expectedSessionFile?: string,
+		options?: { isScan?: boolean },
+	): boolean;
 	/** Transition `id` to `status` when it still matches `expected`. */
 	setStatus(id: string, status: AgentStatus, expected?: AgentRefExpectation): boolean;
 	/** Record that the current run handed over its final result. */
@@ -274,7 +279,12 @@ export class AgentRegistry implements AgentRegistryApi {
 	}
 
 	/** Attach transcript-derived identity and telemetry without changing lifecycle state. */
-	setHistory(id: string, history: AgentHistorySummary, expectedSessionFile?: string): boolean {
+	setHistory(
+		id: string,
+		history: AgentHistorySummary,
+		expectedSessionFile?: string,
+		options?: { isScan?: boolean },
+	): boolean {
 		const ref = this.#refs.get(id);
 		if (!ref || (expectedSessionFile !== undefined && ref.sessionFile !== expectedSessionFile)) return false;
 		const definedHistory = Object.fromEntries(
@@ -296,7 +306,7 @@ export class AgentRegistry implements AgentRegistryApi {
 		) {
 			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
 		}
-		if (expectedSessionFile !== undefined && ref.history?.tokensPerSecond !== undefined) {
+		if (options?.isScan && ref.history?.tokensPerSecond !== undefined) {
 			delete definedHistory.tokensPerSecond;
 		}
 		ref.history = { ...ref.history, ...definedHistory };

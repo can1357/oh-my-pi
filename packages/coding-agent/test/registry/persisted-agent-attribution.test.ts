@@ -296,6 +296,29 @@ describe("persisted agent model attribution", () => {
 		expect(ref.history?.directCost).toBeCloseTo(0.05);
 	});
 
+	it("protects fresh park-time throughput from delayed history scan overwrite while allowing follow-up park updates", () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/worker.jsonl",
+			status: "idle",
+		});
+		// Authoritative park snapshot sets rate to 150 tok/s:
+		registry.setHistory("Worker", { tokensPerSecond: 150.0 }, "/tmp/worker.jsonl");
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
+
+		// Delayed background scan with an older rate (75 tok/s) must NOT overwrite the park-time rate:
+		registry.setHistory("Worker", { tokensPerSecond: 75.0 }, "/tmp/worker.jsonl", { isScan: true });
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
+
+		// A subsequent authoritative park update (e.g. from follow-up turn) updates the rate:
+		registry.setHistory("Worker", { tokensPerSecond: 180.0 }, "/tmp/worker.jsonl");
+		expect(ref.history?.tokensPerSecond).toBe(180.0);
+	});
+
 	it("uses an off-branch usage record's active leaf for cold selected-leaf metrics", async () => {
 		using tempDir = TempDir.createSync("@omp-active-leaf-history-");
 		const registry = await historyFor(tempDir.path(), "Branching", [
