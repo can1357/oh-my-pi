@@ -13,6 +13,7 @@ import {
 	ElementDetachedError,
 	fillViaHandle,
 	resolveActionableQueryHandlerClickTarget,
+	setElementChecked,
 	TypingInterruptedError,
 	withLiveElement,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
@@ -2019,6 +2020,62 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 		}
 	}, 30_000);
 
+	test("looks replaced checkboxes up before returning their state and replaced radios up before unchecking", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent(
+				'<input id="check" type="checkbox"><input id="uncheck" type="checkbox" checked><input id="radio" type="radio" checked>',
+			);
+			const signal = new AbortController().signal;
+			for (const [id, desired] of [
+				["check", true],
+				["uncheck", false],
+				["radio", false],
+			] as const) {
+				let first = true;
+				await withLiveElement(
+					async () => {
+						const handle = await page.locator(`#${id}`).waitHandle();
+						if (first) {
+							first = false;
+							await handle.evaluate((input, desired) => {
+								if (input.type === "radio") {
+									// Detach after the state read, before the separate radio mutation.
+									Object.defineProperty(input, "checked", {
+										get() {
+											queueMicrotask(() => input.replaceWith(input.cloneNode()));
+											return true;
+										},
+									});
+								} else {
+									const next = input.cloneNode() as typeof input;
+									input.checked = desired;
+									next.checked = !desired;
+									input.replaceWith(next);
+								}
+							}, desired);
+						}
+						return handle;
+					},
+					async handle => {
+						try {
+							await setElementChecked(handle, desired, `tab.${desired ? "check" : "uncheck"}`, signal);
+						} finally {
+							await handle.dispose();
+						}
+					},
+					signal,
+				);
+			}
+			expect(await page.$$eval("input", inputs => inputs.map(input => input.checked))).toEqual([true, false, false]);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
 	test("a click whose element the page removed after replacing it reports the selector matching nothing", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -2107,7 +2164,7 @@ describe("looking a replaced element up again", () => {
 					throw new ElementDetachedError("tab.click(aria-ref=e3)");
 				},
 				new AbortController().signal,
-				false,
+				{ retry: false },
 			),
 		);
 		expect(once).toBeInstanceOf(ElementDetachedError);

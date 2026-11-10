@@ -3510,7 +3510,7 @@ export class WorkerCore {
 				}
 			},
 			signal,
-			parseAriaRefSelector(selector) === null,
+			{ retry: parseAriaRefSelector(selector) === null },
 		);
 	}
 
@@ -3631,7 +3631,7 @@ export class WorkerCore {
 				}
 			},
 			sig,
-			parseAriaRefSelector(selector) === null,
+			{ retry: parseAriaRefSelector(selector) === null },
 		);
 	}
 

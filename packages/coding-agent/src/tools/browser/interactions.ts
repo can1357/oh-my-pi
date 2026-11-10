@@ -211,7 +211,7 @@ export async function withLiveElement<T>(
 	resolve: () => Promise<ElementHandle>,
 	act: (handle: ElementHandle) => Promise<T>,
 	signal: AbortSignal,
-	retry = true,
+	options: { retry?: boolean } = {},
 ): Promise<T> {
 	let replaced = false;
 	while (true) {
@@ -219,7 +219,8 @@ export async function withLiveElement<T>(
 		try {
 			return await act(handle);
 		} catch (error) {
-			if (!retry || !(error instanceof ElementDetachedError)) throw replacedRefusal(error, replaced, signal);
+			if (options.retry === false || !(error instanceof ElementDetachedError))
+				throw replacedRefusal(error, replaced, signal);
 			replaced = true;
 		}
 	}
@@ -1018,30 +1019,37 @@ export async function setElementChecked(
 	const state = (await untilAborted(signal, () =>
 		handle.evaluate(el => {
 			const element = el as unknown as PageElement;
+			if (!element.isConnected) return null;
 			const tag = element.tagName.toLowerCase();
 			const type = tag === "input" ? element.type.toLowerCase() : "";
 			const role = element.getAttribute("role")?.toLowerCase() ?? "";
 			if (tag === "input" && (type === "checkbox" || type === "radio")) {
-				return { kind: type, checked: element.checked };
+				const checked = element.checked;
+				return element.isConnected ? { kind: type, checked } : null;
 			}
 			if (role === "switch" || role === "checkbox" || role === "radio") {
-				return { kind: `aria-${role}`, checked: element.getAttribute("aria-checked") === "true" };
+				const checked = element.getAttribute("aria-checked") === "true";
+				return element.isConnected ? { kind: `aria-${role}`, checked } : null;
 			}
 			return { kind: "", checked: false };
 		}),
-	)) as { kind: string; checked: boolean };
+	)) as { kind: string; checked: boolean } | null;
+	if (state === null) throw new ElementDetachedError(label);
 	if (!state.kind) throw new ToolError(`${label} requires a checkbox, radio, or ARIA switch`);
 	if (state.checked === checked) return;
 	if (state.kind === "radio" && !checked) {
-		await untilAborted(signal, () =>
+		const applied = await untilAborted(signal, () =>
 			handle.evaluate(el => {
 				const input = el as unknown as PageElement;
+				if (!input.isConnected) return false;
 				const page = globalThis as unknown as PageGlobals;
 				input.checked = false;
 				input.dispatchEvent(new page.Event("input", { bubbles: true }));
 				input.dispatchEvent(new page.Event("change", { bubbles: true }));
+				return true;
 			}),
 		);
+		if (!applied) throw new ElementDetachedError(label);
 		return;
 	}
 	await clickElement(handle, label, signal);
