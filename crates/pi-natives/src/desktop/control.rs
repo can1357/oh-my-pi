@@ -743,6 +743,18 @@ pub(crate) enum Admit {
 	Recheck,
 }
 
+enum WaitingStop {
+	Unarmed,
+	Unsupported,
+	Watching(EscapeMonitor),
+}
+
+impl WaitingStop {
+	fn armed(monitor: Option<EscapeMonitor>) -> Self {
+		monitor.map_or(Self::Unsupported, Self::Watching)
+	}
+}
+
 impl InputLease {
 	/// `takeover` arms the physical-Escape stop for this operation; held control
 	/// keeps the stop it armed when it was granted. Control another session
@@ -756,7 +768,7 @@ impl InputLease {
 			Instant::now,
 			|duration| token.wait(duration),
 			|| ControlLease::escape_monitor(&token.source),
-			None,
+			WaitingStop::Unarmed,
 		)
 	}
 
@@ -792,14 +804,14 @@ impl InputLease {
 		token: &OperationToken,
 		mut admit: impl FnMut(Admit) -> CoreResult<bool>,
 		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
-		mut acquire: impl FnMut(Option<Option<EscapeMonitor>>) -> CoreResult<Self>,
+		mut acquire: impl FnMut(WaitingStop) -> CoreResult<Self>,
 	) -> CoreResult<Self> {
 		loop {
 			// Held control armed its stop when it was granted.
 			let stop = if token.source.control_active() {
-				None
+				WaitingStop::Unarmed
 			} else {
-				Some(arm()?)
+				WaitingStop::armed(arm()?)
 			};
 			admit(Admit::Wait)?;
 			let lease = acquire(stop)?;
@@ -819,7 +831,7 @@ impl InputLease {
 		now: impl Fn() -> Instant,
 		mut wait: impl FnMut(Duration) -> CoreResult<()>,
 		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
-		armed: Option<Option<EscapeMonitor>>,
+		armed: WaitingStop,
 	) -> CoreResult<Self> {
 		token.check()?;
 		let limit = now() + LEASE_WAIT;
@@ -841,10 +853,15 @@ impl InputLease {
 				match state.as_ref() {
 					Some(owner) => break owner.clone(),
 					None => {
-						match ControlLease::acquire(&token.source, takeover && waiting_stop.is_none()) {
+						match ControlLease::acquire(
+							&token.source,
+							takeover && matches!(waiting_stop, WaitingStop::Unarmed),
+						) {
 							Ok(mut owner) => {
-								if let Some(stop) = waiting_stop.take() {
-									owner._escape = stop;
+								match waiting_stop {
+									WaitingStop::Unarmed => {},
+									WaitingStop::Unsupported => owner._escape = None,
+									WaitingStop::Watching(stop) => owner._escape = Some(stop),
 								}
 								break Arc::new(owner);
 							},
@@ -860,8 +877,8 @@ impl InputLease {
 			}
 			// A takeover operation takes the user's input once control frees up,
 			// so an Escape they press while it waits stops it too.
-			if takeover && waiting_stop.is_none() {
-				waiting_stop = Some(arm()?);
+			if takeover && matches!(waiting_stop, WaitingStop::Unarmed) {
+				waiting_stop = WaitingStop::armed(arm()?);
 			}
 			last_refusal = Some(refused);
 			wait(left.min(LEASE_POLL))?;
@@ -1147,7 +1164,7 @@ mod tests {
 				Ok(())
 			},
 			|| panic!("background input arms no Escape stop"),
-			None,
+			WaitingStop::Unarmed,
 		);
 		(lease, clock.get() - start)
 	}
@@ -1330,7 +1347,7 @@ mod tests {
 				// Like a Linux backend with no physical Escape monitor available.
 				Ok(None)
 			},
-			None,
+			WaitingStop::Unarmed,
 		)
 		.expect("retry reuses the waiting monitor instead of starting another");
 		assert_eq!(arms, 1);
@@ -1357,7 +1374,7 @@ mod tests {
 				token.wait(duration)
 			},
 			|| panic!("background input arms no Escape stop"),
-			None,
+			WaitingStop::Unarmed,
 		);
 		assert_eq!(cancelled.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
 		assert_eq!(waits, 1);
@@ -1393,7 +1410,7 @@ mod tests {
 					.push(EmergencyStop(Arc::downgrade(&source.0)));
 				Ok(None)
 			},
-			None,
+			WaitingStop::Unarmed,
 		);
 		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
 		assert_eq!((waits, armed.borrow().len(), source.escape_stops()), (1, 1, 1));
@@ -1456,7 +1473,7 @@ mod tests {
 				Ok(None)
 			},
 			|armed| {
-				assert!(armed.is_some(), "the stop armed for the wait goes into the lease");
+				assert!(!matches!(armed, WaitingStop::Unarmed), "the waiting stop goes into the lease");
 				InputLease::acquire(&token, false)
 			},
 		)
