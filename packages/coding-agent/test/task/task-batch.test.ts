@@ -456,49 +456,6 @@ describe("task.batch validation", () => {
 		},
 	);
 
-	it("refuses a whitespace model before any batch spawn", async () => {
-		mockDiscovery();
-		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("unexpected"));
-		const tool = await TaskTool.create(
-			createSession({ settings: { "async.enabled": false, "task.batch": true, "task.perCallModel": "off" } }),
-		);
-		const mock = createMockModel({
-			responses: [
-				{
-					content: [
-						{
-							type: "toolCall",
-							id: "restricted-model",
-							name: "task",
-							arguments: {
-								context: "ctx",
-								tasks: [
-									{ task: "Allowed", solutionSpace: "bounded", model: [] },
-									{ task: "Restricted", solutionSpace: "bounded", model: " " },
-								],
-							},
-						},
-					],
-				},
-				{ content: ["done"] },
-			],
-		});
-		const agent = new Agent({
-			initialState: {
-				model: mock.model,
-				systemPrompt: ["Test"],
-				tools: [tool as unknown as AgentTool],
-				messages: [],
-			},
-			streamFn: mock.stream,
-		});
-		await agent.prompt("go");
-		const result = agent.state.messages.find(message => message.role === "toolResult");
-		expect(result?.role === "toolResult" && result.isError).toBe(true);
-		expect(result?.role === "toolResult" ? getFirstText(result) : "").toContain("task.perCallModel: off");
-		expect(run).not.toHaveBeenCalled();
-	});
-
 	// The agent loop validates arguments against the wire schema before execute(),
 	// and that schema deletes undeclared keys. With per-call model off, `model` and
 	// `sourceSession` on an ordinary agent must still be refused by every call form

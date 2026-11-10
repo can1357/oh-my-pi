@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed `omp stats` re-parsing every unchanged session after a filesystem's device number changes, such as across ZFS remounts ([#14736](https://github.com/can1357/oh-my-pi/issues/14736)) ([#18536](https://github.com/can1357/oh-my-pi/pull/18536) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+
 ## [18.18.2] - 2026-11-08
 
 ### Fixed

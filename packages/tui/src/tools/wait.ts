@@ -54,6 +54,12 @@ export interface JobSnapshot {
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
 	durationMs: number;
+	/**
+	 * When the run settled (epoch ms); absent while it is still running. Lets a
+	 * snapshot tell a result that finished during the call from one recovered
+	 * from an earlier, never-delivered completion (#16052).
+	 */
+	settledAtMs?: number;
 	/** Process exit status when the job reports one. */
 	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */

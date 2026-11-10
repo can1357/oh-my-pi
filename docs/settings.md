@@ -1038,11 +1038,13 @@ Provider credentials and custom model definitions are configured separately — 
 
 #### Saved reset auto-consumption
 
-`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. A session with no prompt UI to ask (such as `omp -p`) spends a reset under `unset` only when that reset expires within 5 minutes and would otherwise be lost; everything else waits for consent, with a notice pointing at `/usage reset`.
+`codexResets.autoRedeem5h` / `autoRedeemWeekly` and `claudeResets.autoRedeem5h` / `autoRedeemWeekly` / `autoRedeemFable` control saved-reset spending per window: `yes` spends automatically, `no` never spends, and `unset` asks first and never spends without a prompt (a session with no prompt UI, such as `omp -p`, only shows a notice pointing at `/usage reset`). Each spend is governed by one window: a restore by the weekly key when any blocked window is weekly (for Claude, any covered limit other than `anthropic:5h`), otherwise by the 5h key; a salvage by the fullest window it restores. A Codex block known only from a 429 wait of 6 hours or less could be either window, so it needs both Codex keys. When several accounts could be restored, one whose key is `yes` goes before one that needs a prompt. A prompt answer is saved to the governing keys that are still `unset`. An older single `autoRedeem` migrates into the 5h and weekly keys; Fable starts `unset`.
 
-When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
+A Claude Fable launch reset restores Fable weekly usage (its 5h clear is incidental), so `claudeResets.autoRedeemFable` alone governs it, it restores a block only when the block includes the Fable weekly cap, and its salvage is judged on reported Fable usage alone: it is never spent, nor warned about, while Fable usage is zero or the report has no Fable row.
 
-`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
+When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Consent, provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
+
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set every window key of a provider to `no` to disable its automatic spending.
 
 To spend one by hand, use `/usage reset` in a session or `omp usage reset` from a shell, which needs no session or TTY and works from an auth-broker client: without arguments it lists each account's saved resets by `<provider>/<credential id>`, and with one it spends a single reset on that account.
 
