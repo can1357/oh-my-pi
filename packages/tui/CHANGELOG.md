@@ -6,6 +6,10 @@
 
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
+### Fixed
+
+- On a native (TSP) surface, a task card's settled agent row draws its `agent` node as running, with the current tool, while the host reports that agent running again; terminal rows keep the recorded status. The host passes `ToolExecutionOptions.liveTaskAgents` and calls `ToolExecutionComponent.refreshLiveTaskAgents()` when its agents change
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

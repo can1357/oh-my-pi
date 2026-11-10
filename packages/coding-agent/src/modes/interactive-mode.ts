@@ -140,7 +140,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { registerPersistedSubagents } from "../registry/persisted-agents";
+import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
@@ -180,7 +180,7 @@ import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
+import { agentTypeBadge, formatTaskId, type LiveTaskAgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import {
 	AUTO_THINKING,
@@ -4883,6 +4883,26 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
+	 * A subagent a settled task card row lists, while it runs again: revived or
+	 * woken by IRC or hub chat, or still running after its call settled. The
+	 * agent registry decides, as for the HUD's agents segment; the run's task
+	 * progress, when the observer registry hears it, adds the current tool.
+	 */
+	readonly liveTaskAgents: LiveTaskAgentSource = id => {
+		const ref = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).get(id);
+		// A ref still `running` after its run handed over the final result is that run's tail, not a new run.
+		if (ref?.kind !== "sub" || ref.status !== "running" || ref.lifecycle?.acceptedAt !== undefined) return undefined;
+		// The registry outlives `/new` and session switches: another session's agent can hold the same id.
+		const root = this.collabGuest ? undefined : this.sessionManager.getSessionFile();
+		if (root && ref.sessionFile && !sessionFileBelongsToRoot(ref.sessionFile, root)) return undefined;
+		const observed = this.#observerRegistry.getSession(id);
+		// A started turn keeps the previous turn's last snapshot but clears `progressAt` until its own first frame.
+		const running =
+			observed?.status === "active" && observed.progressAt !== undefined && observed.progress?.status === "running";
+		return { progress: running ? observed.progress : undefined };
+	};
+
+	/**
 	 * Register a resumed session's persisted subagent transcripts (with usage
 	 * history) so the status line's tree cost matches the Agent Hub without it
 	 * being opened first. Once per on-disk root; registry changes re-sync the cost.
@@ -5315,7 +5335,21 @@ export class InteractiveMode implements InteractiveModeContext {
 			todoChanged = true;
 		}
 		const hudChanged = this.#renderSubagentList();
-		if (badgeChanged || todoChanged || hudChanged) this.ui.requestRender();
+		const cardsChanged = this.#refreshLiveTaskCards();
+		if (badgeChanged || todoChanged || hudChanged || cardsChanged) this.ui.requestRender();
+	}
+
+	/**
+	 * Redraw the task cards whose settled rows list an agent that started or
+	 * stopped running again. Only a native surface draws that; terminal rows
+	 * keep the recorded status, as scrollback cannot be repainted.
+	 */
+	#refreshLiveTaskCards(): boolean {
+		let changed = false;
+		for (const block of this.chatContainer.children) {
+			if (block instanceof ToolExecutionComponent && block.refreshLiveTaskAgents()) changed = true;
+		}
+		return changed;
 	}
 
 	#cancelObserverUiSyncTimer(): void {

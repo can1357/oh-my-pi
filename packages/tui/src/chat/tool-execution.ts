@@ -48,7 +48,7 @@ import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
-import { taskCardAgentIds } from "../tools/task";
+import { type LiveTaskAgent, type LiveTaskAgentSource, liveTaskCardAgents, taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
 import { isNativeRendering } from "../native/state";
 import { isWaitingPollDetails } from "../tools/wait";
@@ -240,6 +240,12 @@ export interface ToolExecutionOptions {
 	useBuiltInRenderer?: boolean;
 	/** Ask the extension transcript presenters; false for a replayed transcript (overlays). Default: true. */
 	transcriptPresenters?: boolean;
+	/**
+	 * The host's live agents: on a native surface, a task card's settled rows
+	 * draw an agent that runs again as running. The host calls
+	 * {@link ToolExecutionComponent.refreshLiveTaskAgents} when they change.
+	 */
+	liveTaskAgents?: LiveTaskAgentSource;
 }
 
 /** A tool result or progress frame as a card shows it. */
@@ -538,6 +544,11 @@ export class ToolExecutionComponent extends Container {
 	readonly #spotlight = new SpotlightNotices();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
+	/** Host source of the agents this task card's settled rows list that run again. */
+	readonly #liveTaskAgentSource: LiveTaskAgentSource | undefined;
+	/** What {@link #liveTaskAgentSource} answered for this card's settled rows, and its change key. */
+	#liveTaskAgents: ReadonlyMap<string, LiveTaskAgent> | undefined;
+	#liveTaskAgentsKey = "";
 	// Set on each `render()` when the last painted pending shape must be
 	// replayed wholesale when the first result arrives. Reset gates key off
 	// these so a topology-changing update that lands before the shape reaches
@@ -585,6 +596,7 @@ export class ToolExecutionComponent extends Container {
 		this.#showImages = options.showImages ?? true;
 		this.#presented = options.transcriptPresenters ?? true;
 		this.#tool = tool;
+		this.#liveTaskAgentSource = toolName === "task" ? options.liveTaskAgents : undefined;
 		this.#ui = ui;
 		this.#args = args;
 		this.#editMode = resolveEditModeForTool(toolName, tool);
@@ -876,6 +888,7 @@ export class ToolExecutionComponent extends Container {
 		const details = sanitizeTextDeep(result.details);
 		this.#result = details === result.details ? result : { ...result, details };
 		this.#resultVersion++;
+		this.#syncLiveTaskAgents();
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
 		this.#presentation.markStale();
@@ -1126,6 +1139,38 @@ export class ToolExecutionComponent extends Container {
 	getClickFocusAgentIds(): string[] {
 		if (this.#toolName !== "task") return [];
 		return taskCardAgentIds(this.#result?.details);
+	}
+
+	/**
+	 * Re-read which agents this task card's settled rows list that run again
+	 * (revived or woken after the call settled); true when the card changed.
+	 * The host calls it when its agents' run state or progress changes. The
+	 * call's own status stays as recorded.
+	 */
+	refreshLiveTaskAgents(): boolean {
+		if (!this.#syncLiveTaskAgents()) return false;
+		this.#blockVersion++;
+		this.#displayInputVersion++;
+		this.#updateDisplay();
+		return true;
+	}
+
+	/**
+	 * Ask the host which agents of this card's settled rows run again; true
+	 * when what the card draws of them changed. Native surfaces only: they edit
+	 * a settled card in place, while a terminal may commit the card to
+	 * scrollback mid-run, where a `running` row could never be repainted.
+	 */
+	#syncLiveTaskAgents(): boolean {
+		const source = this.#liveTaskAgentSource;
+		if (!source) return false;
+		const { agents, key } = isNativeRendering()
+			? liveTaskCardAgents(this.#result?.details, source)
+			: { agents: undefined, key: "" };
+		if (key === this.#liveTaskAgentsKey) return false;
+		this.#liveTaskAgents = agents;
+		this.#liveTaskAgentsKey = key;
+		return true;
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -2211,6 +2256,7 @@ export class ToolExecutionComponent extends Container {
 			context.hasResult = Boolean(this.#result);
 			this.#taskRenderNowMs = Date.now();
 			context.nowMs = this.#taskRenderNowMs;
+			context.liveAgents = this.#liveTaskAgents;
 		} else if (isEditLikeToolName(this.#toolName)) {
 			context.editMode = this.#editMode;
 			const previews = this.#editDiffPreview;
