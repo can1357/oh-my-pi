@@ -11,7 +11,7 @@ import {
 	indexModelsByRequestId,
 	resolveGatewayModel,
 } from "../../src/cli/auth-gateway-cli";
-import { GATEWAY_MODEL_KINDS } from "../../src/cli/auth-gateway-stdio";
+import { gatewayServableModels } from "../../src/cli/auth-gateway-stdio";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 
@@ -157,7 +157,7 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		await storage.credentials.set("openai-codex", { type: "api_key", key: "sk-test-codex" });
 		const registry = new ModelRegistry(storage, tempDir.join("models.yml"));
 		// The stdio gateway's `/v1/models` listing: available models of every routable kind.
-		const listed = GATEWAY_MODEL_KINDS.flatMap(kind => registry.getAvailable(kind));
+		const listed = gatewayServableModels(kind => registry.getAvailable(kind));
 
 		// `/v1/models` on the stdio gateway used chat-only `getAvailable()`, which hid dictation.
 		expect(listed.find(model => model.id === "codex-transcribe")?.provider).toBe("openai-codex");

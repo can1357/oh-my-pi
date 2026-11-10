@@ -12,7 +12,7 @@
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { createAuthGatewayRouter, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
+import { createAuthGatewayRouter, gatewayRouteAccepts, serveAuthGatewayStdio } from "@oh-my-pi/pi-ai/auth-gateway";
 import { getProjectDir, isRecord, logger, postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, normalizeModelPatternList, resolveCliModel } from "../config/model-resolver";
@@ -45,11 +45,21 @@ const ROUTE_KINDS: Record<string, ModelKind> = {
 export const GATEWAY_MODEL_KINDS: readonly ModelKind[] = ["chat", ...new Set(Object.values(ROUTE_KINDS))];
 
 /**
+ * The models `models` yields for each gateway kind that the kind's route can run
+ * ({@link gatewayRouteAccepts}: never an on-device runner), kind by kind.
+ */
+export function gatewayServableModels(models: (kind: ModelKind) => Model<Api>[]): Model<Api>[] {
+	return GATEWAY_MODEL_KINDS.flatMap(kind => models(kind).filter(model => gatewayRouteAccepts(kind, model.api)));
+}
+
+/**
  * The models a request naming `selector` may run on, in order: the model
  * `--model` would pick among models of `kind` (the first entry of a comma
  * list that resolves), then that model's configured `retry.fallbackChains`
  * (its role's chain when the entry named a role; never the role's built-in
- * priority list). Empty when no entry resolves.
+ * priority list). Fallbacks a `kind` route cannot run (an on-device runner,
+ * say) are dropped so their `400` never masks the failure that triggered them.
+ * Empty when no entry resolves.
  */
 export function selectorCandidates(
 	selector: string,
@@ -69,6 +79,7 @@ export function selectorCandidates(
 		const chain = expandOnlineTinyModelFallbacks(model, settings, available, configuredRole);
 		const seen = new Set<string>();
 		return [model, ...chain].filter(candidate => {
+			if (candidate !== model && !gatewayRouteAccepts(kind, candidate.api)) return false;
 			const key = formatModelStringWithRouting(candidate);
 			if (seen.has(key)) return false;
 			seen.add(key);
@@ -107,7 +118,7 @@ export async function runAuthGatewayStdio(): Promise<void> {
 	const router = createAuthGatewayRouter({
 		storage,
 		resolveModel: stdioModelResolver(routed, registry),
-		listModels: () => GATEWAY_MODEL_KINDS.flatMap(kind => registry.getAvailable(kind)),
+		listModels: () => gatewayServableModels(kind => registry.getAvailable(kind)),
 	});
 	const route = async (req: Request): Promise<Response> => {
 		// Unparseable bodies pass through for the route to reject in its own wire format.
