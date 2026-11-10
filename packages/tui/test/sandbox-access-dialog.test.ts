@@ -67,18 +67,21 @@ function nodesOf(root: NativeNode, kind: string): NativeNode[] {
 	return out;
 }
 
-function choiceIds(dialog: SandboxAccessDialogComponent): (string | undefined)[] {
-	const list = nodesOf(dialog.describe(), "list")[0]!;
-	return (list.c ?? []).map(child => ("k" in child ? child.key : undefined));
+/** The native view's button actions, in order (no choice list duplicates them). */
+function actions(dialog: SandboxAccessDialogComponent): unknown[] {
+	const root = dialog.describe();
+	expect(nodesOf(root, "list")).toEqual([]);
+	const bar = nodesOf(root, "row").find(n => n.p?.role === "omp.actions")!;
+	return (bar.c ?? []).flatMap(child => ("k" in child && child.k !== "spacer" ? [child.key] : []));
 }
 
 describe("sandbox access dialog", () => {
-	it("offers Always allow only when the list can be saved, in the native list too", () => {
+	it("offers Always allow only when the list can be saved, as a button in Tern too", () => {
 		expect(open().dialog.choices).toEqual(["session", "always", "deny", "instruct"]);
-		expect(choiceIds(open().dialog)).toEqual(["session", "always", "deny", "instruct"]);
+		expect(actions(open().dialog)).toEqual(["instruct", "always", "deny", "session"]);
 		const locked = open({ canAlways: false }).dialog;
 		expect(locked.choices).toEqual(["session", "deny", "instruct"]);
-		expect(choiceIds(locked)).toEqual(["session", "deny", "instruct"]);
+		expect(actions(locked)).toEqual(["instruct", "deny", "session"]);
 	});
 
 	it("answers each choice from the keyboard; Esc denies", () => {
@@ -95,12 +98,22 @@ describe("sandbox access dialog", () => {
 		}
 	});
 
-	it("ignores Enter and pointer choices until the dialog is armed", () => {
+	it("ignores Enter and granting buttons until the dialog is armed", () => {
 		const answers: SandboxAccessDialogAnswer[] = [];
 		const dialog = new SandboxAccessDialogComponent(VIEW, { onAnswer: answer => answers.push(answer) });
 		press(dialog, ENTER);
-		dialog.handleNativeEvent({ type: "action", key: "", act: "session", mods: [] });
-		dialog.handleNativeEvent({ type: "activate", key: "choices", item: "always" });
+		dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "session",
+			mods: [],
+		});
+		dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "always",
+			mods: [],
+		});
 		expect(answers).toEqual([]);
 	});
 
@@ -125,39 +138,68 @@ describe("sandbox access dialog", () => {
 	it("sends a reply as instructions; an empty reply or Esc goes back to the choices", () => {
 		const { dialog, answers } = open({ canAlways: false });
 		press(dialog, DOWN, DOWN, ENTER);
-		expect(nodesOf(dialog.describe(), "list")).toEqual([]);
+		expect(nodesOf(dialog.describe(), "col").some(n => n.p?.role === "omp.sandbox.access.reply")).toBe(true);
 		// Empty: back to the choices, nothing answered.
 		press(dialog, ENTER);
 		expect(answers).toEqual([]);
-		expect(choiceIds(dialog)).toEqual(["session", "deny", "instruct"]);
+		expect(actions(dialog)).toEqual(["instruct", "deny", "session"]);
 		// Esc while replying: back, not deny.
 		press(dialog, ENTER, "x", ESC);
 		expect(answers).toEqual([]);
-		expect(choiceIds(dialog)).toHaveLength(3);
+		expect(actions(dialog)).toHaveLength(3);
 		press(dialog, ENTER, BACKSPACE);
 		for (const ch of "  build in ./out  ") dialog.handleInput(ch);
 		press(dialog, ENTER);
 		expect(answers).toEqual([{ decision: "instruct", instructions: "build in ./out" }]);
 	});
 
-	it("answers native clicks and the reply's Send and Back like the keys", () => {
+	it("answers native buttons and the reply's Send and Back like the keys", () => {
 		const always = open();
-		always.dialog.handleNativeEvent({ type: "activate", key: "choices", item: "always" });
+		always.dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "always",
+			mods: [],
+		});
 		expect(always.answers).toEqual([{ decision: "always" }]);
+
+		// A stale Always click on a dialog that cannot save grants nothing.
+		const locked = open({ canAlways: false });
+		locked.dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "always",
+			mods: [],
+		});
+		expect(locked.answers).toEqual([]);
 
 		const deny = open();
 		deny.dialog.handleNativeEvent({ type: "action", key: "", act: "deny", mods: [] });
 		expect(deny.answers).toEqual([{ decision: "deny" }]);
 
 		const reply = open();
-		reply.dialog.handleNativeEvent({ type: "activate", key: "choices", item: "instruct" });
+		reply.dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "instruct",
+			mods: [],
+		});
 		// The reply field takes the choices' place.
 		expect(nodesOf(reply.dialog.describe(), "col").some(n => n.p?.role === "omp.sandbox.access.reply")).toBe(true);
-		expect(nodesOf(reply.dialog.describe(), "list")).toEqual([]);
-		reply.dialog.handleNativeEvent({ type: "action", key: "", act: "send", mods: [] });
+		reply.dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "send",
+			mods: [],
+		});
 		expect(reply.answers).toEqual([]);
-		expect(choiceIds(reply.dialog)).toHaveLength(4);
-		reply.dialog.handleNativeEvent({ type: "activate", key: "choices", item: "instruct" });
+		expect(actions(reply.dialog)).toHaveLength(4);
+		reply.dialog.handleNativeEvent({
+			type: "action",
+			key: "",
+			act: "instruct",
+			mods: [],
+		});
 		for (const ch of "no") reply.dialog.handleInput(ch);
 		reply.dialog.handleNativeEvent({ type: "action", key: "", act: "send", mods: [] });
 		expect(reply.answers).toEqual([{ decision: "instruct", instructions: "no" }]);
@@ -190,7 +232,7 @@ describe("sandbox access dialog", () => {
 });
 
 describe("sandbox access dialog in Tern", () => {
-	it("draws the request with its choices and the reply field, and answers the terminal's events", async () => {
+	it("draws the request with its buttons and the reply field, and answers the terminal's events", async () => {
 		const { dialog, answers } = open();
 		const h = await TspHarness.start(tui => {
 			tui.addChild(dialog);
@@ -201,10 +243,14 @@ describe("sandbox access dialog in Tern", () => {
 			for (const field of ["intent", "command", "effect", "alternative"]) {
 				expect(h.find(node => node.p?.role === `omp.sandbox.access.${field}`)).toBeDefined();
 			}
-			const choices = h.find(node => node.k === "list" && node.p?.role === "omp.approval.choices")!;
-			expect(choices.c?.map(child => child.id.split("/").at(-1))).toEqual(["session", "always", "deny", "instruct"]);
-			const instruct = choices.c!.find(child => child.id.endsWith("/instruct"))!;
-			h.event({ ev: "activate", sf: h.terminal.surface!, id: choices.id, item: instruct.id });
+			expect(h.find(node => node.k === "list")).toBeUndefined();
+			const instruct = h.find(node => node.p?.actions?.click === "instruct")!;
+			h.event({
+				ev: "action",
+				sf: h.terminal.surface!,
+				id: instruct.id,
+				act: "instruct",
+			});
 			expect(h.find(node => node.k === "input")).toBeDefined();
 			for (const ch of "skip it") h.terminal.send(ch);
 			h.flush();

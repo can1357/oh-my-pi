@@ -26,8 +26,8 @@ import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { getKeybindings } from "../keybindings";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
-import { col, item, node, span, text } from "../native/describe";
-import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { col, node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainLine } from "../native/spans";
 import { sanitizeDisplayLines, shortenPath } from "../render/render-utils";
@@ -102,7 +102,7 @@ export class SandboxAccessDialogComponent implements Component {
 	readonly #body = new PanelRows();
 	readonly #choiceRows = new PanelRows();
 	readonly #footer = new PanelRows();
-	#native: { reply: Input | undefined; choice: number; node: NativeNode } | undefined;
+	#native: { reply: Input | undefined; node: NativeNode } | undefined;
 
 	readonly #tui: TUI | undefined;
 	readonly #onAnswer: (answer: SandboxAccessDialogAnswer) => void;
@@ -268,12 +268,14 @@ export class SandboxAccessDialogComponent implements Component {
 
 	/**
 	 * In the dock like the approval prompt (the `omp.editor.ask.approval` root role): the title,
-	 * the labeled fields, the choices (a click takes one), and Deny / Allow for this session; while
-	 * replying, the reply field with Back / Send.
+	 * the labeled fields, then every choice as a button — Reply… leading, Always allow (when
+	 * offered), Deny and the primary Allow for this session end-aligned; while replying, the
+	 * reply field with Back / Send. No selectable list beside the buttons: in a pointer UI the
+	 * keyboard's highlighted row read as a second, clickable copy of the same choices.
 	 */
 	describe(): NativeNode {
 		const native = this.#native;
-		if (native && native.reply === this.#reply && native.choice === this.#choice) return native.node;
+		if (native && native.reply === this.#reply) return native.node;
 		const field = (key: string, name: string, value: NativeNode): NativeNode =>
 			node("col", { role: `omp.sandbox.access.${key}`, gap: "xs" }, [text([span(name, "strong")]), value], key);
 		const children: NativeChild[] = [
@@ -311,39 +313,54 @@ export class SandboxAccessDialogComponent implements Component {
 				actionBar([null, actionButton("Back", "back"), actionButton("Send", "send", { tone: "accent" })]),
 			);
 		} else {
-			const choices = this.#choices.map(choice =>
-				item(choice, {
-					label: CHOICE_LABELS[choice],
-					role: "omp.approval.choice",
-					tone: choice === "deny" ? "error" : "accent",
-				}),
-			);
+			const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
 			children.push(
-				node("list", { selected: this.#choices[this.#choice], role: "omp.approval.choices" }, choices, "choices"),
 				actionBar([
+					actionButton("Reply…", "instruct", {
+						title: "Tell the agent what to do instead",
+					}),
 					null,
-					actionButton("Deny", "deny", { tone: "error" }),
+					...(this.#choices.includes("always")
+						? [
+								actionButton("Always allow", "always", {
+									title: "Allow and save to the global config",
+								}),
+							]
+						: []),
+					actionButton("Deny", "deny", {
+						tone: "error",
+						...(cancelKey ? { keys: cancelKey } : {}),
+					}),
 					actionButton(CHOICE_LABELS.session, "session", { tone: "accent" }),
 				]),
 			);
 		}
-		const described = col(children, { role: "omp.editor.ask.approval", gap: "md" });
-		this.#native = { reply, choice: this.#choice, node: described };
+		const described = col(children, {
+			role: "omp.editor.ask.approval",
+			gap: "md",
+		});
+		this.#native = { reply, node: described };
 		return described;
 	}
 
-	/** Buttons and a choice click run what the keys run; the reply's buttons send or go back. */
+	/** Buttons run what the keys run (granting ones only once armed); the reply's buttons send or go back. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#closed) return;
-		if (event.type === "action") {
-			if (event.act === "deny") this.#finish({ decision: "deny" });
-			else if (event.act === "session" && performance.now() >= this.#armedAt) this.#take("session");
-			else if (event.act === "send") this.#reply?.onSubmit?.(this.#reply.getValue());
-			else if (event.act === "back") this.#back();
-			return;
+		if (this.#closed || event.type !== "action") return;
+		switch (event.act) {
+			case "deny":
+			case "instruct":
+				this.#take(event.act);
+				return;
+			case "session":
+			case "always":
+				if (this.#choices.includes(event.act) && performance.now() >= this.#armedAt) this.#take(event.act);
+				return;
+			case "send":
+				this.#reply?.onSubmit?.(this.#reply.getValue());
+				return;
+			case "back":
+				this.#back();
+				return;
 		}
-		if ((event.type !== "select" && event.type !== "activate") || leafKey(event.key) !== "choices") return;
-		const choice = this.#choices.find(candidate => candidate === event.item);
-		if (choice && performance.now() >= this.#armedAt) this.#take(choice);
 	}
 }

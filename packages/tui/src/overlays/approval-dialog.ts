@@ -32,8 +32,8 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
-import { col, item, node } from "../native/describe";
-import { leafKey, type NativeNode, type NativeUiEvent } from "../native/node";
+import { col, node } from "../native/describe";
+import type { NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
 import { theme } from "../theme/theme";
@@ -123,8 +123,6 @@ export class ApprovalDialogComponent implements Component {
 	#rememberAlways = false;
 	#closed = false;
 	#native: NativeNode | undefined;
-	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
-	#nativeDrafting = false;
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
 
@@ -242,7 +240,6 @@ export class ApprovalDialogComponent implements Component {
 	#moveChoice(delta: number): void {
 		const count = this.#choices.length;
 		this.#choice = (this.#choice + delta + count) % count;
-		this.#native = undefined;
 		this.options.tui?.requestRender();
 	}
 
@@ -323,25 +320,34 @@ export class ApprovalDialogComponent implements Component {
 	/**
 	 * In the dock, in the composer's place and framed as the composer is (an
 	 * `omp.editor.*` root role), like the ask dialog, rather than a card over
-	 * the transcript: the title, the details, the choices with the keyboard's
-	 * highlight (a click takes one), then Details (with a full prompt), Deny,
-	 * and the primary Approve, whose keys show in their tooltips.
+	 * the transcript: the title, the details, then every choice as a button —
+	 * the remember toggle and grants on their own row when offered, then Details
+	 * (with a full prompt), the session choice, Deny, and the primary Approve,
+	 * whose keys show in their tooltips. No selectable list beside the buttons:
+	 * in a pointer UI the keyboard's highlighted row read as a second copy of them.
 	 */
 	describe(): NativeNode {
-		const drafting = this.options.draft?.hasDraft() ?? false;
-		if (this.#native && this.#nativeDrafting === drafting) return this.#native;
+		if (this.#native) return this.#native;
 		const cancelKey = getKeybindings().getKeys("tui.select.cancel")[0];
 		const approveKey = appApproveKeys()[0];
+		const grants = this.options.grants ?? [];
 		const deny = actionButton("Deny", "deny", {
 			...(cancelKey ? { keys: cancelKey } : {}),
 			tone: "error",
 			title: `Deny this call${cancelKey ? `  ${formatTooltipKey(cancelKey)}` : ""}`,
 		});
-		const approve = actionButton(this.options.grants?.length ? "Approve Once" : "Approve", "approve", {
+		const approve = actionButton(grants.length > 0 ? "Approve Once" : "Approve", "approve", {
 			...(approveKey ? { keys: approveKey } : {}),
 			tone: "accent",
 			title: `Approve this call${approveKey ? `  ${formatTooltipKey(approveKey)}` : ""}`,
 		});
+		const session = this.options.session
+			? [
+					actionButton(this.options.session.label, "session", {
+						title: "Approve this and like calls until the session ends",
+					}),
+				]
+			: [];
 		const expandKey = appToolsExpandKey();
 		const expand = this.#full
 			? [
@@ -361,37 +367,51 @@ export class ApprovalDialogComponent implements Component {
 			);
 			children.push(node("col", { role: "omp.approval.details" }, rows, "details"));
 		}
-		const choices = this.#choices.map(choice =>
-			item(choice.answer, {
-				label: choice.label,
-				role: "omp.approval.choice",
-				tone: choice.answer === "deny" ? "error" : "accent",
-			}),
-		);
-		const selected = drafting ? "deny" : this.#choices[this.#choice]!.answer;
-		children.push(node("list", { selected, role: "omp.approval.choices" }, choices, "choices"));
+		if (grants.length > 0) {
+			const glyph = this.#rememberAlways ? theme.checkbox.checked : theme.checkbox.unchecked;
+			children.push(
+				actionBar(
+					[
+						actionButton(`${glyph} Remember across sessions`, "remember", {
+							title: "Keep the grants beside it across sessions",
+						}),
+						...grants.map((grant, index) =>
+							actionButton(this.#rememberAlways ? grant.alwaysLabel : grant.label, `grant${index}`),
+						),
+					],
+					"grants",
+				),
+			);
+		}
 		// The countdown, when one runs, leads the bar like the ask dialog's.
 		children.push(
-			actionBar([...(this.#countdown ? [this.#countdown.describe()] : []), null, ...expand, deny, approve]),
+			actionBar([
+				...(this.#countdown ? [this.#countdown.describe()] : []),
+				null,
+				...expand,
+				...session,
+				deny,
+				approve,
+			]),
 		);
 		// Under the `omp.editor.ask` prefix: Tern's console layout sizes an ask's rows to the
 		// composer column by that prefix, where a bare `omp.editor.*` role spans the whole dock.
-		this.#native = col(children, { role: "omp.editor.ask.approval", gap: "md" });
-		this.#nativeDrafting = drafting;
+		this.#native = col(children, {
+			role: "omp.editor.ask.approval",
+			gap: "md",
+		});
 		return this.#native;
 	}
 
-	/** Deny, Approve, and Details run exactly what Esc, the approve key, and the expand key run; a click on a choice takes it. */
+	/** Each button runs exactly what its key or choice runs: Deny, Approve, Details, the session choice, a grant, the remember toggle. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#closed) return;
-		if (event.type === "action") {
-			if (event.act === "approve") this.#finish("once");
-			else if (event.act === "deny") this.#finish("deny");
-			else if (event.act === "expand") this.toggleDetails();
+		if (this.#closed || event.type !== "action") return;
+		if (event.act === "expand") {
+			this.toggleDetails();
 			return;
 		}
-		if ((event.type !== "select" && event.type !== "activate") || leafKey(event.key) !== "choices") return;
-		const choice = this.#choices.find(candidate => candidate.answer === event.item);
+		const answer = event.act === "approve" ? "once" : event.act;
+		const choice = this.#choices.find(candidate => candidate.answer === answer);
 		if (choice) this.#take(choice.answer);
 	}
 
