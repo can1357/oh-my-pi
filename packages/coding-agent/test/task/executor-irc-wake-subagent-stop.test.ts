@@ -8,6 +8,7 @@
  * observer nor races the session's settle — so these tests pin it end to end.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -123,6 +124,8 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		disableAutoRetry?: boolean;
 		/** Check usage health before each turn, a real await in every turn's setup. */
 		usageAwareFallback?: boolean;
+		/** Park every compaction pass in its `session_before_compact` hook until `gate`, and resolve `entered` on arrival. */
+		holdCompaction?: { gate: Promise<void>; entered: PromiseWithResolvers<void> };
 	}) {
 		const stopEvents: SubagentStopEvent[] = [];
 		const lifecycle: LifecycleFrame[] = [];
@@ -136,6 +139,11 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 				pi.on("subagent_stop", async event => {
 					stopEvents.push(event);
 					return args.onStop(event, stopEvents.length);
+				});
+				pi.on("session_before_compact", async () => {
+					args.holdCompaction?.entered.resolve();
+					await args.holdCompaction?.gate;
+					return { cancel: true };
 				});
 			},
 			tempDir.path(),
@@ -178,6 +186,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			...(args.disableAutoRetry ? { "retry.enabled": false } : {}),
 			...(args.usageAwareFallback ? { "retry.usageAwareFallback": true } : {}),
 		});
+		if (args.holdCompaction) cfgCompactionKeepRecentTokens.set(settings, 1);
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
@@ -841,6 +850,70 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			// The holder's yield belongs to the holder's pass; the follow-up's result is its own turn's.
 			expect(result.output).toContain("FOLLOW-UP-YIELD");
 			expect(result.extractedToolData?.yield).toHaveLength(1);
+		});
+	});
+
+	describe("a stop-pass holder whose run is cancelled", () => {
+		it("refuses a continuation once the run's abort signal fires", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["UNWANTED"] }], onStop: () => undefined });
+			const controller = new AbortController();
+			const hold = run.session.holdForStopPass(controller.signal);
+
+			controller.abort();
+
+			expect(hold.signal.aborted).toBe(true);
+			await expect(
+				hold.prompt("CONTINUE", { attribution: "agent", synthetic: true, runCommands: false, throwOnDrop: true }),
+			).rejects.toThrow();
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+		});
+
+		it("starts no continuation when the run is cancelled while the refusal's prompt waits out maintenance", async () => {
+			const manager = new AsyncJobManager({});
+			AsyncJobManager.setInstance(manager);
+			const compaction = Promise.withResolvers<void>();
+			const compactionEntered = Promise.withResolvers<void>();
+			const run = await setup({
+				manager,
+				parentId: "Parent",
+				holdCompaction: { gate: compaction.promise, entered: compactionEntered },
+				responses: [yieldCall("REFUSED-PAYLOAD"), yieldCall("UNWANTED-CONTINUATION")],
+				onStop: (_event, callIndex) => {
+					if (callIndex !== 1) return undefined;
+					// Idle compaction is in flight when the refusal's continuation sets up its prompt.
+					void run.session.runIdleCompaction();
+					return { decision: "block", reason: "keep going" };
+				},
+			});
+
+			// The refusal's continuation has been handed to the hold, and is parked behind the compaction.
+			const continuationPrompted = Promise.withResolvers<void>();
+			const takeHold = run.session.holdForStopPass.bind(run.session);
+			vi.spyOn(run.session, "holdForStopPass").mockImplementation(runSignal => {
+				const hold = takeHold(runSignal);
+				const prompt = hold.prompt;
+				return {
+					...hold,
+					prompt: (text, options) => {
+						continuationPrompted.resolve();
+						return prompt(text, options);
+					},
+				};
+			});
+
+			await deliverWake(run.session, "m1", "Parent");
+			await continuationPrompted.promise;
+			const wakeJob = manager.getJob(AGENT_ID);
+			// The wake job's cancellation (the parent's, a runtime limit or a teardown) aborts the run.
+			manager.cancel(AGENT_ID);
+			compaction.resolve();
+			await wakeJob?.promise.catch(() => undefined);
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.mock.calls).toHaveLength(1);
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
 		});
 	});
 
