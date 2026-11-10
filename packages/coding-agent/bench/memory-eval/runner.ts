@@ -1,7 +1,7 @@
 /** Protocol runner: ingests each case into an engine, recalls every question, maps hits back to message ids and scores them. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { nearestRank, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { codePointLength, sliceCodePoints } from "../../src/commit/conventional/text";
 import { isRememberable } from "./datasets";
 import type { EngineAdapter, EngineName, MnemopiRecall, ProtocolName, RecallHit, RememberItem } from "./engine";
@@ -285,10 +285,6 @@ function means(rows: readonly Record<string, number>[]): Record<string, number> 
 	return Object.fromEntries(Object.entries(sums).map(([key, sum]) => [key, sum / rows.length]));
 }
 
-/** Nearest-rank percentile of an ascending-sorted array. */
-const percentile = (sorted: readonly number[], p: number): number =>
-	sorted.length === 0 ? 0 : sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
-
 export function buildResultFile(config: RunConfig, run: RunOutput, excluded: ExcludedQuestion[]): ResultFile {
 	const { questions } = run;
 	const latencies = questions.map(q => q.latencyMs).sort((a, b) => a - b);
@@ -301,8 +297,8 @@ export function buildResultFile(config: RunConfig, run: RunOutput, excluded: Exc
 		questions,
 		aggregate: {
 			...means(questions.map(q => q.metrics)),
-			"latency.p50": percentile(latencies, 0.5),
-			"latency.p95": percentile(latencies, 0.95),
+			"latency.p50": nearestRank(latencies, 0.5),
+			"latency.p95": nearestRank(latencies, 0.95),
 		},
 		perCategory: Object.fromEntries(Object.entries(byCategory).map(([cat, rows]) => [cat, means(rows)])),
 		fallbackRate: hits.length === 0 ? 0 : hits.filter(h => h.viaFallback).length / hits.length,
