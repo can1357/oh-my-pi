@@ -37,6 +37,8 @@
 	// Nested in another value (a smaller `depth` than the top level's), the same lines sit inside brackets, so
 	// the outer value's keys stay apart. An unlimited `depth` (`null`, `Infinity`) is the same at every level, so
 	// the bracketed form is used there too. With `elements` replaced by a non-array it prints as plain inspect.
+	// The top-level form ends with a newline, so a further `print` argument starts a line of its own instead
+	// of reading as fields of the last element.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
 	const showField = value =>
@@ -69,7 +71,7 @@
 				if (elements.length === 0) return "[]";
 				const lines = elements.map(elementLine);
 				return printedAtTop(depth, options)
-					? lines.join("\n")
+					? `${lines.join("\n")}\n`
 					: ["[", ...lines.map(line => `  ${line}`), "]"].join("\n");
 			},
 		});
@@ -83,7 +85,7 @@
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
 				for (const element of observation.elements) lines.push(elementLine(element));
 				return printedAtTop(depth, options)
-					? lines.join("\n")
+					? `${lines.join("\n")}\n`
 					: ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n");
 			},
 		});

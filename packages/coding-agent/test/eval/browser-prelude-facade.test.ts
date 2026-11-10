@@ -358,6 +358,13 @@ describe("browser facade in real Eval runtimes", () => {
 		expect((await run("print(await tab.observe());")).split("\n")).toEqual(lines);
 		expect((await run("await tab.observe()")).split("\n")).toEqual(lines);
 		expect((await run("print((await tab.observe()).elements);")).split("\n")).toEqual(lines.slice(5));
+		const single = await executeJs("print(await tab.observe());", { cwd: process.cwd(), sessionId, session });
+		expect(single.output).toBe(`${lines.join("\n")}\n`);
+		expect((await run('print(await tab.observe(), "done");')).split("\n")).toEqual([...lines, " done"]);
+		expect((await run('print((await tab.observe()).elements, "done");')).split("\n")).toEqual([
+			...lines.slice(5),
+			" done",
+		]);
 		const expectedJson = JSON.stringify(JSON.stringify(observation));
 		expect(
 			JSON.parse(
