@@ -167,8 +167,8 @@ pub fn batch_command_line<A: AsRef<[u8]>>(
 /// line rather than `argv`.
 ///
 /// Its search string must be quoted (`FIND /C "x"`), with `""` for a literal
-/// `"`. Switches (`/C`) stay bare and every other argument is quoted, as
-/// `cmd.exe` passes them.
+/// `"`. Its switches (`/C`) stay bare and every other argument is quoted, as
+/// `cmd.exe` passes them: a bare `/api` would be refused as a switch.
 pub fn find_command_line<A: AsRef<[u8]>>(argv: &[A]) -> Result<Vec<u16>, CmdlineError> {
 	let Some((program, args)) = argv.split_first() else {
 		return Ok(Vec::new());
@@ -177,7 +177,7 @@ pub fn find_command_line<A: AsRef<[u8]>>(argv: &[A]) -> Result<Vec<u16>, Cmdline
 	for arg in args {
 		let arg = text(arg.as_ref().as_bstr())?;
 		out.push(u16::from(b' '));
-		if arg.starts_with('/') {
+		if crate::cmd_dialect::is_switch(b"find", arg.as_bytes()) {
 			push_str(&mut out, arg);
 		} else {
 			out.push(u16::from(b'"'));
@@ -211,6 +211,8 @@ mod tests {
 			find(&["find", "/I", "say \"hi\"", "a b.txt"]),
 			r#""find" /I "say ""hi""" "a b.txt""#
 		);
+		// A search string or file that starts with `/` is quoted, not a switch.
+		assert_eq!(find(&["find", "/i", "/api", "log.txt"]), r#""find" /i "/api" "log.txt""#);
 	}
 
 	/// The post-2008 MSVCRT/UCRT rules (what `CommandLineToArgvW` and the C

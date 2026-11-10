@@ -47,7 +47,7 @@ use std::{
 	os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
 	ptr,
 	sync::{
-		Arc, Weak,
+		Arc, LazyLock, Weak,
 		atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll},
@@ -640,24 +640,33 @@ fn system_cmd() -> io::Result<Vec<u16>> {
 
 /// Whether `path` is System32's `find.exe` (any case, either separator),
 /// which parses its own command line ([`cmdline::find_command_line`]); a
-/// `find.exe` elsewhere (Git's GNU `find`) parses `argv`.
+/// `find.exe` elsewhere (Git's GNU `find`) parses `argv`. Any other file name
+/// is answered without a system call.
 fn is_system_find(path: &BStr) -> bool {
-	let Ok(mut expected) = system_dir() else {
+	/// ASCII case and `/` folded to `\`, the way Windows compares paths here.
+	fn fold(unit: u16) -> u16 {
+		match u8::try_from(unit) {
+			Ok(b'/') => u16::from(b'\\'),
+			Ok(b) if b.is_ascii() => u16::from(b.to_ascii_lowercase()),
+			_ => unit,
+		}
+	}
+	/// System32's `find.exe`, folded; `None` when the system directory is
+	/// unknown.
+	static SYSTEM_FIND: LazyLock<Option<Vec<u16>>> = LazyLock::new(|| {
+		let mut dir = system_dir().ok()?;
+		dir.extend("\\find.exe".encode_utf16());
+		Some(dir.into_iter().map(fold).collect())
+	});
+	let name = path.rfind_byteset(b"\\/").map_or(path, |i| &path[i + 1..]);
+	if !name.eq_ignore_ascii_case(b"find.exe") {
+		return false;
+	}
+	let expected = &*SYSTEM_FIND;
+	let (Some(expected), Ok(path)) = (expected, path.to_str()) else {
 		return false;
 	};
-	expected.extend("\\find.exe".encode_utf16());
-	let Ok(path) = path.to_str() else {
-		return false;
-	};
-	let fold = |unit: u16| match char::from_u32(u32::from(unit)) {
-		Some('/') => u16::from(b'\\'),
-		Some(c) if c.is_ascii() => u16::from(c.to_ascii_lowercase() as u8),
-		_ => unit,
-	};
-	path
-		.encode_utf16()
-		.map(fold)
-		.eq(expected.into_iter().map(fold))
+	path.encode_utf16().map(fold).eq(expected.iter().copied())
 }
 
 /// Application name and mutable command line (both NUL-terminated).

@@ -153,6 +153,16 @@ pub fn speaks_shadowed_program(name: &[u8], args: &[impl AsRef<[u8]>]) -> bool {
 	switches > 0 && program.most_operands.is_none_or(|most| operands <= most)
 }
 
+/// Whether `arg` is one of the switches of the Windows program `name`
+/// shadows (`/C` for `find`): what that program reads as a switch, not as
+/// its search string or a file ([`crate::sys::cmdline::find_command_line`]).
+pub fn is_switch(name: &[u8], arg: &[u8]) -> bool {
+	PROGRAMS
+		.iter()
+		.find(|p| p.name.as_bytes() == name)
+		.is_some_and(|p| p.switch(arg).is_some())
+}
+
 /// GNU option or `find` expression syntax: `-x`, `--x`, `(`, `)`, `!`.
 const fn is_gnu_syntax(arg: &[u8]) -> bool {
 	(arg.len() > 1 && arg[0] == b'-') || matches!(arg, b"(" | b")" | b"!")
