@@ -25,6 +25,8 @@ The first successful browser call of a conversation carries a short core of the 
 
 Each advisor receives the guide in its own conversation, independently of the primary agent. Platform safety guidance, including the Linux X11 focus warning, stays in the pre-call system prompt rather than waiting for the first result, and follows browser endpoint changes in both primary and advisor requests.
 
+First-call guide blocks bypass Spotlight output shaping; the cell's ordinary output remains eligible for shaping.
+
 ## JavaScript API
 
 ```js

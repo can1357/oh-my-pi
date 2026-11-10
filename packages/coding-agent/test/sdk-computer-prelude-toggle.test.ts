@@ -168,6 +168,13 @@ describe("AgentSession eval preludes", () => {
 			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("On Linux under X11");
 			expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).not.toContain("On Linux under X11");
 		}
+		const movedCwd = path.join(registryDir, "moved");
+		fs.mkdirSync(movedCwd, { recursive: true });
+		await session.moveSession(movedCwd, path.join(registryDir, "moved-sessions"));
+		const moved = await secondEval.execute("advisor-after-move", { language: "js", code: 'print(await sh("pwd"))' });
+		expect(moved.content).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "text", text: expect.stringContaining(movedCwd) }),
+		]));
 	});
 
 	// `/computer on` mid-session used to rebuild the system prompt and eval
