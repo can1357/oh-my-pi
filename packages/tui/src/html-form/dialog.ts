@@ -748,6 +748,8 @@ export class HtmlFormDialog implements Component, Focusable {
 			editor.placeholder = () => field.placeholder || undefined;
 			// Prefilled drafts (a commit message) open at their first line, not scrolled to the end.
 			editor.setText(field.value, { cursor: "start" });
+			// Host edits (a Tern paste) reach the editor directly, past `handleNativeEvent`; they are activity too.
+			editor.onChange = () => this.#resetCountdown();
 			this.#editors.set(field, editor);
 			return;
 		}
@@ -925,6 +927,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		editor.setMaxHeight(4);
 		editor.disableSubmit = true;
 		editor.setUseTerminalCursor(this.#useTerminalCursor);
+		editor.onChange = () => this.#resetCountdown();
 		editor.setText(this.#notes.get(stop.field)?.get(option) ?? "", { cursor: "start" });
 		this.#noteEditor = { field: stop.field, option, editor };
 		this.#syncControlFocus();
@@ -972,6 +975,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#closeNote(): void {
+		// The editor is reused: a later note's literal `[Paste #1]` must not expand to this one's paste.
+		this.#noteEditor?.editor.clearPasteState();
 		this.#noteEditor?.editor.setText("");
 		this.#noteEditor = undefined;
 		this.#syncControlFocus();

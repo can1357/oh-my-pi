@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
+import { Editor } from "@oh-my-pi/pi-tui/components/editor";
 import { loadFormImage } from "@oh-my-pi/pi-tui/html-form/media";
 import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
@@ -39,9 +40,11 @@ function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child && typeof child.k === "string";
 }
 
-/** The `Input` components a description mounts as children (the form's live text controls). */
-function liveInputs(root: NativeNode): Input[] {
-	return (root.c ?? []).flatMap(child => (isNode(child) ? liveInputs(child) : child instanceof Input ? [child] : []));
+/** The components of one kind a description mounts as children (the form's live text controls). */
+function liveControls<T>(root: NativeNode, kind: abstract new (...args: never[]) => T): T[] {
+	return (root.c ?? []).flatMap(child =>
+		isNode(child) ? liveControls(child, kind) : child instanceof kind ? [child] : [],
+	);
 }
 
 function findPath(root: NativeNode, predicate: (node: NativeNode) => boolean, path = ""): string | undefined {
@@ -229,6 +232,43 @@ describe("html form", () => {
 			select.handleInput("\x05");
 			expect(select.debugState().noteEdit).toBe("region=us");
 			select.dispose();
+		});
+
+		it("counts a host edit in the note editor as activity", () => {
+			vi.useFakeTimers();
+			const onTimeout = vi.fn();
+			const { form } = dialog(DB_FORM, { timeout: 1000, onTimeout });
+			form.handleInput("n");
+			const [editor] = liveControls(form.describe(CX), Editor);
+			vi.advanceTimersByTime(900);
+			editor!.handleNativeEvent({ type: "edit", key: "", from: 0, to: 0, text: "pasted", cursor: 6, len: 0 });
+			vi.advanceTimersByTime(900);
+			expect(onTimeout).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(200);
+			expect(onTimeout).toHaveBeenCalledWith(form.data(), [
+				{
+					name: "db",
+					question: "Which store should ledger use?",
+					option: "SQLite",
+					value: "sqlite",
+					text: "pasted",
+				},
+			]);
+			form.dispose();
+		});
+
+		it("does not expand a later note's literal paste marker to an earlier note's paste", () => {
+			const { form } = dialog(DB_FORM);
+			const paste = Array.from({ length: 12 }, (_, line) => `line ${line}`).join("\n");
+			form.handleInput("n");
+			form.handleInput(`\x1b[200~${paste}\x1b[201~`);
+			form.handleInput(ENTER);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("see [Paste #1]");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: paste, 1: "see [Paste #1]" } });
+			form.dispose();
 		});
 
 		it("hides and restores the form with a note draft still open", () => {
@@ -939,9 +979,9 @@ describe("html form", () => {
 		it("natively: clicking Other mounts its input, and text the terminal types there becomes the radio's answer", () => {
 			const { form } = dialog(DB_FORM);
 			const radios = findPath(form.describe(CX), node => node.k === "list" && node.key === "f0")!;
-			expect(liveInputs(form.describe(CX))).toEqual([]);
+			expect(liveControls(form.describe(CX), Input)).toEqual([]);
 			form.handleNativeEvent({ type: "select", key: radios, item: "other" });
-			const [other] = liveInputs(form.describe(CX));
+			const [other] = liveControls(form.describe(CX), Input);
 			expect(other).toBeInstanceOf(Input);
 			other!.handleNativeEvent({
 				type: "edit",
