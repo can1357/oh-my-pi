@@ -129,6 +129,7 @@ import {
 	type SessionInfo,
 } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
+import { deleteSession } from "./session/session-purge";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
@@ -218,19 +219,13 @@ type SessionPicker = (
 
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
 async function loadSessionPicker(init?: { foreign?: boolean }): Promise<SessionPicker> {
-	const [
-		{ selectSession },
-		{ HistoryStorage },
-		{ loadPinnedSessionIds, setSessionPinned },
-		{ deleteSession },
-		{ FileSessionStorage },
-	] = await Promise.all([
-		import("@oh-my-pi/pi-tui/apps/session-picker"),
-		import("./session/history-storage"),
-		import("./session/session-pins"),
-		import("./session/session-purge"),
-		import("./session/session-storage"),
-	]);
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds, setSessionPinned }, { FileSessionStorage }] =
+		await Promise.all([
+			import("@oh-my-pi/pi-tui/apps/session-picker"),
+			import("./session/history-storage"),
+			import("./session/session-pins"),
+			import("./session/session-storage"),
+		]);
 	return (sessions, options) => {
 		const storage = new FileSessionStorage();
 		// The picker runs before interactive mode loads the user's keymap, and its pin keys are remappable.
