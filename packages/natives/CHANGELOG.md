@@ -73,6 +73,7 @@
 ### Fixed
 
 - Fixed X11 takeover taking a typing user's keys: a window or element takeover now waits until you have pressed no key or button for 5 s (failing `UserIntervened` if you are still at it near the run's timeout), and stops with `UserIntervened` at your first key or click once it has activated its target
+- Fixed X11 takeover taking a typing user's keys: a window or element takeover now waits until you have pressed no key or button for 5 s (failing `UserIntervened` if you are still at it near the run's timeout), and stops with `UserIntervened` at your first key or click once it has activated its target ([#18784](https://github.com/can1357/oh-my-pi/pull/18784) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.6] - 2026-11-09
 
