@@ -96,12 +96,9 @@ const MAX_PREFIX_REGEX_MEMO = 4096;
  * size cap: provider context is re-redacted on every request and walks the
  * whole history in order, so any cap below the live context evicts every entry
  * before its next use. Text in the live context is read every turn and never
- * expires; only text that left it (compacted history, superseded prompts) ages out.
+ * expires; entries for text that left it are dropped only if read again.
  */
 const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
-
-/** Minimum time between purges of expired redaction cache entries. */
-const TEXT_CACHE_PURGE_INTERVAL_MS = 60 * 1000;
 
 /** Text-keyed redaction cache; see {@link TEXT_CACHE_IDLE_MS}. */
 function createTextCache<V>(): LRUCache<string, V> {
@@ -250,9 +247,6 @@ export class SecretObfuscator {
 
 	/** Top-level {@link obfuscate} results; see {@link ObfuscateMemo}. */
 	readonly #obfuscateMemo = createTextCache<ObfuscateMemo>();
-
-	/** When the text caches were last purged of expired entries. */
-	#cachesPurgedAt = 0;
 
 	/** Content keys of the shared value sets passed to {@link obfuscate}. */
 	readonly #sharedValuesKeys = new WeakMap<ReadonlySet<string>, SharedValuesKey>();
@@ -590,7 +584,6 @@ export class SecretObfuscator {
 		const sharedValues = sharedRegexSecretValues ?? EMPTY_SECRET_VALUES;
 		const topLevel = this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
 		if (!topLevel) return this.#obfuscateUncached(text, sharedValues);
-		this.#purgeStaleCaches();
 		const revision = this.#revision.value;
 		const sharedKey = this.#sharedValuesKey(sharedValues);
 		const memo = this.#obfuscateMemo.get(text);
@@ -598,16 +591,6 @@ export class SecretObfuscator {
 		const result = this.#obfuscateUncached(text, sharedValues);
 		if (this.#revision.value === revision) this.#obfuscateMemo.set(text, { revision, sharedKey, result });
 		return result;
-	}
-
-	/** Drops expired text cache entries (text that left the context), at most once per interval. */
-	#purgeStaleCaches(): void {
-		const now = performance.now();
-		if (now - this.#cachesPurgedAt < TEXT_CACHE_PURGE_INTERVAL_MS) return;
-		this.#cachesPurgedAt = now;
-		this.#textScans.purgeStale();
-		this.#regexValueMemo.purgeStale();
-		this.#obfuscateMemo.purgeStale();
 	}
 
 	/**

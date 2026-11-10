@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `LRUCache.purgeStale()` to drop expired entries that are never read again
-
 ## [18.18.2] - 2026-11-08
 
 ### Added
