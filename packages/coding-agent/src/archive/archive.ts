@@ -182,7 +182,7 @@ export async function archiveSession(idOrFile: string, limit: number): Promise<A
 	return { text: lines.join("\n"), records: record };
 }
 
-/** Prompt history of one project (`cwd`) or every project, newest first; `query` switches to token search. */
+/** Prompt history of one project (`cwd`) or every project, newest first; `query` matches every whitespace-delimited term literally. */
 export function archivePrompts(
 	query: string | undefined,
 	cwd: string | undefined,

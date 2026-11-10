@@ -298,37 +298,37 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
+	/** Finds unique prompts containing every whitespace-delimited query term, newest first. */
 	search(query: string, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		const tokens = this.#tokenize(query);
-		if (tokens.length === 0) return [];
+		const terms = query.toLowerCase().trim().split(/\s+/u);
+		if (!terms[0]) return [];
 
-		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
-		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
-		//    indexed the stored text, so "git-commit" -> "git"* "commit"*.
-		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+		// FTS5 cannot preserve punctuation inside a term; use literal substring
+		// matching alone for those queries instead of widening their results.
 		let ftsRows: HistoryRow[] = [];
-		try {
-			ftsRows = this.#searchStmt.all(
-				ftsQuery,
-				filter.cwd ?? null,
-				filter.sessionId ?? null,
-				safeLimit,
-			) as HistoryRow[];
-		} catch (error) {
-			// Malformed FTS expression - fall through to substring path.
-			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
+		if (terms.every(term => /^[\p{L}\p{N}]+$/u.test(term))) {
+			const ftsQuery = terms.map(term => `"${term}"*`).join(" ");
+			// unicode61 folds diacritics, so FTS candidates still need literal verification.
+			try {
+				ftsRows = (
+					this.#searchStmt.all(ftsQuery, filter.cwd ?? null, filter.sessionId ?? null, safeLimit) as HistoryRow[]
+				).filter(row => {
+					const prompt = row.prompt.toLowerCase();
+					return terms.every(term => prompt.includes(term));
+				});
+			} catch (error) {
+				logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
+			}
 		}
 
-		// 2. Substring fallback (token-AND LIKE). Catches infix matches FTS5's
-		//    prefix-only wildcard cannot reach (e.g. "mit" -> "commit"). Bounded
-		//    by safeLimit, ordered by recency - no full-table load into JS.
+		// LIKE catches infix matches FTS5's prefix-only wildcard cannot reach.
+		// Both paths are bounded by safeLimit and ordered by recency.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, filter);
+			subRows = this.#searchSubstring(terms, safeLimit, filter);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -533,18 +533,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 		if (!Number.isFinite(limit)) return 0;
 		const clamped = Math.max(0, Math.floor(limit));
 		return Math.min(clamped, 1000);
-	}
-
-	/**
-	 * Split on non-alphanumeric runs, mirroring FTS5's `unicode61` tokenizer so
-	 * query tokens align with how stored prompts were indexed. Lowercases for
-	 * stable substring matching.
-	 */
-	#tokenize(query: string): string[] {
-		return query
-			.toLowerCase()
-			.split(/[^\p{L}\p{N}]+/u)
-			.filter(tok => tok.length > 0);
 	}
 
 	#searchSubstring(tokens: string[], limit: number, filter: HistoryFilter): HistoryRow[] {

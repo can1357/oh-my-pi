@@ -32,15 +32,32 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
-	it("matches across punctuation in the query (FTS token alignment)", async () => {
+	it("requires literal punctuation within each query term", async () => {
 		const storage = await freshStorage();
-		await seed(storage, ["run git commit --amend now", "unrelated noise"]);
+		await seed(storage, ["see a/b path", "alpha and beta note", "see a b path", "unrelated"]);
 
-		// Before the tokenization fix, `git-commit` produced a single FTS phrase
-		// `"git-commit"*` which matched nothing because unicode61 indexed the stored
-		// prompt as `git` and `commit` separately.
-		const results = storage.search("git-commit", 10);
-		expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
+		expect(storage.search("a/b", 10).map(r => r.prompt)).toEqual(["see a/b path"]);
+	});
+
+	it("does not turn a hyphenated term into two independent words", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["run git-commit now", "run git commit --amend now"]);
+
+		expect(storage.search("git-commit", 10).map(r => r.prompt)).toEqual(["run git-commit now"]);
+	});
+
+	it("requires both a literal path and another query term", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["see a/b path", "see a/b note", "alpha and beta path"]);
+
+		expect(storage.search("a/b path", 10).map(r => r.prompt)).toEqual(["see a/b path"]);
+	});
+
+	it("does not return diacritic-folded FTS matches without the literal term", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["a café is here", "a cafe is here"]);
+
+		expect(storage.search("cafe", 10).map(r => r.prompt)).toEqual(["a cafe is here"]);
 	});
 
 	it("falls back to substring matching for infix queries FTS prefix cannot reach", async () => {
@@ -88,11 +105,12 @@ describe("HistoryStorage.search", () => {
 		expect(results.map(r => r.prompt)).toEqual(["Recommit The Patch"]);
 	});
 
-	it("returns empty for queries with no alphanumeric characters", async () => {
+	it("matches punctuation-only terms literally and ignores empty queries", async () => {
 		const storage = await freshStorage();
-		await seed(storage, ["whatever"]);
+		await seed(storage, ["one --- two", "one two", "100% complete", "1000 complete"]);
 
-		expect(storage.search("---", 10)).toEqual([]);
+		expect(storage.search("---", 10).map(r => r.prompt)).toEqual(["one --- two"]);
+		expect(storage.search("100%", 10).map(r => r.prompt)).toEqual(["100% complete"]);
 		expect(storage.search("  ", 10)).toEqual([]);
 	});
 
