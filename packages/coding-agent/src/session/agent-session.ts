@@ -342,6 +342,7 @@ import { formatArtifactErrorNotice, type OutputMeta, stripOutputNotice } from "@
 import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	ASYNC_INLINE_RESULT_MAX_CHARS,
+	ASYNC_JOBS_DEAD_LETTERED_TYPE,
 	ASYNC_PREVIEW_MAX_CHARS,
 	ASYNC_PREVIEW_TAIL_CHARS,
 	ASYNC_RESULT_MESSAGE_TYPE,
@@ -6665,6 +6666,40 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// dead-letter rather than enqueue a follow-up into a disposing session.
 		this.#unregisterAsyncDeliverySink?.();
 		this.#unregisterAsyncDeliverySink = undefined;
+		// Dead-letter record before cancelling: teardown is about to cancel this
+		// agent's running jobs and their completions can never be delivered, so
+		// name them in the transcript — a revived agent reads what was lost
+		// instead of confabulating job state (#11564). Mirrors
+		// #cancelOwnAsyncJobs' owner-scoped cancel set: subagent sessions hold no
+		// owned manager, their jobs live in the inherited one. Best-effort:
+		// teardown proceeds even if the entry cannot be recorded.
+		if (this.#agentId) {
+			const deadLettered = this.#asyncJobManager?.getRunningJobs({ ownerId: this.#agentId }) ?? [];
+			if (deadLettered.length > 0) {
+				const lines = deadLettered.map(
+					job =>
+						`- ${job.id} (${job.type}) ${job.label} — cancelled by session teardown, completion dead-lettered`,
+				);
+				try {
+					this.sessionManager.appendCustomMessageEntry(
+						ASYNC_JOBS_DEAD_LETTERED_TYPE,
+						`Session teardown cancelled ${deadLettered.length} owned background job(s) before completion; their results will not be delivered:\n${lines.join("\n")}`,
+						false,
+						{
+							jobs: deadLettered.map(job => ({
+								id: job.id,
+								type: job.type,
+								label: job.label,
+								startedAt: job.startTime,
+							})),
+						},
+						"agent",
+					);
+				} catch (error) {
+					logger.warn("Failed to record dead-lettered owned jobs during dispose", { error: String(error) });
+				}
+			}
+		}
 		const manager = this.#ownedAsyncJobManager;
 		// The shutdown reason is reserved for the top-level session that OWNS the
 		// manager — the genuine process/handled-shutdown path — so the task

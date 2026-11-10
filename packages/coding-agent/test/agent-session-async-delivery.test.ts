@@ -25,6 +25,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
+	ASYNC_JOBS_DEAD_LETTERED_TYPE,
 	buildAsyncResultBatchMessage,
 	type AsyncResultDetails,
 	type AsyncResultEntry,
@@ -40,7 +41,7 @@ import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
@@ -56,6 +57,7 @@ function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 describe("AgentSession owner-routed async delivery", () => {
 	let session: AgentSession;
 	const authStorages: AuthStorage[] = [];
+	const tempDirs: TempDir[] = [];
 
 	afterEach(async () => {
 		if (session) {
@@ -63,6 +65,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		}
 		for (const authStorage of authStorages.splice(0)) {
 			authStorage.close();
+		}
+		for (const tempDir of tempDirs.splice(0)) {
+			tempDir[Symbol.dispose]();
 		}
 		AsyncJobManager.resetForTests();
 	});
@@ -1428,5 +1433,92 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 		expect(manager.isJobResultConsumed("sub-job")).toBe(true);
 		expect(mock.calls.some(call => JSON.stringify(call.context.messages).includes("QUEUED RESULT"))).toBe(true);
+	});
+
+	it("records dead-lettered owned jobs in the transcript when dispose cancels them", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const tempDir = TempDir.createSync("@omp-async-dead-letter-");
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const appendSpy = vi.spyOn(sessionManager, "appendCustomMessageEntry");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			asyncJobManager: manager,
+		});
+
+		const never = Promise.withResolvers<string>();
+		manager.register(
+			"bash",
+			"long rebuild",
+			({ signal }) => untilAborted(signal, never.promise).then(() => "unreachable"),
+			{ id: "sub-job", ownerId: "SubAgent" },
+		);
+		expect(session.hasPendingAsyncWork()).toBe(true);
+
+		await session.dispose();
+		never.resolve("too late");
+
+		// The dead-letter record is appended to the transcript manager before
+		// the terminal write barrier seals it — a revived agent reads it from
+		// the session file on disk (the manager's own persistence machinery
+		// handles durability; empty-session cleanup is separate behavior).
+		const deadLetterCalls = appendSpy.mock.calls.filter(call => call[0] === ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(deadLetterCalls.length).toBe(1);
+		const [customType, content, display, details] = deadLetterCalls[0]!;
+		expect(customType).toBe(ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(display).toBe(false);
+		expect(content as string).toContain("1 owned background job(s)");
+		expect(content as string).toContain("sub-job");
+		expect(content as string).toContain("long rebuild");
+		expect(details).toMatchObject({ jobs: [{ id: "sub-job", type: "bash", label: "long rebuild" }] });
+	});
+
+	it("writes no dead-letter record when dispose has no pending owned jobs", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		const tempDir = TempDir.createSync("@omp-async-dead-letter-");
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const appendSpy = vi.spyOn(sessionManager, "appendCustomMessageEntry");
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+			asyncJobManager: manager,
+		});
+
+		await session.dispose();
+
+		const deadLetterCalls = appendSpy.mock.calls.filter(call => call[0] === ASYNC_JOBS_DEAD_LETTERED_TYPE);
+		expect(deadLetterCalls.length).toBe(0);
 	});
 });
