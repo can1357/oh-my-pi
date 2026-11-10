@@ -91,40 +91,21 @@ const NON_ASCII_RE = /[^\x00-\x7F]/;
 const MAX_PREFIX_REGEX_MEMO = 4096;
 
 /**
- * Hard cap on the text (UTF-16 units: keys plus retained result strings) one
- * {@link TextCache} holds. Provider context is re-redacted on every request
- * and walks the whole history in order, so a cap below the live context would
- * evict every entry before its next use. The largest provider windows are
- * ~2M tokens (~8M chars); this leaves room for several such contexts at once.
- */
-const MAX_TEXT_CACHE_CHARS = 64 * 1024 * 1024;
-
-/**
- * How long a {@link TextCache} entry survives unused. Text in the live context
- * is touched every turn, so only text that left it (compacted history,
- * superseded prompts) ages out, well before the size cap is reached.
+ * How long a {@link TextCache} entry survives unused. There is deliberately no
+ * size cap: provider context is re-redacted on every request and walks the
+ * whole history in order, so any cap below the live context evicts every entry
+ * before its next use. Text in the live context is touched every turn and never
+ * evicted; only text that left it (compacted history, superseded prompts) ages out.
  */
 const TEXT_CACHE_IDLE_MS = 30 * 60 * 1000;
 
 /** Minimum time between idle sweeps of one {@link TextCache}. */
 const TEXT_CACHE_SWEEP_INTERVAL_MS = 60 * 1000;
 
-interface TextCacheEntry<V> {
-	value: V;
-	/** Characters this entry retains beyond its key (e.g. a distinct result string). */
-	extraChars: number;
-	usedAt: number;
-}
-
-/**
- * Text-keyed LRU. Entries expire after {@link TEXT_CACHE_IDLE_MS} unused, and
- * least recently used entries are evicted whenever retained text exceeds
- * {@link MAX_TEXT_CACHE_CHARS}; a text larger than the cap is never cached.
- */
+/** Text-keyed cache whose entries expire only after {@link TEXT_CACHE_IDLE_MS} unused. */
 class TextCache<V> {
-	/** Least recently used first, so eviction and sweeps stop at the first entry to keep. */
-	readonly #map = new Map<string, TextCacheEntry<V>>();
-	#chars = 0;
+	/** Least recently used first, so a sweep stops at the first live entry. */
+	readonly #map = new Map<string, { value: V; usedAt: number }>();
 	#sweptAt = 0;
 
 	get(text: string): V | undefined {
@@ -136,28 +117,16 @@ class TextCache<V> {
 		return entry.value;
 	}
 
-	set(text: string, value: V, extraChars = 0): void {
-		this.#delete(text);
-		const size = text.length + extraChars;
-		if (size > MAX_TEXT_CACHE_CHARS) return;
+	set(text: string, value: V): void {
 		const now = Date.now();
-		this.#map.set(text, { value, extraChars, usedAt: now });
-		this.#chars += size;
-		const sweep = now - this.#sweptAt >= TEXT_CACHE_SWEEP_INTERVAL_MS;
-		if (sweep) this.#sweptAt = now;
-		for (const [key, entry] of this.#map) {
-			const idle = sweep && now - entry.usedAt >= TEXT_CACHE_IDLE_MS;
-			if (!idle && this.#chars <= MAX_TEXT_CACHE_CHARS) break;
-			this.#map.delete(key);
-			this.#chars -= key.length + entry.extraChars;
-		}
-	}
-
-	#delete(text: string): void {
-		const entry = this.#map.get(text);
-		if (entry === undefined) return;
 		this.#map.delete(text);
-		this.#chars -= text.length + entry.extraChars;
+		this.#map.set(text, { value, usedAt: now });
+		if (now - this.#sweptAt < TEXT_CACHE_SWEEP_INTERVAL_MS) return;
+		this.#sweptAt = now;
+		for (const [key, entry] of this.#map) {
+			if (now - entry.usedAt < TEXT_CACHE_IDLE_MS) break;
+			this.#map.delete(key);
+		}
 	}
 }
 
@@ -645,9 +614,7 @@ export class SecretObfuscator {
 		const memo = this.#obfuscateMemo.get(text);
 		if (memo !== undefined && memo.revision === revision && memo.sharedKey === sharedKey) return memo.result;
 		const result = this.#obfuscateUncached(text, sharedValues);
-		if (this.#revision.value === revision) {
-			this.#obfuscateMemo.set(text, { revision, sharedKey, result }, result === text ? 0 : result.length);
-		}
+		if (this.#revision.value === revision) this.#obfuscateMemo.set(text, { revision, sharedKey, result });
 		return result;
 	}
 
