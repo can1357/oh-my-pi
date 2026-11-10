@@ -100,6 +100,21 @@ fn has_main(store: &mut dyn StateStore, vp: &Vproc) -> Result<bool, StoreError> 
 	))
 }
 
+/// The name the shell `vp` runs in was started with: the `main` level's
+/// `BASH_SOURCE`, and the `$0` a function defined there records.
+///
+/// [`Kernel::argv0`] is the OUTERMOST shell's, set once at `Kernel::new`,
+/// so it is wrong for an in-engine nested shell ([`super::nested`]), which
+/// runs the script it was handed and writes that script's name into its own
+/// overlay as [`MiscKey::Argv0`]. Reading the record resolves to the same
+/// [`Kernel::argv0`] outside one, since `Kernel::new` writes it to the root.
+fn shell_argv0(k: &Kernel, store: &mut dyn StateStore, vp: &Vproc) -> Result<BString, StoreError> {
+	Ok(match state::record(store, vp, Key::Misc(MiscKey::Argv0))? {
+		Some(Record::Misc(name)) => name.clone(),
+		_ => k.argv0.clone(),
+	})
+}
+
 /// One of bash's call-stack arrays as `vp` sees it, innermost level first
 /// (`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ARGC`, `BASH_ARGV`).
 /// `None` for another name, and for `FUNCNAME` outside any function (bash
@@ -145,7 +160,7 @@ pub fn array(
 				})
 				.collect();
 			if has_main(store, vp)? {
-				files.push(k.argv0.clone());
+				files.push(shell_argv0(k, store, vp)?);
 			}
 			files
 		},
@@ -251,12 +266,13 @@ pub fn innermost_file(vp: &Vproc) -> Option<&BString> {
 }
 
 /// The file a function defined now records as its source (bash's
-/// `make_function_def`): `BASH_SOURCE[0]`, else `$0` (a `-c` string or a
-/// script on standard input).
+/// `make_function_def`): `BASH_SOURCE[0]`, else the `$0` of the shell that
+/// defines it (a `-c` string or a script on standard input) -- an in-engine
+/// nested shell's own, never the outermost shell's.
 ///
 /// # Errors
 ///
-/// A store failure reading the run origin or `$0`.
+/// A store failure reading the run origin, the shell's name or `$0`.
 pub fn definition_file(
 	k: &Kernel,
 	store: &mut dyn StateStore,
@@ -265,10 +281,11 @@ pub fn definition_file(
 	if let Some(file) = innermost_file(vp) {
 		return Ok(file.clone());
 	}
+	let argv0 = shell_argv0(k, store, vp)?;
 	if has_main(store, vp)? {
-		return Ok(k.argv0.clone());
+		return Ok(argv0);
 	}
-	state::dollar0(store, vp, &k.argv0)
+	state::dollar0(store, vp, &argv0)
 }
 
 /// bash's `get_bashargcv`: reading `BASH_ARGC`/`BASH_ARGV` outside any
