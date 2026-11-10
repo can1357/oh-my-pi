@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StreamingEditGuard } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { TurnlessAgent } from "@oh-my-pi/pi-coding-agent/session/turn-gate";
 
 interface RecoveryHarnessOptions {
 	settings?: Settings;
@@ -17,6 +18,8 @@ interface RecoveryHarness {
 	notices: { level: string; message: string }[];
 	tasks: ((signal: AbortSignal) => Promise<void>)[];
 	continueCount: () => number;
+	/** Set: the turn gate refuses the next recovery and parks it here. */
+	refuse: { next: boolean; parked?: () => void };
 }
 
 function streamingEditFailure(opts: { path: string; error: string }): AgentEvent {
@@ -41,6 +44,7 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 	const notices: { level: string; message: string }[] = [];
 	const tasks: ((signal: AbortSignal) => Promise<void>)[] = [];
 	let continueCount = 0;
+	const refuse: RecoveryHarness["refuse"] = { next: false };
 	const guard = new StreamingEditGuard({
 		agent: {
 			abort(reason?: unknown) {
@@ -50,10 +54,7 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 				appended.push(message as Record<string, unknown>);
 			},
 			waitForIdle: async () => {},
-			continue: async () => {
-				continueCount++;
-			},
-		} as unknown as Agent,
+		} as unknown as TurnlessAgent,
 		settings: state.settings,
 		sessionManager: {
 			appendCustomMessageEntry(...args: unknown[]) {
@@ -71,8 +72,28 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 			tasks.push(task);
 		},
 		discardAssistantTurn() {},
+		startRecoveryTurn(onAdmitted, park) {
+			if (refuse.next) {
+				refuse.next = false;
+				refuse.parked = park;
+				return undefined;
+			}
+			onAdmitted();
+			continueCount++;
+			return Promise.resolve();
+		},
 	});
-	return { guard, state, aborts, appended, persisted, notices, tasks, continueCount: () => continueCount };
+	return {
+		guard,
+		state,
+		aborts,
+		appended,
+		persisted,
+		notices,
+		tasks,
+		continueCount: () => continueCount,
+		refuse,
+	};
 }
 
 async function runRecoveryTask(opts: { harness: RecoveryHarness; index?: number }): Promise<void> {
@@ -125,6 +146,21 @@ describe("streaming edit recovery", () => {
 		await runRecoveryTask({ harness });
 		expect(harness.appended.length).toBe(0);
 		expect(harness.continueCount()).toBe(0);
+	});
+
+	test("adds its diagnostic only with the continuation the turn gate admits, and asks again after a refusal", async () => {
+		const harness = createHarness();
+		harness.guard.maybeAbort(streamingEditFailure({ path: "src/broken.ts", error: "bad anchors" }));
+		harness.refuse.next = true;
+
+		await runRecoveryTask({ harness });
+		expect(harness.appended).toHaveLength(0);
+		expect(harness.persisted).toHaveLength(0);
+		harness.refuse.parked?.();
+		await runRecoveryTask({ harness, index: 1 });
+
+		expect(harness.appended).toHaveLength(1);
+		expect(harness.continueCount()).toBe(1);
 	});
 
 	test("stops with a warning after the recovery budget is spent", () => {
