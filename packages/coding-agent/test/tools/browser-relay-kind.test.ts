@@ -53,6 +53,8 @@ describe("browser prelude relay guidance", () => {
 		"TERN_PANE_SOCKET",
 		"TERN_PANE",
 		"CMUX_SOCKET_PATH",
+		// Inherited from an interactive omp when the tests run from its bash tool.
+		"PI_TERMINAL_OWNER_PID",
 	] as const;
 	const savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	beforeEach(() => {
