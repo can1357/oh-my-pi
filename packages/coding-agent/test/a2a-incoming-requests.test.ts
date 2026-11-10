@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { IncomingRequests } from "../src/a2a/incoming-requests";
 
 describe("incoming A2A requests", () => {
@@ -173,5 +173,126 @@ describe("incoming A2A requests", () => {
 		expect(await registry.list()).toEqual([kept]);
 		expect(await registry.consume({ to: "agent" })).toBeUndefined();
 		expect(await registry.release(claim!.leaseId)).toBe(false);
+	});
+});
+
+describe("incoming request cleanup", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("removed recipient cannot be resurrected by worker exit", async () => {
+		const registry = new IncomingRequests();
+		const a = { to: "worker-agent", from: "peer", messageId: "a", at: 1 };
+		const other = { to: "other-agent", from: "peer", messageId: "other", at: 2 };
+		await registry.note(a);
+		await registry.note(other);
+		const lease = await registry.consume({ to: "worker-agent" }, "w1");
+		expect(lease).toBeDefined();
+		let listener: ((event: { type: string; ref: { id: string } }) => void) | undefined;
+		const fakeRegistry = {
+			onChange: (item: (event: { type: string; ref: { id: string } }) => void) => {
+				listener = item;
+				return () => {
+					listener = undefined;
+				};
+			},
+		};
+
+		const stop = registry.startCleanup(fakeRegistry as never, 1_800_000);
+		try {
+			listener?.({ type: "removed", ref: { id: "worker-agent" } });
+			// The worker exits after the removal: its unacknowledged claim must
+			// not resurrect the discarded recipient's request.
+			registry.dropHome("w1");
+			expect(await registry.list()).toEqual([other]);
+			expect(await registry.consume({ to: "worker-agent" })).toBeUndefined();
+			expect(await registry.release(lease!.leaseId)).toBe(false);
+			expect(await registry.confirm(lease!.leaseId)).toBe(false);
+			expect(await registry.list()).toEqual([other]);
+		} finally {
+			stop();
+		}
+	});
+
+	it("reply deadline removes open and leased requests", async () => {
+		const registry = new IncomingRequests();
+		vi.useFakeTimers();
+		setSystemTime(100);
+		// Fake time: the notes land at t=100 with a 50 ms reply timeout.
+		await registry.note({ to: "agent", from: "peer", messageId: "open", at: 100 });
+		await registry.note({ to: "agent", from: "peer", messageId: "held", at: 100 });
+		const noEvents = { onChange: () => () => {} };
+		const stop = registry.startCleanup(noEvents as never, 50);
+		try {
+			expect(Date.now()).toBe(100);
+			const held = await registry.consume({ to: "agent", messageId: "held" }, "w1");
+			expect(held).toBeDefined();
+			vi.advanceTimersByTime(49);
+			await Promise.resolve();
+			// At t=149 both records still exist; the open one is claimable.
+			expect(Date.now()).toBe(149);
+			expect((await registry.list("agent")).map(request => request.messageId)).toEqual(["open"]);
+			const openLease = await registry.consume({ to: "agent", messageId: "open" });
+			expect(openLease?.request.messageId).toBe("open");
+			// Put the open one back so it expires alongside the held lease.
+			await registry.release(openLease!.leaseId);
+			vi.advanceTimersByTime(1);
+			await Promise.resolve();
+			// At t=150 the deadline passed: both the open request and the
+			// leased claim are gone, and the held lease settles nothing.
+			expect(Date.now()).toBe(150);
+			expect(await registry.list()).toEqual([]);
+			expect(await registry.consume({ to: "agent" })).toBeUndefined();
+			expect(await registry.release(held!.leaseId)).toBe(false);
+			expect(await registry.confirm(held!.leaseId)).toBe(false);
+		} finally {
+			stop();
+			setSystemTime();
+		}
+	});
+
+	it("zero reply timeout retains requests until recipient removal", async () => {
+		const registry = new IncomingRequests();
+		vi.useFakeTimers();
+		setSystemTime(100);
+		await registry.note({ to: "agent", from: "peer", messageId: "kept", at: 100 });
+		const noEvents = { onChange: () => () => {} };
+		const stop = registry.startCleanup(noEvents as never, 0);
+		try {
+			vi.advanceTimersByTime(31 * 60 * 1000);
+			await Promise.resolve();
+			expect(Date.now()).toBe(1_860_100);
+			expect(await registry.list("agent")).toHaveLength(1);
+			// Removal still discards the whole queue even with no expiry timer.
+			registry.discard({ to: "agent" });
+			expect(await registry.list()).toEqual([]);
+		} finally {
+			stop();
+			setSystemTime();
+		}
+	});
+
+	it("stopping cleanup leaves no active callback on removal or time advancement", async () => {
+		const registry = new IncomingRequests();
+		await registry.note({ to: "agent", from: "peer", messageId: "kept", at: 1 });
+		let listener: ((event: { type: string; ref: { id: string } }) => void) | undefined;
+		const fakeRegistry = {
+			onChange: (item: (event: { type: string; ref: { id: string } }) => void) => {
+				listener = item;
+				return () => {
+					listener = undefined;
+				};
+			},
+		};
+		vi.useFakeTimers();
+		const stop = registry.startCleanup(fakeRegistry as never, 50);
+		stop();
+		stop();
+		// A removed recipient and time past the deadline both stay inert.
+		listener?.({ type: "removed", ref: { id: "agent" } });
+		vi.advanceTimersByTime(60_000);
+		await Promise.resolve();
+		expect(await registry.list("agent")).toHaveLength(1);
 	});
 });

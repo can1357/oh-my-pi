@@ -25,7 +25,7 @@ import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
 import { type IrcBusApi, IrcBus } from "../irc/bus";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import { discoverAgents } from "../task/discovery";
-import { cfgA2aPort, cfgA2aToken } from "../task/settings";
+import { cfgA2aPort, cfgA2aReplyTimeoutMs, cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
 import { buildAgentCard, type AgentCard } from "./card";
 import { IncomingRequests, type IncomingRequestsApi } from "./incoming-requests";
@@ -559,37 +559,58 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		});
 	};
 
-	const handle = createA2aServer({
-		...options,
-		name: identity,
-		port: options.port ?? cfgA2aPort.get(options.settings),
-		token,
-		card,
-	});
-	const agentDir = options.agentDir ?? options.settings.getAgentDir();
-	await registerLocalBridge({
-		agentDir,
-		port: handle.port,
-		name: identity,
-		instanceId,
-	});
-	// A3: remove this process's own discovery file when the bridge stops.
-	return {
-		host: handle.host,
-		port: handle.port,
-		url: handle.url,
-		stop(): void {
-			try {
-				const file = bridgeEntryPath(agentDir, process.pid);
-				const entry: unknown = JSON.parse(syncFs.readFileSync(file, "utf8"));
-				if (isLocalBridgeEntry(entry, process.pid) && entry.instanceId === instanceId)
-					syncFs.rmSync(file, { force: true });
-			} catch {
-				// Discovery cleanup is best effort.
-			}
-			handle.stop();
-		},
-	};
+	// The bridge owns the incoming ledger's maintenance for its lifetime:
+	// recipient removal and reply-deadline expiry. Only the concrete
+	// main-thread ledger carries `startCleanup`; an injected proxy is
+	// maintained by its installer. Workers share main's ledger and never
+	// install a cleanup service of their own.
+	const ledger = options.incoming ?? IncomingRequests.global();
+	const stopCleanup =
+		ledger instanceof IncomingRequests
+			? ledger.startCleanup(registry, cfgA2aReplyTimeoutMs.get(options.settings))
+			: undefined;
+	let handle: A2aServerHandle;
+	try {
+		handle = createA2aServer({
+			...options,
+			name: identity,
+			port: options.port ?? cfgA2aPort.get(options.settings),
+			token,
+			card,
+			incoming: ledger,
+		});
+		const agentDir = options.agentDir ?? options.settings.getAgentDir();
+		await registerLocalBridge({
+			agentDir,
+			port: handle.port,
+			name: identity,
+			instanceId,
+		});
+		// A3: remove this process's own discovery file when the bridge stops,
+		// together with the ledger cleanup this bridge installed.
+		return {
+			host: handle.host,
+			port: handle.port,
+			url: handle.url,
+			stop(): void {
+				try {
+					const file = bridgeEntryPath(agentDir, process.pid);
+					const entry: unknown = JSON.parse(syncFs.readFileSync(file, "utf8"));
+					if (isLocalBridgeEntry(entry, process.pid) && entry.instanceId === instanceId)
+						syncFs.rmSync(file, { force: true });
+				} catch {
+					// Discovery cleanup is best effort.
+				}
+				stopCleanup?.();
+				handle.stop();
+			},
+		};
+	} catch (error) {
+		// A failed startup after cleanup installation must not leave the
+		// subscription or its expiry timer behind on the ledger.
+		stopCleanup?.();
+		throw error;
+	}
 }
 
 /** One registry entry for a locally running bridge; one file per process (A3). */

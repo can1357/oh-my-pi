@@ -2027,6 +2027,101 @@ describe("local bridge registry", () => {
 	});
 });
 
+describe("A2A incoming request cleanup", () => {
+	const REQUEST = (to: string, messageId: string, at: number) => ({ to, from: "peer", messageId, at });
+
+	it("startA2aServer expires and removes requests on the injected ledger", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-cleanup-"));
+		try {
+			const incoming = new IncomingRequests();
+			const registry = new FakeRegistry([makeRef({ id: "Main", kind: "main", status: "running" })]);
+			const handle = await startA2aServer({
+				settings: Settings.isolated({ "a2a.replyTimeoutMs": 50 }),
+				agentDir: dir,
+				port: 0,
+				registry: registry.asApi(),
+				bus: new FakeBus(),
+				incoming,
+			});
+			handles.push(handle);
+			vi.useFakeTimers();
+			setSystemTime(100);
+			try {
+				// Same absolute `at` for both: a lease claim must not reset the
+				// recipient's reply deadline.
+				await incoming.note(REQUEST("Main", "open", 100));
+				await incoming.note(REQUEST("Main", "held", 100));
+				const held = await incoming.consume({ to: "Main", messageId: "held" }, "w1");
+				vi.advanceTimersByTime(49);
+				expect(Date.now()).toBe(149);
+				expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["open"]);
+				vi.advanceTimersByTime(1);
+				await Promise.resolve();
+				expect(Date.now()).toBe(150);
+				expect(await incoming.list()).toEqual([]);
+				// Late settlement of the expired lease settles nothing.
+				expect(await incoming.release(held!.leaseId, "w1")).toBe(false);
+				expect(await incoming.confirm(held!.leaseId, "w1")).toBe(false);
+				// Removal of the recipient discards its whole queue on the
+				// same injected ledger, without touching another recipient.
+				await incoming.note(REQUEST("Main", "late", 150));
+				await incoming.note(REQUEST("Other", "kept", 150));
+				registry.unregister("Main");
+				expect(await incoming.list()).toEqual([REQUEST("Other", "kept", 150)]);
+			} finally {
+				vi.useRealTimers();
+				setSystemTime();
+			}
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a bridge whose startup fails after cleanup installation stops the cleanup", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "a2a-cleanup-fail-"));
+		try {
+			const incoming = new IncomingRequests();
+			let removals = 0;
+			const registry = new FakeRegistry([makeRef({ id: "Main", kind: "main", status: "running" })]);
+			registry.onChange(event => {
+				if (event.type === "removed") removals += 1;
+			});
+			// A non-loopback bind makes `createA2aServer` throw after
+			// `startA2aServer` already installed cleanup on the ledger.
+			await expect(
+				startA2aServer({
+					settings: Settings.isolated({ "a2a.replyTimeoutMs": 50 }),
+					agentDir: dir,
+					host: "0.0.0.0",
+					port: 0,
+					registry: registry.asApi(),
+					bus: new FakeBus(),
+					incoming,
+				}),
+			).rejects.toThrow(/127\.0\.0\.1/);
+			// The failed bridge's cleanup is gone: a later removal and time
+			// advancement on that registry/ledger pair touch nothing.
+			const notedAt = Date.now();
+			await incoming.note(REQUEST("Main", "kept", notedAt));
+			registry.unregister("Main");
+			expect(removals).toBe(1);
+			vi.useFakeTimers();
+			try {
+				// Advancing 60 s past a 50 ms timeout on the same ledger must
+				// not expire the request: the failed bridge's cleanup is gone.
+				vi.advanceTimersByTime(60_000);
+				await Promise.resolve();
+				expect(Date.now() - notedAt).toBeGreaterThan(50);
+				expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["kept"]);
+			} finally {
+				vi.useRealTimers();
+			}
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("A2A reply envelope", () => {
 	it("delivers the task with a reply-back instruction when metadata.from is present", async () => {
 		const bodies: string[] = [];

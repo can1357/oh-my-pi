@@ -1,7 +1,7 @@
 import type { ThreadId } from "../thread/identity";
 import type { A2aIncomingRequest } from "./rpc";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 
-/** Criteria for atomically claiming one request addressed to a local agent. */
 export interface IncomingRequestMatch {
 	to: string;
 	from?: string;
@@ -73,9 +73,12 @@ export class IncomingRequests implements IncomingRequestsApi {
 	/** Open and leased entries in stable arrival order (oldest first). */
 	readonly #entries: LedgerEntry[] = [];
 	#seq = 0;
+	/** Expiry re-arms installed by `startCleanup`; watchers never throw into callers. */
+	readonly #changeWatchers = new Set<() => void>();
 
 	async note(request: A2aIncomingRequest): Promise<void> {
 		this.#entries.push({ seq: this.#seq++, request });
+		this.#notifyChanged();
 	}
 
 	async consume(match: IncomingRequestMatch, home?: ThreadId): Promise<IncomingRequestLease | undefined> {
@@ -97,6 +100,7 @@ export class IncomingRequests implements IncomingRequestsApi {
 		const entry = this.#entries[index]!;
 		if (entry.lease === undefined || !ownsLease(entry.lease, home)) return false;
 		this.#entries.splice(index, 1);
+		this.#notifyChanged();
 		return true;
 	}
 
@@ -105,6 +109,7 @@ export class IncomingRequests implements IncomingRequestsApi {
 		if (entry === undefined || entry.lease === undefined) return false;
 		if (!ownsLease(entry.lease, home)) return false;
 		entry.lease = undefined;
+		this.#notifyChanged();
 		return true;
 	}
 
@@ -133,6 +138,7 @@ export class IncomingRequests implements IncomingRequestsApi {
 		}
 		this.#entries.length = 0;
 		this.#entries.push(...kept);
+		this.#notifyChanged();
 	}
 
 	/**
@@ -144,6 +150,88 @@ export class IncomingRequests implements IncomingRequestsApi {
 	dropHome(home: ThreadId): void {
 		for (const entry of this.#entries) {
 			if (entry.lease?.home === home) entry.lease = undefined;
+		}
+	}
+
+	/**
+	 * Main-only maintenance for this ledger, driven by the agent registry:
+	 *
+	 * - A `removed` recipient can never answer, so its whole queue — open
+	 *   requests and outstanding leases alike — is discarded. Their lease ids
+	 *   are spent; a worker exiting later cannot reopen what is already gone.
+	 * - With `replyTimeoutMs > 0`, every request expires at its absolute
+	 *   `at + replyTimeoutMs` deadline whether open or leased; the earliest
+	 *   deadline is armed as one timer. `replyTimeoutMs <= 0` arms no expiry
+	 *   timer but keeps the removal cleanup.
+	 *
+	 * The timer is re-evaluated on every note, confirmation, release, discard,
+	 * and expiry, and is unref'd so it never pins the event loop. The returned
+	 * stop is idempotent and unsubscribes plus clears the timer.
+	 */
+	startCleanup(registry: Pick<AgentRegistryApi, "onChange">, replyTimeoutMs: number): () => void {
+		let timer: Timer | undefined;
+		let stopped = false;
+		const clearTimer = (): void => {
+			if (timer !== undefined) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
+		};
+		const armExpiry = (): void => {
+			clearTimer();
+			if (stopped || replyTimeoutMs <= 0) return;
+			// The earliest deadline decides the next wake-up; a deadline
+			// already in the past fires on the next tick.
+			let earliest: number | undefined;
+			for (const entry of this.#entries) {
+				const deadline = entry.request.at + replyTimeoutMs;
+				if (earliest === undefined || deadline < earliest) earliest = deadline;
+			}
+			if (earliest === undefined) return;
+			timer = setTimeout(
+				() => {
+					timer = undefined;
+					this.#expire(Date.now(), replyTimeoutMs);
+					armExpiry();
+				},
+				Math.max(0, earliest - Date.now()),
+			);
+			timer.unref?.();
+		};
+		const unsubscribe = registry.onChange(event => {
+			if (stopped || event.type !== "removed") return;
+			void this.discard({ to: event.ref.id });
+		});
+		this.#changeWatchers.add(armExpiry);
+		armExpiry();
+		return () => {
+			if (stopped) return;
+			stopped = true;
+			unsubscribe();
+			this.#changeWatchers.delete(armExpiry);
+			clearTimer();
+		};
+	}
+
+	/** Remove every request whose reply deadline has passed (open or leased). */
+	#expire(now: number, replyTimeoutMs: number): void {
+		const kept: LedgerEntry[] = [];
+		for (const entry of this.#entries) {
+			if (entry.request.at + replyTimeoutMs > now) kept.push(entry);
+		}
+		this.#entries.length = 0;
+		this.#entries.push(...kept);
+		this.#notifyChanged();
+	}
+
+	/** Re-arm every installed expiry watcher; a throwing watcher is contained. */
+	#notifyChanged(): void {
+		for (const watcher of this.#changeWatchers) {
+			try {
+				watcher();
+			} catch {
+				// Maintenance must never break a caller's settlement.
+			}
 		}
 	}
 }

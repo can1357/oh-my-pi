@@ -127,6 +127,20 @@ addressed reply job. There is no exactly-once delivery guarantee across
 network or acknowledgement failure: a worker lost after the peer accepted the
 reply but before the local acknowledgement can leave the request reopened.
 
+An outstanding request does not linger forever. The bridge installs one
+maintenance service on the process-wide incoming ledger: when a recipient is
+`removed` from the agent registry — it can never answer anymore — its whole
+queue (open requests and outstanding leases alike) is discarded, and a worker
+whose lease pointed there cannot reopen it on exit. Independently, when
+`a2a.replyTimeoutMs` is greater than zero, each request expires at its
+absolute `at + a2a.replyTimeoutMs` deadline, whether open or held by a lease;
+releasing a lease does not reset the deadline. Expiry ends the local
+bookkeeping only — it is not a transport timeout (`a2a.clientTimeoutMs`) and
+it does not cancel or signal the peer's work; the peer may still reply, and a
+late reply simply arrives as a labelled IRC message that no longer matches an
+open request. With `a2a.replyTimeoutMs: 0` no request ever expires on a
+deadline; only recipient removal cleans the queue.
+
 For remote spawns, task states follow the A2A task model: `SUBMITTED` ->
 `WORKING` -> `COMPLETED`/`FAILED` (via `GetTask` polling or SSE updates).
 If a reserved spawn has not registered yet, it remains `SUBMITTED`; registration
@@ -158,7 +172,7 @@ through the bridge, including when Main is addressed by its identity alias.
 | Card filtering | The card lists only the main and currently running agents; finished one-shot workers never appear. |
 | Ingress guard | Inbound A2A deliveries are `external` IRC messages, exempt from the rate/dedup/hop guard applied to in-session traffic. |
 | Output cap | Published task output is inlined as an artifact capped at 100 k characters; files themselves never travel. |
-| Reply deadline | `a2a.replyTimeoutMs` defaults to `1_800_000` ms (30 minutes); `0` means no deadline for an addressed reply. A timeout ends the local wait, not the remote work. |
+| Reply deadline | `a2a.replyTimeoutMs` defaults to `1_800_000` ms (30 minutes); `0` means no deadline for an addressed reply. A timeout ends the local wait and expires the recipient's incoming request (open or leased) at its absolute `at + timeout` deadline; it is not a transport timeout and never cancels the remote work. Removing a recipient from the registry discards its whole request queue regardless of the timeout. |
 | Client budget | `a2a.clientTimeoutMs` (default 0, no total budget) bounds transport for the initial `SendMessage` and any `GetTask` polls, not the separate addressed-reply wait. The per-request connect timeout remains 10 s. |
 | Plan mode | Every `a2a:` dispatch is refused in plan mode: a remote terminal cannot be held read-only. |
 
