@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -106,7 +107,6 @@
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
-- Assistant messages on `openai-codex-responses` and `openai-responses` carry `effort`, the reasoning effort the request actually sent on the wire after the model's effort ladder clamped the selector, so JSON/RPC and session consumers can read it the way Anthropic routes read `requestControls.effort` ([#15165](https://github.com/can1357/oh-my-pi/pull/15165) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
