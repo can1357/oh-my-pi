@@ -234,8 +234,8 @@ export function resolveBrowserKind(
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
 	// endpoint. A configured endpoint is a default, not an override: an
-	// explicit app wins. Subagents select the user's Chrome only with app: "relay".
-	const subagent = session.subagent === true;
+	// explicit app wins. A `/tan` clone (task depth 0) keeps its parent's defaults.
+	const subagent = (session.taskDepth ?? 0) > 0;
 	if (app !== "auto" && !subagent) {
 		const relayKind = resolveRelayKind(
 			{
@@ -252,23 +252,24 @@ export function resolveBrowserKind(
 	}
 	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
 	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
-	// pane env, and its tabs would float over the other session's work. A subagent has no pane
-	// of its own either: its tabs would pile up over the parent's.
-	const ownsPane = ownsTerminal(env) && !subagent;
-	// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
-	const ternKind = resolveTernKind(
-		{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
-		env,
-	);
-	if (ternKind) return ternKind;
-	const cmuxKind = resolveCmuxKind(
-		{
-			settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings),
-		},
-		env,
-	);
-	if (cmuxKind) {
-		return cmuxKind;
+	// pane env, and its tabs would float over the other session's work. A subagent has no pane of
+	// its own either: its tabs would pile up over the parent's, so it skips both even when
+	// PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent.
+	const ownsPane = ownsTerminal(env);
+	if (!subagent || params.target !== undefined) {
+		// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
+		const ternKind = resolveTernKind(
+			{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
+			env,
+		);
+		if (ternKind) return ternKind;
+	}
+	if (!subagent) {
+		const cmuxKind = resolveCmuxKind(
+			{ settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings) },
+			env,
+		);
+		if (cmuxKind) return cmuxKind;
 	}
 	return ownBrowserKind(params, session, env);
 }
