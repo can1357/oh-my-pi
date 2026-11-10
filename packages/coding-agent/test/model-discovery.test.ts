@@ -2677,6 +2677,32 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(modelListCalls).toBe(1);
 		expect(registry.find("llama.cpp", "restarted-model")?.contextWindow).toBe(88832);
 	});
+	test("openai-models-list keeps Eden AI models when a host and model namespace tie", async () => {
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "eden-ai",
+				api: "openai-completions",
+				baseUrl: "https://api.edenai.run/v3",
+				discovery: { type: "openai-models-list", injectV1: false },
+			},
+			{
+				fetch: async input => {
+					expect(String(input)).toBe("https://api.edenai.run/v3/models");
+					return Response.json({
+						object: "list",
+						data: [
+							{ id: "vertex/gemini-4-carbon@eu", object: "model", owned_by: "vertex" },
+							{ id: "amazon/openai.gpt-6.1-sol", object: "model", owned_by: "amazon" },
+						],
+					});
+				},
+				getBearerApiKeyResolver: async () => undefined,
+			},
+		);
+		expect(models.map(model => model.id)).toEqual(["vertex/gemini-4-carbon@eu", "amazon/openai.gpt-6.1-sol"]);
+		expect(models[1]?.identity.class).toBe("openai");
+	});
+
 	test("openai-models-list discovery honors API-reported context_length over fallback", async () => {
 		writeRawModelsJson({
 			"openai-test": {

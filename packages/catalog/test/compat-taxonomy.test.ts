@@ -30,6 +30,18 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("model namespace outranks an equally ranked host namespace", () => {
+		expect(classifyModel("eden-ai", "amazon/openai.gpt-6.1-sol")).toMatchObject({
+			class: "openai",
+			revision: "6.1.0",
+		});
+		expect(classifyModel("eden-ai", "openai/amazon.nova-lite")).toMatchObject({
+			class: "amazon",
+			family: "nova",
+		});
+		expect(classifyModel("eden-ai", "amazon/openai/gpt-6.1-sol").class).toBe("openai");
+	});
+
 	test("bare o-series names carry no revision", () => {
 		expect(classifyModel("openai", "o3")).toEqual({ class: "openai", family: "o-series" });
 		expect(classifyModel("openai", "o3-mini")).toEqual({

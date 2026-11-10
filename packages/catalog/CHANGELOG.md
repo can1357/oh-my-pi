@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Model identifiers with both host and product namespaces (such as `amazon/openai.gpt-6.1-sol`) now resolve to the product lineage instead of failing classification ([#18770](https://github.com/can1357/oh-my-pi/issues/18770))
+
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 ### Added
 

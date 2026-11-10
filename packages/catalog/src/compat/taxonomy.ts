@@ -60,24 +60,21 @@ function boundedMatch(value: string, token: string): boolean {
 	return next === 45 || next === 95 || next === 46 || next === 58 || (next >= 48 && next <= 57); // - _ . : 0-9
 }
 
-function matcherMatches(matcher: CompiledMatcher, lower: string, bare: string): boolean {
+/** Match a class selector, recording how close a namespace is to the model basename. */
+function matcherDepth(matcher: CompiledMatcher, lower: string, bare: string): number {
 	switch (matcher.kind) {
 		case "exact":
-			return bare === matcher.token;
+			return bare === matcher.token ? 0 : -1;
 		case "bounded":
-			return boundedMatch(bare, matcher.token);
-		case "namespace": {
-			const parts = matcher.bounded ? lower.split(/[/.:]/) : lower.split("/");
-			for (const part of parts) {
-				if (!part) continue;
-				if (matcher.bounded ? boundedMatch(part, matcher.token) : part === matcher.token) return true;
-			}
-			return false;
-		}
+			return boundedMatch(bare, matcher.token) ? 0 : -1;
+		case "namespace":
+			return lower
+				.split(matcher.bounded ? /[/.:]/ : "/")
+				.findLastIndex(part => (matcher.bounded ? boundedMatch(part, matcher.token) : part === matcher.token));
 		case "prefix":
-			return bare.startsWith(matcher.token);
+			return bare.startsWith(matcher.token) ? 0 : -1;
 		case "glob":
-			return globMatch(matcher.token, bare);
+			return globMatch(matcher.token, bare) ? 0 : -1;
 	}
 }
 
@@ -162,15 +159,29 @@ interface ClassRanks {
 function classifyRanks(model: string, lenient: boolean): ClassRanks {
 	const lower = model.trim().toLowerCase();
 	const bare = bareOf(lower);
-	let winner: { rank: readonly [number, number]; cls: CompiledClass } | undefined;
+	let winner: { rank: readonly [number, number, number]; cls: CompiledClass } | undefined;
 	let tied: readonly [string, string] | undefined;
 	for (const cls of rules.taxonomy.classes) {
 		for (const matcher of cls.matchers) {
-			if (!matcherMatches(matcher, lower, bare)) continue;
-			const rank = [MATCHER_RANK[matcher.kind], matcher.token.length] as const;
-			if (winner && winner.rank[0] === rank[0] && winner.rank[1] === rank[1] && winner.cls.id !== cls.id) {
+			const namespaceRank = matcherDepth(matcher, lower, bare);
+			if (namespaceRank < 0) continue;
+			// Equal-length host and model namespaces identify different things:
+			// the namespace nearest the basename owns the model lineage.
+			const rank = [MATCHER_RANK[matcher.kind], matcher.token.length, namespaceRank] as const;
+			if (
+				winner &&
+				winner.rank[0] === rank[0] &&
+				winner.rank[1] === rank[1] &&
+				winner.rank[2] === rank[2] &&
+				winner.cls.id !== cls.id
+			) {
 				tied = [winner.cls.id, cls.id];
-			} else if (!winner || winner.rank[0] < rank[0] || (winner.rank[0] === rank[0] && winner.rank[1] < rank[1])) {
+			} else if (
+				!winner ||
+				winner.rank[0] < rank[0] ||
+				(winner.rank[0] === rank[0] &&
+					(winner.rank[1] < rank[1] || (winner.rank[1] === rank[1] && winner.rank[2] < rank[2])))
+			) {
 				winner = { rank, cls };
 				tied = undefined;
 			}
