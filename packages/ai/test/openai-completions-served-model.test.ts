@@ -80,6 +80,27 @@ describe("openai-completions served model capture", () => {
 		expect(result.upstreamModel).toBe("claude-opus-5");
 	});
 
+	it("keeps a signed id when an echo arrives after it", async () => {
+		// The same invariant from the other direction: once signed evidence names the
+		// serving model, a later echo is unsigned host noise and cannot replace it.
+		const result = await streamWith([
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_details: [
+								{ type: "reasoning.text", format: "anthropic-claude-v1", signature: OPUS_5_SIGNATURE },
+							],
+						},
+					},
+				],
+			},
+			{ model: "anthropic/claude-opus-5-20250915", choices: [{ index: 0, delta: { content: "Hi" } }] },
+		]);
+		expect(result.upstreamModel).toBe("claude-opus-5");
+	});
+
 	it("ignores an empty model echo", async () => {
 		const result = await streamWith([{ model: "", choices: [{ index: 0, delta: { content: "Hi" } }] }]);
 		expect(result.upstreamModel).toBeUndefined();
