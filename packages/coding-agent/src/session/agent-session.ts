@@ -867,6 +867,13 @@ type ScheduledAgentContinueOptions = {
 	claim?: "recovery" | "background" | "user";
 	/** A `"background"` request a hold refused at dispatch: the turn gate calls it once the last hold releases. */
 	park?: () => void;
+	/** Called synchronously as the turn gate admits the continued turn, right before the agent claims it. */
+	onTurnAdmitted?: () => void;
+	/**
+	 * The pooled yield contract the continued turn runs under (a restored follow-up's): installed once the turn may
+	 * run, before it dispatches, and put back if it never goes live.
+	 */
+	workPoolYieldItems?: readonly WorkPoolYieldItem[];
 };
 
 type ScheduledAgentContinueRequest = {
@@ -5583,6 +5590,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		coalescedSources: Set<string>,
 		onStart?: () => void,
 	): Promise<AgentContinueOutcome> {
+		// The yield contract to put back if this turn never goes live, and whether it did.
+		let restoreWorkPoolItems: readonly WorkPoolYieldItem[] | undefined;
+		let turnLive = false;
 		try {
 			// During an automatic-retry saga the primary model's selector cooldown
 			// can expire while a chain-tail fallback is still mid-backoff. Restoring
@@ -5621,6 +5631,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				kind === "recovery"
 					? { kind, park: () => this.#scheduleAgentContinue(request.options) }
 					: { kind, park: request.options.park };
+			const onAdmitted = (): void => {
+				turnLive = true;
+				onStart?.();
+			};
+			const poolItems = request.options.workPoolYieldItems;
+			if (poolItems) {
+				// The contract goes in only once this turn may run (a user's claim cancels the holds and waits for
+				// their release), so no other owner's turn runs under it.
+				await this.#turnGate.whenAdmissible(claim, signal).catch(() => {});
+				if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
+					return { status: "skipped", reason: "session-unavailable" };
+				}
+				const before = this.#workPoolYieldItems;
+				const installing = this.setWorkPoolYieldItems(poolItems);
+				if (this.#workPoolYieldItems !== before) restoreWorkPoolItems = before;
+				await installing;
+			}
 			for (;;) {
 				try {
 					if (signal.aborted || this.#isDisposed || this.#abortInProgress) {
@@ -5628,7 +5655,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 					// The awaits above (and an earlier busy wait) can outlast a wake taking its `subagent_stop` hold
 					// after this request was scheduled: the turn gate decides now, in the tick of the dispatch.
-					const run = this.#startAgentTurn(claim, () => this.agent.continue(signal), onStart);
+					const run = this.#startAgentTurn(claim, () => this.agent.continue(signal), onAdmitted);
 					if (!run) {
 						// A user's retry or continue cancelled the pass, as a prompt does, and goes on once it releases.
 						if (claim.kind === "user") {
@@ -5680,6 +5707,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				stack: error instanceof Error ? error.stack : undefined,
 			});
 			return { status: "failed", error };
+		} finally {
+			// A turn that never went live puts back the contract it installed, inside its in-flight bracket.
+			if (restoreWorkPoolItems && !turnLive) {
+				try {
+					await this.setWorkPoolYieldItems(restoreWorkPoolItems);
+				} catch (error) {
+					logger.warn("Failed to put back the pooled yield contract of an undispatched continuation", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		}
 	}
 
@@ -5749,11 +5787,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const inFlight = this.#beginInFlight({ kind: options.claim ?? "recovery" });
 				const coalescedSources = new Set([options.source]);
 				let observation: TurnObservation | undefined;
-				const onStart = this.#ircWakeTurnObserver
-					? () => {
-							observation = this.#startTurnObservation(options.turnRecords ?? []);
-						}
-					: undefined;
+				const onStart = (): void => {
+					options.onTurnAdmitted?.();
+					if (this.#ircWakeTurnObserver) observation = this.#startTurnObservation(options.turnRecords ?? []);
+				};
 				const promise = this.#runAgentContinue(signal, request, coalescedSources, onStart);
 				const attempt: ActiveAgentContinue = {
 					schedulerToken: request.schedulerToken,
@@ -9205,17 +9242,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// turn no task executor drives: observe it like an IRC wake so an accepted
 		// yield rewrites the artifact and reaches the parent (#14428). Executor
 		// prompts are agent-attributed and run under their own monitor; a pooled
-		// turn owns the worker's yield contract.
-		const observation =
-			(options?.userInitiated === true || promptAttribution === "user") && this.#workPoolYieldItems.length === 0
-				? this.#startTurnObservation([message])
-				: undefined;
+		// turn owns the worker's yield contract. The observation opens as the turn is admitted.
+		const observed = options?.userInitiated === true || promptAttribution === "user";
+		let observation: TurnObservation | undefined;
 		let turnError: unknown;
 		let dispatched = false;
 		const refusalBeforeDispatch = this.#costCapRefusal;
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
+				onTurnAdmitted: () => {
+					options?.onTurnAdmitted?.();
+					if (observed && this.#workPoolYieldItems.length === 0)
+						observation = this.#startTurnObservation([message]);
+				},
 				stopPassHolder: holder,
 				followUpBatch: followUps,
 				images: normalizedImages,
@@ -9697,7 +9737,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			| "onPromptAdmitted"
 			| "userInitiated"
 			| "workPoolYieldItems"
-			| "onPromptAbandoned"
+			| "onTurnAdmitted"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -9763,10 +9803,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (this.#refuseOverCostCap()) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
-			this.#eval.flushPending();
-			// This turn carries the assignment: IRC asides parked for it fold in ahead of the message.
-			this.#ircAwaitingAssignment = false;
-			this.#irc.flushPending();
 
 			this.#todo.resetCycle();
 			this.#resetPromptMaintenanceState();
@@ -10035,6 +10071,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 							options?.followUpBatch?.release();
 						},
 						claim,
+						() => {
+							options?.onTurnAdmitted?.();
+							// Folded in only once the turn is admitted: a prompt handed back leaves them for the turn
+							// that runs. This turn carries the assignment: IRC asides parked for it fold in ahead of it.
+							this.#eval.flushPending();
+							this.#ircAwaitingAssignment = false;
+							this.#irc.flushPending();
+						},
 					);
 				while (!(await dispatch())) {
 					if (!(await admitPastTurnGate())) {
@@ -10050,17 +10094,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			return true;
 		} finally {
-			// A turn that never went live (handed back, dropped, failed in setup) gives back what its caller took at
-			// admission and the yield contract it installed, both before the bracket releases, so whoever the hold
-			// lets run next finds the session as it held it. Once the turn ran, the contract is the caller's to clear.
+			// A turn that never went live (handed back, dropped, failed in setup) gives back the yield contract it
+			// installed before the bracket releases, so whoever the hold lets run next finds the session as it held
+			// it. Once the turn ran, the contract is the caller's to clear.
 			if (!turnLive) {
-				try {
-					options?.onPromptAbandoned?.();
-				} catch (error) {
-					logger.warn("onPromptAbandoned callback failed", {
-						error: error instanceof Error ? error.message : String(error),
-					});
-				}
 				if (restoreWorkPoolItems) {
 					try {
 						await this.setWorkPoolYieldItems(restoreWorkPoolItems);
@@ -13801,9 +13838,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * the retry rewrites context and starts a turn, so the candidate the handlers
 	 * were judging could no longer be the one published.
 	 */
-	async retry(): Promise<boolean> {
+	retry(): Promise<boolean> {
+		return this.#retry();
+	}
+
+	async #retry(options?: Pick<PromptOptions, "workPoolYieldItems" | "onTurnAdmitted">): Promise<boolean> {
 		if (this.#turnGate.held) await this.whenTurnAdmissible("user");
-		const didRetry = await this.#recovery.retry();
+		const didRetry = await this.#recovery.retry(options);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
 		if (didRetry) this.#advisors.autoResumeSuppressed = false;
@@ -13821,10 +13862,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * transcript stops. A turn that finished, failed, or the user interrupted stays
 	 * as it is.
 	 *
+	 * `options` are the retried turn's own: its pooled yield contract goes in, and `onTurnAdmitted` runs, only once
+	 * the turn gate admits it, so neither sits under a turn it does not own.
+	 *
 	 * @returns whether a continuation was scheduled; false while a turn runs, without
 	 * a model, or with nothing left unfinished.
 	 */
-	async restoreInterruptedTurn(): Promise<boolean> {
+	async restoreInterruptedTurn(
+		options?: Pick<PromptOptions, "workPoolYieldItems" | "onTurnAdmitted">,
+	): Promise<boolean> {
 		const branch = this.sessionManager.getBranch();
 		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
 		const model = this.model;
@@ -13839,7 +13885,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.appendMessage(abort);
 			this.replaceMessagesFromSessionContext(this.buildDisplaySessionContext().messages);
 		}
-		return this.retry();
+		return this.#retry(options);
 	}
 
 	// =========================================================================
