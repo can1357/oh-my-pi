@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Task tool params accept `actualEffort`, and the session effort ceiling is a per-model `ThinkingLevelCeiling` resolver instead of a single effort
+- Task tool params accept `actualEffort`, and the session effort ceiling is a per-model `ThinkingLevelCeiling` resolver instead of a single effort ([#18780](https://github.com/can1357/oh-my-pi/pull/18780) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.20.0] - 2026-11-12
 
