@@ -426,12 +426,13 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					const usage = session.sessionManager.getUsageStatistics();
 					const directCost = usage.cost - usage.subagentCost;
 					const tokensPerSecond = lastAssistantThroughput(session.agent?.state?.messages);
-					const historyPatch: { directCost?: number; tokensPerSecond?: number } = {};
+					const historyPatch: { directCost?: number; tokensPerSecond?: number; tokensPerSecondSource?: "park" | "scan" } = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
 						historyPatch.directCost = directCost;
 					}
 					if (tokensPerSecond !== undefined) {
 						historyPatch.tokensPerSecond = tokensPerSecond;
+						historyPatch.tokensPerSecondSource = "park";
 					}
 					if (Object.keys(historyPatch).length > 0) {
 						this.#registry.setHistory(id, historyPatch, ref.sessionFile ?? undefined);

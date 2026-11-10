@@ -320,6 +320,7 @@ async function readPersistedAgentHistory(
 	return {
 		directCost,
 		tokensPerSecond,
+		tokensPerSecondSource: "scan",
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),

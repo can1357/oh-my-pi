@@ -50,9 +50,9 @@ export interface AgentHistorySummary {
 	/** Whether the last resolved model was selected by retry fallback routing. */
 	resolvedModelIsFallback?: boolean;
 	metrics?: AgentMetricsSummary;
-	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 	directCost?: number;
 	tokensPerSecond?: number;
+	tokensPerSecondSource?: "park" | "scan";
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;
@@ -306,8 +306,13 @@ export class AgentRegistry implements AgentRegistryApi {
 		) {
 			definedHistory.directCost = Math.max(previousDirectCost, incomingDirectCost);
 		}
-		if (options?.isScan && ref.history?.tokensPerSecond !== undefined) {
+		if (
+			options?.isScan &&
+			ref.history?.tokensPerSecondSource === "park" &&
+			ref.history?.tokensPerSecond !== undefined
+		) {
 			delete definedHistory.tokensPerSecond;
+			delete definedHistory.tokensPerSecondSource;
 		}
 		ref.history = { ...ref.history, ...definedHistory };
 		this.#emit({ type: "metadata_changed", ref });

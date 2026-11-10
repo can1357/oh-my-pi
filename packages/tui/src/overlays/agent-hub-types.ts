@@ -60,6 +60,7 @@ export interface AgentRecordLike {
 		/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 		directCost?: number;
 		tokensPerSecond?: number;
+		tokensPerSecondSource?: "park" | "scan";
 		readOnly?: boolean;
 		outputPath?: string;
 		patchPath?: string;

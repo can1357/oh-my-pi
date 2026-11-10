@@ -306,9 +306,10 @@ describe("persisted agent model attribution", () => {
 			sessionFile: "/tmp/worker.jsonl",
 			status: "idle",
 		});
-		// Authoritative park snapshot sets rate to 150 tok/s:
-		registry.setHistory("Worker", { tokensPerSecond: 150.0 }, "/tmp/worker.jsonl");
+		// Authoritative park snapshot sets rate to 150 tok/s with park provenance:
+		registry.setHistory("Worker", { tokensPerSecond: 150.0, tokensPerSecondSource: "park" }, "/tmp/worker.jsonl");
 		expect(ref.history?.tokensPerSecond).toBe(150.0);
+		expect(ref.history?.tokensPerSecondSource).toBe("park");
 
 		// Delayed background scan with an older rate (75 tok/s) must NOT overwrite the park-time rate:
 		registry.setHistory("Worker", { tokensPerSecond: 75.0 }, "/tmp/worker.jsonl", { isScan: true });
@@ -317,6 +318,25 @@ describe("persisted agent model attribution", () => {
 		// A subsequent authoritative park update (e.g. from follow-up turn) updates the rate:
 		registry.setHistory("Worker", { tokensPerSecond: 180.0 }, "/tmp/worker.jsonl");
 		expect(ref.history?.tokensPerSecond).toBe(180.0);
+	});
+
+	it("allows fresh scans to update scan-derived throughput (e.g. for advisor rows)", () => {
+		const registry = new AgentRegistry();
+		const ref = registry.register({
+			id: "Advisor",
+			displayName: "Advisor",
+			kind: "advisor",
+			session: null,
+			sessionFile: "/tmp/advisor.jsonl",
+			status: "idle",
+		});
+		// First scan sets rate to 75 tok/s:
+		registry.setHistory("Advisor", { tokensPerSecond: 75.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", { isScan: true });
+		expect(ref.history?.tokensPerSecond).toBe(75.0);
+
+		// Subsequent scan after another advisor turn updates rate to 150 tok/s:
+		registry.setHistory("Advisor", { tokensPerSecond: 150.0, tokensPerSecondSource: "scan" }, "/tmp/advisor.jsonl", { isScan: true });
+		expect(ref.history?.tokensPerSecond).toBe(150.0);
 	});
 
 	it("uses an off-branch usage record's active leaf for cold selected-leaf metrics", async () => {
