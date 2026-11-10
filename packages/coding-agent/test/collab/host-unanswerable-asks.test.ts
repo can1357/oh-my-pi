@@ -69,7 +69,7 @@ it("settles a guest ask the queue refused instead of awaiting an answer", async 
 
 /** Past the peer's share, so the queue takes some of these and then sheds the peer holding them. */
 const ASK_FLOOD = 40;
-it("settles the asks a shed guest was holding", async () => {
+it("re-poses a shed guest's asks when it rejoins instead of settling them", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: true });
 	const seen: HostObservations = { notices: [], participantCounts: [] };
@@ -97,9 +97,8 @@ it("settles the asks a shed guest was holding", async () => {
 		"the host transport never stalled with the snapshot still queued",
 	);
 
-	// Every one of these is offered to a writable guest, so every one is
-	// registered as an outstanding ask. The queue takes the first of them behind
-	// the stalled snapshot and then sheds the peer holding the lot.
+	// Every one of these is offered to a writable guest. The queue takes the first
+	// of them behind the stalled snapshot and then sheds the peer holding the lot.
 	const asks: Promise<unknown>[] = [];
 	for (let i = 0; i < ASK_FLOOD; i++) {
 		const ask = host.requestGuestUi({ kind: "select", title: `ask ${i}`, options: [{ label: "yes" }] });
@@ -110,13 +109,24 @@ it("settles the asks a shed guest was holding", async () => {
 		() => seen.notices.some(notice => notice.includes("fell too far behind")),
 		"host never shed the guest holding the asks",
 	);
-
-	// Nothing was delivered and nobody is left to answer, so no caller may still
-	// be waiting: `requestGuestUi` has no timeout of its own.
 	expect(received.filter(frame => frame.t === "ui-request")).toEqual([]);
 	expect(host.participants.filter(participant => participant.role === "guest")).toEqual([]);
-	const settled = await Promise.race([Promise.all(asks), Bun.sleep(2_000).then(() => "still waiting" as const)]);
-	expect(settled).toEqual(asks.map(() => ({ kind: "unavailable" })));
+
+	// The shed guest was the only writer, and a shed guest rejoins: the ask it held
+	// waits for that rather than settling, and the rejoin's welcome re-poses it.
+	let settled: unknown;
+	void asks[0]!.then(result => {
+		settled = result;
+	});
+	guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
+	const hostWs = probe.hostSocket();
+	const deadline = Date.now() + 10_000;
+	while (!received.some(frame => frame.t === "ui-request" && frame.request.title === "ask 0")) {
+		if (Date.now() > deadline) throw new Error("the rejoined guest was never re-posed the ask it held");
+		hostWs.bufferedAmount = 0;
+		await Bun.sleep(5);
+	}
+	expect(settled).toBeUndefined();
 }, 30_000);
 
 it("ignores an answer from a writer the ask was never delivered to", async () => {

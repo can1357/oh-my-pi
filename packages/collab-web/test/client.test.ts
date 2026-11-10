@@ -437,10 +437,11 @@ describe("GuestClient frame apply", () => {
 				client.applyFrameForTest(welcomeFrame(0));
 				expect(client.getSnapshot().phase).toBe("live");
 			}
+			// Past the cap the session ends, so the user can rejoin by hand.
 			client.applyFrameForTest({ t: "error", message: "rejoin to resync", resync: true });
 			expect(hellos()).toBe(3);
-			expect(client.getSnapshot().phase).toBe("live");
-			expect(client.getSnapshot().notices.at(-1)?.message).toBe("rejoin to resync");
+			expect(client.getSnapshot().phase).toBe("ended");
+			expect(client.getSnapshot().endedReason).toBe("rejoin to resync");
 		} finally {
 			sendSpy.mockRestore();
 		}

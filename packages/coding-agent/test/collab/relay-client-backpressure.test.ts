@@ -176,6 +176,34 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("sheds a peer whose draining snapshot holds the head instead of ending the room", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/head", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		let closeReason: string | undefined;
+		socket.onClose = reason => {
+			closeReason = reason;
+		};
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// A joining guest's snapshot heads the stalled queue; the 16th 1 MiB broadcast
+			// behind it exceeds the byte budget, but fits once that snapshot is gone.
+			expect(socket.sendBatch(welcomeBatch("snapshot"), GREEDY, 8 * 1024 * 1024)).toBe(true);
+			const big = "x".repeat(1024 * 1024);
+			for (let i = 0; i < 16; i++) expect(socket.send({ t: "bye", reason: big })).toBe(true);
+			await flushUntil(() => shed.length > 0, "the snapshot's peer was never shed");
+			expect(shed).toEqual([GREEDY]);
+			expect(closeReason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("discards a stale targeted batch across a transient reconnect", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = 0;

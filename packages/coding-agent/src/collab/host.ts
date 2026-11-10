@@ -440,13 +440,16 @@ export class CollabHost {
 
 	/**
 	 * Drop {@link peer} from every outstanding ask once it can no longer answer
-	 * (departure, shed, or demotion), so no caller waits on it. A departure retains an
-	 * emptied ask for the next writer; a shed or demotion settles it.
+	 * (departure, shed, or demotion). An ask left with no holder follows the posting
+	 * rule in {@link requestGuestUi}: writers still present refused it, so it settles;
+	 * with none, it waits for the next writer, which a shed guest's rejoin is. An
+	 * answer awaiting a session transition owns the outcome instead.
 	 */
-	#dropAskRecipient(peer: number, retainWhenEmpty = false): void {
+	#dropAskRecipient(peer: number): void {
+		const writersRemain = this.#hasWritablePeers();
 		for (const pending of this.#pendingUi.values()) {
-			if (!pending.recipients.delete(peer)) continue;
-			if (pending.recipients.size === 0 && !retainWhenEmpty) pending.settle({ kind: "unavailable" });
+			if (!pending.recipients.delete(peer) || pending.recipients.size > 0) continue;
+			if (writersRemain && !pending.responsePending) pending.settle({ kind: "unavailable" });
 		}
 	}
 
@@ -1223,7 +1226,7 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
-		this.#dropAskRecipient(peer, true);
+		this.#dropAskRecipient(peer);
 		// Relay controls arrive outside the normal frame handler.
 		if (!this.#guestTrafficAllowed()) return;
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
@@ -1339,7 +1342,8 @@ export class CollabHost {
 		if (this.ending || this.#agentsDebounce || this.#peers.size === 0) return;
 		this.#agentsDebounce = setTimeout(() => {
 			this.#agentsDebounce = null;
-			this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true);
+			// A dropped snapshot is retried; nothing else would send it again.
+			if (!this.#broadcast({ t: "agents", agents: this.#snapshotAgents() }, true)) this.#scheduleAgentsBroadcast();
 		}, AGENTS_DEBOUNCE_MS);
 	}
 
@@ -1445,8 +1449,9 @@ export class CollabHost {
 			const state = this.#buildState();
 			const json = JSON.stringify(state);
 			if (json === this.#lastStateJson) return;
-			// A dropped `state` is healed by the next change, which must not dedupe against it.
+			// A dropped `state` is retried and never becomes the dedupe baseline.
 			if (this.#broadcast({ t: "state", state }, true)) this.#lastStateJson = json;
+			else this.#scheduleStateBroadcast();
 		}, STATE_DEBOUNCE_MS);
 	}
 

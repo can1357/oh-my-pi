@@ -60,9 +60,8 @@ export const RELAY_SILENCE_LIMIT_MS = 40_000;
 const MAX_PENDING_SENDS = 256;
 /**
  * Ceiling on the queue's summed charge: a frame's serialized length, or the bytes a
- * lazy batch's iterator keeps reachable, levied once at admission. An entry admitted
- * into an empty queue is charged nothing (see {@link CollabSocket.#enqueueSend}), so
- * the true ceiling is this plus one entry.
+ * lazy batch's iterator keeps reachable. The head's charge is waived (see
+ * {@link CollabSocket.#fits}), so the true ceiling is this plus one entry.
  */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /** Entries one guest may hold. A peer at its share is shed, not the room. */
@@ -82,7 +81,7 @@ const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
 interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
 	targetPeer: number;
-	/** Charge against {@link MAX_PENDING_SEND_BYTES}; 0 for an entry admitted into an empty queue. */
+	/** Charge against {@link MAX_PENDING_SEND_BYTES}, waived while this entry is the head. */
 	bytes: number;
 	/** Materializes frames as the transport drains; the welcome-plus-snapshot batch. */
 	lazy: boolean;
@@ -364,9 +363,8 @@ export class CollabSocket {
 	 *   A replica-bearing broadcast displaces advisories, then sheds the peer
 	 *   holding most of the exhausted resource; a queue of nothing but replica
 	 *   broadcasts is the host's own overload and ends the room.
-	 * - An entry admitted into an empty queue is charged nothing, so a session larger
-	 *   than the whole budget is shareable and live traffic queues behind it instead
-	 *   of shedding its peer.
+	 * - The head's charge is waived, so a session larger than the whole budget is
+	 *   shareable and live traffic queues behind it instead of shedding its peer.
 	 *
 	 * @returns whether the entry was queued; a refused entry's `onPrepared` has run.
 	 */
@@ -395,7 +393,6 @@ export class CollabSocket {
 				return this.#refuse(entry);
 			}
 		}
-		if (this.#pendingSends.length === 0) entry.bytes = 0;
 		this.#pendingSends.push(entry);
 		this.#pumpSends();
 		return true;
@@ -407,14 +404,18 @@ export class CollabSocket {
 		return false;
 	}
 
-	/** Whether {@link bytes} more fits the queue, optionally as if its advisories, or the entries {@link without} matches, were gone. */
+	/**
+	 * Whether {@link bytes} more fits the queue, optionally as if its advisories, or the
+	 * entries {@link without} matches, were gone. The head is not charged: it is the one
+	 * entry draining, and an entry larger than the budget must still be able to.
+	 */
 	#fits(bytes: number, withAdvisories: boolean, without?: (pending: PendingSend) => boolean): boolean {
 		let count = 0;
 		let charged = 0;
 		for (const pending of this.#pendingSends) {
 			if ((!withAdvisories && pending.advisory) || without?.(pending)) continue;
 			count++;
-			charged += pending.bytes;
+			if (pending !== this.#pendingSends[0]) charged += pending.bytes;
 		}
 		return count === 0 || (count < MAX_PENDING_SENDS && charged + bytes <= MAX_PENDING_SEND_BYTES);
 	}
@@ -429,7 +430,8 @@ export class CollabSocket {
 
 	/**
 	 * Shed the peer holding most of whichever resource is exhausted: entries when the
-	 * queue is at its entry cap, charged bytes otherwise. False when no peer holds any.
+	 * queue is at its entry cap, bytes otherwise. A head's waived bytes still count: its
+	 * drain is what holds every later entry. False when no peer holds any.
 	 */
 	#shedHeaviestPeer(): boolean {
 		const byCount = this.#pendingSends.length >= MAX_PENDING_SENDS;

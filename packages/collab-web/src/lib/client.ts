@@ -273,13 +273,13 @@ export class GuestClient {
 
 	/**
 	 * Say hello again after the host dropped this guest, within the auto-rejoin
-	 * budget. A welcome that does not follow retries through the same budget.
-	 * @returns false, with an error notice, once the budget is spent.
+	 * budget. A welcome that does not follow retries through the same budget. Once
+	 * the budget is spent the session ends, leaving the rejoin to the user.
 	 */
-	#rejoin(message: string): boolean {
+	#rejoin(message: string): void {
 		if (!takeAutoRejoin(this.#autoRejoins)) {
-			this.#pushNotice("error", message);
-			return false;
+			this.#end(message);
+			return;
 		}
 		this.#clearSnapshotProgressTimer();
 		this.#pendingSnapshot = null;
@@ -288,7 +288,6 @@ export class GuestClient {
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
 		this.#armRejoinTimer();
 		this.#commit();
-		return true;
 	}
 
 	/** A post-join hello the host never welcomes retries through the rejoin budget. */
@@ -297,7 +296,7 @@ export class GuestClient {
 		this.#welcomeTimer = setTimeout(() => {
 			this.#welcomeTimer = null;
 			if (this.#phase === "live" || this.#phase === "ended") return;
-			if (!this.#rejoin("timed out waiting for the host's welcome")) this.#commit();
+			this.#rejoin("timed out waiting for the host's welcome");
 		}, WELCOME_TIMEOUT_MS);
 	}
 
@@ -503,8 +502,8 @@ export class GuestClient {
 					// The host dropped this guest but the relay link is intact. A hello
 					// still awaiting its welcome is retried by the welcome timer.
 					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
-					if (this.#rejoin(frame.message)) return; // #rejoin already committed
-					break;
+					this.#rejoin(frame.message);
+					return; // #rejoin or #end already committed
 				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our

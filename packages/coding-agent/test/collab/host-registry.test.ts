@@ -416,29 +416,30 @@ describe("collab host registry lifecycle (#6099)", () => {
 		}
 	});
 
-	it("settles a retained ask once its only recreated-room holder is demoted", async () => {
+	it("settles an ask once its only holder is demoted and the remaining writer refused it", async () => {
 		const { transport, writeToken } = await startCapturedHost();
-		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "first", writeToken }, 1);
-		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "second", writeToken }, 2);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "holder", writeToken }, 1);
+		transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "refused", writeToken }, 2);
+		const real = transport.send.bind(transport);
+		const refuse = spyOn(transport, "send").mockImplementation((frame, targetPeer) =>
+			typeof frame === "object" && frame.t === "ui-request" && targetPeer === 2 ? false : real(frame, targetPeer),
+		);
 		const abort = new AbortController();
-		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal, {
-			retainOnReconnect: true,
-		});
+		const answer = host!.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
 		if (!answer) throw new Error("host did not offer the ask");
 		let outcome: CollabGuestUiResult | undefined;
 		void answer.then(result => {
 			outcome = result;
 		});
 		try {
-			transport.onRoomRecreated?.();
-			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "rejoined", writeToken }, 1);
 			await setImmediate();
 			expect(outcome).toBeUndefined();
-			// Old-room peer 2 never rejoined; demoting the one real holder leaves nobody to answer.
-			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "rejoined" }, 1);
+			// The only holder loses write access; the writer still present never got the ask.
+			transport.onFrame!({ t: "hello", proto: COLLAB_PROTO, name: "holder" }, 1);
 			await setImmediate();
 			expect(outcome).toEqual({ kind: "unavailable" });
 		} finally {
+			refuse.mockRestore();
 			abort.abort();
 		}
 	});
