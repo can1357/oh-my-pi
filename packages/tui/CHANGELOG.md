@@ -2,6 +2,115 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+## [18.18.6] - 2026-11-09
+
+### Added
+
+- The `wait` result's `JobSnapshot` now carries `settledAtMs` (epoch ms when the run settled, absent while it is still running), so a snapshot can tell a result that finished during the call from one recovered from an earlier, never-delivered completion ([#18635](https://github.com/can1357/oh-my-pi/pull/18635) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Added a `thinking.set` composer action so Tern's phone effort menu can pick a thinking level in one tap
+- Added All, Running, Done and Parked status scopes with counts to the agent hub's roster, so Tern's phone can filter agents by status
+- A prompt and a turn's answer list their actions for a phone's long press (`actions.hold`): Copy, Edit & resend (a prompt's), Retry turn, Rewind to here… and Fork from here; the desktop keeps its hover toolbars
+- A click or tap on a turn on the native rewind page picks it, and the rewind selector can open on a given turn (`startAt`)
+- A status notice can carry a button on its native toast (`StatusNoticeAction`), such as the Undo after a rewind
+
+### Fixed
+
+- Fixed streamed rows being clipped above the screen before they reached scrollback while the working row was up, so a scrolled-back terminal saw rows jump at the screen's top edge and the whole screen dropped when a run ended ([#12307](https://github.com/can1357/oh-my-pi/issues/12307), [#16117](https://github.com/can1357/oh-my-pi/pull/16117) by [@galtamam-cmyk](https://github.com/galtamam-cmyk)). `Composer.setRuntimeChildren` takes a `billedChrome` option for roots billed at their current height instead of through the floor.
+- Fixed rows of a streaming reply, and the top rows of a table taller than the screen, going missing from both the screen and scrollback with `tui.completeScrollback` on; such a table now keeps the column widths it had when it outgrew the screen ([#16355](https://github.com/can1357/oh-my-pi/pull/16355) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+
+## [18.18.4] - 2026-11-09
+
+### Added
+
+- `ask` HTML forms with two or more `<fieldset>`s show one tab per question plus a Review tab in Tern; Next moves on, ←/→ and PgUp/PgDn switch tabs, and Submit lives on Review ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+- `ask` HTML forms hide to one row with `app.ask.hide` (`Alt+H`) or the Hide button, as the ask dialog does ([#18608](https://github.com/can1357/oh-my-pi/pull/18608) by [@Gabriel-Hiss](https://github.com/Gabriel-Hiss))
+
+### Fixed
+
+- Prefilled single-line `ask` fields now open at the start of their value instead of scrolling to the end when focused ([#18585](https://github.com/can1357/oh-my-pi/issues/18585)).
+- Fixed the `│` rails of a wrapped box-drawing tree line (`├── **label**: …`) taking the color and weight of the node's leading bold, italic or code span under colorful Markdown; continuation rails now match the first row's rails and the node text keeps its own styling ([#18584](https://github.com/can1357/oh-my-pi/pull/18584) by [@chan1103](https://github.com/chan1103))
+- Fixed relayed Windows terminal events after an event-loop stall so they neither abort the running turn nor type TSP data into the composer ([#18512](https://github.com/can1357/oh-my-pi/issues/18512)).
+- Fixed transcript rows a few turns above the composer disappearing from the screen and from scrollback, at a place that moved with every resize, while a todo list or subagent panel stayed up after a turn ([#18510](https://github.com/can1357/oh-my-pi/pull/18510) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Fixed `xd://<device>:raw` and `xd://<device>:conflicts` resolving as that device. Those suffixes stay in the name, so the read or write no longer runs the device ([#18561](https://github.com/can1357/oh-my-pi/pull/18561) by [@wisehead](https://github.com/wisehead))
+- Fixed `ask` HTML forms taller than the composer area being cut off and unscrollable in Tern: the form now scrolls in the composer's place, and Cancel/Submit stay visible
+- Fixed the Agent Hub in Tern freezing itself and the session behind it once hundreds of agents are listed: moving the selection no longer re-sends every roster row, and live roster updates on large hubs are batched (up to once a second) so the terminal keeps up
+
+## [18.18.3] - 2026-11-09
+
+### Breaking Changes
+
+- The `ask` tool renderer now draws `{ html }` form calls and `AskToolDetails { answers, timedOut }` results; `QuestionResult` and the question-list detail fields were removed.
+
+### Added
+
+- Added a Note entry to the right-click menu of each ask dialog answer row in Tern, annotating that answer without picking it ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+- Added `HtmlFormDialog`, which renders an HTML form as an interactive terminal form, splits long forms into pages, and returns the answers as JSON. Single `<select>`s are one-row dropdowns, radio and checkbox groups get a free-text "Other" answer, `<img>` (URL, `data:` URI or local file) and inline `<svg>` pictures load in the background, an optional inactivity timeout submits the current values, and Tern terminals get the form natively.
+- Added a `cursor: "start"` option to `Editor.setText` so prefilled multi-line text opens at its first line.
+
+### Changed
+
+- The ask dialog's Note right after a pointer click now annotates the highlighted answer of the question shown instead of the answer just clicked, and the Note button no longer names a redirect target ([#18551](https://github.com/can1357/oh-my-pi/pull/18551) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed the ask dialog's `n` right after a keyboard pick annotating the previous question's answer instead of the highlighted row shown; only a pointer click still redirects Note to the answer just picked, and the Note button then names it ([#18317](https://github.com/can1357/oh-my-pi/pull/18317) by [@DonMikone](https://github.com/DonMikone))
+
+## [18.18.2] - 2026-11-08
+
+### Added
+
+- Added a model catalog refresh callback that lets applications update the active model scope after catalogs are re-fetched.
+- Preserved unfinished answers in ask dialogs and custom editors, allowing users to resume drafts when reopening them.
+
+### Changed
+
+- Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
+
+### Fixed
+
+- Fixed streaming and scrolling display issues in terminals without synchronized output, including duplicated rows and blank screens or status lines.
+- Fixed Markdown rendering while streaming list items, preserving bold text and heading formatting.
+- Fixed wrapping of long embedded Bash arguments so indentation and the gutter remain aligned.
+- Fixed prompts and Enter presses entered while the application was starting so they submit normally instead of leaving Enter as a newline.
+- Fixed restored transcripts so aliased tool calls use the same rendering as live tool calls.
+- Fixed debugger tool cards with tabs and control characters in arguments so their displayed width remains accurate.
+- Fixed LaTeX styling in nested content, including bold and italic resets, radical and optional-argument styling, color scoping, and inline math in headings.
+- Fixed unnecessary repainting in the setup wizard while waiting for input in ANSI terminals.
+- Fixed Windows ConPTY event handling so delayed terminal event data no longer appears in the composer.
+- Fixed OSC 8 hyperlink support in Rex terminals so transcript URLs and file paths are command-clickable.
+
+## [18.18.1] - 2026-11-08
+
+### Added
+
+- Grep headers syntax-highlight regex patterns, including incomplete patterns while a call streams, in terminal and native views ([#18392](https://github.com/can1357/oh-my-pi/pull/18392) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Changed
+
+- Grep results for a single searched file no longer repeat `1 file` after the match count; the header already names the file ([#18422](https://github.com/can1357/oh-my-pi/pull/18422) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
+
+### Fixed
+
+- Pinned sessions color their pin icon with the theme accent in the status line instead of the session title's color, matching the resume picker ([#18401](https://github.com/can1357/oh-my-pi/pull/18401) by [@SuperUserA](https://github.com/SuperUserA))
+- A saved bash trace the shell visualization can no longer restore (e.g. a `tool_result` hook rewrote its `script`) renders as plain command and output instead of crashing the TUI and every `omp --resume` of that session ([#18338](https://github.com/can1357/oh-my-pi/issues/18338))
+- Tables with near-equal large numeric columns no longer crash transcript rendering during chart analysis ([#18343](https://github.com/can1357/oh-my-pi/issues/18343))
+- A JPEG truncated before its end-of-image marker is rejected when read and omitted from the request, instead of failing the whole provider request with "unsupported image" ([#18385](https://github.com/can1357/oh-my-pi/pull/18385) by [@iwangjie](https://github.com/iwangjie))
+- Desktop notifications use unique OSC 99 ids per omp process to avoid interfering with other omp processes ([#18413](https://github.com/can1357/oh-my-pi/pull/18413) by [@farnoy](https://github.com/farnoy))
+- `updateNotesToolRenderer` now renders `update_notes` calls that omit `body` ([#18439](https://github.com/can1357/oh-my-pi/pull/18439) by [@eggpeat](https://github.com/eggpeat))
+- The copy overlay now offers fenced code blocks indented under list items, and splits code and quote blocks the same way the message renderer draws them ([#18410](https://github.com/can1357/oh-my-pi/pull/18410) by [@farnoy](https://github.com/farnoy))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Ctrl+J from a win32-input-mode record with `VK_J` and `Uc=LF` now decodes as `ctrl+j`, so Windows Terminal / mini-term insert a newline instead of submitting ([#18253](https://github.com/can1357/oh-my-pi/pull/18253) by [@Clannad47](https://github.com/Clannad47))
+- The BTW history page (`f` on a side answer) scrolls its reader and history list with the mouse wheel, matching the other scrolling sheets ([#18303](https://github.com/can1357/oh-my-pi/pull/18303) by [@ImAlexBlock](https://github.com/ImAlexBlock))
+- The BTW history list shows the date for questions asked before today (and the year for ones from an earlier year), instead of a bare time that read as today's; a follow-up asked on a later day than its topic shows its date too ([#18210](https://github.com/can1357/oh-my-pi/pull/18210) by [@a-glapinski](https://github.com/a-glapinski))
+
 ## [18.17.0] - 2026-11-06
 
 ### Breaking Changes

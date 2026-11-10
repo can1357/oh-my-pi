@@ -336,13 +336,7 @@ describe("advisor", () => {
 					id: "ask-1",
 					name: "ask",
 					arguments: {
-						questions: [
-							{
-								id: "deploy",
-								question: "Authorize deployment?",
-								options: [{ label: "Yes" }, { label: "No" }],
-							},
-						],
+						html: '<form><p>Authorize deployment?</p><label><input type="radio" name="deploy" value="yes"> Yes</label><label><input type="radio" name="deploy" value="no"> No</label></form>',
 					},
 				},
 			],
@@ -352,8 +346,8 @@ describe("advisor", () => {
 			role: "toolResult",
 			toolCallId: "ask-1",
 			toolName: "ask",
-			content: [{ type: "text", text: "User selected: Yes" }],
-			details: { selectedOptions: ["Yes"] },
+			content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+			details: { answers: [{ name: "deploy", question: "Authorize deployment?", answer: "Yes" }] },
 			isError: false,
 			timestamp: 2,
 		} as unknown as AgentMessage;
@@ -365,28 +359,22 @@ describe("advisor", () => {
 				expandToolIO: true,
 			});
 
-			expect(compact).not.toContain("User selected: Yes");
-			expect(expanded).toContain('"question": "Authorize deployment?"');
-			expect(expanded).toContain('"label": "Yes"');
-			expect(expanded).toContain("User selected: Yes");
+			expect(compact).not.toContain('"deploy": "yes"');
+			expect(expanded).toContain("<p>Authorize deployment?</p>");
+			expect(expanded).toContain('value="no"> No</label>');
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
-		it("bounds long ask questions and custom answers with visible head and tail context", () => {
+		it("bounds long ask forms and answers with visible head and tail context", () => {
 			const questionEnd = "question-at-end";
 			const answerEnd = "answer-at-end";
 			const longQuestion = {
-				...(askCall as unknown as { content: { arguments: { questions: unknown[] } }[] }),
+				...(askCall as unknown as Record<string, unknown>),
 				content: [
 					{
 						...(askCall as unknown as { content: Record<string, unknown>[] }).content[0],
 						arguments: {
-							questions: [
-								{
-									id: "deploy",
-									question: `question-start ${"context ".repeat(1200)}${questionEnd}`,
-									options: [{ label: "Custom" }],
-								},
-							],
+							html: `<form><p>question-start ${"context\n".repeat(1200)}${questionEnd}</p><textarea name="answer"></textarea></form>`,
 						},
 					},
 				],
@@ -411,18 +399,8 @@ describe("advisor", () => {
 				role: "toolResult",
 				toolCallId: "ask-orphan",
 				toolName: "ask",
-				content: [{ type: "text", text: "deploy: Yes" }],
-				details: {
-					results: [
-						{
-							id: "deploy",
-							question: "Authorize production deployment?",
-							options: ["Yes", "No"],
-							multi: false,
-							selectedOptions: ["Yes"],
-						},
-					],
-				},
+				content: [{ type: "text", text: 'User answers:\n{\n  "deploy": "yes"\n}' }],
+				details: { answers: [{ name: "deploy", question: "Authorize production deployment?", answer: "Yes" }] },
 				isError: false,
 				timestamp: 2,
 			} as unknown as AgentMessage;
@@ -430,7 +408,7 @@ describe("advisor", () => {
 			const expanded = formatSessionHistoryMarkdown([orphan], { expandToolIO: true });
 
 			expect(expanded).toContain("Authorize production deployment?");
-			expect(expanded).toContain("deploy: Yes");
+			expect(expanded).toContain('"deploy": "yes"');
 		});
 
 		it("bounds expanded tool results with visible head and tail context", () => {

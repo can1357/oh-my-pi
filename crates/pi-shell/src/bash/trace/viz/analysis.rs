@@ -10,10 +10,18 @@ use parking_lot::Mutex;
 use super::{
 	model::{Effect, EffectKind, NodeKey},
 	runtime::VizSource,
+	source::{self, SourceMap},
 };
 use crate::bash::{
-	syntax::*,
-	trace::syntax::{SyntaxTree, UnitSyntax},
+	syntax::{
+		NodeId, RedirOp, Sep, Span,
+		tree::{
+			ArithText, ArrayElem, Assign, AssignValue, Command, CommandKind, Cond, CondExpr, List,
+			ParamName, ParamOp, Part, Pipeline, RedirFd, RedirTarget, Seq, Simple, Subscript, Tree,
+			Word, WordPart,
+		},
+	},
+	trace::syntax::{Root, UnitSyntax},
 };
 
 type ArithmeticCache = Mutex<HashMap<Vec<u8>, Option<Arc<str>>>>;
@@ -44,6 +52,9 @@ pub struct Analysis {
 	pub leaves:            HashSet<NodeKey>,
 	/// Canonical byte spans; source projection belongs to the renderer.
 	pub colors:            Vec<(NodeKey, Span, String)>,
+	/// Here-document bodies through their closing delimiter, by the command
+	/// reading them: source that runs with the command outside its span.
+	pub heredocs:          Vec<(NodeKey, Span)>,
 }
 
 impl Analysis {
@@ -67,19 +78,19 @@ pub struct Variable {
 
 /// Quote removal only: expansions, translations and unquoted tilde are not
 /// literals.
-pub fn literal(word: &Word) -> Option<String> {
+pub fn literal(word: Word<'_>) -> Option<String> {
 	let mut out = Vec::new();
-	append_literal(&word.parts, false, &mut out)?;
+	append_literal(word.parts(), false, &mut out)?;
 	String::from_utf8(out).ok()
 }
 
-fn append_literal(parts: &[WordPart], quoted: bool, out: &mut Vec<u8>) -> Option<()> {
+fn append_literal(parts: Seq<'_, WordPart<'_>>, quoted: bool, out: &mut Vec<u8>) -> Option<()> {
 	for part in parts {
-		match part {
-			WordPart::Lit(bytes) if quoted || !bytes.contains(&b'~') => out.extend_from_slice(bytes),
-			WordPart::Escaped(bytes) | WordPart::SQuote(bytes) => out.extend_from_slice(bytes),
-			WordPart::DQuote(parts) => append_literal(parts, true, out)?,
-			WordPart::AnsiC(bytes) if !quoted => {
+		match part.get() {
+			Part::Lit(bytes) if quoted || !bytes.contains(&b'~') => out.extend_from_slice(bytes),
+			Part::Escaped(bytes) | Part::SQuote(bytes) => out.extend_from_slice(bytes),
+			Part::DQuote(parts) => append_literal(parts, true, out)?,
+			Part::AnsiC(bytes) if !quoted => {
 				let decoded = crate::bash::syntax::ansi_decode_all(bytes);
 				out.extend_from_slice(decoded.split(|b| *b == 0).next().unwrap_or_default());
 			},
@@ -89,16 +100,36 @@ fn append_literal(parts: &[WordPart], quoted: bool, out: &mut Vec<u8>) -> Option
 	Some(())
 }
 
-fn contains_parameter(parts: &[WordPart]) -> bool {
-	parts.iter().any(|part| match part {
-		WordPart::Param(_) => true,
-		WordPart::DQuote(parts) | WordPart::Locale(parts) => contains_parameter(parts),
+/// The literal text `word` ends with (`"$dir/main.rs"` → `/main.rs`): enough
+/// to tell a file's extension when the rest expands at run time.
+pub fn literal_tail(word: Word<'_>) -> String {
+	let mut out = Vec::new();
+	append_tail(word.parts(), &mut out);
+	String::from_utf8_lossy_owned(out)
+}
+
+fn append_tail(parts: Seq<'_, WordPart<'_>>, out: &mut Vec<u8>) {
+	for part in parts {
+		match part.get() {
+			Part::Lit(bytes) | Part::Escaped(bytes) | Part::SQuote(bytes) => {
+				out.extend_from_slice(bytes);
+			},
+			Part::DQuote(parts) => append_tail(parts, out),
+			_ => out.clear(),
+		}
+	}
+}
+
+fn contains_parameter(parts: Seq<'_, WordPart<'_>>) -> bool {
+	parts.iter().any(|part| match part.get() {
+		Part::Param(_) => true,
+		Part::DQuote(parts) | Part::Locale(parts) => contains_parameter(parts),
 		_ => false,
 	})
 }
 
-pub fn command_name(simple: &Simple) -> Option<String> {
-	literal(simple.words.first()?)
+pub fn command_name(simple: Simple<'_>) -> Option<String> {
+	literal(simple.words().first()?)
 }
 
 #[derive(Clone, Copy)]
@@ -109,7 +140,7 @@ struct Context {
 }
 
 struct Definition<'a> {
-	assignment:   Option<&'a Assign>,
+	assignment:   Option<Assign<'a>>,
 	owner:        NodeKey,
 	order:        usize,
 	safe:         bool,
@@ -123,7 +154,7 @@ struct Reference {
 	simple: bool,
 }
 struct Call<'a> {
-	command:    &'a Command,
+	command:    Command<'a>,
 	key:        NodeKey,
 	background: bool,
 	refs:       std::ops::Range<usize>,
@@ -145,6 +176,8 @@ struct Walker<'a> {
 	function_arity:  Vec<u32>,
 	command_stack:   Vec<NodeKey>,
 	source_slot:     Option<u32>,
+	/// The walked unit's byte coordinates and source, locating heredoc bodies.
+	located:         Option<(SourceMap, &'a [u8])>,
 }
 
 pub fn analyze(source: &impl VizSource) -> Analysis {
@@ -166,6 +199,7 @@ pub fn analyze(source: &impl VizSource) -> Analysis {
 				.push(unit.index);
 		}
 		walker.unit = unit.index;
+		walker.located = Some((source::unit_bytes(&unit), unit.source.as_ref()));
 		walker.root(syntax);
 	}
 	walker
@@ -176,13 +210,18 @@ pub fn analyze(source: &impl VizSource) -> Analysis {
 }
 
 /// Analyze an already parsed static body using its caller-assigned source
-/// identities. Each `CompleteCommand` restarts canonical node numbering.
-pub fn program(program: &Program, unit: u32, sources: &[u32]) -> Analysis {
-	assert_eq!(program.commands.len(), sources.len(), "one source identity per complete command");
+/// identities: one tree and `List` root per complete command. Each restarts
+/// canonical node numbering.
+pub fn program(commands: &[(Tree, u32)], unit: u32, sources: &[u32]) -> Analysis {
+	assert_eq!(commands.len(), sources.len(), "one source identity per complete command");
 	let mut walker = Walker { unit, ..Walker::default() };
-	for (command, &source) in program.commands.iter().zip(sources) {
+	for ((tree, root), &source) in commands.iter().zip(sources) {
 		walker.source = source;
-		walker.list(&command.list, Context { restricted: false, background: false, order: 0 });
+		walker.list(List::at(tree, *root), Context {
+			restricted: false,
+			background: false,
+			order:      0,
+		});
 	}
 	walker.finish()
 }
@@ -192,11 +231,11 @@ impl<'a> Walker<'a> {
 		self.source_slot = Some(1);
 		let context =
 			Context { restricted: syntax.parent.is_some(), background: false, order: 0 };
-		match &syntax.tree {
-			SyntaxTree::List(list) => self.list(list, context),
-			SyntaxTree::Command(command) => self.command(command, context),
-			SyntaxTree::Word(word) => {
-				let key = self.key(word.id);
+		match syntax.tree.view() {
+			Root::List(list) => self.list(list, context),
+			Root::Command(command) => self.command(command, context),
+			Root::Word(word) => {
+				let key = self.key(word.id());
 				self.word(word, key, Context { restricted: true, ..context }, "arg");
 			},
 		}
@@ -216,88 +255,89 @@ impl<'a> Walker<'a> {
 		self.result.colors.push((owner, span, style.to_owned()));
 	}
 
-	fn list(&mut self, list: &'a List, context: Context) {
-		for item in &list.items {
-			let background = context.background || matches!(item.sep, Sep::Amp | Sep::Disown);
+	fn list(&mut self, list: List<'a>, context: Context) {
+		for item in list.items() {
+			let background = context.background || matches!(item.sep(), Sep::Amp | Sep::Disown);
+			let and_or = item.and_or();
 			let context = Context {
 				background,
-				restricted: context.restricted || background || !item.and_or.rest.is_empty(),
+				restricted: context.restricted || background || and_or.rest().len() != 0,
 				..context
 			};
-			self.and_or(&item.and_or, context);
+			self.and_or(and_or, context);
 		}
 	}
 
-	fn and_or(&mut self, and_or: &'a AndOr, context: Context) {
-		self.result.spans.insert(self.key(and_or.id), and_or.span);
-		self.pipeline(&and_or.first, context);
-		for (_, pipeline) in &and_or.rest {
+	fn and_or(&mut self, and_or: crate::bash::syntax::tree::AndOr<'a>, context: Context) {
+		self
+			.result
+			.spans
+			.insert(self.key(and_or.id()), and_or.span());
+		self.pipeline(and_or.first(), context);
+		for (_, pipeline) in and_or.rest() {
 			self.pipeline(pipeline, context);
 		}
 	}
 
-	fn pipeline(&mut self, pipeline: &'a Pipeline, context: Context) {
+	fn pipeline(&mut self, pipeline: Pipeline<'a>, context: Context) {
 		self
 			.result
 			.spans
-			.insert(self.key(pipeline.id), pipeline.span);
+			.insert(self.key(pipeline.id()), pipeline.span());
+		let stages = pipeline.stages();
 		let context = Context {
-			restricted: context.restricted || pipeline.stages.len() != 1 || pipeline.bang,
+			restricted: context.restricted || stages.len() != 1 || pipeline.bang(),
 			..context
 		};
-		for stage in &pipeline.stages {
-			self.command(&stage.cmd, context);
+		for stage in stages {
+			self.command(stage, context);
 		}
 	}
 
 	/// Only direct single-stage predicates in the final condition `AndOr` are
 	/// guards; earlier semicolon commands and nested substitutions are not.
-	fn guard(&mut self, list: &List) {
-		let Some(item) = list.items.last() else {
+	fn guard(&mut self, list: List<'_>) {
+		let Some(item) = list.items().last() else {
 			return;
 		};
-		if matches!(item.sep, Sep::Amp | Sep::Disown) {
+		if matches!(item.sep(), Sep::Amp | Sep::Disown) {
 			return;
 		}
-		for pipeline in std::iter::once(&item.and_or.first)
-			.chain(item.and_or.rest.iter().map(|(_, pipeline)| pipeline))
-		{
-			if pipeline.stages.len() != 1 {
+		let and_or = item.and_or();
+		for pipeline in std::iter::once(and_or.first()).chain(and_or.rest().map(|(_, p)| p)) {
+			let Some(command) = pipeline.stages().one() else {
 				continue;
-			}
-			let command = &pipeline.stages[0].cmd;
-			let predicate = match &command.kind {
+			};
+			let predicate = match command.kind() {
 				CommandKind::Cond(_) | CommandKind::Arith(_) => true,
 				CommandKind::Simple(simple) => command_name(simple)
 					.is_some_and(|name| matches!(name.as_str(), "test" | "[" | "false" | "true")),
 				_ => false,
 			};
 			if predicate {
-				self.result.guards.insert(self.key(command.id));
+				self.result.guards.insert(self.key(command.id()));
 			}
 		}
 	}
 
-	fn command(&mut self, command: &'a Command, context: Context) {
+	fn command(&mut self, command: Command<'a>, context: Context) {
 		self.order += 1;
 		let context = Context { order: self.order, ..context };
-		let owner = self.key(command.id);
-		self.register(command.id, command.span, owner);
+		let (id, span, kind) = (command.id(), command.span(), command.kind());
+		let owner = self.key(id);
+		self.register(id, span, owner);
 		if let Some(parent) = self.command_stack.last().copied() {
 			self.result.parents.insert(owner, parent);
 		}
 		self.command_stack.push(owner);
-		if matches!(
-			command.kind,
-			CommandKind::Simple(_) | CommandKind::Arith(_) | CommandKind::Cond(_)
-		) {
+		if matches!(kind, CommandKind::Simple(_) | CommandKind::Arith(_) | CommandKind::Cond(_)) {
 			self.result.leaves.insert(owner);
 		}
 		let start = self.references.len();
 		let scoped = Context { restricted: true, ..context };
-		let keyword = match &command.kind {
+		let keyword = match kind {
 			CommandKind::If(_) => Some("if"),
-			CommandKind::While(w) => Some(if w.until { "until" } else { "while" }),
+			CommandKind::While(w) => Some(if w.until() { "until" } else { "while" }),
 			CommandKind::For(_) | CommandKind::ArithFor(_) => Some("for"),
 			CommandKind::Select(_) => Some("select"),
 			CommandKind::Case(_) => Some("case"),
@@ -306,111 +346,128 @@ impl<'a> Walker<'a> {
 			_ => None,
 		};
 		if let Some(keyword) = keyword {
-			self.color(
-				owner,
-				Span::new(command.span.lo, command.span.lo + keyword.len() as u32),
-				"kw",
-			);
+			self.color(owner, Span::new(span.lo, span.lo + keyword.len() as u32), "kw");
 		}
-		match &command.kind {
+		let redirs = command.redirs();
+		if let Some((map, bytes)) = &self.located
+			&& redirs
+				.iter()
+				.any(|redir| matches!(redir.target(), RedirTarget::HereDoc(_)))
+		{
+			for body in source::heredoc_spans(map, bytes, redirs)
+				.into_iter()
+				.flatten()
+			{
+				let delimiter = map.bytes(body).map_or(0, |[_, end]| {
+					bytes[end..]
+						.iter()
+						.position(|byte| *byte == b'\n')
+						.unwrap_or(bytes.len() - end)
+				});
+				self
+					.result
+					.heredocs
+					.push((owner, Span::new(body.lo, body.hi + delimiter as u32)));
+			}
+		}
+		match kind {
 			CommandKind::Simple(simple) => {
-				self.simple(simple, owner, context, command.redirs.is_empty());
+				self.simple(simple, owner, context, redirs.is_empty());
 			},
 			CommandKind::Brace(list) => self.list(list, scoped),
 			CommandKind::Subshell(list) => self.list(list, scoped),
 			CommandKind::If(branch) => {
 				let conditions = branch
-					.arms
-					.iter()
-					.filter_map(|arm| arm.cond.items.last())
-					.map(|item| self.key(item.and_or.id))
+					.arms()
+					.filter_map(|arm| arm.cond.items().last())
+					.map(|item| self.key(item.and_or().id()))
 					.collect();
 				self.result.branch_conditions.insert(owner, conditions);
-				for arm in &branch.arms {
-					self.guard(&arm.cond);
-					self.list(&arm.cond, scoped);
-					self.list(&arm.body, scoped);
+				for arm in branch.arms() {
+					self.guard(arm.cond);
+					self.list(arm.cond, scoped);
+					self.list(arm.body, scoped);
 				}
-				if let Some(body) = &branch.else_body {
+				if let Some(body) = branch.else_body() {
 					self.list(body, scoped);
 				}
 			},
 			CommandKind::While(loop_) => {
 				let conditions = loop_
-					.cond
-					.items
+					.cond()
+					.items()
 					.last()
-					.map(|item| self.key(item.and_or.id))
+					.map(|item| self.key(item.and_or().id()))
 					.into_iter()
 					.collect();
 				self.result.branch_conditions.insert(owner, conditions);
-				self.guard(&loop_.cond);
-				self.list(&loop_.cond, scoped);
-				self.list(&loop_.body, scoped);
+				self.guard(loop_.cond());
+				self.list(loop_.cond(), scoped);
+				self.list(loop_.body(), scoped);
 			},
 			CommandKind::For(loop_) | CommandKind::Select(loop_) => {
-				self.writes.insert(text(&loop_.var));
-				for name in &loop_.extra_vars {
+				self.writes.insert(text(loop_.var()));
+				for name in loop_.extra_vars() {
 					self.writes.insert(text(name));
 				}
-				if let Some(words) = &loop_.words {
+				if let Some(words) = loop_.words() {
 					for word in words {
 						self.word(word, owner, scoped, "arg");
 					}
 				}
-				self.list(&loop_.body, scoped);
+				self.list(loop_.body(), scoped);
 			},
 			CommandKind::ArithFor(loop_) => {
-				self.arithmetic(&loop_.init, scoped);
-				self.arithmetic(&loop_.cond, scoped);
-				self.arithmetic(&loop_.step, scoped);
-				self.list(&loop_.body, scoped);
+				self.arithmetic(loop_.init(), scoped);
+				self.arithmetic(loop_.cond(), scoped);
+				self.arithmetic(loop_.step(), scoped);
+				self.list(loop_.body(), scoped);
 			},
 			CommandKind::Case(case) => {
-				self.word(&case.word, owner, scoped, "arg");
-				for arm in &case.arms {
-					for word in &arm.patterns {
+				self.word(case.word(), owner, scoped, "arg");
+				for arm in case.arms() {
+					for word in arm.patterns() {
 						self.word(word, owner, scoped, "arg");
 					}
-					self.list(&arm.body, scoped);
+					self.list(arm.body(), scoped);
 				}
 			},
 			CommandKind::Arith(expr) => self.arithmetic(expr, context),
 			CommandKind::Cond(expr) => self.condition(expr, owner, context),
 			CommandKind::FuncDef(function) => {
 				self.function_arity.push(0);
-				self.command(&function.body, scoped);
+				self.command(function.body(), scoped);
 				let arity = self.function_arity.pop().unwrap_or(0);
-				self.result.functions.insert(text(&function.name), arity);
-				for name in &function.extra_names {
+				self.result.functions.insert(text(function.name()), arity);
+				for name in function.extra_names() {
 					self.result.functions.insert(text(name), arity);
 				}
 			},
 			CommandKind::Coproc(coproc) => {
-				self.command(&coproc.body, Context { background: true, ..scoped });
+				self.command(coproc.body(), Context { background: true, ..scoped });
 			},
 			CommandKind::Repeat(repeat) => {
-				self.word(&repeat.count, owner, scoped, "arg");
-				self.list(&repeat.body, scoped);
+				self.word(repeat.count(), owner, scoped, "arg");
+				self.list(repeat.body(), scoped);
 			},
 			CommandKind::Try(try_) => {
-				self.list(&try_.body, scoped);
-				self.list(&try_.always, scoped);
+				self.list(try_.body(), scoped);
+				self.list(try_.always(), scoped);
 			},
 			CommandKind::AnonFunc(function) => {
-				for word in &function.args {
+				for word in function.args() {
 					self.word(word, owner, context, "arg");
 				}
-				self.command(&function.body, scoped);
+				self.command(function.body(), scoped);
 			},
 		}
-		for redir in &command.redirs {
-			if let Some(RedirFd::Var(name)) = &redir.fd {
+		for redir in redirs {
+			if let Some(RedirFd::Var(name)) = redir.fd() {
 				self.writes.insert(text(name));
 			}
-			match &redir.target {
+			match redir.target() {
 				RedirTarget::Word(word) => self.word(word, owner, context, "path"),
-				RedirTarget::HereDoc(doc) if !doc.quoted => self.deferred_text(&doc.text, context),
+				RedirTarget::HereDoc(doc) if !doc.quoted() => self.deferred_text(doc.text(), context),
 				RedirTarget::HereDoc(_) => {},
 			}
 		}
@@ -423,9 +480,10 @@ impl<'a> Walker<'a> {
 		self.command_stack.pop();
 	}
 
-	fn simple(&mut self, simple: &'a Simple, owner: NodeKey, context: Context, no_redirs: bool) {
+	fn simple(&mut self, simple: Simple<'a>, owner: NodeKey, context: Context, no_redirs: bool) {
 		let name = command_name(simple).unwrap_or_default();
-		let args: Vec<_> = simple.words.iter().map(literal).collect();
+		let words = simple.words();
+		let args: Vec<_> = words.iter().map(literal).collect();
 		let mutation = |name: &str| {
 			matches!(
 				name,
@@ -444,7 +502,7 @@ impl<'a> Walker<'a> {
 			)
 		};
 		if mutation(&name)
-			|| simple.typeset
+			|| simple.typeset()
 			|| (matches!(name.as_str(), "command" | "builtin")
 				&& args.get(1).and_then(Option::as_deref).is_some_and(mutation))
 			|| (name == "printf" && args.iter().any(|arg| arg.as_deref() == Some("-v")))
@@ -463,20 +521,18 @@ impl<'a> Walker<'a> {
 		if secret_command {
 			self.secret_reads += 1;
 		}
-		for assignment in &simple.assigns {
-			self.register(assignment.id, assignment.span, owner);
-			self.color(
-				owner,
-				Span::new(assignment.span.lo, assignment.span.lo + assignment.name.len() as u32),
-				"var def",
-			);
+		for assignment in simple.assigns() {
+			let (id, span, aname) = (assignment.id(), assignment.span(), assignment.name());
+			self.register(id, span, owner);
+			self.color(owner, Span::new(span.lo, span.lo + aname.len() as u32), "var def");
 			let start = self.references.len();
 			let secret_before = self.secret_reads;
 			let calls_before = self.calls.len();
-			if let Some(index) = &assignment.index {
+			if let Some(index) = assignment.index() {
 				self.word(index, owner, Context { restricted: true, ..context }, "arg");
 			}
-			match &assignment.value {
+			let value = assignment.value();
+			match value {
 				AssignValue::Scalar(word) => self.word(word, owner, context, "str"),
 				AssignValue::Array(elements) => self.elements(elements, owner, context),
 			}
@@ -489,22 +545,22 @@ impl<'a> Walker<'a> {
 				owner,
 				order: context.order,
 				safe: !context.restricted
-					&& simple.words.is_empty()
+					&& words.is_empty()
 					&& no_redirs
-					&& assignment.index.is_none()
-					&& !assignment.append
-					&& matches!(assignment.value, AssignValue::Scalar(_)),
+					&& assignment.index().is_none()
+					&& !assignment.append()
+					&& matches!(value, AssignValue::Scalar(_)),
 				dependencies,
 				secret: self.secret_reads != secret_before
-					|| (secret_name(&text(&assignment.name)) && self.calls.len() != calls_before),
+					|| (secret_name(&text(aname)) && self.calls.len() != calls_before),
 			};
 			self
 				.definitions
-				.entry(text(&assignment.name))
+				.entry(text(aname))
 				.or_default()
 				.push(definition);
 		}
-		for (index, word) in simple.words.iter().enumerate() {
+		for (index, word) in words.iter().enumerate() {
 			let start = self.references.len();
 			let secret_before = self.secret_reads;
 			let calls_before = self.calls.len();
@@ -534,17 +590,17 @@ impl<'a> Walker<'a> {
 		}
 	}
 
-	fn elements(&mut self, elements: &'a [ArrayElem], owner: NodeKey, context: Context) {
+	fn elements(&mut self, elements: Seq<'a, ArrayElem<'a>>, owner: NodeKey, context: Context) {
 		for element in elements {
-			if let Some(key) = &element.key {
+			if let Some(key) = element.key() {
 				self.word(key, owner, Context { restricted: true, ..context }, "arg");
 			}
-			self.word(&element.value, owner, context, "arg");
+			self.word(element.value(), owner, context, "arg");
 		}
 	}
 
-	fn word(&mut self, word: &'a Word, owner: NodeKey, context: Context, fallback: &str) {
-		self.register(word.id, word.span, owner);
+	fn word(&mut self, word: Word<'a>, owner: NodeKey, context: Context, fallback: &str) {
+		self.register(word.id(), word.span(), owner);
 		let value = literal(word);
 		if let (Some(body), Some(slot)) = (&value, self.source_slot) {
 			let next = u32::try_from(body.len())
@@ -555,7 +611,7 @@ impl<'a> Walker<'a> {
 			// into an already allocated source identity.
 			self.source_slot = next;
 			if next.is_some() {
-				self.result.source_slots.insert(self.key(word.id), slot);
+				self.result.source_slots.insert(self.key(word.id()), slot);
 			}
 		}
 		let style = if fallback == "cmd" {
@@ -565,47 +621,49 @@ impl<'a> Walker<'a> {
 				"flag"
 			} else if value.contains('/') {
 				"path"
-			} else if word.parts.iter().any(|part| {
-				matches!(part, WordPart::SQuote(_) | WordPart::DQuote(_) | WordPart::AnsiC(_))
-			}) {
+			} else if word
+				.parts()
+				.iter()
+				.any(|part| matches!(part.get(), Part::SQuote(_) | Part::DQuote(_) | Part::AnsiC(_)))
+			{
 				"str"
 			} else {
 				fallback
 			}
-		} else if contains_parameter(&word.parts) {
+		} else if contains_parameter(word.parts()) {
 			"var"
 		} else {
 			fallback
 		};
-		self.color(owner, word.span, style);
-		self.parts(&word.parts, owner, context);
+		self.color(owner, word.span(), style);
+		self.parts(word.parts(), owner, context);
 	}
 
-	fn parts(&mut self, parts: &'a [WordPart], owner: NodeKey, context: Context) {
+	fn parts(&mut self, parts: Seq<'a, WordPart<'a>>, owner: NodeKey, context: Context) {
 		for part in parts {
-			match part {
-				WordPart::DQuote(parts) | WordPart::Locale(parts) => self.parts(parts, owner, context),
-				WordPart::Param(param) => {
-					if let ParamName::Positional(position) = &param.name
+			match part.get() {
+				Part::DQuote(parts) | Part::Locale(parts) => self.parts(parts, owner, context),
+				Part::Param(param) => {
+					let (name, index, op) = (param.name(), param.index(), param.op());
+					if let ParamName::Positional(position) = name
 						&& let Some(arity) = self.function_arity.last_mut()
 					{
-						*arity = (*arity).max(*position);
+						*arity = (*arity).max(position);
 					}
-					if let ParamName::Var(name) = &param.name {
+					if let ParamName::Var(name) = name {
 						self.references.push(Reference {
 							name:   text(name),
 							order:  context.order,
 							simple: !context.restricted
-								&& param.index.is_none()
-								&& !param.indirect
-								&& matches!(param.op, ParamOp::None),
+								&& index.is_none()
+								&& !param.indirect()
+								&& matches!(op, ParamOp::None),
 						});
-						if matches!(param.op, ParamOp::Assign { .. }) {
+						if matches!(op, ParamOp::Assign { .. }) {
 							self.writes.insert(text(name));
 						}
 					}
-					if param.indirect
-						|| matches!(param.op, ParamOp::Indirect | ParamOp::PrefixNames { .. })
+					if param.indirect() || matches!(op, ParamOp::Indirect | ParamOp::PrefixNames { .. })
 					{
 						self.opaque_mutation = true;
 					}
@@ -613,11 +671,11 @@ impl<'a> Walker<'a> {
 					// replacement strings, conditional words, or arithmetic), not
 					// the surrounding command's simple argument context.
 					let operand_context = Context { restricted: true, ..context };
-					if let Some(Subscript::Expr(word)) = &param.index {
+					if let Some(Subscript::Expr(word)) = index {
 						self.word(word, owner, operand_context, "arg");
 						self.opaque_mutation = true;
 					}
-					match &param.op {
+					match op {
 						ParamOp::Default { word, .. }
 						| ParamOp::Assign { word, .. }
 						| ParamOp::Alt { word, .. } => self.word(word, owner, operand_context, "arg"),
@@ -643,11 +701,11 @@ impl<'a> Walker<'a> {
 						_ => {},
 					}
 				},
-				WordPart::Comsub(sub) => self.list(&sub.body, Context { restricted: true, ..context }),
-				WordPart::ProcSub(sub) => self.list(&sub.body, Context { restricted: true, ..context }),
-				WordPart::Arith(expr) => self.arithmetic(expr, context),
-				WordPart::Compound(elements) => self.elements(elements, owner, context),
-				WordPart::Zsh(_) | WordPart::BadSubst(_) | WordPart::BadComsub(_) => {
+				Part::Comsub(sub) => self.list(sub.body(), Context { restricted: true, ..context }),
+				Part::ProcSub(sub) => self.list(sub.body(), Context { restricted: true, ..context }),
+				Part::Arith(expr) => self.arithmetic(expr, context),
+				Part::Compound(elements) => self.elements(elements, owner, context),
+				Part::Zsh(_) | Part::BadSubst(_) | Part::BadComsub(_) => {
 					self.opaque_mutation = true;
 				},
 				_ => {},
@@ -655,46 +713,41 @@ impl<'a> Walker<'a> {
 		}
 	}
 
-	fn condition(&mut self, expr: &'a CondExpr, owner: NodeKey, context: Context) {
-		match expr {
-			CondExpr::Unary { arg, .. } | CondExpr::Word(arg) => self.word(arg, owner, context, "arg"),
-			CondExpr::Binary { lhs, rhs, op } => {
+	fn condition(&mut self, expr: CondExpr<'a>, owner: NodeKey, context: Context) {
+		match expr.get() {
+			Cond::Unary { arg, .. } | Cond::Word(arg) => self.word(arg, owner, context, "arg"),
+			Cond::Binary { lhs, rhs, op } => {
 				self.word(lhs, owner, context, "arg");
 				self.word(rhs, owner, context, "arg");
-				if matches!(op.as_slice(), b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge") {
+				if matches!(op, b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge") {
 					self.opaque_mutation = true;
 				}
 			},
-			CondExpr::Not(expr) | CondExpr::Group(expr) => self.condition(expr, owner, context),
-			CondExpr::And(lhs, rhs) | CondExpr::Or(lhs, rhs) => {
+			Cond::Not(expr) | Cond::Group(expr) => self.condition(expr, owner, context),
+			Cond::And(lhs, rhs) | Cond::Or(lhs, rhs) => {
 				self.condition(lhs, owner, context);
 				self.condition(rhs, owner, context);
 			},
 		}
 	}
 
-	fn arithmetic(&mut self, expr: &ArithText, context: Context) {
+	fn arithmetic(&mut self, expr: ArithText<'_>, context: Context) {
 		// Arithmetic recursively dereferences variable contents and array
 		// subscripts. Any identifier here is not a direct immutable
 		// parameter reference.
-		for name in identifiers(&expr.src) {
+		let src = expr.src();
+		for name in identifiers(src) {
 			self.references.push(Reference {
 				name:   text(name),
 				order:  context.order,
 				simple: false,
 			});
 		}
-		if expr
-			.src
-			.windows(2)
-			.any(|pair| pair == b"++" || pair == b"--")
-			|| expr.src.iter().enumerate().any(|(i, byte)| {
+		if src.windows(2).any(|pair| pair == b"++" || pair == b"--")
+			|| src.iter().enumerate().any(|(i, byte)| {
 				*byte == b'='
-					&& !matches!(
-						expr.src.get(i.wrapping_sub(1)).copied(),
-						Some(b'=' | b'!' | b'<' | b'>')
-					)
-					&& expr.src.get(i + 1) != Some(&b'=')
+					&& !matches!(src.get(i.wrapping_sub(1)).copied(), Some(b'=' | b'!' | b'<' | b'>'))
+					&& src.get(i + 1) != Some(&b'=')
 			}) {
 			self.opaque_mutation = true;
 		}
@@ -798,8 +851,8 @@ impl<'a> Walker<'a> {
 		{
 			return None;
 		}
-		let value = match &first.assignment?.value {
-			AssignValue::Scalar(word) => self.constant_parts(&word.parts, first.order, seen, false),
+		let value = match first.assignment?.value() {
+			AssignValue::Scalar(word) => self.constant_parts(word.parts(), first.order, seen, false),
 			AssignValue::Array(_) => None,
 		};
 		seen.remove(name);
@@ -808,7 +861,7 @@ impl<'a> Walker<'a> {
 
 	fn constant_parts(
 		&self,
-		parts: &[WordPart],
+		parts: Seq<'_, WordPart<'_>>,
 		before: usize,
 		seen: &mut HashSet<String>,
 		quoted: bool,
@@ -820,18 +873,20 @@ impl<'a> Walker<'a> {
 
 	fn append_constant_parts(
 		&self,
-		parts: &[WordPart],
+		parts: Seq<'_, WordPart<'_>>,
 		before: usize,
 		seen: &mut HashSet<String>,
 		quoted: bool,
 		out: &mut String,
 	) -> Option<()> {
 		for part in parts {
-			match part {
-				WordPart::Param(param)
-					if param.index.is_none() && !param.indirect && matches!(param.op, ParamOp::None) =>
+			match part.get() {
+				Part::Param(param)
+					if param.index().is_none()
+						&& !param.indirect()
+						&& matches!(param.op(), ParamOp::None) =>
 				{
-					let ParamName::Var(name) = &param.name else {
+					let ParamName::Var(name) = param.name() else {
 						return None;
 					};
 					out.push_str(&self.constant_definition(
@@ -840,16 +895,16 @@ impl<'a> Walker<'a> {
 						seen,
 					)?);
 				},
-				WordPart::DQuote(parts) => {
+				Part::DQuote(parts) => {
 					self.append_constant_parts(parts, before, seen, true, out)?;
 				},
-				WordPart::Lit(bytes) if quoted || !bytes.contains(&b'~') => {
+				Part::Lit(bytes) if quoted || !bytes.contains(&b'~') => {
 					out.push_str(std::str::from_utf8(bytes).ok()?);
 				},
-				WordPart::Escaped(bytes) | WordPart::SQuote(bytes) => {
+				Part::Escaped(bytes) | Part::SQuote(bytes) => {
 					out.push_str(std::str::from_utf8(bytes).ok()?);
 				},
-				WordPart::AnsiC(bytes) if !quoted => {
+				Part::AnsiC(bytes) if !quoted => {
 					let bytes = crate::bash::syntax::ansi_decode_all(bytes);
 					let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or_default();
 					out.push_str(std::str::from_utf8(bytes).ok()?);
@@ -864,8 +919,8 @@ impl<'a> Walker<'a> {
 // Declaration builtins retain their arguments as canonical words rather than
 // Assign nodes. Inspect only the literal name prefix, never fabricate an
 // Assign.
-fn declaration_name(word: &Word) -> Option<String> {
-	let WordPart::Lit(prefix) = word.parts.first()? else {
+fn declaration_name(word: Word<'_>) -> Option<String> {
+	let Part::Lit(prefix) = word.parts().first()?.get() else {
 		return None;
 	};
 	let end = prefix
@@ -908,16 +963,62 @@ fn secret_name(name: &str) -> bool {
 		.any(|suffix| upper.ends_with(suffix))
 }
 
+/// Whether an `sd` command line rewrites files in place: it names files after
+/// `FIND` and `REPLACE_WITH` and does not ask for `-p`/`--preview`. `words` is
+/// the argv after `sd`, `None` where a word expands at run time; such a word
+/// counts as an operand, so a dynamic file list still reads as a write.
+fn sd_edits_files(words: impl IntoIterator<Item = Option<String>>) -> bool {
+	let mut words = words.into_iter();
+	let mut operands = 0;
+	let mut options = true;
+	while let Some(word) = words.next() {
+		let Some(word) = word.filter(|word| options && word.len() > 1 && word.starts_with('-'))
+		else {
+			operands += 1;
+			continue;
+		};
+		if word == "--" {
+			options = false;
+		} else if let Some(long) = word.strip_prefix("--") {
+			match long {
+				"preview" => return false,
+				// `--flags=i` carries its value; the bare form takes the next word.
+				"max-replacements" | "flags" => {
+					words.next();
+				},
+				_ => {},
+			}
+		} else {
+			// A short cluster (`-pF`, `-n1`, `-fi`): `-n`/`-f` take the rest of
+			// the cluster as their value, or the next word when nothing is left.
+			let cluster = &word[1..];
+			for (at, flag) in cluster.char_indices() {
+				match flag {
+					'p' => return false,
+					'n' | 'f' => {
+						if at + 1 == cluster.len() {
+							words.next();
+						}
+						break;
+					},
+					_ => {},
+				}
+			}
+		}
+	}
+	operands > 2
+}
+
 fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>) -> Vec<Effect> {
 	let mut result = Vec::new();
-	let simple = match &call.command.kind {
+	let simple = match call.command.kind() {
 		CommandKind::Simple(simple) => Some(simple),
 		_ => None,
 	};
 	let name = simple.and_then(command_name).unwrap_or_default();
 	let args: Vec<_> = simple
 		.into_iter()
-		.flat_map(|simple| simple.words.iter())
+		.flat_map(|simple| simple.words().iter())
 		.filter_map(literal)
 		.collect();
 	let has = |values: &[&str]| {
@@ -964,6 +1065,8 @@ fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>)
 	}
 	if matches!(name.as_str(), "mkdir" | "touch" | "cp" | "mv" | "ln" | "tee" | "install")
 		|| (name == "sed" && args.iter().any(|arg| arg.starts_with("-i")))
+		|| (name == "sd"
+			&& simple.is_some_and(|simple| sd_edits_files(simple.words().iter().skip(1).map(literal))))
 		|| (name == "git"
 			&& has(&[
 				"add",
@@ -1003,11 +1106,11 @@ fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>)
 	if matches!(name.as_str(), "source" | ".") && args.iter().any(|arg| arg.contains(".env")) {
 		add(EffectKind::Secret, "◆", "secret", "loads environment file".to_owned());
 	}
-	for redir in &call.command.redirs {
-		match &redir.target {
+	for redir in call.command.redirs() {
+		match redir.target() {
 			RedirTarget::Word(word)
 				if matches!(
-					redir.op,
+					redir.op(),
 					RedirOp::Out
 						| RedirOp::Append
 						| RedirOp::Clobber
@@ -1025,8 +1128,8 @@ fn effects(call: &Call<'_>, references: &[Reference], tainted: &HashSet<String>)
 				}
 			},
 			RedirTarget::HereDoc(doc)
-				if doc.text.windows(4).any(|bytes| bytes == b".env")
-					|| doc.text.windows(7).any(|bytes| bytes == b"API_KEY") =>
+				if doc.text().windows(4).any(|bytes| bytes == b".env")
+					|| doc.text().windows(7).any(|bytes| bytes == b"API_KEY") =>
 			{
 				add(
 					EffectKind::Secret,

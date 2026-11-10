@@ -974,6 +974,31 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
 	});
 
+	/** A settled block, then a streaming one whose stable rows a completeScrollback commit carries along. */
+	function commitCarryingHead() {
+		const transcript = new TranscriptContainer();
+		transcript.completeScrollback = true;
+		transcript.addChild(new Block(["settled"], true));
+		const head = new AppendBlock(["s1", "s2", "s3", "tail"], ["s1", "s2", "s3"]);
+		transcript.addChild(head);
+		const batch = transcript.peekFinalizedBatch(80, 2);
+		expect(batch?.rows).toEqual(["settled", "", "s1", "s2"]);
+		return { transcript, head, batch: batch! };
+	}
+
+	it("keeps a streaming block whose rows ride an offered commit from being removed", () => {
+		const { transcript, head } = commitCarryingHead();
+		expect(transcript.canRemoveBlock(head)).toBe(false);
+	});
+
+	it("drops a commit carrying streaming rows when stable emission resets", () => {
+		const { transcript, batch } = commitCarryingHead();
+		transcript.resetStableEmission();
+		// The reset forgot those rows; acknowledging the stale offer must not bring them back.
+		transcript.acknowledgeFinalizedBatch(batch.id);
+		expect(transcript.emittedStableRows()).toEqual([0, 0]);
+	});
+
 	it("removes live blocks behind a settled one without disturbing committed or settled bookkeeping", () => {
 		const transcript = new TranscriptContainer();
 		const committedA = new Block(["committed a"], true);

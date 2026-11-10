@@ -3970,6 +3970,70 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after empty reasonless abort" });
 	});
 
+	it("stops same-model retries after three consecutive generic aborts", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ stopReason: "aborted", errorMessage: "Request was aborted" },
+				{ content: ["unused success"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
+		});
+
+		await session.prompt("Trigger consecutive generic aborts");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 2 });
+		expect(fallbackEvents).toHaveLength(0);
+		const last = lastAssistant(session);
+		expect(last.errorMessage).toBe("Retry budget exhausted after 2 retries: Request was aborted");
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("does not retry reasonless aborted turns that have partial content", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {

@@ -189,6 +189,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	CursorExecFrameContext,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
 	CursorExecPairing,
@@ -265,6 +266,7 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "./cursor/exec-modern";
+import { CursorExecOrder } from "./cursor/exec-order";
 import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
@@ -448,7 +450,7 @@ export interface CursorOptions extends StreamOptions {
 	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
-	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation. */
+	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
 }
 
@@ -462,8 +464,9 @@ interface CursorRetryContext {
 	checkpointHash?: string;
 	noProgressResumes: number;
 	output: AssistantMessage;
-	blockState: BlockState;
-	usageState: UsageState;
+	/** Unset when the earlier attempt failed before its run started. */
+	blockState?: BlockState;
+	usageState?: UsageState;
 	baseConversationId: string;
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
@@ -1016,14 +1019,32 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 }
 
-function isHttp2Unavailable(error: unknown): boolean {
-	const code = (error as { code?: unknown } | null)?.code;
+function isHttp2AlpnRejected(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
 	const message = error instanceof Error ? error.message : String(error);
 	return (
 		(code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) ||
 		/Cursor run transport could not negotiate HTTP\/2/i.test(message)
 	);
 }
+
+function isCursorTlsReset(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const message = error instanceof Error ? error.message : String(error);
+	return code === "ECONNRESET" && /disconnected before secure TLS connection was established/i.test(message);
+}
+
+function isHttp2Unavailable(error: unknown): boolean {
+	return isHttp2AlpnRejected(error) || isCursorTlsReset(error);
+}
+
+const CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX = 32;
+const CURSOR_HTTP2_UNAVAILABLE_TTL_MS = 10 * 60_000;
+
+const http2Unavailable = new LRUCache<string, true>({
+	max: CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX,
+	ttl: CURSOR_HTTP2_UNAVAILABLE_TTL_MS,
+});
 
 /**
  * Maps an opaque HTTP/2 negotiation failure into an actionable error.
@@ -1189,7 +1210,12 @@ function streamCursorWithWireMode(
 
 	(async () => {
 		const retryContext = timing?.retry;
-		const transportMode = timing?.transport ?? (options?.transport === "http1" ? "http1" : "http2");
+		const transportMode =
+			timing?.transport ??
+			(options?.transport === "http1" ||
+			(options?.transport !== "http2" && http2Unavailable.get(model.baseUrl || CURSOR_API_URL))
+				? "http1"
+				: "http2");
 		let startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime = retryContext?.firstTokenTime;
 
@@ -1482,6 +1508,8 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			// Before connecting: the RunSSE fallback for a failed connect does not push its own start.
+			if (!retryContext) stream.push({ type: "start", partial: output });
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
@@ -1507,8 +1535,6 @@ function streamCursorWithWireMode(
 					signal: options?.signal,
 				});
 			}
-
-			if (!retryContext) stream.push({ type: "start", partial: output });
 
 			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
@@ -1549,7 +1575,9 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
+				onEditSettled: options?.execHandlers?.editSettled?.bind(options.execHandlers),
 				onToolResult,
+				execOrder: new CursorExecOrder(),
 				holdExternalCall: relay
 					? (execMsg, mcpCall) => {
 							relay.held.set(mcpCall.toolCallId, { execMsg, mcpCall });
@@ -1904,6 +1932,7 @@ function streamCursorWithWireMode(
 				clearTimeout(relay.quietTimer);
 			}
 			await h2Completion.promise;
+			state.execOrder?.close();
 			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
 				successfulRotatedConversationIds.add(conversationId);
 				freshRotatedConversationIds.delete(conversationId);
@@ -1988,13 +2017,12 @@ function streamCursorWithWireMode(
 			if (relay) clearTimeout(relay.quietTimer);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
+			if (h2Unavailable && isHttp2AlpnRejected(error)) http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 			if (
 				h2Unavailable &&
 				options?.transport !== "http2" &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
-				openBlockState !== undefined &&
-				usageState !== undefined &&
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
@@ -2018,8 +2046,8 @@ function streamCursorWithWireMode(
 						checkpointHash: retryContext?.checkpointHash,
 						noProgressResumes: retryContext?.noProgressResumes ?? 0,
 						output,
-						blockState: openBlockState,
-						usageState,
+						blockState: openBlockState ?? retryContext?.blockState,
+						usageState: usageState ?? retryContext?.usageState,
 						baseConversationId,
 						conversationId,
 						blobStore: activeBlobStore,
@@ -2031,6 +2059,7 @@ function streamCursorWithWireMode(
 				try {
 					for await (const event of http1Stream) {
 						if (event.type === "start") continue;
+						if (event.type === "done") http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 						stream.push(event);
 					}
 					const http1Result = await http1Stream.result();
@@ -2084,6 +2113,7 @@ function streamCursorWithWireMode(
 			// Resume only from a checkpoint that followed every decoded side effect
 			// and every client result write; without one, replay is safe solely
 			// before the provider emitted work.
+			openBlockState?.execOrder?.close();
 			await drainInFlightDispatches();
 			const retryAttempt = retryContext?.attempt ?? 0;
 			const hasFreshCheckpoint =
@@ -2386,6 +2416,10 @@ export interface BlockState {
 	editOwnedToolCallIds?: Set<string>;
 	/** Edit blocks whose write already persisted a `toolResult`. */
 	pairedEditToolCallIds?: Set<string>;
+	/** Orders this run's exec frames like a local tool batch. Optional so existing test harnesses stay valid. */
+	execOrder?: CursorExecOrder;
+	/** Ends the live card of an edit the server completed without a materializing write. */
+	onEditSettled?: (result: ToolResultMessage) => void;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
@@ -2857,6 +2891,55 @@ function sendShellStreamExitFromResult(
 	}
 }
 
+/** Frames that mutate files: omp runs `edit`, `write` and `delete` alone. */
+const EXCLUSIVE_EXEC_CASES: Partial<Record<NonNullable<ExecServerMessage["message"]["case"]>, true>> = {
+	writeArgs: true,
+	deleteArgs: true,
+	piEditArgs: true,
+	piWriteArgs: true,
+};
+
+/**
+ * Whether an MCP frame runs alone, classified by the host from the tool it
+ * will actually run (`CursorExecHandlers.mcpConcurrency`).
+ *
+ * Only a call this host executes (`execHandlers.mcp`) takes an exclusive
+ * place: a frame handed to an external executor never touches local state,
+ * and an approval probe runs nothing. A throwing classifier resolves to
+ * exclusive — the ordering that cannot race — rather than taking the batch
+ * down, matching the agent loop's handling of a throwing `concurrency`
+ * resolver. The decoded call rides into `runExecServerMessage` so the frame
+ * is decoded once.
+ */
+function classifyMcpExecFrame(
+	execMsg: ExecServerMessage,
+	execHandlers: CursorExecHandlers | undefined,
+): { exclusive: boolean; call?: CursorMcpCall } {
+	if (execMsg.message.case !== "mcpArgs" || !execHandlers?.mcp || !execHandlers.mcpConcurrency) {
+		return { exclusive: false };
+	}
+	const call = decodeMcpCall(execMsg.message.value);
+	if (call.approvalOnly) return { exclusive: false, call };
+	try {
+		return { exclusive: execHandlers.mcpConcurrency(call) === "exclusive", call };
+	} catch {
+		return { exclusive: true, call };
+	}
+}
+
+/** The call a frame belongs to: its tool call id, or the frame itself when it carries none. */
+function execFrameCallId(execMsg: ExecServerMessage): string {
+	const value = execMsg.message.value;
+	const toolCallId = value && "toolCallId" in value ? value.toolCallId : undefined;
+	return typeof toolCallId === "string" && toolCallId.length > 0 ? toolCallId : `exec:${execMsg.id}:${execMsg.execId}`;
+}
+
+const EDIT_MATERIALIZATION: CursorExecFrameContext = { editMaterialization: true };
+
+/**
+ * Runs one exec frame in its place in the tool batch ({@link CursorExecOrder}).
+ * Must be entered synchronously as frames arrive: the order is arrival order.
+ */
 async function handleExecServerMessage(
 	execMsg: ExecServerMessage,
 	runTransport: CursorMessageWriter,
@@ -2868,6 +2951,50 @@ async function handleExecServerMessage(
 	stream: AssistantMessageEventStream,
 	state: BlockState,
 	externalToolExecutor: boolean,
+): Promise<void> {
+	const order = state.execOrder;
+	const execCase = execMsg.message.case;
+	const gated = order !== undefined && execCase !== undefined && execCase !== "requestContextArgs";
+	const mcp = gated ? classifyMcpExecFrame(execMsg, execHandlers) : { exclusive: false };
+	const run = () =>
+		runExecServerMessage(
+			execMsg,
+			runTransport,
+			execHandlers,
+			onToolResult,
+			requestContextTools,
+			requestContextRules,
+			output,
+			stream,
+			state,
+			externalToolExecutor,
+			mcp.call,
+		);
+	if (!gated) return run();
+	const callId = execFrameCallId(execMsg);
+	const editOwned =
+		(execCase === "readArgs" || execCase === "writeArgs") && isEditOwnedToolCallId(state, output, callId);
+	const reached = await order.enter(callId, editOwned || mcp.exclusive || EXCLUSIVE_EXEC_CASES[execCase] === true);
+	try {
+		if (reached) await run();
+	} finally {
+		// An edit keeps its place past its read: its write follows, or the server completes it.
+		if (!reached || !(editOwned && execCase === "readArgs")) order.leave(callId);
+	}
+}
+
+async function runExecServerMessage(
+	execMsg: ExecServerMessage,
+	runTransport: CursorMessageWriter,
+	execHandlers: CursorExecHandlers | undefined,
+	onToolResult: CursorToolResultHandler | undefined,
+	requestContextTools: McpToolDefinition[],
+	requestContextRules: CursorRule[],
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
+	externalToolExecutor: boolean,
+	predecodedMcpCall?: CursorMcpCall,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -2942,9 +3069,10 @@ async function handleExecServerMessage(
 						: { path: piReadDisplayPath(args.path, args.offset, args.limit) },
 				);
 			}
+			const read = execHandlers?.read?.bind(execHandlers);
 			const { execResult: readResult, toolResult } = await resolveExecHandler(
 				handlerArgs,
-				execHandlers?.read?.bind(execHandlers),
+				read && editOwned ? (readArgs: typeof handlerArgs) => read(readArgs, EDIT_MATERIALIZATION) : read,
 				editOwned ? undefined : onToolResult,
 				result =>
 					buildReadResultFromToolResult(
@@ -3072,8 +3200,8 @@ async function handleExecServerMessage(
 			const write = execHandlers?.write?.bind(execHandlers);
 			const writeHandler = write
 				? async (writeArgs: typeof args) => {
-						const result = await write(writeArgs);
-						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
+						if (!editOwned) return await write(writeArgs);
+						return remapExecHandlerToolName(await write(writeArgs, EDIT_MATERIALIZATION), "edit");
 					}
 				: undefined;
 			const { execResult } = await resolveExecHandler(
@@ -3214,7 +3342,7 @@ async function handleExecServerMessage(
 		}
 		case "mcpArgs": {
 			const args = execMsg.message.value;
-			const mcpCall = decodeMcpCall(args);
+			const mcpCall = predecodedMcpCall ?? decodeMcpCall(args);
 			// An approval probe, not an invocation: the frame asks whether the
 			// call would be permitted. Running the tool to find out fires a side
 			// effect the user has not been asked about, and fires it again when
@@ -4911,6 +5039,15 @@ function stringToolArg(args: Record<string, unknown> | undefined, key: string): 
 	return typeof value === "string" ? value : undefined;
 }
 
+/** End the live card of an edit no materializing write settled; a host failure must not break the stream. */
+function settleEdit(state: BlockState, result: ToolResultMessage): void {
+	try {
+		state.onEditSettled?.(result);
+	} catch (error) {
+		log("error", "onEditSettled", { error: error instanceof Error ? error.message : String(error) });
+	}
+}
+
 function markEditToolCallPaired(state: BlockState, toolCallId: string): void {
 	if (!state.pairedEditToolCallIds) state.pairedEditToolCallIds = new Set();
 	state.pairedEditToolCallIds.add(toolCallId);
@@ -5097,14 +5234,17 @@ export function flushOpenToolCalls(
 		const kind = block[kStreamingBlockKind];
 		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
-				state.onToolResult?.({
+				const result: ToolResultMessage = {
 					role: "toolResult",
 					toolCallId: block.id,
 					toolName: block.name,
 					content: [{ type: "text", text: "The connection to Cursor closed before this call completed." }],
 					isError: true,
 					timestamp: Date.now(),
-				});
+				};
+				state.onToolResult?.(result);
+				// The edit's materializing read surfaced no call, so nothing else ends its live card.
+				if (kind === "cursor-edit") settleEdit(state, result);
 			}
 		}
 		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
@@ -6012,16 +6152,19 @@ export function processInteractionUpdate(
 						stream_content: edit.args.streamContent ?? stringToolArg(settled.arguments, "stream_content"),
 					});
 				}
+				state.execOrder?.leave(settled.id);
 				if (!state.pairedEditToolCallIds?.has(settled.id)) {
 					const { text, isError } = describeEditResult(toolCall);
-					state.onToolResult?.({
+					const result: ToolResultMessage = {
 						role: "toolResult",
 						toolCallId: settled.id,
 						toolName: "edit",
 						content: [{ type: "text", text }],
 						isError,
 						timestamp: Date.now(),
-					});
+					};
+					state.onToolResult?.(result);
+					settleEdit(state, result);
 				}
 			}
 			const idx = streamedBlockIndex(output, settled);

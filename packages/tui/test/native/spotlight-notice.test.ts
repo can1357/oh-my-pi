@@ -151,7 +151,7 @@ const RICH: SpotlightDetails = {
 		lines: 10,
 		start: 40,
 		path: "src/ingest.ts",
-		heat: "3712849-01",
+		heat: "3712948-01",
 		why: "sabbbracfs",
 		kept: [
 			[1, 2],
@@ -449,7 +449,7 @@ describe("spotlight notice", () => {
 		expect(markAt(41)).toEqual({ line: 41, heat: 7 / 9, tone: "accent", wash: parts(1) });
 		// Hidden: heat only, unless it scored hot.
 		expect(markAt(43)).toEqual({ line: 43, heat: 2 / 9, wash: parts(3) });
-		expect(markAt(44)).toEqual({ line: 44, heat: 8 / 9, tone: "error", wash: parts(4) });
+		expect(markAt(44)).toEqual({ line: 44, heat: 1, tone: "error", wash: parts(4) });
 		// A context line Spotlight never scored still carries its tone.
 		expect(markAt(47)).toEqual({ line: 47, tone: "info", wash: parts(7) });
 		expect(parts(4)[0]).toBeCloseTo(0.8, 2);
@@ -464,7 +464,7 @@ describe("spotlight notice", () => {
 			to: 45,
 			label: "  … 4 lines cut",
 			note: [
-				{ t: "4 lines · peak 0.89", s: "muted" },
+				{ t: "4 lines · peak 1.00", s: "muted" },
 				{ t: " · line 44 cut by the budget", s: "error" },
 			],
 			tone: "error",
@@ -482,7 +482,7 @@ describe("spotlight notice", () => {
 			path: "src/ingest.ts",
 			start: 44,
 			numbers: true,
-			marks: [{ line: 44, heat: 8 / 9, tone: "error", wash: parts(4) }],
+			marks: [{ line: 44, heat: 1, tone: "error", wash: parts(4) }],
 		});
 		expect(prop(sum, "spans")).toEqual([{ t: "0.80 + 0.30 = 1.10 · cutoff 0.88", s: "muted" }]);
 		expect(prop(why, "spans")).toEqual([

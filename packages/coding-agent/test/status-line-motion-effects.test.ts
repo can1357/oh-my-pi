@@ -32,7 +32,7 @@ function fixture(): { component: StatusLineComponent; render: () => string } {
 		systemPrompt: [],
 		agent: { state: { tools: [] } },
 		skills: [],
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 0,

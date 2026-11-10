@@ -31,6 +31,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// lanes), so no rows are frozen into the bundled catalog.
 	"singularityapi-dev",
 	"singularityapi-tech",
+	// Otari's roster is workspace-scoped and credential-scoped
+	// (otariModelManagerOptions discovers it live per key), so no rows are
+	// frozen into the bundled catalog.
+	"otari",
 	// Clef judges are a `bundle="always"` KDL seed that
 	// cloudflareWorkersAiModelManagerOptions serves at runtime; the bundled
 	// catalog gains the rows at the next regeneration.
