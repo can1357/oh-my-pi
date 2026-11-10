@@ -21,7 +21,9 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
-use bstr::{BString, ByteSlice};
+use std::sync::LazyLock;
+
+use bstr::{BStr, BString, ByteSlice};
 use hashbrown::HashMap;
 use strum::IntoEnumIterator;
 
@@ -382,8 +384,41 @@ pub const NAMES: &[u8] = b"argv * @ # ARGC ? status $ ! - 0 _ LINENO PPID RANDOM
 	zsh_eval_context ZSH_EVAL_CONTEXT options functions functions_source functrace funcsourcetrace funcfiletrace aliases galiases saliases commands \
 	parameters builtins modules jobstates jobtexts jobdirs nameddirs userdirs mapfile EPOCHSECONDS EPOCHREALTIME epochtime langinfo terminfo termcap zsh_scheduled_events errnos sysparams exint exstr exarr zcurses_colors zcurses_attrs zcurses_keycodes zcurses_windows ZCURSES_COLORS ZCURSES_COLOR_PAIRS watch WATCH ZSH_VERSION ZSH_PATCHLEVEL ZSH_NAME ZSH_ARGZERO";
 
+/// [`scan`]'s answers for every name it knows ([`NAMES`], the tie
+/// scalars, [`PLAIN`], [`PROMPTS`], [`VERSION`], the ZLE and completion
+/// specials): every variable access asks [`lookup`], and most names are
+/// not special.
+static TABLE: LazyLock<HashMap<&'static [u8], Special>> = LazyLock::new(|| {
+	word_list(NAMES)
+		.chain(
+			Tie::ALL
+				.iter()
+				.flat_map(|t| [t.array().as_bytes(), t.scalar().as_bytes()]),
+		)
+		.chain(word_list(PLAIN))
+		.chain(word_list(PROMPTS))
+		.chain(word_list(VERSION))
+		.chain(crate::bash::vm::zle::params::NAMES.iter().copied())
+		.chain(crate::bash::vm::zle::comp::complete::NAMES.iter().copied())
+		.filter_map(|name| scan(name).map(|sp| (name, sp)))
+		.collect()
+});
+
 /// The special `name` names in zsh dialect.
 pub fn lookup(name: &[u8]) -> Option<Special> {
+	let found = TABLE.get(name).copied();
+	debug_assert_eq!(
+		found,
+		scan(name),
+		"`{}` is special but missing from the names TABLE is built from",
+		BStr::new(name)
+	);
+	found
+}
+
+/// The special `name` names in zsh dialect, by its definition (see
+/// [`TABLE`]).
+fn scan(name: &[u8]) -> Option<Special> {
 	Some(match name {
 		b"argv" => Special::Argv,
 		b"*" | b"@" => Special::Star,
@@ -1419,7 +1454,10 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 	};
 	let platform = ex.k.engine.config().platform;
 	let windows = platform == Platform::Windows;
-	let mut entries = HashMap::new();
+	// Every directory's listing is asked first, and the table is built only
+	// once all are answered: each answer re-runs the expansion, which
+	// otherwise rebuilt the names of every directory listed before it.
+	let mut lists: Vec<(&[u8], usize)> = Vec::new();
 	for dir in path.split(|&c| c == crate::bash::vm::probe::path_separator(platform)) {
 		// zsh `isrelative`: not absolute, or with a `.` or `..` component.
 		let absolute = dir.first() == Some(&b'/')
@@ -1431,9 +1469,17 @@ pub fn fill_cmdnamtab(ex: &mut Expander<'_, '_>) -> X<()> {
 		{
 			continue;
 		}
-		let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
-		let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
-		let Atom::List(names) = ask(ex, Probe::Fs { seq, req })? else {
+		if ex.log.get(ex.cursor).is_none() {
+			let seq = u32::try_from(ex.cursor).unwrap_or(u32::MAX);
+			let req = Box::new(FsReq::ReadDir { path: BString::from(dir) });
+			return Err(Stop::Probe(Probe::Fs { seq, req }));
+		}
+		lists.push((dir, ex.cursor));
+		ex.cursor += 1;
+	}
+	let mut entries = HashMap::new();
+	for (dir, at) in lists {
+		let Some(Atom::List(names)) = ex.log.get(at).cloned() else {
 			continue;
 		};
 		for name in names {

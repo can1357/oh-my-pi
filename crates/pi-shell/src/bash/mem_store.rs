@@ -473,9 +473,9 @@ impl StateStore for MemStore {
 					_ => return Err(shape(key)),
 				}
 			},
-			Change::InsertElem(key, at, k, value) => match self.var_mut(key) {
+			Change::InsertElem(key, buckets, k, value) => match self.var_mut(key) {
 				Some(VarValue::Assoc(items)) => {
-					items.insert_at(at, BString::from(bytes(k)), BString::from(value));
+					items.insert_front(buckets, BString::from(bytes(k)), BString::from(value));
 				},
 				_ => return Err(shape(key)),
 			},

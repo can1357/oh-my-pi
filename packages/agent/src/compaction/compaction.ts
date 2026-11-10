@@ -1289,7 +1289,9 @@ async function generateShortSummary(
 					maxTokens,
 					signal,
 					apiKey,
-					reasoning: resolveCompactionEffort(model, options?.thinkingLevel),
+					// Display-only summary under a 512-token cap: reasoning would consume the
+					// whole budget. The full summary keeps the session's effort.
+					disableReasoning: true,
 					initiatorOverride: options?.initiatorOverride,
 					metadata: options?.metadata,
 					fetch: options?.fetch,

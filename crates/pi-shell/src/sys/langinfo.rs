@@ -66,9 +66,10 @@ pub fn strftime(locale: &[u8], fmt: &[u8], tm: &Tm) -> Option<Vec<u8>> {
 pub struct Collator(native::Coll);
 
 impl Collator {
-	/// The collation of locale `name`; `None` for `C`, `POSIX`, an empty
-	/// or unknown name (strings compare as bytes), or a target without the
-	/// C library's locale functions.
+	/// The collation of locale `name`; `None` for `C`, `POSIX` and their
+	/// UTF-8 variants (`C.UTF-8`: code point order, which is byte order for
+	/// UTF-8), an empty or unknown name (strings compare as bytes), or a
+	/// target without the C library's locale functions.
 	pub fn new(name: &[u8]) -> Option<Self> {
 		native::Coll::new(name).map(Self)
 	}
@@ -136,7 +137,12 @@ mod native {
 
 	impl Coll {
 		pub fn new(name: &[u8]) -> Option<Self> {
-			if matches!(name, b"" | b"C" | b"POSIX") || name.contains(&0) {
+			let (lang, codeset) =
+				name.split_at(name.iter().position(|&c| c == b'.').unwrap_or(name.len()));
+			let utf8 = codeset.is_empty()
+				|| codeset.eq_ignore_ascii_case(b".UTF-8")
+				|| codeset.eq_ignore_ascii_case(b".utf8");
+			if (matches!(lang, b"" | b"C" | b"POSIX") && utf8) || name.contains(&0) {
 				return None;
 			}
 			let c = CString::new(name).ok()?;

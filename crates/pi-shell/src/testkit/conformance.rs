@@ -528,30 +528,57 @@ fn del_elem_removes_one_element(store: &mut dyn StateStore) {
 	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)), "key a removed");
 }
 
-/// `InsertElem` puts a new key at the position given (zsh's hash order),
-/// later lookups find every key at its new place, and a present key takes
-/// the value where it is.
+/// `InsertElem` puts a new key before every key of its zsh hash bucket,
+/// the entries being listed bucket by bucket (zsh's hash order); later
+/// lookups find every key at its new place, and a present key takes the
+/// value where it is.
 fn insert_elem_places_a_new_key(store: &mut dyn StateStore) {
-	let m = VarValue::Assoc(vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"2"))].into());
+	const BUCKETS: usize = 17;
+	let bucket = |k: &str| crate::bash::store::zsh_bucket(k.as_bytes(), BUCKETS);
+	// The listing zsh keeps: bucket by bucket.
+	let mut keys = vec!["z", "a", "m", "k1", "k2", "k3"];
+	keys.sort_by_key(|k| bucket(k));
+	let value = |k: &str, keys: &[&str]| -> BString {
+		match k {
+			"a" => bytes(b"3"),
+			_ if ["q", "e", "k9"].contains(&k) && keys.contains(&k) => bytes(b"9"),
+			_ => bytes(b"1"),
+		}
+	};
+	let m = VarValue::Assoc(
+		keys
+			.iter()
+			.map(|k| (bytes(k.as_bytes()), bytes(b"1")))
+			.collect(),
+	);
 	apply(store, Change::Put(var(b"m"), var_rec(Attrs::ASSOC, m)));
-	apply(store, Change::InsertElem(var(b"m"), 1, BStr::new("q"), BStr::new("9")));
-	apply(store, Change::InsertElem(var(b"m"), 0, BStr::new("a"), BStr::new("3")));
-	apply(store, Change::InsertElem(var(b"m"), 99, BStr::new("e"), BStr::new("5")));
+	for new in ["q", "e", "k9"] {
+		apply(store, Change::InsertElem(var(b"m"), BUCKETS, BStr::new(new), BStr::new("9")));
+		let at = keys.partition_point(|k| bucket(k) < bucket(new));
+		keys.insert(at, new);
+	}
+	apply(store, Change::InsertElem(var(b"m"), BUCKETS, BStr::new("a"), BStr::new("3")));
 	let want = VarValue::Assoc(
-		vec![
-			(bytes(b"z"), bytes(b"1")),
-			(bytes(b"q"), bytes(b"9")),
-			(bytes(b"a"), bytes(b"3")),
-			(bytes(b"e"), bytes(b"5")),
-		]
-		.into(),
+		keys
+			.iter()
+			.map(|k| (bytes(k.as_bytes()), value(k, &keys)))
+			.collect(),
 	);
 	assert_eq!(read(store, var(b"m")), Some(var_rec(Attrs::ASSOC, want)));
 	apply(store, Change::DelElem(var(b"m"), Elem::Key(BStr::new("q"))));
 	apply(store, Change::AppendElem(var(b"m"), Elem::Key(BStr::new("a")), BStr::new("+")));
+	keys.retain(|&k| k != "q");
 	let want = VarValue::Assoc(
-		vec![(bytes(b"z"), bytes(b"1")), (bytes(b"a"), bytes(b"3+")), (bytes(b"e"), bytes(b"5"))]
-			.into(),
+		keys
+			.iter()
+			.map(|k| {
+				let mut v = value(k, &keys);
+				if *k == "a" {
+					v.push(b'+');
+				}
+				(bytes(k.as_bytes()), v)
+			})
+			.collect(),
 	);
 	assert_eq!(
 		read(store, var(b"m")),

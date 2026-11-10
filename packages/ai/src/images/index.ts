@@ -1,5 +1,6 @@
 import { type Api, IMAGE_GENERATION_APIS, type ImageGenerationApi, type Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
+import { assertProviderEnabled } from "../registry/oauth";
 import { isFactoryDroidModel } from "../providers/factory-droid";
 import { generateFactoryDroidImage } from "./factory-droid";
 import { generateAntigravityImage } from "./google-antigravity";
@@ -30,6 +31,8 @@ export async function generateImage(
 	request: ImageGenerationRequest,
 	options: ImageGenerationOptions,
 ): Promise<ImageGenerationResult> {
+	// A provider turned off in its auth rules is never called, even with a key passed in directly.
+	assertProviderEnabled(model.provider);
 	if (isFactoryDroidModel(model)) return generateFactoryDroidImage(model, request, options);
 	switch (model.api) {
 		case "openai-images":

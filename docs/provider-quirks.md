@@ -1832,6 +1832,24 @@ Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an Open
 - **Model Options**: `qianfanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) constructs `openai-completions` options bound to `https://qianfan.baidubce.com/v2` via `createSimpleOpenAICompletionsOptions`.
 - **Bundled Models**: Static model specifications in `packages/catalog/src/models.json` define Qianfan models (e.g. `deepseek-v3.2` with `reasoning: true` and `baseUrl: "https://qianfan.baidubce.com/v2"`).
 
+## Otari (`otari`)
+
+Otari is an AI gateway and control plane that routes requests to upstream model providers on a workspace's behalf over an OpenAI-compatible Chat Completions interface at `https://api.otari.ai/api/v1`.
+
+### Special casings
+
+- **Workspace-scoped roster**: a workspace enables upstream providers and models in Otari, so the catalog is per-credential and dynamic. Nothing is bundled — the provider is registered in `CREDENTIAL_SCOPED_PROVIDERS` (`packages/catalog/scripts/generate-models.ts`), so catalog generation never fetches or commits one workspace's roster. Runtime discovery is authoritative (`dynamic-models-authoritative`): a successful key-scoped `/models` fetch is the whole catalog and prunes whatever the workspace has since disabled.
+- **Live row ownership**: `/models` rows are OpenRouter-style: `supported_parameters` (contains `reasoning` for reasoning models), `architecture.input_modalities` / `output_modalities`, context and output caps, and per-million USD pricing (`input_price_per_million`, `output_price_per_million`, optional `cache_read_price_per_million` / `cache_write_price_per_million`). With no bundled reference to merge from, the live row owns every capability field (`otariModelManagerOptions` in `packages/catalog/src/provider-models/openai-compat.ts`). Rows the gateway has no models.dev metadata for omit `supported_parameters` and `architecture` and map as text-only, non-reasoning, with unknown limits.
+- **Non-chat rows**: the roster lists every model a workspace enables, including embedding, rerank, speech, image, and realtime models. Rows whose `architecture.output_modalities` contain no `text` are dropped in the mapper; metadata-less non-chat rows are dropped by `exclude-models provider="otari"` in `runtime/behavior.kdl`.
+- **No `developer` role**: Otari forwards through any-llm to the upstream, and some upstreams reject the `developer` role (`anthropic/` rows answer 400), so `supports-developer-role #false` sends instructions as `system`. `store`, `max_completion_tokens`, tool calls, and `reasoning_effort` (`minimal`..`xhigh`) pass through; the gateway maps effort to each upstream's own control.
+- **No stable default**: because the roster depends on the workspace, no model id is guaranteed to be enabled for every token, and `/models` marks no workspace default. `default-model` (`deepseek/deepseek-v4.1-flash`, the example selector in Otari's `/models` API docs) is a placeholder that only ranks already-available models and never fabricates a row; when the workspace does not enable it, the resolver falls back to the first available model.
+
+### Auth & usage
+
+- Login kind `api-key` is declared in `packages/catalog/src/compat/rules/auth/otari.kdl`. Environment key: `OTARI_API_KEY`. Validation uses `models-endpoint` against `https://api.otari.ai/api/v1/models`, which answers 401 both without a key and with a rejected one (verified 2026-11-02), so the probe validates the pasted key and bills nothing.
+- Self-hosted deployments set `OTARI_BASE_URL` to the deployment's API root (`https://host.example.com/api/v1`). It redirects `/login otari` validation (`base-url-env`), discovery, and requests, so a self-hosted key is never sent to the hosted gateway. A `models.yml` provider `baseUrl` override also redirects discovery and requests, but login validation only reads `OTARI_BASE_URL`.
+- **Cache scope**: the model cache namespace hashes the API key and base URL (`resolveModelCacheProviderId`, `otari` is in `CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS`), so a second workspace or deployment never reads another's cached roster.
+
 ## Qwen Portal (`qwen-portal`)
 
 Qwen Portal provides access to Qwen hosted models via an OpenAI-compatible endpoint at `https://portal.qwen.ai/v1`. It uses the OpenAI Chat Completions transport for model execution and tool calling.
