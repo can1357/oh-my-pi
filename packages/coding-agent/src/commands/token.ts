@@ -2,7 +2,7 @@
  * Get the API key or OAuth token for a provider.
  */
 
-import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import { PROVIDER_REGISTRY, providerPauseReason } from "@oh-my-pi/pi-ai";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
@@ -101,6 +101,15 @@ export default class Token extends Command {
 				process.exitCode = 1;
 				return;
 			}
+		}
+
+		// A paused provider resolves no key from any source; say why instead of
+		// letting `ProviderDisabledError` escape or reporting "no accounts".
+		const pauseReason = providerPauseReason(provider);
+		if (pauseReason !== undefined) {
+			process.stderr.write(`${chalk.red(`Provider "${providerName}" is paused: ${pauseReason}`)}\n`);
+			process.exitCode = 1;
+			return;
 		}
 
 		const authStorage = await discoverAuthStorage();

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pausedProviders()`, listing every built-in provider a `disabled` auth rule pauses with its reason ([#18697](https://github.com/can1357/oh-my-pi/issues/18697))
+
 ## [18.18.4] - 2026-11-09
 
 ### Added

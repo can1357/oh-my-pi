@@ -67,6 +67,27 @@ export function assertProviderEnabled(provider: string): void {
 	if (reason !== undefined) throw new AIError.ProviderDisabledError(provider, reason);
 }
 
+/** A built-in provider its auth rules pause, with the reason shown to users. */
+export interface PausedProvider {
+	id: string;
+	name: string;
+	reason: string;
+}
+
+/**
+ * Every built-in provider {@link providerPauseReason} currently pauses. Listings
+ * (`omp models`) name these instead of dropping them, so a paused provider does
+ * not look like one that was never configured.
+ */
+export function pausedProviders(): PausedProvider[] {
+	const paused: PausedProvider[] = [];
+	for (const provider of PROVIDER_REGISTRY) {
+		const reason = providerPauseReason(provider.id);
+		if (reason !== undefined) paused.push({ id: provider.id, name: provider.name, reason });
+	}
+	return paused;
+}
+
 /**
  * Remove all custom OAuth providers registered by a source.
  */
