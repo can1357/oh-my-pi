@@ -177,6 +177,7 @@ async function createPersistedSession(
 		resolvedModel?: string;
 		perCallModelIdentity?: string;
 		perCallThinkingLevel?: ConfiguredThinkingLevel | null;
+		actualEffort?: Effort;
 	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
@@ -197,6 +198,7 @@ async function createPersistedSession(
 		perCallModel: contract?.perCallModel,
 		perCallModelIdentity: contract?.perCallModelIdentity,
 		perCallThinkingLevel: contract?.perCallThinkingLevel,
+		actualEffort: contract?.actualEffort,
 		...(contract?.compactionThreshold !== undefined
 			? { compactionThreshold: contract.compactionThreshold }
 			: undefined),
@@ -759,6 +761,46 @@ describe("persisted subagent revival", () => {
 		const check = options?.assertDispatchModel;
 		if (!check) throw new Error("Expected a per-call dispatch check");
 		expect(() => check(highOnly)).toThrow("no supported thinking effort at or below task.maxEffort=low");
+	});
+
+	it("re-applies task.maxActualEffort, not task.maxEffort, when reviving an actualEffort spawn", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
+		const highOnly = perCallModelFixture("mock-high-only", [Effort.High]);
+		const settings = Settings.isolated({
+			"task.maxEffort": "high",
+			"task.maxActualEffort": { "mock/*": "low" },
+			modelRoles: { review: "mock/mock-high-only" },
+		});
+		const create = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () =>
+				({
+					session: Object.assign(createRevivedSession([]).session, { model: highOnly }),
+				}) as CreateAgentSessionResult,
+		);
+		const revive = async (actualEffort: Effort | undefined) => {
+			const cwd = makeTempDir("@pi-revive-actual-effort-");
+			const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+				agent: "task",
+				perCallModel: true,
+				resolvedModel: "mock/mock-high-only",
+				perCallModelIdentity: "mock/mock-high-only",
+				perCallThinkingLevel: Effort.High,
+				actualEffort,
+			});
+			const ref = createRef(sessionFile);
+			const reviver = await createFactory(cwd, undefined, { settings, modelRegistry: stubRegistry([highOnly]) })(
+				ref,
+			);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			return reviver(ref);
+		};
+
+		await expect(revive(Effort.High)).rejects.toThrow(
+			"mock/mock-high-only has no supported thinking effort at or below task.maxActualEffort=low",
+		);
+		expect(create).not.toHaveBeenCalled();
+		// The same transcript without actualEffort revives under task.maxEffort=high.
+		await expect(revive(undefined)).resolves.toBeDefined();
 	});
 
 	it.each([

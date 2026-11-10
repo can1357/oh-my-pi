@@ -19,7 +19,6 @@ import {
 import type {
 	Context,
 	CredentialDisabledEvent,
-	Effort,
 	Message,
 	Model,
 	ModelUsageHealth,
@@ -305,6 +304,7 @@ import {
 	parseThinkingLevel,
 	resolveConfiguredThinkingLevel,
 	shouldDisableReasoning,
+	type ThinkingLevelCeiling,
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import {
@@ -685,8 +685,8 @@ export interface CreateAgentSessionOptions {
 	disableServerSideFallback?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
-	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
-	thinkingLevelCeiling?: Effort;
+	/** Hard per-model ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort` entry for each model); retry-fallback recovery re-clamps to it. */
+	thinkingLevelCeiling?: ThinkingLevelCeiling;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
 	openAIServiceTier?: ServiceTier | null;
 	/**

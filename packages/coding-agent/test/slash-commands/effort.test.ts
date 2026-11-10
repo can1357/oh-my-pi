@@ -51,7 +51,7 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; ce
 			emit: () => {},
 			emitNotice: () => {},
 		} as unknown as ModelControlsHost,
-		{ thinkingLevelCeiling: options.ceiling },
+		{ thinkingLevelCeiling: options.ceiling === undefined ? undefined : () => options.ceiling },
 	);
 	const session = {
 		model,
