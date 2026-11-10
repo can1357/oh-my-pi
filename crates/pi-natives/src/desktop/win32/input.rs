@@ -82,7 +82,7 @@ fn keyboard_layout(target: Option<HWND>) -> HKL {
 		// SAFETY: GetForegroundWindow has no preconditions.
 		|| unsafe { GetForegroundWindow() },
 		|hwnd| {
-			// SAFETY: Both calls accept a window/thread identifier without borrowing it.
+			// SAFETY: Both calls accept scalar window/thread identifiers.
 			unsafe { GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut())) }
 		},
 	)
@@ -611,7 +611,7 @@ mod background {
 						"{character:?} has no Win32 virtual key"
 					)));
 				}
-				// SAFETY: VkKeyScanExW performs a scalar lookup in the receiving layout.
+				// SAFETY: VkKeyScanExW is a scalar lookup on this layout.
 				let mapped = unsafe { VkKeyScanExW(units[0], layout) };
 				if mapped == -1 {
 					return Err(DesktopError::input_failed(format!(
@@ -1341,7 +1341,7 @@ mod foreground {
 	/// Virtual-key transition carrying the hardware scan code and extended
 	/// flag, for applications that read scan codes rather than virtual keys.
 	fn key_event(vk: u16, up: bool, layout: super::HKL) -> INPUT {
-		// SAFETY: MapVirtualKeyExW is a pure scalar lookup in the receiving layout.
+		// SAFETY: MapVirtualKeyExW is a scalar lookup on this layout.
 		let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, layout) } as u16;
 		let mut flags = if up { KEYEVENTF_KEYUP } else { 0 };
 		if background::is_extended(vk) {
