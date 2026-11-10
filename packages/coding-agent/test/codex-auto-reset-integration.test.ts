@@ -374,7 +374,10 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		// The 5h window was explicitly off; only the governing weekly key records the answer.
 		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("no");
 		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
-		expect(targets).toHaveLength(1);
+		// An interactive "yes" spends the credit the plan priced, never a later one.
+		expect(targets).toEqual([
+			{ provider: "openai-codex", credentialId: 1, accountId: "acct-a", email: EMAIL, creditId: "credit-1" },
+		]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 

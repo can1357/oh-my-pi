@@ -175,7 +175,7 @@ export interface CodexResetPlanInput {
 	activeBlockUnblockAtMs?: number;
 }
 
-/** One credit to spend. `redeemResetCredit` picks the account's soonest-expiring credit. */
+/** One credit to spend. `target.creditId` pins the credit picked here, so a redeem cannot spend a later one. */
 export interface CodexResetAction {
 	reason: "blocked-account" | "expiring-credit";
 	/** Window whose policy governs this spend. */
@@ -397,6 +397,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				accountId,
 				email,
 				...(orgId ? { orgId } : {}),
+				...(soonestCredit?.credit.id ? { creditId: soonestCredit.credit.id } : {}),
 			},
 			label,
 			active: isActive,

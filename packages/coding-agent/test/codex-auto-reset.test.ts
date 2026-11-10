@@ -223,6 +223,32 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		]);
 	});
 
+	it("pins an imminent blocked restore to its approved credit instead of a later credit", () => {
+		const candidate = report({ primaryUsed: 1, weeklyUsed: 0.8, credits: 2 });
+		candidate.resetCredits!.credits = [
+			{ id: "later-credit", status: "available", expiresAt: new Date(NOW + DAY).toISOString() },
+			{ id: "approved-credit", status: "available", expiresAt: new Date(NOW + 60_000).toISOString() },
+		];
+		const plan = planCodexResetRedemptions(
+			input([candidate], {
+				settings: {
+					modes: { "5h": "no", weekly: "yes" },
+					minBlockedMinutes: 60,
+					keepCredits: 0,
+					salvageHorizonMs: 12 * HOUR,
+				},
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "blocked-account",
+				window: "5h",
+				target: { creditId: "approved-credit" },
+				creditId: "approved-credit",
+			},
+		]);
+	});
+
 	it("unblocks at the LATEST exhausted-window reset when both are exhausted", () => {
 		const plan = planCodexResetRedemptions(input([report({ primaryUsed: 1.0, weeklyUsed: 1.0 })]));
 		expect(plan.actions).toEqual([
@@ -772,6 +798,22 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 				salvageUsedFraction: 0.8,
 				expiresInMs: 2 * HOUR,
 				active: true,
+			},
+		]);
+	});
+
+	it("pins salvage to its expiring credit instead of a later credit", () => {
+		const candidate = report({ weeklyUsed: 0.8, limitReached: false, credits: 2 });
+		candidate.resetCredits!.credits = [
+			{ id: "later-credit", status: "available", expiresAt: new Date(NOW + DAY).toISOString() },
+			{ id: "expiring-credit", status: "available", expiresAt: new Date(NOW + 2 * HOUR).toISOString() },
+		];
+		const plan = planCodexResetRedemptions(input([candidate], { trigger: "sweep" }));
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				target: { creditId: "expiring-credit" },
+				creditId: "expiring-credit",
 			},
 		]);
 	});
