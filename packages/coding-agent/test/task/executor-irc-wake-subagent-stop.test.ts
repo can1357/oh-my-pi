@@ -795,6 +795,27 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			hold.release();
 		});
 
+		it("hands back, without cancelling the pass, an agent-attributed prompt that is a user-role message", async () => {
+			const preflight = parkPreflight();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [{ content: ["never asked"] }],
+				onStop: () => undefined,
+			});
+
+			// The executor's assignment: not synthetic, so a user-role message, but attributed to the agent.
+			const prompted = run.session.prompt("AGENT-ASSIGNMENT", { attribution: "agent", throwOnDrop: true });
+			await preflight.entered.promise;
+			const hold = run.session.holdForStopPass();
+			preflight.gate.resolve();
+
+			await expect(prompted).rejects.toThrow();
+			expect(hold.signal.aborted).toBe(false);
+			expect(run.mock.calls).toHaveLength(0);
+			hold.release();
+		});
+
 		it("cancels the pass for a user retry whose continuation was scheduled before the hold", async () => {
 			const run = await setup({
 				driven: true,
@@ -1331,6 +1352,88 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 			expect(hold.signal.aborted).toBe(true);
 			expect(run.mock.calls).toHaveLength(2);
 			expect(JSON.stringify(run.mock.calls[1]?.context.messages)).toContain("USER-SKILL");
+		});
+	});
+
+	describe("a follow-up whose monitor must not observe another owner's turns", () => {
+		const followUpOptions = () => ({
+			id: AGENT_ID,
+			agent: wakeAgent,
+			message: "do more",
+			artifactsDir: tempDir.path(),
+		});
+
+		it("does not attach across the wait for a hold a wake took while the follow-up's prompt was being sent", async () => {
+			const run = await setup({
+				driven: true,
+				responses: [yieldCall("HOLDER-YIELD"), yieldCall("FOLLOW-UP-YIELD")],
+				onStop: () => undefined,
+			});
+			const holdTaken = Promise.withResolvers<StopPassHold>();
+			const prompt = run.session.prompt.bind(run.session);
+			vi.spyOn(run.session, "prompt").mockImplementation(async (text, options) => {
+				if (text === "do more") {
+					// A wake's observation takes its hold after the follow-up passed its ownership waits, while its
+					// prompt is on the way in: the prompt waits the hold out instead of losing a race.
+					holdTaken.resolve(run.session.holdForStopPass());
+				}
+				return prompt(text, options);
+			});
+
+			const followUp = runSubagentFollowUpTurn(followUpOptions());
+			const hold = await holdTaken.promise;
+			// The holder's refusal continuation runs while the follow-up's prompt is parked behind the hold.
+			await hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			hold.release();
+			const result = await followUp;
+
+			// The holder's yield belongs to the holder's pass: the follow-up's result is its own turn's alone.
+			expect(result.error).toBeUndefined();
+			expect(result.extractedToolData?.yield).toHaveLength(1);
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
+			expect(result.output).not.toContain("HOLDER-YIELD");
+		});
+
+		it("detaches when a hold taken during prompt setup hands the prompt back, until its retry is admitted", async () => {
+			const healthy = { state: "healthy" as const, accounts: [] };
+			const preflightEntered = Promise.withResolvers<void>();
+			const preflightGate = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				usageAwareFallback: true,
+				responses: [yieldCall("HOLDER-YIELD"), yieldCall("FOLLOW-UP-YIELD")],
+				onStop: () => undefined,
+			});
+			// Only the follow-up's first prompt parks in its setup; the holder's continuation passes straight through.
+			vi.spyOn(authStorage.health, "model")
+				.mockImplementationOnce(async () => {
+					preflightEntered.resolve();
+					await preflightGate.promise;
+					return healthy;
+				})
+				.mockResolvedValue(healthy);
+			const handedBack = Promise.withResolvers<void>();
+			const prompt = run.session.prompt.bind(run.session);
+			vi.spyOn(run.session, "prompt").mockImplementation((text, options) => {
+				const sent = prompt(text, options);
+				if (text === "do more") sent.catch(() => handedBack.resolve());
+				return sent;
+			});
+
+			const followUp = runSubagentFollowUpTurn(followUpOptions());
+			await preflightEntered.promise;
+			// The prompt is admitted and in setup when a wake's observation takes its hold: the prompt is handed back.
+			const hold = run.session.holdForStopPass();
+			preflightGate.resolve();
+			await handedBack.promise;
+			// The holder's continuation runs while the follow-up backs off, with its monitor admitted once already.
+			await hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			hold.release();
+			const result = await followUp;
+
+			expect(result.error).toBeUndefined();
+			expect(result.extractedToolData?.yield).toHaveLength(1);
+			expect(result.output).toContain("FOLLOW-UP-YIELD");
 		});
 	});
 	describe("a stop-pass holder whose run is cancelled", () => {

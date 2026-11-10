@@ -2632,6 +2632,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 }
 
+/**
+ * Who owns a driven run's monitor while its initial prompt is in flight. The monitor is attached when the
+ * session admits the prompt, the point from which the session's in-flight bracket keeps every other turn out,
+ * and detached when the prompt is handed back unrun or loses a prompt race: it never observes a turn it
+ * does not own while the prompt waits behind a hold, maintenance or a backoff.
+ */
+interface PromptOwnership {
+	attach(): void;
+	detach(): void;
+}
+
 interface DriveOutcome {
 	exitCode: number;
 	error?: string;
@@ -2750,11 +2761,16 @@ async function driveSessionToResult(
 		 * while backing off. Absent, the busy error keeps the old path.
 		 */
 		onPromptBusy?: () => Promise<void>;
+		/**
+		 * The initial prompt's ownership of the monitor: `attach` runs when the session admits the prompt,
+		 * `detach` when it is handed back unrun. Absent, the caller's monitor is attached for the whole drive.
+		 */
+		promptOwnership?: PromptOwnership;
 		/** Go on with the interrupted turn instead of sending `task`, which only labels the run. */
 		restore?: boolean;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore, outputSchema } = options;
+	const { solutionSpace, onPromptBusy, restore, outputSchema, promptOwnership } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2820,17 +2836,27 @@ async function driveSessionToResult(
 		text: string,
 		promptOptions: PromptOptions,
 		label: string,
-		{ forceFinalYield = false }: { forceFinalYield?: boolean } = {},
+		{ forceFinalYield = false, ownership }: { forceFinalYield?: boolean; ownership?: PromptOwnership } = {},
 	): Promise<void> => {
 		for (let attempt = 1; attempt <= MAX_PROMPT_DISPATCH_ATTEMPTS; attempt++) {
 			if (forceFinalYield) monitor.markFinalYieldForced(true);
 			try {
 				// Once a stop pass holds the session, the run's own turns go through the hold.
 				const prompter = stopPassHold ?? session;
-				await awaitAbortable(prompter.prompt(text, { ...promptOptions, runCommands: false, throwOnDrop: true }));
+				await awaitAbortable(
+					prompter.prompt(text, {
+						...promptOptions,
+						// The monitor takes the session from the moment the prompt is admitted.
+						...(ownership ? { onPromptAdmitted: ownership.attach } : {}),
+						runCommands: false,
+						throwOnDrop: true,
+					}),
+				);
 				return;
 			} catch (err) {
 				if (!(err instanceof PromptDroppedError)) throw err;
+				// Handed back unrun (a hold taken during setup): whatever turn runs next is not this prompt's.
+				ownership?.detach();
 			}
 			const refusal = costCapRefusal();
 			if (refusal) throw new CostCapError(refusal);
@@ -2861,8 +2887,16 @@ async function driveSessionToResult(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					if (restore) await awaitAbortable(session.restoreInterruptedTurn());
-					else await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+					if (restore) {
+						// No prompt to admit: a restored turn is continued by the session itself, so its monitor attaches
+						// first (the interrupted-turn retry cancels any hold, and nothing else runs on a fresh restore).
+						promptOwnership?.attach();
+						await awaitAbortable(session.restoreInterruptedTurn());
+					} else {
+						await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt", {
+							ownership: promptOwnership,
+						});
+					}
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -4488,8 +4522,8 @@ async function driveFollowUpTurn(
 		await acquireOwnership();
 	}
 	// The install awaits above can outlast a wake taking its `subagent_stop` hold after the ownership
-	// check: wait it out again, so this turn's monitor does not attach while the holder's turns run.
-	// Nothing awaits from here to the attach below.
+	// check: wait it out again before this turn's contract is armed. (The monitor itself attaches only
+	// when the prompt is admitted, so it is never attached across a wait that lets another turn run.)
 	await session.waitForStopPasses(signal);
 	// A kept-alive session reuses its YieldTool across turns; clear the prior
 	// run's incremental-section flag and retry counters so this turn's guards
@@ -4535,17 +4569,22 @@ async function driveFollowUpTurn(
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 	monitor.setActiveSession(session);
-	// The batch monitor attaches per attempt; the hook below detaches before each
-	// backoff and reattaches for the retry, so the teardown always releases the
-	// current attempt — including when the drive rejects and no winning attempt
-	// was ever assigned.
+	// The batch monitor attaches when the initial prompt is admitted and detaches whenever that prompt is
+	// handed back or loses a race, so it never observes a turn it does not own while the prompt waits (for a
+	// hold, maintenance, a backoff). The teardown always releases whatever is attached — including when the
+	// drive rejects before any attempt was admitted.
 	let outcome: DriveOutcome;
-	// An IRC wake may own the session when this turn dispatches. drive retries the
-	// initial prompt through this hook: detach first so the wake turn's `yield`
-	// neither marks this batch yielded nor leaks into its result, restore the
-	// ordinary contract so the wake cannot consume pooled items, wait it out,
-	// then reinstall and reattach for the retry.
-	let attemptUnsubscribe = monitor.attach(session);
+	let attemptUnsubscribe: () => void = () => {};
+	const promptOwnership: PromptOwnership = {
+		attach: () => {
+			attemptUnsubscribe();
+			attemptUnsubscribe = monitor.attach(session);
+		},
+		detach: () => {
+			attemptUnsubscribe();
+			attemptUnsubscribe = () => {};
+		},
+	};
 	const structured = options.structured !== false;
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
@@ -4567,8 +4606,9 @@ async function driveFollowUpTurn(
 				structured,
 				restore: options.restore,
 				outputSchema: options.outputSchema,
+				promptOwnership,
 				onPromptBusy: async () => {
-					attemptUnsubscribe();
+					promptOwnership.detach();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
 					await session.setWorkPoolYieldItems([]);
 					if (signal) {
@@ -4578,16 +4618,12 @@ async function driveFollowUpTurn(
 					}
 					// The wake that won the race can be idle while its observer still holds the session for a
 					// `subagent_stop` pass, which waitForIdle does not cover: wait out the pass and any turn that
-					// follows it before the contract is reinstalled and the monitor reattached. Each lost race is
-					// bounded by its own ownership waits.
+					// follows it before the contract is reinstalled. Each lost race is bounded by its own ownership
+					// waits. The retry's own admission reattaches the monitor.
 					ownershipWaits = 0;
 					await acquireOwnership();
 					resetYieldTurnState(session.getToolByName("yield"));
 					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
-					// The reinstall awaits can outlast a wake taking its hold: wait it out again, with nothing
-					// awaited before the attach.
-					await session.waitForStopPasses(signal);
-					attemptUnsubscribe = monitor.attach(session);
 				},
 			});
 			releaseStopPass = outcome.releaseStopPass;

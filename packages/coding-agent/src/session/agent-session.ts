@@ -9834,11 +9834,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// check sits before the prewalk is armed and nothing awaits between it and dispatch.
 			const holder = options?.stopPassHolder;
 			const stopPassBlocks = (): boolean => (holder ? holder.cancel.signal.aborted : this.#stopPassHolds.size > 0);
+			// Whose prompt this is decides what a hold does to it: a user's cancels the pass, anything else is handed
+			// back. By attribution, as at the early wait: an agent-attributed prompt (the executor's assignment, an
+			// IRC wake's) is a user-role message but never the user's.
+			const messageAttribution = "attribution" in message ? message.attribution : undefined;
+			const userPrompted =
+				options?.userInitiated === true || (isUserAuthoredMessage(message) && messageAttribution !== "agent");
 			// Whether this prompt may go on while a hold blocks it; false hands it back, put back what it took.
 			const admitPastStopPass = async (): Promise<boolean> => {
 				while (stopPassBlocks()) {
 					holder?.cancel.signal.throwIfAborted();
-					if (options?.userInitiated !== true && !isUserAuthoredMessage(message)) {
+					if (!userPrompted) {
 						this.#pendingNextTurnMessages = [...consumedNextTurnMessages, ...this.#pendingNextTurnMessages];
 						options?.onStopPassHeld?.();
 						return false;
