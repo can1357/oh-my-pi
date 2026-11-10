@@ -2,11 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Computer-use window input with `takeover` omitted now stays in the background after `computer.control.acquire`, so an acquired grant no longer activates the target app or moves the user's pointer; pass `takeover: true` for foreground input ([#15173](https://github.com/can1357/oh-my-pi/pull/15173) by [@will-bogusz](https://github.com/will-bogusz))
-- Mnemopi begins warming recall-bank embeddings in the background at session start to reduce first-recall decoding; an immediate prompt can still reach demand loading before warmup finishes. Warmup is skipped when embeddings or auto-recall are disabled ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
-
 ## [18.20.0] - 2026-11-12
 
 ### Breaking Changes
@@ -253,6 +248,10 @@
 - On Windows, cmd-style command lines such as `dir | find /c /v ""`, `sort /r`, `timeout /t 5` and `whoami /all` in the bash tool run the Windows programs they were written for, instead of pi's GNU-style `find`/`sort`/`timeout`/`whoami` (which read `/c` as drive C: and could walk the whole drive)
 - Changing or unsetting `PATH` in the bash tool's shell now forgets remembered command locations, as bash does, so a command no longer runs from a directory that has left `PATH`
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
+
+### Changed
+
+- Mnemopi begins warming recall-bank embeddings in the background at session start to reduce first-recall decoding; an immediate prompt can still reach demand loading before warmup finishes. Warmup is skipped when embeddings or auto-recall are disabled ([#15729](https://github.com/can1357/oh-my-pi/pull/15729) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.18.6] - 2026-11-09
 
