@@ -32,9 +32,51 @@
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
+	// A printed or returned `observe()` result shows every element, one line each, through util.inspect's
+	// custom hook; the object, `.elements` and every field stay as they are for code.
+	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
+	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
+	const showField = value =>
+		typeof value === "number" || typeof value === "boolean"
+			? String(value)
+			: (JSON.stringify(value) ?? String(value));
+	const elementLine = element => {
+		if (element === null || typeof element !== "object") return showField(element);
+		let line = `[${element.id}] ${element.role}`;
+		if (element.name !== undefined) line += ` ${showField(element.name)}`;
+		for (const key of ["value", "description", "keyshortcuts"]) {
+			if (element[key] !== undefined) line += ` ${key}=${showField(element[key])}`;
+		}
+		for (const [key, value] of Object.entries(element)) {
+			if (!knownElementKeys.has(key) && value !== undefined) line += ` ${key}=${showField(value)}`;
+		}
+		if (Array.isArray(element.states) && element.states.length > 0) line += ` ${element.states.join(" ")}`;
+		return line;
+	};
+	const withPrintForm = observation => {
+		if (observation === null || typeof observation !== "object" || !Array.isArray(observation.elements)) {
+			return observation;
+		}
+		const elementLines = () => observation.elements.map(elementLine).join("\n");
+		Object.defineProperty(observation.elements, inspectCustom, {
+			value: () => (observation.elements.length > 0 ? elementLines() : "[]"),
+		});
+		Object.defineProperty(observation, inspectCustom, {
+			value: () => {
+				const lines = [];
+				for (const [key, value] of Object.entries(observation)) {
+					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value)}`);
+				}
+				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
+				if (observation.elements.length > 0) lines.push(elementLines());
+				return lines.join("\n");
+			},
+		});
+		return observation;
+	};
 	const callValue = async (name, chain) => {
 		const details = await invoke("call", { name, chain });
-		return details.value;
+		return chain.length === 1 && chain[0].method === "observe" ? withPrintForm(details.value) : details.value;
 	};
 	const directMethods = [
 		"url",

@@ -7,6 +7,7 @@ import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/prelu
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import type { ObservationEntry } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import { chromiumAvailable } from "../tools/chromium-probe";
 
 interface FacadeResponse {
@@ -291,6 +292,86 @@ describe("browser facade in real Eval runtimes", () => {
 				{ method: "fill", args: ["Grace"] },
 			],
 		});
+	});
+
+	it("prints every observed element, one line each, and keeps the observation's data for code", async () => {
+		const elements: ObservationEntry[] = Array.from({ length: 150 }, (_, index) => ({
+			id: index + 1,
+			role: "button",
+			name: `Item ${index + 1}`,
+			value: undefined,
+			description: undefined,
+			keyshortcuts: undefined,
+			states: [],
+		}));
+		elements[1] = {
+			id: 2,
+			role: "textbox",
+			name: 'Two\nlines "quoted"',
+			value: "Ada",
+			description: "Full name",
+			keyshortcuts: "Alt+N",
+			states: ["focused", "required"],
+		};
+		elements[2] = { ...elements[2], value: 0 };
+		const observation = {
+			url: "https://example.test/list",
+			title: "List",
+			viewport: { width: 800, height: 600 },
+			scroll: { x: 0, y: 40, width: 800, height: 600, scrollWidth: 800, scrollHeight: 4000 },
+			elements,
+		};
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		const shipped = createBrowserPrelude(session);
+		definitions = [
+			{
+				...shipped,
+				async invoke(parameters) {
+					const action = field(parameters, "action");
+					if (action === "open") return { content: [], details: { name: "many" } };
+					return { content: [], details: { value: structuredClone(observation) } };
+				},
+			},
+		];
+		const sessionId = `browser-facade-observe-${crypto.randomUUID()}`;
+		const run = async (code: string) => {
+			const result = await executeJs(code, { cwd: process.cwd(), sessionId, session });
+			expect(result.exitCode).toBe(0);
+			return result.output.trimEnd();
+		};
+		await run('globalThis.tab = await browser.open({ name: "many" });');
+
+		const lines = [
+			'url: "https://example.test/list"',
+			'title: "List"',
+			'viewport: {"width":800,"height":600}',
+			'scroll: {"x":0,"y":40,"width":800,"height":600,"scrollWidth":800,"scrollHeight":4000}',
+			"elements (150; tab.id(n) acts on [n]):",
+			'[1] button "Item 1"',
+			'[2] textbox "Two\\nlines \\"quoted\\"" value="Ada" description="Full name" keyshortcuts="Alt+N" focused required',
+			'[3] button "Item 3" value=0',
+			...elements.slice(3).map(element => `[${element.id}] button "${element.name}"`),
+		];
+		expect((await run("print(await tab.observe());")).split("\n")).toEqual(lines);
+		expect((await run("await tab.observe()")).split("\n")).toEqual(lines);
+		expect((await run("print((await tab.observe()).elements);")).split("\n")).toEqual(lines.slice(5));
+		const expectedJson = JSON.stringify(JSON.stringify(observation));
+		expect(
+			JSON.parse(
+				await run(
+					`const o = await tab.observe(); print(JSON.stringify({ same: JSON.stringify(o) === ${expectedJson}, keys: Object.keys(o), element: Object.keys(o.elements[0]), length: o.elements.length }));`,
+				),
+			),
+		).toEqual({
+			same: true,
+			keys: ["url", "title", "viewport", "scroll", "elements"],
+			element: ["id", "role", "name", "value", "description", "keyshortcuts", "states"],
+			length: 150,
+		});
+		const filtered = await run('print((await tab.observe()).elements.filter(e => e.role === "button"));');
+		expect(filtered).toContain("name: 'Item 150'");
+		expect(filtered).not.toContain("more items");
 	});
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
