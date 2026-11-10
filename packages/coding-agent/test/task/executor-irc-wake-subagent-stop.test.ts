@@ -20,6 +20,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { SubagentStopEvent, SubagentStopEventResult } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type StopPassHold } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -104,6 +106,7 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		onStop: (
 			event: SubagentStopEvent,
 			callIndex: number,
+			ctx: ExtensionContext,
 		) => SubagentStopEventResult | undefined | Promise<SubagentStopEventResult | undefined>;
 		/** Owner async-job manager the session owns; the wake turn's owner jobs live here. */
 		manager?: AsyncJobManager;
@@ -137,9 +140,9 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
-				pi.on("subagent_stop", async event => {
+				pi.on("subagent_stop", async (event, ctx) => {
 					stopEvents.push(event);
-					return args.onStop(event, stopEvents.length);
+					return args.onStop(event, stopEvents.length, ctx);
 				});
 				pi.on("session_before_compact", async () => {
 					args.holdCompaction?.entered.resolve();
@@ -1228,6 +1231,108 @@ describe("IRC wake turn subagent_stop (real session)", () => {
 		expect(result.output).not.toContain("WAKE-REPLACEMENT");
 	});
 
+	describe("a stop pass whose session is interrupted", () => {
+		it("starts no continuation when the session is aborted while a handler is still judging", async () => {
+			const stopEntered = Promise.withResolvers<void>();
+			const releaseStop = Promise.withResolvers<void>();
+			const run = await setup({
+				responses: [yieldCall("UNCONFIRMED-PAYLOAD"), yieldCall("UNWANTED-CONTINUATION")],
+				onStop: async () => {
+					stopEntered.resolve();
+					await releaseStop.promise;
+					return { decision: "block", reason: "keep going" };
+				},
+			});
+
+			await deliverWake(run.session, "m1");
+			await stopEntered.promise;
+			await run.session.abort();
+			releaseStop.resolve();
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			// The late `block` verdict came after the cancellation finished: it must not start a provider turn.
+			expect(run.stopEvents).toHaveLength(1);
+			expect(run.mock.calls).toHaveLength(1);
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
+			expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+			expect(run.lifecycle.map(frame => frame.status)).not.toContain("failed");
+		});
+
+		it("starts no continuation when the handler itself interrupts through the extension's ctx.abort()", async () => {
+			const run = await setup({
+				responses: [yieldCall("UNCONFIRMED-PAYLOAD"), yieldCall("UNWANTED-CONTINUATION")],
+				onStop: async (_event, _callIndex, ctx) => {
+					await ctx.abort();
+					return { decision: "block", reason: "keep going" };
+				},
+			});
+			// The same wiring a running session gets: ctx.abort() is session.abort({ reason: USER_INTERRUPT_LABEL }).
+			await initializeExtensions(run.session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+
+			await deliverWake(run.session, "m1");
+			await run.session.waitForIrcReplies();
+			await run.session.waitForIdle();
+
+			expect(run.stopEvents).toHaveLength(1);
+			expect(run.mock.calls).toHaveLength(1);
+			expect(await Bun.file(run.artifact).exists()).toBe(false);
+			expect(run.lifecycle.map(frame => frame.status)).toContain("aborted");
+		});
+
+		it("cancels the holds for an interrupt, but not for a turn-stop or a manual compaction's startup abort", async () => {
+			const run = await setup({ driven: true, responses: [{ content: ["unused"] }], onStop: () => undefined });
+			const hold = run.session.holdForStopPass();
+
+			await run.session.abort({ turnStop: true });
+			expect(hold.signal.aborted).toBe(false);
+			await run.session.abort({ goalReason: "internal", preserveCompaction: true });
+			expect(hold.signal.aborted).toBe(false);
+			await run.session.abort();
+			expect(hold.signal.aborted).toBe(true);
+			hold.release();
+		});
+
+		it("runs a user skill prompt that cancels the pass while a continuation is running, instead of dropping it", async () => {
+			const continuationStarted = Promise.withResolvers<void>();
+			const run = await setup({
+				driven: true,
+				responses: [
+					// The holder's continuation: a provider call that only the user's cancel ends.
+					() => {
+						continuationStarted.resolve();
+						return { ...yieldCall("UNJUDGED-CONTINUATION"), delayMs: 60_000 };
+					},
+					{ content: ["answered the user"] },
+				],
+				onStop: () => undefined,
+			});
+			const hold = run.session.holdForStopPass();
+			const continuation = hold.prompt("continue", { attribution: "agent", synthetic: true, runCommands: false });
+			// The executor releases the hold once the cancelled pass has dropped its candidate.
+			const released = continuation.then(
+				() => hold.release(),
+				() => hold.release(),
+			);
+			await continuationStarted.promise;
+
+			// A user-invoked prompt waits for the hold before it looks at the session, so it reaches it while the
+			// continuation is still running: its cancel stops that turn, which is not a cancellation of the prompt.
+			const skill = await run.session.promptCustomMessage({
+				customType: "skill-prompt",
+				content: "USER-SKILL",
+				display: true,
+				attribution: "user",
+			});
+			await released;
+			await run.session.waitForIdle();
+
+			expect(skill).toBe(true);
+			expect(hold.signal.aborted).toBe(true);
+			expect(run.mock.calls).toHaveLength(2);
+			expect(JSON.stringify(run.mock.calls[1]?.context.messages)).toContain("USER-SKILL");
+		});
+	});
 	describe("a stop-pass holder whose run is cancelled", () => {
 		it("refuses a continuation once the run's abort signal fires", async () => {
 			const run = await setup({ driven: true, responses: [{ content: ["UNWANTED"] }], onStop: () => undefined });
