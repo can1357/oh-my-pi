@@ -48,8 +48,9 @@ use windows_sys::Win32::{
 };
 
 use crate::bash::{
-	CtlChar, File, FileKind, OsHandle, Pty, SetWhen, Shtty, TermFlag, Terminal, Termios, TtyInfo,
-	fs::SeekFrom,
+	CtlChar, File, FileKind, OsHandle, Pty, SetWhen, Shtty, Stat, TermFlag, Terminal, Termios,
+	TtyInfo,
+	fs::{SeekFrom, StatKind},
 };
 
 /// UTF-8, the code page the shell writes in.
@@ -404,6 +405,30 @@ impl File for ConsoleFile {
 
 	fn kind(&self) -> FileKind {
 		FileKind::Tty
+	}
+
+	fn stat(&self) -> io::Result<Stat> {
+		let (uid, gid) = crate::sys::user::owner();
+		Ok(Stat {
+			kind:     StatKind::CharDev,
+			mode:     0o666,
+			size:     0,
+			uid,
+			gid,
+			dev:      0,
+			ino:      0,
+			nlink:    1,
+			mtime_ns: 0,
+			atime_ns: 0,
+			ctime_ns: 0,
+			blocks:   0,
+			rdev:     0,
+			blksize:  0,
+		})
+	}
+
+	fn on_filesystem(&self) -> bool {
+		true
 	}
 
 	fn os_handle(&self) -> Option<OsHandle> {
