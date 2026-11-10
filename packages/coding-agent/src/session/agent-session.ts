@@ -1148,6 +1148,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	/** The prompt generation in which a `subagent_stop` hold deferred the hidden next-turn messages; the hold's release runs them. */
+	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
 	/** Queued messages a session path took out of the agent queues to put back later (follow-ups
 	 *  parked behind an IRC wake turn, a session switch's rollback snapshot), in queue order. */
 	readonly #heldQueuedMessages = new Set<AgentMessage>();
@@ -9572,6 +9574,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			followUpBatch?: PromptFollowUps;
 			/** The `subagent_stop` hold this prompt is a continuation of. */
 			stopPassHolder?: StopPassHoldState;
+			/** Called when a `subagent_stop` hold, taken after the caller's own check, made this prompt hand itself back. */
+			onStopPassHeld?: () => void;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -9682,7 +9686,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this.#pendingNextTurnMessages) {
+			const consumedNextTurnMessages = this.#pendingNextTurnMessages;
+			for (const msg of consumedNextTurnMessages) {
 				messages.push(msg);
 			}
 			this.#pendingNextTurnMessages = [];
@@ -9752,13 +9757,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			if (autoPrewalk) {
-				const decision = await autoPrewalk;
-				if (this.#promptGeneration !== generation) {
-					return false;
+			const prewalkDecision = autoPrewalk ? await autoPrewalk : undefined;
+			if (autoPrewalk && this.#promptGeneration !== generation) {
+				return false;
+			}
+			// The setup awaits above can outlast a wake taking its `subagent_stop` hold, after the caller's
+			// own check. A turn started now would run inside the held pass, so a user's prompt cancels the
+			// pass and goes on, the holder's own turn is dropped once its pass was cancelled, and any other
+			// prompt is handed back (waiting here would stall the holder's wait for idle: this prompt is in
+			// flight). What this call already took is put back, and the caller is told, so nothing is lost
+			// with the prompt: the next-turn messages it consumed return to their queue, and a caller that
+			// owns messages of its own (the hidden next-turn turn) retries them once the hold releases. The
+			// check sits before the prewalk is armed and nothing awaits between it and dispatch.
+			const holder = options?.stopPassHolder;
+			const stopPassBlocks = (): boolean => (holder ? holder.cancel.signal.aborted : this.#stopPassHolds.size > 0);
+			// Whether this prompt may go on while a hold blocks it; false hands it back, put back what it took.
+			const admitPastStopPass = async (): Promise<boolean> => {
+				while (stopPassBlocks()) {
+					holder?.cancel.signal.throwIfAborted();
+					if (options?.userInitiated !== true && !isUserAuthoredMessage(message)) {
+						this.#pendingNextTurnMessages = [...consumedNextTurnMessages, ...this.#pendingNextTurnMessages];
+						options?.onStopPassHeld?.();
+						return false;
+					}
+					await this.#waitOutStopPasses(true);
+					if (this.#promptGeneration !== generation) return false;
 				}
+				return true;
+			};
+			if (stopPassBlocks() && !(await admitPastStopPass())) return false;
+			if (autoPrewalk) {
 				// Synchronous from here to dispatch, so the arm and its plan nudge travel with this task.
-				const planMessage = this.#prewalk.applyAuto(decision);
+				const planMessage = this.#prewalk.applyAuto(prewalkDecision);
 				if (planMessage) {
 					messages.push(planMessage);
 					// The first-turn eager todo reminder was built before this task armed. Like a configured
@@ -9769,18 +9799,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					);
 					if (eager >= 0) messages.splice(eager, 1);
 				}
-			}
-			// The setup awaits above can outlast a wake taking its `subagent_stop` hold, after the caller's
-			// own check. A turn started now would run inside the held pass, so a user's prompt cancels the
-			// pass and goes on, the holder's own turn is dropped once its pass was cancelled, and any other
-			// prompt is handed back (waiting here would stall the holder's wait for idle: this prompt is in
-			// flight). Nothing awaits between the last check and dispatch.
-			const holder = options?.stopPassHolder;
-			while (holder ? holder.cancel.signal.aborted : this.#stopPassHolds.size > 0) {
-				holder?.cancel.signal.throwIfAborted();
-				if (options?.userInitiated !== true && !isUserAuthoredMessage(message)) return false;
-				await this.#waitOutStopPasses(true);
-				if (this.#promptGeneration !== generation) return false;
 			}
 			// Consume the xd:// notice only when its previewed revision still holds.
 			// A mount delta or catalog rebuild during the await invalidates it: any
@@ -9839,16 +9857,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#planReferenceSent = true;
 			}
 			try {
-				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
-					// `agent.prompt` claims streaming synchronously before its
-					// first await: this callback fires exactly when THIS
-					// client-owned run goes live (never on a busy-retry that
-					// waits behind an autonomous run) — wake steers parked on
-					// the dispatch so they admit into the run they targeted.
-					this.#wakeDispatchLiveWaiters();
-					options?.followUpBatch?.release();
-				});
-				await run;
+				// A turn that waits behind a running one is retried when that one ends, which is when a wake's
+				// observer takes its hold: the retry rechecks the hold, and a prompt it stops goes through the
+				// same admission as at the guard above (a user's cancels the pass; anything else hands itself
+				// back, with what it consumed put back).
+				const dispatch = (): Promise<boolean> =>
+					this.#recovery.promptAgentWithIdleRetry(
+						messages,
+						agentPromptOptions,
+						() => {
+							// `agent.prompt` claims streaming synchronously before its
+							// first await: this callback fires exactly when THIS
+							// client-owned run goes live (never on a busy-retry that
+							// waits behind an autonomous run) — wake steers parked on
+							// the dispatch so they admit into the run they targeted.
+							this.#wakeDispatchLiveWaiters();
+							options?.followUpBatch?.release();
+						},
+						() => !stopPassBlocks(),
+					);
+				while (!(await dispatch())) {
+					if (!(await admitPastStopPass())) {
+						if (planReferenceMessage) this.#planReferenceSent = false;
+						return false;
+					}
+				}
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
@@ -10690,7 +10723,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
-		if (!triggerTurn) return;
+		if (triggerTurn) this.#scheduleHiddenNextTurn();
+	}
+
+	/** Run the queued hidden next-turn messages as a turn of their own once the current one settles; one per generation. */
+	#scheduleHiddenNextTurn(): void {
 		const generation = this.#promptGeneration;
 		if (this.#scheduledHiddenNextTurnGeneration === generation) {
 			return;
@@ -10725,6 +10762,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#pendingNextTurnMessages.length === 0) {
 			return;
 		}
+		// A `subagent_stop` pass holds the session: these wait for its release, which schedules them again.
+		if (this.#stopPassHolds.size > 0) {
+			this.#hiddenNextTurnHeldGeneration = this.#promptGeneration;
+			return;
+		}
 
 		const queuedMessages = [...this.#pendingNextTurnMessages];
 		this.#pendingNextTurnMessages = [];
@@ -10739,6 +10781,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
+				// A hold taken during the prompt's setup hands it back: keep these queued, in order, for the
+				// release to run them.
+				onStopPassHeld: () => {
+					this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+					this.#hiddenNextTurnHeldGeneration = this.#promptGeneration;
+				},
 			});
 		} catch (error) {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
@@ -10799,7 +10847,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// output under the verdict for the earlier candidate. Park the message as a stranded aside;
 			// the hold's release wakes for it.
 			if (this.#stopPassHolds.size > 0) {
-				this.#irc.queueAside([message]);
+				this.#irc.queueAside(prepared);
 				return false;
 			}
 			const run = this.agent.prompt(prepared.length > 1 ? prepared : message);
@@ -13845,11 +13893,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.#stopPassHolds.size > 0) return;
 				this.#scheduleIdleQueueDrain();
 				this.yieldQueue.requestIdleFlush();
-				// A prompt that waited out the hold goes first; parked wakes follow it.
-				if (this.hasAdmittedSubmission) {
-					void this.waitForAdmittedSubmissions().then(() => this.#resumeStrandedIrcAsides());
-				} else {
+				// A prompt that waited out the hold goes first; parked wakes and the hidden next-turn messages
+				// the hold deferred follow it. An abort since the deferral cancelled that turn, as it does an
+				// undeferred one.
+				const resumeParked = (): void => {
 					this.#resumeStrandedIrcAsides();
+					if (this.#hiddenNextTurnHeldGeneration === this.#promptGeneration) this.#scheduleHiddenNextTurn();
+					this.#hiddenNextTurnHeldGeneration = undefined;
+				};
+				if (this.hasAdmittedSubmission) {
+					void this.waitForAdmittedSubmissions().then(resumeParked);
+				} else {
+					resumeParked();
 				}
 			},
 		};
