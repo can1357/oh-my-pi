@@ -398,6 +398,11 @@ pub struct Shell {
 	/// External programs still running after their owner was unwound. Their
 	/// handles stay here until exit or whole-shell cancellation, without
 	/// keeping a dead vproc or frame.
+	///
+	/// A lifecycle operation the host drives over native children reaches
+	/// no retained program through `procs`, which holds none of them: every
+	/// such operation (cancellation in `signal_work`, pause and resume in
+	/// `set_paused`) must walk this too.
 	surviving_externals: Vec<Retained>,
 }
 
@@ -2550,6 +2555,15 @@ impl Shell {
 		for p in &mut self.procs {
 			pause_handles(p, on);
 		}
+		// A retained program has no vproc and no frame, so the loop above
+		// cannot reach it and it would keep running while `step` reports
+		// `Paused`. Its owner's lineage does not matter, as it does for
+		// cancellation: the host is suspending the whole shell rather than
+		// going away, the loop above already stops an ACTIVE detached
+		// vproc's external, and this is that same program a moment later.
+		for r in &mut self.surviving_externals {
+			pause_ext(&mut *r.child, on);
+		}
 		let root = (self.procs[0].vpid, self.procs[0].mode);
 		let data = if on {
 			EventData::Stopped { job: None }
@@ -2823,16 +2837,17 @@ fn pause_handles(p: &mut Vproc, on: bool) {
 			match &mut sc.live {
 				Live::Task(t) if on => t.pause(),
 				Live::Task(t) => t.resume(),
-				Live::Ext(e) if on => {
-					let _ = e.stop();
-				},
-				Live::Ext(e) => {
-					let _ = e.cont();
-				},
+				Live::Ext(e) => pause_ext(&mut **e, on),
 				_ => {},
 			}
 		}
 	}
+}
+
+/// Stop or continue one native program: the whole-shell pause, for a
+/// frame-backed handle and for a retained one alike.
+fn pause_ext(e: &mut dyn ExtProc, on: bool) {
+	let _ = if on { e.stop() } else { e.cont() };
 }
 
 impl Vproc {
