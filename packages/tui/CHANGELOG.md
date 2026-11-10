@@ -226,6 +226,8 @@
 ### Fixed
 
 - Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
+- The terminal stays responsive through long tool output: the TUI does less work per render while edit previews stream and streamed assistant tables grow ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ## [18.18.6] - 2026-11-09
 
@@ -290,7 +292,6 @@
 ### Changed
 
 - Simplified Bash previews for redirection to /dev/null by showing a single icon in the Nerd Font symbol preset.
-- The terminal stays responsive through long tool output: the TUI does less work per render while edit previews stream and streamed assistant tables grow ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
