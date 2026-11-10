@@ -108,12 +108,14 @@ describe("CmuxSocketClient", () => {
 				try {
 					await client.connect();
 					vi.useFakeTimers();
+					spyOn(Date, "now").mockReturnValue(0);
 					tab.setRunContext({
 						session: { cwd: process.cwd() },
 						output: new RunOutput(),
 						screenshots: [],
 						signal: new AbortController().signal,
 						timeoutMs: 40_000,
+						deadline: 40_000,
 					});
 					const pending = tab.evaluate(() => 42);
 					const outcome = pending.then(
@@ -124,6 +126,51 @@ describe("CmuxSocketClient", () => {
 					vi.advanceTimersByTime(35_000);
 					socket.write(`${JSON.stringify({ ok: true, result: { value: { __ompOk: 42 } } })}\n`);
 					expect(await outcome).toEqual({ value: 42 });
+				} finally {
+					tab.clearRunContext();
+					client.close();
+					vi.useRealTimers();
+				}
+			},
+		);
+	});
+
+	it("bounds a late helper by the run's remaining time", async () => {
+		const received = Promise.withResolvers<void>();
+		await withSocketServer(
+			(_line, socket) => {
+				socket.on("error", () => undefined);
+				received.resolve();
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "late-budget" });
+				try {
+					await client.connect();
+					vi.useFakeTimers();
+					const now = spyOn(Date, "now").mockReturnValue(0);
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: new AbortController().signal,
+						timeoutMs: 40_000,
+						deadline: 40_000,
+					});
+					vi.advanceTimersByTime(35_000);
+					now.mockReturnValue(35_000);
+					let error: unknown;
+					const pending = tab.evaluate(() => 42).catch(cause => {
+						error = cause;
+					});
+					await received.promise;
+					vi.advanceTimersByTime(4_999);
+					await Promise.resolve();
+					expect(error).toBeUndefined();
+					vi.advanceTimersByTime(1);
+					await pending;
+					expect(error).toBeInstanceOf(ToolError);
+					expect(String(error)).toContain("Timed out waiting for cmux socket response");
 				} finally {
 					tab.clearRunContext();
 					client.close();
