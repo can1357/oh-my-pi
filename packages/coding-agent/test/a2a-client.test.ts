@@ -165,6 +165,10 @@ afterEach(() => {
 	vi.useRealTimers();
 	IncomingRequests.resetGlobalForTests();
 	OutgoingRequests.resetGlobalForTests();
+	// Other files in the shared process install a global job manager without
+	// resetting it; this file's "no implicit global" assertions must not
+	// observe that leftover.
+	AsyncJobManager.resetForTests();
 });
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
