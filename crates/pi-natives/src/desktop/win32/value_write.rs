@@ -11,8 +11,7 @@ pub(super) fn route(class: &str, combo: bool) -> ValueRoute {
 	if class.eq_ignore_ascii_case("ComboBox")
 		|| class.split_once(".app.").is_some_and(|(base, suffix)| {
 			base.eq_ignore_ascii_case("WindowsForms10.COMBOBOX") && !suffix.is_empty()
-		})
-	{
+		}) {
 		ValueRoute::Combo
 	} else if combo {
 		ValueRoute::RefuseCombo
@@ -28,21 +27,30 @@ pub(super) fn verify(expected: &str, actual: Option<&str>, secure: bool) -> Core
 #[cfg(target_os = "windows")]
 pub(super) fn set_combo(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) -> CoreResult<()> {
 	use windows_sys::Win32::UI::WindowsAndMessaging::{
-		CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE, CBN_SELENDOK,
-		GetComboBoxInfo, GetDlgCtrlID, GetParent, SendMessageTimeoutW, COMBOBOXINFO,
-		CBN_EDITCHANGE, GWL_STYLE, GetWindowLongW, SMTO_ABORTIFHUNG, WM_COMMAND, WM_SETTEXT,
+		CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE, CBN_SELENDOK,
+		COMBOBOXINFO, GWL_STYLE, GetComboBoxInfo, GetDlgCtrlID, GetParent, GetWindowLongW,
+		SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_SETTEXT,
 	};
+
 	use super::super::error::DesktopError;
-	let failed = || DesktopError::ax_failed(
-		"the combo box selection could not be confirmed; select the item via press/click and inspect the target before writing again",
-	);
+	let failed = || {
+		DesktopError::ax_failed(
+			"the combo box selection could not be confirmed; select the item via press/click and \
+			 inspect the target before writing again",
+		)
+	};
 	let send = |target, message, wparam, lparam| {
 		let mut result = 0;
-		// SAFETY: string pointers remain valid until this synchronous message returns.
+		// SAFETY: string pointers remain valid until this synchronous message
+		// returns.
 		let answered = unsafe {
 			SendMessageTimeoutW(target, message, wparam, lparam, SMTO_ABORTIFHUNG, 3000, &mut result)
 		};
-		if answered == 0 { Err(failed()) } else { Ok(result as isize) }
+		if answered == 0 {
+			Err(failed())
+		} else {
+			Ok(result as isize)
+		}
 	};
 	if text.contains('\0') {
 		return Err(failed());
@@ -64,10 +72,8 @@ pub(super) fn set_combo(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) 
 				"the combo box has no matching item; select the item via press/click instead",
 			));
 		}
-		let mut info = COMBOBOXINFO {
-			cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32,
-			..Default::default()
-		};
+		let mut info =
+			COMBOBOXINFO { cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32, ..Default::default() };
 		if unsafe { GetComboBoxInfo(hwnd, &mut info) } == 0 || info.hwndItem.is_null() {
 			return Err(failed());
 		}

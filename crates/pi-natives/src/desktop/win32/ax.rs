@@ -481,13 +481,21 @@ impl AxBackend for Win32Ax {
 		let combo = element.get_control_type().map_err(ax_error)? == ControlType::ComboBox;
 		match super::value_write::route(&class, combo) {
 			super::value_write::ValueRoute::Combo => {
-				super::value_write::set_combo(hwnd.ok_or_else(|| {
-					DesktopError::ax_failed("combo box has no native window; select the item via press/click instead")
-				})?, text)?;
+				super::value_write::set_combo(
+					hwnd.ok_or_else(|| {
+						DesktopError::ax_failed(
+							"combo box has no native window; select the item via press/click instead",
+						)
+					})?,
+					text,
+				)?;
 			},
-			super::value_write::ValueRoute::RefuseCombo => return Err(DesktopError::ax_failed(
-				"this combo box cannot notify the app through setValue; select the item via press/click instead",
-			)),
+			super::value_write::ValueRoute::RefuseCombo => {
+				return Err(DesktopError::ax_failed(
+					"this combo box cannot notify the app through setValue; select the item via \
+					 press/click instead",
+				));
+			},
 			super::value_write::ValueRoute::Pattern => self.contained(element, || {
 				element
 					.get_pattern::<UIValuePattern>()
