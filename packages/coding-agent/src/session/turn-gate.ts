@@ -49,10 +49,8 @@ export interface TurnGateHost {
 
 /** A claim's in-flight bracket, from its setup to its settle: a holder waits until every non-holder one ends. */
 export interface TurnReservation {
-	/** The reserved turn went live: its undo no longer runs. */
-	started(): void;
-	/** Ends the reservation, first running the undo of a turn that never went live. Idempotent. */
-	end(): Promise<void>;
+	/** Ends the reservation. Idempotent. */
+	end(): void;
 }
 
 /** An `Agent` without its turn starts: a host given this can only start turns through the session's gate. */
@@ -201,33 +199,14 @@ export class TurnGate {
 		}
 	}
 
-	/** Opens `claim`'s in-flight bracket; `undo` puts back what its setup installed if its turn never goes live. */
-	reserve(claim: TurnClaim, undo?: () => void | Promise<void>): TurnReservation {
+	/** Opens `claim`'s in-flight bracket. */
+	reserve(claim: TurnClaim): TurnReservation {
 		// One entry per reservation, even for a claim reserved twice.
 		const entry = { kind: claim.kind };
 		this.#reservations.add(entry);
-		let live = false;
-		let ended = false;
-		const close = (): void => {
-			if (this.#reservations.delete(entry)) this.#notify();
-		};
 		return {
-			started: () => {
-				live = true;
-			},
-			end: async () => {
-				if (ended) return;
-				ended = true;
-				if (live || !undo) {
-					// Synchronous, so a bracket without an undo closes in the caller's tick.
-					close();
-					return;
-				}
-				try {
-					await undo();
-				} finally {
-					close();
-				}
+			end: () => {
+				if (this.#reservations.delete(entry)) this.#notify();
 			},
 		};
 	}
