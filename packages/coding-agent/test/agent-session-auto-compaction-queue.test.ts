@@ -475,6 +475,23 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 			expect(prompted).toHaveLength(0);
 		});
+
+		it("keeps the held resume when only the internal stop of a settled turn landed meanwhile", async () => {
+			const { abort, prompted } = interruptedTurn();
+			const hold = session.holdForStopPass();
+			await session.compact();
+			await session.waitForIdle();
+
+			// The executor stops the holder's settled turn (a yield parked behind a pass): no cancellation.
+			abort.mockRestore();
+			await session.abort({ turnStop: true });
+			hold.release();
+			await until(() => prompted.length > 0, "the deferred resume to start its turn");
+			await session.waitForIdle();
+
+			expect(prompted).toHaveLength(1);
+			expect(isResume(prompted[0])).toBe(true);
+		});
 	});
 
 	it("does not start a turn when a manual compaction interrupted nothing", async () => {

@@ -1162,9 +1162,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	/** The prompt generation in which a `subagent_stop` hold deferred the hidden next-turn messages; the hold's release runs them. */
 	#hiddenNextTurnHeldGeneration: number | undefined = undefined;
+	/** Aborts that only stopped a settled turn (see `abort({ turnStop })`): counted out of the cancellation generation. */
+	#turnStopAborts = 0;
 	/** A compaction continuation a `subagent_stop` hold stopped from starting; the hold's release schedules it again. */
-	#heldCompactionContinuation: { options: CompactionContinuationOptions; promptSequence: number } | undefined =
-		undefined;
+	#heldCompactionContinuation:
+		| { options: CompactionContinuationOptions; cancellationGeneration: number; promptSequence: number }
+		| undefined = undefined;
 	/** Queued messages a session path took out of the agent queues to put back later (follow-ups
 	 *  parked behind an IRC wake turn, a session switch's rollback snapshot), in queue order. */
 	readonly #heldQueuedMessages = new Set<AgentMessage>();
@@ -5785,23 +5788,31 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Keep a compaction continuation a hold stopped from starting, stamped so a later abort or prompt cancels it. */
 	#holdCompactionContinuation(options: CompactionContinuationOptions): void {
-		this.#heldCompactionContinuation = { options, promptSequence: this.#promptSequence };
+		// Superseded before it was held: the scheduler would skip it as stale, so there is nothing to keep.
+		if (options.generation !== this.#promptGeneration) return;
+		this.#heldCompactionContinuation = {
+			options,
+			cancellationGeneration: this.#cancellationGeneration(),
+			promptSequence: this.#promptSequence,
+		};
 	}
 
 	/** The hold released: schedule its deferred compaction continuation again, unless it was superseded meanwhile. */
 	#resumeCompactionContinuation(): void {
 		const held = this.#heldCompactionContinuation;
 		this.#heldCompactionContinuation = undefined;
-		// An abort since the deferral cancelled the continuation, and a prompt that ran since carried the run on itself.
+		// A cancellation since the deferral cancelled the continuation, and a prompt that ran since carried the
+		// run on itself. The internal stop of a settled turn is neither.
 		if (
 			!held ||
 			this.#isDisposed ||
-			held.options.generation !== this.#promptGeneration ||
+			held.cancellationGeneration !== this.#cancellationGeneration() ||
 			held.promptSequence !== this.#promptSequence
 		) {
 			return;
 		}
-		this.#scheduleCompactionContinuation(held.options);
+		// Only turn-stops bumped the generation since: the continuation goes on under the one that stands now.
+		this.#scheduleCompactionContinuation({ ...held.options, generation: this.#promptGeneration });
 	}
 
 	#scheduleAutoContinuePrompt(options: CompactionContinuationOptions): boolean {
@@ -9090,8 +9101,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			holder.cancel.signal.throwIfAborted();
 		} else if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = options?.userInitiated === true || promptAttribution === "user";
+			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
-			if (!cancelsPass && this.#promptGeneration !== preflightGeneration) {
+			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
 				outcome.sessionClaimed = false;
 				this.#reportDroppedPrompt(typedText, options, followUps);
 				if (options?.throwOnDrop) throw new PromptDroppedError();
@@ -9250,9 +9262,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// abort() lands meanwhile (the abort that cancels the holder's turn for a user's prompt is not one).
 		if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = message.attribution === "user";
-			const waitGeneration = this.#promptGeneration;
+			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
-			if (!cancelsPass && this.#promptGeneration !== waitGeneration) {
+			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
 				this.#reportDroppedCustomPrompt(message, options, followUps);
 				return false;
 			}
@@ -9394,10 +9406,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// between here and dispatch, so a hold taken meanwhile is honored too.
 		if (this.#stopPassHolds.size > 0) {
 			const cancelsPass = message.attribution === "user";
+			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
 			// A plain wait can outlast an abort() like the image preparation above: drop the prompt the same
-			// way. A user's prompt cancels the pass, and the abort that stops the holder's turn bumps the generation.
-			if (!cancelsPass && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
+			// way. A user's prompt cancels the pass, and the abort that stops the holder's turn bumps the
+			// generation; the internal stop of a settled turn is no cancellation.
+			if (!cancelsPass && (this.#cancellationGeneration() !== waitGeneration || this.#isDisposed)) {
 				outcome.sessionClaimed = false;
 				this.#reportDroppedCustomPrompt(message, options, followUps);
 				return false;
@@ -9880,8 +9894,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						options?.onStopPassHeld?.();
 						return false;
 					}
+					const waitGeneration = this.#cancellationGeneration();
 					await this.#waitOutStopPasses(true);
-					if (this.#promptGeneration !== generation) return false;
+					if (this.#cancellationGeneration() !== waitGeneration) return false;
 				}
 				return true;
 			};
@@ -10864,7 +10879,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		// A `subagent_stop` pass holds the session: these wait for its release, which schedules them again.
 		if (this.#stopPassHolds.size > 0) {
-			this.#hiddenNextTurnHeldGeneration = this.#promptGeneration;
+			this.#hiddenNextTurnHeldGeneration = this.#cancellationGeneration();
 			return;
 		}
 
@@ -10885,7 +10900,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// release to run them.
 				onStopPassHeld: () => {
 					this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
-					this.#hiddenNextTurnHeldGeneration = this.#promptGeneration;
+					this.#hiddenNextTurnHeldGeneration = this.#cancellationGeneration();
 				},
 			});
 		} catch (error) {
@@ -11207,12 +11222,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#stopPassHolds.size > 0
 		) {
 			const cancelsPass = normalizedAppMessage.attribution === "user";
-			const waitGeneration = this.#promptGeneration;
+			const waitGeneration = this.#cancellationGeneration();
 			await this.#waitOutStopPasses(cancelsPass);
 			// An abort() during a plain wait supersedes only the turn, as one during the context-replacement
 			// wait above does: the message stays in the transcript, delivered like one that triggers none. A
-			// user's message needs no check, as the abort that cancels the holder's turn bumps the generation.
-			if (!cancelsPass && this.#promptGeneration !== waitGeneration) {
+			// user's message needs no check, as the abort that cancels the holder's turn bumps the generation;
+			// the internal stop of a settled turn is no cancellation.
+			if (!cancelsPass && this.#cancellationGeneration() !== waitGeneration) {
 				options = { ...options, triggerTurn: false, deliverAs: undefined };
 			}
 		}
@@ -12426,6 +12442,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		deliverQueuedMessages?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
+		/**
+		 * The abort only ends a turn whose outcome is already settled (a yield parked behind owner work, a soft
+		 * budget stop) and the session goes on: work it still owes, such as a deferred next-turn message or a
+		 * compaction's continuation, is not cancelled by it. Every other abort counts as a cancellation.
+		 */
+		turnStop?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
@@ -12459,6 +12481,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
+			if (options?.turnStop) this.#turnStopAborts++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -13998,7 +14021,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// that turn, as it does an undeferred one.
 				const resumeParked = (): void => {
 					this.#resumeStrandedIrcAsides();
-					if (this.#hiddenNextTurnHeldGeneration === this.#promptGeneration) this.#scheduleHiddenNextTurn();
+					if (this.#hiddenNextTurnHeldGeneration === this.#cancellationGeneration())
+						this.#scheduleHiddenNextTurn();
 					this.#hiddenNextTurnHeldGeneration = undefined;
 					this.#resumeCompactionContinuation();
 				};
@@ -14027,6 +14051,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const changed = this.#stopPassChanged.promise;
 			await (signal ? untilAborted(signal, changed) : changed);
 		}
+	}
+
+	/**
+	 * The prompt generation net of aborts that only stopped a settled turn ({@link abort}'s `turnStop`). Work a
+	 * `subagent_stop` hold defers is stamped with it: a real cancellation (a user's abort, a run's cancel, a
+	 * session reset) changes it, the executor's internal stop of a turn that already yielded does not.
+	 */
+	#cancellationGeneration(): number {
+		return this.#promptGeneration - this.#turnStopAborts;
 	}
 
 	#stopPassConsulting(): boolean {

@@ -1670,7 +1670,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		budgetStopRequested = true;
 		const session = activeSession;
 		budgetStopAbortPromise = session
-			? session.abort().catch(error => {
+			? session.abort({ turnStop: true }).catch(error => {
 					logger.debug("Subagent budget-stop abort failed", {
 						error: error instanceof Error ? error.message : String(error),
 					});
@@ -1695,7 +1695,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		yieldTurnStopRequested = true;
 		const session = activeSession;
 		yieldTurnStopPromise = session
-			? session.abort().catch(error => {
+			? session.abort({ turnStop: true }).catch(error => {
 					logger.debug("Subagent yield turn-stop abort failed", {
 						error: error instanceof Error ? error.message : String(error),
 					});
