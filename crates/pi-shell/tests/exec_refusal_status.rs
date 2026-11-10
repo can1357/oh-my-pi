@@ -523,9 +523,29 @@ const DEFERRED: &[Row] = &[
 	},
 ];
 
+/// Root's DAC bypass lets `open(O_RDONLY)` succeed on a mode-0111 file, so
+/// both Bash 5.3.0 and this engine read the shebang and report "bad
+/// interpreter" (126) instead of "required file not found" (127).  When
+/// `geteuid() == 0`, these override the non-root expectation for the
+/// `unreadable_missing_interpreter` rows.
+const ROOT_OVERRIDES: &[(&str, i32, &[&str])] = &[
+	(
+		"unreadable-missing-interpreter",
+		126,
+		&["/does/not/exist: bad interpreter: No such file or directory"],
+	),
+	(
+		"deferred-unreadable-missing-interpreter",
+		0,
+		&["/does/not/exist: bad interpreter: No such file or directory", "status=126"],
+	),
+];
+
 /// Runs every row in a fresh shell and a fresh directory, reporting all
 /// mismatches at once.
 async fn check(rows: &[Row]) {
+	// SAFETY: geteuid is always safe to call.
+	let root = unsafe { libc::geteuid() } == 0;
 	let mut bad = Vec::new();
 	for row in rows {
 		let dir = tempfile::tempdir().expect("tempdir");
@@ -549,8 +569,16 @@ async fn check(rows: &[Row]) {
 			.await
 			.expect("shell execution");
 		let output: String = rx.drain().collect();
-		let missing: Vec<&str> = row
-			.wants
+		let (status, wants): (i32, &[&str]) = if root {
+			ROOT_OVERRIDES
+				.iter()
+				.find(|(n, _, _)| *n == row.name)
+				.map(|(_, s, w)| (*s, *w))
+				.unwrap_or((row.status, row.wants))
+		} else {
+			(row.status, row.wants)
+		};
+		let missing: Vec<&str> = wants
 			.iter()
 			.copied()
 			.filter(|w| match w.strip_prefix('!') {
@@ -558,10 +586,10 @@ async fn check(rows: &[Row]) {
 				None => !output.contains(w),
 			})
 			.collect();
-		if result.exit_code != Some(row.status) || !missing.is_empty() {
+		if result.exit_code != Some(status) || !missing.is_empty() {
 			bad.push(format!(
 				"{}: status {:?} (want {}), output {output:?} missing {missing:?}",
-				row.name, result.exit_code, row.status
+				row.name, result.exit_code, status
 			));
 		}
 	}
