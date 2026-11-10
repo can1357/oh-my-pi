@@ -3086,6 +3086,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setModelTemporary: async (model, thinkingLevel, options) => {
 				await this.#models.setModelTemporary(model, thinkingLevel, options, "automatic");
 			},
+			thinkingLevelCeiling: model => this.#models.thinkingLevelCeiling?.(model),
 			abort: options => this.abort(options),
 			abortHandoff: () => this.abortHandoff(),
 		};
