@@ -13,7 +13,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { cfgBrowserEnabled, cfgBrowserRelayUrl } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { cfgComputerEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Guards the SDK/session boundary: browser and computer stay outside the tool
@@ -153,6 +153,21 @@ describe("AgentSession eval preludes", () => {
 		expect(secondResult.content).toEqual(expect.arrayContaining([
 			expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
 		]));
+		if (!second) throw new Error("Expected second advisor");
+		const before = (await second.buildSideRequestContext([])).systemPrompt?.join("\n") ?? "";
+		if (process.platform !== "linux") expect(before).not.toContain("On Linux under X11");
+		cfgBrowserRelayUrl.set(settings, "http://10.0.0.5:9224");
+		await Promise.resolve();
+		await session.runToolRegistryMutation(async () => undefined);
+		expect(session.agent.state.systemPrompt.join("\n")).toContain("On Linux under X11");
+		expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).toContain("On Linux under X11");
+		cfgBrowserRelayUrl.set(settings, "");
+		await Promise.resolve();
+		await session.runToolRegistryMutation(async () => undefined);
+		if (process.platform !== "linux") {
+			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("On Linux under X11");
+			expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).not.toContain("On Linux under X11");
+		}
 	});
 
 	// `/computer on` mid-session used to rebuild the system prompt and eval
