@@ -1257,8 +1257,11 @@ prediction is wanted, typically after a `prompt_result` with
 `status: "completed"` while the host's own draft is empty (the server cannot
 see it). It answers `predictionId: null` without a request when
 `composer.predictions` is off, no model is set, or the session is streaming,
-compacting, generating a handoff, or running a host `bash` command (its result
-lands without a session event). A new request supersedes the previous one.
+compacting, generating a handoff, running a host `bash` command, still
+admitting or holding queued `prompt`/`steer`/`follow_up` input, or changing
+sessions (including an extension's `newSession`, `switchSession` or `branch`):
+the conversation would move under the prediction without a session event to
+retire it. A new request supersedes the previous one.
 
 ```json
 { "id": "req_1", "type": "predict_next_message" }

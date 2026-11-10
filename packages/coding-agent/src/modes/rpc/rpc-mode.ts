@@ -1470,7 +1470,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const wordPredictor = new RpcWordPredictor();
 	const btw = new RpcBtwController(session, output);
 	// Frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
-	const nextMessagePredictor = new RpcNextMessagePredictor(session, output);
+	const nextMessagePredictor = new RpcNextMessagePredictor(session, output, {
+		// Admission and session changes run on background tasks the serial queue no longer waits for.
+		isHostBusy: () => orderedInputsInFlight > 0 || sessionChangesInProgress > 0,
+	});
 	// A continuation abandoned while waiting leaves nothing to end the activity stretch: re-check settlement.
 	const goalController = new RpcGoalController(session, () => void settleWatcher.check());
 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
@@ -1913,7 +1916,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const inputGate = new RpcUserInputGate();
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	type OrderedInputOutcome = "local" | "cancelled" | "admitted" | "builtin-agent";
-	const dispatchOrderedUserInput = (
+	const admitOrderedUserInput = (
 		command: OrderedUserInput,
 		ticket: RpcPromptTicket | undefined,
 	): Promise<OrderedInputOutcome> =>
@@ -2028,6 +2031,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			});
 			return "admitted";
 		});
+	// Counted from the call (before the gate's queue) until admission settles: the input hook and image
+	// normalization run before the session reports anything, so next-message predictions stay off.
+	let orderedInputsInFlight = 0;
+	const dispatchOrderedUserInput = (
+		command: OrderedUserInput,
+		ticket: RpcPromptTicket | undefined,
+	): Promise<OrderedInputOutcome> => {
+		orderedInputsInFlight++;
+		return admitOrderedUserInput(command, ticket).finally(() => {
+			orderedInputsInFlight--;
+		});
+	};
 	// Abort controllers for builtin commands whose work outlives the prompt
 	// response (e.g. the `/mcp reauth` browser wait, dispatched through
 	// `runCommandInBackground`). Host abort and disconnect must tear those

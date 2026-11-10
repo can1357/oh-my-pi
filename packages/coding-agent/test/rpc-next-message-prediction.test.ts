@@ -45,6 +45,10 @@ function harness(
 	const session = {
 		model: MODEL,
 		isStreaming: false,
+		isBashRunning: false,
+		hasAdmittedSubmission: false,
+		queuedMessageCount: 0,
+		isSessionTransitioning: false,
 		isCompacting: false,
 		isGeneratingHandoff: options.handoff ?? false,
 		messages,
@@ -62,14 +66,21 @@ function harness(
 			return promise;
 		},
 	} as unknown as AgentSession;
+	let hostBusy = false;
 	const predictor = new RpcNextMessagePredictor(session, frame => frames.push(frame), {
 		meterProvider: options.meterProvider,
+		isHostBusy: () => hostBusy,
 	});
 	return {
 		predictor,
 		settings: session.settings,
 		frames,
 		turns,
+		/** Move the session or the RPC host into a state that must hold predictions off. */
+		busy(state: { session?: Partial<AgentSession>; hostBusy?: boolean }) {
+			Object.assign(session, state.session);
+			hostBusy = state.hostBusy ?? hostBusy;
+		},
 		async reply(index: number, replyText: string) {
 			const turn = turns[index]!;
 			turn.resolve({
@@ -112,6 +123,21 @@ describe("RpcNextMessagePredictor", () => {
 		const { predictor, turns } = harness({ handoff: true });
 		expect(predictor.request()).toBeNull();
 		expect(turns).toHaveLength(0);
+	});
+
+	it.each([
+		["user input is admitted but has not started a turn", { session: { hasAdmittedSubmission: true } }],
+		["user input is queued", { session: { queuedMessageCount: 1 } }],
+		["the session is switching", { session: { isSessionTransitioning: true } }],
+		["the host is still admitting input or changing the session", { hostBusy: true }],
+	])("makes no request, and ends an offered one, while %s", async (_label, state) => {
+		const { predictor, frames, turns, reply, busy } = harness();
+		const id = predictor.request()!;
+		await reply(0, "ship it");
+		busy(state);
+		expect(predictor.request()).toBeNull();
+		expect(turns).toHaveLength(1);
+		expect(frames.at(-1)).toEqual({ type: "next_message_prediction", predictionId: id, status: "retired" });
 	});
 
 	it("offers ordered choices under the request's id, then retires them once the conversation moves on", async () => {

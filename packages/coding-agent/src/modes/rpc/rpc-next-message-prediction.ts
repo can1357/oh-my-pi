@@ -23,18 +23,29 @@ const CANCELLING_EVENTS: Partial<Record<AgentSessionEvent["type"], true>> = {
 	manual_compaction_start: true,
 };
 
+/** Host-side state the session cannot see that must also hold predictions off. */
+export interface RpcNextMessagePredictorOptions extends Omit<ComposerPredictionOptions, "onUpdate"> {
+	/**
+	 * True while RPC user input is still being admitted (input hooks, image normalization, queueing)
+	 * or a session change is underway: either can move the conversation without an `agent_start`.
+	 */
+	isHostBusy?: () => boolean;
+}
+
 export class RpcNextMessagePredictor {
 	readonly #session: AgentSession;
 	readonly #controller: ComposerPredictionController;
+	readonly #isHostBusy: () => boolean;
 	/** The offered prediction not yet retired; it may have gone stale since. */
 	#offered: string | undefined;
 
 	constructor(
 		session: AgentSession,
 		output: (frame: RpcNextMessagePredictionFrame) => void,
-		options: Omit<ComposerPredictionOptions, "onUpdate"> = {},
+		{ isHostBusy = () => false, ...options }: RpcNextMessagePredictorOptions = {},
 	) {
 		this.#session = session;
+		this.#isHostBusy = isHostBusy;
 		this.#controller = new ComposerPredictionController(
 			{
 				settings: session.settings,
@@ -71,10 +82,19 @@ export class RpcNextMessagePredictor {
 
 	/**
 	 * Start a prediction for the conversation as it stands, superseding any earlier one; null when none
-	 * started. None starts while a host `bash` command runs: its result lands without a session event.
+	 * started. None starts while the conversation is about to move without a session event that would
+	 * retire it: a host `bash` command running, user input admitted or queued but not yet in a turn,
+	 * or a session change underway.
 	 */
 	request(): string | null {
-		if (this.#session.isBashRunning) {
+		const session = this.#session;
+		if (
+			session.isBashRunning ||
+			session.hasAdmittedSubmission ||
+			session.queuedMessageCount > 0 ||
+			session.isSessionTransitioning ||
+			this.#isHostBusy()
+		) {
 			this.#controller.cancel();
 			return null;
 		}
