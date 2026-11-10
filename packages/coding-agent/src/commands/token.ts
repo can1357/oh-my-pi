@@ -3,6 +3,7 @@
  */
 
 import { PROVIDER_REGISTRY } from "@oh-my-pi/pi-ai";
+import { providerPauseReason } from "@oh-my-pi/pi-ai/oauth";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
@@ -101,6 +102,16 @@ export default class Token extends Command {
 				process.exitCode = 1;
 				return;
 			}
+		}
+
+		// A paused provider keeps its stored logins but resolves no key. Report the
+		// rule's reason as a normal failure instead of letting the key lookup throw
+		// an internal ProviderDisabledError stack trace (#18697).
+		const pauseReason = managedMcpOAuth ? undefined : providerPauseReason(provider);
+		if (pauseReason !== undefined) {
+			process.stderr.write(`${chalk.red(`${providerName} is paused: ${pauseReason}`)}\n`);
+			process.exitCode = 1;
+			return;
 		}
 
 		const authStorage = await discoverAuthStorage();
