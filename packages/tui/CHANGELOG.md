@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed a picture in an `ask` form staying painted on screen after the form closed on Kitty-graphics terminals: form pictures now go through the TUI's image budget, so their placements are deleted with the form. `HtmlFormHost` takes an optional `imageBudget`, and `SvgFigure.release()` retires the current raster.
+- Fixed a picture in an `ask` form staying painted on screen after the form closed on Kitty-graphics terminals: form pictures now go through the TUI's image budget, so their placements are deleted with the form. `HtmlFormHost` takes an optional `imageBudget`, and `SvgFigure.release()` retires the current raster ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 
 ## [18.18.6] - 2026-11-09
 
