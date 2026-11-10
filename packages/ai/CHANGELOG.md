@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `CursorExecHandlers.subagent` and `subagentAwait`: Cursor's native `Task` runs on the host's subagents and returns their report instead of being rejected. Hosts without the handlers still reject it
+- Added `CursorExecHandlers.subagent` and `subagentAwait`: Cursor's native `Task` runs on the host's subagents and returns their report instead of being rejected. Hosts without the handlers still reject it ([#18736](https://github.com/can1357/oh-my-pi/pull/18736) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ## [18.18.4] - 2026-11-09
 
