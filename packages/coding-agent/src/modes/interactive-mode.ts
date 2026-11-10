@@ -1973,7 +1973,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * A session seen for the first time is seeded from the cwds its replies were
 	 * persisted with, so a resumed session keeps cwd changes from earlier runs.
 	 */
-	#trackProseGithubRepo(session: AgentSession): ProseGithubRepoEntry[] {
+	#trackProseGithubRepo(session: AgentViewSession): ProseGithubRepoEntry[] {
 		const sessionId = session.sessionManager.getSessionId();
 		let history = this.#proseGithubRepos.get(sessionId);
 		if (!history) {
