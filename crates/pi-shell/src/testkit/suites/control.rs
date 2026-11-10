@@ -44,17 +44,19 @@ fn restore_rejects_the_upstream_version_30_frame_layout() {
 
 #[test]
 fn restore_rejects_the_version_31_frame_layout() {
-	// The upstream version-30 blob with byte 5 (the frames-version varint)
-	// changed from 30 to 31, matching the layout this branch used before
-	// the tag-preserving pin fix bumped it to 32.  The build id (bytes
-	// 6..38) also differs, so `check()` rejects on both `h.frames` and
-	// `h.build`.
+	// A fresh shell's complete frames blob, externalized at this branch's
+	// fc5682e90c commit where FRAMES_VERSION was 31 (before the
+	// tag-preserving pin fix bumped it to 32).  The build id in the blob
+	// is the real version-31 build id, so this test passes only because
+	// the current engine expects version 32: if FRAMES_VERSION were
+	// accidentally left at 31, check() would accept the blob and the test
+	// would fail.
 	const FRAMES_31: &[u8] = &[
-		79, 66, 70, 49, 17, 31, 227, 114, 110, 55, 159, 22, 47, 12, 8, 97, 238, 223, 248, 150, 20,
-		133, 174, 55, 174, 212, 240, 112, 117, 1, 191, 245, 130, 43, 177, 109, 14, 237, 0, 0, 1, 1,
-		1, 0, 135, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 1, 128, 128, 128, 128,
-		4, 0, 0, 0, 3, 1, 0, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		3, 0, 0, 0, 1, 0, 2, 0, 0, 0,
+		79, 66, 70, 49, 17, 31, 50, 237, 179, 171, 212, 180, 66, 143, 24, 238, 218, 173, 241, 235,
+		206, 38, 83, 78, 170, 230, 72, 96, 120, 161, 91, 255, 42, 214, 248, 37, 58, 234, 0, 1, 1,
+		1, 1, 0, 135, 255, 255, 255, 255, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 1, 128, 128, 128,
+		128, 4, 0, 0, 0, 3, 1, 0, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 2, 0, 0, 0,
 	];
 	let mut r = rig();
 	let (_, host, store) = r.parts();

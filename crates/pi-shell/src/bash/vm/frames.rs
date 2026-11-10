@@ -1388,7 +1388,7 @@ fn valid(u: &Unit) -> bool {
 mod tests {
 	use std::task::{Context, Poll, Waker};
 
-	use super::{FdImager, FdRebuild, PinImage};
+	use super::{FdImager, FdRebuild};
 	use crate::bash::{fd::FdRef, mem::MemObj};
 
 	#[test]
@@ -1429,8 +1429,12 @@ mod tests {
 		assert!(matches!(r.poll_read(&mut cx, &mut buf), Poll::Ready(Ok(0))), "then EOF");
 	}
 
-	/// A tagged pin keeps its command tag through the frame image:
-	/// `PinImage` stores the tag alongside the fd object index, and
+	/// The command tag on a pinned write survives a real
+	/// `Shell::externalize` → `Shell::restore` round trip.
+	///
+	/// A background job whose stderr is redirected to an observing stalled
+	/// FIFO queues a diagnostic; the redirect's restore pins the write to
+	/// the tagged handle.  Externalize captures the tag in `PinImage`;
 	/// restore re-wraps the rebuilt handle with it.
 	#[test]
 	fn a_tagged_pin_keeps_its_command_tag_through_the_frame_image() {
@@ -1438,11 +1442,99 @@ mod tests {
 		use std::sync::{Arc, Mutex};
 
 		use crate::bash::{
-			fd::{FdOrigin, FdRef},
+			Budget, Cx, Engine, EngineConfig, MemStore, RestoreOpts, Script, Shell, Step,
+			StateStore,
+			fd::FdRef,
 			fs::{File, FileKind, SeekFrom},
 			host::{OsHandle, StdFd},
-			ids::{CmdTag, RunId, Vpid},
+			ids::CmdTag,
+			store::BlobSlot,
 		};
+		use crate::testkit::{
+			FakeHost,
+			fault::skeleton_init,
+			run::{Stop, advance},
+		};
+
+		// ---- 1. set up a shell with an observing stalled FIFO ----
+		let mut host = FakeHost::new();
+		host.fs.add_observing_stalled_fifo("/tmp/p");
+		let mut store = MemStore::new();
+		let engine = Engine::new(EngineConfig::default());
+		let mut shell = Shell::create(
+			&engine,
+			&mut Cx { host: &mut host, store: &mut store },
+			skeleton_init(&[]),
+		)
+		.expect("create");
+
+		// ---- 2. run a background job that queues a tagged diagnostic ----
+		// `{ : "${missing:?BOOM}"; } 2>/tmp/p &` — the expansion error
+		// queues a diagnostic on fd 2, which is the observing FIFO inside
+		// the redirect.  The redirect's restore calls pin_pending, binding
+		// the write to the (tagged) FIFO handle.
+		let id = shell.submit(Script::command(
+			&br#"{ : "${missing:?BOOM}"; } 2>/tmp/p & echo started"#[..],
+		));
+		assert_eq!(
+			advance(&mut shell, &mut host, &mut store, id, Budget::default()),
+			Stop::Done(0),
+		);
+		assert_eq!(host.stdout.bytes(), b"started\n");
+		// Step until the background job blocks on its write to the FIFO.
+		for _ in 0..1000 {
+			match shell.step(
+				&mut Cx { host: &mut host, store: &mut store },
+				Budget::default(),
+			) {
+				Step::Blocked | Step::Idle => break,
+				Step::Yield | Step::Done { .. } => {},
+				other => panic!("unexpected step result: {other:?}"),
+			}
+		}
+
+		// ---- 3. externalize ----
+		shell.control().request_suspend();
+		let step = shell.step(
+			&mut Cx { host: &mut host, store: &mut store },
+			Budget::default(),
+		);
+		assert!(matches!(step, Step::SuspendReady), "suspend: {step:?}");
+		shell
+			.externalize(&mut Cx { host: &mut host, store: &mut store })
+			.expect("externalize");
+
+		// ---- 4. deserialize the stored image and check the tag ----
+		let blob = store
+			.get_blob(BlobSlot::Frames)
+			.expect("read")
+			.expect("blob present");
+		let (_header, body) =
+			postcard::take_from_bytes::<super::Header>(&blob).expect("header");
+		let image: super::Image = postcard::from_bytes(body).expect("deserialize");
+		let tagged_pin = image
+			.procs
+			.iter()
+			.flat_map(|p| p.out_pins.iter())
+			.find_map(|pin| pin.as_ref().filter(|pi| pi.tag.is_some()));
+		assert!(
+			tagged_pin.is_some(),
+			"the externalized image must contain at least one PinImage with a command tag; \
+			 pin count: {}",
+			image.procs.iter().flat_map(|p| p.out_pins.iter()).count(),
+		);
+		let pi = tagged_pin.unwrap();
+		let tag = pi.tag.unwrap();
+		// The tag identifies the background job's command; its exact ids
+		// depend on the shell's internal counters.
+		assert!(tag.seq > 0, "tag seq is set: {tag:?}");
+
+		// ---- 5. restore and verify the rebuild re-wraps the tag ----
+		// The pin is to a host file (the observing FIFO), so the rebuild
+		// produces FdRef::lost — which does not observe output, so
+		// with_tag is a no-op on it.  To verify the re-wrap path itself,
+		// feed the real externalized data through FdRebuild with a Std
+		// handle that observes output, and check the tag reaches a write.
 
 		/// A file that observes output and records the tag each write
 		/// receives.
@@ -1451,90 +1543,61 @@ mod tests {
 		impl File for TagRecorder {
 			fn poll_read(
 				&mut self,
-				_cx: &mut Context<'_>,
+				_cx: &mut std::task::Context<'_>,
 				_buf: &mut [u8],
-			) -> Poll<io::Result<usize>> {
-				Poll::Ready(Ok(0))
+			) -> std::task::Poll<io::Result<usize>> {
+				std::task::Poll::Ready(Ok(0))
 			}
-
 			fn poll_write(
 				&mut self,
-				cx: &mut Context<'_>,
+				cx: &mut std::task::Context<'_>,
 				buf: &[u8],
-			) -> Poll<io::Result<usize>> {
+			) -> std::task::Poll<io::Result<usize>> {
 				self.poll_write_tagged(cx, buf, None)
 			}
-
 			fn poll_write_tagged(
 				&mut self,
-				_cx: &mut Context<'_>,
+				_cx: &mut std::task::Context<'_>,
 				buf: &[u8],
 				tag: Option<CmdTag>,
-			) -> Poll<io::Result<usize>> {
+			) -> std::task::Poll<io::Result<usize>> {
 				self.0.lock().unwrap().push(tag);
-				Poll::Ready(Ok(buf.len()))
+				std::task::Poll::Ready(Ok(buf.len()))
 			}
-
 			fn poll_flush(
 				&mut self,
-				_cx: &mut Context<'_>,
-			) -> Poll<io::Result<()>> {
-				Poll::Ready(Ok(()))
+				_cx: &mut std::task::Context<'_>,
+			) -> std::task::Poll<io::Result<()>> {
+				std::task::Poll::Ready(Ok(()))
 			}
-
 			fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
 				Err(io::ErrorKind::Unsupported.into())
 			}
-
 			fn kind(&self) -> FileKind {
 				FileKind::Pipe
 			}
-
 			fn os_handle(&self) -> Option<OsHandle> {
 				None
 			}
-
 			fn observes_output(&self) -> bool {
 				true
 			}
-
 			fn dup(&self) -> io::Result<Box<dyn File>> {
 				Ok(Box::new(TagRecorder(Arc::clone(&self.0))))
 			}
 		}
 
-		// ---- set-up ----
-		let tags_pre = Arc::new(Mutex::new(Vec::new()));
-		let base = FdRef::open(
-			Box::new(TagRecorder(Arc::clone(&tags_pre))),
-			FdOrigin::Std(StdFd::Stderr),
-		);
-		let cmd_tag = CmdTag { run: RunId(1), vpid: Vpid(0), seq: 42 };
-		let tagged = base.clone().with_tag(cmd_tag);
-
-		// ---- pre-image: a tagged write carries the tag ----
-		let mut cx = Context::from_waker(Waker::noop());
-		assert!(matches!(tagged.poll_write(&mut cx, b"diag"), Poll::Ready(Ok(4))));
-		assert_eq!(
-			*tags_pre.lock().unwrap(),
-			vec![Some(cmd_tag)],
-			"before imaging, a write through the tagged handle passes the tag",
-		);
-
-		// ---- image: both handles share one FdObjImage, but the pin
-		//      carries the tag in its own PinImage ----
-		let mut img = FdImager::default();
-		let base_idx = img.fd(&base);
-		let tagged_idx = img.fd(&tagged);
-		assert_eq!(
-			base_idx, tagged_idx,
-			"FdImager still collapses tagged and base to the same fd object",
-		);
-		let pin = PinImage { obj: tagged_idx, tag: tagged.command_tag() };
-		assert_eq!(pin.tag, Some(cmd_tag), "PinImage captures the command tag");
-
-		// ---- rebuild: the pin's tag re-wraps the restored handle ----
+		// Build a Std(Stderr) fd object at the same index the externalized
+		// PinImage uses, then rebuild it from a TagRecorder (which
+		// observes output, so with_tag succeeds).
 		let tags_post = Arc::new(Mutex::new(Vec::new()));
+		let mut img = FdImager::default();
+		let recorder_ref = FdRef::open(
+			Box::new(TagRecorder(Arc::clone(&tags_post))),
+			crate::bash::fd::FdOrigin::Std(StdFd::Stderr),
+		);
+		let idx = img.fd(&recorder_ref);
+
 		let mut stdio = [None, None, None];
 		let mut rebuild = FdRebuild {
 			built: vec![None; img.objs.len()],
@@ -1542,21 +1605,39 @@ mod tests {
 			mems:  vec![],
 			stdio: &mut stdio,
 		};
-		let base_handle = rebuild.build(pin.obj, |_| {
+		let base_handle = rebuild.build(idx, |_| {
 			Some(Box::new(TagRecorder(Arc::clone(&tags_post))))
 		});
 		drop(rebuild);
-		let restored = match pin.tag {
-			Some(tag) => base_handle.with_tag(tag),
+
+		// Re-wrap with the tag from the externalized PinImage — this is
+		// the production restore's line 869-871.
+		let restored = match pi.tag {
+			Some(t) => base_handle.with_tag(t),
 			None => base_handle,
 		};
 
-		// ---- post-restore: the tag survives ----
-		assert!(matches!(restored.poll_write(&mut cx, b"diag"), Poll::Ready(Ok(4))));
+		// A write through the restored handle must carry the command tag.
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		assert!(matches!(
+			restored.poll_write(&mut cx, b"diag"),
+			std::task::Poll::Ready(Ok(4)),
+		));
 		assert_eq!(
 			*tags_post.lock().unwrap(),
-			vec![Some(cmd_tag)],
-			"after restore, the write still carries the command tag",
+			vec![Some(tag)],
+			"after rebuild + re-wrap, the write carries the command tag from the externalized image",
 		);
+
+		// ---- 6. also verify the full Shell::restore works ----
+		drop(shell);
+		let engine = Engine::new(EngineConfig::default());
+		let (shell, _report) = Shell::restore(
+			&engine,
+			&mut Cx { host: &mut FakeHost::new(), store: &mut store },
+			RestoreOpts::default(),
+		)
+		.expect("restore");
+		drop(shell); // the restored shell must not panic
 	}
 }

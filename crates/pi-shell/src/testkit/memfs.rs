@@ -79,6 +79,9 @@ enum Node {
 	},
 	/// A FIFO nobody reads: an open succeeds, a write never completes.
 	Stalled,
+	/// Like `Stalled`, but [`File::observes_output`] is true — a write to
+	/// this FIFO goes through the engine's tag path.
+	ObservedStalled,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +166,14 @@ impl MemFs {
 	pub fn add_stalled_fifo(&self, path: &str) {
 		self.add_parents(path);
 		self.nodes.lock().insert(BString::from(path), Node::Stalled);
+	}
+
+	/// Like [`Self::add_stalled_fifo`], but the opened file reports
+	/// [`File::observes_output`] `true`, so writes through it are routed
+	/// via the engine's command-tag path.
+	pub fn add_observing_stalled_fifo(&self, path: &str) {
+		self.add_parents(path);
+		self.nodes.lock().insert(BString::from(path), Node::ObservedStalled);
 	}
 
 	fn add_parents(&self, path: &str) {
@@ -270,6 +281,7 @@ impl MemFs {
 				return Err(io::Error::other("Too many levels of symbolic links"));
 			},
 			Some(Node::Stalled) => return Ok(Box::new(StalledFifo)),
+			Some(Node::ObservedStalled) => return Ok(Box::new(ObservingStalledFifo)),
 			Some(Node::File { .. }) if flags.contains(OpenFlags::EXCL) => {
 				return Err(io::ErrorKind::AlreadyExists.into());
 			},
@@ -555,13 +567,52 @@ impl File for StalledFifo {
 	}
 }
 
+/// Like [`StalledFifo`] but with [`File::observes_output`] `true`: the
+/// engine routes writes through the command-tag path so a pending write
+/// pinned to this file carries the executing command's tag.
+struct ObservingStalledFifo;
+
+impl File for ObservingStalledFifo {
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _buf: &mut [u8]) -> Poll<io::Result<usize>> {
+		Poll::Ready(Ok(0))
+	}
+
+	fn poll_write(&mut self, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<io::Result<usize>> {
+		Poll::Pending
+	}
+
+	fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+		Poll::Pending
+	}
+
+	fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
+		Err(io::ErrorKind::Unsupported.into())
+	}
+
+	fn kind(&self) -> FileKind {
+		FileKind::Pipe
+	}
+
+	fn os_handle(&self) -> Option<OsHandle> {
+		None
+	}
+
+	fn observes_output(&self) -> bool {
+		true
+	}
+
+	fn dup(&self) -> io::Result<Box<dyn File>> {
+		Ok(Box::new(Self))
+	}
+}
+
 fn stat_of(node: &Node) -> Stat {
 	let (kind, mode, size) = match node {
 		Node::File { data, mode } => (StatKind::File, *mode, data.lock().len() as u64),
 		Node::Dir { mode } => (StatKind::Dir, *mode, 0),
 		Node::Null => (StatKind::CharDev, 0o666, 0),
 		Node::Link { target } => (StatKind::Symlink, 0o755, target.len() as u64),
-		Node::Stalled => (StatKind::Fifo, 0o666, 0),
+		Node::Stalled | Node::ObservedStalled => (StatKind::Fifo, 0o666, 0),
 	};
 	Stat {
 		kind,
@@ -601,7 +652,7 @@ impl Fs for MemFs {
 		let res = self.node(path).and_then(|n| {
 			let bits = match n {
 				Node::File { mode, .. } | Node::Dir { mode } => mode,
-				Node::Null | Node::Stalled => 0o666,
+				Node::Null | Node::Stalled | Node::ObservedStalled => 0o666,
 				Node::Link { .. } => 0,
 			};
 			let need = [(Access::READ, 0o444), (Access::WRITE, 0o222), (Access::EXEC, 0o111)];
@@ -637,7 +688,7 @@ impl Fs for MemFs {
 					.collect();
 				Ok(Box::new(MemDir(entries)) as Box<dyn DirIter>)
 			},
-			Ok(Node::File { .. } | Node::Null | Node::Link { .. } | Node::Stalled) => {
+			Ok(Node::File { .. } | Node::Null | Node::Link { .. } | Node::Stalled | Node::ObservedStalled) => {
 				Err(io::ErrorKind::NotADirectory.into())
 			},
 			Err(e) => Err(e),
@@ -669,7 +720,7 @@ impl Fs for MemFs {
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()> {
 		let res = match self.node(path) {
 			Ok(Node::Dir { .. }) => Ok(()),
-			Ok(Node::File { .. } | Node::Null | Node::Link { .. } | Node::Stalled) => {
+			Ok(Node::File { .. } | Node::Null | Node::Link { .. } | Node::Stalled | Node::ObservedStalled) => {
 				Err(io::ErrorKind::NotADirectory.into())
 			},
 			Err(e) => Err(e),
@@ -814,7 +865,7 @@ impl Fs for MemFs {
 				Ok(())
 			},
 			// `/dev/null` and a FIFO keep their bits; a dangling link has no target.
-			Node::Null | Node::Stalled => Ok(()),
+			Node::Null | Node::Stalled | Node::ObservedStalled => Ok(()),
 			Node::Link { .. } => Err(io::ErrorKind::NotFound.into()),
 		});
 		self.answer(res)
