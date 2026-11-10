@@ -863,7 +863,8 @@ class El {
 	 * with one, that chord typed into the element.
 	 */
 	async press(chord?: string | string[] | MenuOptions, options?: InputOptions): Promise<void> {
-		strictOptions(options, inputOptionsKeys, "press");
+		// Validate the overload being executed, not the union of its option types.
+		strictOptions(options, chord === undefined || isMenuOptions(chord) ? {} : inputOptionsKeys, "press");
 		if (isMenuOptions(chord)) strictOptions(chord, menuOptionsKeys, "press");
 		const context = this.#getContext();
 		guardRun(context, "press");
@@ -1570,7 +1571,7 @@ export class ComputerWorkerCore {
 					if (!condition) throw new ToolError(text ?? "Assertion failed");
 				},
 				wait: (msOrPredicate: number | (() => unknown), options?: WaitPredicateOptions): Promise<unknown> => {
-					strictOptions(options, waitPredicateOptionsKeys, "wait");
+					strictOptions(options, typeof msOrPredicate === "number" ? {} : waitPredicateOptionsKeys, "wait");
 					const resolved =
 						typeof msOrPredicate === "number"
 							? undefined

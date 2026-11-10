@@ -57,6 +57,7 @@ await computer.close();
 
 Unknown option or filter keys are rejected with the helper name and valid keys. A spelling suggestion appears only when exactly one valid key matches after ignoring case, underscores, and hyphens.
 `windows()` lists once and rejects `wait`; use `window({ ..., wait })` to wait for one matching window.
+Options are checked for the selected overload: `wait(milliseconds)` accepts no option keys, and element `press()` or `press({ menu })` accepts no second-argument input option keys. Use `wait(predicate, { timeout, interval })` or `press(chord, { takeover })` for those options.
 
 Python uses the same helper names; keyword arguments become the trailing options object, and `win.raise_()` stands in for the keyword `raise`:
 
