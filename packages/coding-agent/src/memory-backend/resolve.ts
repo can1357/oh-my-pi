@@ -1,6 +1,7 @@
 import type { Settings } from "../config/settings";
 import { localBackend } from "./local-backend";
 import { offBackend } from "./off-backend";
+import { supermemoryBackend } from "../supermemory/backend";
 import type { MemoryBackend } from "./types";
 
 import { cfgMemoryBackend } from "./settings";
@@ -25,7 +26,7 @@ export async function resolveMemoryBackend(settings: Settings): Promise<MemoryBa
 	if (id === "hindsight") return (await import("../hindsight/backend")).hindsightBackend;
 	if (id === "mnemopi") return (await import("../mnemopi/backend")).mnemopiBackend;
 	if (id === "sharpshooter") return (await import("../sharpshooter/backend")).sharpshooterBackend;
-	if (id === "supermemory") return (await import("../supermemory/backend")).supermemoryBackend;
+	if (id === "supermemory") return supermemoryBackend;
 	if (id === "local") return localBackend;
 	return offBackend;
 }

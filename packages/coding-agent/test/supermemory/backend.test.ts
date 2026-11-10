@@ -22,6 +22,7 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 	const cwd = options.cwd ?? "/tmp";
 	const session = {
 		sessionId: "s1",
+		transcriptId: "t1",
 		settings: Settings.isolated({ ...CONFIGURED, ...options.settings }),
 		sessionManager: {
 			getEntries: () => entries,
@@ -38,7 +39,7 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 				return "";
 			},
 			getCwd: () => cwd,
-			getSessionId: () => "t1",
+			getSessionId: () => session.transcriptId,
 		},
 		subscribe(listener: AgentSessionEventListener) {
 			listeners.add(listener);
@@ -457,12 +458,42 @@ describe("supermemoryBackend", () => {
 		const session = makeSession();
 		await start(session);
 		const memory = { agentDir: temp.path(), cwd: "/tmp", session: session as never };
-		await supermemoryBackend.save!(memory, { content: `token ${secret} and key sm-synthetic-key` });
+		await supermemoryBackend.save!(memory, {
+			content: `token ${secret} and key sm-synthetic-key`,
+			context: `ctx ${secret} sm-synthetic-key`,
+		});
 		await supermemoryBackend.search!(memory, `find ${secret}`);
-		const sent = `${create.mock.calls[0]?.[0]?.content} ${search.mock.calls[0]?.[0]?.q}`;
+		const doc = create.mock.calls[0]?.[0];
+		const sent = `${doc?.content} ${JSON.stringify(doc?.metadata)} ${search.mock.calls[0]?.[0]?.q}`;
 		expect(sent).not.toContain(secret);
 		expect(sent).not.toContain("sm-synthetic-key");
 		expect(sent).toContain("[REDACTED]");
+	});
+
+	it("a branched copy of a transcript ignores the source's retention cursor", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		session.addTurn("two");
+		await session.endTurn();
+		await session.getSupermemorySessionState()?.dispose();
+		// `/branch` at turn one: a new transcript id, the turn-two messages dropped, custom entries kept.
+		const entries = session.sessionManager.getEntries();
+		const two = entries.findIndex(entry => entry.type === "message" && JSON.stringify(entry).includes("two"));
+		entries.splice(two, entries.length - two, ...entries.slice(two).filter(entry => entry.type === "custom"));
+		session.transcriptId = "t2";
+		create.mockClear();
+
+		await start(session);
+		session.addTurn("three");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[0]);
+		expect(docs.map(doc => doc?.metadata)).toMatchObject([{ sessionId: "t2", turnStart: 1, turnEnd: 2 }]);
+		expect(docs[0]?.content).toContain("three");
 	});
 
 	it("recall lists editable memory ids and marks document chunks", async () => {

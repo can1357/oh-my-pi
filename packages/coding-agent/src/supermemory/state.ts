@@ -54,6 +54,8 @@ interface RetentionCursorData {
 	version: 1;
 	/** Server, account and container (see `#scope`); a cursor only applies to the same ones. */
 	scope: string;
+	/** Transcript the turns were counted in; a branched copy has a new id and must not adopt it. */
+	transcriptId: string;
 	/** User turns `[0, turn)` are retained. */
 	turn: number;
 }
@@ -66,6 +68,8 @@ function isRetentionCursor(data: unknown): data is RetentionCursorData {
 		data.version === 1 &&
 		"scope" in data &&
 		typeof data.scope === "string" &&
+		"transcriptId" in data &&
+		typeof data.transcriptId === "string" &&
 		"turn" in data &&
 		Number.isSafeInteger(data.turn)
 	);
@@ -229,7 +233,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 					entry.type === "custom" &&
 					entry.customType === RETENTION_CURSOR_ENTRY_TYPE &&
 					isRetentionCursor(entry.data) &&
-					entry.data.scope === scope,
+					entry.data.scope === scope &&
+					entry.data.transcriptId === this.transcriptId,
 			);
 		this.#hasCursor = cursor?.type === "custom" && isRetentionCursor(cursor.data);
 		if (cursor?.type === "custom" && isRetentionCursor(cursor.data)) {
@@ -305,7 +310,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				content: this.#redact(content),
 				containerTag: this.containerTag,
 				customId,
-				metadata,
+				metadata: Object.fromEntries(
+					Object.entries(metadata).map(([key, value]) => [
+						key,
+						typeof value === "string" ? this.#redact(value) : value,
+					]),
+				),
 			}),
 		);
 	}
@@ -490,6 +500,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
 			scope: this.#scope(),
+			transcriptId: this.transcriptId,
 			turn,
 		} satisfies RetentionCursorData);
 		this.#hasCursor = true;
