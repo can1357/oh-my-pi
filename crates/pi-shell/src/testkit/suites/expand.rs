@@ -236,6 +236,22 @@ fn bash_cmds_reads_the_command_hash_table() {
 	);
 }
 
+/// bash's `sv_path`: assigning a `PATH` that is already set (plain or
+/// `+=`) and unsetting it empty the command hash table, as creating it
+/// does. Reassignment used to keep stale entries, so a command ran from a
+/// directory no longer on `PATH`.
+#[test]
+fn reassigning_or_unsetting_path_empties_the_hash_table() {
+	assert_eq!(
+		out(
+			"PATH=/first; hash -p /usr/sbin/foo foo; PATH=/second; echo ${#BASH_CMDS[@]}; hash -p \
+			 /usr/sbin/foo foo; PATH+=:/third; echo ${#BASH_CMDS[@]}; hash -p /usr/sbin/foo foo; \
+			 unset PATH; echo ${#BASH_CMDS[@]}"
+		),
+		"0\n0\n0\n"
+	);
+}
+
 // Upstream array23.sub; golden: bash 5.3.20 (`bash -c`). The subscript's
 // value is not expanded again, so `$( … )` in it is an arithmetic error,
 // not a command (this used to loop forever), and the error ends the
