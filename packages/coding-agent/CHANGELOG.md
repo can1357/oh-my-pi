@@ -4,7 +4,7 @@
 
 ### Added
 
-- Revisit completed replies with `/summary` or `/summary last`, with age/agent labels and bounded Markdown previews; Ctrl+Alt+R adds a quoted reference above your unsent draft ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+- Browse completed replies from the current agent tree with `/summary` or `/summary last`, with bounded previews; Ctrl+Alt+R adds a quoted reference above your unsent draft ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 
 ## [18.18.7] - 2026-11-10
 

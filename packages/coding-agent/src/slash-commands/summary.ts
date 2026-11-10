@@ -35,8 +35,13 @@ export async function listSessionSummaries(
 	const rootFile = manager.getSessionFile();
 	const rootSource = rootFile ? path.resolve(rootFile) : manager.getSessionId();
 	const summaries: SessionSummary[] = [];
+	const seenEntryIds = new Set<string>();
 	const collect = (entry: FileEntry, entryIndex: number, source: string, agentName: string): void => {
 		if (entry.type !== "message" || !isTerminalTextAssistantAnswer(entry.message)) return;
+		if (typeof entry.id === "string" && entry.id.length > 0) {
+			if (seenEntryIds.has(entry.id)) return;
+			seenEntryIds.add(entry.id);
+		}
 		const messageTime = new Date(entry.message.timestamp).getTime();
 		const entryTime = Date.parse(entry.timestamp);
 		summaries.push({
@@ -66,18 +71,21 @@ export async function listSessionSummaries(
 			if (seen.has(source)) continue;
 			seen.add(source);
 			const agentName = ref.displayName || ref.id;
-			if (ref.session && isLocalAgentSession(ref.session)) {
-				ref.session.sessionManager.getEntries().forEach((entry, index) => collect(entry, index, source, agentName));
-			} else {
-				let index = 0;
-				await visitEntriesFromFileStream(
-					source,
-					entry => {
-						if (entry.type !== "session") collect(entry, index++, source, agentName);
-					},
-					{ shouldContinue },
-				);
-			}
+			const live = ref.session && isLocalAgentSession(ref.session) ? ref.session.sessionManager : undefined;
+			let inherited = Boolean(live?.getHeader()?.seanceSource);
+			let index = 0;
+			const visit = (entry: FileEntry): void => {
+				if (entry.type === "session") {
+					inherited = Boolean(entry.seanceSource);
+					return;
+				}
+				// Consult forks neutralize inherited init entries; their own init starts authored replies.
+				if (entry.type === "session_init") inherited = false;
+				if (!inherited) collect(entry, index, source, agentName);
+				index++;
+			};
+			if (live) live.getEntries().forEach(visit);
+			else await visitEntriesFromFileStream(source, visit, { shouldContinue });
 		}
 	}
 	return summaries.sort(
