@@ -335,9 +335,10 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 	});
 
 	it.each([
-		{ expired: true, label: "caps startup after an expired run" },
-		{ expired: false, label: "preserves the startup budget of recovery before a run expires" },
-	])("$label", async ({ expired }) => {
+		{ expired: true, cancel: false, label: "caps startup after an expired run" },
+		{ expired: false, cancel: false, label: "preserves the startup budget of recovery before a run expires" },
+		{ expired: false, cancel: true, label: "cancels a stalled replacement and terminates its worker" },
+	])("$label", async ({ expired, cancel }) => {
 		const scope = trackedScope();
 		spyOn(sharedDaemon, "stopSharedBrowserIfUnreachable").mockResolvedValue(false);
 		const tab = makeWedgeTab(scope, { close: "fail" });
@@ -348,6 +349,8 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 		getTabsMapForTest().set(tab.name, tab);
 		const RealWorker = globalThis.Worker;
 		const readyWait = Promise.withResolvers<void>();
+		const replacementTerminated = Promise.withResolvers<void>();
+		const controller = new AbortController();
 		let replacement: EventTarget | undefined;
 		vi.useFakeTimers();
 		let now = 0;
@@ -375,30 +378,47 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 					this.dispatchEvent(new MessageEvent("message", { data: { type: "closed" } }));
 				}
 			}
-			terminate(): void {}
+			terminate(): void {
+				replacementTerminated.resolve();
+			}
 		} as unknown as typeof Worker;
 		try {
-			const run = runInTab(tab.name, { code: "", timeoutMs: expired ? 120_000 : 10_000, session: makeSession() });
+			const run = runInTab(tab.name, {
+				code: "",
+				timeoutMs: cancel ? 300_000 : expired ? 120_000 : 10_000,
+				signal: controller.signal,
+				session: makeSession(),
+			});
 			const result = run.catch(error => error);
 			const id = await runSent.promise;
 			const pending = tab.pending.get(id)!;
 			if (expired) pending.reject(new ToolError("Browser code execution timed out after 120000ms"));
 			else pending.resolve({ displays: [], screenshots: [], returnValue: true, recoverTab: true });
 			await readyWait.promise;
-			now = 6_000;
-			vi.advanceTimersByTime(6_000);
-			if (!expired) {
+			if (cancel) {
+				controller.abort();
+				vi.advanceTimersByTime(749);
+				expect(getTabsMapForTest().has(tab.name)).toBe(true);
+				vi.advanceTimersByTime(1);
+			} else {
+				now = 6_000;
+				vi.advanceTimersByTime(6_000);
+			}
+			if (!expired && !cancel) {
 				replacement!.dispatchEvent(new MessageEvent("message", { data: { type: "ready", info: {} } }));
 			}
 			const outcome = await result;
-			if (expired) {
+			if (cancel) {
+				expect(outcome).toBeInstanceOf(ToolAbortError);
+				await replacementTerminated.promise;
+			} else if (expired) {
 				expect(outcome).toBeInstanceOf(ToolError);
 				expect(String(outcome)).toContain("released");
 				expect(String(outcome)).toContain("tools.maxTimeout");
 			} else {
 				expect(outcome).toMatchObject({ returnValue: true });
 			}
-			expect(getTabsMapForTest().has(tab.name)).toBe(!expired);
+			expect(getTabsMapForTest().has(tab.name)).toBe(!expired && !cancel);
 		} finally {
 			globalThis.Worker = RealWorker;
 		}
