@@ -399,6 +399,13 @@ export class TranscriptContainer extends Container {
 	#historyEnd: RowsAbove;
 	/** Native wrappers of compact runs keyed by their first member; see {@link nativeBlocks}. */
 	#nativeRuns: ReadonlyMap<Component, CompactRun> = NO_RUNS;
+	/**
+	 * The live tail's `{ entry, index }` wrappers, reused while `#entries` holds the
+	 * same entries from the same start: the per-frame readers (`liveRowCount`,
+	 * `#composeViewport`, `#peekBatch`) would otherwise each allocate one per live block.
+	 */
+	#liveWrappers: ReadonlyArray<{ entry: TranscriptEntry; index: number }> = [];
+	#liveWrappersStart = 0;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -1901,10 +1908,20 @@ export class TranscriptContainer extends Container {
 		}
 	}
 
-	#liveEntries(): Array<{ entry: TranscriptEntry; index: number }> {
+	#liveEntries(): ReadonlyArray<{ entry: TranscriptEntry; index: number }> {
 		const start = this.#offered?.kind === "commit" ? this.#offered.end : this.#frontier;
+		const cached = this.#liveWrappers;
+		if (
+			start === this.#liveWrappersStart &&
+			cached.length === this.#entries.length - start &&
+			cached.every((wrapper, offset) => wrapper.entry === this.#entries[start + offset])
+		) {
+			return cached;
+		}
 		const live: Array<{ entry: TranscriptEntry; index: number }> = [];
 		for (let index = start; index < this.#entries.length; index++) live.push({ entry: this.#entries[index]!, index });
+		this.#liveWrappers = live;
+		this.#liveWrappersStart = start;
 		return live;
 	}
 

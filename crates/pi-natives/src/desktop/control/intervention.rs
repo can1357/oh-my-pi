@@ -16,14 +16,12 @@ use std::{
 
 use parking_lot::Mutex;
 
-use super::{OperationToken, macos::UserInputMonitor};
+use super::{DEADLINE_MARGIN, OperationToken, macos::UserInputMonitor};
 use crate::desktop::error::{CoreResult, DesktopError};
 
 /// How long the user leaves an app alone before a read of it shows what they
 /// left there.
 const QUIET: Duration = Duration::from_secs(5);
-/// Time left before the run's deadline for the refusal to reach the caller.
-const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
 

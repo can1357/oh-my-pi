@@ -1044,9 +1044,8 @@ export class MCPCommandController {
 				}
 			}
 
-			// refreshMCPTools preserves the prior MCP tool selection, so tools from
-			// brand-new servers are registered in the registry but never activated.
-			// Explicitly activate the newly added server's tools now.
+			// A new server's tools are enabled by refresh; explicitly selecting this
+			// server also enables tools that were registered before the wizard ran.
 			if (isConnected && this.ctx.mcpManager) {
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
 				if (serverTools.length > 0) {
