@@ -4534,8 +4534,17 @@ async function driveFollowUpTurn(
 					} else {
 						await session.waitForIdle();
 					}
+					// The wake that won the race can be idle while its observer still holds the session for a
+					// `subagent_stop` pass, which waitForIdle does not cover: wait out the pass and any turn that
+					// follows it before the contract is reinstalled and the monitor reattached. Each lost race is
+					// bounded by its own ownership waits.
+					ownershipWaits = 0;
+					await acquireOwnership();
 					resetYieldTurnState(session.getToolByName("yield"));
 					await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+					// The reinstall awaits can outlast a wake taking its hold: wait it out again, with nothing
+					// awaited before the attach.
+					await session.waitForStopPasses(signal);
 					attemptUnsubscribe = monitor.attach(session);
 				},
 			});
