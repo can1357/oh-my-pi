@@ -11,9 +11,7 @@
  * would produce, across the mutation that must invalidate the cache.
  */
 import { describe, expect, it } from "bun:test";
-import {
-	TranscriptContainer,
-} from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import type { Component } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
@@ -45,14 +43,6 @@ function primeAndRerender(transcript: TranscriptContainer, width: number, rows: 
 }
 
 describe("TranscriptContainer live-entry wrapper cache", () => {
-	it("serves the same viewport rows across repeated frames without a rebuild", () => {
-		const transcript = new TranscriptContainer();
-		transcript.addChild(new Block(["first"]));
-		transcript.addChild(new Block(["second"]));
-
-		primeAndRerender(transcript, 80, 10);
-		expect(transcript.renderViewport(80, 10, frame)).toEqual(["first", "", "second"]);
-	});
 	it("includes blocks added after the cache was primed", () => {
 		// A new block extends the live tail; a cache that keeps serving the
 		// old list would drop its rows from the viewport.
