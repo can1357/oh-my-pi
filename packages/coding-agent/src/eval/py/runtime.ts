@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $whichAll, getPythonEnvDir } from "@oh-my-pi/pi-utils";
+import { $env, $whichAll, getPythonEnvDir, normalizeEnvKey } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_ENV_ALLOWLIST = new Set([
 	"PATH",
@@ -85,19 +85,11 @@ const DEFAULT_ENV_ALLOW_PREFIXES = ["LC_", "XDG_", "PI_"];
 const CASE_INSENSITIVE_ENV = process.platform === "win32";
 const BASE_ENV_ALLOWLIST = new Set([...DEFAULT_ENV_ALLOWLIST, ...WINDOWS_ENV_ALLOWLIST]);
 
-const NORMALIZED_ALLOWLIST = new Set(
-	Array.from(BASE_ENV_ALLOWLIST, key => (CASE_INSENSITIVE_ENV ? key.toUpperCase() : key)),
-);
-const NORMALIZED_DENYLIST = new Set(
-	Array.from(DEFAULT_ENV_DENYLIST, key => (CASE_INSENSITIVE_ENV ? key.toUpperCase() : key)),
-);
+const NORMALIZED_ALLOWLIST = new Set(Array.from(BASE_ENV_ALLOWLIST, normalizeEnvKey));
+const NORMALIZED_DENYLIST = new Set(Array.from(DEFAULT_ENV_DENYLIST, normalizeEnvKey));
 const NORMALIZED_ALLOW_PREFIXES = CASE_INSENSITIVE_ENV
 	? DEFAULT_ENV_ALLOW_PREFIXES.map(prefix => prefix.toUpperCase())
 	: DEFAULT_ENV_ALLOW_PREFIXES;
-
-function normalizeEnvKey(key: string): string {
-	return CASE_INSENSITIVE_ENV ? key.toUpperCase() : key;
-}
 
 function resolvePathKey(env: Record<string, string | undefined>): string {
 	if (!CASE_INSENSITIVE_ENV) return "PATH";

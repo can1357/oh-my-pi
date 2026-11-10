@@ -19,6 +19,11 @@ export function isValidEnvName(name: string): boolean {
 	return ENV_NAME_RE.test(name);
 }
 
+/** `key` as the OS matches environment names: Windows is case-insensitive, so `PythonPath` is `PYTHONPATH`. */
+export function normalizeEnvKey(key: string): string {
+	return process.platform === "win32" ? key.toUpperCase() : key;
+}
+
 /**
  * The only names that are genuinely unsafe to forward to a native `execve`
  * spawn: empty, containing `=` (would corrupt the `KEY=VALUE` framing) or
