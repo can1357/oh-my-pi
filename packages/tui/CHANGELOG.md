@@ -4,9 +4,9 @@
 
 ### Added
 
-- Command reports can expose a primary action with a keyboard shortcut and native button.
-- Selectors can show a bounded Markdown preview of the selected item and search its content.
-- Added a separately configurable shortcut for quoting a viewed summary into the draft (Ctrl+Alt+R).
+- Command reports can expose a primary action with a keyboard shortcut and native button ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+- Selectors can show a bounded Markdown preview of the selected item and search its content ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
+- Added a separately configurable shortcut for quoting a viewed summary into the draft (Ctrl+Alt+R) ([#18757](https://github.com/can1357/oh-my-pi/pull/18757) by [@Shadorain](https://github.com/Shadorain)).
 
 ### Changed
 
