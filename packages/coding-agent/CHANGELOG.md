@@ -6,6 +6,10 @@
 
 - Added `omp bench --account` to benchmark a specific stored OAuth account, and report rejected priority requests instead of silently benchmarking standard speed.
 
+### Fixed
+
+- Agents no longer edit README or other docs after a fix that leaves them accurate, and no longer write session notes into repo docs ([#16155](https://github.com/can1357/oh-my-pi/issues/16155), [#18681](https://github.com/can1357/oh-my-pi/pull/18681) by [@boazy](https://github.com/boazy))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
