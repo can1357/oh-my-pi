@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Morph (`api.morphllm.com`) Chat Completions requests now send `x-session-id`, pinning a conversation to one worker so its prompt cache keeps hitting; previously consecutive turns could land on cold workers and lose cached prefixes
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed

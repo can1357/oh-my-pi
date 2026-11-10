@@ -598,7 +598,11 @@ function detectOpenAICompat(
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai")
+			? "x-grok-conv-id"
+			: hostMatchesUrl(baseUrl, "morph")
+				? "x-session-id"
+				: undefined,
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,

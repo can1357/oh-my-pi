@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type OpenAICompletionsOptions, streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, FetchImpl, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -198,5 +199,43 @@ describe("OpenAI Chat Completions explicit prompt cache policy", () => {
 				expect(message).not.toMatchObject({ content: [{ prompt_cache_breakpoint: { mode: "explicit" } }] });
 			}
 		}
+	});
+});
+
+describe("Morph Chat Completions worker affinity", () => {
+	// Morph is reached through a custom provider, so only the base URL identifies it.
+	const customModel = (baseUrl: string): Model<"openai-completions"> =>
+		buildModel({
+			provider: "my-morph",
+			id: "morph-kimik31",
+			name: "Kimi K3.1",
+			api: "openai-completions",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 262_144,
+			maxTokens: 8192,
+		});
+	const morph = customModel("https://api.morphllm.com/v1");
+
+	it("pins the conversation to one worker with x-session-id", async () => {
+		const { headers } = await captureRequest({ sessionId: "session-123" }, morph);
+
+		expect(headers.get("x-session-id")).toBe("session-123");
+	});
+
+	it("prefers an explicit prompt cache key over the session id", async () => {
+		const { headers } = await captureRequest({ sessionId: "session-123", promptCacheKey: "shared-key" }, morph);
+
+		expect(headers.get("x-session-id")).toBe("shared-key");
+	});
+
+	it("sends no affinity header when caching is disabled or the host is not Morph", async () => {
+		const disabled = await captureRequest({ sessionId: "session-123", cacheRetention: "none" }, morph);
+		const otherHost = await captureRequest({ sessionId: "session-123" }, customModel("https://llm.example.com/v1"));
+
+		expect(disabled.headers.get("x-session-id")).toBeNull();
+		expect(otherHost.headers.get("x-session-id")).toBeNull();
 	});
 });
