@@ -315,6 +315,8 @@ Test the contract the system exposes — not the easiest internal detail to asse
 - Don't add tests for tiny low-risk changes unless they protect a real contract or fix a regression-prone edge case.
 - Prefer focused package-local verification for the changed area.
 
+`scripts/ci-test-ts.ts` parallelism: `CI` set to a truthy value makes the runner sequential (one chunk at a time, all chunks run, failures summarized at the end, non-zero exit if any failed); `OMP_TEST_CONCURRENCY=<n|all|max>` forces the worker pool instead.
+
 ## Changelog
 
 Location: `packages/*/CHANGELOG.md` (per package).
