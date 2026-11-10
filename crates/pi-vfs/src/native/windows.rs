@@ -29,7 +29,7 @@ use windows_sys::Win32::{
 use crate::{
 	error::{permission_denied, unsupported},
 	metadata::Metadata,
-	types::{FileId, FileKind, FileType, FileTime, NodeKind, Permissions, StatFs, SymlinkKind},
+	types::{FileId, FileKind, FileTime, FileType, NodeKind, Permissions, StatFs, SymlinkKind},
 };
 
 /// Identity fields std does not expose for a Windows path stat.
@@ -321,14 +321,10 @@ fn null_device_metadata(path: &Path) -> io::Result<Metadata> {
 	if !is_null_device(path) {
 		return Err(io::Error::from(io::ErrorKind::NotFound));
 	}
-	Ok(Metadata::new(
-		FileType::from_kind(FileKind::CharDevice),
-		0,
-		Permissions::from_mode(0o666),
-	)
-	.with_blocks(0, 4096)
-	.with_nlink(1)
-	.with_rdev(0))
+	Ok(Metadata::new(FileType::from_kind(FileKind::CharDevice), 0, Permissions::from_mode(0o666))
+		.with_blocks(0, 4096)
+		.with_nlink(1)
+		.with_rdev(0))
 }
 
 pub(crate) fn file_is_locked(_file: &fs::File) -> io::Result<bool> {
