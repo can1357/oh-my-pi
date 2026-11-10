@@ -570,6 +570,12 @@ export interface InteractiveModeContext {
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(): void;
 	/**
+	 * Request the coalesced observer-UI sync that repaints settled task cards
+	 * whose rows list an agent that started or stopped running again. A collab
+	 * guest's mirrored liveness can change with no local registry or session event.
+	 */
+	scheduleLiveTaskCardRefresh(): void;
+	/**
 	 * A subagent a settled task card row lists, while it runs again: revived or
 	 * woken by IRC or hub chat, or still running after its call settled.
 	 */

@@ -306,6 +306,24 @@ describe("settled task card rows follow agents that run again", () => {
 		expect(agentProps(card, ALPHA).status).toBe("aborted");
 	});
 
+	it("repaints a settled card when the mirrored liveness changes with no registry event", () => {
+		const card = cancelledTaskCard();
+		vi.useFakeTimers();
+
+		registerRunning(ALPHA);
+		vi.advanceTimersByTime(100);
+		expect(agentProps(card, ALPHA).status).toBe("running");
+
+		// A collab guest writes the host's run lifecycle onto the mirrored ref, so
+		// nothing on the registry announces that the run handed over its result.
+		const mirrored = registry.get(ALPHA);
+		if (!mirrored) throw new Error("Expected the mirrored ref");
+		mirrored.lifecycle = { ...mirrored.lifecycle, acceptedAt: Date.now() };
+		mode.scheduleLiveTaskCardRefresh();
+		vi.advanceTimersByTime(100);
+		expect(agentProps(card, ALPHA)).toMatchObject({ status: "aborted", tool: null, stats: { took: 1000 } });
+	});
+
 	it("never redraws a terminal card for an agent that runs again", () => {
 		setNativeRendering(false);
 		const card = cancelledTaskCard();

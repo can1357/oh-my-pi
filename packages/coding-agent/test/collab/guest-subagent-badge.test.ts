@@ -111,6 +111,7 @@ function makeGuestContext(): InteractiveModeContext {
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);
 			ctx.statusLine.setRunningSubagents(agentIds);
 		},
+		scheduleLiveTaskCardRefresh: () => {},
 		setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
 			Object.assign(ctx, { collabGuest: guest });
 		},
@@ -257,6 +258,114 @@ describe("collab guest task-card liveness", () => {
 			hostRegistry.setStatus("Worker", "running");
 			await settle(() => mirrored()?.lifecycle?.acceptedAt === undefined);
 			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+		} finally {
+			await guest.leave("test cleanup").catch(() => {});
+			await host.stop("test cleanup").catch(() => {});
+			writeSpy.mockRestore();
+			renameSpy.mockRestore();
+		}
+	}, 20000);
+
+	it("replaces a killed agent's mirrored ref when the host revives the same id", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
+		const hostRegistry = AgentRegistry.global();
+		const streaming = { isStreaming: true } as unknown as AgentSessionHandle;
+		hostRegistry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			session: streaming,
+		});
+		const host = new CollabHost(makeHostContext());
+		await host.start("ws://localhost:8788");
+		const guest = new CollabGuestLink(makeGuestContext());
+		const mirrored = () => guest.agentRegistry.get("Worker");
+
+		try {
+			await guest.join(host.link);
+			expect(mirrored()?.status).toBe("running");
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+
+			// An explicit kill detaches the session before publishing the terminal row.
+			const killed = hostRegistry.get("Worker");
+			if (!killed) throw new Error("Expected the running ref");
+			expect(hostRegistry.detachSession("Worker", killed)).toBe(true);
+			expect(hostRegistry.setStatus("Worker", "aborted", killed)).toBe(true);
+			await settle(() => mirrored()?.status === "aborted");
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toBeUndefined();
+
+			// Revival reopens the id as a new generation (as `ensureLive` does for a killed ref).
+			const revived = hostRegistry.reopen("Worker", killed);
+			if (!revived) throw new Error("Expected the host to reopen the killed ref");
+			expect(hostRegistry.attachSession("Worker", streaming, null, revived)).toBe(true);
+			expect(hostRegistry.setStatus("Worker", "running", revived)).toBe(true);
+			await settle(() => mirrored()?.status === "running");
+
+			// The mirrored tombstone could never adopt the live status; the guest
+			// mirrors the host's replacement generation instead.
+			expect(mirrored()).not.toBe(killed);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+		} finally {
+			await guest.leave("test cleanup").catch(() => {});
+			await host.stop("test cleanup").catch(() => {});
+			writeSpy.mockRestore();
+			renameSpy.mockRestore();
+		}
+	}, 20000);
+
+	it("repaints the settled card when a snapshot changes only the mirrored acceptance", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
+		const hostRegistry = AgentRegistry.global();
+		hostRegistry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			session: { isStreaming: true } as unknown as AgentSessionHandle,
+		});
+		const host = new CollabHost(makeHostContext());
+		await host.start("ws://localhost:8788");
+		const ctx = makeGuestContext();
+		const guest = new CollabGuestLink(ctx);
+		const mirrored = () => guest.agentRegistry.get("Worker");
+		let frames = 0;
+		let cardRefreshes = 0;
+		ctx.syncRunningSubagentBadge = () => {
+			frames++;
+		};
+		ctx.scheduleLiveTaskCardRefresh = () => {
+			cardRefreshes++;
+		};
+
+		try {
+			await guest.join(host.link);
+			expect(frames).toBe(1);
+			expect(cardRefreshes).toBe(0);
+
+			// The run hands over its result while its session still streams: status stays `running`.
+			expect(hostRegistry.markResultAccepted("Worker")).toBe(true);
+			await settle(() => mirrored()?.lifecycle?.acceptedAt !== undefined);
+			expect(mirrored()?.status).toBe("running");
+			expect(cardRefreshes).toBe(1);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toBeUndefined();
+
+			// A new run inside the host's debounce window reaches the guest `running` → `running`.
+			const framesBeforeNewRun = frames;
+			hostRegistry.setStatus("Worker", "idle");
+			hostRegistry.setStatus("Worker", "running");
+			await settle(() => mirrored()?.lifecycle?.acceptedAt === undefined);
+			expect(frames).toBe(framesBeforeNewRun + 1);
+			expect(cardRefreshes).toBe(2);
+			expect(liveTaskAgent(mirrored(), undefined, undefined)).toEqual({ progress: undefined });
+
+			// A snapshot the card cannot draw differently must not repaint it.
+			const framesBeforeNoop = frames;
+			hostRegistry.setHistory("Worker", {});
+			await settle(() => frames > framesBeforeNoop);
+			expect(cardRefreshes).toBe(2);
 		} finally {
 			await guest.leave("test cleanup").catch(() => {});
 			await host.stop("test cleanup").catch(() => {});

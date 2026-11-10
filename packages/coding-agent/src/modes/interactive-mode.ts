@@ -4893,6 +4893,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 
 	/**
+	 * Repaint settled task cards through the coalesced observer sync: a collab
+	 * guest writes the host's run lifecycle straight onto its mirrored refs, so
+	 * no registry event announces the change.
+	 */
+	scheduleLiveTaskCardRefresh(): void {
+		this.#scheduleObserverUiSync("progress");
+	}
+
+	/**
 	 * Register a resumed session's persisted subagent transcripts (with usage
 	 * history) so the status line's tree cost matches the Agent Hub without it
 	 * being opened first. Once per on-disk root; registry changes re-sync the cost.

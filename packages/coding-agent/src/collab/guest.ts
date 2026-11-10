@@ -822,10 +822,13 @@ export class CollabGuestLink {
 				this.#agentHasTranscript.delete(ref.id);
 			}
 		}
+		let acceptedAtChanged = false;
 		for (const snap of agents) {
-			if (this.agentRegistry.get(snap.id)) {
-				this.agentRegistry.setStatus(snap.id, snap.status);
-			} else {
+			// `aborted` is terminal for its generation, and a revived agent keeps its
+			// id: the host's replacement generation can never reach the mirrored
+			// tombstone through `setStatus`, so replace that ref through the
+			// registry's replace API instead of leaving the killed row on the card.
+			if (!this.agentRegistry.get(snap.id) || !this.agentRegistry.setStatus(snap.id, snap.status)) {
 				this.agentRegistry.register({
 					id: snap.id,
 					displayName: snap.displayName,
@@ -846,10 +849,16 @@ export class CollabGuestLink {
 				// older host) clears it, since `setStatus` keeps a running ref's lifecycle.
 				if (ref.lifecycle?.acceptedAt !== snap.acceptedAt) {
 					ref.lifecycle = { ...ref.lifecycle, acceptedAt: snap.acceptedAt };
+					acceptedAtChanged = true;
 				}
 			}
 			this.#agentHasTranscript.set(snap.id, snap.hasSessionFile);
 		}
+		// A run's acceptance can change with its status unchanged (`running` → its
+		// own tail, or a new run inside the host's debounce window), and neither
+		// `setStatus` nor the lifecycle write above emits, so the settled card that
+		// draws this row must be repainted explicitly.
+		if (acceptedAtChanged) this.#ctx.scheduleLiveTaskCardRefresh();
 	}
 
 	#clearAgentMirror(): void {
