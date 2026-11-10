@@ -327,6 +327,37 @@ describe("supermemoryBackend", () => {
 		expect(session.getSupermemorySessionState()?.lastRecallSnippet).toBeUndefined();
 	});
 
+	it("re-upserts the last window when a manual continuation adds an answer without a new user turn", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("one");
+		await session.endTurn();
+		// `.`/`c`: a synthetic developer prompt; the transcript gains only an assistant answer.
+		session.sessionManager.getEntries().push({
+			type: "message",
+			id: "a-cont",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "continued answer" }],
+				stopReason: "stop",
+				timestamp: 0,
+			},
+		} as never);
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[0]);
+		expect(docs).toHaveLength(2);
+		expect(docs[1]?.customId).toBe(docs[0]?.customId);
+		expect(docs[1]?.content).toContain("continued answer");
+		// A further settle with nothing new sends nothing.
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(2);
+	});
+
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),

@@ -60,6 +60,8 @@ interface RetentionCursorData {
 	transcriptId: string;
 	/** User turns `[0, turn)` are retained. */
 	turn: number;
+	/** Messages covered by the last retained window; a manual continuation that adds an answer without a user turn grows past it. */
+	messages: number;
 }
 
 /** Transcript messages captured for one retention job, with the identity they belong to. */
@@ -87,7 +89,9 @@ function isRetentionCursor(data: unknown): data is RetentionCursorData {
 		"transcriptId" in data &&
 		typeof data.transcriptId === "string" &&
 		"turn" in data &&
-		Number.isSafeInteger(data.turn)
+		Number.isSafeInteger(data.turn) &&
+		"messages" in data &&
+		Number.isSafeInteger(data.messages)
 	);
 }
 
@@ -162,6 +166,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	hasRecalledForFirstTurn = false;
 	/** User turns already covered by automatic retention documents. */
 	lastRetainedTurn = 0;
+	/** Messages covered by the last retained window (see {@link RetentionCursorData.messages}). */
+	#retainedMessages = 0;
 	readonly #writes = new Set<Promise<unknown>>();
 	/** Config, client and outbox of a primary state; an alias has none. */
 	readonly #own: SupermemoryOwnResources | undefined;
@@ -257,10 +263,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		this.#hasCursor = cursor?.type === "custom" && isRetentionCursor(cursor.data);
 		if (cursor?.type === "custom" && isRetentionCursor(cursor.data)) {
 			this.lastRetainedTurn = cursor.data.turn;
+			this.#retainedMessages = cursor.data.messages;
 			return;
 		}
 		const every = this.#config.retainEveryNTurns;
 		this.lastRetainedTurn = Math.floor(countUserTurns(this.session.sessionManager) / every) * every;
+		this.#retainedMessages = 0;
 	}
 
 	resetConversationTracking(): void {
@@ -283,7 +291,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			) {
 				// Record where retention starts before any upload: a transcript without a cursor reads as
 				// pre-cursor on resume, which skips every turn it already holds.
-				this.#appendCursor(this.lastRetainedTurn);
+				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages);
 			}
 			if (event.type !== "agent_end") return;
 			// A non-terminal settle is followed by the agent's own continuation; closing the window now
@@ -291,10 +299,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			if (this.#config.autoRetain && event.isTerminal !== false) {
 				// Snapshot the settled history now: a job queued behind a slow upload must not read a
 				// turn that started afterwards and close its window before the answer exists.
-				if (countUserTurns(this.session.sessionManager) - this.lastRetainedTurn >= this.#config.retainEveryNTurns) {
-					const settled = this.#settledHistory();
-					void this.#enqueueRetention(() => this.#retainDue(settled));
-				}
+				// Every terminal settle: a manual continuation can extend the last window without a user turn.
+				const settled = this.#settledHistory();
+				void this.#enqueueRetention(() => this.#retainDue(settled));
 			}
 			void this.drainOutbox();
 		});
@@ -543,6 +550,17 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			const start = this.lastRetainedTurn;
 			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
 		}
+		// A continuation (`.`/`c`) answered after the last full window without a new user turn:
+		// upsert that window again under its customId so the answer is kept.
+		if (
+			!history.openTail &&
+			settledTurns === this.lastRetainedTurn &&
+			this.lastRetainedTurn >= every &&
+			messages.length > this.#retainedMessages
+		) {
+			const start = this.lastRetainedTurn - every;
+			await this.#retainWindow(messages, userStarts, start, this.lastRetainedTurn, history);
+		}
 	}
 
 	/** Upserts user turns `[startTurn, endTurn)`; resolves whether {@link lastRetainedTurn} advanced. */
@@ -565,7 +583,7 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 			// Before this transcript's first send, record where retention starts: without it, a
 			// resume after a failed or cut-off first window would read the transcript as pre-cursor
 			// and skip that window.
-			if (!this.#hasCursor) this.#appendCursor(startTurn);
+			if (!this.#hasCursor) this.#appendCursor(startTurn, userStarts[startTurn] ?? 0);
 			const omittedChars = Math.max(0, transcript.length - MAX_RETAIN_CHARS);
 			try {
 				await this.save(
@@ -601,16 +619,18 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		// enqueue or the completed window upserts over it under the same customId.
 		if (endTurn - startTurn < this.#config.retainEveryNTurns) return true;
 		this.lastRetainedTurn = endTurn;
-		this.#appendCursor(endTurn);
+		this.#retainedMessages = userStarts[endTurn] ?? messages.length;
+		this.#appendCursor(endTurn, this.#retainedMessages);
 		return true;
 	}
 
-	#appendCursor(turn: number): void {
+	#appendCursor(turn: number, messages: number): void {
 		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
 			version: 1,
 			scope: this.#scope(),
 			transcriptId: this.transcriptId,
 			turn,
+			messages,
 		} satisfies RetentionCursorData);
 		this.#hasCursor = true;
 	}
