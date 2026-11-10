@@ -242,96 +242,51 @@ describe("html form", () => {
 			}
 		});
 
-		it("places a Kitty picture under its own id and deletes it when the form closes", async () => {
-			// An id-less `a=T` placement survives the rows that drew it being repainted,
-			// so a closed form would leave its picture painted over whatever comes next.
-			// `id` has no setter; pin a non-Ghostty id so the test TUI paints its frames.
-			const terminalId = TERMINAL as unknown as { id: string };
-			const originalProtocol = TERMINAL.imageProtocol;
-			const originalId = terminalId.id;
-			terminalId.id = "xterm";
-			const originalGraphics = { ...getKittyGraphics() };
-			const originalCells = { ...getCellDimensions() };
-			setTerminalImageProtocol(ImageProtocol.Kitty);
-			setKittyGraphics({ unicodePlaceholders: false });
-			setCellDimensions({ widthPx: 10, heightPx: 10 });
-			const term = new VirtualTerminal(60, 30);
-			const writes: string[] = [];
-			const realWrite = term.write.bind(term);
-			vi.spyOn(term, "write").mockImplementation((data: string) => {
-				writes.push(data);
-				realWrite(data);
-			});
-			const scheduler = new VirtualRenderScheduler();
-			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
-			const loaded = Promise.withResolvers<void>();
-			const form = new HtmlFormDialog(
-				parseHtmlForm(`<form><img src="data:image/png;base64,${PNG_1PX}" alt="dot">
-					<label><input type="checkbox" name="ok"> OK</label></form>`),
-				{
-					onSubmit: vi.fn(),
-					onCancel: vi.fn(),
-					tui: {
-						terminal: tui.terminal,
-						imageBudget: tui.imageBudget,
-						requestRender: () => {
-							tui.requestRender();
-							loaded.resolve();
-						},
-					},
-				},
-			);
-			tui.addChild(form);
-			try {
-				tui.start();
-				await loaded.promise;
-				await scheduler.settle(term);
-				const shown = writes.join("");
-				expect(shown).not.toContain("\x1b_Ga=T");
-				const id = /\x1b_Ga=p,[^\x1b]*\bi=(\d+)/u.exec(shown)?.[1];
-				expect(id).toBeDefined();
-
-				writes.length = 0;
-				tui.removeChild(form);
-				form.dispose();
-				tui.requestRender();
-				await scheduler.settle(term);
-				expect(writes.join("")).toContain(`\x1b_Ga=d,d=I,i=${id}`);
-			} finally {
-				tui.stop();
-				vi.restoreAllMocks();
-				setTerminalImageProtocol(originalProtocol);
-				terminalId.id = originalId;
-				setKittyGraphics(originalGraphics);
-				setCellDimensions(originalCells);
-			}
-		});
-
-		it("spends image slots only on the pictures of the page shown", async () => {
+		describe("on a Kitty terminal", () => {
 			// 10x200 px: 16 rows at 10 px cells, so two of them cannot share a page of a 30-row terminal.
 			const TALL_PNG =
 				"iVBORw0KGgoAAAANSUhEUgAAAAoAAADICAAAAAD0eS/eAAAAIElEQVR42mNsYIABJoZR5ihzlDnKHGWOMkeZo8wBZAIAC30CEMb50JQAAAAASUVORK5CYII=";
-			const terminalId = TERMINAL as unknown as { id: string };
-			const originalProtocol = TERMINAL.imageProtocol;
-			const originalId = terminalId.id;
-			terminalId.id = "xterm";
-			const originalGraphics = { ...getKittyGraphics() };
-			const originalCells = { ...getCellDimensions() };
-			setTerminalImageProtocol(ImageProtocol.Kitty);
-			setKittyGraphics({ unicodePlaceholders: false });
-			setCellDimensions({ widthPx: 10, heightPx: 10 });
-			const term = new VirtualTerminal(60, 30);
-			const scheduler = new VirtualRenderScheduler();
-			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
-			// One live image: a picture on a later page must not take it from the one shown.
-			tui.setMaxInlineImages(1);
-			let loads = 0;
-			const loaded = Promise.withResolvers<void>();
-			const form = new HtmlFormDialog(
-				parseHtmlForm(`<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
-					<img src="data:image/png;base64,${TALL_PNG}" alt="second">
-					<label><input type="checkbox" name="ok"> OK</label></form>`),
-				{
+			const OK = `<label><input type="checkbox" name="ok"> OK</label>`;
+			const TWO_PAGES = `<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
+				<img src="data:image/png;base64,${TALL_PNG}" alt="second">${OK}</form>`;
+			const PAGE_DOWN = "\x1b[6~";
+			const PAGE_UP = "\x1b[5~";
+			const cleanups: (() => void)[] = [];
+
+			afterEach(() => {
+				for (const cleanup of cleanups.splice(0)) cleanup();
+			});
+
+			/**
+			 * A 60x30 Kitty terminal (direct placements, 10 px cells) showing `html` as a form,
+			 * settled once `pictures` of them have landed. `landed()` waits for the next one.
+			 */
+			async function kittyForm(html: string, options: { liveImages?: number; pictures?: number } = {}) {
+				// `id` has no setter; a non-Ghostty id lets the test TUI paint its frames.
+				const terminalId = TERMINAL as unknown as { id: string };
+				const original = {
+					id: terminalId.id,
+					protocol: TERMINAL.imageProtocol,
+					graphics: { ...getKittyGraphics() },
+					cells: { ...getCellDimensions() },
+				};
+				terminalId.id = "xterm";
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				setKittyGraphics({ unicodePlaceholders: false });
+				setCellDimensions({ widthPx: 10, heightPx: 10 });
+				const term = new VirtualTerminal(60, 30);
+				const writes: string[] = [];
+				const realWrite = term.write.bind(term);
+				vi.spyOn(term, "write").mockImplementation((data: string) => {
+					writes.push(data);
+					realWrite(data);
+				});
+				const scheduler = new VirtualRenderScheduler();
+				const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+				if (options.liveImages !== undefined) tui.setMaxInlineImages(options.liveImages);
+				let waiting = options.pictures ?? 1;
+				let next = Promise.withResolvers<void>();
+				const form = new HtmlFormDialog(parseHtmlForm(html), {
 					onSubmit: vi.fn(),
 					onCancel: vi.fn(),
 					tui: {
@@ -339,28 +294,100 @@ describe("html form", () => {
 						imageBudget: tui.imageBudget,
 						requestRender: () => {
 							tui.requestRender();
-							if (++loads === 2) loaded.resolve();
+							if (--waiting <= 0) next.resolve();
 						},
 					},
-				},
-			);
-			tui.addChild(form);
-			try {
+				});
+				let closed = false;
+				cleanups.push(() => {
+					tui.stop();
+					if (!closed) form.dispose();
+					vi.restoreAllMocks();
+					terminalId.id = original.id;
+					setTerminalImageProtocol(original.protocol);
+					setKittyGraphics(original.graphics);
+					setCellDimensions(original.cells);
+				});
+				const frame = async (): Promise<void> => {
+					tui.requestRender();
+					await scheduler.settle(term);
+				};
+				// A drawing rasterizes from a render, and renders run only while the scheduler settles:
+				// render first, then wait for the picture to ask for its frame.
+				const landed = async (): Promise<void> => {
+					await scheduler.settle(term);
+					await next.promise;
+					await scheduler.settle(term);
+				};
+				tui.addChild(form);
 				tui.start();
-				await loaded.promise;
-				await scheduler.settle(term);
-				expect(form.debugState()).toMatchObject({ page: 1, pages: 2 });
-				const screen = term.getViewport().join("\n");
+				await landed();
+				return {
+					term,
+					form,
+					writes,
+					frame,
+					/** Render a frame, then wait for the next picture to land, e.g. a drawing's redraw. */
+					landed: (): Promise<void> => {
+						waiting = 1;
+						next = Promise.withResolvers<void>();
+						tui.requestRender();
+						return landed();
+					},
+					close: async (): Promise<void> => {
+						closed = true;
+						tui.removeChild(form);
+						form.dispose();
+						await frame();
+					},
+				};
+			}
+
+			it("places a picture under its own id and deletes it when the form closes", async () => {
+				// An id-less `a=T` placement survives the rows that drew it being repainted,
+				// so a closed form would leave its picture painted over whatever comes next.
+				const view = await kittyForm(`<form><img src="data:image/png;base64,${PNG_1PX}" alt="dot">${OK}</form>`);
+				expect(view.writes.join("")).not.toContain("\x1b_Ga=T");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
+
+			it("spends image slots only on the pictures of the page shown", async () => {
+				// One live image: a picture on a later page must not take it from the one shown.
+				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
+				view.form.handleInput(PAGE_UP);
+				await view.frame();
+				expect(view.form.debugState()).toMatchObject({ page: 1, pages: 2 });
+				const screen = view.term.getViewport().join("\n");
 				expect(screen).not.toContain("[Image: first");
 				expect(screen).not.toContain("second");
-			} finally {
-				tui.stop();
-				form.dispose();
-				setTerminalImageProtocol(originalProtocol);
-				terminalId.id = originalId;
-				setKittyGraphics(originalGraphics);
-				setCellDimensions(originalCells);
-			}
+			});
+
+			it("deletes a picture the budget evicted and sent again when the form closes", async () => {
+				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
+				// Page 2 takes the one live slot and evicts page 1's picture; back on page 1 it is sent again.
+				for (const key of [PAGE_UP, PAGE_DOWN, PAGE_UP]) {
+					view.form.handleInput(key);
+					await view.frame();
+				}
+				expect(view.form.debugState()).toMatchObject({ page: 1 });
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
+
+			it("deletes every raster of a drawing redrawn while the form is open", async () => {
+				const view = await kittyForm(
+					`<form><svg viewBox="0 0 838 200"><rect width="838" height="200" fill="#f0f"/></svg>${OK}</form>`,
+				);
+				// New cell metrics redraw the drawing under a new image id.
+				setCellDimensions({ widthPx: 10, heightPx: 12 });
+				await view.landed();
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
+				await view.close();
+				expect(view.term.graphicsPlacements()).toEqual([]);
+			});
 		});
 	});
 

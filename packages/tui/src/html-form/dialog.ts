@@ -126,7 +126,6 @@ const CAPTION_MAX_ROWS = 4;
 /** Tallest a picture draws, in rows, and its share of the terminal below that. */
 const MAX_PICTURE_ROWS = 16;
 const PICTURE_SHARE = 0.35;
-let nextFormId = 0;
 /** Options a PgUp/PgDn moves an open dropdown's highlight by. */
 const DROPDOWN_PAGE = 5;
 /** Native action a text well's click sends, suffixed with the field index. */
@@ -303,9 +302,6 @@ export class HtmlFormDialog implements Component, Focusable {
 	#native: { key: string; node: NativeNode } | undefined;
 	readonly #media = new Map<MediaBlock, MediaSlot>();
 	readonly #mediaAbort = new AbortController();
-	/** Budget keys of this form's raster pictures, released on dispose so their placements go with the form. */
-	readonly #imageKeys: string[] = [];
-	readonly #imageKeyPrefix = `html-form${nextFormId++}`;
 	/** Bumped when a picture loads, fails or rasterizes: its rows change the panel's natural height. */
 	#mediaVersion = 0;
 	/** Each field's question ({@link fieldQuestions}): Review keys and the hidden row's summary. */
@@ -594,12 +590,11 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#stopCountdown();
 		this.#mediaAbort.abort();
 		for (const slot of this.#media.values()) {
-			if (slot.state === "ready" && slot.rows instanceof SvgFigure) {
-				slot.rows.release();
-				slot.rows.dispose();
-			}
+			if (slot.state !== "ready") continue;
+			// By the component's own id: one retired and sent again no longer maps from a key.
+			slot.rows.release();
+			if (slot.rows instanceof SvgFigure) slot.rows.dispose();
 		}
-		for (const key of this.#imageKeys) this.#options.tui?.imageBudget?.release(key);
 		this.#panel.dispose();
 	}
 
@@ -645,17 +640,20 @@ export class HtmlFormDialog implements Component, Focusable {
 		const budget = this.#options.tui?.imageBudget;
 		const native = nativeImageNode(media.bytes, media.mime, { alt, max: { h: `${maxRows}lines` } });
 		if (isSvgMedia(media)) {
-			const figure = new SvgFigure({ budget, maxRows: () => maxRows, onChange: () => this.#mediaChanged() });
+			const figure = new SvgFigure({
+				budget,
+				releaseSuperseded: true,
+				maxRows: () => maxRows,
+				onChange: () => this.#mediaChanged(),
+			});
 			figure.update(new TextDecoder().decode(media.bytes), true);
 			return { state: "ready", rows: figure, native };
 		}
-		const imageKey = `${this.#imageKeyPrefix}:${this.#imageKeys.length}`;
-		this.#imageKeys.push(imageKey);
 		const image = new Image(
 			media.bytes.toBase64(),
 			media.mime,
 			{ fallbackColor: text => theme.fg("dim", text) },
-			{ maxHeightCells: maxRows, filename: alt, budget, imageKey, requestRender: () => this.#mediaChanged() },
+			{ maxHeightCells: maxRows, filename: alt, budget, requestRender: () => this.#mediaChanged() },
 		);
 		return { state: "ready", rows: image, native };
 	}
