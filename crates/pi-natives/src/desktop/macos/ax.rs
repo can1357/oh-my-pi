@@ -612,6 +612,29 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 		})
 }
 
+/// Whether `pid`'s `AXFocusedWindow` is no window at all, as Finder's desktop
+/// is once a click on it took focus, even while Finder's windows stay open.
+/// `false` when `_AXUIElementGetWindow` is unavailable, since then no element
+/// maps and that proves nothing.
+pub(super) fn focus_outside_windows(pid: libc::pid_t) -> bool {
+	if GET_WINDOW_ID.is_none() {
+		return false;
+	}
+	let Some(focused) = probe_application(pid).and_then(|app| copy_element(&app, "AXFocusedWindow"))
+	else {
+		return false;
+	};
+	is_outside_windows(window_id(&focused).is_some(), copy_string(&focused, "AXRole").as_deref())
+}
+
+/// [`focus_outside_windows`]'s decision for a focused window that maps to a
+/// window id (`mapped`) and reports `role`: only an unmapped scroll area, the
+/// desktop's role, counts. A real window that fails to map, or any other
+/// element, does not.
+fn is_outside_windows(mapped: bool, role: Option<&str>) -> bool {
+	!mapped && role == Some("AXScrollArea")
+}
+
 /// `AXFrontmost` as `pid`'s application reports it. `AppKit` answers from the
 /// application's own active state, which an `AppKit`-defined activation event
 /// sets while `WindowServer`'s front process stays the user's app.
@@ -2466,9 +2489,9 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
-		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
-		takes_inserted_text, target_window, window_records_of,
+		focused_window, is_outside_windows, may_borrow_focus, menu_window, perform_choosing,
+		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
+		select_attached, stringify_value, takes_inserted_text, target_window, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -3227,6 +3250,17 @@ mod tests {
 		// cannot map it; the system-wide element is unmappable the same way.
 		let records = window_records_of(&[create_system_wide()]);
 		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
+	}
+
+	#[test]
+	fn only_an_unmapped_scroll_area_is_focus_outside_windows() {
+		// Finder's desktop after a click on it.
+		assert!(is_outside_windows(false, Some("AXScrollArea")));
+		// A window that maps, a real window that fails to, or anything else.
+		assert!(!is_outside_windows(true, Some("AXScrollArea")));
+		assert!(!is_outside_windows(false, Some("AXWindow")));
+		assert!(!is_outside_windows(false, Some("AXUnknown")));
+		assert!(!is_outside_windows(false, None));
 	}
 
 	#[test]
