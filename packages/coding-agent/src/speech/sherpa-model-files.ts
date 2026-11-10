@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
+import { getTinyModelsCacheDir, withFileLock } from "@oh-my-pi/pi-utils";
 
 /** A sherpa-onnx model archive; the release artifact is a `.tar.bz2`. */
 export interface SherpaArchiveSpec {
@@ -27,6 +27,11 @@ export interface EnsureSherpaModelOptions {
 
 const HF_RESOLVE_BASE = "https://huggingface.co";
 const PROGRESS_EMIT_BYTES = 4_000_000;
+// A second installer may be streaming hundreds of MB. The native lock is
+// process-owned, so a crashed holder releases it; the caller's signal is the
+// escape hatch for a live holder that hangs.
+const INSTALL_LOCK_RETRIES = 4500;
+const INSTALL_LOCK_RETRY_MS = 200;
 
 export function sherpaModelDir(repo: string): string {
 	return path.join(getTinyModelsCacheDir(), ...repo.split("/"));
@@ -84,11 +89,14 @@ async function downloadFile(
 	if (!response.ok || !response.body) throw new Error(`Failed to download ${name}: HTTP ${response.status}`);
 	const total = Number(response.headers.get("content-length") ?? 0);
 	await fs.mkdir(path.dirname(dest), { recursive: true });
-	const part = `${dest}.part`;
+	// Private staging name: a concurrent or crashed attempt must never share the
+	// in-progress file, and the final path only ever appears via the rename.
+	const part = `${dest}.${process.pid}-${crypto.randomUUID().slice(0, 8)}.part`;
 	const handle = await fs.open(part, "w");
 	let loaded = 0;
 	let lastEmitted = 0;
 	onProgress?.({ status: "download", file: name, loaded: 0, total });
+	let completed = false;
 	try {
 		const reader = response.body.getReader();
 		for (;;) {
@@ -102,8 +110,10 @@ async function downloadFile(
 				onProgress?.({ status: "progress", file: name, loaded, total: total || loaded });
 			}
 		}
+		completed = true;
 	} finally {
 		await handle.close();
+		if (!completed) await fs.rm(part, { force: true }).catch(() => {});
 	}
 	await fs.rename(part, dest);
 }
@@ -133,21 +143,26 @@ async function extractArchive(archivePath: string, dest: string): Promise<void> 
 	for (const entry of entries) {
 		if (!isSafeRelativePath(entry)) throw new Error(`Model archive contains an unsafe path: ${entry}`);
 	}
-	await fs.rm(dest, { recursive: true, force: true });
-	await fs.mkdir(dest, { recursive: true });
 	await runTar(["-xjf", archivePath, "-C", dest]);
 }
 
 async function installArchive(archivePath: string, repoDir: string): Promise<void> {
-	const temp = `${repoDir}.extract`;
-	await extractArchive(archivePath, temp);
-	const topLevel = await fs.readdir(temp);
-	const only = topLevel.length === 1 ? path.join(temp, topLevel[0]!) : undefined;
-	const source = only && (await isDirectory(only)) ? only : temp;
-	await fs.rm(repoDir, { recursive: true, force: true });
-	await fs.mkdir(path.dirname(repoDir), { recursive: true });
-	await fs.rename(source, repoDir);
-	if (source !== temp) await fs.rm(temp, { recursive: true, force: true });
+	// Extract into a private staging directory; the cache directory is only
+	// replaced once the full tree is on disk, so a failed or concurrent install
+	// never exposes a half-extracted model.
+	const staging = await fs.mkdtemp(path.join(path.dirname(repoDir), `.${path.basename(repoDir)}.extract-`));
+	try {
+		await extractArchive(archivePath, staging);
+		const topLevel = await fs.readdir(staging);
+		const only = topLevel.length === 1 ? path.join(staging, topLevel[0]!) : undefined;
+		const source = only && (await isDirectory(only)) ? only : staging;
+		// Under the per-repo install lock an existing directory is a stale or
+		// partial install; it is replaced only after the new tree is complete.
+		await fs.rm(repoDir, { recursive: true, force: true });
+		await fs.rename(source, repoDir);
+	} finally {
+		await fs.rm(staging, { recursive: true, force: true });
+	}
 }
 
 async function ensureArchive(options: EnsureSherpaModelOptions, repoDir: string): Promise<void> {
@@ -160,12 +175,18 @@ async function ensureArchive(options: EnsureSherpaModelOptions, repoDir: string)
 	if (!(await isFile(archivePath))) {
 		await downloadFile(archive.url, archivePath, options.signal, options.onProgress, archiveName);
 	}
-	await installArchive(archivePath, repoDir);
-	await fs.rm(archivePath, { force: true });
+	try {
+		await installArchive(archivePath, repoDir);
+	} finally {
+		// A kept archive would turn one corrupt extraction into a permanent
+		// failure; the extracted model is the durable artifact.
+		await fs.rm(archivePath, { force: true });
+	}
 	options.onProgress?.({ status: "done", file: archiveName, loaded: 0, total: 0 });
 }
 
 async function ensureFiles(options: EnsureSherpaModelOptions, repoDir: string): Promise<void> {
+	await fs.mkdir(repoDir, { recursive: true });
 	for (const filename of Object.values(options.files)) {
 		if (!isSafeRelativePath(filename)) throw new Error(`Unsafe model file path: ${filename}`);
 		const dest = path.join(repoDir, filename);
@@ -179,23 +200,29 @@ async function ensureFiles(options: EnsureSherpaModelOptions, repoDir: string): 
 /**
  * Ensure a sherpa-onnx model's files exist in the shared tiny-model cache.
  * Archives are preferred when the release only publishes a `.tar.bz2`; otherwise
- * individual files are streamed from the Hugging Face repository.
+ * individual files are streamed from the Hugging Face repository. Concurrent
+ * installers of the same model — `omp setup speech` and a dictation worker, for
+ * example — serialize on a per-model OS file lock, and a completed file or model
+ * directory is never deleted by a failed install.
  */
 export async function ensureSherpaModelFiles(options: EnsureSherpaModelOptions): Promise<Record<string, string>> {
 	const repoDir = sherpaModelDir(options.repo);
-	await fs.mkdir(repoDir, { recursive: true });
-	if (await isSherpaModelCached(options)) {
-		return Object.fromEntries(Object.entries(options.files).map(([key, file]) => [key, path.join(repoDir, file)]));
-	}
-	try {
-		if (options.archive) await ensureArchive(options, repoDir);
-		else await ensureFiles(options, repoDir);
-		if (!(await isSherpaModelCached(options))) {
-			throw new Error(`Model download finished without the required files (${options.repo}).`);
-		}
-	} catch (error) {
-		await fs.rm(repoDir, { recursive: true, force: true });
-		throw error;
-	}
-	return Object.fromEntries(Object.entries(options.files).map(([key, file]) => [key, path.join(repoDir, file)]));
+	const resolved = Object.fromEntries(
+		Object.entries(options.files).map(([key, file]) => [key, path.join(repoDir, file)]),
+	);
+	if (await isSherpaModelCached(options)) return resolved;
+	await fs.mkdir(path.dirname(repoDir), { recursive: true });
+	return withFileLock(
+		`${repoDir}.install`,
+		async () => {
+			if (await isSherpaModelCached(options)) return resolved;
+			if (options.archive) await ensureArchive(options, repoDir);
+			else await ensureFiles(options, repoDir);
+			if (!(await isSherpaModelCached(options))) {
+				throw new Error(`Model download finished without the required files (${options.repo}).`);
+			}
+			return resolved;
+		},
+		{ retries: INSTALL_LOCK_RETRIES, retryDelayMs: INSTALL_LOCK_RETRY_MS, signal: options.signal },
+	);
 }

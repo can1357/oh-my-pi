@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import * as fs from "node:fs/promises";
 import { MemoizedRuntime } from "../src/subprocess/worker-runtime";
+import * as sherpaFiles from "../src/speech/sherpa-model-files";
 import type { SttTransport, SttWorkerInbound, SttWorkerOutbound } from "../src/stt/asr-protocol";
 import { startSttWorker } from "../src/stt/asr-worker";
 import * as registry from "../src/stt/models";
@@ -12,12 +12,14 @@ import * as runtime from "../src/stt/sherpa-runtime";
 class OnlineStream implements runtime.SherpaOnlineStream {
 	pending: number[] = [];
 	words: string[] = [];
+	waveforms: number[] = [];
 	endpoint = false;
 	finished = false;
 	finishCalls = 0;
 
 	acceptWaveform({ samples }: { samples: Float32Array; sampleRate: number }): void {
 		if (this.finished) throw new Error("audio after inputFinished");
+		this.waveforms.push(samples.length);
 		for (const sample of samples) if (sample !== 0) this.pending.push(sample);
 	}
 
@@ -91,7 +93,13 @@ const offlineSpec = registry.getSttModelSpec("parakeet-tdt-0.6b-v3")!;
 let nextKey = 0;
 let key: registry.SttModelKey;
 let offlineKey: registry.SttModelKey;
-const presentFile = await fs.stat(import.meta.path);
+// The fake recognizer never reads model files, so a resolved path map is enough.
+const installedModelFiles = {
+	encoder: "encoder.onnx",
+	decoder: "decoder.onnx",
+	joiner: "joiner.onnx",
+	tokens: "tokens.txt",
+};
 
 function harness() {
 	const events: SttWorkerOutbound[] = [];
@@ -149,8 +157,9 @@ beforeEach(() => {
 		requested === key ? onlineSpec : requested === offlineKey ? offlineSpec : undefined,
 	);
 	spyOn(runtime, "loadSherpaRuntime").mockResolvedValue(nativeRuntime);
-	spyOn(fs, "mkdir").mockResolvedValue(undefined);
-	spyOn(fs, "stat").mockResolvedValue(presentFile);
+	// Keep the worker off the shared cache and network; gated tests override this
+	// once to hold the load in flight or surface a cache failure.
+	spyOn(sherpaFiles, "ensureSherpaModelFiles").mockResolvedValue(installedModelFiles);
 	OnlineRecognizer.instances.length = 0;
 });
 
@@ -203,10 +212,11 @@ describe("native online STT worker", () => {
 
 	it("buffers startup audio and Stop while model files are loading", async () => {
 		const entered = Promise.withResolvers<void>();
-		const loaded = Promise.withResolvers<undefined>();
-		spyOn(fs, "mkdir").mockImplementationOnce(() => {
+		const loaded = Promise.withResolvers<void>();
+		spyOn(sherpaFiles, "ensureSherpaModelFiles").mockImplementationOnce(async () => {
 			entered.resolve();
-			return loaded.promise;
+			await loaded.promise;
+			return installedModelFiles;
 		});
 		const h = harness();
 		h.send({ type: "stream_start", id: "loading", modelKey: key });
@@ -215,7 +225,7 @@ describe("native online STT worker", () => {
 		h.send({ type: "stream_audio", id: "loading", audio: Float32Array.of(2, 3) });
 		h.send({ type: "stream_stop", id: "loading" });
 		expect(transcriptEvents(h.events)).toEqual([]);
-		loaded.resolve(undefined);
+		loaded.resolve();
 		expect(await h.waitFor("stream_done", "loading")).toEqual({
 			type: "stream_done",
 			id: "loading",
@@ -225,10 +235,11 @@ describe("native online STT worker", () => {
 
 	it("suppresses all callbacks after startup cancellation and keeps the loaded model warm", async () => {
 		const entered = Promise.withResolvers<void>();
-		const loaded = Promise.withResolvers<undefined>();
-		spyOn(fs, "mkdir").mockImplementationOnce(() => {
+		const loaded = Promise.withResolvers<void>();
+		spyOn(sherpaFiles, "ensureSherpaModelFiles").mockImplementationOnce(async () => {
 			entered.resolve();
-			return loaded.promise;
+			await loaded.promise;
+			return installedModelFiles;
 		});
 		const h = harness();
 		h.send({ type: "stream_start", id: "cancelled", modelKey: key });
@@ -236,7 +247,7 @@ describe("native online STT worker", () => {
 		h.send({ type: "stream_audio", id: "cancelled", audio: Float32Array.of(1) });
 		h.send({ type: "stream_cancel", id: "cancelled" });
 		const callbacksAtCancel = h.events.length;
-		loaded.resolve(undefined);
+		loaded.resolve();
 		await nextTurn();
 		expect(h.events).toHaveLength(callbacksAtCancel);
 		expect(OnlineRecognizer.instances[0]!.streams).toHaveLength(0);
@@ -262,14 +273,17 @@ describe("native online STT worker", () => {
 	});
 
 	it("reports startup failure without waiting for audio and suppresses cancelled failure", async () => {
-		spyOn(fs, "mkdir").mockRejectedValueOnce(new Error("model cache unavailable"));
+		spyOn(sherpaFiles, "ensureSherpaModelFiles").mockRejectedValueOnce(new Error("model cache unavailable"));
 		const h = harness();
 		h.send({ type: "stream_start", id: "failed", modelKey: key });
 		expect(await h.waitFor("error", "failed")).toMatchObject({
 			error: expect.stringContaining("model cache unavailable"),
 		});
-		const failedLoad = Promise.withResolvers<undefined>();
-		spyOn(fs, "mkdir").mockImplementationOnce(() => failedLoad.promise);
+		const failedLoad = Promise.withResolvers<void>();
+		spyOn(sherpaFiles, "ensureSherpaModelFiles").mockImplementationOnce(async () => {
+			await failedLoad.promise;
+			throw new Error("cancelled cache failure");
+		});
 		h.send({ type: "stream_start", id: "failed-cancel", modelKey: key });
 		await nextTurn();
 		h.send({ type: "stream_cancel", id: "failed-cancel" });
@@ -312,6 +326,32 @@ describe("native online STT worker", () => {
 			text: "hello world",
 		});
 		expect(offlineDecode).toHaveBeenCalledTimes(1);
+	});
+
+	it("feeds each online tier its configured terminal silence", async () => {
+		const paddedSpec = registry.STT_MODELS.find(model => model.key === "x-asr-960ms-zh-en")!;
+		const paddedKey = paddedSpec.key;
+		const defaultKey = `default-worker-test-${++nextKey}` as registry.SttModelKey;
+		spyOn(registry, "getSttModelSpec").mockImplementation(requested =>
+			requested === paddedKey ? paddedSpec : requested === defaultKey ? onlineSpec : undefined,
+		);
+
+		const h = harness();
+		h.send({ type: "stream_start", id: "padded", modelKey: paddedKey });
+		h.send({ type: "stream_audio", id: "padded", audio: Float32Array.of(1) });
+		h.send({ type: "stream_stop", id: "padded" });
+		expect(await h.waitFor("stream_done", "padded")).toMatchObject({ text: "hello" });
+		h.send({ type: "stream_start", id: "default", modelKey: defaultKey });
+		h.send({ type: "stream_audio", id: "default", audio: Float32Array.of(2) });
+		h.send({ type: "stream_stop", id: "default" });
+		expect(await h.waitFor("stream_done", "default")).toMatchObject({ text: "world" });
+
+		const [paddedStream, defaultStream] = [
+			OnlineRecognizer.instances[0]!.streams[0]!,
+			OnlineRecognizer.instances[1]!.streams[0]!,
+		];
+		expect(paddedStream.waveforms).toEqual([1, 24_000]);
+		expect(defaultStream.waveforms).toEqual([1, 9_600]);
 	});
 
 	it("stops scheduling previews after consecutive decodes slower than the preview cadence", async () => {
