@@ -6595,6 +6595,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Ask extensions whether an operator-requested close may proceed, via the
+	 * cancellable `session_before_shutdown` gate. Hosts call this only for a
+	 * close they can still refuse; forced closes go straight to disposal.
+	 * Resolves `true` to proceed: only an explicit cancel delivered before
+	 * `signal` aborts keeps the session open; errors and timeouts proceed.
+	 */
+	async confirmClose(signal: AbortSignal): Promise<boolean> {
+		if (!this.#extensionRunner?.hasHandlers("session_before_shutdown")) return true;
+		const result = await this.#extensionRunner.emit({ type: "session_before_shutdown", signal });
+		return result?.cancel !== true || signal.aborted;
+	}
+
+	/**
 	 * Synchronously mark the session as disposing so new work is rejected
 	 * immediately: eval starts throw, queued asides are dropped, the aside
 	 * provider is detached, and settings listeners bound to the session stop
@@ -10988,6 +11001,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			normalizedAppMessage.display,
 			normalizedAppMessage.details,
 			normalizedAppMessage.attribution,
+			// Its own timestamp, as `#persistMessageEnd` keeps one: a view rebuilt while its events are
+			// queued matches the entry to them by it.
+			normalizedAppMessage.timestamp,
 		);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive
