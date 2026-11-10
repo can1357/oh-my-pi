@@ -2031,7 +2031,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							: undefined,
 					},
 				);
-		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
+		// Located with the context the read itself resolved with: an extension scheme routes each
+		// session to its own handler, and its `locateSync` may derive the path from cwd or session file.
+		const displayTarget = InternalUrlRouter.instance().locateSync(
+			params.path,
+			sessionResolveContext(this.session, { signal }),
+		);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;

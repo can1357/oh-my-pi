@@ -35,6 +35,11 @@ export function contextLocalProtocolOptions(session: ToolSession): LocalProtocol
 	return sessionLocalProtocolOptions(session);
 }
 
+/** The id of the session a tool session belongs to, as internal URL contexts carry it (`sessionId`). */
+export function sessionCallerId(session: ToolSession): string | undefined {
+	return session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined;
+}
+
 /** The single ResolveContext builder for a tool session; replaces per-tool literal assembly. */
 export function sessionResolveContext(
 	session: ToolSession,
@@ -47,7 +52,7 @@ export function sessionResolveContext(
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
 		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
-		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,
+		sessionId: sessionCallerId(session),
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),
 		skills: session.skills,
