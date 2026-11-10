@@ -569,6 +569,19 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		expect(plan.actions[0]).toMatchObject({ accountKey: ACCOUNT_KEY, active: true });
 	});
 
+	it("restores a sibling that spends without a prompt before an active account that needs one", () => {
+		const active = report();
+		const sibling = report({ accountId: "acct-sib", email: "sib@example.com", primaryUsed: 1, weeklyUsed: 0.5 });
+		const settings = {
+			modes: { "5h": "yes", weekly: "unset" },
+			minBlockedMinutes: 60,
+			keepCredits: 0,
+			salvageHorizonMs: 0,
+		} as const;
+		const plan = planCodexResetRedemptions(input([active, sibling], { settings }));
+		expect(plan.actions[0]).toMatchObject({ window: "5h", active: false });
+	});
+
 	it("does not treat a Team seat sharing the workspace account id as the active account", () => {
 		// Team seats report the workspace account id; only the email tells them apart.
 		const active = report({ creditExpiries: [5 * DAY] });

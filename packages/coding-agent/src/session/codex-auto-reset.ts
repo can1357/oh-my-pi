@@ -428,6 +428,8 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			unblockAtMs: number;
 			blockedWindows: ("5h" | "weekly")[];
 			window: "5h" | "weekly" | undefined;
+			/** Spends without a prompt, so it outranks a candidate that needs one. */
+			approved: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -510,7 +512,8 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			// Any weekly block governs by the weekly key; no known window needs both keys.
 			const window = blockedWindows.includes("weekly") ? "weekly" : blockedWindows[0];
-			if (resetWindowMode(settings.modes, window) === "no") {
+			const mode = resetWindowMode(settings.modes, window);
+			if (mode === "no") {
 				skip("window-disabled");
 				continue;
 			}
@@ -537,10 +540,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("cooldown");
 				continue;
 			}
-			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows, window });
+			candidates.push({ snapshot, remainingMs, unblockAtMs, blockedWindows, window, approved: mode === "yes" });
 		}
 		candidates.sort((a, b) => {
-			// Active account first: the sticky session credential stays usable.
+			if (a.approved !== b.approved) return a.approved ? -1 : 1;
+			// Then the active account: the sticky session credential stays usable.
 			if (a.snapshot.active !== b.snapshot.active) return a.snapshot.active ? -1 : 1;
 			// Then spend the credit that dies soonest.
 			const aExpiry = a.snapshot.creditExpiresAtMs ?? Number.POSITIVE_INFINITY;

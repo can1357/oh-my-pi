@@ -18,6 +18,8 @@ interface ReportOptions {
 	fiveHourUsed?: number;
 	weeklyUsed?: number;
 	sonnetUsed?: number;
+	/** Adds the Fable weekly cap row when set. */
+	fableUsed?: number;
 }
 
 function report(options: ReportOptions = {}): UsageReport {
@@ -48,6 +50,17 @@ function report(options: ReportOptions = {}): UsageReport {
 				window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 4 * 24 * HOUR },
 				amount: { usedFraction: options.sonnetUsed ?? 0.2, unit: "percent" },
 			},
+			...(options.fableUsed === undefined
+				? []
+				: [
+						{
+							id: "anthropic:7d:fable",
+							label: "Claude 7 Day (Fable)",
+							scope: { provider: "anthropic", tier: "fable", windowId: "7d" },
+							window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 5 * 24 * HOUR },
+							amount: { usedFraction: options.fableUsed, unit: "percent" as const },
+						},
+					]),
 		],
 		metadata: { email, orgId },
 	};
@@ -303,30 +316,83 @@ describe("planClaudeResetRedemptions: window consent", () => {
 		keepCredits: 0,
 		salvageHorizonMs: 12 * HOUR,
 	});
-	const fiveHourBlock = { reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })] };
+	const fiveHourBlock = { fiveHourUsed: 1, weeklyUsed: 0.5 };
 	const fiveHourCredit = { blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1 } };
+	const fable = { clears: ["anthropic:5h", "anthropic:7d:fable"], usedFractions: {} };
+	const expiring = { requiresLimit: false, blocking: [], expiresAt: new Date(NOW + 60_000).toISOString() };
 
-	it.each([
-		{ name: "a weekly block by the weekly key", modes: { "5h": "yes", weekly: "no" }, overrides: {} },
+	it.each<{
+		name: string;
+		trigger?: "sweep";
+		modes: ClaudeResetPlanInput["settings"]["modes"];
+		usage?: ReportOptions;
+		credit?: Partial<UsageResetCredit>;
+		expected: string;
+	}>([
 		{
-			name: "a 5h-only block by the 5h key",
+			name: "a weekly block is governed by the weekly key",
+			modes: { "5h": "yes", weekly: "no" },
+			expected: "window-disabled",
+		},
+		{
+			name: "a 5h-only block is governed by the 5h key",
 			modes: { "5h": "no", weekly: "yes" },
-			overrides: { ...fiveHourBlock, statuses: [status({ credit: fiveHourCredit })] },
+			usage: fiveHourBlock,
+			credit: fiveHourCredit,
+			expected: "window-disabled",
 		},
 		{
-			name: "a Fable launch grant by the Fable key alone",
+			name: "a Fable grant is governed by the Fable key alone",
 			modes: { "5h": "yes", weekly: "yes", fable: "no" },
-			overrides: {
-				...fiveHourBlock,
-				statuses: [status({ credit: { ...fiveHourCredit, clears: ["anthropic:5h", "anthropic:7d:fable"] } })],
-			},
+			usage: { ...fiveHourBlock, fableUsed: 1 },
+			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
+			expected: "window-disabled",
 		},
-	] as const)("governs $name", ({ modes, overrides }) => {
-		const plan = planClaudeResetRedemptions(input({ settings: settings(modes), ...overrides }));
-		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual(
-			expect.objectContaining({ rule: "blocked-account", reason: "window-disabled" }),
+		{
+			name: "a Fable grant never restores a block without the Fable cap",
+			modes: ALL,
+			usage: { ...fiveHourBlock, fableUsed: 0.6 },
+			credit: { ...fable, ...fiveHourCredit },
+			expected: "fable-not-blocked",
+		},
+		{
+			name: "a Fable grant restores a Fable cap block",
+			modes: { fable: "yes" },
+			usage: { weeklyUsed: 0.5, fableUsed: 1 },
+			credit: { ...fable, blocking: ["anthropic:7d:fable"] },
+			expected: "fable",
+		},
+		{
+			name: "an expiring Fable grant is salvaged on its Fable usage",
+			trigger: "sweep",
+			modes: { fable: "yes" },
+			usage: { fiveHourUsed: 0.9, weeklyUsed: 0.5, fableUsed: 0.6 },
+			credit: { ...fable, ...expiring },
+			expected: "fable",
+		},
+		{
+			name: "an expiring Fable grant with no Fable usage is never spent, whatever its 5h usage",
+			trigger: "sweep",
+			modes: { fable: "yes" },
+			usage: { fiveHourUsed: 0.9, weeklyUsed: 0.5, fableUsed: 0 },
+			credit: { ...fable, ...expiring },
+			expected: "window-mostly-free",
+		},
+	])("$name", ({ trigger, modes, usage, credit, expected }) => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				trigger: trigger ?? "blocked",
+				modelId: "claude-fable-5",
+				settings: settings(modes),
+				...(usage ? { reports: [report(usage)] } : {}),
+				...(credit ? { statuses: [status({ credit })] } : {}),
+			}),
 		);
+		const rule = trigger === "sweep" ? "expiring-credit" : "blocked-account";
+		const outcome: string | undefined =
+			plan.actions.find(action => action.reason === rule)?.window ??
+			plan.skipped.find(skip => skip.rule === rule)?.reason;
+		expect(outcome).toBe(expected);
 	});
 });
 

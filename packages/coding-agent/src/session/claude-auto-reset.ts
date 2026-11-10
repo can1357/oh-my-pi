@@ -47,6 +47,7 @@ export type ClaudeResetSkipReason =
 	| "reserve"
 	| "outside-account-pool"
 	| "no-blocked-window"
+	| "fable-not-blocked"
 	| "unsupported-window"
 	| "incomplete-coverage"
 	| "no-reset-time"
@@ -214,12 +215,19 @@ function maxPlausibleRemainingMs(limitId: string, limit: UsageLimit | undefined)
 	return limitId === FIVE_HOUR_LIMIT_ID ? MAX_PLAUSIBLE_FIVE_HOUR_MS : MAX_PLAUSIBLE_WEEKLY_MS;
 }
 
-/** Limits a grant restores: the ones it clears, and only the 5h window for a Juniper grant. */
+/**
+ * Limits a grant restores: the ones it clears, only the 5h window for a Juniper
+ * grant, and only the Fable weekly cap for a Fable launch grant (its 5h clear is
+ * incidental, so ordinary 5h usage never makes it worth spending).
+ */
 export function claudeCoveredLimits(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit[] {
 	const clears = new Set(credit.clears ?? []);
-	return limits.filter(
-		limit => clears.has(limit.id) && (credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
-	);
+	const only = isFableGrant(credit)
+		? FABLE_LIMIT_ID
+		: credit.program === JUNIPER_PROGRAM
+			? FIVE_HOUR_LIMIT_ID
+			: undefined;
+	return limits.filter(limit => clears.has(limit.id) && (only === undefined || limit.id === only));
 }
 
 /** The fullest covered limit by the report's or the grant's own used fraction: what a salvage spend restores. */
@@ -398,6 +406,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			remainingMs: number;
 			unblockAtMs: number;
 			window: ResetWindow;
+			/** Spends without a prompt, so it outranks a candidate that needs one. */
+			approved: boolean;
 		}
 		const candidates: RestoreCandidate[] = [];
 		for (const snapshot of snapshots) {
@@ -438,8 +448,13 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				continue;
 			}
 			const window = claudeResetWindow(snapshot.credit, blockers);
-			if (resetWindowMode(input.settings.modes, window) === "no") {
+			const mode = resetWindowMode(input.settings.modes, window);
+			if (mode === "no") {
 				skip("window-disabled");
+				continue;
+			}
+			if (window === "fable" && !blockers.includes(FABLE_LIMIT_ID)) {
+				skip("fable-not-blocked");
 				continue;
 			}
 			let unblockAtMs = Number.NEGATIVE_INFINITY;
@@ -485,9 +500,10 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				skip(episodeSkip);
 				continue;
 			}
-			candidates.push({ snapshot, blockers, remainingMs, unblockAtMs, window });
+			candidates.push({ snapshot, blockers, remainingMs, unblockAtMs, window, approved: mode === "yes" });
 		}
 		candidates.sort((left, right) => {
+			if (left.approved !== right.approved) return left.approved ? -1 : 1;
 			if (left.snapshot.active !== right.snapshot.active) return left.snapshot.active ? -1 : 1;
 			const leftExpiry = creditExpiryMs(left.snapshot.credit) ?? Number.POSITIVE_INFINITY;
 			const rightExpiry = creditExpiryMs(right.snapshot.credit) ?? Number.POSITIVE_INFINITY;
@@ -570,7 +586,12 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		const fullest = fullestClaudeLimit(covered, snapshot.credit);
-		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
+		// A Fable grant restores only Fable usage, so even a last-chance spend needs some.
+		if (
+			!fullest ||
+			(!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION) ||
+			(isFableGrant(snapshot.credit) && fullest.used <= 0)
+		) {
 			skip("window-mostly-free");
 			continue;
 		}
@@ -622,6 +643,11 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
  * model-scoped limit makes it weekly, and only a 5h-only spend is 5h.
  */
 export function claudeResetWindow(credit: UsageResetCreditDetail, limitIds: readonly string[]): ResetWindow {
-	if (credit.clears?.includes(FABLE_LIMIT_ID)) return "fable";
+	if (isFableGrant(credit)) return "fable";
 	return limitIds.some(id => id !== FIVE_HOUR_LIMIT_ID) ? "weekly" : "5h";
+}
+
+/** A Fable launch grant, identified by the Fable weekly cap it clears. */
+function isFableGrant(credit: UsageResetCreditDetail): boolean {
+	return credit.clears?.includes(FABLE_LIMIT_ID) === true;
 }
