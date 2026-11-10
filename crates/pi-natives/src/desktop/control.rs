@@ -38,7 +38,6 @@ pub(crate) use macos::{
 };
 
 /// Time left before the run's deadline for a refusal to reach the caller.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
@@ -51,8 +50,8 @@ struct CancellationState {
 	/// stop from its own. Shared with every session under the same key.
 	escape_stops: Arc<AtomicU32>,
 	/// When the current computer run ends. Input waiting for the user to pause
-	/// (macOS) or for a Wayland permission prompt stops shortly before it.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	/// (macOS), for a Wayland permission prompt or for another session's input
+	/// lock stops shortly before it.
 	deadline:     Mutex<Option<Instant>>,
 	#[cfg(target_os = "linux")]
 	async_wake:   tokio::sync::Notify,
@@ -69,10 +68,9 @@ impl CancellationSource {
 
 	pub(crate) fn token(&self) -> OperationToken {
 		OperationToken {
-			source: self.clone(),
+			source:     self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
-			#[cfg(any(target_os = "macos", target_os = "linux"))]
-			reply_by: None,
+			reply_by:   None,
 		}
 	}
 
@@ -128,7 +126,6 @@ impl CancellationSource {
 
 	/// Sets when the current computer run ends, `None` for no deadline. Each
 	/// run sets it before its first call.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
 		*self.0.deadline.lock() = deadline;
 	}
@@ -160,14 +157,12 @@ pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	reply_by:   Option<Instant>,
 }
 
 impl OperationToken {
 	/// When this operation must have answered: the run's end or the caller's
 	/// reply timeout, whichever comes first.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		let run = *self.source.0.deadline.lock();
 		match (run, self.reply_by) {
@@ -177,7 +172,6 @@ impl OperationToken {
 	}
 
 	/// This token for a request whose caller waits for its reply until `at`.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
 		Self { reply_by: Some(at), ..self }
 	}
@@ -727,7 +721,6 @@ impl InputLease {
 	) -> CoreResult<Self> {
 		token.check()?;
 		let limit = now() + LEASE_WAIT;
-		#[cfg(any(target_os = "macos", target_os = "linux"))]
 		let limit = token.deadline().map_or(limit, |deadline| {
 			limit.min(deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
 		});
@@ -1045,9 +1038,13 @@ mod tests {
 		let old = source.token();
 		{
 			let _operation = InputLease::acquire(&old, false).expect("reuse task ownership");
-			assert!(InputLease::acquire(&source.token(), false).is_err());
-			let other = CancellationSource::default().token();
-			assert!(acquire_on_test_clock(&other, Instant::now(), |_| {}).0.is_err());
+			// This session's own running operation refuses at once.
+			let (running, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+			assert_eq!(running.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+			assert_eq!(waited, Duration::ZERO);
+			let (other, _) =
+				acquire_on_test_clock(&CancellationSource::default().token(), Instant::now(), |_| {});
+			assert!(other.is_err());
 		}
 		source.retire();
 		assert!(source.control_active());
@@ -1156,14 +1153,11 @@ mod tests {
 		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
 		assert_eq!(waited, LEASE_WAIT);
 		// A run ending sooner ends the wait shortly before its deadline.
-		#[cfg(any(target_os = "macos", target_os = "linux"))]
-		{
-			let start = Instant::now();
-			source.set_deadline(Some(start + Duration::from_secs(2)));
-			let (refused, waited) = acquire_on_test_clock(&source.token(), start, |_| {});
-			assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
-			assert_eq!(waited, Duration::from_secs(2) - DEADLINE_MARGIN);
-		}
+		let start = Instant::now();
+		source.set_deadline(Some(start + Duration::from_secs(2)));
+		let (refused, waited) = acquire_on_test_clock(&source.token(), start, |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited + DEADLINE_MARGIN, Duration::from_secs(2));
 		drop(other);
 		remove_test_lock();
 	}
@@ -1487,8 +1481,9 @@ mod tests {
 		// An earlier operation stopped waiting for its helper, which still holds
 		// its share of ownership.
 		let (_descriptor, handed) = shared_ownership().expect("held lock is shared");
-		let refused = InputLease::acquire(&source.token(), false).map(drop);
-		assert_eq!(refused.map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		let (refused, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited, Duration::ZERO, "this session's helper is not waited for");
 		drop(handed);
 		drop(InputLease::acquire(&source.token(), false).expect("input once the helper is reaped"));
 		source.release_control();
