@@ -707,12 +707,22 @@ function obfuscateMessage(
 	return content === target.content ? current : ({ ...target, content } as Message);
 }
 
-/** One message's outbound redaction state in an {@link ObfuscatorMemo}. */
+/**
+ * One message's outbound redaction state in an {@link ObfuscatorMemo}. A dirty
+ * entry is valid while `revision` (and, for `output`, `sharedVersion`) holds.
+ * A clean entry is a message whose every text scanned clean in both collection
+ * and redaction: it contributes no regex values and redacts to itself, so it is
+ * valid while `literalRevision` holds, across mints and shared-set changes.
+ */
 interface ObfuscatedMessage {
 	/** {@link SecretObfuscator.revision} `regexValues`, and `output` once set, were computed under. */
 	revision: number;
+	/** {@link SecretObfuscator.literalRevision} when `regexValues` were collected. */
+	literalRevision: number;
 	/** {@link messageEstimateVersion} of the message; owners bump it when they rewrite a message in place. */
 	messageVersion: number;
+	/** Whether the message is clean under `literalRevision`; then `output` is the message itself. */
+	clean: boolean;
 	/** Regex secret values this message contributes to the request-wide shared set. */
 	regexValues: readonly string[];
 	/** {@link ObfuscatorMemo.sharedVersion} `output` was redacted under. */
@@ -767,7 +777,9 @@ function sameValues(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * With a `memo`, unchanged history is not re-scanned: each message's regex
  * values and redacted form are kept by message identity and reused while the
  * registry revision, the message's version and the request-wide shared values
- * hold. Without one, every message is scanned and redacted.
+ * hold. A message with no secret-bearing text (the common case) is reused while
+ * only the configured literals hold, since it redacts to itself regardless.
+ * Without a memo, every message is scanned and redacted.
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[], memo?: ObfuscatorMemo): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
@@ -799,27 +811,48 @@ function obfuscateMemoizedBatch(obfuscator: SecretObfuscator, messages: Message[
 		memo.shared = new Set();
 	}
 	const entries: ObfuscatedMessage[] = [];
+	// Whether each message was collected in this request with every text clean.
+	const collectedClean: boolean[] = [];
 	const sharedRegexSecretValues = new SecretValueSet();
 	for (const message of messages) {
 		const revision = obfuscator.revision;
+		const literalRevision = obfuscator.literalRevision;
 		const messageVersion = messageEstimateVersion(message);
 		let entry = memo.messages.get(message);
-		if (entry === undefined || entry.revision !== revision || entry.messageVersion !== messageVersion) {
+		let clean = false;
+		if (
+			entry === undefined ||
+			entry.messageVersion !== messageVersion ||
+			(entry.clean ? entry.literalRevision !== literalRevision : entry.revision !== revision)
+		) {
+			const dirtyScans = obfuscator.dirtyScans;
 			const values = new Set<string>();
 			collectMessageRegexSecretValues(obfuscator, message, values);
+			clean = obfuscator.dirtyScans === dirtyScans;
 			const regexValues = values.size === 0 ? NO_REGEX_VALUES : [...values];
 			if (entry === undefined) {
-				entry = { revision, messageVersion, regexValues, sharedVersion: 0, output: undefined };
+				entry = {
+					revision,
+					literalRevision,
+					messageVersion,
+					clean: false,
+					regexValues,
+					sharedVersion: 0,
+					output: undefined,
+				};
 				memo.messages.set(message, entry);
 			} else {
 				entry.revision = revision;
+				entry.literalRevision = literalRevision;
 				entry.messageVersion = messageVersion;
+				entry.clean = false;
 				entry.regexValues = regexValues;
 				entry.output = undefined;
 			}
 		}
 		for (const value of entry.regexValues) sharedRegexSecretValues.add(value);
 		entries.push(entry);
+		collectedClean.push(clean);
 	}
 	// Redaction depends on the shared set, so it is versioned once per request.
 	if (!sameValues(sharedRegexSecretValues, memo.shared)) {
@@ -827,18 +860,38 @@ function obfuscateMemoizedBatch(obfuscator: SecretObfuscator, messages: Message[
 		memo.sharedVersion++;
 	}
 	const sharedVersion = memo.sharedVersion;
+	// Clean messages skip `obfuscate`, which would resolve a lazy key first
+	// when the shared values mint; resolve it here so they see it as a literal.
+	obfuscator.prepareSharedValues(sharedRegexSecretValues);
 	let changed = false;
 	const result = messages.map((message, index): Message => {
 		const entry = entries[index];
+		// Re-checked per message: resolving the key (above, or while redacting an
+		// earlier message) is a literal change that can make this text dirty.
+		if (entry.clean && entry.literalRevision === obfuscator.literalRevision) return message;
 		const revision = obfuscator.revision;
 		let output = entry.output;
-		if (output === undefined || entry.revision !== revision || entry.sharedVersion !== sharedVersion) {
+		if (entry.clean || output === undefined || entry.revision !== revision || entry.sharedVersion !== sharedVersion) {
+			const dirtyScans = obfuscator.dirtyScans;
 			output = obfuscateMessage(obfuscator, message, sharedRegexSecretValues);
-			// Kept only when collection and redaction both ran under the current
-			// registry; a mint in between ties the result to an older state.
-			if (entry.revision === revision && obfuscator.revision === revision) {
+			if (
+				collectedClean[index] &&
+				obfuscator.dirtyScans === dirtyScans &&
+				output === message &&
+				obfuscator.literalRevision === entry.literalRevision
+			) {
+				// Clean through collection and redaction under unchanged literals.
+				entry.clean = true;
+				entry.output = message;
+			} else if (!entry.clean && entry.revision === revision && obfuscator.revision === revision) {
+				// Kept only when collection and redaction both ran under the current
+				// registry; a mint in between ties the result to an older state.
 				entry.output = output;
 				entry.sharedVersion = sharedVersion;
+			} else {
+				// A clean entry outdated by a literal change is collected afresh next time.
+				entry.clean = false;
+				entry.output = undefined;
 			}
 		}
 		if (output !== message) changed = true;

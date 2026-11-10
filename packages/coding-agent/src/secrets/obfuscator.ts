@@ -213,6 +213,9 @@ export class SecretObfuscator {
 	/** Per-string scan results of the {@link batch} in progress, if any; dropped when it ends. */
 	#batchScans: Map<string, TextScan> | undefined;
 
+	/** Texts whose scan was not clean so far; see {@link dirtyScans}. */
+	#dirtyScans = 0;
+
 	/** Placeholder ranges and expanded scan view of the last text `#collectRegexMatches` scanned. */
 	#lastRegexScan: RegexScanMemo | undefined;
 
@@ -464,6 +467,39 @@ export class SecretObfuscator {
 	}
 
 	/**
+	 * Version of the configured literals (plain and replace mappings, including
+	 * a resolved key). Regex entries and probes are fixed at construction, so
+	 * these literals are the only registry state the clean check reads: a text
+	 * that scanned clean stays clean, whatever else is minted, while this holds.
+	 */
+	get literalRevision(): number {
+		return this.#plainMappings.version + this.#replaceMappings.version;
+	}
+
+	/**
+	 * Count of texts whose scan was not clean (a regex value, a configured
+	 * literal or a `$$` candidate). Equal readings around a region prove that
+	 * every text {@link obfuscate} and {@link collectRegexSecretValuesForObfuscation}
+	 * saw in it was clean: it contributed no regex values and redacts to itself,
+	 * whatever the shared values, while {@link literalRevision} holds (see
+	 * {@link prepareSharedValues} for the one literal the shared values can add).
+	 */
+	get dirtyScans(): number {
+		return this.#dirtyScans;
+	}
+
+	/**
+	 * Do what the first {@link obfuscate} against `sharedRegexSecretValues`
+	 * does before anything else, even for clean text: resolve a lazy placeholder
+	 * key when those values would mint a regex placeholder. The key registers as
+	 * a literal, so a caller that skips `obfuscate` for text it knows is clean
+	 * calls this first and re-checks {@link literalRevision}.
+	 */
+	prepareSharedValues(sharedRegexSecretValues: ReadonlySet<string>): void {
+		if (this.#keyProvider !== undefined && this.#willMintRegexPlaceholder(sharedRegexSecretValues)) this.#getKey();
+	}
+
+	/**
 	 * Toggle outbound obfuscation. When off, {@link obfuscate} is identity, while
 	 * placeholders minted earlier keep deobfuscating so prior turns stay readable.
 	 */
@@ -554,7 +590,10 @@ export class SecretObfuscator {
 		// bytes already present in this same provider-visible input.
 		if (this.#keyProvider !== undefined && this.#willMintRegexPlaceholder(currentValues, sharedValues)) {
 			this.#getKey();
-			clean &&= this.#isLiteralFree(text);
+			if (clean && !this.#isLiteralFree(text)) {
+				clean = false;
+				this.#dirtyScans++;
+			}
 		}
 		// Every phase below is the identity on clean text, so skip building origin/scan state.
 		if (clean) return text;
@@ -693,6 +732,9 @@ export class SecretObfuscator {
 		for (const secretValue of this.#collectRegexSecretValues(result)) {
 			this.#currentRegexSecretValues.add(secretValue);
 		}
+		// Regex values are a pure function of the text and the current set only
+		// grows, so a text already scanned in this call adds nothing on a rescan.
+		let scanned = result;
 		for (const secretValue of this.#collectRegexSecretValuesAfterRegexReplacements(result, origin)) {
 			this.#currentRegexSecretValues.add(secretValue);
 		}
@@ -847,10 +889,11 @@ export class SecretObfuscator {
 					origin = replaceRange(origin, match.start, match.end, "F".repeat(placeholder.length));
 				}
 			}
-			if (entry.mode === "replace") {
+			if (entry.mode === "replace" && result !== scanned) {
 				for (const secretValue of this.#collectRegexSecretValues(result)) {
 					this.#currentRegexSecretValues.add(secretValue);
 				}
+				scanned = result;
 			}
 		}
 		({ text: result, origin } = this.#stabilizeReplaceRegexPlaceholderSpillover(result, origin));
@@ -1315,6 +1358,7 @@ export class SecretObfuscator {
 		const scan = this.#scanText(text);
 		if (scan.initialValues.length === 0 && scan.literalFree)
 			return { values: EMPTY_SECRET_VALUES, literalFree: true };
+		this.#dirtyScans++;
 		const values = new Set(scan.initialValues);
 		const reusable =
 			this.#batchScans !== undefined &&
