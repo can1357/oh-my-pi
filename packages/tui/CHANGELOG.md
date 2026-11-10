@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Command reports can expose a primary action with a keyboard shortcut and native button.
+- Selectors can show a bounded Markdown preview of the selected item and search its content.
+
 ### Changed
 
 - `grep` and `ast_grep` results with no matches render as one line with `0 matches` in the warning color, dropping the separate `No matches found` row ([#18700](https://github.com/can1357/oh-my-pi/pull/18700) by [@JustasMasiulis](https://github.com/JustasMasiulis))

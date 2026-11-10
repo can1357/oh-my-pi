@@ -38,6 +38,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import type { CommandReportOptions } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, compact, kbd, keyed, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import {
@@ -57,7 +58,7 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
+import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspTreeNode } from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -9803,6 +9804,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleBtwInjectKey(): boolean {
 		return this.#btwController.handleInject();
 	}
+	handleCommandReportAction(): boolean {
+		return this.#commandController.handleCommandReportAction();
+	}
 
 	async handleBtwBranch(
 		question: string,
@@ -9854,7 +9858,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#cleanseController.handleEscape();
 	}
 
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: CommandReportOptions): void {
 		this.#commandController.showCommandReport(options);
 	}
 

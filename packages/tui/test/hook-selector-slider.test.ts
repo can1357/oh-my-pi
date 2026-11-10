@@ -1,7 +1,30 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
+const pickerCx: DescribeContext = {
+	cols: 80,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+
+function isNode(child: NativeChild): child is NativeNode {
+	return "k" in child && typeof child.k === "string";
+}
+
+function markdownText(root: NativeNode): string[] {
+	const texts: string[] = [];
+	const stack = [root];
+	while (stack.length > 0) {
+		const current = stack.pop()!;
+		if (current.k === "md" && typeof current.p?.text === "string") texts.push(current.p.text);
+		for (const child of current.c ?? []) if (isNode(child)) stack.push(child);
+	}
+	return texts;
+}
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";
 const KITTY_H = "\x1b[104;1u";
@@ -161,5 +184,49 @@ describe("HookSelectorComponent model slider", () => {
 
 		component.handleInput("\n");
 		expect(selected).toEqual(["OpenCode Go"]);
+	});
+
+	it("searches preview content and updates a bounded selected preview", () => {
+		const component = new HookSelectorComponent(
+			"Browse summaries",
+			[
+				{ label: "root summary", preview: "root-only marker\n" + "extra text\n".repeat(80) },
+				{ label: "child summary", preview: "child-only marker\n" + "extra text\n".repeat(80) },
+			],
+			() => {},
+			() => {},
+			{ maxVisible: 4 },
+		);
+
+		const initial = component
+			.render(40)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(initial).toContain("root-only marker");
+		expect(initial.split("\n").length).toBeLessThan(20);
+
+		for (const key of "child-only marker") component.handleInput(key);
+		const searched = component
+			.render(40)
+			.map(line => Bun.stripANSI(line))
+			.join("\n");
+		expect(searched).toContain("child summary");
+		expect(searched).not.toContain("root summary");
+		expect(searched).toContain("child-only marker");
+	});
+
+	it("describes the selected preview in the native picker", () => {
+		const component = new HookSelectorComponent(
+			"Browse",
+			[
+				{ label: "first", preview: "# First preview" },
+				{ label: "second", preview: "# Second preview" },
+			],
+			() => {},
+			() => {},
+		);
+		expect(markdownText(component.describe(pickerCx))).toContain("# First preview");
+		component.handleNativeEvent({ type: "select", key: "^picker", item: "1" });
+		expect(markdownText(component.describe(pickerCx))).toContain("# Second preview");
 	});
 });

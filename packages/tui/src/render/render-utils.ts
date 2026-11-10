@@ -101,6 +101,10 @@ export const PREVIEW_LIMITS = {
 	COLLAPSED_LINES: 3,
 	/** Lines shown in expanded view */
 	EXPANDED_LINES: 12,
+	/** Selected-item Markdown preview in a picker. */
+	PICKER_LINES: 6,
+	/** Source bound before rendering a picker preview. */
+	PICKER_CHARS: 4_000,
 	/** Items (files, results) shown in collapsed view */
 	COLLAPSED_ITEMS: 8,
 	/** Definition, type-definition and implementation locations shown in collapsed view */
