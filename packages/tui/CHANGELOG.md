@@ -25,6 +25,9 @@
 
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 
+- The terminal stays responsive through long tool output: the TUI does less work per render while edit previews stream and streamed assistant tables grow ([#15206](https://github.com/can1357/oh-my-pi/pull/15206) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
