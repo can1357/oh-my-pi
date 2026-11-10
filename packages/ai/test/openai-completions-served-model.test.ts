@@ -3,6 +3,11 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
+// Captured from OpenRouter → "Claude Platform on AWS" for anthropic/claude-opus-5
+// (2026-09-15); its header names the serving model, see anthropic-signature.test.ts.
+const OPUS_5_SIGNATURE =
+	"CAISnAIKrgEIERgCKkBun5aw4pp8OwMcmPih8WPkWUcibrzQ8Jg5AooTtYTxb4OGtHksxfgAiCJWYNO0xqC4zVwgAFZ0nU0+5/QoKQStMg1jbGF1ZGUtb3B1cy01OAFCCHRoaW5raW5nWiQ0YzBmMDQ2Zi0yNWZkLTQ1ZmItYmZiMy1hMDhhOGUyNDljYTd6HnVwcm9mXzAxMUNlUVRqY1ZkV2lES1F4d0Zlc3BldqgBndWi1QYSDDfLtFY9SutE7G2OLhoMvcDeJZgBIoqoYb4IIjBvpyKZu6JlaYZEy4cKXscU+OxzGZkpQapVraxYNEwKypi+Dbvz9FD2bO0yHjFhi5kqGwmcLJKipAse80nNfJfANbVYCqh6yW6HgnkXAxgB";
+
 const model = {
 	...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
 	api: "openai-completions",
@@ -54,11 +59,25 @@ describe("openai-completions served model capture", () => {
 		expect(result.upstreamModel).toBeUndefined();
 	});
 
-	it("records a checkpoint-path echo verbatim for the classifier to judge", async () => {
+	it("prefers a signed reasoning_details id over a canonicalised echo", async () => {
+		// The echo is unsigned host text; a gateway canonicalising it (dated slug) must
+		// not hide the model its own forwarded Anthropic signature names.
 		const result = await streamWith([
-			{ model: "/models/GPT-4o-Mini", choices: [{ index: 0, delta: { content: "Hi" } }] },
+			{ model: "anthropic/claude-opus-5-20250915", choices: [{ index: 0, delta: { content: "Hi" } }] },
+			{
+				choices: [
+					{
+						index: 0,
+						delta: {
+							reasoning_details: [
+								{ type: "reasoning.text", format: "anthropic-claude-v1", signature: OPUS_5_SIGNATURE },
+							],
+						},
+					},
+				],
+			},
 		]);
-		expect(result.upstreamModel).toBe("/models/GPT-4o-Mini");
+		expect(result.upstreamModel).toBe("claude-opus-5");
 	});
 
 	it("ignores an empty model echo", async () => {

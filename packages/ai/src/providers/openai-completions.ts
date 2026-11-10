@@ -1543,6 +1543,13 @@ const streamOpenAICompletionsOnce = (
 			/** Server-declared repetition stop; classified after the finalization sweep. */
 			let repetitionStop: string | undefined;
 			let nativeFinishError: string | undefined;
+			/**
+			 * Provenance of `output.upstreamModel` for this stream: true while the value
+			 * came from an unsigned `chunk.model` echo, which signed evidence (the
+			 * `reasoning_details` recovery below) may replace. A signed value is never
+			 * replaced by an echo.
+			 */
+			let upstreamModelFromEcho = false;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1611,14 +1618,20 @@ const streamOpenAICompletionsOnce = (
 				// Local OpenAI-compatible hosts (llama.cpp, LM Studio, VLM `serve`, …) echo
 				// the weights they actually loaded in `ChatCompletionChunk.model`, which can
 				// name a different checkpoint than the id we asked for. Record only a genuine
-				// difference: a host that echoes the requested id stays silent, so the
-				// signed-thinking-block recovery below keeps its more precise source.
+				// difference: a host that echoes the requested id stays silent. An echo is
+				// unsigned host text, so a gateway canonicalising it (dated slug, normalized
+				// id) must not outrank the signed-thinking-block recovery below, which names
+				// the serving model from a signature it cannot lie about.
 				if (!output.upstreamModel) {
 					const servedModel = chunk.model;
-					output.upstreamModel =
+					const echoed =
 						typeof servedModel === "string" && servedModel.length > 0 && servedModel !== requestedWireModelId
 							? servedModel
 							: undefined;
+					if (echoed) {
+						output.upstreamModel = echoed;
+						upstreamModelFromEcho = true;
+					}
 				}
 
 				if (chunk.usage) {
@@ -1933,7 +1946,11 @@ const streamOpenAICompletionsOnce = (
 					}
 
 					for (const detail of reasoningDetails) {
-						if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
+						const signedModel = servedModelFromOpenRouterReasoning(detail);
+						if (signedModel && (!output.upstreamModel || upstreamModelFromEcho)) {
+							output.upstreamModel = signedModel;
+							upstreamModelFromEcho = false;
+						}
 						accumulateReasoningDetail(receivedReasoningDetails, detail);
 						// An encrypted entry also stays on the tool call it names (blob in
 						// OpenRouter's `data` or Bifrost's `signature`): a pass that rewrites the
