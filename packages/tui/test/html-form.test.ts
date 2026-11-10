@@ -63,6 +63,7 @@ const DB_FORM = `<form>
 const SELECT_FORM = `<form><label>Region<select name="region">
 	<option value="us">US</option><option disabled>Unavailable</option>
 	<option value="eu">EU</option><option value="ap">AP</option>
+	<option value="nl">Netherlands</option>
 	</select></label><p>Choose a deployment region.</p></form>`;
 
 function dialog(html: string, overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
@@ -95,14 +96,14 @@ describe("html form", () => {
 			const { form, onSubmit, onCancel } = dialog(SELECT_FORM);
 			form.handleInput(SPACE);
 			form.handleInput(DOWN);
-			form.handleInput("n");
+			form.handleInput("\x1bn");
 			expect(form.debugState().noteEdit).toBe("region=eu");
 			form.handleInput("data residency");
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual({ region: "us" });
 			expect(form.debugState().open).toBe("region");
 			expect(form.render(100).join("\n")).toContain("✎ note");
-			form.handleInput("n");
+			form.handleInput("\x1bn");
 			form.handleInput(" changed");
 			form.handleInput(ESC);
 			expect(form.debugState().notes).toMatchObject({ region: { 2: "data residency" } });
@@ -110,7 +111,7 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data()).toEqual({ region: "eu" });
 			expect(form.render(100).join("\n")).toContain("✎ note");
-			form.handleInput("n");
+			form.handleInput("\x1bn");
 			expect(form.debugState().noteEdit).toBe("region=eu");
 			form.handleInput(" edited");
 			form.handleInput(ENTER);
@@ -119,6 +120,21 @@ describe("html form", () => {
 			]);
 			expect(onSubmit).not.toHaveBeenCalled();
 			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("preserves n type-ahead in closed and open dropdowns", () => {
+			const { form } = dialog(SELECT_FORM);
+			form.handleInput("n");
+			expect(form.data()).toEqual({ region: "nl" });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput("u");
+			form.handleInput(SPACE);
+			form.handleInput("n");
+			expect(form.data()).toEqual({ region: "us" });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "nl" });
 			form.dispose();
 		});
 
@@ -225,17 +241,22 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("defers inactivity submission until note editing closes, exactly once", () => {
+		it("saves a note draft and submits once when inactivity expires during editing", () => {
 			vi.useFakeTimers();
 			const onTimeout = vi.fn();
 			const { form, onCancel } = dialog(DB_FORM, { timeout: 1000, onTimeout });
 			form.handleInput("n");
+			vi.advanceTimersByTime(500);
 			form.handleInput("draft");
-			vi.advanceTimersByTime(2000);
+			vi.advanceTimersByTime(999);
 			expect(onTimeout).not.toHaveBeenCalled();
-			form.handleInput(ESC);
+			vi.advanceTimersByTime(501);
 			expect(onTimeout).toHaveBeenCalledTimes(1);
 			expect(onTimeout).toHaveBeenCalledWith(form.data());
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.optionNotes()).toEqual([
+				{ name: "db", question: "Which store should ledger use?", option: "SQLite", text: "draft" },
+			]);
 			expect(onCancel).not.toHaveBeenCalled();
 			vi.advanceTimersByTime(2000);
 			expect(onTimeout).toHaveBeenCalledTimes(1);

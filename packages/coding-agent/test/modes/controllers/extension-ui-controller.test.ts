@@ -332,14 +332,21 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.getFocused()).toBe(harness.editor);
 	});
 
-	it("submits the current values when the timeout lapses", async () => {
+	it("submits current values and an active note draft when the timeout lapses", async () => {
 		const harness = makeHarness();
 		const onTimeout = vi.fn();
 		const pending = harness.controller.showFormDialog(html, { timeout: 20, onTimeout });
+		harness.handleInput("n");
+		harness.handleInput("local store");
 
-		expect(await pending).toEqual({ data: { db: "sqlite" }, timedOut: true });
+		expect(await pending).toEqual({
+			data: { db: "sqlite" },
+			notes: [{ name: "db", question: "Database", option: "SQLite", text: "local store" }],
+			timedOut: true,
+		});
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
 	});
 
 	it("tears the form down when the signal aborts", async () => {

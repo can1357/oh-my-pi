@@ -18,9 +18,9 @@
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
  * radio (or leaves a field) and moves on, Enter on Submit validates and
  * submits, PgUp/PgDn (←/→ on choices) turn pages (question tabs natively),
- * `app.ask.hide` collapses the form to one row, Esc cancels. On a choice,
- * `n` edits its note without selecting it. With a `timeout`, inactivity
- * submits the current values through `onTimeout`.
+ * `app.ask.hide` collapses the form to one row, Esc cancels. Notes use `n`
+ * on option rows and Alt+n on dropdowns, without selecting the option.
+ * With a `timeout`, inactivity submits the current values through `onTimeout`.
  *
  * @example
  * const dialog = new HtmlFormDialog(parseHtmlForm(html), {
@@ -128,6 +128,7 @@ const MAX_PICTURE_ROWS = 16;
 const PICTURE_SHARE = 0.35;
 /** Options a PgUp/PgDn moves an open dropdown's highlight by. */
 const DROPDOWN_PAGE = 5;
+const SELECT_NOTE_KEY = "alt+n";
 /** Native action a text well's click sends, suffixed with the field index. */
 const EDIT_ACT = "edit:";
 /** List item key of a group's Other answer (option items are `o<index>`). */
@@ -268,7 +269,6 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #notes = new Map<ChoiceField, Map<number, string>>();
 	#noteEditor: { field: ChoiceField; option: number; editor: Editor } | undefined;
 	#savedNoteEditor: Editor | undefined;
-	#noteEditTimeout = false;
 	#useTerminalCursor = false;
 	/** The Other answer's text of each group that offers one. */
 	readonly #others = new Map<ChoiceField, Input>();
@@ -411,9 +411,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		return selected;
 	}
+
 	debugState(): Record<string, unknown> {
 		const stop = this.#stops[this.#focus];
-
 		return {
 			page: this.#page + 1,
 			pages: this.#pages.length,
@@ -859,8 +859,8 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#changed();
 		if (left <= 0) {
 			this.#stopCountdown();
-			if (this.#noteEditor) this.#noteEditTimeout = true;
-			else this.#options.onTimeout?.(this.data());
+			if (this.#noteEditor) this.#saveNote();
+			this.#options.onTimeout?.(this.data());
 			return;
 		}
 		this.#remaining = Math.ceil(left / 1000);
@@ -927,10 +927,6 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#noteEditor = undefined;
 		this.#syncControlFocus();
 		this.#changed();
-		if (this.#noteEditTimeout) {
-			this.#noteEditTimeout = false;
-			this.#options.onTimeout?.(this.data());
-		}
 	}
 
 	#noteFromPointer(key: string): void {
@@ -959,11 +955,11 @@ export class HtmlFormDialog implements Component, Focusable {
 		} else if (leafKey(key) !== "note") return;
 		this.#startNote();
 	}
+
 	#textInput(field: TextField, data: string): void {
 		const up = matchesSelectUp(data);
 		const down = matchesSelectDown(data);
 		const editor = this.#editors.get(field);
-
 		if (!editor) {
 			if (up || down) {
 				this.#moveStop(down ? 1 : -1);
@@ -1011,7 +1007,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option. */
 	#selectInput(field: ChoiceField, data: string): void {
-		if (matchesKey(data, "n")) {
+		if (matchesKey(data, SELECT_NOTE_KEY)) {
 			this.#startNote();
 			return;
 		}
@@ -1040,7 +1036,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** An open dropdown owns the keys until a pick (Enter/Space), Esc or Tab closes it. */
 	#dropdownInput(open: { field: ChoiceField; highlight: number }, data: string): void {
-		if (matchesKey(data, "n")) {
+		if (matchesKey(data, SELECT_NOTE_KEY)) {
 			this.#startNote(open.highlight);
 			return;
 		}
@@ -1321,9 +1317,11 @@ export class HtmlFormDialog implements Component, Focusable {
 		const guard = this.#options.inputGuard;
 		if (guard && this.#guardBlocks()) return `${this.#guardHint(guard)} · ${cancel}`;
 		const stop = this.#stops[this.#focus]!;
+		const noteKey = formatKeyHint(stop.kind === "select" ? SELECT_NOTE_KEY : "n");
 		const enter = formatKeyHint("enter");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
-		if (this.#open) return `${upDown} highlight · ${enter} choose · n note · ${editorKey("tui.select.cancel")} close`;
+		if (this.#open)
+			return `${upDown} highlight · ${enter} choose · ${noteKey} note · ${editorKey("tui.select.cancel")} close`;
 		let action: string;
 		if (stop.kind === "submit") action = `${enter} submit`;
 		else if (stop.kind === "text") action = `${enter} next`;
@@ -1332,7 +1330,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} next`;
 		else if (stop.field.multi) action = `${formatKeyHint("space")} toggle · ${enter} next`;
 		else action = `${enter} choose`;
-		if (stop.kind === "option" || stop.kind === "select") action += " · n note";
+		if (stop.kind === "option" || stop.kind === "select") action += ` · ${noteKey} note`;
 		const hints = [action, `${upDown} move`, `${formatKeyHint("tab")} next field`, cancel];
 		if (this.#pages.length > 1) {
 			const keys =
@@ -1469,6 +1467,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		return out;
 	}
 
+	/** `○ Other: <text>` — an inline input while focused, else the text or a dim prompt. */
 	#otherLine(field: ChoiceField, focused: boolean, width: number): string {
 		const chosen = this.#otherChosen(field);
 		const input = this.#others.get(field)!;
@@ -1745,6 +1744,7 @@ export class HtmlFormDialog implements Component, Focusable {
 				: this.#remaining !== undefined
 					? `Submits these answers in ${this.#remaining}s`
 					: undefined;
+		const noteKey = this.#stops[this.#focus]!.kind === "select" ? SELECT_NOTE_KEY : "n";
 		return actionBar([
 			actionButton("Hide", "hide", hideKey ? { keys: hideKey } : {}),
 			lead ? text([span(lead, "muted")], { truncate: "end", role: "omp.ask.summary" }) : null,
@@ -1752,7 +1752,12 @@ export class HtmlFormDialog implements Component, Focusable {
 			actionButton("Cancel", "cancel", { keys: "escape" }),
 			...(next ? [actionButton("Next", "next", submit ? {} : { tone: "accent" })] : []),
 			...(!blocked && ["option", "select"].includes(this.#stops[this.#focus]!.kind)
-				? [actionButton("Note", "note", { keys: "n", title: "Add a note to the highlighted answer  n" })]
+				? [
+						actionButton("Note", "note", {
+							keys: noteKey,
+							title: `Add a note to the highlighted answer  ${formatKeyHint(noteKey)}`,
+						}),
+					]
 				: []),
 			...(submit
 				? [actionButton(SUBMIT_LABEL, "submit", { ...(next ? {} : { keys: "enter" }), tone: "accent" })]
