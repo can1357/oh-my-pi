@@ -114,8 +114,6 @@
 		"initScripts",
 		"waitForDownload",
 		"downloads",
-		"console",
-		"errors",
 		"clearConsole",
 		"traceStart",
 		"traceStop",
@@ -201,6 +199,12 @@
 		"includes",
 		"join",
 		"flatMap",
+		"sort",
+		"toSorted",
+		"reverse",
+		"concat",
+		"indexOf",
+		"findIndex",
 	];
 	const captureResult = (method, result) => {
 		if (result === null || typeof result !== "object" || !Array.isArray(result.entries)) return result;
@@ -260,8 +264,10 @@
 			tab[method] = (...args) => callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]);
 		}
 		for (const method of ["console", "errors"]) {
-			tab[method] = async (...args) =>
-				captureResult(method, await callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]));
+			tab[method] = (...args) =>
+				callValue(name, [{ method, args: encodeArgs("tab helper argument", args) }]).then(result =>
+					captureResult(method, result),
+				);
 		}
 		tab.id = id => makeElement(name, "id", encodeArgs("tab helper argument", [id]));
 		tab.ref = id => makeElement(name, "ref", encodeArgs("tab helper argument", [id]));

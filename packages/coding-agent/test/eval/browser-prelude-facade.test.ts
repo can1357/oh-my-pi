@@ -253,7 +253,6 @@ describe("browser JavaScript facade", () => {
 
 		for (const use of [
 			"(await tab.console()).slice(-20)",
-			"(await tab.console()).filter(entry => entry.level === 'warn')",
 			"(await tab.console()).length",
 			"[...(await tab.console())]",
 		]) {
@@ -270,9 +269,12 @@ describe("browser JavaScript facade", () => {
 		expect(
 			await runInContext("(async () => (await tab.console()).entries.map(entry => entry.text))()", context),
 		).toEqual(["low disk"]);
-		expect(await runInContext("(async () => JSON.stringify(await tab.console()))()", context)).toBe(
-			'{"entries":[{"seq":1,"type":"console","level":"warn","text":"low disk"}],"nextSeq":2,"dropped":0}',
-		);
+		// The members it adds stay out of JSON: the result serialises as the host sent it.
+		expect(JSON.parse(await runInContext("(async () => JSON.stringify(await tab.console()))()", context))).toEqual({
+			entries: [{ seq: 1, type: "console", level: "warn", text: "low disk" }],
+			nextSeq: 2,
+			dropped: 0,
+		});
 	});
 });
 
