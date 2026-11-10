@@ -132,6 +132,15 @@ describe("agentLoop soft tool requirement", () => {
 		// The skipped peek call still produced a paired tool result (API pairing).
 		const peekResult = messages.find(m => m.role === "toolResult" && m.toolCallId === "p1");
 		expect(peekResult).toBeDefined();
+		const skipText =
+			peekResult?.role === "toolResult" ? peekResult.content.find(part => part.type === "text")?.text : "";
+		expect(skipText).toContain("waiting for the `resolve` tool first");
+		expect(skipText).toContain("Resolve the pending preview.");
+		expect(skipText).not.toContain("assistant ended its turn");
+		expect(peekResult?.role === "toolResult" ? peekResult.details : undefined).toMatchObject({
+			source: "soft_requirement_skipped",
+			waitingFor: "resolve",
+		});
 	});
 
 	it("uses the satisfies predicate over bare name matching for compliance", async () => {

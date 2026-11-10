@@ -427,6 +427,10 @@
 - Fixed inline images, hyperlinks, notifications and styled underlines staying off in iTerm2 sessions reached over SSH, where the forwarded `LC_TERMINAL` marker was ignored ([#16450](https://github.com/can1357/oh-my-pi/pull/16450) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Eval `mcp_progress` status events, updated in place per call and evictable under the status-event cap, plus `formatMCPProgress()` and `MCPToolDetails.progress` for MCP progress display ([#16431](https://github.com/can1357/oh-my-pi/pull/16431) by [@alphastorm](https://github.com/alphastorm))
 
+### Fixed
+
+- Fixed soft-requirement skips of `wait` calls rendering nothing in `render()`; only interrupt skips are hidden now, so the "waiting for <tool>" status shows ([#16535](https://github.com/can1357/oh-my-pi/pull/16535) by [@Komzpa](https://github.com/Komzpa))
+
 ## [18.12.3] - 2026-10-19
 
 ### Added
