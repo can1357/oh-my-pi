@@ -121,19 +121,15 @@ pub fn start(
 		Input::Stdin => (BString::default(), true, "s"),
 		Input::Script(name) => {
 			let path = probe::absolute(&vp.cwd, name);
-			let regular =
-				match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
-					Err(key) => return Some(Flow::Block(key)),
-					Ok(ProbeResult::Stat(Some(stat))) => stat.kind == crate::bash::fs::StatKind::File,
-					_ => false,
-				};
-			match command_probe(k, cx, vp, &Probe::Read { path }) {
+			match command_probe(k, cx, vp, &Probe::ReadKind { path }) {
 				Err(key) => return Some(Flow::Block(key)),
-				Ok(ProbeResult::Bytes(Ok(text))) => {
+				Ok(ProbeResult::BytesKind { data: Ok(text), kind }) => {
 					// Bash 5.2.21/5.3.0 nested script operands use the
 					// same measured 79/80 boundary and regular-file-only
 					// ELF refusal as a top-level operand (including FIFOs).
-					if regular
+					// The kind is the read's own open, so no replacement of
+					// the name can have it describe another object.
+					if kind == Some(crate::bash::fs::FileKind::Regular)
 						&& super::looks_binary(&text, super::BinaryCheck {
 							sample_len: 80,
 							elf_magic:  args.mode.dialect() != crate::bash::Dialect::Zsh,
@@ -143,10 +139,12 @@ pub fn start(
 					}
 					(text, false, "")
 				},
-				Ok(ProbeResult::Bytes(Err(msg))) if msg.as_slice() == b"Is a directory" => {
+				Ok(ProbeResult::BytesKind { data: Err(msg), .. })
+					if msg.as_slice() == b"Is a directory" =>
+				{
 					return reply(vp, 2, message(&dollar0, name, &msg), 126);
 				},
-				Ok(ProbeResult::Bytes(Err(msg))) => {
+				Ok(ProbeResult::BytesKind { data: Err(msg), .. }) => {
 					let status = if msg.as_slice() == b"No such file or directory" {
 						127
 					} else {

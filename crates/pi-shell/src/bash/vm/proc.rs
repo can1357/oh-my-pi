@@ -1393,6 +1393,12 @@ pub enum Probe {
 	Path { name: BString, path: BString },
 	/// Whole-file read (`source`).
 	Read { path: BString },
+	/// Whole-file read whose answer also carries the kind of the object
+	/// that was opened ([`ProbeResult::BytesKind`]): a reader that refuses
+	/// a regular file's bytes but streams a FIFO's learns both from one
+	/// open, so no replacement of the path between a `stat` and a read can
+	/// make the kind describe one inode and the bytes another.
+	ReadKind { path: BString },
 	/// `cd` target validation.
 	Chdir { path: BString },
 	/// Input from an fd up to a delimiter (`read`): `delim` `None` reads
@@ -1467,6 +1473,14 @@ pub enum ProbeResult {
 	Path(Option<BString>),
 	/// File contents, or the `strerror` text of the failure.
 	Bytes(Result<BString, BString>),
+	/// Answer of a [`Probe::ReadKind`]: the same contents or `strerror`
+	/// text as [`Self::Bytes`], and what the opened object was. `kind` is
+	/// `None` when nothing was opened (the read failed) or when the object
+	/// cannot say (an engine descriptor behind `/dev/fd/N`).
+	BytesKind {
+		data: Result<BString, BString>,
+		kind: Option<crate::bash::fs::FileKind>,
+	},
 	Input {
 		data:      BString,
 		eof:       bool,

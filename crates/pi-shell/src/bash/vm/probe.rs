@@ -231,30 +231,10 @@ pub fn perform(
 				Search::Pending(key) => return Err(key),
 			}
 		},
-		Probe::Read { path } => {
-			if let Some(fd) = dev_fd(path) {
-				// `. /dev/stdin`: the engine's fd, not the host process's.
-				let handle = vp.fds.handle(fd);
-				let input = &mut sc.io().input;
-				loop {
-					let mut buf = [0u8; 8192];
-					match handle.poll_read(&mut tcx, &mut buf) {
-						Poll::Ready(Ok(0)) => {
-							break ProbeResult::Bytes(Ok(BString::from(std::mem::take(input))));
-						},
-						Poll::Ready(Ok(n)) => input.extend_from_slice(&buf[..n]),
-						Poll::Ready(Err(e)) => {
-							break ProbeResult::Bytes(Err(BString::from(diag::strerror(&e).as_bytes())));
-						},
-						Poll::Pending => return Err(WaitKey::Read { fd }),
-					}
-				}
-			} else {
-				match read_file(&mut tcx, cx, sc, path) {
-					Poll::Ready(polled) => ProbeResult::Bytes(polled),
-					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
-				}
-			}
+		Probe::Read { path } => ProbeResult::Bytes(read_whole(cx, vp, sc, &mut tcx, path)?.0),
+		Probe::ReadKind { path } => {
+			let (data, kind) = read_whole(cx, vp, sc, &mut tcx, path)?;
+			ProbeResult::BytesKind { data, kind }
 		},
 		Probe::DumpHas(q) => {
 			let (path, name) = (&q.path, &q.name);
@@ -512,12 +492,57 @@ pub(super) fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
 	r
 }
 
+/// A whole-file read of `path`, with the kind of the object it came from:
+/// the engine's own descriptor behind a `/dev/fd/N` name, else the host's
+/// file. Both observations are of one open, so nothing the filesystem does
+/// to `path` meanwhile can make them disagree.
+fn read_whole(
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	sc: &mut Scratch,
+	tcx: &mut Context<'_>,
+	path: &BString,
+) -> Result<(Result<BString, BString>, Option<FileKind>), WaitKey> {
+	if let Some(fd) = dev_fd(path) {
+		// `. /dev/stdin`: the engine's fd, not the host process's.
+		let kind = vp.fds.get(fd).and_then(|h| h.kind());
+		let handle = vp.fds.handle(fd);
+		let input = &mut sc.io().input;
+		loop {
+			let mut buf = [0u8; 8192];
+			match handle.poll_read(tcx, &mut buf) {
+				Poll::Ready(Ok(0)) => return Ok((Ok(BString::from(std::mem::take(input))), kind)),
+				Poll::Ready(Ok(n)) => input.extend_from_slice(&buf[..n]),
+				Poll::Ready(Err(e)) => {
+					return Ok((Err(BString::from(diag::strerror(&e).as_bytes())), kind));
+				},
+				Poll::Pending => return Err(WaitKey::Read { fd }),
+			}
+		}
+	}
+	match read_file_kind(tcx, cx, sc, path) {
+		Poll::Ready(polled) => Ok(polled),
+		Poll::Pending => Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
+	}
+}
+
 fn read_file(
 	tcx: &mut Context<'_>,
 	cx: &mut Cx<'_>,
 	sc: &mut Scratch,
 	path: &BString,
 ) -> Poll<Result<BString, BString>> {
+	read_file_kind(tcx, cx, sc, path).map(|(data, _)| data)
+}
+
+/// [`read_file`], answering with the opened file's kind beside its bytes;
+/// `None` when no file was opened (the open itself failed).
+fn read_file_kind(
+	tcx: &mut Context<'_>,
+	cx: &mut Cx<'_>,
+	sc: &mut Scratch,
+	path: &BString,
+) -> Poll<(Result<BString, BString>, Option<FileKind>)> {
 	let err = |e: &std::io::Error| BString::from(diag::strerror(e).as_bytes());
 	// The bytes so far, beside `sc.live` (the file).
 	let input = &mut sc.io.get_or_insert_with(Box::default).input;
@@ -528,23 +553,24 @@ fn read_file(
 				let opened = cx.host.fs().open(BStr::new(path), OpenFlags::READ, 0);
 				match opened {
 					FsPoll::Ready(Ok(f)) => sc.live = Live::File(f),
-					FsPoll::Ready(Err(e)) => return Poll::Ready(Err(err(&e))),
+					FsPoll::Ready(Err(e)) => return Poll::Ready((Err(err(&e)), None)),
 					FsPoll::Pending(f) => sc.live = Live::Open(f),
 				}
 			},
 			Live::Open(f) => match f.poll(tcx) {
 				Poll::Ready(Ok(file)) => sc.live = Live::File(file),
-				Poll::Ready(Err(e)) => return Poll::Ready(Err(err(&e))),
+				Poll::Ready(Err(e)) => return Poll::Ready((Err(err(&e)), None)),
 				Poll::Pending => return Poll::Pending,
 			},
 			Live::File(f) => {
 				let mut buf = [0u8; 8192];
 				match f.poll_read(tcx, &mut buf) {
 					Poll::Ready(Ok(0)) => {
-						return Poll::Ready(Ok(BString::from(std::mem::take(input))));
+						let kind = f.kind();
+						return Poll::Ready((Ok(BString::from(std::mem::take(input))), Some(kind)));
 					},
 					Poll::Ready(Ok(n)) => input.extend_from_slice(&buf[..n]),
-					Poll::Ready(Err(e)) => return Poll::Ready(Err(err(&e))),
+					Poll::Ready(Err(e)) => return Poll::Ready((Err(err(&e)), Some(f.kind()))),
 					Poll::Pending => return Poll::Pending,
 				}
 			},
