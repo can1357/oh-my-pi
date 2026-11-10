@@ -39,11 +39,13 @@ pub(super) struct Atoms {
 	pub time_probe:          Atom,
 	/// `_NET_WM_WINDOW_TYPE`s of override-redirect windows that hold no grab.
 	pub passive_popup_types: [Atom; 3],
+	/// Master pointer property naming the session holding an MPX pair.
+	pub mpx_holder:          Atom,
 }
 
 impl Atoms {
 	pub(super) fn intern(conn: &RustConnection) -> CoreResult<Self> {
-		const NAMES: [&str; 10] = [
+		const NAMES: [&str; 11] = [
 			"_NET_ACTIVE_WINDOW",
 			"_NET_WM_PID",
 			"_NET_WM_NAME",
@@ -54,6 +56,7 @@ impl Atoms {
 			"_NET_WM_WINDOW_TYPE_TOOLTIP",
 			"_NET_WM_WINDOW_TYPE_NOTIFICATION",
 			"_NET_WM_WINDOW_TYPE_DND",
+			"_OMP_MPX_HOLDER",
 		];
 		let cookies = NAMES
 			.iter()
@@ -74,6 +77,7 @@ impl Atoms {
 			wm_state:            atoms[5],
 			time_probe:          atoms[6],
 			passive_popup_types: [atoms[7], atoms[8], atoms[9]],
+			mpx_holder:          atoms[10],
 		})
 	}
 }

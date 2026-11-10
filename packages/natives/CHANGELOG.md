@@ -31,6 +31,10 @@
 - Computer element searches accept native role names, spaced role names such as `text field`, and `radiobutton` for macOS `radio` controls without changing printed accessibility roles ([#18745](https://github.com/can1357/oh-my-pi/pull/18745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input and takeover refusing every call, with nothing sent, while Finder is in front with its focus on the desktop and a Finder window open; Finder gets its front status back with its focus left on the desktop ([#18680](https://github.com/can1357/oh-my-pi/pull/18680) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed your running Qt 6.5+ apps crashing on Linux X11 whenever a `computer` session that used background window input ended, was cancelled, or was cleaned up by the next omp process
+
 ## [18.18.6] - 2026-11-09
 
 ### Fixed

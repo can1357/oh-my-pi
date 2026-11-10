@@ -9,11 +9,14 @@
 //! non-synthetic XI2 events. Core events are disabled: core-protocol WMs
 //! otherwise mistake virtual-device focus for a user activation.
 //!
-//! The pair lives for the whole desktop session: adding and removing masters
-//! churns the `XInput` hierarchy, which crashes mutter 42 and `LibreOffice` VCL
-//! when it happens per action. Masters are named after their owning process
-//! incarnation so a later session can remove the ones a killed process left
-//! behind (an orphaned master keeps drawing a second cursor).
+//! A master pair, once added, stays for the X server's lifetime. Removing a
+//! master makes every running Qt 6.5+ xcb client delete that master's child
+//! devices twice and crash (QTBUG-146876), and adding and removing masters per
+//! action crashes mutter 42 and `LibreOffice` VCL. So a session takes a pair
+//! no live session holds, or adds one, and records itself as the holder in a
+//! property of the master pointer; when it ends it unplugs its uinput slaves
+//! and marks the pair free for the next session. Holders are named after
+//! their process incarnation, so a pair a killed process held is taken again.
 
 use std::{
 	fs, io,
@@ -27,12 +30,11 @@ use x11rb::{
 	protocol::{
 		Event,
 		xinput::{
-			self, ChangeMode, ConnectionExt as _, Device, DeviceType, EventMode, HierarchyChange,
+			self, ConnectionExt as _, Device, DeviceType, EventMode, HierarchyChange,
 			HierarchyChangeData, HierarchyChangeDataAddMaster, HierarchyChangeDataAttachSlave,
-			HierarchyChangeDataRemoveMaster, XIChangePropertyAux, XIDeviceInfo, XIEventMask,
-			XIGetPropertyItems,
+			XIChangePropertyAux, XIDeviceInfo, XIEventMask, XIGetPropertyItems,
 		},
-		xproto::{AtomEnum, ConnectionExt as _, PropMode, Window},
+		xproto::{Atom, AtomEnum, ConnectionExt as _, PropMode, Window},
 	},
 	rust_connection::RustConnection,
 };
@@ -78,6 +80,10 @@ const WARM_UP_KEYCODE: u8 = 240 + X_KEYCODE_OFFSET;
 const WARM_UP_SETTLE: Duration = Duration::from_millis(120);
 /// Master names that encode an owner incarnation (see [`Owner`]).
 const OWNER_PREFIX: &str = "OMP MPX v1.";
+/// Every master this module adds, with or without an owner incarnation.
+const MASTER_PREFIX: &str = "OMP MPX ";
+/// Holder property value of a pair no session holds.
+const HOLDER_FREE: &[u8] = b"free";
 
 static NONCE: AtomicU16 = AtomicU16::new(1);
 
@@ -143,39 +149,32 @@ impl Mpx {
 		}
 		let atoms = Atoms::intern(&conn)?;
 		let owner = Owner::current();
-		if let Some(owner) = &owner {
-			reap_orphans(&conn, owner);
-		}
 		let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
 		let name = owner.as_ref().map_or_else(
 			|| format!("OMP MPX {}.{nonce:x}", std::process::id()),
 			|owner| owner.master_name(nonce),
 		);
-		// The non-X resource first: a late uinput failure must not leave a
-		// fresh master pair behind.
+		// Prove hotplug before touching the hierarchy: a pair once added stays,
+		// so a server that never binds the slave must not get one.
 		let pointer_name = format!("{name} uinput pointer");
-		let pointer = UInputDevice::pointer(&pointer_name)?;
-		add_master(&conn, &name)?;
-		let (master_pointer, master_keyboard) = find_masters(&conn, &name)?;
-		let pointer_slave = match wait_for_slave(&conn, &pointer_name, DeviceType::SLAVE_POINTER)
-			.and_then(|slave| attach(&conn, slave, master_pointer).map(|()| slave))
-			.and_then(|slave| {
-				select_raw(
-					&conn,
-					root,
-					slave,
-					XIEventMask::RAW_BUTTON_PRESS
-						| XIEventMask::RAW_BUTTON_RELEASE
-						| XIEventMask::RAW_MOTION,
-				)
-				.map(|()| slave)
-			}) {
-			Ok(slave) => slave,
-			Err(error) => {
-				remove_master(&conn, master_pointer);
-				return Err(error);
-			},
-		};
+		let mut pointer = UInputDevice::pointer(&pointer_name)?;
+		let pointer_slave = wait_for_slave(&conn, &pointer_name, DeviceType::SLAVE_POINTER)?;
+		let (master_pointer, master_keyboard) =
+			claim_pair(&conn, atoms.mpx_holder, &name, owner.as_ref())?;
+		if let Err(error) = attach(&conn, pointer_slave, master_pointer).and_then(|()| {
+			select_raw(
+				&conn,
+				root,
+				pointer_slave,
+				XIEventMask::RAW_BUTTON_PRESS
+					| XIEventMask::RAW_BUTTON_RELEASE
+					| XIEventMask::RAW_MOTION,
+			)
+		}) {
+			pointer.destroy();
+			release_pair(&conn, atoms.mpx_holder, master_pointer, master_keyboard);
+			return Err(error);
+		}
 		set_flat_acceleration(&conn, pointer_slave);
 		let mpx = Self {
 			conn,
@@ -758,13 +757,14 @@ impl Mpx {
 
 impl Drop for Mpx {
 	fn drop(&mut self) {
-		// Unplug the slaves first so the removal never hands a live slave back
-		// to the user's core devices.
+		// Park the sprite even after a cancelled call, and unplug the slaves
+		// before the pair is free, so the next holder inherits neither.
+		control::cleanup(|| self.park());
 		if let Some(mut keyboard) = self.keyboard.take() {
 			keyboard.device.destroy();
 		}
 		self.pointer.destroy();
-		remove_master(&self.conn, self.master_pointer);
+		release_pair(&self.conn, self.atoms.mpx_holder, self.master_pointer, self.master_keyboard);
 	}
 }
 
@@ -874,13 +874,7 @@ fn find_masters(conn: &RustConnection, name: &str) -> CoreResult<(u16, u16)> {
 		find("keyboard", DeviceType::MASTER_KEYBOARD),
 	) {
 		(Some(pointer), Some(keyboard)) => Ok((pointer, keyboard)),
-		(Some(pointer), None) => {
-			remove_master(conn, pointer);
-			Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master keyboard"))
-		},
-		_ => {
-			Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master pointer"))
-		},
+		_ => Err(DesktopError::input_failed("XIChangeHierarchy did not create the MPX master pair")),
 	}
 }
 
@@ -923,32 +917,6 @@ fn attach(conn: &RustConnection, slave: u16, master: u16) -> CoreResult<()> {
 		.map_err(mpx_failed)?
 		.check()
 		.map_err(mpx_failed)
-}
-
-/// Removes a master pair without ever attaching a pending virtual slave to
-/// the user's core devices. Kernel hot-unplug is asynchronous.
-fn remove_master(conn: &RustConnection, master_pointer: u16) {
-	if let Ok(devices) = query_devices(conn)
-		&& let Some(pointer) = devices
-			.iter()
-			.find(|device| device.deviceid == master_pointer)
-		&& let Ok(cookie) = conn.xinput_xi_set_focus(NONE, CURRENT_TIME, pointer.attachment)
-	{
-		let _ = cookie.check();
-	}
-	let change = HierarchyChange {
-		len:  3,
-		data: HierarchyChangeData::RemoveMaster(HierarchyChangeDataRemoveMaster {
-			deviceid:        master_pointer,
-			return_mode:     ChangeMode::FLOAT,
-			return_pointer:  0,
-			return_keyboard: 0,
-		}),
-	};
-	if let Ok(cookie) = conn.xinput_xi_change_hierarchy(&[change]) {
-		let _ = cookie.check();
-	}
-	let _ = conn.flush();
 }
 
 fn select_raw(
@@ -1020,10 +988,15 @@ fn set_flat_acceleration(conn: &RustConnection, slave: u16) {
 	}
 }
 
-/// Removes masters left behind by dead incarnations of this user's processes
-/// on this machine. Runs under a server grab so no device id is reused
-/// between enumeration and removal.
-fn reap_orphans(conn: &RustConnection, owner: &Owner) {
+/// Takes a master pair for the session named `name`: one no live session
+/// holds, else a new one. Runs under a server grab, so two sessions never
+/// take the same pair.
+fn claim_pair(
+	conn: &RustConnection,
+	holder: Atom,
+	name: &str,
+	owner: Option<&Owner>,
+) -> CoreResult<(u16, u16)> {
 	struct Grab<'a>(&'a RustConnection);
 	impl Drop for Grab<'_> {
 		fn drop(&mut self) {
@@ -1032,32 +1005,97 @@ fn reap_orphans(conn: &RustConnection, owner: &Owner) {
 			}
 		}
 	}
-	if conn
+	conn
 		.grab_server()
-		.ok()
-		.and_then(|cookie| cookie.check().ok())
-		.is_none()
-	{
-		return;
-	}
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)?;
 	let _grab = Grab(conn);
-	let Ok(devices) = query_devices(conn) else {
-		return;
+	let devices = query_devices(conn)?;
+	let free = devices.iter().find(|info| {
+		info.type_ == DeviceType::MASTER_POINTER
+			&& std::str::from_utf8(&info.name).is_ok_and(|pointer| {
+				pointer.starts_with(MASTER_PREFIX)
+					&& is_claimable(
+						read_holder(conn, holder, info.deviceid).as_deref(),
+						pointer,
+						owner,
+						process_start,
+					)
+			})
+	});
+	let pair = match free {
+		Some(info) => (info.deviceid, info.attachment),
+		None => {
+			add_master(conn, name)?;
+			find_masters(conn, name)?
+		},
 	};
-	for info in devices
-		.iter()
-		.filter(|info| info.type_ == DeviceType::MASTER_POINTER)
-	{
-		let Some(candidate) = std::str::from_utf8(&info.name)
-			.ok()
-			.and_then(Owner::from_pointer_name)
-		else {
-			continue;
-		};
-		if candidate.is_stale_for(owner, process_start) {
-			remove_master(conn, info.deviceid);
-		}
+	write_holder(conn, holder, pair.0, name.as_bytes())?;
+	Ok(pair)
+}
+
+/// Hands a pair back: its keyboard focuses nothing and the next session may
+/// take it. Removing it instead would crash Qt 6.5+ clients (module docs).
+fn release_pair(conn: &RustConnection, holder: Atom, master_pointer: u16, master_keyboard: u16) {
+	if let Ok(cookie) = conn.xinput_xi_set_focus(NONE, CURRENT_TIME, master_keyboard) {
+		let _ = cookie.check();
 	}
+	let _ = write_holder(conn, holder, master_pointer, HOLDER_FREE);
+	let _ = conn.flush();
+}
+
+/// The holder property of a master pointer; `None` when it has none.
+fn read_holder(conn: &RustConnection, holder: Atom, master_pointer: u16) -> Option<Vec<u8>> {
+	let reply = conn
+		.xinput_xi_get_property(master_pointer, false, holder, AtomEnum::ANY.into(), 0, 64)
+		.ok()?
+		.reply()
+		.ok()?;
+	match reply.items {
+		XIGetPropertyItems::Data8(value) if reply.type_ != NONE => Some(value),
+		_ => None,
+	}
+}
+
+fn write_holder(
+	conn: &RustConnection,
+	holder: Atom,
+	master_pointer: u16,
+	value: &[u8],
+) -> CoreResult<()> {
+	conn
+		.xinput_xi_change_property(
+			master_pointer,
+			PropMode::REPLACE,
+			holder,
+			AtomEnum::STRING.into(),
+			value.len() as u32,
+			&XIChangePropertyAux::Data8(value.to_vec()),
+		)
+		.map_err(mpx_failed)?
+		.check()
+		.map_err(mpx_failed)
+}
+
+/// Whether a session of `current` may take the pair whose master pointer is
+/// named `pointer` and whose holder property reads `holder`. A pair without
+/// the property was added by an earlier version and is held by the owner its
+/// name encodes. Holders whose death cannot be proven keep their pair.
+fn is_claimable(
+	holder: Option<&[u8]>,
+	pointer: &str,
+	current: Option<&Owner>,
+	start_of: impl FnOnce(u32) -> io::Result<u64>,
+) -> bool {
+	let holder = match holder {
+		Some(value) if value == HOLDER_FREE => return true,
+		Some(value) => std::str::from_utf8(value).ok().and_then(Owner::from_name),
+		None => Owner::from_pointer_name(pointer),
+	};
+	holder
+		.zip(current)
+		.is_some_and(|(holder, current)| holder.is_stale_for(current, start_of))
 }
 
 /// Process incarnation encoded in a master's name: an identity domain (boot,
@@ -1100,13 +1138,18 @@ impl Owner {
 		format!("{OWNER_PREFIX}{:016x}.{:x}.{:x}.{nonce:x}", self.domain, self.pid, self.start)
 	}
 
-	fn from_pointer_name(name: &str) -> Option<Self> {
-		let mut parts = name.strip_circumfix(OWNER_PREFIX, " pointer")?.split('.');
+	/// The owner a session or master name (`master_name`) encodes.
+	fn from_name(name: &str) -> Option<Self> {
+		let mut parts = name.strip_prefix(OWNER_PREFIX)?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let _nonce = u16::from_str_radix(parts.next()?, 16).ok()?;
 		(parts.next().is_none() && pid != 0).then_some(Self { domain, pid, start })
+	}
+
+	fn from_pointer_name(name: &str) -> Option<Self> {
+		Self::from_name(name.strip_suffix(" pointer")?)
 	}
 
 	/// Whether this master's owner is provably gone. Foreign domains and
@@ -1175,6 +1218,67 @@ mod tests {
 		assert!(peer(OWNER.pid, 1).is_stale_for(&OWNER, gone), "earlier incarnation of our pid");
 		let foreign = Owner { domain: 1, ..peer(99, 5) };
 		assert!(!foreign.is_stale_for(&OWNER, gone), "other machine or namespace");
+	}
+
+	#[test]
+	fn a_pair_is_taken_only_when_free_or_its_holder_is_provably_gone() {
+		let gone = |_| Err(io::Error::from(io::ErrorKind::NotFound));
+		let live = |_| Ok(5);
+		let only_peer_lives = |pid| {
+			if pid == 99 {
+				Ok(5)
+			} else {
+				Err(io::ErrorKind::NotFound.into())
+			}
+		};
+		let peer = Owner { pid: 99, start: 5, ..OWNER }.master_name(1);
+		let creator = format!("{} pointer", Owner { pid: 98, start: 5, ..OWNER }.master_name(1));
+		assert!(is_claimable(Some(HOLDER_FREE), &creator, Some(&OWNER), live), "released");
+		assert!(
+			is_claimable(Some(HOLDER_FREE), "OMP MPX 7.1 pointer", None, live),
+			"released, any process"
+		);
+		assert!(
+			!is_claimable(Some(peer.as_bytes()), &creator, Some(&OWNER), only_peer_lives),
+			"the holder, not the dead creator, decides"
+		);
+		assert!(is_claimable(Some(peer.as_bytes()), &creator, Some(&OWNER), gone), "dead holder");
+		let sibling = OWNER.master_name(2);
+		assert!(
+			!is_claimable(Some(sibling.as_bytes()), &creator, Some(&OWNER), gone),
+			"our other session"
+		);
+		assert!(
+			!is_claimable(Some(b"OMP MPX 7.1"), &creator, Some(&OWNER), gone),
+			"unidentifiable holder"
+		);
+		assert!(!is_claimable(Some(peer.as_bytes()), &creator, None, gone), "we cannot prove death");
+		// Pairs added before the holder property name their owner.
+		assert!(is_claimable(None, &creator, Some(&OWNER), gone), "earlier version, dead");
+		assert!(!is_claimable(None, &creator, Some(&OWNER), live), "earlier version, live");
+	}
+
+	/// Removing a master crashes running Qt 6.5+ clients, so a session hands
+	/// its pair to the next one instead. Needs Xorg with uinput hotplug and a
+	/// writable `/dev/uinput`; run it with `--ignored`.
+	#[test]
+	#[ignore = "needs Xorg with uinput hotplug"]
+	fn a_session_hands_its_pair_to_the_next_without_removing_it() {
+		let masters = || {
+			let (conn, _) = x11rb::connect(None).unwrap();
+			query_devices(&conn)
+				.unwrap()
+				.iter()
+				.filter(|info| info.type_ == DeviceType::MASTER_POINTER)
+				.map(|info| info.deviceid)
+				.collect::<Vec<_>>()
+		};
+		let first = Mpx::create().unwrap();
+		let pair = first.master_pointer;
+		drop(first);
+		assert!(masters().contains(&pair), "the pair outlives its session");
+		let second = Mpx::create().unwrap();
+		assert_eq!(second.master_pointer, pair, "the next session takes the free pair");
 	}
 
 	#[test]
