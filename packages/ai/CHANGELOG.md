@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added host-run Cursor subagent types: `CursorExecHandlers.customSubagents` advertises them in the request context so Cursor's `Task` accepts the type, `artifactsFolder` names the folder `Task` may attach files from (`file_attachments`), and `CursorSubagentCall` carries the model Cursor picked (`modelId`) and the attached videos. `cursorVideos` (`CursorOptions.videos`) sends videos inline in the user message, which Gemini models read
+- Added host-run Cursor subagent types: `CursorExecHandlers.customSubagents` advertises them in the request context so Cursor's `Task` accepts the type, `artifactsFolder` names the folder `Task` may attach files from (`file_attachments`), and `CursorSubagentCall` carries the model Cursor picked (`modelId`) and the attached videos. `cursorVideos` (`CursorOptions.videos`) sends videos inline in the user message, which Gemini models read ([#18741](https://github.com/can1357/oh-my-pi/pull/18741) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - Added `CursorExecHandlers.subagent` and `subagentAwait`: Cursor's native `Task` runs on the host's subagents and returns their report instead of being rejected. Hosts without the handlers still reject it ([#18736](https://github.com/can1357/oh-my-pi/pull/18736) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ## [18.18.4] - 2026-11-09

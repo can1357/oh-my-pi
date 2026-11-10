@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the Cursor proto fields for video attachments and host-run subagents: `SelectedVideo` and `SelectedContext.selected_videos`, `SubagentArgs.model_id` and `selected_context`, `RequestContextEnv.artifacts_folder`, `CustomSubagent.force_default_model`
+- Added the Cursor proto fields for video attachments and host-run subagents: `SelectedVideo` and `SelectedContext.selected_videos`, `SubagentArgs.model_id` and `selected_context`, `RequestContextEnv.artifacts_folder`, `CustomSubagent.force_default_model` ([#18741](https://github.com/can1357/oh-my-pi/pull/18741) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 
 ### Fixed
 

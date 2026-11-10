@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added Cursor's `videoReview` subagent: a Cursor model hands videos to Gemini 3.1 Pro, which watches them with their sound and reports what it sees and hears. The model copies the video into the session's artifacts folder and attaches it with `Task`'s `file_attachments` (up to 5 videos, 35 MB in total)
+- Added Cursor's `videoReview` subagent: a Cursor model hands videos to Gemini 3.1 Pro, which watches them with their sound and reports what it sees and hears. The model copies the video into the session's artifacts folder and attaches it with `Task`'s `file_attachments` (up to 5 videos, 35 MB in total) ([#18741](https://github.com/can1357/oh-my-pi/pull/18741) by [@KadirBerkpolat1](https://github.com/KadirBerkpolat1))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 
 ### Fixed
