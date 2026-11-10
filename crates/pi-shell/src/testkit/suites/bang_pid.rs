@@ -388,7 +388,7 @@ fn a_redirection_that_would_wait_is_left_to_the_process() {
 	let world = World::new();
 	let fs = MemFs::with_latency(7, 1.0, 1);
 	let host = world.host().with_fs(fs).with_child_opens();
-	let (out, _) = run(host, "/x/sleeper > /f 2>&1 & echo $!; kill $!; wait $!; echo $?");
+	let (out, _) = run(host, "/x/sleeper > /out 2>&1 & echo $!; kill $!; wait $!; echo $?");
 	assert_eq!(out, "5001\n143\n");
 	let seen = world.redirs.lock().clone();
 	let Some((name, Some(redirs))) = seen.first() else {
@@ -400,14 +400,14 @@ fn a_redirection_that_would_wait_is_left_to_the_process() {
 	else {
 		panic!("{redirs:?}");
 	};
-	assert_eq!((fds.as_slice(), path.as_slice(), *mode), (&[1][..], &b"/f"[..], 0o644));
+	assert_eq!((fds.as_slice(), path.as_slice(), *mode), (&[1][..], &b"/out"[..], 0o644));
 	assert_eq!(
 		*flags,
 		OpenFlags::WRITE
 			.with(OpenFlags::CREATE)
 			.with(OpenFlags::TRUNC)
 	);
-	assert!(diag.ends_with(b"/f: ") && diag.starts_with(b"bash: "), "{diag}");
+	assert!(diag.ends_with(b"/out: ") && diag.starts_with(b"bash: "), "{diag}");
 	assert!(redirs.exec_diag.ends_with(b"/x/sleeper: "), "{}", redirs.exec_diag);
 
 	// A builtin opens it here: the job keeps its virtual pid at once.
@@ -420,7 +420,7 @@ fn a_redirection_that_would_wait_is_left_to_the_process() {
 	// Without the host's consent the engine opens it: virtual pid, no wait.
 	let world = World::new();
 	let host = world.host().with_fs(MemFs::with_latency(7, 1.0, 1));
-	let (out, _) = run(host, "/x/true > /f & echo $!; wait");
+	let (out, _) = run(host, "/x/true > /out & echo $!; wait");
 	assert!(is_virtual(out.trim()), "{out}");
 	assert!(world.redirs.lock().iter().all(|(_, r)| r.is_none()));
 }

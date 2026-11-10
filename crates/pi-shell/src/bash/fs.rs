@@ -45,6 +45,19 @@ pub fn url_root_len(path: &[u8]) -> Option<usize> {
 	path[colon..].starts_with(b"://").then_some(colon + 3)
 }
 
+/// An MSYS drive alias (`/c/x`, `/mnt/c/x`) in the engine's Windows spelling
+/// `C:/x`; `None` for any other path.
+///
+/// The engine applies it on Windows wherever it makes a name absolute, so
+/// command names, redirections, `test` and `cd` reach the drive the alias
+/// names ([`pi_vfs::msys_drive`] parses it).
+pub fn msys_drive_path(path: &[u8]) -> Option<BString> {
+	let (letter, tail) = pi_vfs::msys_drive(path)?;
+	let mut out = BString::from(vec![letter, b':', b'/']);
+	out.extend_from_slice(tail);
+	Some(out)
+}
+
 /// A Windows path without the verbatim prefix `canonicalize` puts on drive
 /// and share paths, as a user and `$PWD` spell it.
 ///
