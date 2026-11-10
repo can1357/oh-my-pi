@@ -41,6 +41,14 @@ if (!String(status.path ?? "").startsWith(`${tree}/`)) {
 	console.error(`run-fatal-sites-batch: ${tree} loaded ${status.path}, which is not inside it`);
 	process.exit(3);
 }
+if (status.stale) {
+	console.error(
+		`run-fatal-sites-batch: the loaded addon is @oh-my-pi/pi-natives@${status.version}, ` +
+			`but this tree expects @${status.packageVersion}. Rebuild with ` +
+			"`bun --cwd=packages/natives run build` before measuring.",
+	);
+	process.exit(3);
+}
 const cases = JSON.parse(await Bun.file(caseFile).text()) as {
 	id: string;
 	script: string;
