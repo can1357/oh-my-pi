@@ -358,6 +358,8 @@ export interface ToolSession {
 	readonly seanceSourceArtifactsDir?: string;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Whether this session is a subagent (task child, eval `agent()`, `/tan` clone) rather than the session the user talks to. */
+	subagent?: boolean;
 	/** Get this agent's eval executor session ID; keys its retained JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
