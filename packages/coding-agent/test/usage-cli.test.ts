@@ -26,7 +26,11 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { resetAccountLockKey } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
-import { claimResetExpiryNotice } from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
+import {
+	claimResetExpiryNotice,
+	classifyResetExpiry,
+	resetSpendVerdict,
+} from "@oh-my-pi/pi-coding-agent/session/reset-expiry";
 import { resetLockPath } from "@oh-my-pi/pi-coding-agent/session/reset-fence";
 import {
 	collectUnreportedAccounts,
@@ -1495,22 +1499,29 @@ describe("formatUsageBreakdown", () => {
 
 	it("decides each provider's expiring reset by its own setting", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const reports = [
-			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
-			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
-		];
-		const options = resetExpiryOptions({
+		const codex = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
+		const claude = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [
+			cedarGrant(now, "cedar", 3 * HOUR),
+		]);
+		const settings = Settings.isolated({
 			"codexResets.autoRedeem5h": "yes",
 			"codexResets.autoRedeemWeekly": "yes",
 			"claudeResets.autoRedeem5h": "no",
 			"claudeResets.autoRedeemWeekly": "no",
 		});
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
-		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
-		expect(text).toContain("(codexResets.autoRedeem5h + codexResets.autoRedeemWeekly: yes)");
-		expect(text).toContain(
-			"→ not spent automatically  (claudeResets.autoRedeem5h + claudeResets.autoRedeemWeekly: no)",
-		);
+		const verdictOf = (report: UsageReport) => {
+			const warning = classifyResetExpiry(report, now);
+			if (!warning) throw new Error(`expected an expiry warning for ${report.provider}`);
+			return resetSpendVerdict(report, warning, settings, now);
+		};
+		const codexVerdict = verdictOf(codex);
+		expect(codexVerdict).toMatchObject({ kind: "auto", mode: "yes" });
+		expect(codexVerdict.setting).toContain("codexResets.autoRedeemWeekly");
+		expect(codexVerdict.setting).not.toContain("claudeResets");
+		const claudeVerdict = verdictOf(claude);
+		expect(claudeVerdict).toMatchObject({ kind: "off", mode: "no" });
+		expect(claudeVerdict.setting).toContain("claudeResets.autoRedeemWeekly");
+		expect(claudeVerdict.setting).not.toContain("codexResets");
 	});
 
 	it.each([
@@ -1521,8 +1532,7 @@ describe("formatUsageBreakdown", () => {
 				"claudeResets.autoRedeemWeekly": "no",
 				"claudeResets.autoRedeemFable": "yes",
 			},
-			verdict:
-				"→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeemFable: yes)",
+			expected: { kind: "auto", mode: "yes", setting: "claudeResets.autoRedeemFable" },
 		},
 		{
 			name: "leaves a Fable grant when only the Fable setting refuses it",
@@ -1531,17 +1541,19 @@ describe("formatUsageBreakdown", () => {
 				"claudeResets.autoRedeemWeekly": "yes",
 				"claudeResets.autoRedeemFable": "no",
 			},
-			verdict: "→ not spent automatically  (claudeResets.autoRedeemFable: no)",
+			expected: { kind: "off", mode: "no", setting: "claudeResets.autoRedeemFable" },
 		},
-	])("$name", ({ overrides, verdict }) => {
+	])("$name", ({ overrides, expected }) => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const report = claudeFableResetReport(now, 0.6);
+		const warning = classifyResetExpiry(report, now);
+		if (!warning) throw new Error("expected an expiry warning for the Fable grant");
+		// The grant also clears 5h, but only the Fable key governs it.
+		expect(resetSpendVerdict(report, warning, Settings.isolated(overrides), now)).toMatchObject(expected);
 		const text = stripVTControlCharacters(
 			formatUsageBreakdown([report], [], now, undefined, [], undefined, resetExpiryOptions(overrides)),
 		);
-		expect(text).toContain("▲ 1 saved reset expires within 24h");
-		// The grant also clears 5h, but only the Fable key governs it, so no sibling key is named.
-		expect(text).toContain(verdict);
+		expect(text).toContain("claudeResets.autoRedeemFable");
 		expect(text).not.toContain("claudeResets.autoRedeem5h");
 	});
 
