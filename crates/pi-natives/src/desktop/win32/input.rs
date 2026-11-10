@@ -1464,24 +1464,36 @@ mod foreground {
 		holding(target, &presses, &releases, operation)
 	}
 
-	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
-		with_foreground_keys(id, keys, || Ok(()))
+	/// Takeover chord for window `id`. `focus` runs once the user's foreground
+	/// window is saved and the target is in front: focusing an element brings
+	/// its window forward, so focusing it first would save the target as the
+	/// window to hand the foreground back to.
+	pub(super) fn key_chord(
+		id: &str,
+		keys: &[KeyName],
+		focus: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		with_foreground_keys(id, keys, focus, || Ok(()))
 	}
 
 	pub(super) fn hold_keys(id: &str, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
-		with_foreground_keys(id, keys, || control::wait(duration))
+		with_foreground_keys(id, keys, || Ok(()), || control::wait(duration))
 	}
 
 	fn with_foreground_keys(
 		id: &str,
 		keys: &[KeyName],
+		focus: impl FnOnce() -> CoreResult<()>,
 		held: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		// Resolve all key names before activation or input.
 		for &key in keys {
 			background::virtual_key(key)?;
 		}
-		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| with_keys(target, keys, held))
+		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
+			focus()?;
+			with_keys(target, keys, held)
+		})
 	}
 
 	fn with_keys(
@@ -1558,13 +1570,22 @@ mod foreground {
 		Ok(())
 	}
 
-	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
+	/// Takeover text for window `id`; `focus` runs under the foreground guard
+	/// as in [`key_chord`].
+	pub(super) fn type_text(
+		id: &str,
+		text: &str,
+		focus: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		control::check()?;
 		background::ensure_text_supported(id, background::hwnd(id)?)?;
 		if text.is_empty() {
 			return Ok(());
 		}
-		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| send_text(Some(target), text))
+		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
+			focus()?;
+			send_text(Some(target), text)
+		})
 	}
 
 	#[cfg(test)]
@@ -1675,7 +1696,7 @@ pub(super) fn type_text(target: &Target, text: &str, mode: DeliveryMode) -> Core
 		Target::Window(id) if mode == DeliveryMode::Background => {
 			background::type_text(id, text, None)
 		},
-		Target::Window(id) => foreground::type_text(id, text),
+		Target::Window(id) => foreground::type_text(id, text, || Ok(())),
 	}
 }
 
@@ -1694,7 +1715,7 @@ pub(super) fn key_chord(
 		Target::Window(id) if mode == DeliveryMode::Background => {
 			background::key_chord(id, keys, None)
 		},
-		Target::Window(id) => foreground::key_chord(id, keys),
+		Target::Window(id) => foreground::key_chord(id, keys, || Ok(())),
 	}
 }
 
@@ -1708,6 +1729,24 @@ pub(super) fn element_background(id: &str, element: HWND, input: &ElementInput) 
 			Err(DesktopError::input_failed("key chord is empty"))
 		},
 		ElementInput::Chord(keys) => background::key_chord(id, keys, Some(element)),
+	}
+}
+
+/// Takeover keyboard `input` for window `id` into the element `focus` gives
+/// keyboard focus, run once the target is in front so the user's window is
+/// the one the foreground returns to.
+pub(super) fn element_foreground(
+	id: &str,
+	input: &ElementInput,
+	focus: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	control::check()?;
+	match input {
+		ElementInput::Text(text) => foreground::type_text(id, text, focus),
+		ElementInput::Chord(keys) if keys.is_empty() => {
+			Err(DesktopError::input_failed("key chord is empty"))
+		},
+		ElementInput::Chord(keys) => foreground::key_chord(id, keys, focus),
 	}
 }
 

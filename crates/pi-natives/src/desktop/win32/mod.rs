@@ -145,8 +145,9 @@ impl Backend for Win32Backend {
 	/// leaving the window's focus and the foreground alone: UI Automation's
 	/// `SetFocus` would bring the window to the front, taking the user's
 	/// keyboard. A windowless element (WPF, `WinUI`, web content) has no
-	/// window to post to, so background input refuses. Takeover focuses the
-	/// element and types through the foreground route.
+	/// window to post to, so background input refuses. Takeover saves the
+	/// user's foreground window, brings the target forward, and only then
+	/// focuses the element and types through the foreground route.
 	fn element_input(
 		&mut self,
 		element: &AxHandle,
@@ -169,14 +170,7 @@ impl Backend for Win32Backend {
 				input::element_background(&id, own, input)?;
 			},
 			DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus => {
-				let target = Target::Window(id);
-				self.ax.focus(element)?;
-				match input {
-					ElementInput::Text(text) => input::type_text(&target, text, mode)?,
-					ElementInput::Chord(keys) => {
-						input::key_chord(&mut self.global_input, &target, keys, mode)?;
-					},
-				}
+				input::element_foreground(&id, input, || self.ax.focus(element))?;
 			},
 		}
 		Ok(ElementDelivery::Delivered)
@@ -219,5 +213,146 @@ impl Backend for Win32Backend {
 
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		Some(&mut self.ax)
+	}
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+	use std::{
+		sync::mpsc,
+		thread,
+		time::{Duration, Instant},
+	};
+
+	use windows_sys::Win32::{
+		Foundation::HWND,
+		System::Threading::GetCurrentThreadId,
+		UI::WindowsAndMessaging::{
+			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow,
+			GetMessageW, MSG, PostThreadMessageW, SendMessageW, SetForegroundWindow,
+			TranslateMessage, WM_GETTEXT, WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+		},
+	};
+
+	use super::*;
+	use crate::desktop::{control::CancellationSource, keys::parse_key};
+
+	fn wide(text: &str) -> Vec<u16> {
+		text.encode_utf16().chain(Some(0)).collect()
+	}
+
+	/// Two top-level edit windows on a thread that pumps their messages, as
+	/// another app's would: the user's window and the takeover target.
+	struct Windows {
+		user:   HWND,
+		target: HWND,
+		thread: u32,
+	}
+
+	impl Windows {
+		fn open() -> Self {
+			let (sender, receiver) = mpsc::channel();
+			thread::spawn(move || {
+				let create = |title: &str| {
+					let (class, title) = (wide("EDIT"), wide(title));
+					// SAFETY: both strings are NUL-terminated and outlive the call;
+					// EDIT is a system class, so no instance handle is needed.
+					unsafe {
+						CreateWindowExW(
+							0,
+							class.as_ptr(),
+							title.as_ptr(),
+							WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+							CW_USEDEFAULT,
+							CW_USEDEFAULT,
+							400,
+							300,
+							std::ptr::null_mut(),
+							std::ptr::null_mut(),
+							std::ptr::null_mut(),
+							std::ptr::null(),
+						)
+					}
+				};
+				let user = create("omp test: user window") as usize;
+				let target = create("omp test: takeover target") as usize;
+				// SAFETY: no preconditions.
+				let thread = unsafe { GetCurrentThreadId() };
+				sender.send((user, target, thread)).unwrap();
+				// SAFETY: `message` is writable for each call.
+				unsafe {
+					let mut message: MSG = std::mem::zeroed();
+					while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+						TranslateMessage(&message);
+						DispatchMessageW(&message);
+					}
+				}
+			});
+			let (user, target, thread) = receiver.recv().unwrap();
+			let windows = Self { user: user as HWND, target: target as HWND, thread };
+			assert!(!windows.user.is_null() && !windows.target.is_null());
+			windows
+		}
+
+		fn text(&self, window: HWND) -> String {
+			let mut buffer = [0u16; 256];
+			// SAFETY: `buffer` holds the length WM_GETTEXT is told.
+			let length = unsafe {
+				SendMessageW(window, WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize)
+			};
+			String::from_utf16_lossy(&buffer[..length as usize])
+		}
+	}
+
+	impl Drop for Windows {
+		fn drop(&mut self) {
+			// SAFETY: posting to a thread id has no memory preconditions.
+			unsafe { PostThreadMessageW(self.thread, WM_QUIT, 0, 0) };
+		}
+	}
+
+	fn wait_foreground(window: HWND) -> bool {
+		let deadline = Instant::now() + Duration::from_secs(2);
+		// SAFETY: no preconditions.
+		while unsafe { GetForegroundWindow() } != window {
+			if Instant::now() > deadline {
+				return false;
+			}
+			thread::sleep(Duration::from_millis(10));
+		}
+		true
+	}
+
+	#[test]
+	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
+	            terminal in a signed-in desktop session"]
+	fn element_takeover_hands_the_foreground_back_to_the_users_window() {
+		let windows = Windows::open();
+		let mut backend = Win32Backend::new(DisplaySelector::Active).unwrap();
+		let target = backend
+			.windows()
+			.unwrap()
+			.into_iter()
+			.find(|window| window.id == (windows.target as usize).to_string())
+			.expect("the target window is listed");
+		let element = backend.ax.window_root(&target).unwrap();
+		let token = CancellationSource::default().token();
+		for input in [
+			ElementInput::Text("typed".to_string()),
+			ElementInput::Chord(vec![parse_key("end").unwrap()]),
+		] {
+			// SAFETY: a window handle this test created.
+			unsafe { SetForegroundWindow(windows.user) };
+			assert!(
+				wait_foreground(windows.user),
+				"this process cannot take the foreground; run it from a focused terminal"
+			);
+			backend
+				.element_input(&element, &input, DeliveryMode::ForegroundReturnFocus, &token)
+				.unwrap();
+			// SAFETY: no preconditions.
+			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
+		}
+		assert_eq!(windows.text(windows.target), "typed");
 	}
 }
