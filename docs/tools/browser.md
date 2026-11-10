@@ -178,7 +178,7 @@ By default, omp-owned managed Chromium tabs freeze at turn settle and unfreeze o
 ## Common recovery
 
 - Missing/dead tab: call `browser.open` again.
-- Stale id/ref: call `observe` or `ariaSnapshot` again, then reacquire the handle.
+- Stale id/ref: call `observe` or `ariaSnapshot` again, then reacquire the handle. A click through a handle or an `aria-ref` whose element the page replaced fails at once; `tab.click`, `dblclick`, `check`, `uncheck`, `uploadFile` and `frame.click` given a selector look it up again instead.
 - Busy tab: await the active helper/run before issuing another.
 - Selector timeout: re-observe and use a supported selector.
 - Relay unavailable: install/start the relay and verify its Chrome extension connection.

@@ -73,7 +73,9 @@ interface ClickPoint {
 	y: number;
 }
 
-type ActionabilityResult = { ok: true; x: number; y: number } | { ok: false; reason: string; coveredBy?: string };
+type ActionabilityResult =
+	| { ok: true; x: number; y: number }
+	| { ok: false; reason: string; coveredBy?: string; detached?: true };
 
 interface PageRect {
 	left: number;
@@ -178,6 +180,51 @@ export class TypingInterruptedError extends ToolAbortError {
 	}
 }
 
+/**
+ * The element left the document before the click reached it: the page replaced it, as a re-render does. A handle
+ * cannot follow the replacement, so a click on a handle fails at once; a click given a selector looks it up again.
+ */
+export class ElementDetachedError extends ToolError {
+	constructor(label: string) {
+		super(`${label}: the page replaced this element (it is detached from the document); look it up again`);
+	}
+}
+
+/**
+ * `error` as it ends a click that ran out of time after the page had replaced its element at least once: the refusal
+ * it reports is that replacement.
+ */
+function replacedRefusal(error: unknown, replaced: boolean, signal: AbortSignal): unknown {
+	return replaced && signal.aborted && !(error instanceof ClickRefusedError)
+		? new ClickRefusedError("detached (the page kept replacing this element)", { cause: signal.reason })
+		: error;
+}
+
+/**
+ * Runs `act` on the element `resolve` looks up, and looks it up again whenever the page replaced that element before
+ * `act` reached it ({@link ElementDetachedError}), as a re-render does; `act` owns each handle it is given. With
+ * `retry` false, as for an `aria-ref`, which resolves to the replaced node again, a replacement fails at once. A wait
+ * that runs out in `act` after a replacement reports the replacement as its refusal; one that runs out looking the
+ * element up keeps its own error, such as a selector that no longer matches.
+ */
+export async function withLiveElement<T>(
+	resolve: () => Promise<ElementHandle>,
+	act: (handle: ElementHandle) => Promise<T>,
+	signal: AbortSignal,
+	retry = true,
+): Promise<T> {
+	let replaced = false;
+	while (true) {
+		const handle = await resolve();
+		try {
+			return await act(handle);
+		} catch (error) {
+			if (!retry || !(error instanceof ElementDetachedError)) throw replacedRefusal(error, replaced, signal);
+			replaced = true;
+		}
+	}
+}
+
 function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
@@ -210,7 +257,11 @@ function checkClickActionable(
 	const page = globalThis as unknown as PageGlobals;
 	// A node the page replaced (e.g. a re-render) has no computed style; say so rather than misread it.
 	if (!element.isConnected) {
-		return { ok: false as const, reason: "detached (the page replaced this element; look it up again)" };
+		return {
+			ok: false as const,
+			reason: "detached (the page replaced this element; look it up again)",
+			detached: true as const,
+		};
 	}
 	const style = page.getComputedStyle(element);
 	if (style.display === "none") return { ok: false as const, reason: "display:none" };
@@ -329,6 +380,7 @@ async function actionableClickPoint(
 				Math.abs(previous.width - current.width) < 0.5 &&
 				Math.abs(previous.height - current.height) < 0.5;
 			const result = await isClickActionable(handle, signal, options);
+			if (!result.ok && result.detached) throw new ElementDetachedError(label);
 			// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
 			if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
 			if (stable && !result.ok && result.coveredBy) {
@@ -917,7 +969,10 @@ export async function resolveActionableQueryHandlerClickTarget(
 	return winner?.handle ?? null;
 }
 
-/** Click the actionable match chosen for a Puppeteer text query handler. */
+/**
+ * Click the actionable match chosen for a Puppeteer text query handler, querying again when the page replaced the
+ * chosen match before the click reached it.
+ */
 export async function clickQueryHandlerText(
 	page: Page,
 	selector: string,
@@ -928,6 +983,7 @@ export async function clickQueryHandlerText(
 ): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const clickSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	let replaced = false;
 	while (true) {
 		throwIfAborted(clickSignal);
 		const handles = (await untilAborted(clickSignal, () => page.$$(selector))) as ElementHandle[];
@@ -938,8 +994,13 @@ export async function clickQueryHandlerText(
 				await untilAborted(clickSignal, () => Bun.sleep(50));
 				continue;
 			}
-			await clickElement(target, label, clickSignal, options);
-			return;
+			try {
+				await clickElement(target, label, clickSignal, options);
+				return;
+			} catch (error) {
+				if (!(error instanceof ElementDetachedError)) throw replacedRefusal(error, replaced, clickSignal);
+				replaced = true;
+			}
 		} finally {
 			if (target && !handles.includes(target)) await target.dispose().catch(() => undefined);
 			await Promise.all(handles.map(async handle => handle.dispose().catch(() => undefined)));

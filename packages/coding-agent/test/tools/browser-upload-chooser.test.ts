@@ -135,6 +135,37 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser uploadFile", () => {
 		}
 	}, 60_000);
 
+	test("looks the trigger up again when the page replaces it before the click", async () => {
+		const { attempt, close } = await openFixture();
+		try {
+			// The trigger the upload resolves takes no clicks, and the page swaps it for a working one once the click
+			// scrolls it into view, so the resolved handle is detached before the chooser could open.
+			const result = await attempt(`await tab.evaluate(() => {
+  const input = document.getElementById("trigger-input");
+  const make = trapped => {
+    const button = document.createElement("button");
+    button.id = "trigger";
+    button.type = "button";
+    button.textContent = "Upload";
+    if (trapped) button.style.pointerEvents = "none";
+    else button.addEventListener("click", () => input.click());
+    return button;
+  };
+  document.getElementById("trigger").replaceWith(make(true));
+  document.body.style.paddingTop = "1200px";
+  document.body.style.height = "3000px";
+  addEventListener("scroll", () => {
+    const trigger = document.getElementById("trigger");
+    if (trigger.style.pointerEvents === "none") trigger.replaceWith(make(false));
+  });
+});
+await tab.uploadFile("#trigger", "alpha.txt");`);
+			expect(result).toEqual({ log: [{ id: "trigger-input", event: "change", names: ["alpha.txt"] }] });
+		} finally {
+			await close();
+		}
+	}, 60_000);
+
 	test.skipIf(!MODE_BITS_ENFORCED)(
 		"cancels the chooser when delivering the files fails",
 		async () => {
