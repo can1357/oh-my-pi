@@ -286,6 +286,47 @@ describe("supermemoryBackend", () => {
 		expect(create.mock.calls[1]?.[0]?.content).toContain("resumed answer");
 	});
 
+	it("leaves an interrupted, partly answered turn open so /retry's answer is retained", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		const entries = session.sessionManager.getEntries();
+		const at = new Date(0).toISOString();
+		const message = (id: string, value: unknown) =>
+			entries.push({ type: "message", id, parentId: null, timestamp: at, message: value } as never);
+		message("u1", { role: "user", content: "one", timestamp: 0 });
+		message("a1", {
+			role: "assistant",
+			content: [{ type: "text", text: "partial" }],
+			stopReason: "aborted",
+			timestamp: 0,
+		});
+		await session.endTurn();
+		expect(create).not.toHaveBeenCalled();
+		// `/retry` continues the same prompt without a new user entry.
+		message("a2", {
+			role: "assistant",
+			content: [{ type: "text", text: "retried answer" }],
+			stopReason: "stop",
+			timestamp: 0,
+		});
+		await session.endTurn();
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(create.mock.calls[0]?.[0]?.content).toContain("retried answer");
+	});
+
+	it("/memory clear revokes a recall that was still being prepared", async () => {
+		spyRecall();
+		const session = makeSession();
+		await start(session);
+		const staged = await supermemoryBackend.beforeAgentStartPrompt!(session as never, "first", undefined);
+		await supermemoryBackend.clear("/tmp", "/tmp", session as never);
+		expect(staged?.commit()).toBe(false);
+		expect(session.getSupermemorySessionState()?.lastRecallSnippet).toBeUndefined();
+	});
+
 	it("tolerates one failing recall endpoint and returns nothing when both fail", async () => {
 		vi.spyOn(SupermemoryClient.prototype, "profile").mockRejectedValue(
 			new Error("Supermemory request failed with HTTP 500."),

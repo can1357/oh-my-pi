@@ -65,6 +65,8 @@ interface RetentionCursorData {
 /** Transcript messages captured for one retention job, with the identity they belong to. */
 interface SettledHistory {
 	messages: HindsightMessage[];
+	/** The last turn is unfinished (no answer, or an aborted/errored one): bare resume or `/retry` completes it without a new user turn. */
+	openTail: boolean;
 	generation: number;
 	transcriptId: string;
 }
@@ -455,6 +457,8 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 	 */
 	clearRecall(): void {
 		this.lastRecallSnippet = undefined;
+		// Revokes a recall still in flight or staged but not yet committed.
+		this.#recallGeneration++;
 		if (this.aliasOf) return;
 		this.session.sessionManager.appendCustomEntry(RECALL_CLEAR_ENTRY_TYPE, { version: 1, scope: this.#scope() });
 	}
@@ -504,11 +508,26 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 
 	/** The transcript as it stands now, bound to its identity so a later `/new` or reset discards it. */
 	#settledHistory(): SettledHistory {
+		const messages = extractMessages(this.session.sessionManager);
 		return {
-			messages: extractMessages(this.session.sessionManager),
+			messages,
+			openTail: messages.at(-1)?.role === "user" || this.#lastTurnUnfinished(),
 			generation: this.#transcriptGeneration,
 			transcriptId: this.transcriptId,
 		};
+	}
+
+	#lastTurnUnfinished(): boolean {
+		const entries = this.session.sessionManager.getEntries();
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			if (entry.type !== "message") continue;
+			if (entry.message.role === "user") return false;
+			if (entry.message.role === "assistant") {
+				return entry.message.stopReason === "aborted" || entry.message.stopReason === "error";
+			}
+		}
+		return false;
 	}
 
 	/** Every complete `retainEveryNTurns` window of `history` not stored yet, oldest first. */
@@ -517,9 +536,9 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 		const every = this.#config.retainEveryNTurns;
 		const { messages } = history;
 		const userStarts = userTurnStarts(messages);
-		// A trailing turn with no answer yet (aborted or errored) stays open: a bare resume answers
-		// it without adding a user turn, so closing it now would leave that answer out of every window.
-		const settledTurns = messages.at(-1)?.role === "user" ? userStarts.length - 1 : userStarts.length;
+		// An unfinished last turn stays open: a bare resume or `/retry` completes it without adding a
+		// user turn, so closing it now would leave the finished answer out of every window.
+		const settledTurns = history.openTail ? userStarts.length - 1 : userStarts.length;
 		while (settledTurns - this.lastRetainedTurn >= every) {
 			const start = this.lastRetainedTurn;
 			if (!(await this.#retainWindow(messages, userStarts, start, start + every, history))) return;
