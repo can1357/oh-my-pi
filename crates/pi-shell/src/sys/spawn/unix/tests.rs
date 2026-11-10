@@ -518,6 +518,140 @@ fn shebang_less_script_fails_with_enoexec_on_both_paths() {
 	std::fs::remove_file(&path).unwrap();
 }
 
+/// A host launched without standard streams — a service, a daemon's
+/// child — spawns with descriptors 0, 1 and 2 vacant and the command's
+/// own standard streams closed with them. The spawn allocates its
+/// exec-error pipe at the lowest free numbers, which are exactly those
+/// slots, and the child closes them before `execve`, so the kernel's
+/// `ENOEXEC` for a `#!`-less script must still reach the parent, which
+/// runs such a script in-engine as bash does. Regression: the parent
+/// read a clean spawn, the script never ran and its status was lost.
+#[test]
+fn an_exec_error_reaches_a_host_whose_standard_slots_are_closed() {
+	if !in_a_process_of_its_own("an_exec_error_reaches_a_host_whose_standard_slots_are_closed") {
+		return;
+	}
+	use std::os::unix::fs::PermissionsExt;
+
+	let path = temp_path("closed-slots-enoexec");
+	std::fs::write(&path, b"echo inscript\n").unwrap();
+	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = vec![BString::from(path.as_os_str().as_encoded_bytes())];
+	let mut forked = spec(&a, &env, NEW);
+	forked.stdio = [StdioSpec::Closed, StdioSpec::Closed, StdioSpec::Closed];
+	// A umask of its own keeps this spawn off the `posix_spawn` path,
+	// which has no error pipe to lose.
+	forked.umask = if forked.umask == 0o077 { 0o027 } else { 0o077 };
+	let saved = take_slots(&[0, 1, 2]);
+	let spawned = s.spawn(forked);
+	give_back_slots(saved);
+	let err = spawned
+		.err()
+		.unwrap_or_else(|| panic!("the fork path reported a clean spawn of a shebang-less script"));
+	assert_eq!(err.raw_os_error(), Some(libc::ENOEXEC), "{err}");
+	std::fs::remove_file(&path).unwrap();
+}
+
+/// The number a command's descriptor is closed at may be the number
+/// another of its descriptors comes from: a host with its standard input
+/// closed opens a file at descriptor 0 and gives the command that file
+/// as its fd 5, with fd 0 closed. Both spawn paths must duplicate before
+/// they close. Regression: the child closed descriptor 0 first and the
+/// duplication failed with `EBADF`.
+#[test]
+fn a_closed_descriptor_goes_after_the_one_it_is_the_source_of() {
+	if !in_a_process_of_its_own("a_closed_descriptor_goes_after_the_one_it_is_the_source_of") {
+		return;
+	}
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = sh("echo ok >&5");
+	for (what, own_umask) in [("posix_spawn", false), ("fork", true)] {
+		let path = temp_path(&format!("closed-source-{what}"));
+		let saved = take_slots(&[0]);
+		let direct = std::fs::File::create(&path).unwrap();
+		let at = std::os::fd::AsRawFd::as_raw_fd(&direct);
+		let mut sp = spec(&a, &env, NEW);
+		sp.stdio = [StdioSpec::Closed, StdioSpec::Null, StdioSpec::Null];
+		sp.extra_fds = vec![(5, StdioSpec::File(Box::new(crate::sys::StdFile::new(direct))))];
+		if own_umask {
+			sp.umask = if sp.umask == 0o077 { 0o027 } else { 0o077 };
+		}
+		let spawned = s.spawn(sp);
+		give_back_slots(saved);
+		assert_eq!(at, 0, "{what}: the file had to land in the vacant standard slot");
+		let mut p = spawned.unwrap_or_else(|e| panic!("{what}: {e}"));
+		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "{what}");
+		assert_eq!(std::fs::read(&path).unwrap(), b"ok\n", "{what}");
+		std::fs::remove_file(&path).unwrap();
+	}
+}
+
+/// Take the descriptors `slots` away from this process, each saved out
+/// of the way at 100 or above, as [`give_back_slots`] restores them.
+/// Which descriptors a process holds is process-wide, which is why the
+/// tests that do this run in a process of their own.
+fn take_slots(slots: &[i32]) -> Vec<(i32, i32)> {
+	slots
+		.iter()
+		.map(|&fd| {
+			// SAFETY: plain descriptor calls; the copy is close-on-exec, so
+			// no child of another thread inherits it.
+			let saved = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 100) };
+			// SAFETY: as above.
+			unsafe { libc::close(fd) };
+			(fd, saved)
+		})
+		.collect()
+}
+
+/// Put back what [`take_slots`] took; a slot that was already vacant
+/// (its copy failed) stays vacant.
+fn give_back_slots(saved: Vec<(i32, i32)>) {
+	for (fd, from) in saved {
+		if from < 0 {
+			continue;
+		}
+		// SAFETY: plain descriptor calls on descriptors this process owns.
+		unsafe {
+			libc::dup2(from, fd);
+			libc::close(from);
+		}
+	}
+}
+
+/// `true` in the child process of this test binary that runs test
+/// `name`; in the test process, runs that child and checks that it ran
+/// and passed. A test whose body changes what descriptors the process
+/// holds may not share a process with any other test.
+///
+/// The harness names a unit test by its path below the crate, which is
+/// this module's path without its first segment and then `name`.
+fn in_a_process_of_its_own(name: &str) -> bool {
+	const CHILD: &str = "PI_SHELL_TEST_SPAWN_ALONE";
+	let module = module_path!();
+	let module = module.split_once("::").map_or(module, |(_crate, rest)| rest);
+	let path = format!("{module}::{name}");
+	if std::env::var(CHILD).is_ok_and(|running| running == path) {
+		return true;
+	}
+	let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", &path, "--nocapture", "--test-threads", "1"])
+		.env(CHILD, &path)
+		.output()
+		.expect("child test process");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains("1 passed"),
+		"{path} in a process of its own: {}\nstdout:\n{stdout}\nstderr:\n{}",
+		output.status,
+		String::from_utf8_lossy(&output.stderr)
+	);
+	false
+}
+
 /// A fresh path in the temp directory for test `what`.
 fn temp_path(what: &str) -> std::path::PathBuf {
 	std::env::temp_dir().join(format!("obash-{what}-{}", std::process::id()))

@@ -1147,6 +1147,103 @@ fn descriptor_listing_room() -> Vec<libc::proc_fdinfo> {
 	vec![libc::proc_fdinfo { proc_fd: -1, proc_fdtype: 0 }; listed + SPARE]
 }
 
+/// How a target closes the descriptors the command will not have: which
+/// arm of [`close_descriptors_except`] its gates compile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CloseMechanism {
+	/// Whole ranges with `close_range(2)`, and the descriptors
+	/// `/proc/self/fd` lists where the kernel is too old for that call:
+	/// every system on a Linux kernel.
+	Ranges,
+	/// The descriptors the kernel lists for `proc_pidinfo`, which is all
+	/// the Apple systems have.
+	Listed,
+	/// Everything above the highest kept number in one `closefrom(3)`
+	/// call: the BSDs and the Solaris family, where the call began.
+	Above,
+	/// One `close(2)` per number below the kernel's ceiling — normally
+	/// 1,048,576 calls — because the system offers nothing better.
+	PerNumber,
+}
+
+/// Which arm a target takes, by `target_os`: one statement of the gates
+/// the arms of [`close_descriptors_except`] carry today.
+const fn close_mechanism(os: &str) -> CloseMechanism {
+	if is_one_of(os, &["linux"]) {
+		CloseMechanism::Ranges
+	} else if is_one_of(os, &["macos"]) {
+		CloseMechanism::Listed
+	} else if is_one_of(os, &["freebsd", "dragonfly", "netbsd", "openbsd"]) {
+		CloseMechanism::Above
+	} else {
+		CloseMechanism::PerNumber
+	}
+}
+
+/// The Unix targets Rust supports at tier 1 or tier 2 with host tools —
+/// the ones that host a shell — together with Android and the rest of
+/// each family they share a mechanism with. None of them may reach the
+/// per-number last resort by construction.
+///
+/// Fuchsia and Redox are tier 2 without host tools, publish none of
+/// these calls and run no shell of ours; they are left out knowingly and
+/// take the last resort.
+const TIER_UNIX: [&str; 13] = [
+	"linux",
+	"android",
+	"macos",
+	"ios",
+	"tvos",
+	"watchos",
+	"visionos",
+	"freebsd",
+	"dragonfly",
+	"netbsd",
+	"openbsd",
+	"illumos",
+	"solaris",
+];
+
+/// Whether `name` is one of `names` (`str` comparison is not const).
+const fn is_one_of(name: &str, names: &[&str]) -> bool {
+	let (name, mut i) = (name.as_bytes(), 0);
+	while i < names.len() {
+		let candidate = names[i].as_bytes();
+		if candidate.len() == name.len() {
+			let mut at = 0;
+			while at < name.len() && candidate[at] == name[at] {
+				at += 1;
+			}
+			if at == name.len() {
+				return true;
+			}
+		}
+		i += 1;
+	}
+	false
+}
+
+#[cfg(test)]
+mod mechanism_tests {
+	use super::{CloseMechanism, TIER_UNIX, close_mechanism};
+
+	/// Every target of [`TIER_UNIX`] closes the host's descriptors with a
+	/// call its kernel has, not with one `close(2)` per number the kernel
+	/// could ever give out. The arms are gated by the family that shares
+	/// the mechanism, never by a list of system names: Android is a Linux
+	/// kernel and has both of Linux's, and the Apple systems other than
+	/// macOS have the same `proc_pidinfo` listing it has.
+	#[test]
+	fn every_unix_target_rust_supports_closes_without_a_call_per_number() {
+		let left_out: Vec<&str> = TIER_UNIX
+			.iter()
+			.copied()
+			.filter(|os| close_mechanism(os) == CloseMechanism::PerNumber)
+			.collect();
+		assert!(left_out.is_empty(), "no descriptor-closing call compiled for {left_out:?}");
+	}
+}
+
 /// Close every descriptor that is not one of `keep` (the command's own,
 /// installed before), so the process holds only what the command will
 /// have: the host's descriptors go whether or not `exec` would close them.
