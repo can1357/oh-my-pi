@@ -584,7 +584,7 @@ instance that loaded another checkpoint, for example. An echo may also be the sa
 canonicalised (a snapshot suffix, a gateway prefix, or a checkpoint path such as
 `/models/Qwen2.5-Coder-32B-Instruct`), so the verdict comes from the model identity
 classifier rather than string comparison: genuine substitutions name the served id in the
-chat transcript and the status line; canonicalisations stay silent. No configuration is
+chat transcript; canonicalisations stay silent. No configuration is
 involved.
 
 ### Implicit LM Studio discovery
