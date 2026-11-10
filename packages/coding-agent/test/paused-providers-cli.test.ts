@@ -3,6 +3,7 @@ import * as path from "node:path";
 import * as piAi from "@oh-my-pi/pi-ai";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { renderProviderModels } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -25,8 +26,11 @@ const acme = buildModel({
 	maxTokens: 8_192,
 } as ModelSpec);
 
+const pausedChat: Model<Api> = { ...acme, id: "paused-chat", provider: PAUSED.id };
+const pausedImage: Model<Api> = { ...pausedChat, id: "paused-image", kind: "image" };
+
 /** Run `omp models [pattern]` against one available model and the {@link PAUSED} provider. */
-function listing(pattern: string | undefined, json = false): string {
+function listing(pattern: string | undefined, json = false, kind: ModelKind | "all" = "chat"): string {
 	spyOn(piAi, "pausedProviders").mockReturnValue([PAUSED]);
 	const output: string[] = [];
 	spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -34,7 +38,18 @@ function listing(pattern: string | undefined, json = false): string {
 		return true;
 	});
 	const available: Model<Api>[] = [acme];
-	renderProviderModels({ getAvailable: () => available, getError: () => undefined }, "ls", pattern, json);
+	renderProviderModels(
+		{
+			getAvailable: selected =>
+				selected === "all" ? available : available.filter(model => modelKind(model) === selected),
+			getProviderModels: () => [pausedChat, pausedImage],
+			getError: () => undefined,
+		},
+		"ls",
+		pattern,
+		json,
+		kind,
+	);
 	vi.restoreAllMocks();
 	return output.join("").replace(/\u001b\[[0-9;]*m/g, "");
 }
@@ -69,6 +84,21 @@ describe("omp models with a paused provider", () => {
 			models: [],
 			paused: [{ provider: "acme-cloud", name: "Acme Cloud", reason: PAUSED.reason }],
 		});
+	});
+
+	it("omits a paused chat/image provider from TTS text and JSON listings", () => {
+		expect(listing("acme-cloud", false, "tts")).not.toContain("acme-cloud (paused)");
+		expect(JSON.parse(listing("acme-cloud", true, "tts"))).toEqual({ models: [], paused: [] });
+	});
+
+	it("retains paused providers for catalog kinds they serve", () => {
+		expect(listing("acme-cloud", false, "image")).toContain("acme-cloud (paused)");
+		expect(JSON.parse(listing("acme-cloud", true, "image")).paused).toEqual([
+			{ provider: PAUSED.id, name: PAUSED.name, reason: PAUSED.reason },
+		]);
+		expect(JSON.parse(listing("acme-cloud", true, "all")).paused).toEqual([
+			{ provider: PAUSED.id, name: PAUSED.name, reason: PAUSED.reason },
+		]);
 	});
 });
 

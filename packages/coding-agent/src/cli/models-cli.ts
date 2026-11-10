@@ -188,12 +188,14 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 }
 
 /**
- * The two registry reads the listing performs. Structural so the renderer can be
+ * The registry reads the listing performs. Structural so the renderer can be
  * exercised without booting a full {@link ModelRegistry}.
  */
 export interface ModelsListingSource {
 	/** Return models available for the selected catalog kind, or every kind for `all`. */
 	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
+	/** Return one provider's catalog regardless of credentials, for paused kind filtering. */
+	getProviderModels(provider: string): Model<Api>[];
 	getError(): ConfigError | undefined;
 }
 
@@ -212,7 +214,9 @@ export function renderProviderModels(
 	const available = source.getAvailable(kind);
 	const needle = pattern?.toLowerCase();
 	let filtered = available;
-	let paused: PausedProvider[] = pausedProviders();
+	let paused: PausedProvider[] = pausedProviders().filter(
+		provider => kind === "all" || source.getProviderModels(provider.id).some(model => modelKind(model) === kind),
+	);
 
 	if (needle) {
 		let exactFound = false;
