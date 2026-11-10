@@ -341,22 +341,22 @@ export interface DevinModelManagerConfig {
 	fetch?: DevinModelDiscoveryOptions["fetch"];
 }
 
-// Seed rows Devin retired. A cache written while they were seeded keeps them
-// through a static-fingerprint change, so a failed discovery would list them again.
+// Seed rows Devin retired from its own catalog. A cache written while they were
+// seeded keeps them through a static-fingerprint change, so a failed discovery
+// would list them again. Only Devin's own host drops them: a configured Cascade
+// host may still serve them.
 const DEVIN_RETIRED_SEED_MODEL_IDS = ["swe-1-6-fast"] as const;
 
 export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): ModelManagerOptions<"devin-agent"> {
 	const { apiKey, baseUrl, fetch } = config;
 	const staticModels = seedModels<"devin-agent">("devin");
+	const defaultHost = baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL;
 	return {
 		providerId: "devin",
 		cacheProviderId: resolveModelCacheProviderId("devin"),
-		dropCachedModelIdsOnStaticMismatch: DEVIN_RETIRED_SEED_MODEL_IDS,
+		...(defaultHost ? { dropCachedModelIdsOnStaticMismatch: DEVIN_RETIRED_SEED_MODEL_IDS } : undefined),
 		// A configured host serves its own Cascade deployment; keep the seed on it.
-		staticModels:
-			baseUrl === undefined || baseUrl === DEVIN_DEFAULT_BASE_URL
-				? staticModels
-				: staticModels.map(model => ({ ...model, baseUrl })),
+		staticModels: defaultHost ? staticModels : staticModels.map(model => ({ ...model, baseUrl })),
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
