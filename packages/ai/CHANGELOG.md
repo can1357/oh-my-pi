@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed concurrent OAuth first requests all being rejected as `claude_code_version_too_old`: only the first one retried with the required version while the rest fell through to the thread-drop path, because the retry predicate compared against the process-wide adopted version instead of the one the request actually sent ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
+- Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
 
 ## [18.18.4] - 2026-11-09
 
