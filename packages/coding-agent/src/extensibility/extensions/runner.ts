@@ -509,7 +509,7 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 							? SessionStopEventResult | undefined
 							: TEvent extends { type: "subagent_stop" }
 								? SubagentStopEventResult | undefined
-							: undefined;
+								: undefined;
 
 // Session-lifecycle handler types live once in session-handler-types (imported
 // above for local use); re-exported here to keep this module's public API stable.
