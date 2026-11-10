@@ -11,15 +11,21 @@ import {
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, getHistoryDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
+const XDG_KEYS = ["XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] as const;
 const originalAgentDir = getAgentDir();
-const originalConfigDir = process.env.PI_CONFIG_DIR;
+const originalEnv: Record<string, string | undefined> = {};
 let tempDir: TempDir;
 
 beforeEach(() => {
 	tempDir = TempDir.createSync("@pi-drop-session-purge-");
 	HistoryStorage.close();
 	closeSessionIndex();
-	// Both stores resolve under the isolated config root: history.db via the agent dir, stats.db via the root.
+	// An XDG override would route both stores to a shared data dir, so clear it; then
+	// history.db resolves under the temp agent dir and stats.db under the temp config root.
+	for (const key of ["PI_CONFIG_DIR", ...XDG_KEYS]) {
+		originalEnv[key] = process.env[key];
+		delete process.env[key];
+	}
 	const configDir = path.relative(os.homedir(), tempDir.join("config"));
 	process.env.PI_CONFIG_DIR = configDir;
 	setAgentDir(path.join(os.homedir(), configDir, "agent"));
@@ -28,8 +34,11 @@ beforeEach(() => {
 afterEach(() => {
 	HistoryStorage.close();
 	closeSessionIndex();
-	if (originalConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
-	else process.env.PI_CONFIG_DIR = originalConfigDir;
+	for (const key in originalEnv) {
+		const value = originalEnv[key];
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 	setAgentDir(originalAgentDir);
 	tempDir.removeSync();
 });
@@ -60,10 +69,13 @@ describe("SessionManager.dropSession", () => {
 		try {
 			const ftsHits = db.query("SELECT rowid FROM history_fts WHERE history_fts MATCH 'dropped'").all();
 			expect(ftsHits).toEqual([]);
+			const ids = [kept.getSessionId(), dropped.getSessionId()];
 			const sessionsWith = (table: string) =>
 				db
-					.query<{ session_id: string }, []>(`SELECT DISTINCT session_id FROM ${table} ORDER BY session_id`)
-					.all()
+					.query<{ session_id: string }, [string, string]>(
+						`SELECT DISTINCT session_id FROM ${table} WHERE session_id IN (?, ?)`,
+					)
+					.all(ids[0], ids[1])
 					.map(row => row.session_id);
 			expect(sessionsWith("session_titles")).toEqual([kept.getSessionId()]);
 			expect(sessionsWith("session_recaps")).toEqual([kept.getSessionId()]);
