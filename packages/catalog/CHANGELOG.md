@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Morph (`api.morphllm.com`) Chat Completions requests now send `x-session-id`, pinning a conversation to one worker so its prompt cache keeps hitting; previously consecutive turns could land on cold workers and lose cached prefixes ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
+- Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.18.6] - 2026-11-09
 

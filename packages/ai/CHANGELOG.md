@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- OpenAI Chat Completions requests to Morph (`api.morphllm.com`) now carry the prompt-cache key (`promptCacheKey`, else `sessionId`) in `x-session-id`, so Morph keeps the conversation on the worker holding its cached prefix ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))
-
 ## [18.18.4] - 2026-11-09
 
 ### Added
