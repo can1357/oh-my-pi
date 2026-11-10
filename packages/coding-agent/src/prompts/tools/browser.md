@@ -79,6 +79,7 @@ await tab.close()
 <critical>
 - MUST open a tab before direct use; `browser.tab(name)` does not open one.
 - Default to `tab.observe()`; use screenshots for visual confirmation.
+- Report only what the page showed you. Never alter the page with scripts to make a step look done (inserting controls, writing app state, revealing hidden elements); when a step cannot be done through the page, say so. When the user asks you to change the page with a script, do it.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
 - Relay and CDP actions operate on real user sessions.
 </critical>
