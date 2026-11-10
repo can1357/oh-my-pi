@@ -112,6 +112,8 @@ export class SupermemorySessionState {
 	#recallGeneration = 0;
 	/** Bumped when the transcript changes identity; stale retention never advances {@link lastRetainedTurn}. */
 	#transcriptGeneration = 0;
+	/** Whether this transcript already holds a retention cursor for {@link #scope}. */
+	#hasCursor = false;
 	#unsubscribe?: () => void;
 
 	constructor(options: SupermemorySessionStateOptions) {
@@ -184,6 +186,7 @@ export class SupermemorySessionState {
 					isRetentionCursor(entry.data) &&
 					entry.data.scope === scope,
 			);
+		this.#hasCursor = cursor?.type === "custom" && isRetentionCursor(cursor.data);
 		if (cursor?.type === "custom" && isRetentionCursor(cursor.data)) {
 			this.lastRetainedTurn = cursor.data.turn;
 			return;
@@ -375,6 +378,10 @@ export class SupermemorySessionState {
 		const window = messages.slice(userStarts[startTurn], userStarts[endTurn] ?? messages.length);
 		const { transcript } = prepareRetentionTranscript(window, true, { includeTimestamps: true });
 		if (transcript) {
+			// Before this transcript's first send, record where retention starts: without it, a
+			// resume after a failed or cut-off first window would read the transcript as pre-cursor
+			// and skip that window.
+			if (!this.#hasCursor) this.#appendCursor(startTurn);
 			const omittedChars = Math.max(0, transcript.length - MAX_RETAIN_CHARS);
 			try {
 				await this.save(
@@ -396,14 +403,17 @@ export class SupermemorySessionState {
 		if (generation !== this.#transcriptGeneration) return false;
 		this.lastRetainedTurn = endTurn;
 		// A `/memory enqueue` tail is an open window: a resume re-sends it complete under the same customId.
-		if (endTurn - startTurn === this.config.retainEveryNTurns) {
-			this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
-				version: 1,
-				scope: this.#scope(),
-				turn: endTurn,
-			} satisfies RetentionCursorData);
-		}
+		if (endTurn - startTurn === this.config.retainEveryNTurns) this.#appendCursor(endTurn);
 		return true;
+	}
+
+	#appendCursor(turn: number): void {
+		this.session.sessionManager.appendCustomEntry(RETENTION_CURSOR_ENTRY_TYPE, {
+			version: 1,
+			scope: this.#scope(),
+			turn,
+		} satisfies RetentionCursorData);
+		this.#hasCursor = true;
 	}
 
 	/**

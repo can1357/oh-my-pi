@@ -391,6 +391,30 @@ describe("supermemoryBackend", () => {
 		expect(docs[0]?.content).toContain("two");
 	});
 
+	it("retries a session's very first window on resume when it failed before exit", async () => {
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockRejectedValueOnce(new Error("Supermemory request failed with HTTP 503."))
+			.mockResolvedValue({ id: "d", status: "queued" });
+		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
+		await start(session);
+		session.addTurn("first");
+		await session.endTurn();
+		await session.getSupermemorySessionState()?.dispose();
+		const failed = create.mock.calls[0]?.[0];
+		create.mockClear();
+
+		await start(session);
+		session.addTurn("second");
+		await session.endTurn();
+		const docs = create.mock.calls.map(call => call[0]);
+		expect(docs.map(doc => doc?.metadata)).toMatchObject([
+			{ turnStart: 0, turnEnd: 1 },
+			{ turnStart: 1, turnEnd: 2 },
+		]);
+		expect(docs[0]?.customId).toBe(failed?.customId);
+	});
+
 	it("redacts the API key and recognizable secrets in stored content and search queries", async () => {
 		const create = vi
 			.spyOn(SupermemoryClient.prototype, "createDocument")
