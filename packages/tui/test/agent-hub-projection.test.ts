@@ -360,4 +360,22 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const metrics = hubRowMetrics(ref, observed, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(75.0);
 	});
+
+	it("prefers current live completed throughput over persisted historical throughput when live session is attached", () => {
+		const session = {
+			agent: { state: { messages: [] } },
+			getSessionStats: () => ({ tokens: { input: 10, output: 150, cacheWrite: 0 }, assistantMessages: 1, toolCalls: 0, cost: 0.01 }),
+		};
+		const ref = {
+			id: "worker",
+			session,
+			history: { metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 50.0 } },
+		} as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		sessionMetrics.set(session, {
+			metrics: { tokens: 150, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 150.0 },
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(150.0);
+	});
 });

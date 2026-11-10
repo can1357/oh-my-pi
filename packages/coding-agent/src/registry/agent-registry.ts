@@ -52,6 +52,7 @@ export interface AgentHistorySummary {
 	metrics?: AgentMetricsSummary;
 	/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 	directCost?: number;
+	tokensPerSecond?: number;
 	readOnly?: boolean;
 	/** Durable task output artifact, when the executor wrote one. */
 	outputPath?: string;

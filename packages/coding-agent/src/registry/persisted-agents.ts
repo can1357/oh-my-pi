@@ -18,6 +18,7 @@ import {
 	MAIN_AGENT_ID,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
+import { usageThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
@@ -144,7 +145,7 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 			stopReason: message.stopReason,
 			content,
 		} as Pick<AssistantMessage, "stopReason" | "content">),
-		tokensPerSecond: duration !== undefined && duration > 100 && output > 0 ? (output / duration) * 1000 : undefined,
+		tokensPerSecond: usageThroughput({ output }, duration),
 	};
 }
 
@@ -318,6 +319,7 @@ async function readPersistedAgentHistory(
 	if (tokensPerSecond !== undefined) metrics.tokensPerSecond = tokensPerSecond;
 	return {
 		directCost,
+		tokensPerSecond,
 		...(metrics.requests > 0 ? { metrics } : {}),
 		...(resolvedModel ? { resolvedModel, resolvedModelIsFallback } : {}),
 		...(modelRole ? { modelRole } : {}),

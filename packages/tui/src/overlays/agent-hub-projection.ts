@@ -272,9 +272,11 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 
 	const tokensPerSecond =
 		liveRate ??
+		(hasLiveSession ? liveMetrics?.tokensPerSecond : undefined) ??
 		rawTps ??
 		liveMetrics?.tokensPerSecond ??
 		retainedMetrics?.tokensPerSecond ??
+		ref.history?.tokensPerSecond ??
 		ref.history?.metrics?.tokensPerSecond;
 	const result: AgentMetrics = { ...(metrics as AgentMetrics) };
 	if (cost !== undefined) result.cost = cost;

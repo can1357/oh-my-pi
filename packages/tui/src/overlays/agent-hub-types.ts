@@ -58,6 +58,7 @@ export interface AgentRecordLike {
 		metrics?: AgentMetricsSummary;
 		/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 		directCost?: number;
+		tokensPerSecond?: number;
 		readOnly?: boolean;
 		outputPath?: string;
 		patchPath?: string;

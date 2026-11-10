@@ -24,6 +24,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, postmortem, untilAborted } from "@oh-my-pi/pi-utils";
+import { usageThroughput } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { AgentSessionDisposeOptions } from "../session/agent-session-types";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -429,24 +430,30 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 					if (Array.isArray(messages)) {
 						for (let i = messages.length - 1; i >= 0; i--) {
 							const m = messages[i];
-							if (m?.role === "assistant" && typeof m.duration === "number" && m.duration > 100) {
-								const output = m.usage?.output ?? 0;
-								if (output > 0) {
-									tokensPerSecond = (output / m.duration) * 1000;
-									break;
-								}
+							if (
+								m &&
+								typeof m === "object" &&
+								"role" in m &&
+								m.role === "assistant" &&
+								"duration" in m &&
+								typeof m.duration === "number" &&
+								"usage" in m &&
+								m.usage &&
+								typeof m.usage === "object" &&
+								"output" in m.usage &&
+								typeof m.usage.output === "number"
+							) {
+								tokensPerSecond = usageThroughput({ output: m.usage.output }, m.duration);
+								if (tokensPerSecond !== undefined) break;
 							}
 						}
 					}
-					const historyPatch: { directCost?: number; metrics?: AgentMetricsSummary } = {};
+					const historyPatch: { directCost?: number; tokensPerSecond?: number } = {};
 					if (Number.isFinite(directCost) && directCost >= 0) {
 						historyPatch.directCost = directCost;
 					}
 					if (tokensPerSecond !== undefined) {
-						historyPatch.metrics = {
-							...(ref.history?.metrics ?? { tokens: 0, requests: 0, tools: 0, cost: directCost, durationMs: 0 }),
-							tokensPerSecond,
-						};
+						historyPatch.tokensPerSecond = tokensPerSecond;
 					}
 					if (Object.keys(historyPatch).length > 0) {
 						this.#registry.setHistory(id, historyPatch, ref.sessionFile ?? undefined);
