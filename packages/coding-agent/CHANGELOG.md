@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- added multi-client terminal and rpc attachment to the same running session, so detaching a view no longer ends its active turn ([#18725](https://github.com/can1357/oh-my-pi/pull/18725) by [@atacolak](https://github.com/atacolak)).
+
 ### Changed
 
 - The `task` tool no longer advertises a per-call `model` field unless `task.perCallModel` is `on` or the bundled seance is spawnable; a `model` sent anyway is still refused before dispatch ([#18554](https://github.com/can1357/oh-my-pi/pull/18554) by [@xiangnan0811](https://github.com/xiangnan0811))
