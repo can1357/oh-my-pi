@@ -857,6 +857,12 @@ type ScheduledAgentContinueOptions = {
 	onError?: (error: unknown) => void;
 	/** Messages the continued turn answers, handed to the turn observer (see `#startTurnObservation`). */
 	turnRecords?: AgentMessage[];
+	/**
+	 * What a `subagent_stop` hold taken after this request was scheduled does to it, decided at dispatch:
+	 * a user's retry or continue `"cancel"`s the pass and goes on, a background request `"skip"`s (the
+	 * hold's release re-requests it). Unset requests are the held turn's own recovery and run under it.
+	 */
+	stopPass?: "cancel" | "skip";
 };
 
 type ScheduledAgentContinueRequest = {
@@ -5550,6 +5556,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			for (;;) {
 				try {
+					// The awaits above (and an earlier busy wait) can outlast a wake taking its `subagent_stop`
+					// hold after this request was scheduled. A user's retry or continue cancels that pass, as a
+					// prompt does; a background request is skipped, and the hold's release re-requests it.
+					// Nothing awaits between the last check and dispatch.
+					if (request.options.stopPass === "cancel") {
+						while (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
+					}
+					if (
+						signal.aborted ||
+						this.#isDisposed ||
+						this.#abortInProgress ||
+						(request.options.stopPass === "skip" && this.#stopPassHolds.size > 0)
+					) {
+						return { status: "skipped", reason: "session-unavailable" };
+					}
 					if (!this.agent.state.isStreaming) onStart?.();
 					await this.agent.continue(signal);
 					return { status: "completed" };
@@ -8704,7 +8725,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async resume(): Promise<void> {
 		// A user continue cancels a held `subagent_stop` pass, like a typed prompt.
-		await this.#waitOutStopPasses(true);
+		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
 		if (!this.isStreaming) return this.#resumeIdle();
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
 		// until the continuation is live, so a host driving this session to a result
@@ -8755,7 +8776,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#noteUserTurn();
 		this.#todo.resetCycle();
 		this.#resetPromptMaintenanceState();
-		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt] });
+		this.#scheduleAgentContinue({ source: "manual-continue", turnRecords: [prompt], stopPass: "cancel" });
 	}
 
 	/**
@@ -9059,6 +9080,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
+				stopPassHolder: holder,
 				followUpBatch: followUps,
 				images: normalizedImages,
 				prependMessages:
@@ -9129,7 +9151,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	): Promise<boolean> {
 		const followUps = this.#createPromptFollowUps(options?.followUps);
 		// A user skill prompt cancels an active stop pass; agent prompts wait for it.
-		await this.#waitOutStopPasses(message.attribution === "user");
+		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(message.attribution === "user");
 		try {
 			this.#rejectQueuedExtensionCommands(options?.followUps);
 			// Same barrier/claim protocol as prompt(): skill invocations, collab peer
@@ -9265,7 +9287,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A held `subagent_stop` pass: a user skill prompt cancels it, any other waits
 		// it out. Checked after preprocessing and the abort check above, with no await
 		// between here and dispatch, so a hold taken meanwhile is honored too.
-		await this.#waitOutStopPasses(message.attribution === "user");
+		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(message.attribution === "user");
 
 		// Image normalization and the vision-description call suspend after the
 		// isStreaming check above, so a concurrent submission can start a turn in
@@ -9512,13 +9534,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		expandedText: string,
 		options?: Pick<
 			PromptOptions,
-			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted"
+			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted" | "userInitiated"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
 			/** Follow-ups held until this run goes live; queued behind it then. */
 			followUpBatch?: PromptFollowUps;
+			/** The `subagent_stop` hold this prompt is a continuation of. */
+			stopPassHolder?: StopPassHoldState;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -9716,6 +9740,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					);
 					if (eager >= 0) messages.splice(eager, 1);
 				}
+			}
+			// The setup awaits above can outlast a wake taking its `subagent_stop` hold, after the caller's
+			// own check. A turn started now would run inside the held pass, so a user's prompt cancels the
+			// pass and goes on, the holder's own turn is dropped once its pass was cancelled, and any other
+			// prompt is handed back (waiting here would stall the holder's wait for idle: this prompt is in
+			// flight). Nothing awaits between the last check and dispatch.
+			const holder = options?.stopPassHolder;
+			while (holder ? holder.cancel.signal.aborted : this.#stopPassHolds.size > 0) {
+				holder?.cancel.signal.throwIfAborted();
+				if (options?.userInitiated !== true && !isUserAuthoredMessage(message)) return false;
+				await this.#waitOutStopPasses(true);
+				if (this.#promptGeneration !== generation) return false;
 			}
 			// Consume the xd:// notice only when its previewed revision still holds.
 			// A mount delta or catalog rebuild during the await invalidates it: any
@@ -10543,6 +10579,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#queuedMessageDrainScheduled = true;
 		this.#scheduleAgentContinue({
 			source: "queued-message-drain",
+			stopPass: "skip",
 			shouldContinue: () => {
 				this.#queuedMessageDrainScheduled = false;
 				return (
@@ -10728,6 +10765,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
 			const prepared = await this.#prepareUserAuthoredWake(message, setupAbort.signal, sessionGeneration);
 			if (!prepared) return false;
+			// A wake can take its `subagent_stop` hold during the awaits above, after the caller's own
+			// hold check: a turn started now would run inside the held pass, whose monitor would take its
+			// output under the verdict for the earlier candidate. Park the message as a stranded aside;
+			// the hold's release wakes for it.
+			if (this.#stopPassHolds.size > 0) {
+				this.#irc.queueAside([message]);
+				return false;
+			}
 			const run = this.agent.prompt(prepared.length > 1 ? prepared : message);
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
@@ -10979,7 +11024,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		// A turn-starting message (an idle aside starts one too) waits out a held
 		// `subagent_stop` pass; a user's cancels it.
-		if ((options?.triggerTurn || options?.deliverAs === "aside") && !this.isStreaming) {
+		if (
+			(options?.triggerTurn || options?.deliverAs === "aside") &&
+			!this.isStreaming &&
+			this.#stopPassHolds.size > 0
+		) {
 			await this.#waitOutStopPasses(normalizedAppMessage.attribution === "user");
 		}
 		if (this.isStreaming) {
@@ -13473,7 +13522,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * were judging could no longer be the one published.
 	 */
 	async retry(): Promise<boolean> {
-		await this.#waitOutStopPasses(true);
+		if (this.#stopPassHolds.size > 0) await this.#waitOutStopPasses(true);
 		const didRetry = await this.#recovery.retry();
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.

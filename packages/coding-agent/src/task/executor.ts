@@ -4445,6 +4445,10 @@ async function driveFollowUpTurn(
 		session = live;
 		await acquireOwnership();
 	}
+	// The install awaits above can outlast a wake taking its `subagent_stop` hold after the ownership
+	// check: wait it out again, so this turn's monitor does not attach while the holder's turns run.
+	// Nothing awaits from here to the attach below.
+	await session.waitForStopPasses(signal);
 	// A kept-alive session reuses its YieldTool across turns; clear the prior
 	// run's incremental-section flag and retry counters so this turn's guards
 	// evaluate against its own state, not stale accumulators.
