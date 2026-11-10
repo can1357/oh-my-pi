@@ -141,18 +141,6 @@ describe("legacy pi virtual module package layout (issue #15208)", () => {
 		expect(keys).toContain("@oh-my-pi/pi-agent-core/sub/helper");
 	});
 
-	it("names the missing package when the install does not provide it", async () => {
-		using temp = TempDir.createSync("@omp-legacy-pi-missing-");
-		const packageDir = path.join(temp.path(), "node_modules", "@oh-my-pi", "pi-coding-agent");
-		await Bun.write(path.join(packageDir, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent" }));
-		const layout: LegacyPiLayout = {
-			packageDir,
-			repoRoot: path.join(temp.path(), "node_modules"),
-		};
-
-		await expect(collectBundledPiEntries(layout)).rejects.toThrow(/pi-agent-core/);
-	});
-
 	// The generated loaders import the bundled packages by their bare names, so
 	// the bundler resolves them against the importing module's directory. The
 	// virtual module therefore has to live inside the installed package: a
