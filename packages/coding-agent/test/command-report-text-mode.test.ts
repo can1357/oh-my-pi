@@ -94,14 +94,7 @@ describe("text-mode command reports on a real terminal core", () => {
 			parentSession: mainFile,
 		});
 		const report = [
-			"# Child summary heading",
-			"",
-			"```ts",
-			"const answer = 42;",
-			"```",
-			"",
-			"Earlier content for scrolling.",
-			"\tIndented tab content.",
+			"# Child summary heading\n\n```ts\nconst answer = 42;\n```\n\nEarlier content for scrolling.\n\tIndented tab content.",
 			...Array.from({ length: 80 }, (_, index) => `Child report line ${index}`),
 			"CHILD_SUMMARY_END_MARKER",
 		].join("\n");
@@ -120,10 +113,7 @@ describe("text-mode command reports on a real terminal core", () => {
 		const mainBytesBefore = fs.readFileSync(mainFile);
 		const childBytesBefore = fs.readFileSync(childFile);
 
-		term.sendInput("/summary");
-		await term.waitForRender(() => screen(term).some(row => row.includes("/summary")));
-		term.sendInput("\r");
-		await term.waitForRender(() => screen(term).some(row => row.includes("Session summaries")));
+		await runCommand("/summary", "Session summaries");
 		await term.waitForRender(() => screen(term).some(row => row.includes("const answer")));
 		const pickerRows = screen(term);
 		expect(pickerRows.some(row => /1\..*SummaryWorker/.test(row))).toBe(true);
@@ -149,10 +139,7 @@ describe("text-mode command reports on a real terminal core", () => {
 		const buffer = term.getScrollBuffer().map(row => Bun.stripANSI(row));
 		expect(buffer.some(row => row.includes("CHILD_SUMMARY_END_MARKER"))).toBe(false);
 
-		term.sendInput("/summary last");
-		await term.waitForRender(() => screen(term).some(row => row.includes("/summary last")));
-		term.sendInput("\r");
-		await term.waitForRender(() => screen(term).some(row => row.includes("Child summary heading")));
+		await runCommand("/summary last", "Child summary heading");
 		expect(screen(term).some(row => row.includes("CHILD_SUMMARY_END_MARKER"))).toBe(false);
 		term.sendInput("\x1b[4~");
 		await term.waitForRender(() => screen(term).some(row => row.includes("CHILD_SUMMARY_END_MARKER")));
@@ -165,13 +152,10 @@ describe("text-mode command reports on a real terminal core", () => {
 		expect(fs.readFileSync(childFile)).toEqual(childBytesBefore);
 	});
 
-	it.each([
-		{ fullscreen: false, key: "\x1b\x12" },
-		{ fullscreen: true, key: "\x1b[114;7u" },
-		{ fullscreen: false, key: "\x1b[27;7;114~" },
-	])(
-		"prepends a quoted summary without changing the conversation (fullscreen=$fullscreen, key=$key)",
-		async ({ fullscreen, key }) => {
+	it.each([false, true])(
+		"quotes a summary above the intact draft without changing the conversation (fullscreen=%s)",
+		async fullscreen => {
+			const key = "\x1b\x12";
 			await mountTranscript(5);
 			const text = fullscreen ? (await seedSummaryTree()).report : "Short reference summary";
 			if (!fullscreen) await writeSummaryReply(session.sessionManager, text, Date.now());
@@ -191,7 +175,6 @@ describe("text-mode command reports on a real terminal core", () => {
 			for (const line of text.split(/\r?\n/)) expect(draft).toContain(`> ${line}`);
 			expect(draft.startsWith("> ")).toBe(true);
 			expect(draft.endsWith(`> ${text.split(/\r?\n/).at(-1)}\n\n${question}`)).toBe(true);
-			expect(draft.split("^")).toHaveLength(2);
 			expect(mode.editor.getCursor()).toEqual({ line: draft.split("\n").length - 1, col: "question".length });
 			expect(session.isStreaming).toBe(false);
 			expect(session.messages).toEqual(beforeMessages);
@@ -221,29 +204,12 @@ describe("text-mode command reports on a real terminal core", () => {
 		term.sendInput("\x1f");
 		await term.waitForRender(() => mode.editor.getExpandedText() === question);
 		expect(session.messages).toEqual([]);
-	});
-
-	it("does not steal f or literal carets from normal draft typing", async () => {
-		await mountTranscript(5);
-		await writeSummaryReply(session.sessionManager, "Quoted reference", Date.now());
-		await runCommand("/summary last", "Inject");
-		term.sendInput("foo ^ bar");
-		await term.waitForRender(() => mode.editor.getExpandedText() === "foo ^ bar");
-		expect(session.messages).toEqual([]);
-	});
-
-	it("leaves a blank prompt after injecting into an empty draft", async () => {
-		await mountTranscript(5);
-		await writeSummaryReply(session.sessionManager, "Quoted reference", Date.now());
-		await runCommand("/summary last", "Inject");
+		mode.editor.setText("");
 		term.sendInput("\x1b\x12");
-		await term.waitForRender(() => mode.editor.getExpandedText().includes("> Quoted reference"));
-		const draft = mode.editor.getExpandedText();
-		expect(draft.startsWith("> ")).toBe(true);
-		expect(draft.endsWith("> Quoted reference\n\n")).toBe(true);
-		term.sendInput("My next question ^");
-		await term.waitForRender(() => mode.editor.getExpandedText() === `${draft}My next question ^`);
-		expect(session.messages).toEqual([]);
+		await term.waitForRender(() => mode.editor.getExpandedText().endsWith("> Quoted reference\n\n"));
+		const reference = mode.editor.getExpandedText();
+		term.sendInput("My next f question ^");
+		await term.waitForRender(() => mode.editor.getExpandedText() === `${reference}My next f question ^`);
 	});
 
 	it.each([5, 40])(

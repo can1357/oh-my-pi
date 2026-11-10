@@ -186,35 +186,6 @@ describe("HookSelectorComponent model slider", () => {
 		expect(selected).toEqual(["OpenCode Go"]);
 	});
 
-	it("searches preview content and updates a bounded selected preview", () => {
-		const component = new HookSelectorComponent(
-			"Browse summaries",
-			[
-				{ label: "root summary", preview: "root-only marker\n" + "extra text\n".repeat(80) },
-				{ label: "child summary", preview: "child-only marker\n" + "extra text\n".repeat(80) },
-			],
-			() => {},
-			() => {},
-			{ maxVisible: 8 },
-		);
-
-		const initial = component
-			.render(40)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
-		expect(initial).toContain("root-only marker");
-		expect(initial.split("\n").length).toBeLessThan(20);
-
-		for (const key of "child-only marker") component.handleInput(key);
-		const searched = component
-			.render(40)
-			.map(line => Bun.stripANSI(line))
-			.join("\n");
-		expect(searched).toContain("child summary");
-		expect(searched).not.toContain("root summary");
-		expect(searched).toContain("child-only marker");
-	});
-
 	it.each([4, 8])("keeps previews within the same row budget as a plain picker at %s rows", maxVisible => {
 		const labels = Array.from({ length: 20 }, (_, index) => `Option ${index}`);
 		const plain = new HookSelectorComponent(

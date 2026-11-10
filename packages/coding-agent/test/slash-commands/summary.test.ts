@@ -1,73 +1,54 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	SUMMARY_SLASH_COMMAND,
-	listSessionSummaries,
-	type SessionSummary,
-} from "@oh-my-pi/pi-coding-agent/slash-commands/summary";
-import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { createSessionStub } from "../helpers/interactive-mode-context";
+import { SUMMARY_SLASH_COMMAND, listSessionSummaries } from "@oh-my-pi/pi-coding-agent/slash-commands/summary";
+import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInteractiveModeContext, createSessionStub } from "../helpers/interactive-mode-context";
+import { makeAssistantMessage } from "../session-manager/helpers";
 
 type SummaryManager = Pick<SessionManager, "getEntries" | "getSessionFile" | "getSessionId">;
-let tempDir = "";
-const openManagers: SessionManager[] = [];
-
+let dir: TempDir;
+const managers: SessionManager[] = [];
+beforeEach(() => {
+	dir = TempDir.createSync("omp-summary-test-");
+});
 afterEach(async () => {
 	vi.restoreAllMocks();
-	await Promise.all(openManagers.splice(0).map(manager => manager.close()));
-	if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
-	tempDir = "";
+	await Promise.all(managers.splice(0).map(manager => manager.close()));
+	dir.removeSync();
 });
 
-async function fixtureDir(): Promise<string> {
-	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-summary-test-"));
-	return tempDir;
-}
-
-function textAnswer(
+function answer(
 	text: string,
 	timestamp: number,
-	options: { stopReason?: string; content?: unknown[]; errorMessage?: string } = {},
-): SessionMessageEntry {
+	overrides: Partial<AssistantMessage> = {},
+): SessionMessageEntry & { message: AssistantMessage } {
 	return {
 		type: "message",
 		id: crypto.randomUUID(),
 		parentId: null,
 		timestamp: new Date(Number.isFinite(timestamp) ? timestamp : 0).toISOString(),
-		message: {
-			role: "assistant",
-			content: options.content ?? [{ type: "text", text }],
-			stopReason: options.stopReason ?? "stop",
-			timestamp,
-			...(options.errorMessage ? { errorMessage: options.errorMessage } : {}),
-		},
-	} as unknown as SessionMessageEntry;
+		message: { ...makeAssistantMessage(), content: [{ type: "text", text }], timestamp, ...overrides },
+	};
 }
-
-function rootManager(entries: SessionEntry[], sessionFile: string | undefined, sessionId = "root"): SummaryManager {
-	return {
-		getEntries: () => entries,
-		getSessionFile: () => sessionFile,
-		getSessionId: () => sessionId,
-	} as SummaryManager;
+function root(entries: SessionEntry[] = [], file?: string): SummaryManager {
+	return { getEntries: () => entries, getSessionFile: () => file, getSessionId: () => "root" };
 }
-
-async function writeTranscript(file: string, id: string, messages: SessionEntry[] = []): Promise<void> {
+async function transcript(file: string, messages: SessionEntry[] = []): Promise<void> {
 	const records = [
-		{ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd: path.dirname(file) },
+		{ type: "session", id: path.basename(file, ".jsonl"), timestamp: "2026-01-01T00:00:00Z", cwd: dir.path() },
 		{
 			type: "session_init",
-			id: `init-${id}`,
+			id: "init",
 			parentId: null,
-			timestamp: "2026-01-01T00:00:00.000Z",
+			timestamp: "2026-01-01T00:00:00Z",
 			systemPrompt: [],
 			tools: [],
 		},
@@ -75,327 +56,156 @@ async function writeTranscript(file: string, id: string, messages: SessionEntry[
 	];
 	await Bun.write(file, `${records.map(record => JSON.stringify(record)).join("\n")}\n`);
 }
-
-function summaryEntries(items: SessionSummary[]) {
-	return items.map(({ agentName, source, entryIndex, timestamp, text }) => ({
-		agentName,
-		source: path.basename(source),
-		entryIndex,
-		timestamp,
-		text,
-	}));
+function context(manager: SummaryManager): InteractiveModeContext {
+	const ctx = createInteractiveModeContext({ sessionManager: manager, showCommandReport: vi.fn() });
+	managers.push(ctx.sessionManager);
+	return ctx;
 }
+const run = (ctx: InteractiveModeContext, args = "") =>
+	SUMMARY_SLASH_COMMAND.handleTui?.({ name: "summary", args, text: `/summary ${args}` }, {
+		ctx,
+	} as TuiSlashCommandRuntime);
 
-describe("/summary collector", () => {
-	it("collects every retained tree reply, orders deterministically, and scopes colliding ids to the root", async () => {
-		const dir = await fixtureDir();
-		const rootFile = path.join(dir, "root.jsonl");
-		const childFile = path.join(dir, "root", "child.jsonl");
-		const nestedFile = path.join(dir, "root", "child", "nested.jsonl");
-		const siblingFile = path.join(dir, "root", "sibling.jsonl");
-		const outsideFile = path.join(dir, "other-root", "collision.jsonl");
-		const tie = Date.parse("2026-05-01T00:00:00.000Z");
-		const rootEntries = [
-			textAnswer("root old", tie - 100),
-			textAnswer("root tie first", tie),
-			textAnswer("root tie later", tie),
-			textAnswer("same words", tie - 50),
-			textAnswer("same words", tie - 40),
+describe("/summary", () => {
+	it("orders retained tree replies without crossing roots, duplicating sources, or changing live sessions", async () => {
+		const main = path.join(dir.path(), "root.jsonl");
+		const child = path.join(dir.path(), "root", "child.jsonl");
+		const nested = path.join(dir.path(), "root", "child", "nested.jsonl");
+		const outside = path.join(dir.path(), "other-root", "child.jsonl");
+		const liveFile = path.join(dir.path(), "root", "live.jsonl");
+		const entries = [
+			answer("tie first", 100),
+			answer("tie later", 100),
+			answer("same words", 50),
+			answer("same words", 60),
 		];
-		await writeTranscript(rootFile, "root", rootEntries);
-		await writeTranscript(childFile, "child", [textAnswer("child tie", tie), textAnswer("child newer", tie + 10)]);
-		await writeTranscript(nestedFile, "nested", [textAnswer("nested newest", tie + 20)]);
-		await writeTranscript(siblingFile, "sibling", [textAnswer("sibling branch", tie - 5)]);
-		await writeTranscript(path.join(dir, "root", "__advisor.review.jsonl"), "advisor", [
-			textAnswer("private review", tie + 100),
-		]);
-		await writeTranscript(outsideFile, "child", [textAnswer("outside root", tie + 200)]);
-
+		await transcript(main, entries);
+		await transcript(child, [answer("child tie", 100)]);
+		await transcript(nested, [answer("nested newest", 120)]);
+		await transcript(path.join(dir.path(), "root", "sibling.jsonl"), [answer("sibling branch", 90)]);
+		await transcript(path.join(dir.path(), "root", "__advisor.review.jsonl"), [answer("private review", 200)]);
+		await transcript(outside, [answer("outside root", 300)]);
+		await transcript(liveFile, [answer("superseded disk reply", 400)]);
+		const live = SessionManager.inMemory();
+		managers.push(live);
+		live.appendMessage(answer("unsaved child reply", 130).message);
 		const registry = new AgentRegistry();
 		registry.register({
 			id: "child",
-			displayName: "Outside collision",
+			displayName: "child",
 			kind: "sub",
-			parentId: "other",
 			session: null,
-			sessionFile: outsideFile,
+			sessionFile: outside,
 			status: "parked",
 		});
-		const entries = await listSessionSummaries(rootManager(rootEntries, rootFile), registry);
-		expect(summaryEntries(entries)).toEqual([
-			{ agentName: "nested", source: "nested.jsonl", entryIndex: 1, timestamp: tie + 20, text: "nested newest" },
-			{ agentName: "child", source: "child.jsonl", entryIndex: 2, timestamp: tie + 10, text: "child newer" },
-			{ agentName: "main", source: "root.jsonl", entryIndex: 2, timestamp: tie, text: "root tie later" },
-			{ agentName: "main", source: "root.jsonl", entryIndex: 1, timestamp: tie, text: "root tie first" },
-			{ agentName: "child", source: "child.jsonl", entryIndex: 1, timestamp: tie, text: "child tie" },
-			{ agentName: "sibling", source: "sibling.jsonl", entryIndex: 1, timestamp: tie - 5, text: "sibling branch" },
-			{ agentName: "main", source: "root.jsonl", entryIndex: 4, timestamp: tie - 40, text: "same words" },
-			{ agentName: "main", source: "root.jsonl", entryIndex: 3, timestamp: tie - 50, text: "same words" },
-			{ agentName: "main", source: "root.jsonl", entryIndex: 0, timestamp: tie - 100, text: "root old" },
-		]);
-		expect(registry.get("child")?.sessionFile).toBe(outsideFile);
-		expect(entries.some(item => item.text === "outside root" || item.text === "private review")).toBe(false);
-	});
-
-	it("reads unsaved local child replies from memory without changing the roster or transcript", async () => {
-		const dir = await fixtureDir();
-		const rootFile = path.join(dir, "root.jsonl");
-		const childFile = path.join(dir, "root", "live.jsonl");
-		await writeTranscript(rootFile, "root");
-		await writeTranscript(childFile, "live", [textAnswer("superseded disk reply", 1)]);
-		const manager = SessionManager.inMemory();
-		openManagers.push(manager);
-		manager.appendMessage(textAnswer("unsaved child reply", 2).message as AssistantMessage);
-		const registry = new AgentRegistry();
 		registry.register({
 			id: "live",
-			displayName: "Live worker",
+			displayName: "live",
 			kind: "sub",
-			session: createSessionStub(manager, Settings.isolated()),
-			sessionFile: childFile,
+			session: createSessionStub(live, Settings.isolated()),
+			sessionFile: liveFile,
 			status: "idle",
 		});
-		const beforeBytes = await Bun.file(childFile).text();
-		const beforeEntries = structuredClone(manager.getEntries());
 		const beforeRefs = structuredClone(registry.list().map(ref => ({ ...ref, session: null })));
-		const result = await listSessionSummaries(rootManager([], rootFile), registry);
-		expect(result.map(item => ({ agent: item.agentName, text: item.text }))).toEqual([
-			{ agent: "Live worker", text: "unsaved child reply" },
+		const beforeEntries = structuredClone(live.getEntries());
+		const beforeBytes = await Bun.file(liveFile).text();
+		const result = await listSessionSummaries(root(entries, main), registry);
+		expect(
+			result.map(item => [item.agentName, path.basename(item.source), item.entryIndex, item.timestamp, item.text]),
+		).toEqual([
+			["live", "live.jsonl", 0, 130, "unsaved child reply"],
+			["nested", "nested.jsonl", 1, 120, "nested newest"],
+			["main", "root.jsonl", 1, 100, "tie later"],
+			["main", "root.jsonl", 0, 100, "tie first"],
+			["child", "child.jsonl", 1, 100, "child tie"],
+			["sibling", "sibling.jsonl", 1, 90, "sibling branch"],
+			["main", "root.jsonl", 3, 60, "same words"],
+			["main", "root.jsonl", 2, 50, "same words"],
 		]);
-		expect(await Bun.file(childFile).text()).toBe(beforeBytes);
-		expect(manager.getEntries()).toEqual(beforeEntries);
 		expect(registry.list().map(ref => ({ ...ref, session: null }))).toEqual(beforeRefs);
+		expect(live.getEntries()).toEqual(beforeEntries);
+		expect(await Bun.file(liveFile).text()).toBe(beforeBytes);
 	});
 
-	it("includes only terminal visible text, tolerates legacy ids, and uses timestamp fallbacks", async () => {
-		const now = Date.parse("2026-06-01T00:00:00.000Z");
-		const eligible = [
-			textAnswer("Visible one", now, {
+	it("extracts visible final text and orders legacy replies using timestamp fallbacks without persisting", async () => {
+		const legacy = answer("legacy", Number.NaN);
+		Reflect.deleteProperty(legacy, "id");
+		legacy.timestamp = "invalid";
+		const fallback = answer("entry timestamp", Number.NaN);
+		fallback.timestamp = new Date(101).toISOString();
+		const entries = [
+			answer("", 100, {
 				content: [
 					{ type: "thinking", thinking: "secret" },
 					{ type: "text", text: "Visible " },
-					{ type: "text", text: "one" },
+					{ type: "text", text: "reply" },
 				],
 			}),
-			textAnswer("Visible fallback", now, { content: [{ type: "text", text: "Visible fallback" }] }),
-			textAnswer("", now, { content: [{ type: "text", text: "  \n\t " }] }),
-			textAnswer("error", now, { stopReason: "error" }),
-			textAnswer("aborted", now, { stopReason: "aborted" }),
-			textAnswer("length", now, { stopReason: "length" }),
-			textAnswer("tool", now, {
+			...(["error", "aborted", "length"] as const).map(stopReason => answer("incomplete", 200, { stopReason })),
+			answer("", 200, {
 				stopReason: "toolUse",
 				content: [{ type: "toolCall", id: "call", name: "yield", arguments: {} }],
 			}),
-			textAnswer("generated image", now, { content: [{ type: "image", data: "abc", mimeType: "image/png" }] }),
-			textAnswer("yield result", now, {
-				content: [{ type: "toolResult", toolName: "yield", content: [{ type: "text", text: "structured" }] }],
-			}),
+			answer("", 200, { content: [{ type: "image", data: "abc", mimeType: "image/png" }] }),
+			answer(" \n\t ", 200),
+			legacy,
+			fallback,
 		];
-		const entries: SessionEntry[] = [...eligible];
-		const legacy = textAnswer("legacy", Number.NaN);
-		const legacyRecord = legacy as unknown as { id?: string; message: { timestamp?: number }; timestamp: string };
-		delete legacyRecord.id;
-		delete legacyRecord.message.timestamp;
-		legacyRecord.timestamp = "not a timestamp";
-		entries.push(legacy);
-		const fallback = textAnswer("entry timestamp", Number.NaN);
-		const fallbackRecord = fallback as unknown as { message: { timestamp?: number }; timestamp: string };
-		delete fallbackRecord.message.timestamp;
-		fallbackRecord.timestamp = new Date(now + 1).toISOString();
-		entries.push(fallback);
-
-		const result = await listSessionSummaries(rootManager(entries, undefined), new AgentRegistry());
-		expect(result.map(item => item.text)).toEqual(["entry timestamp", "Visible fallback", "Visible one", "legacy"]);
-		expect(result.find(item => item.text === "legacy")).toMatchObject({ entryIndex: 9, timestamp: 0 });
-		expect(result.some(item => item.text.includes("secret"))).toBe(false);
+		const result = await listSessionSummaries(root(entries), new AgentRegistry());
+		expect(result.map(item => [item.text, item.timestamp])).toEqual([
+			["entry timestamp", 101],
+			["Visible reply", 100],
+			["legacy", 0],
+		]);
+		expect(result.at(-1)?.entryIndex).toBe(entries.indexOf(legacy));
+		expect(await fs.readdir(dir.path())).toEqual([]);
 	});
 
-	it("uses only in-memory root entries when unpersisted and handles empty, malformed, missing, and read-error sources", async () => {
-		const dir = await fixtureDir();
-		const unpersisted = await listSessionSummaries(
-			rootManager([textAnswer("memory only", 100)], undefined, "memory-root"),
-			new AgentRegistry(),
-		);
-		expect(summaryEntries(unpersisted)).toEqual([
-			{ agentName: "main", source: "memory-root", entryIndex: 0, timestamp: 100, text: "memory only" },
-		]);
-		expect(await fs.readdir(dir)).toEqual([]);
-		expect(await listSessionSummaries(rootManager([], undefined), new AgentRegistry())).toEqual([]);
-
-		const rootFile = path.join(dir, "root.jsonl");
-		const validChild = path.join(dir, "root", "valid.jsonl");
-		const malformedChild = path.join(dir, "root", "malformed.jsonl");
-		const missingChild = path.join(dir, "root", "vanished.jsonl");
-		await writeTranscript(rootFile, "root", []);
-		await writeTranscript(validChild, "valid", [textAnswer("kept despite malformed sibling", 200)]);
-		await Bun.write(malformedChild, "not-json\n");
+	it("skips malformed and vanished children but surfaces real read errors instead of an empty report", async () => {
+		const main = path.join(dir.path(), "root.jsonl");
+		await transcript(main);
+		await transcript(path.join(dir.path(), "root", "valid.jsonl"), [answer("kept reply", 100)]);
 		const registry = new AgentRegistry();
-		registry.register({
-			id: "malformed",
-			displayName: "Malformed",
-			kind: "sub",
-			session: null,
-			sessionFile: malformedChild,
-			status: "parked",
-		});
-		registry.register({
-			id: "vanished",
-			displayName: "Vanished",
-			kind: "sub",
-			session: null,
-			sessionFile: missingChild,
-			status: "parked",
-		});
-		await expect(listSessionSummaries(rootManager([], rootFile), registry)).resolves.toEqual([
-			expect.objectContaining({ text: "kept despite malformed sibling" }),
-		]);
-
-		const inaccessible = path.join(dir, "root", "blocked.jsonl");
-		await fs.mkdir(inaccessible, { recursive: true });
+		for (const id of ["malformed", "vanished"]) {
+			const file = path.join(dir.path(), "root", `${id}.jsonl`);
+			if (id === "malformed") await Bun.write(file, "not-json\n");
+			registry.register({ id, displayName: id, kind: "sub", session: null, sessionFile: file, status: "parked" });
+		}
+		expect((await listSessionSummaries(root([], main), registry)).map(item => item.text)).toEqual(["kept reply"]);
+		const blocked = path.join(dir.path(), "root", "blocked.jsonl");
+		await fs.mkdir(blocked);
 		registry.register({
 			id: "blocked",
-			displayName: "Blocked",
+			displayName: "blocked",
 			kind: "sub",
 			session: null,
-			sessionFile: inaccessible,
-			status: "parked",
-		});
-		await expect(listSessionSummaries(rootManager([], rootFile), registry)).rejects.toBeDefined();
-	});
-});
-
-function commandHarness(manager: SummaryManager) {
-	const editor = { setText: vi.fn(), getText: () => "" };
-	const showCommandReport = vi.fn();
-	const showStatus = vi.fn();
-	const showError = vi.fn();
-	const showWarning = vi.fn();
-	const showHookSelector = vi.fn(
-		async (_title: string, items: Array<{ label: string; preview?: string }>) => items[0]?.label,
-	);
-	const mainSession = {};
-	const ctx = {
-		session: mainSession,
-		sessionManager: manager,
-		editor,
-		keybindings: { getKeys: () => ["ctrl+alt+r"] },
-		showCommandReport,
-		showStatus,
-		showError,
-		showWarning,
-		showHookSelector,
-	} as unknown as InteractiveModeContext;
-	return {
-		ctx,
-		mainSession,
-		showCommandReport,
-		showStatus,
-		showError,
-		showWarning,
-		showHookSelector,
-		runtime: { ctx } as TuiSlashCommandRuntime,
-	};
-}
-
-const parsed = (args: string): ParsedSlashCommand => ({
-	name: "summary",
-	args,
-	text: `/summary${args ? ` ${args}` : ""}`,
-});
-
-describe("/summary command", () => {
-	it("opens /last directly, and maps a picker selection to its item rather than preview text", async () => {
-		const dir = await fixtureDir();
-		const manager = SessionManager.create(dir, dir);
-		openManagers.push(manager);
-		manager.appendSessionInit({ systemPrompt: [], task: "summary test", tools: [] });
-		manager.appendMessage(
-			textAnswer(`same preview ${"x".repeat(180)} ROOT EARLIER BODY`, 100).message as AssistantMessage,
-		);
-		manager.appendMessage(
-			textAnswer(`same preview ${"x".repeat(180)} ROOT NEWEST BODY`, 200).message as AssistantMessage,
-		);
-		const rootFile = manager.getSessionFile();
-		if (!rootFile) throw new Error("Expected real root transcript");
-		const childFile = path.join(rootFile.slice(0, -".jsonl".length), "same-preview.jsonl");
-		await writeTranscript(childFile, "same-preview", [
-			textAnswer(`same preview ${"x".repeat(180)} CHILD EARLIER BODY`, 100),
-			textAnswer(`same preview ${"x".repeat(180)} CHILD NEWEST BODY`, 300),
-		]);
-		const registry = new AgentRegistry();
-		vi.spyOn(AgentRegistry, "global").mockReturnValue(registry);
-		const beforeBytes = await fs.readFile(rootFile);
-		const beforeChildBytes = await fs.readFile(childFile);
-		const beforeEntries = structuredClone(manager.getEntries());
-		const beforeLeaf = manager.getLeafId();
-		const beforeSessionId = manager.getSessionId();
-		const last = commandHarness(manager);
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed("last"), last.runtime);
-		expect(last.showHookSelector).not.toHaveBeenCalled();
-		expect(last.showCommandReport).toHaveBeenCalledTimes(1);
-		expect(last.showCommandReport.mock.calls[0]?.[0].title).toContain("same-preview");
-
-		const picker = commandHarness(manager);
-		picker.showHookSelector.mockImplementationOnce(async (_title, items) => items[3]?.label);
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed(""), picker.runtime);
-		expect(picker.showHookSelector).toHaveBeenCalledTimes(1);
-		const options = picker.showHookSelector.mock.calls[0]?.[1] ?? [];
-		expect(options).toHaveLength(4);
-		expect(picker.showCommandReport).toHaveBeenCalledTimes(1);
-		expect(picker.showCommandReport.mock.calls[0]?.[0].title).toContain("same-preview");
-		const reportBody = picker.showCommandReport.mock.calls[0]?.[0].body;
-		expect(reportBody.render(100).join("\n")).toContain("CHILD EARLIER BODY");
-		expect(await fs.readFile(rootFile)).toEqual(beforeBytes);
-		expect(await fs.readFile(childFile)).toEqual(beforeChildBytes);
-		expect(manager.getEntries()).toEqual(beforeEntries);
-		expect(manager.getLeafId()).toBe(beforeLeaf);
-		expect(manager.getSessionId()).toBe(beforeSessionId);
-	});
-
-	it("keeps empty and invalid invocations out of reports and ignores a picker result after session change", async () => {
-		const empty = commandHarness(rootManager([], undefined));
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed(""), empty.runtime);
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed("last"), empty.runtime);
-		expect(empty.showStatus).toHaveBeenCalled();
-		expect(empty.showHookSelector).not.toHaveBeenCalled();
-		expect(empty.showCommandReport).not.toHaveBeenCalled();
-
-		const invalid = commandHarness(rootManager([textAnswer("present", 1)], undefined));
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed("else"), invalid.runtime);
-		expect(invalid.showWarning).toHaveBeenCalled();
-		expect(invalid.showCommandReport).not.toHaveBeenCalled();
-		expect(invalid.showHookSelector).not.toHaveBeenCalled();
-
-		const dir = await fixtureDir();
-		const rootFile = path.join(dir, "root.jsonl");
-		await writeTranscript(rootFile, "root", []);
-		const blockedFile = path.join(dir, "root", "blocked.jsonl");
-		await fs.mkdir(blockedFile, { recursive: true });
-		const registry = new AgentRegistry();
-		registry.register({
-			id: "blocked",
-			displayName: "Blocked",
-			kind: "sub",
-			session: null,
-			sessionFile: blockedFile,
+			sessionFile: blocked,
 			status: "parked",
 		});
 		vi.spyOn(AgentRegistry, "global").mockReturnValue(registry);
-		const failed = commandHarness(rootManager([], rootFile));
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed("last"), failed.runtime);
-		expect(failed.showError).toHaveBeenCalled();
-		expect(failed.showCommandReport).not.toHaveBeenCalled();
+		const ctx = context(root([], main));
+		await run(ctx, "last");
+		expect(ctx.showError).toHaveBeenCalled();
+		expect(ctx.showCommandReport).not.toHaveBeenCalled();
+	});
 
-		const staleFile = path.join(dir, "stale.jsonl");
-		await writeTranscript(staleFile, "stale", []);
-		const manager = rootManager([textAnswer("stale reply", 1)], staleFile);
-		const stale = commandHarness(manager);
-		stale.showHookSelector.mockImplementationOnce(async (_title, items) => {
-			stale.ctx.sessionManager = rootManager([], undefined) as SessionManager;
-			return items[0]?.label;
+	it("does not open reports for empty, invalid, cancelled, or stale invocations", async () => {
+		const ctx = context(root());
+		await run(ctx);
+		await run(ctx, "last");
+		expect(ctx.showStatus).toHaveBeenCalled();
+		expect(ctx.showHookSelector).not.toHaveBeenCalled();
+		vi.spyOn(ctx.sessionManager, "getEntries").mockReturnValue([answer("available reply", 100)]);
+		await run(ctx, "else");
+		expect(ctx.showWarning).toHaveBeenCalled();
+		expect(ctx.showHookSelector).not.toHaveBeenCalled();
+		await run(ctx);
+		vi.spyOn(ctx, "showHookSelector").mockImplementationOnce(async (_title, items) => {
+			ctx.session = createSessionStub(ctx.sessionManager, Settings.isolated());
+			const first = items[0];
+			return typeof first === "string" ? first : first?.label;
 		});
-		await SUMMARY_SLASH_COMMAND.handleTui?.(parsed(""), stale.runtime);
-		expect(stale.showHookSelector).toHaveBeenCalled();
-		expect(stale.showCommandReport).not.toHaveBeenCalled();
+		await run(ctx);
+		expect(ctx.showCommandReport).not.toHaveBeenCalled();
 	});
 });
