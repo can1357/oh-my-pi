@@ -159,18 +159,38 @@ type HoldMouseOptions = Pick<NativeHoldOptions, "duration" | "button" | "keys" |
 const inputOptionsKeys: Record<keyof InputOptions, true> = { takeover: true };
 const screenshotOptionsKeys: Record<keyof ScreenshotOptions, true> = { silent: true };
 const menuOptionsKeys: Record<keyof MenuOptions, true> = { menu: true };
-const clickOptionsKeys: Record<keyof ClickOptions, true> = { takeover: true, menu: true, button: true, count: true, modifiers: true };
+const clickOptionsKeys: Record<keyof ClickOptions, true> = {
+	takeover: true,
+	menu: true,
+	button: true,
+	count: true,
+	modifiers: true,
+};
 const dragOptionsKeys: Record<keyof DragOptions, true> = { takeover: true, modifiers: true, keys: true };
 const scrollOptionsKeys: Record<keyof ScrollOptions, true> = { takeover: true, dx: true, dy: true };
 const axOptionsKeys: Record<keyof AxOptions, true> = { all: true, maxDepth: true };
 const holdOptionsKeys: Record<keyof HoldOptions, true> = { duration: true, takeover: true };
-const holdMouseOptionsKeys: Record<keyof HoldMouseOptions, true> = { duration: true, button: true, keys: true, takeover: true };
+const holdMouseOptionsKeys: Record<keyof HoldMouseOptions, true> = {
+	duration: true,
+	button: true,
+	keys: true,
+	takeover: true,
+};
 const windowFilterKeys: Record<keyof WindowFilter, true> = { id: true, app: true, title: true, wait: true };
 const applicationQueryKeys: Record<keyof ApplicationQuery, true> = { query: true, runningOnly: true };
-const applicationOpenOptionsKeys: Record<keyof ApplicationOpenOptions, true> = { activate: true, reveal: true, app: true };
+const applicationOpenOptionsKeys: Record<keyof ApplicationOpenOptions, true> = {
+	activate: true,
+	reveal: true,
+	app: true,
+};
 const axQueryKeys: Record<keyof AxQuery, true> = { role: true, title: true, value: true, limit: true };
 const axSelectTextOptionsKeys: Record<keyof AxSelectTextOptions, true> = { prefix: true, suffix: true, select: true };
-const doubleClickKeys: Record<keyof Omit<ClickOptions, "count">, true> = { takeover: true, menu: true, button: true, modifiers: true };
+const doubleClickKeys: Record<keyof Omit<ClickOptions, "count">, true> = {
+	takeover: true,
+	menu: true,
+	button: true,
+	modifiers: true,
+};
 const observeKeys: Record<keyof (ScreenshotOptions & AxOptions), true> = { silent: true, all: true, maxDepth: true };
 
 type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
@@ -350,15 +370,20 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	const unknown = Object.keys(value).filter(key => !allowed.includes(key));
 	if (unknown.length === 0) return;
 	const hints = unknown.flatMap(key => {
-		const matches = allowed.filter(name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()));
+		const matches = allowed.filter(
+			name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()),
+		);
 		return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
 	});
-	throw new ToolError(`${label}: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`);
+	throw new ToolError(
+		`${label}: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`,
+	);
 }
 
 function strictOptions(value: unknown, keys: object, label: string): void {
 	if (value != null) strictObject(value, Object.keys(keys), label);
 }
+
 
 function windowWait(wait: unknown): number {
 	if (wait === undefined) return 0;

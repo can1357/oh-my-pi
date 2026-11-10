@@ -700,12 +700,7 @@ describe("computer prelude", () => {
 		expect(
 			await runInContext("computer.run(fn, { args: [7, /save/gi, argFn], read_only: true, timeout: 5 })", realm),
 		).toBe(42);
-		expect(
-			await runInContext(
-				'computer.run("41 + 1", { timeout: 2, action: "close", code: "old", fn: "old", unexpected: true })',
-				realm,
-			),
-		).toBe(42);
+		expect(await runInContext('computer.run("41 + 1", { timeout: 2 })', realm)).toBe(42);
 		expect(await runInContext("computer.capabilities()", realm)).toEqual(capabilities);
 
 		expect(
@@ -1313,7 +1308,7 @@ describe("computer prelude", () => {
 				`(async () => {
 					const win = await computer.window(42);
 					await win.ref("e1").doubleClick({ button: "right" });
-					await (await win.ref("e1")).doubleClick({ count: 3 });
+					await (await win.ref("e1")).doubleClick();
 					const found = await win.find({ role: "button" });
 					await found[0].doubleClick();
 					await computer.run(async ({ desktop }) => {
@@ -1474,7 +1469,10 @@ describe("computer worker round trips", () => {
 		}
 		const transport = new MemoryTransport();
 		new ComputerWorkerCore(transport, () => new OptionsSession());
-		const result = await runWorker(transport, "strict-options", `
+		const result = await runWorker(
+			transport,
+			"strict-options",
+			`
 			const win = await desktop.window("42");
 			const el = await win.ref("e1");
 			const screen = await desktop.display("active");
@@ -1505,7 +1503,7 @@ describe("computer worker round trips", () => {
 			await check("press", o => el.press("enter", o), { takeover: false });
 			await check("type", o => el.type("Save", o), { takeover: false });
 			await check("click", o => el.click(o), { button: "left", count: 1, modifiers: [], menu: ["Save"], takeover: false });
-			await check("doubleClick", o => el.doubleClick(o), { button: "left", modifiers: [], menu: ["Save"], takeover: false });
+			await check("doubleClick", o => el.doubleClick(o), { button: "left", modifiers: [], menu: ["Save"], takeover: false }, { count: 3 });
 			for (const target of [win, screen, desktop]) {
 				await check("screenshot", o => target.screenshot(o), { silent: true });
 				await check("zoom", o => target.zoom({ x: 0, y: 0, width: 1, height: 1 }, o), { silent: true });
@@ -1523,7 +1521,8 @@ describe("computer worker round trips", () => {
 			await desktop.windows(null);
 			assert(failures.length === 0, failures.join("; "));
 			return true;
-		`);
+		`,
+		);
 		if (!result.ok) throw new Error(result.error.message);
 		expect(result.payload.returnValue).toBe(true);
 	});
@@ -5036,7 +5035,7 @@ describe("computer background fallback", () => {
 		});
 	});
 
-	it("never forwards a model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
+	it("rejects model-supplied returnFocus on holds; only the host's rerun sets it", async () => {
 		const native = new RefusingSession();
 		const holds: NativeHoldOptions[] = [];
 		native.holdKeys = async (_target: string, _keys: string[], options: NativeHoldOptions) => {
@@ -5046,10 +5045,18 @@ describe("computer background fallback", () => {
 		native.holdMouse = async (_target: string, _x: number, _y: number, options: NativeHoldOptions) => {
 			holds.push(options);
 		};
+		const rejected = await run(
+			native,
+			'const win = await desktop.window("42"); await win.holdMouse(1, 2, { duration: 0, returnFocus: true });',
+			"takeover",
+		);
+		expect(rejected.ok).toBe(false);
+		if (!rejected.ok) expect(rejected.error.message).toContain("unknown option(s): returnFocus");
+		expect(holds).toEqual([]);
 		const code = [
 			'const win = await desktop.window("42");',
-			"await win.holdMouse(1, 2, { duration: 0, takeover: true, returnFocus: true });",
-			"await win.holdKeys(['a'], { duration: 0, returnFocus: true });",
+			"await win.holdMouse(1, 2, { duration: 0, takeover: true });",
+			"await win.holdKeys(['a'], { duration: 0 });",
 		].join("\n");
 		await run(native, code, "takeover");
 		expect(holds.map(options => options.returnFocus)).toEqual([undefined, undefined, true]);

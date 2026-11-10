@@ -238,10 +238,14 @@
 		const unknown = Object.keys(opts).filter(key => !allowed.includes(key));
 		if (unknown.length > 0) {
 			const hints = unknown.flatMap(key => {
-				const matches = allowed.filter(name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()));
+				const matches = allowed.filter(
+					name => name.toLowerCase().includes(key.toLowerCase()) || key.toLowerCase().includes(name.toLowerCase()),
+				);
 				return matches.length === 1 ? [`${key}: did you mean ${matches[0]}?`] : [];
 			});
-			const error = new Error(`computer.run: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`);
+			const error = new Error(
+				`computer.run: unknown option(s): ${unknown.join(", ")}. Valid names: ${allowed.join(", ")}${hints.length ? `. ${hints.join(" ")}` : ""}`,
+			);
 			error.name = "ToolError";
 			throw error;
 		}
