@@ -2812,8 +2812,8 @@ type SkillAnalysisCandidate struct {
 	Fingerprint string `json:"fingerprint"`
 	// False when part of the skill directory was left out of the snapshot.
 	Complete bool `json:"complete"`
-	// Files included in the snapshot.
-	Files int64 `json:"files"`
+	// Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt.
+	Files []string `json:"files"`
 	// What was left out and why.
 	Omissions []string `json:"omissions"`
 }

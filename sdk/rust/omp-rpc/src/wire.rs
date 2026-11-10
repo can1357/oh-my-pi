@@ -3288,8 +3288,8 @@ pub struct SkillAnalysisCandidate {
 	pub fingerprint: String,
 	/// False when part of the skill directory was left out of the snapshot.
 	pub complete: bool,
-	/// Files included in the snapshot.
-	pub files: i64,
+	/// Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt.
+	pub files: Vec<String>,
 	/// What was left out and why.
 	pub omissions: Vec<String>,
 }

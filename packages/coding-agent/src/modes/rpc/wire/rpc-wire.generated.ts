@@ -561,8 +561,8 @@ export interface SkillAnalysisCandidate {
 	fingerprint: string;
 	/** False when part of the skill directory was left out of the snapshot. */
 	complete: boolean;
-	/** Files included in the snapshot. */
-	files: number;
+	/** Relative paths of the files that would be sent, in the order they are read; list them in the consent prompt. */
+	files: string[];
 	/** What was left out and why. */
 	omissions: string[];
 }

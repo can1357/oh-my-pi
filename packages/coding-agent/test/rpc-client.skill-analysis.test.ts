@@ -50,7 +50,7 @@ function candidate(id: string) {
 		root: `/${id}/review`,
 		fingerprint: "f".repeat(64),
 		complete: true,
-		files: 1,
+		files: ["SKILL.md"],
 		omissions: [],
 	};
 }

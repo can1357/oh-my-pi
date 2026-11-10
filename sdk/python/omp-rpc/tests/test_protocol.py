@@ -163,7 +163,7 @@ def analysis_candidate(candidate_id: str) -> dict[str, object]:
         "root": f"/{candidate_id}/review",
         "fingerprint": "f" * 64,
         "complete": True,
-        "files": 1,
+        "files": ["SKILL.md"],
         "omissions": [],
     }
 

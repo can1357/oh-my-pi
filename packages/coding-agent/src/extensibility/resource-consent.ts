@@ -19,7 +19,12 @@ export const INCOMPLETE_COVERAGE_DISCLOSURE =
 
 const kib = (bytes: number): string => `${(bytes / 1024).toFixed(1)} KiB`;
 
-/** One line: label, location, files and size read, and whether coverage was partial. */
+/** One indented line per file that would be sent, so a person consenting reviews names, not a count. */
+export function listFiles(paths: readonly string[]): string[] {
+	return paths.map(file => `    ${sanitizeDisplaySingleLine(file)}`);
+}
+
+/** One line: label, location, files and size read, and whether coverage was partial. The files themselves follow via {@link listFiles}. */
 export function describeSnapshot(snapshot: ResourceSnapshot): string {
 	const { label, root } = snapshot.candidate;
 	const bytes = snapshot.files.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0);
@@ -28,13 +33,16 @@ export function describeSnapshot(snapshot: ResourceSnapshot): string {
 }
 
 /**
- * The request as it will be sent: each resource with size and coverage, the total against the cap,
+ * The request as it will be sent: each resource with size, coverage and the files it contributes, the total against the cap,
  * and a warning for partial coverage. Throws, before anything is asked or billed, when the analyzer
  * would refuse the request (too few or too many resources, over the size cap, duplicate roots).
  */
 export function describeRequest(snapshots: readonly ResourceSnapshot[]): string {
 	const { bytes } = preflightResourceAnalysis(snapshots);
-	const lines = snapshots.map(snapshot => `  ${describeSnapshot(snapshot)}`);
+	const lines = snapshots.flatMap(snapshot => [
+		`  ${describeSnapshot(snapshot)}`,
+		...listFiles(snapshot.files.map(file => file.path)),
+	]);
 	lines.push(
 		`Resource data: ${kib(bytes)} of the ${kib(MAX_RESOURCE_ANALYSIS_PROMPT_BYTES)} budget, plus prompt framing.`,
 	);

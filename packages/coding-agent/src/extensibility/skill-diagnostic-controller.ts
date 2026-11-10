@@ -15,7 +15,7 @@ import {
 	type SkillDiagnosticEntry,
 	type SkillDiagnosticDuplicate,
 } from "./skill-diagnostics";
-import type { SkillSelectionReason } from "./skills";
+import type { SkillDiagnostic, SkillSelectionReason } from "./skills";
 
 export type SkillAnalysisStatus = "prepared" | "running" | "complete" | "failed" | "cancelled" | "applied" | "stale";
 export interface SkillAnalysisCandidate {
@@ -25,7 +25,7 @@ export interface SkillAnalysisCandidate {
 	root: string;
 	fingerprint: string;
 	complete: boolean;
-	files: number;
+	files: string[];
 	omissions: string[];
 }
 export interface SkillDiagnosticAnalysisRecord {
@@ -57,9 +57,19 @@ interface PreparedAnalysis {
 	record: SkillDiagnosticAnalysisRecord;
 	snapshots: ResourceSnapshot[];
 	context: string;
+	/** The loaded copies the analysis compared (see {@link groupMembers}); a plan is void once they differ. */
+	members: string;
 	abort: AbortController;
 	completion: PromiseWithResolvers<SkillDiagnosticAnalysisRecord>;
 	applying?: Promise<SkillDiagnosticAnalysisRecord>;
+}
+
+/** The files of every loaded copy in a diagnostic group, as one comparable key. */
+function groupMembers(group: SkillDiagnostic): string {
+	return [...group.skills, ...group.duplicates.map(copy => copy.skill)]
+		.map(skill => skill.filePath)
+		.sort()
+		.join("\0");
 }
 
 /** Shared session-owned workflow; neither navigating a panel nor querying RPC starts a model call. */
@@ -146,6 +156,7 @@ export class SkillDiagnosticController {
 			throw new Error("This skill already has an active analysis or application; cancel or wait for it first.");
 		const group = this.#session.skillDiagnostics.find(group => group.name === name);
 		if (!group) throw new Error("No comparable diagnostic variants exist for the selected skill.");
+		const members = groupMembers(group);
 		const candidates: ResourceCandidate[] = [];
 		const seen = new Set<string>();
 		for (const skill of [...group.skills, ...group.duplicates.map(copy => copy.skill)]) {
@@ -182,7 +193,7 @@ export class SkillDiagnosticController {
 				root: snapshot.candidate.root,
 				fingerprint: snapshot.fingerprint,
 				complete: snapshot.complete,
-				files: snapshot.files.length,
+				files: snapshot.files.map(file => file.path),
 				omissions: [...snapshot.omissions],
 			})),
 		};
@@ -195,6 +206,7 @@ export class SkillDiagnosticController {
 			record,
 			snapshots,
 			context,
+			members,
 			abort: new AbortController(),
 			completion: Promise.withResolvers<SkillDiagnosticAnalysisRecord>(),
 		});
@@ -289,17 +301,21 @@ export class SkillDiagnosticController {
 		delete plan.record.error;
 		try {
 			this.#assertContext(plan.context);
-			await excludeReviewedResources(plan.snapshots, preferredId, this.#session.settings, () =>
-				this.#assertContext(plan.context),
-			);
+			this.#assertMembers(plan);
+			await excludeReviewedResources(plan.snapshots, preferredId, this.#session.settings, () => {
+				this.#assertContext(plan.context);
+				this.#assertMembers(plan);
+			});
 			// Saving and reloading are distinct: a reload failure must not imply the global choice was unsaved.
+			// The choice is global and the authorization above is its commit point, so a session switch while the
+			// settings flush was pending still reports it as saved rather than as a failure.
 			plan.record.applied = true;
 			plan.record.status = "applied";
-			this.#assertContext(plan.context);
-			await this.#session.refreshSkills();
-			this.#assertContext(plan.context);
-			this.#lastCompleted.set(plan.record.name, structuredClone(plan.record));
-			this.#emit();
+			if (!this.#disposed) await this.#session.refreshSkills();
+			if (this.#active(plan)) {
+				this.#lastCompleted.set(plan.record.name, structuredClone(plan.record));
+				this.#emit();
+			}
 			return structuredClone(plan.record);
 		} catch (error) {
 			if (error instanceof StaleResourceReviewError) this.#finish(plan, "stale", sanitizeText(error.message));
@@ -362,6 +378,17 @@ export class SkillDiagnosticController {
 		this.#assertOpen();
 		this.#syncContext();
 		if (context !== this.#context) throw new Error("Session changed; the old analysis cannot be used here.");
+	}
+	/** Void a plan whose copies are no longer the ones loaded: hiding the "other" copy could leave none. */
+	#assertMembers(plan: PreparedAnalysis): void {
+		// A saved choice is only retried to reload; the copies it hid are meant to be gone.
+		if (plan.record.applied) return;
+		const group = this.#session.skillDiagnostics.find(group => group.name === plan.record.name);
+		if (!group || groupMembers(group) !== plan.members) {
+			throw new StaleResourceReviewError(
+				"The loaded copies of this skill changed after analysis; nothing was saved. Prepare and analyze the current copies again.",
+			);
+		}
 	}
 	#syncContext(): void {
 		const current = this.#currentContext();

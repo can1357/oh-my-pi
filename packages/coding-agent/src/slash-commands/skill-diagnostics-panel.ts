@@ -7,7 +7,7 @@ import type {
 	SkillDiagnosticAnalysisRecord,
 	SkillDiagnosticController,
 } from "../extensibility/skill-diagnostic-controller";
-import { INCOMPLETE_COVERAGE_DISCLOSURE } from "../extensibility/resource-consent";
+import { INCOMPLETE_COVERAGE_DISCLOSURE, listFiles } from "../extensibility/resource-consent";
 import {
 	SkillDiagnosticsPanel,
 	type SkillDiagnosticsPanelNotice,
@@ -126,9 +126,13 @@ function consentMessage(record: SkillDiagnosticAnalysisRecord): string {
 	const lines = [
 		`Send these skill copies to ${line(record.model)}?`,
 		"",
-		...record.candidates.map(candidate => {
+		...record.candidates.flatMap(candidate => {
 			const partial = candidate.complete ? "" : `, PARTIAL: ${candidate.omissions.length} omission(s)`;
-			return `  ${line(candidate.root)} (${candidate.files} file${candidate.files === 1 ? "" : "s"}${partial})`;
+			const count = candidate.files.length;
+			return [
+				`  ${line(candidate.root)} (${count} file${count === 1 ? "" : "s"}${partial})`,
+				...listFiles(candidate.files),
+			];
 		}),
 		`Resource data: ${(record.bytes / 1024).toFixed(1)} KiB, plus prompt framing.`,
 	];

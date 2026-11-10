@@ -268,6 +268,16 @@ describe("omp plugin doctor --analyze", () => {
 		expect(exclusions()).toEqual({});
 	});
 
+	test("the consent prompt lists every file that would be sent, not just how many", async () => {
+		await Bun.write(path.join(first, "personal-notes.md"), "Reminders for myself.\n");
+		tty = true;
+		answers = [false];
+		await run({ analyze: true });
+		const prompt = String(io.confirm.mock.calls[0]?.[0]);
+		expect(prompt).toContain("personal-notes.md");
+		expect(prompt).toContain("index.ts");
+	});
+
 	test("--yes runs the analysis read-only and sends exactly the two selected extensions", async () => {
 		await plugin("gamma-tools", "export default function (pi) { /* gamma */ }\n");
 		await run({ analyze: true, yes: true });

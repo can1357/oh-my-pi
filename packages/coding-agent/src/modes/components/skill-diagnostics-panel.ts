@@ -232,7 +232,7 @@ function describeRecord(record: SkillDiagnosticAnalysisRecord, label: string, ad
 	);
 	for (const entry of record.candidates) {
 		add(
-			`${entry.id}  ${shortenPath(entry.root)} · ${entry.files} file${entry.files === 1 ? "" : "s"} · ${entry.complete ? "complete" : "PARTIAL"}`,
+			`${entry.id}  ${shortenPath(entry.root)} · ${entry.files.length} file${entry.files.length === 1 ? "" : "s"} · ${entry.complete ? "complete" : "PARTIAL"}`,
 			entry.complete ? "muted" : "warning",
 			{ indent: 2 },
 		);

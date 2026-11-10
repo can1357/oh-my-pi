@@ -6,6 +6,7 @@ import * as snapshots from "../src/extensibility/resource-snapshot";
 import * as decisions from "../src/extensibility/resource-decisions";
 import { ModelRegistry } from "../src/config/model-registry";
 import { Settings, resetSettingsForTest } from "../src/config/settings";
+import { cfgSkillsCustomDirectories } from "../src/extensibility/settings";
 import { cfgResourceExclusions, cfgUserResourceExclusions } from "../src/extensibility/resource-settings";
 import { createAgentSession } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
@@ -106,6 +107,8 @@ test("preparing a selected diagnostic discloses the plan without billing or chan
 	expect(prepared.candidates.map(candidate => candidate.root).sort()).toEqual(
 		session.skills.map(skill => skill.baseDir).sort(),
 	);
+	// Hosts show these names in their own consent prompt, so the record carries paths rather than a count.
+	expect(prepared.candidates.map(candidate => candidate.files)).toEqual([["SKILL.md"], ["SKILL.md"]]);
 	expect(complete).not.toHaveBeenCalled();
 	expect(() => controller.start(prepared.id, false)).toThrow();
 	expect(complete).not.toHaveBeenCalled();
@@ -314,6 +317,45 @@ test("session change inside the writer prevents saving old-context approval", as
 	resume.resolve();
 	expect(await refused).toBe(true);
 	expect(cfgUserResourceExclusions.get(session.settings)).toEqual({});
+});
+
+test("a session switch while the choice is being saved still reports the choice that was saved", async () => {
+	const controller = session.skillDiagnosticController;
+	const plan = await controller.prepare("review");
+	spyOn(ai, "completeSimple").mockResolvedValue(responseFor(plan.candidates));
+	controller.start(plan.id, true);
+	await controller.wait(plan.id);
+	const flush = session.settings.flush.bind(session.settings);
+	const entered = Promise.withResolvers<void>();
+	const resume = Promise.withResolvers<void>();
+	spyOn(session.settings, "flush").mockImplementationOnce(async () => {
+		entered.resolve();
+		await resume.promise;
+		return flush();
+	});
+	const applying = controller.apply(plan.id, true);
+	await entered.promise;
+	await session.newSession();
+	resume.resolve();
+	const record = await applying;
+	expect(record.status).toBe("applied");
+	expect(Object.keys(cfgUserResourceExclusions.get(session.settings))).toHaveLength(1);
+});
+
+test("a preference for a copy that no longer loads cannot hide the copy that still does", async () => {
+	const controller = session.skillDiagnosticController;
+	const plan = await controller.prepare("review");
+	spyOn(ai, "completeSimple").mockResolvedValue(responseFor(plan.candidates));
+	controller.start(plan.id, true);
+	await controller.wait(plan.id);
+	// The preferred copy's source stops loading while neither file changes.
+	const generic = path.join(await fs.realpath(temp.path()), "generic");
+	cfgSkillsCustomDirectories.override(session.settings, [generic]);
+	await session.refreshSkills();
+	expect(session.skills.map(skill => skill.baseDir)).not.toContain(preferredRoot);
+	await expect(controller.apply(plan.id, true)).rejects.toThrow();
+	expect(cfgUserResourceExclusions.get(session.settings)).toEqual({});
+	expect(controller.items().find(item => item.name === "review")?.analysis?.status).toBe("stale");
 });
 
 test("saved choice and reload failure are distinguishable, and successful retry clears the error", async () => {

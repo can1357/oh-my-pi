@@ -46,7 +46,7 @@ const candidate = (id: string, root: string, extra: Partial<SkillAnalysisCandida
 	root,
 	fingerprint: "f".repeat(64),
 	complete: true,
-	files: 1,
+	files: ["SKILL.md"],
 	omissions: [],
 	...extra,
 });
