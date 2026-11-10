@@ -691,6 +691,9 @@
 - Changing or unsetting `PATH` in the bash tool's shell now forgets remembered command locations, as bash does, so a command no longer runs from a directory that has left `PATH`
 - One slow or flooding collab guest no longer ends sharing for the room: the host drops that guest's backlog and asks it to rejoin, sessions larger than the send budget can be joined, and guest questions nobody received settle as unavailable ([#18629](https://github.com/can1357/oh-my-pi/pull/18629) by [@iliaal](https://github.com/iliaal))
 
+- `/advisor on`, `/advisor off` and the bare toggle now flip the advisor of the focused subagent you are viewing instead of the main session's, and its autocomplete line describes that agent's advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+
 ## [18.18.6] - 2026-11-09
 
 ### Added
@@ -864,7 +867,6 @@
 - Edit auto-repair now accounts for retry costs and stops before exceeding the session cost cap.
 - MCP prompt commands now correctly assign positional arguments that follow `key=value` arguments.
 - `/shake thinking` now reports and preserves reasoning blocks that the provider continues to replay, avoiding inaccurate context-reduction claims.
-- `/advisor on`, `/advisor off` and the bare toggle now flip the advisor of the focused subagent you are viewing instead of the main session's, and its autocomplete line describes that agent's advisor ([#15055](https://github.com/can1357/oh-my-pi/issues/15055), [#15171](https://github.com/can1357/oh-my-pi/pull/15171) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.1] - 2026-11-08
 
