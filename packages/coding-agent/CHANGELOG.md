@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values
+- Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
 
 ## [18.18.7] - 2026-11-10
 

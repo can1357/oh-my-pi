@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Ask forms support `n` to add or edit notes on radio, checkbox, and select-menu options, with selected notes shown alongside submitted answers
+- Ask forms support `n` to add or edit notes on radio, checkbox, and select-menu options, with selected notes shown alongside submitted answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
 
 ## [18.18.7] - 2026-11-10
 
