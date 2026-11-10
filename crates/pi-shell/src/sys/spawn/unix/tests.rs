@@ -3,7 +3,8 @@
 
 use std::{
 	io,
-	os::unix::process::CommandExt,
+	io::Read as _,
+	os::{fd::FromRawFd as _, unix::process::CommandExt},
 	sync::Arc,
 	task::{Context, Poll, Wake, Waker},
 	thread,
@@ -41,6 +42,226 @@ fn a_session_is_signalled_before_its_leader_ran_setsid() {
 	Scope::Session(pid).signal(Signal::Term).unwrap();
 	let status = child.wait().unwrap();
 	assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(libc::SIGTERM));
+}
+
+/// A descriptor opened before **both** open-file limits were lowered under
+/// it stays open and valid above them, so neither limit can bound the
+/// child's closing of the host's descriptors: a background command's
+/// redirection could otherwise duplicate one and write into it. Each arm
+/// of [`close_descriptors_except`](super::close_descriptors_except) must
+/// reach it. Runs in a forked child, since the limits are process-wide.
+#[test]
+fn the_descriptor_closer_reaches_above_both_lowered_limits() {
+	let status = closer_reaches_high(false);
+	assert!(matches!(status, 0 | 3), "the descriptor stayed open (1) or the setup failed (2)");
+}
+
+/// The last arm, the check of each descriptor below
+/// [`descriptor_bound`](super::descriptor_bound), which runs where the
+/// kernel can neither close a range nor list the descriptors it has.
+#[test]
+fn the_unlisted_descriptor_check_reaches_above_both_lowered_limits() {
+	let status = closer_reaches_high(true);
+	assert!(matches!(status, 0 | 3), "the descriptor stayed open (1) or the setup failed (2)");
+}
+
+/// In a forked child: open a descriptor well above the lowered limits,
+/// lower both open-file limits to 64, close the host's descriptors
+/// (`bounded_only`: through the bounded check alone, else through
+/// `close_descriptors_except`), and exit 0 when that descriptor is
+/// closed, 1 when it is not, 2 when the setup failed and 3 when this
+/// host's own hard limit leaves no room above the lowered ones, so
+/// there is nothing here to measure.
+///
+/// The number is taken from that hard limit rather than fixed at 600,
+/// which a host whose hard limit is lower cannot reach at all; what the
+/// guard needs is a descriptor above the limits it then lowers.
+///
+/// The bound is taken again in the child, from the limits as lowered and
+/// the ceiling the parent read, because that is the host this guards:
+/// one whose limits were already this low when the spawn read them. Only
+/// the reading of the ceiling, which opens a file, stays in the parent.
+fn closer_reaches_high(bounded_only: bool) -> i32 {
+	let file = std::fs::File::open("/dev/null").unwrap();
+	let source = std::os::fd::AsRawFd::as_raw_fd(&file);
+	// Before the fork, as the spawn path reads it.
+	let mut plan = super::ClosePlan::new();
+	let ceiling = super::kernel_descriptor_ceiling();
+	// SAFETY: the forked child calls only async-signal-safe functions
+	// (fcntl, getrlimit, setrlimit, close, close_range, _exit) and the
+	// closing under test, which is written for a forked child, then exits.
+	let pid = unsafe { libc::fork() };
+	assert!(pid >= 0, "fork");
+	if pid == 0 {
+		// SAFETY: as above.
+		unsafe {
+			let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+			libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim);
+			let want = if lim.rlim_max >= 1024 {
+				600
+			} else {
+				i32::try_from(lim.rlim_max / 2).unwrap_or(i32::MAX)
+			};
+			if want <= 64 {
+				libc::_exit(3);
+			}
+			let high = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, want);
+			// Both limits, not the soft one alone: a lowered hard limit
+			// bounded the check and left the descriptor open.
+			lim.rlim_cur = 64;
+			lim.rlim_max = 64;
+			if high < want || libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim) != 0 {
+				libc::_exit(2);
+			}
+			plan.bound = super::sweep_bound(ceiling, Some(64), Some(64));
+			let keep = [0, 1, 2];
+			if bounded_only {
+				for fd in 0..plan.bound {
+					super::close_unless_kept(fd, &keep, -1);
+				}
+			} else {
+				super::close_descriptors_except(&keep, &mut plan);
+			}
+			libc::_exit(i32::from(libc::fcntl(high, libc::F_GETFD) >= 0));
+		}
+	}
+	let mut status = 0;
+	// SAFETY: waits for the child forked above.
+	assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+	assert!(libc::WIFEXITED(status), "child status {status}");
+	libc::WEXITSTATUS(status)
+}
+
+/// The check of each descriptor one by one costs one `close(2)` per
+/// number below its bound, and the forked child of every deferred
+/// background spawn pays it before its first redirection. The bound must
+/// therefore be what the kernel says it can give out — Linux's
+/// `fs.nr_open`, `kern.maxfilesperproc` on macOS and the BSDs — and not
+/// a constant above it. macOS leaves the hard open-file limit at
+/// `RLIM_INFINITY` and `kern.maxfilesperproc` at 24,576, so a constant
+/// of 1,048,576 there is 42 times the numbers the kernel can ever hand
+/// out, and the whole cost of the arm.
+#[test]
+fn the_sweep_bound_is_the_kernel_ceiling_and_not_a_constant_above_it() {
+	// A macOS host: soft 10,240, hard RLIM_INFINITY, ceiling 24,576.
+	assert_eq!(super::sweep_bound(Some(24_576), Some(10_240), None), 24_576, "macOS defaults");
+	// Lowered limits do not lower it: a descriptor opened before the
+	// lowering stays open and valid above them.
+	assert_eq!(super::sweep_bound(Some(24_576), Some(64), Some(64)), 24_576, "lowered limits");
+	// A limit an administrator raised above the published ceiling wins.
+	assert_eq!(
+		super::sweep_bound(Some(24_576), Some(65_536), Some(65_536)),
+		65_536,
+		"a limit above the ceiling"
+	);
+	// Linux's published default.
+	assert_eq!(super::sweep_bound(Some(1 << 20), Some(1024), None), 1 << 20, "Linux defaults");
+	// Nothing published: the limits cannot bound it on their own, so the
+	// last resort stands.
+	assert_eq!(super::sweep_bound(None, Some(64), Some(64)), 1 << 20, "no published ceiling");
+}
+
+/// This host publishes its ceiling, and the bound the spawn path uses
+/// must be that number raised to any higher limit, never a constant
+/// chosen without reading it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn the_hosts_sweep_bound_comes_from_the_number_its_kernel_publishes() {
+	let published: u64 = std::fs::read_to_string("/proc/sys/fs/nr_open")
+		.expect("Linux publishes fs.nr_open")
+		.trim()
+		.parse()
+		.expect("fs.nr_open is a number");
+	let (soft, hard) = crate::sys::rlimit::get(Rlimit::Nofile).unwrap();
+	let want = published.max(soft.unwrap_or(0)).max(hard.unwrap_or(0));
+	assert_eq!(i64::from(super::descriptor_bound()), i64::try_from(want).unwrap());
+}
+
+/// Every deferred background spawn closes the host's descriptors in its
+/// forked child before its first redirection, so that closing may not
+/// cost one call per number the kernel could give out: that is a
+/// million `close(2)` calls on a host whose ceiling is a million, and
+/// `cmd <fifo &` pays it each time. Whichever arm this operating system
+/// has — whole ranges, the kernel's own listing, `closefrom` — the cost
+/// must follow the descriptors, not the ceiling.
+#[test]
+fn closing_the_hosts_descriptors_costs_no_call_per_possible_number() {
+	let live = open_descriptor_count();
+	let (calls, bound) = closer_call_count();
+	assert!(bound >= 600, "the bound under test is {bound}");
+	// The cost follows the descriptors this process holds, not the
+	// ceiling: an arm that lists them makes one call each, and the
+	// slack covers the pipe `closer_call_count` opens and anything the
+	// harness opened beside it.
+	assert!(
+		calls <= live + 8,
+		"{calls} descriptor-closing calls for {live} open descriptors and a bound of {bound}"
+	);
+}
+
+/// How many descriptors this process holds, counted without the code
+/// under test: the entries `/proc/self/fd` lists on a Linux kernel.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_descriptor_count() -> u32 {
+	let listed = std::fs::read_dir("/proc/self/fd").expect("the kernel lists this process's fds");
+	// The listing's own descriptor is one of them and closes with it.
+	u32::try_from(listed.count()).unwrap_or(u32::MAX)
+}
+
+/// [`open_descriptor_count`] where the kernel lists nothing: the
+/// numbers below 1,024 that answer `F_GETFD`. A test process holds
+/// none above that.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn open_descriptor_count() -> u32 {
+	// SAFETY: a plain descriptor query; it writes nothing.
+	(0..1024)
+		.filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0)
+		.count()
+		.try_into()
+		.unwrap_or(u32::MAX)
+}
+
+/// In a forked child: close the host's descriptors through
+/// [`close_descriptors_except`](super::close_descriptors_except) and
+/// report the number of calls it made through a pipe the child keeps
+/// open across it. The count and the bound the last resort would have
+/// used.
+fn closer_call_count() -> (u32, i32) {
+	let mut ends = [0i32; 2];
+	// SAFETY: `pipe` writes two descriptors into the array it is given.
+	assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0, "pipe");
+	let [read, write] = ends;
+	let mut plan = super::ClosePlan::new();
+	let bound = plan.bound;
+	let mut keep = [0, 1, 2, write];
+	keep.sort_unstable();
+	// SAFETY: the forked child calls only async-signal-safe functions —
+	// the closing under test, which is written for a forked child, then
+	// `write` and `_exit`.
+	let pid = unsafe { libc::fork() };
+	assert!(pid >= 0, "fork");
+	if pid == 0 {
+		// SAFETY: as above.
+		unsafe {
+			let calls = super::close_descriptors_except(&keep, &mut plan).to_ne_bytes();
+			libc::write(write, calls.as_ptr().cast(), calls.len());
+			libc::_exit(0);
+		}
+	}
+	// SAFETY: the parent's copy of the write end, owned here; the child
+	// has its own, and the read below ends when the child exits.
+	unsafe { libc::close(write) };
+	let mut counted = [0u8; 4];
+	// SAFETY: `read` is open and owned here; `from_raw_fd` takes it.
+	let mut pipe = unsafe { std::fs::File::from_raw_fd(read) };
+	pipe
+		.read_exact(&mut counted)
+		.expect("the child reported its count");
+	let mut status = 0;
+	// SAFETY: waits for the child forked above.
+	assert_eq!(unsafe { libc::waitpid(pid, &raw mut status, 0) }, pid);
+	assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "child status {status}");
+	(u32::from_ne_bytes(counted), bound)
 }
 
 struct Unpark(thread::Thread);
@@ -335,6 +556,175 @@ fn shebang_less_script_fails_with_enoexec_on_both_paths() {
 		assert_eq!(err.raw_os_error(), Some(libc::ENOEXEC), "{what}: {err}");
 	}
 	std::fs::remove_file(&path).unwrap();
+}
+
+/// A host launched without standard streams — a service, a daemon's
+/// child — spawns with descriptors 0, 1 and 2 vacant and the command's
+/// own standard streams closed with them. The spawn allocates its
+/// exec-error pipe at the lowest free numbers, which are exactly those
+/// slots, and the child closes them before `execve`, so the kernel's
+/// `ENOEXEC` for a `#!`-less script must still reach the parent, which
+/// runs such a script in-engine as bash does. Regression: the parent
+/// read a clean spawn, the script never ran and its status was lost.
+#[test]
+fn an_exec_error_reaches_a_host_whose_standard_slots_are_closed() {
+	if !in_a_process_of_its_own("an_exec_error_reaches_a_host_whose_standard_slots_are_closed") {
+		return;
+	}
+	use std::os::unix::fs::PermissionsExt;
+
+	let path = temp_path("closed-slots-enoexec");
+	std::fs::write(&path, b"echo inscript\n").unwrap();
+	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = vec![BString::from(path.as_os_str().as_encoded_bytes())];
+	let mut forked = spec(&a, &env, NEW);
+	forked.stdio = [StdioSpec::Closed, StdioSpec::Closed, StdioSpec::Closed];
+	// A umask of its own keeps this spawn off the `posix_spawn` path,
+	// which has no error pipe to lose.
+	forked.umask = if forked.umask == 0o077 { 0o027 } else { 0o077 };
+	let saved = take_slots(&[0, 1, 2]);
+	let spawned = s.spawn(forked);
+	give_back_slots(saved);
+	let err = spawned
+		.err()
+		.unwrap_or_else(|| panic!("the fork path reported a clean spawn of a shebang-less script"));
+	assert_eq!(err.raw_os_error(), Some(libc::ENOEXEC), "{err}");
+	std::fs::remove_file(&path).unwrap();
+}
+
+/// The same host, with the command's standard streams open rather than
+/// closed: the spawn duplicates them onto 0, 1 and 2 in the child, and
+/// those are the vacant numbers its own exec-error pipe was given, so a
+/// duplication destroys the pipe exactly as a close did. Every target
+/// the child installs must be held in the parent, not only the ones it
+/// closes.
+#[test]
+fn an_exec_error_reaches_a_host_whose_standard_slots_are_free() {
+	if !in_a_process_of_its_own("an_exec_error_reaches_a_host_whose_standard_slots_are_free") {
+		return;
+	}
+	use std::os::unix::fs::PermissionsExt;
+
+	let path = temp_path("free-slots-enoexec");
+	std::fs::write(&path, b"echo inscript\n").unwrap();
+	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = vec![BString::from(path.as_os_str().as_encoded_bytes())];
+	let mut forked = spec(&a, &env, NEW);
+	// An umask of its own keeps this spawn off the `posix_spawn` path,
+	// which has no error pipe to lose.
+	forked.umask = if forked.umask == 0o077 { 0o027 } else { 0o077 };
+	let saved = take_slots(&[0, 1, 2]);
+	let spawned = s.spawn(forked);
+	give_back_slots(saved);
+	let err = spawned
+		.err()
+		.unwrap_or_else(|| panic!("the fork path reported a clean spawn of a shebang-less script"));
+	assert_eq!(err.raw_os_error(), Some(libc::ENOEXEC), "{err}");
+	std::fs::remove_file(&path).unwrap();
+}
+
+/// The number a command's descriptor is closed at may be the number
+/// another of its descriptors comes from: a host with its standard input
+/// closed opens a file at descriptor 0 and gives the command that file
+/// as its fd 5, with fd 0 closed. Both spawn paths must duplicate before
+/// they close. Regression: the child closed descriptor 0 first and the
+/// duplication failed with `EBADF`.
+#[test]
+fn a_closed_descriptor_goes_after_the_one_it_is_the_source_of() {
+	if !in_a_process_of_its_own("a_closed_descriptor_goes_after_the_one_it_is_the_source_of") {
+		return;
+	}
+	let env = EnvView::default();
+	let s = NativeSpawner::default();
+	let a = sh("echo ok >&5");
+	for (what, own_umask) in [("posix_spawn", false), ("fork", true)] {
+		let path = temp_path(&format!("closed-source-{what}"));
+		let saved = take_slots(&[0]);
+		let direct = std::fs::File::create(&path).unwrap();
+		let at = std::os::fd::AsRawFd::as_raw_fd(&direct);
+		let mut sp = spec(&a, &env, NEW);
+		sp.stdio = [StdioSpec::Closed, StdioSpec::Null, StdioSpec::Null];
+		sp.extra_fds = vec![(5, StdioSpec::File(Box::new(crate::sys::StdFile::new(direct))))];
+		if own_umask {
+			sp.umask = if sp.umask == 0o077 { 0o027 } else { 0o077 };
+		}
+		let spawned = s.spawn(sp);
+		give_back_slots(saved);
+		assert_eq!(at, 0, "{what}: the file had to land in the vacant standard slot");
+		let mut p = spawned.unwrap_or_else(|e| panic!("{what}: {e}"));
+		assert_eq!(wait(&mut p), ExitStatus::Exited(0), "{what}");
+		assert_eq!(std::fs::read(&path).unwrap(), b"ok\n", "{what}");
+		std::fs::remove_file(&path).unwrap();
+	}
+}
+
+/// Take the descriptors `slots` away from this process, each saved out
+/// of the way at 100 or above, as [`give_back_slots`] restores them.
+/// Which descriptors a process holds is process-wide, which is why the
+/// tests that do this run in a process of their own.
+fn take_slots(slots: &[i32]) -> Vec<(i32, i32)> {
+	slots
+		.iter()
+		.map(|&fd| {
+			// SAFETY: plain descriptor calls; the copy is close-on-exec, so
+			// no child of another thread inherits it.
+			let saved = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 100) };
+			// SAFETY: as above.
+			unsafe { libc::close(fd) };
+			(fd, saved)
+		})
+		.collect()
+}
+
+/// Put back what [`take_slots`] took; a slot that was already vacant
+/// (its copy failed) stays vacant.
+fn give_back_slots(saved: Vec<(i32, i32)>) {
+	for (fd, from) in saved {
+		if from < 0 {
+			continue;
+		}
+		// SAFETY: plain descriptor calls on descriptors this process owns.
+		unsafe {
+			libc::dup2(from, fd);
+			libc::close(from);
+		}
+	}
+}
+
+/// `true` in the child process of this test binary that runs test
+/// `name`; in the test process, runs that child and checks that it ran
+/// and passed. A test whose body changes what descriptors the process
+/// holds may not share a process with any other test.
+///
+/// The harness names a unit test by its path below the crate, which is
+/// this module's path without its first segment and then `name`.
+fn in_a_process_of_its_own(name: &str) -> bool {
+	const CHILD: &str = "PI_SHELL_TEST_SPAWN_ALONE";
+	let module = module_path!();
+	let module = module
+		.split_once("::")
+		.map_or(module, |(_crate, rest)| rest);
+	let path = format!("{module}::{name}");
+	if std::env::var(CHILD).is_ok_and(|running| running == path) {
+		return true;
+	}
+	let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", &path, "--nocapture", "--test-threads", "1"])
+		.env(CHILD, &path)
+		.output()
+		.expect("child test process");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	assert!(
+		output.status.success() && stdout.contains("1 passed"),
+		"{path} in a process of its own: {}\nstdout:\n{stdout}\nstderr:\n{}",
+		output.status,
+		String::from_utf8_lossy(&output.stderr)
+	);
+	false
 }
 
 /// A fresh path in the temp directory for test `what`.

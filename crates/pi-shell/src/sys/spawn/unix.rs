@@ -55,7 +55,7 @@ use bstr::BString;
 use parking_lot::{Condvar, Mutex, MutexGuard};
 use pi_builtins::read_process_umask as process_umask;
 
-use super::{Dir, Leftover, Sessions, Shared, child_end};
+use super::{ChildEnd, Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
@@ -69,10 +69,11 @@ use crate::{
 	},
 };
 
-/// Include Linux realtime signal 64; macOS has only signals 1 through 31.
-#[cfg(target_os = "linux")]
+/// Include the Linux kernel's realtime signal 64, Android's as well as
+/// Linux's; macOS has only signals 1 through 31.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const NSIG: usize = 65;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const NSIG: usize = 32;
 
 /// Waiter and escalation threads only wait and signal.
@@ -344,30 +345,30 @@ fn invalid(e: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error 
 /// (closed after the spawn, so pumps see the child's end of file) or the
 /// engine's own handle of an inherited stream, installed as it is (the
 /// engine keeps it open for the spawn call; a copy cost a `dup` and a
-/// `close` per stream and spawn).
+/// `close` per stream and spawn), or a descriptor left closed by the script.
 enum Source {
+	Closed,
 	Owned(OwnedFd),
 	Host(RawFd),
 }
 
-impl AsFd for Source {
-	fn as_fd(&self) -> BorrowedFd<'_> {
+impl Source {
+	fn open_fd(&self) -> Option<BorrowedFd<'_>> {
 		match self {
-			Self::Owned(fd) => fd.as_fd(),
+			Self::Closed => None,
+			Self::Owned(fd) => Some(fd.as_fd()),
 			// SAFETY: the engine keeps the fd object that owns this
 			// descriptor alive for the whole spawn call.
-			Self::Host(fd) => unsafe { BorrowedFd::borrow_raw(*fd) },
+			Self::Host(fd) => Some(unsafe { BorrowedFd::borrow_raw(*fd) }),
 		}
 	}
-}
 
-impl AsRawFd for Source {
-	fn as_raw_fd(&self) -> RawFd {
-		self.as_fd().as_raw_fd()
+	fn raw_fd(&self) -> Option<RawFd> {
+		self.open_fd().map(|fd| fd.as_raw_fd())
 	}
 }
 
-/// The child's fd for one stream (`/dev/null` for `Null`).
+/// The child's fd for one stream (`/dev/null` for `Null`, absent for `Closed`).
 fn child_fd(
 	shared: &Shared,
 	spec: crate::bash::StdioSpec,
@@ -379,8 +380,9 @@ fn child_fd(
 		return RawFd::try_from(h.0).map(Source::Host).map_err(invalid);
 	}
 	match child_end(shared, spec, dir, pumps, held)? {
-		Some(f) => Ok(Source::Owned(f.into())),
-		None => Ok(Source::Owned(
+		ChildEnd::Closed => Ok(Source::Closed),
+		ChildEnd::File(f) => Ok(Source::Owned(f.into())),
+		ChildEnd::Null => Ok(Source::Owned(
 			fs::File::options()
 				.read(true)
 				.write(true)
@@ -390,19 +392,33 @@ fn child_fd(
 	}
 }
 
-/// Move every source fd above every target fd, so installing one target
-/// (`dup2`) can never clobber a source still to be installed.
+/// Move every source fd that is also a target number to a descriptor that
+/// is none, so installing one target (`dup2`) can never clobber a source
+/// still to be installed, and no source is its own target (`dup2` onto
+/// itself would keep close-on-exec). The new descriptors are the lowest
+/// free ones, not ones above every target: a target near the open-file
+/// limit leaves no room above it.
 fn lift(fds: &mut [(i32, Source)]) -> io::Result<()> {
-	let floor = fds.iter().map(|(t, _)| *t).max().unwrap_or(2).max(2) + 1;
+	let targets: Vec<i32> = fds.iter().map(|(t, _)| *t).collect();
 	for (_, fd) in fds.iter_mut() {
-		if fd.as_raw_fd() < floor {
+		// Descriptors handed out meanwhile that are targets themselves; they
+		// close when this loop step ends.
+		let mut skipped = Vec::new();
+		while let Some(source) = fd.raw_fd()
+			&& targets.contains(&source)
+		{
 			// SAFETY: fcntl on an fd we hold; returns a new descriptor.
-			let lifted = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+			let lifted = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 3) };
 			if lifted < 0 {
 				return Err(io::Error::last_os_error());
 			}
 			// SAFETY: a successful F_DUPFD_CLOEXEC returned a descriptor we own.
-			*fd = Source::Owned(unsafe { OwnedFd::from_raw_fd(lifted) });
+			let lifted = unsafe { OwnedFd::from_raw_fd(lifted) };
+			if targets.contains(&lifted.as_raw_fd()) {
+				skipped.push(lifted);
+			} else {
+				*fd = Source::Owned(lifted);
+			}
 		}
 	}
 	Ok(())
@@ -547,9 +563,6 @@ struct Program<'a> {
 	/// A foreground job's terminal: the child makes its group the
 	/// terminal's foreground before it execs ([`attach_tty`]).
 	tty:     Option<RawFd>,
-	/// Targets the child gets closed ([`StdioSpec::Closed`]): each is
-	/// installed from a null-device placeholder, then closed.
-	closed:  &'a [i32],
 }
 
 /// A possible shell text file needs the engine's ENOEXEC retry. The child
@@ -622,12 +635,8 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
 	let mut fds = Vec::with_capacity(3 + extra_fds.len());
-	let mut closed = Vec::new();
 	let [stdin, stdout, stderr] = stdio;
 	for (target, spec, dir) in [(0, stdin, Dir::In), (1, stdout, Dir::Out), (2, stderr, Dir::Out)] {
-		if matches!(spec, StdioSpec::Closed) {
-			closed.push(target);
-		}
 		fds.push((target, child_fd(shared, spec, dir, &mut pumps, &mut feeds)?));
 	}
 	for (fd, s) in extra_fds {
@@ -645,8 +654,7 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
-	let program =
-		Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty, closed: &closed };
+	let program = Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty };
 	let launched = match &redirs {
 		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
 		None => launch(&shared.state, &program, &fds, place),
@@ -725,7 +733,7 @@ fn launch(
 		&& let Some(add_chdir) = state.add_chdir
 	{
 		let exec = Exec::new(prog)?;
-		return retry_join(place, |p| posix::spawn(&exec, fds, prog.closed, p, prog.ign, add_chdir));
+		return retry_join(place, |p| posix::spawn(&exec, fds, p, prog.ign, add_chdir));
 	}
 	#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 	let _ = state;
@@ -855,6 +863,18 @@ impl Exec {
 /// script in-engine, like bash.
 fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Result<(i32, Place)> {
 	let exec = Exec::new(prog)?;
+	// No descriptor this spawn installs may be one the spawn itself
+	// needs. `Command` takes the lowest free numbers for the descriptors
+	// it makes — the pipe the child reports a failed `execve` on, and the
+	// duplicate of every `Stdio` below — and those are exactly the
+	// numbers the child then closes or duplicates onto: the vacant ones
+	// among the command's own targets. A host whose standard streams are
+	// closed leaves 0, 1 and 2 vacant; a `9>file` leaves 9. Holding one
+	// descriptor in each of them, from before the first of those
+	// allocations until after the spawn, keeps the spawn's own out of the
+	// child's way; the child closes or replaces the placeholder with the
+	// slot, and the parent drops the rest at the end of this function.
+	let held = occupy_vacant_targets(fds);
 	let mut cmd = Command::new(OsStr::from_bytes(prog.path));
 	cmd.current_dir(OsStr::from_bytes(prog.cwd));
 	let stdio = |target: i32| -> io::Result<Stdio> {
@@ -862,17 +882,19 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			.iter()
 			.find(|(t, _)| *t == target)
 			.ok_or_else(|| invalid("missing stdio"))?;
-		Ok(Stdio::from(fd.as_fd().try_clone_to_owned()?))
+		match fd.open_fd() {
+			Some(fd) => Ok(Stdio::from(fd.try_clone_to_owned()?)),
+			None => Ok(Stdio::inherit()),
+		}
 	};
 	cmd.stdin(stdio(0)?);
 	cmd.stdout(stdio(1)?);
 	cmd.stderr(stdio(2)?);
-	let extra: Vec<(i32, RawFd)> = fds
+	let extra: Vec<(i32, Option<RawFd>)> = fds
 		.iter()
-		.filter(|(t, _)| *t > 2)
-		.map(|(t, fd)| (*t, fd.as_raw_fd()))
+		.filter(|(t, fd)| *t > 2 || matches!(fd, Source::Closed))
+		.map(|(t, fd)| (*t, fd.raw_fd()))
 		.collect();
-	let closed = prog.closed.to_vec();
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
@@ -896,13 +918,22 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 				attach_tty(tty, libc::getpgrp());
 			}
 			libc::umask(mask);
+			// Every duplication first, and only then the closes: a number
+			// the command is to be without may be the very number another
+			// of its descriptors is duplicated from, and closing it first
+			// would fail that duplication with `EBADF`.
 			for &(target, src) in &extra {
-				if libc::dup2(src, target) < 0 {
+				if let Some(src) = src
+					&& src != target
+					&& libc::dup2(src, target) < 0
+				{
 					return Err(io::Error::last_os_error());
 				}
 			}
-			for &target in &closed {
-				libc::close(target);
+			for &(target, src) in &extra {
+				if src.is_none() {
+					libc::close(target);
+				}
 			}
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
@@ -924,13 +955,68 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 			Err(io::Error::last_os_error())
 		});
 	}
-	retry_join(place, |p| {
+	let spawned = retry_join(place, |p| {
 		if let Place::Group(pgid) = p {
 			cmd.process_group(pgid);
 		}
 		// Dropping the `Child` neither waits nor kills; the waiter owns it.
 		cmd.spawn().map(|child| child.id() as i32)
-	})
+	});
+	// The spawn has made its own descriptors and the child has them: the
+	// slots are the child's business now.
+	drop(held);
+	spawned
+}
+
+/// Hold one close-on-exec descriptor in each of this spawn's target
+/// numbers that the parent leaves vacant, until the returned
+/// descriptors are dropped: the child closes or duplicates onto every
+/// one of them, so none may be a number the spawn is given for itself.
+/// A number the parent already holds is one the spawn cannot be given,
+/// so it needs no placeholder; a vacant one is the next number `pipe2`
+/// or `dup` returns.
+///
+/// Best effort: a system out of descriptors gets the spawn it had
+/// before, which is better than failing it here.
+fn occupy_vacant_targets(fds: &[(i32, Source)]) -> Vec<OwnedFd> {
+	let mut vacant: Vec<i32> = fds
+		.iter()
+		.map(|(target, _)| *target)
+		// SAFETY: a plain descriptor query; it writes nothing.
+		.filter(|target| *target >= 0 && unsafe { libc::fcntl(*target, libc::F_GETFD) } < 0)
+		.collect();
+	vacant.sort_unstable();
+	vacant.dedup();
+	if vacant.is_empty() {
+		return Vec::new();
+	}
+	// One open for the whole spawn: every placeholder is a duplicate of
+	// it, and it is held with them, wherever it landed.
+	let Ok(null) = fs::File::open("/dev/null") else {
+		return Vec::new();
+	};
+	let null = OwnedFd::from(null);
+	let mut held = vec![null];
+	for target in vacant {
+		// SAFETY: a plain descriptor query; it writes nothing. The open
+		// above may have taken this number, and then it is held already.
+		if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+			continue;
+		}
+		// `F_DUPFD_CLOEXEC` gives the lowest free number at or above the
+		// one asked for, which is this vacant one, and it is close-on-exec
+		// from the start, so no other thread's exec can carry it.
+		// SAFETY: a plain descriptor call on a descriptor this function owns.
+		let placeholder = unsafe { libc::fcntl(held[0].as_raw_fd(), libc::F_DUPFD_CLOEXEC, target) };
+		if placeholder == target {
+			// SAFETY: a fresh descriptor nothing else owns.
+			held.push(unsafe { OwnedFd::from_raw_fd(placeholder) });
+		} else if placeholder >= 0 {
+			// SAFETY: as above; the number was not the one needed.
+			unsafe { libc::close(placeholder) };
+		}
+	}
+	held
 }
 
 /// The resource limits to set in the child; resources this platform lacks
@@ -1022,6 +1108,547 @@ fn errno() -> i32 {
 	io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
+/// The kernel's own ceiling on the descriptor numbers it will give this
+/// process, from where the operating system publishes it: `fs.nr_open`
+/// on Linux, `kern.maxfilesperproc` on macOS, FreeBSD and DragonFly.
+/// `None` where the system publishes none — NetBSD and OpenBSD publish
+/// only the system-wide `kern.maxfiles` — or it cannot be read. For the
+/// parent, before a fork: on Linux it reads a file.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	fs::read_to_string("/proc/sys/fs/nr_open")
+		.ok()?
+		.trim()
+		.parse()
+		.ok()
+}
+
+/// [`kernel_descriptor_ceiling`] from `kern.maxfilesperproc`.
+#[cfg(any(target_vendor = "apple", target_os = "freebsd", target_os = "dragonfly"))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	let mut name = [libc::CTL_KERN, libc::KERN_MAXFILESPERPROC];
+	let mut value: libc::c_int = 0;
+	let mut len = size_of::<libc::c_int>();
+	// SAFETY: `name` holds the two elements its length says, and the
+	// kernel writes one `c_int` into `value`, whose size it is given.
+	let read = unsafe {
+		libc::sysctl(
+			name.as_mut_ptr(),
+			2,
+			(&raw mut value).cast(),
+			&raw mut len,
+			std::ptr::null_mut(),
+			0,
+		)
+	};
+	(read == 0 && value > 0).then_some(value as u64)
+}
+
+/// [`kernel_descriptor_ceiling`] where the system publishes nothing.
+#[cfg(not(any(
+	target_os = "linux",
+	target_os = "android",
+	target_vendor = "apple",
+	target_os = "freebsd",
+	target_os = "dragonfly"
+)))]
+fn kernel_descriptor_ceiling() -> Option<u64> {
+	None
+}
+
+/// One past the highest descriptor this process can hold, for the
+/// child's check of every descriptor when it can neither close whole
+/// ranges nor list them, from the kernel's `ceiling` and the current
+/// `soft` and `hard` open-file limits (`None` for `RLIM_INFINITY`).
+///
+/// The kernel's ceiling bounds it: no descriptor number ever reaches
+/// the most the kernel will give out. The current limits cannot bound
+/// it on their own, because both of them can be lowered under a
+/// descriptor already open, which stays open and valid above them; a
+/// limit an administrator raised above the published ceiling does raise
+/// it. Where the system publishes no ceiling the limits are all there
+/// is, so the last resort stands: 1,048,576, Linux's default
+/// `fs.nr_open`.
+fn sweep_bound(ceiling: Option<u64>, soft: Option<u64>, hard: Option<u64>) -> i32 {
+	const UNPUBLISHED: u64 = 1 << 20;
+	let limits = soft.unwrap_or(0).max(hard.unwrap_or(0));
+	let bound = ceiling.unwrap_or(UNPUBLISHED).max(limits);
+	i32::try_from(bound).unwrap_or(i32::MAX)
+}
+
+/// [`sweep_bound`] for this process, read before a fork.
+fn descriptor_bound() -> i32 {
+	let (soft, hard) = rlimit::get(Rlimit::Nofile).unwrap_or((None, None));
+	sweep_bound(kernel_descriptor_ceiling(), soft, hard)
+}
+
+/// What the forked child needs to close the host's descriptors, read
+/// and reserved by the parent before the fork: the child may neither
+/// allocate nor read a file.
+struct ClosePlan {
+	/// One past the highest number the child's last resort must reach,
+	/// from [`sweep_bound`].
+	bound:   i32,
+	/// The Apple systems: room for the kernel's own list of this
+	/// process's open descriptors, which the child fills after the fork.
+	#[cfg(target_vendor = "apple")]
+	listing: Vec<libc::proc_fdinfo>,
+}
+
+impl ClosePlan {
+	fn new() -> Self {
+		Self {
+			bound: descriptor_bound(),
+			#[cfg(target_vendor = "apple")]
+			listing: descriptor_listing_room(),
+		}
+	}
+}
+
+/// Room for `proc_pidinfo` to write this process's descriptor list
+/// into, with space for the ones the host's other threads may open
+/// between here and the fork. A list that fills it to its end may have
+/// been cut short, and the child falls back rather than trust it.
+#[cfg(target_vendor = "apple")]
+fn descriptor_listing_room() -> Vec<libc::proc_fdinfo> {
+	const SPARE: usize = 64;
+	// SAFETY: a null buffer of length zero asks the kernel for the size
+	// it would write and writes nothing.
+	let size = unsafe {
+		libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0)
+	};
+	let listed = usize::try_from(size).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
+	vec![libc::proc_fdinfo { proc_fd: -1, proc_fdtype: 0 }; listed + SPARE]
+}
+
+/// How a target closes the descriptors the command will not have: which
+/// arm of [`close_descriptors_except`] its gates compile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CloseMechanism {
+	/// Whole ranges with `close_range(2)`, and the descriptors
+	/// `/proc/self/fd` lists where the kernel is too old for that call:
+	/// every system on a Linux kernel.
+	Ranges,
+	/// The descriptors the kernel lists for `proc_pidinfo`, which is all
+	/// the Apple systems have.
+	Listed,
+	/// Everything above the highest kept number in one `closefrom(3)`
+	/// call: the BSDs and the Solaris family, where the call began.
+	Above,
+	/// One `close(2)` per number below the kernel's ceiling — normally
+	/// 1,048,576 calls — because the system offers nothing better.
+	PerNumber,
+}
+
+/// Which arm a target takes, by `target_os`: Linux kernels (Android is
+/// one) close ranges, the Apple systems read the kernel's list, and the
+/// BSDs and the Solaris family close everything above the highest kept
+/// number. One statement of the gates on the arms, which
+/// [`COMPILED_MECHANISM`] holds them to at compile time for the target
+/// actually being built.
+const fn close_mechanism(os: &str) -> CloseMechanism {
+	if is_one_of(os, &["linux", "android"]) {
+		CloseMechanism::Ranges
+	} else if is_one_of(os, &["macos", "ios", "tvos", "watchos", "visionos"]) {
+		CloseMechanism::Listed
+	} else if is_one_of(os, &["freebsd", "dragonfly", "netbsd", "openbsd", "illumos", "solaris"]) {
+		CloseMechanism::Above
+	} else {
+		CloseMechanism::PerNumber
+	}
+}
+
+/// What the arms below compiled for this target, by the gates they
+/// carry. The Apple arm is gated on the vendor rather than on each
+/// system's name, which is the same set as the table's.
+const COMPILED_MECHANISM: CloseMechanism = if cfg!(any(target_os = "linux", target_os = "android"))
+{
+	CloseMechanism::Ranges
+} else if cfg!(target_vendor = "apple") {
+	CloseMechanism::Listed
+} else if cfg!(any(
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "illumos",
+	target_os = "solaris"
+)) {
+	CloseMechanism::Above
+} else {
+	CloseMechanism::PerNumber
+};
+
+/// The table and the gates are one statement, so a target that compiles
+/// an arm the table does not name, or the other way about, does not
+/// build at all.
+const _: () = assert!(
+	close_mechanism(std::env::consts::OS) as u8 == COMPILED_MECHANISM as u8,
+	"close_mechanism() and the gates on close_descriptors_except's arms disagree for this target"
+);
+
+/// A target of [`TIER_UNIX`] that reaches the per-number last resort by
+/// construction is a family left out of a gate, not a kernel that
+/// refused: it does not build.
+const _: () = assert!(
+	!is_tier_unix(std::env::consts::OS)
+		|| COMPILED_MECHANISM as u8 != CloseMechanism::PerNumber as u8,
+	"this target has no descriptor-closing call but one close(2) per number: give its family an \
+	 arm in close_descriptors_except"
+);
+
+/// The Unix targets Rust supports at tier 1 or tier 2 with host tools —
+/// the ones that host a shell — together with Android and the rest of
+/// each family they share a mechanism with. None of them may reach the
+/// per-number last resort by construction.
+///
+/// Left out knowingly, and so taking the last resort: Fuchsia and
+/// Redox, tier 2 without host tools, which publish none of these calls;
+/// and AIX, tier 3, whose bulk close is `fcntl(F_CLOSEM)`, a call no
+/// other family here has and one nobody can build or run for from this
+/// host. A target of any of the three that is to host this shell gets
+/// its own arm and a line in the table first.
+const TIER_UNIX: [&str; 13] = [
+	"linux",
+	"android",
+	"macos",
+	"ios",
+	"tvos",
+	"watchos",
+	"visionos",
+	"freebsd",
+	"dragonfly",
+	"netbsd",
+	"openbsd",
+	"illumos",
+	"solaris",
+];
+
+/// Whether `os` is one of [`TIER_UNIX`].
+const fn is_tier_unix(os: &str) -> bool {
+	is_one_of(os, &TIER_UNIX)
+}
+
+/// Whether `name` is one of `names` (`str` comparison is not const).
+const fn is_one_of(name: &str, names: &[&str]) -> bool {
+	let (name, mut i) = (name.as_bytes(), 0);
+	while i < names.len() {
+		let candidate = names[i].as_bytes();
+		if candidate.len() == name.len() {
+			let mut at = 0;
+			while at < name.len() && candidate[at] == name[at] {
+				at += 1;
+			}
+			if at == name.len() {
+				return true;
+			}
+		}
+		i += 1;
+	}
+	false
+}
+
+#[cfg(test)]
+mod mechanism_tests {
+	use super::{CloseMechanism, TIER_UNIX, close_mechanism};
+
+	/// Every target of [`TIER_UNIX`] closes the host's descriptors with a
+	/// call its kernel has, not with one `close(2)` per number the kernel
+	/// could ever give out. The arms are gated by the family that shares
+	/// the mechanism, never by a list of system names: Android is a Linux
+	/// kernel and has both of Linux's, and the Apple systems other than
+	/// macOS have the same `proc_pidinfo` listing it has.
+	#[test]
+	fn every_unix_target_rust_supports_closes_without_a_call_per_number() {
+		let left_out: Vec<&str> = TIER_UNIX
+			.iter()
+			.copied()
+			.filter(|os| close_mechanism(os) == CloseMechanism::PerNumber)
+			.collect();
+		assert!(left_out.is_empty(), "no descriptor-closing call compiled for {left_out:?}");
+	}
+}
+
+/// Close every descriptor that is not one of `keep` (the command's own,
+/// installed before), so the process holds only what the command will
+/// have: the host's descriptors go whether or not `exec` would close them.
+/// `keep` is sorted and without repeats. Returns the number of
+/// descriptor-closing calls it made, which is what a deferred background
+/// spawn pays before its first redirection: every call, including the
+/// ones an arm made before it gave up and the one that closes the
+/// listing itself.
+///
+/// Each operating system gets the cheapest way it has, by the family
+/// that shares the call and never by a list of system names: whole
+/// ranges where the kernel closes ranges (`close_range`, Linux 5.9, and
+/// Android, which is a Linux kernel), the descriptors it lists where it
+/// lists them (`/proc/self/fd` on a Linux kernel, `proc_pidinfo` on the
+/// Apple systems, which have neither call), everything above the
+/// highest kept number in one call where there is `closefrom` (the BSDs
+/// and the Solaris family, where the call began), and only failing all
+/// of those one `close(2)` per number below `plan.bound`.
+/// [`close_mechanism`] is the whole mapping, and no target it covers
+/// reaches that last resort except from a kernel that refused its own
+/// call at run time. Async-signal-safe: for a forked child.
+///
+/// An arm a target has no call for is compiled as a `false` of its own,
+/// so this reads as the order of preference rather than as a stack of
+/// gates.
+fn close_descriptors_except(keep: &[i32], plan: &mut ClosePlan) -> u32 {
+	let mut calls = 0;
+	if close_descriptor_ranges_except(keep, plan, &mut calls)
+		|| close_listed_descriptors_except(keep, plan, &mut calls)
+		|| close_descriptors_above_except(keep, plan, &mut calls)
+	{
+		return calls;
+	}
+	for fd in 0..plan.bound {
+		calls += close_unless_kept(fd, keep, -1);
+	}
+	calls
+}
+
+/// Close every descriptor outside the sorted `keep` with `close_range`,
+/// one call per gap between kept numbers and one for everything above
+/// the last, counting each into `calls`; whether every call succeeded. A
+/// kernel without the call answers `ENOSYS` on the first one and nothing
+/// is closed. Unlike a bound taken from a limit, this reaches a
+/// descriptor opened before both limits were lowered under it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn close_descriptor_ranges_except(keep: &[i32], _plan: &mut ClosePlan, calls: &mut u32) -> bool {
+	let mut from: u32 = 0;
+	for &fd in keep {
+		let Ok(fd) = u32::try_from(fd) else {
+			continue;
+		};
+		if fd > from {
+			*calls += 1;
+			if !close_descriptor_range(from, fd - 1) {
+				return false;
+			}
+		}
+		let Some(next) = fd.checked_add(1) else {
+			return true;
+		};
+		from = next;
+	}
+	*calls += 1;
+	close_descriptor_range(from, u32::MAX)
+}
+
+/// No `close_range(2)` on this target.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const fn close_descriptor_ranges_except(
+	_keep: &[i32],
+	_plan: &mut ClosePlan,
+	_calls: &mut u32,
+) -> bool {
+	false
+}
+
+/// `close_range(from, to, 0)`: whether it closed them.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn close_descriptor_range(from: u32, to: u32) -> bool {
+	// SAFETY: a plain descriptor call; it closes descriptors and writes
+	// nothing through a pointer.
+	unsafe { libc::syscall(libc::SYS_close_range, from, to, 0) == 0 }
+}
+
+/// Close the numbers the sorted `keep` leaves free below the highest of
+/// them one at a time, then everything above it with `closefrom`, which
+/// the BSDs and their relations have where `close_range` is missing,
+/// counting each call into `calls`; whether the kernel took it. Like
+/// `close_range`, and unlike a bound taken from a limit, this reaches a
+/// descriptor opened before both limits were lowered under it.
+#[cfg(any(
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "illumos",
+	target_os = "solaris"
+))]
+fn close_descriptors_above_except(keep: &[i32], _plan: &mut ClosePlan, calls: &mut u32) -> bool {
+	let mut from = 0;
+	for &fd in keep {
+		if fd < from {
+			continue;
+		}
+		while from < fd {
+			*calls += close_unless_kept(from, keep, -1);
+			from += 1;
+		}
+		from = fd.saturating_add(1);
+	}
+	*calls += 1;
+	close_from(from)
+}
+
+/// No `closefrom(3)` on this target.
+#[cfg(not(any(
+	target_os = "freebsd",
+	target_os = "dragonfly",
+	target_os = "netbsd",
+	target_os = "openbsd",
+	target_os = "illumos",
+	target_os = "solaris"
+)))]
+const fn close_descriptors_above_except(
+	_keep: &[i32],
+	_plan: &mut ClosePlan,
+	_calls: &mut u32,
+) -> bool {
+	false
+}
+
+/// `closefrom(lowfd)`: whether the kernel took it. FreeBSD, Solaris and
+/// illumos return nothing and cannot fail.
+#[cfg(any(target_os = "freebsd", target_os = "illumos", target_os = "solaris"))]
+fn close_from(lowfd: i32) -> bool {
+	// SAFETY: a plain descriptor call; it closes descriptors and writes
+	// nothing through a pointer.
+	unsafe { closefrom(lowfd) };
+	true
+}
+
+/// `closefrom(lowfd)`: NetBSD, OpenBSD and DragonFly answer -1 for a
+/// kernel that refused, and then the caller checks each number instead.
+#[cfg(any(target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
+fn close_from(lowfd: i32) -> bool {
+	// SAFETY: as above.
+	unsafe { libc::closefrom(lowfd) >= 0 }
+}
+
+/// FreeBSD's `closefrom` through the libc crate, which declares it
+/// returning nothing there.
+#[cfg(target_os = "freebsd")]
+use libc::closefrom;
+
+/// `closefrom(3C)`, where the call began: Solaris 11 and illumos have
+/// it in their libc, and the libc crate declares it for the BSDs only.
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+unsafe extern "C" {
+	fn closefrom(lowfd: libc::c_int);
+}
+
+/// Close `fd` unless it is in `keep` or is `dir`; whether it called
+/// `close(2)`. Closing a descriptor that is not open fails with `EBADF`,
+/// which changes nothing.
+fn close_unless_kept(fd: i32, keep: &[i32], dir: i32) -> u32 {
+	if fd == dir || keep.contains(&fd) {
+		return 0;
+	}
+	// SAFETY: a plain descriptor call.
+	unsafe { libc::close(fd) };
+	1
+}
+
+/// [`close_descriptors_except`] over the descriptors `/proc/self/fd`
+/// lists, counting every call into `calls`, the close of the listing
+/// itself among them; whether it could list them all.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn close_listed_descriptors_except(keep: &[i32], _plan: &mut ClosePlan, calls: &mut u32) -> bool {
+	// SAFETY: the path is NUL-terminated.
+	let dir = unsafe {
+		libc::open(c"/proc/self/fd".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+	};
+	if dir < 0 {
+		return false;
+	}
+	let listed = close_descriptors_listed_in(dir, keep, calls);
+	*calls += 1;
+	// SAFETY: `dir` is open and owned here.
+	unsafe { libc::close(dir) };
+	listed
+}
+
+/// [`close_descriptors_except`] over the descriptors the kernel lists
+/// for this process, where there is neither `close_range` nor
+/// `closefrom` nor `/proc`, counting each call into `calls`; whether the
+/// list can be trusted. The kernel refusing, and a list that fills the
+/// room to its end and so may be short of the truth, both answer
+/// `false`.
+///
+/// `plan.listing` was reserved before the fork: `proc_pidinfo` is one
+/// call into the kernel that writes into it and allocates nothing, so
+/// the child may make it.
+#[cfg(target_vendor = "apple")]
+fn close_listed_descriptors_except(keep: &[i32], plan: &mut ClosePlan, calls: &mut u32) -> bool {
+	let room: &mut [libc::proc_fdinfo] = &mut plan.listing;
+	let size = i32::try_from(size_of_val(room)).unwrap_or(i32::MAX);
+	// SAFETY: the kernel writes at most `size` bytes into `room`, which
+	// is valid for that length.
+	let written = unsafe {
+		libc::proc_pidinfo(libc::getpid(), libc::PROC_PIDLISTFDS, 0, room.as_mut_ptr().cast(), size)
+	};
+	if written <= 0 || written >= size {
+		return false;
+	}
+	let listed = usize::try_from(written).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
+	for open in &room[..listed] {
+		*calls += close_unless_kept(open.proc_fd, keep, -1);
+	}
+	true
+}
+
+/// Neither `/proc/self/fd` nor `proc_pidinfo` on this target.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+const fn close_listed_descriptors_except(
+	_keep: &[i32],
+	_plan: &mut ClosePlan,
+	_calls: &mut u32,
+) -> bool {
+	false
+}
+
+/// Read the descriptor listing open at `dir` with `getdents64` into a
+/// buffer on the stack and close each descriptor it names that is not in
+/// `keep`, except `dir`, counting each call into `calls`; whether it
+/// read the listing to its end. A failed read other than `EINTR`, or a
+/// record it cannot parse, leaves descriptors unchecked, and the caller
+/// checks them another way.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn close_descriptors_listed_in(dir: i32, keep: &[i32], calls: &mut u32) -> bool {
+	let mut buffer = [0u8; 4096];
+	loop {
+		// SAFETY: `buffer` is valid for its length; the kernel writes whole
+		// `linux_dirent64` records into it.
+		let read =
+			unsafe { libc::syscall(libc::SYS_getdents64, dir, buffer.as_mut_ptr(), buffer.len()) };
+		let Ok(read) = usize::try_from(read) else {
+			if errno() == libc::EINTR {
+				continue;
+			}
+			return false;
+		};
+		if read == 0 {
+			return true;
+		}
+		// Each record: inode (8 bytes), offset (8), length (2), type (1), name.
+		let mut at = 0;
+		while at < read {
+			if at + 19 > read {
+				return false;
+			}
+			let length = usize::from(u16::from_ne_bytes([buffer[at + 16], buffer[at + 17]]));
+			if length < 19 || at + length > read {
+				return false;
+			}
+			let name = &buffer[at + 19..at + length];
+			let fd = name
+				.iter()
+				.take_while(|b| b.is_ascii_digit())
+				.try_fold(0i32, |fd, d| fd.checked_mul(10)?.checked_add(i32::from(d - b'0')));
+			if name.first().is_some_and(u8::is_ascii_digit)
+				&& let Some(fd) = fd
+			{
+				*calls += close_unless_kept(fd, keep, dir);
+			}
+			at += length;
+		}
+	}
+}
+
 /// The spawn of a process that applies redirections itself
 /// ([`ChildRedirs`]): a bare `fork` whose child installs its fds, applies
 /// the redirections in order (an open may wait for a FIFO's other end:
@@ -1045,8 +1672,18 @@ fn fork_redirs(
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
-	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
-	let closed = prog.closed;
+	let raw: Vec<(i32, Option<RawFd>)> = fds.iter().map(|(t, fd)| (*t, fd.raw_fd())).collect();
+	// The kernel's numbers and the room the child needs, read here: the
+	// forked child may neither allocate nor read a file.
+	let mut plan = ClosePlan::new();
+	// Sorted and without repeats before the fork: the child closes the
+	// ranges between these numbers and may not allocate or sort.
+	let own: Vec<i32> = {
+		let mut own: Vec<i32> = raw.iter().map(|(t, _)| *t).collect();
+		own.sort_unstable();
+		own.dedup();
+		own
+	};
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -1092,14 +1729,27 @@ fn fork_redirs(
 			if libc::chdir(exec.cwd()) != 0 {
 				child_fail(&exec_diag, errno(), 126, texts);
 			}
+			// Every duplication first, and only then the closes: a number
+			// the command is to be without may be the very number another
+			// of its descriptors is duplicated from.
 			for &(target, src) in &raw {
-				if libc::dup2(src, target) < 0 {
+				if let Some(src) = src
+					&& src != target
+					&& libc::dup2(src, target) < 0
+				{
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
 			}
-			for &target in closed {
-				libc::close(target);
+			for &(target, src) in &raw {
+				if src.is_none() {
+					libc::close(target);
+				}
 			}
+			// The redirections below run with only the command's own
+			// descriptors, as in the child bash forks: every host descriptor
+			// goes now, so a lowered open-file limit leaves room for their
+			// opens and a duplication of a descriptor the command lacks fails.
+			close_descriptors_except(&own, &mut plan);
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
@@ -1171,7 +1821,7 @@ fn fork_redirs(
 
 #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 mod posix {
-	use std::{cell::RefCell, io, mem::MaybeUninit, os::fd::AsRawFd};
+	use std::{cell::RefCell, io, mem::MaybeUninit};
 
 	thread_local! {
 		/// Reusable actions for this thread's last descriptor map and cwd.
@@ -1184,40 +1834,41 @@ mod posix {
 
 	/// The cached action list and the inputs that completely describe it.
 	struct Actions {
-		raw:    FileActions,
-		fds:    Vec<(i32, i32)>,
-		closed: Vec<i32>,
-		cwd:    Vec<u8>,
+		raw: FileActions,
+		fds: Vec<(i32, Option<i32>)>,
+		cwd: Vec<u8>,
 	}
 
 	impl Actions {
-		fn matches(&self, exec: &Exec, fds: &[(i32, Source)], closed: &[i32]) -> bool {
+		fn matches(&self, exec: &Exec, fds: &[(i32, Source)]) -> bool {
 			self.cwd == exec.buf[exec.cwd..]
-				&& self.closed == closed
 				&& self.fds.len() == fds.len()
 				&& self
 					.fds
 					.iter()
 					.zip(fds)
-					.all(|(&(target, source), (want, fd))| target == *want && source == fd.as_raw_fd())
+					.all(|(&(target, source), (want, fd))| target == *want && source == fd.raw_fd())
 		}
 
-		fn new(
-			exec: &Exec,
-			fds: &[(i32, Source)],
-			closed: &[i32],
-			add_chdir: AddChdir,
-		) -> io::Result<Self> {
+		fn new(exec: &Exec, fds: &[(i32, Source)], add_chdir: AddChdir) -> io::Result<Self> {
 			let mut raw = FileActions::new()?;
+			// File actions run in the order they were added, and a number
+			// the command is to be without may be the very number another
+			// of its descriptors is duplicated from: every duplication
+			// first, and only then the closes.
 			for (target, fd) in fds {
-				// SAFETY: initialized actions; descriptors are plain integers.
-				check(unsafe {
-					libc::posix_spawn_file_actions_adddup2(raw.ptr(), fd.as_raw_fd(), *target)
-				})?;
+				if let Some(source) = fd.raw_fd() {
+					// SAFETY: initialized actions; descriptors are plain integers.
+					check(unsafe {
+						libc::posix_spawn_file_actions_adddup2(raw.ptr(), source, *target)
+					})?;
+				}
 			}
-			for &target in closed {
-				// SAFETY: initialized actions; `target` is a plain integer.
-				check(unsafe { libc::posix_spawn_file_actions_addclose(raw.ptr(), target) })?;
+			for (target, fd) in fds {
+				if fd.raw_fd().is_none() {
+					// SAFETY: as above.
+					check(unsafe { libc::posix_spawn_file_actions_addclose(raw.ptr(), *target) })?;
+				}
 			}
 			// SAFETY: initialized actions; libc copies the NUL-terminated cwd.
 			check(unsafe { add_chdir(raw.ptr(), exec.cwd()) })?;
@@ -1225,9 +1876,8 @@ mod posix {
 				raw,
 				fds: fds
 					.iter()
-					.map(|(target, fd)| (*target, fd.as_raw_fd()))
+					.map(|(target, fd)| (*target, fd.raw_fd()))
 					.collect(),
-				closed: closed.to_vec(),
 				cwd: exec.buf[exec.cwd..].to_vec(),
 			})
 		}
@@ -1284,8 +1934,8 @@ mod posix {
 		}
 	}
 
-	/// `posix_spawn` `exec` with `fds` installed and the targets `closed`
-	/// closed after, at `place`, with every signal not in `ign` at its
+	/// `posix_spawn` `exec` with `fds` installed (a closed source closes
+	/// its target), at `place`, with every signal not in `ign` at its
 	/// default: the ones the host ignores are reset (`exec` resets caught
 	/// ones; glibc's child spends a `sigaction` on each signal of the set).
 	/// `add_chdir` is the resolved libc entry point, one value for the
@@ -1293,7 +1943,6 @@ mod posix {
 	pub fn spawn(
 		exec: &Exec,
 		fds: &[(i32, Source)],
-		closed: &[i32],
 		place: Place,
 		ign: SigSet,
 		add_chdir: AddChdir,
@@ -1301,9 +1950,9 @@ mod posix {
 		ACTIONS.with_borrow_mut(|cached| {
 			if !cached
 				.as_ref()
-				.is_some_and(|actions| actions.matches(exec, fds, closed))
+				.is_some_and(|actions| actions.matches(exec, fds))
 			{
-				*cached = Some(Actions::new(exec, fds, closed, add_chdir)?);
+				*cached = Some(Actions::new(exec, fds, add_chdir)?);
 			}
 			let actions = &mut cached.as_mut().expect("initialized actions").raw;
 			ATTRS.with_borrow_mut(|cached| {
