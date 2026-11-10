@@ -181,13 +181,17 @@ export class UsageService implements UsageApi {
 	/**
 	 * Replace every configuration-sourced usage provider. A provider whose
 	 * effective adapter changes has its cached reports invalidated, like
-	 * {@link setProvider}; one shadowed by a runtime override keeps them.
+	 * {@link setProvider}; one shadowed by a runtime override keeps them, and so
+	 * does one gaining its first adapter, whose persisted reports another process
+	 * wrote with that same configuration.
 	 */
 	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
 		const previous = this.#configuredUsageProviders;
 		for (const provider of new Set([...previous.keys(), ...providers.keys()])) {
-			if (previous.get(provider) === providers.get(provider)) continue;
-			if (!this.#runtimeUsageProviderOverrides.has(provider)) this.#deps.cache.invalidateForProvider(provider);
+			if (this.#runtimeUsageProviderOverrides.has(provider)) continue;
+			const before = previous.get(provider) ?? this.#deps.usageProviders(provider);
+			const after = providers.get(provider) ?? this.#deps.usageProviders(provider);
+			if (before !== undefined && before !== after) this.#deps.cache.invalidateForProvider(provider);
 		}
 		this.#configuredUsageProviders = new Map(providers);
 	}

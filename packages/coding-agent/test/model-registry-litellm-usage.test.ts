@@ -17,6 +17,7 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let probes: string[];
+	let usageFetch: typeof fetch;
 	let mtime = 1_700_000_000;
 
 	function writeModels(providers: Record<string, unknown>): void {
@@ -39,7 +40,7 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 		tempDir = TempDir.createSync("@omp-litellm-usage-");
 		probes = [];
 		// Every gateway answers its user record with a spend derived from the bearer.
-		const usageFetch = Object.assign(
+		usageFetch = Object.assign(
 			async (input: string | URL | Request, init?: RequestInit) => {
 				const url = new URL(String(input));
 				const bearer = new Headers(init?.headers).get("authorization")?.replace("Bearer ", "") ?? "";
@@ -105,5 +106,37 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 		await authStorage.usage.invalidate("gateway-a");
 		expect(await budgets(registry)).toEqual(["gateway-a 11"]);
 		expect(probes).toEqual(["key-a a.example/v2/user/info", "runtime-key a.example/v2/user/info"]);
+	});
+
+	test("a new process reuses the persisted report instead of re-probing the gateway", async () => {
+		writeModels({ "gateway-a": gatewayAlias("a.example", "key-a") });
+		const dbPath = tempDir.join("agent.db");
+		const openProcess = async (): Promise<AuthStorage> => {
+			const storage = new AuthStorage(await SqliteAuthCredentialStore.open(dbPath), { usageFetch });
+			await storage.credentials.reload();
+			return storage;
+		};
+
+		const first = await openProcess();
+		const firstRegistry = new ModelRegistry(first, tempDir.join("models.yml"), {
+			settings: Settings.isolated(),
+			cacheDbPath: tempDir.join("models.db"),
+		});
+		await first.usage.reports({ baseUrlResolver: id => firstRegistry.getProviderBaseUrl(id) });
+		first.close();
+		expect(probes).toEqual(["key-a a.example/v2/user/info"]);
+
+		const second = await openProcess();
+		try {
+			const registry = new ModelRegistry(second, tempDir.join("models.yml"), {
+				settings: Settings.isolated(),
+				cacheDbPath: tempDir.join("models.db"),
+			});
+			const reports = await second.usage.reports({ baseUrlResolver: id => registry.getProviderBaseUrl(id) });
+			expect(reports?.map(report => report.provider)).toEqual(["gateway-a"]);
+			expect(probes).toEqual(["key-a a.example/v2/user/info"]);
+		} finally {
+			second.close();
+		}
 	});
 });
