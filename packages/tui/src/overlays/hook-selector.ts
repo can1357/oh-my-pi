@@ -115,7 +115,7 @@ function normalizeHookSelectorOption(option: HookSelectorOptionInput): HookSelec
 	return {
 		label: option.label,
 		...(option.description?.trim() ? { description: option.description.trim() } : {}),
-		...(option.preview ? { preview: option.preview } : {}),
+		...(option.preview ? { preview: replaceTabs(option.preview.slice(0, PREVIEW_LIMITS.PICKER_CHARS)) } : {}),
 	};
 }
 
@@ -180,8 +180,12 @@ function plainInline(source: string, mdTheme: MarkdownTheme): string {
 }
 
 function renderPreview(source: string, rows: number, width = 80): string[] {
-	const markdown = new Markdown(replaceTabs(source.slice(0, PREVIEW_LIMITS.PICKER_CHARS)), 0, 0, getMarkdownTheme());
+	const markdown = new Markdown(source, 0, 0, getMarkdownTheme());
 	return markdown.render(Math.max(1, width)).slice(0, rows);
+}
+
+function describePreview(source: string): NativeNode {
+	return md(source.split("\n", PREVIEW_LIMITS.PICKER_LINES).join("\n"));
 }
 const ENTER_KEYS: readonly KeyName[] = ["enter"];
 
@@ -204,10 +208,11 @@ export class HookSelectorComponent extends OverlayPanel {
 	#checkedIndices: Set<number>;
 	#markableCount: number;
 	#maxVisible: number;
+	readonly #hasPreview: boolean;
 	#preview: Text | undefined;
 	#previewSourceIndex: number | undefined;
 	#previewRenderWidth: number | undefined;
-	#previewRows: number;
+	readonly #previewRows: number;
 	#listContainer: Container | undefined;
 	#outlinedList: OutlinedList | undefined;
 	#onSelectCallback: (option: string) => void;
@@ -277,9 +282,9 @@ export class HookSelectorComponent extends OverlayPanel {
 		);
 		this.#markableCount = Math.max(0, Math.min(opts?.markableCount ?? this.#options.length, this.#options.length));
 		const baseMaxVisible = opts?.maxVisible ?? 12;
-		const hasPreview = this.#options.some(option => option.preview);
-		this.#previewRows = hasPreview ? Math.min(PREVIEW_LIMITS.PICKER_LINES, Math.max(1, baseMaxVisible - 3)) : 0;
-		this.#maxVisible = Math.max(3, baseMaxVisible - (hasPreview ? this.#previewRows + 2 : 0));
+		this.#hasPreview = this.#options.some(option => option.preview);
+		this.#previewRows = this.#hasPreview ? Math.min(PREVIEW_LIMITS.PICKER_LINES, Math.max(0, baseMaxVisible - 5)) : 0;
+		this.#maxVisible = Math.max(3, baseMaxVisible - (this.#previewRows > 0 ? this.#previewRows + 2 : 0));
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
 		this.#baseTitle = this.title;
@@ -333,7 +338,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			this.#listContainer = new Container();
 			this.addChild(this.#listContainer);
 		}
-		if (this.#options.some(option => option.preview)) {
+		if (this.#previewRows > 0) {
 			this.addChild(new Spacer(1));
 			this.#preview = new Text("", 0, 0);
 			this.addChild(this.#preview);
@@ -542,6 +547,10 @@ export class HookSelectorComponent extends OverlayPanel {
 			}
 		}
 
+		if (total === 0) {
+			rows.push({ text: theme.fg("dim", "  No matching options"), highlight: false });
+		}
+
 		if (this.#shouldRenderSearchStatus(renderWidth, mdTheme)) {
 			rows.push({ text: this.#renderStatusLine(total), highlight: false });
 		}
@@ -604,10 +613,7 @@ export class HookSelectorComponent extends OverlayPanel {
 	}
 
 	#isSearchEnabled(renderWidth = this.#lastRenderWidth, mdTheme?: MarkdownTheme): boolean {
-		return (
-			this.#options.some(option => option.preview !== undefined) ||
-			this.#totalOptionRows(this.#options, renderWidth, mdTheme) > this.#maxVisible
-		);
+		return this.#hasPreview || this.#totalOptionRows(this.#options, renderWidth, mdTheme) > this.#maxVisible;
 	}
 
 	#shouldRenderSearchStatus(renderWidth = this.#lastRenderWidth, mdTheme?: MarkdownTheme): boolean {
@@ -653,7 +659,8 @@ export class HookSelectorComponent extends OverlayPanel {
 	 *  type-to-search is active, digits stay searchable. Checkbox menus only
 	 *  move the cursor — confirmation stays on `enter`. */
 	#handleQuickSelect(keyData: string): boolean {
-		if (this.#menu.query.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9") return false;
+		if (this.#hasPreview || this.#menu.query.length > 0 || keyData.length !== 1 || keyData < "1" || keyData > "9")
+			return false;
 		const targetIndex = this.#menu.visibleItems.findIndex(({ option }) => option.label.startsWith(`${keyData}. `));
 		if (targetIndex < 0) return false;
 		const target = this.#menu.visibleItems[targetIndex];
@@ -714,6 +721,12 @@ export class HookSelectorComponent extends OverlayPanel {
 		return super.render(width);
 	}
 
+	override invalidate(): void {
+		this.#previewSourceIndex = undefined;
+		this.#lastRenderWidth = undefined;
+		super.invalidate();
+	}
+
 	override dispose(): void {
 		this.#countdown?.dispose();
 	}
@@ -761,7 +774,7 @@ export class HookSelectorComponent extends OverlayPanel {
 				empty: "No matching options",
 				actions: [pickerAction("confirm", "Select", "enter", { primary: true }), CLOSE_ACTION],
 			},
-			preview ? [md(replaceTabs(preview.slice(0, PREVIEW_LIMITS.PICKER_CHARS)))] : [],
+			preview ? [describePreview(preview)] : [],
 		);
 		this.#pickerMemo = { items, selected, query, cursor, node: result };
 		return result;
@@ -820,7 +833,7 @@ export class HookSelectorComponent extends OverlayPanel {
 			),
 		);
 		if (selectedItem?.option.preview) {
-			children.push(md(replaceTabs(selectedItem.option.preview.slice(0, PREVIEW_LIMITS.PICKER_CHARS))));
+			children.push(describePreview(selectedItem.option.preview));
 		}
 		if (query)
 			children.push(

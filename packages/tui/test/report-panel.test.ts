@@ -198,16 +198,14 @@ describe("ReportPanel in text mode", () => {
 });
 
 describe("ReportPanel natively", () => {
-	it("invokes the primary native action and refreshes its result label without closing", () => {
+	it.each([false, true])("invokes the native primary action and honors closeOnAction=%s", closeOnAction => {
 		let added = 0;
 		let closed = 0;
 		const action = {
-			label: "Add reference",
-			keys: ["alt+i"] as const,
-			onAction: () => {
-				added++;
-				action.label = "Reference added";
-			},
+			label: "Inject",
+			keys: ["ctrl+alt+r"] as const,
+			closeOnAction,
+			onAction: () => added++,
 		};
 		const panel = new ReportPanel({
 			title: "Summary",
@@ -219,9 +217,7 @@ describe("ReportPanel natively", () => {
 		panel.describe();
 		panel.handleNativeEvent({ type: "action", key: "actions/primary", act: "primary", mods: [] });
 		expect(added).toBe(1);
-		expect(closed).toBe(0);
-		expect(JSON.stringify(panel.describe())).toContain("Reference added");
-		expect(JSON.stringify(panel.describe())).not.toContain("Add reference");
+		expect(closed).toBe(closeOnAction ? 1 : 0);
 	});
 	it("describes the report as the scrolled reading body, then Close, which closes it like Esc", () => {
 		let closed = 0;

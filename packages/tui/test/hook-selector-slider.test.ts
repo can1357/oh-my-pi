@@ -195,7 +195,7 @@ describe("HookSelectorComponent model slider", () => {
 			],
 			() => {},
 			() => {},
-			{ maxVisible: 4 },
+			{ maxVisible: 8 },
 		);
 
 		const initial = component
@@ -215,18 +215,72 @@ describe("HookSelectorComponent model slider", () => {
 		expect(searched).toContain("child-only marker");
 	});
 
-	it("describes the selected preview in the native picker", () => {
+	it.each([4, 8])("keeps previews within the same row budget as a plain picker at %s rows", maxVisible => {
+		const labels = Array.from({ length: 20 }, (_, index) => `Option ${index}`);
+		const plain = new HookSelectorComponent(
+			"Browse",
+			labels,
+			() => {},
+			() => {},
+			{ maxVisible },
+		);
+		const previewed = new HookSelectorComponent(
+			"Browse",
+			labels.map(label => ({ label, preview: "preview line\n".repeat(80) })),
+			() => {},
+			() => {},
+			{ maxVisible },
+		);
+		expect(previewed.render(60).length).toBeLessThanOrEqual(plain.render(60).length);
+	});
+
+	it("searches numeric preview text instead of confirming a numbered option", () => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Browse",
+			[
+				{ label: "1. main", preview: "Unrelated reply" },
+				{ label: "2. worker", preview: "Task 18757" },
+			],
+			value => selected.push(value),
+			() => {},
+		);
+		for (const key of "18757") component.handleInput(key);
+		expect(selected).toEqual([]);
+		component.handleInput("\n");
+		expect(selected).toEqual(["2. worker"]);
+	});
+
+	it("excludes text beyond the bounded preview from search and clears a no-match preview", () => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Browse",
+			[{ label: "main", preview: `Visible reply\n${"x".repeat(10_000)}\nFAR_ONLY_MATCH` }],
+			value => selected.push(value),
+			() => {},
+		);
+		for (const key of "FAR_ONLY_MATCH") component.handleInput(key);
+		expect(markdownText(component.describe(pickerCx))).toEqual([]);
+		component.handleInput("\n");
+		expect(selected).toEqual([]);
+	});
+
+	it.each([true, false])("updates a bounded native preview with picker support=%s", supportsPicker => {
 		const component = new HookSelectorComponent(
 			"Browse",
 			[
 				{ label: "first", preview: "# First preview" },
-				{ label: "second", preview: "# Second preview" },
+				{ label: "second", preview: `# Second preview\n${"extra line\n".repeat(100)}HIDDEN_NATIVE_TAIL` },
 			],
 			() => {},
 			() => {},
 		);
-		expect(markdownText(component.describe(pickerCx))).toContain("# First preview");
-		component.handleNativeEvent({ type: "select", key: "^picker", item: "1" });
-		expect(markdownText(component.describe(pickerCx))).toContain("# Second preview");
+		const cx = { ...pickerCx, supports: () => supportsPicker };
+		expect(markdownText(component.describe(cx)).join("\n")).toContain("# First preview");
+		component.handleNativeEvent({ type: "select", key: supportsPicker ? "^picker" : "list", item: "1" });
+		const preview = markdownText(component.describe(cx)).join("\n");
+		expect(preview).toContain("# Second preview");
+		expect(preview).not.toContain("# First preview");
+		expect(preview).not.toContain("HIDDEN_NATIVE_TAIL");
 	});
 });

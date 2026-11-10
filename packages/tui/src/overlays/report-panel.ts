@@ -31,7 +31,7 @@ export interface ReportPanelOptions {
 	readonly body: Component;
 	/** Optional primary action available from the focused report. */
 	readonly action?: {
-		label: string;
+		readonly label: string;
 		readonly keys: readonly KeyId[];
 		readonly onAction: () => void;
 		/** Close a focused report after the action; docked reports remain visible. */
@@ -82,7 +82,7 @@ export class ReportPanel extends OverlayPanel {
 	#closeHint: string;
 	#bodyRows = 0;
 	#scroll: NativeScroll | undefined;
-	#native: { scroll: NativeScroll | undefined; actionLabel: string | undefined; node: NativeNode } | undefined;
+	#native: { scroll: NativeScroll | undefined; node: NativeNode } | undefined;
 
 	constructor(options: ReportPanelOptions) {
 		super(options.title, "omp.overlay.report");
@@ -112,7 +112,9 @@ export class ReportPanel extends OverlayPanel {
 
 	#footerHint(): string {
 		const action = this.#action;
-		return action ? `${this.#closeHint} · ${formatKeyHints(action.keys)} ${action.label}` : this.#closeHint;
+		return action?.keys.length
+			? `${this.#closeHint} · ${formatKeyHints(action.keys)} ${action.label}`
+			: this.#closeHint;
 	}
 
 	/**
@@ -164,9 +166,7 @@ export class ReportPanel extends OverlayPanel {
 	 */
 	override describe(): NativeNode {
 		const scroll = this.#scroll;
-		const actionLabel = this.#action?.label;
-		if (this.#native && this.#native.scroll === scroll && this.#native.actionLabel === actionLabel)
-			return this.#native.node;
+		if (this.#native && this.#native.scroll === scroll) return this.#native.node;
 		const body: NativeNode = { ...col([this.#body], { role: "omp.report.body" }), key: "body", scroll };
 		const action = this.#action;
 		const node = col(
@@ -180,7 +180,7 @@ export class ReportPanel extends OverlayPanel {
 			],
 			{ gap: "md" },
 		);
-		this.#native = { scroll, actionLabel, node };
+		this.#native = { scroll, node };
 		return node;
 	}
 
