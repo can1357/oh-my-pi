@@ -14,14 +14,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { A2aAgentBridge } from "@oh-my-pi/pi-coding-agent/a2a/agent-bridge";
+import {
+	IncomingRequests,
+	type IncomingRequestLease,
+	type IncomingRequestsApi,
+} from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import {
-	type A2aIncomingRequest,
 	type A2aTask,
 	RPC_ERRORS,
 	TASK_STATE,
 	mapAgentStatus,
 	taskFromAgentRef,
+	sendA2aMessage,
 } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import {
 	A2A_HOST,
@@ -181,7 +186,7 @@ const handles: A2aServerHandle[] = [];
 afterEach(() => {
 	while (handles.length > 0) handles.pop()?.stop();
 	vi.useRealTimers();
-	OutgoingRequests.resetGlobalForTests();
+	IncomingRequests.resetGlobalForTests();
 });
 
 function startServer(options: {
@@ -190,7 +195,7 @@ function startServer(options: {
 	registry?: FakeRegistry;
 	bus?: FakeBus;
 	streamPollMs?: number;
-	onIncomingRequest?: (request: A2aIncomingRequest) => void;
+	incoming?: IncomingRequestsApi;
 }): { handle: A2aServerHandle; registry: FakeRegistry; bus: FakeBus } {
 	const registry = options.registry ?? new FakeRegistry(options.refs ?? []);
 	const bus = options.bus ?? new FakeBus();
@@ -201,7 +206,7 @@ function startServer(options: {
 		bus,
 		spawn: options.spawn,
 		streamPollMs: options.streamPollMs ?? 20,
-		onIncomingRequest: options.onIncomingRequest,
+		incoming: options.incoming ?? new IncomingRequests(),
 		card: () =>
 			buildAgentCard({
 				url: `http://${A2A_HOST}:${handle.port}/`,
@@ -716,27 +721,160 @@ describe("A2A delivery ingress", () => {
 		return handle;
 	}
 
-	it("tracks replies only for successfully delivered peer requests", async () => {
-		const incoming: string[] = [];
+	it("fast recipient can claim request before send receipt resolves", async () => {
+		const base = new IncomingRequests();
+		const gate = Promise.withResolvers<void>();
+		const notedFirst = Promise.withResolvers<void>();
+		let sendEntered = false;
+		const incoming: IncomingRequestsApi = {
+			// Gate `note`: the dispatch must not enter the bus send until it resolves.
+			note: request => {
+				notedFirst.resolve();
+				return gate.promise.then(() => base.note(request));
+			},
+			consume: match => base.consume(match),
+			confirm: leaseId => base.confirm(leaseId),
+			release: leaseId => base.release(leaseId),
+			discard: match => base.discard(match),
+			list: to => base.list(to),
+		};
 		const bus = new FakeBus();
+		let claimedBeforeReceipt = false;
+		let replyDelivered: string | undefined;
+		bus.send = async msg => {
+			sendEntered = true;
+			bus.sent.push({ from: msg.from, to: msg.to, body: msg.body });
+			// A fast recipient wakes synchronously inside the bus delivery: it
+			// claims the just-addressed request and completes a correlated
+			// answer before the send receipt resolves.
+			const lease = await base.consume({ to: "Main", from: "peer" });
+			claimedBeforeReceipt = lease?.request.messageId === "fast-1" && lease.request.from === "peer";
+			const sent: string[] = [];
+			await sendA2aMessage(
+				{
+					message: { messageId: "answer-1", role: "ROLE_USER", parts: [{ text: "the answer" }] },
+					metadata: { to: "Peer", from: "Main", inReplyTo: lease?.request.messageId },
+				},
+				{
+					registry: {
+						get: (id: string) => (id === "Peer" ? makeRef({ id: "Peer", status: "running" }) : undefined),
+						list: () => [],
+						setStatus: () => false,
+					},
+					send: async reply => {
+						sent.push(reply.body);
+						return { to: reply.to, outcome: "injected" };
+					},
+					incoming: base,
+				},
+			);
+			replyDelivered = sent[0];
+			return { to: msg.to, outcome: "woken" };
+		};
 		const { handle } = startServer({
 			refs: [makeRef({ id: "Main", kind: "main", status: "running" })],
 			bus,
-			onIncomingRequest: request => incoming.push(`${request.from}:${request.messageId}->${request.to}`),
+			incoming,
 		});
-		const send = (id: string) =>
-			rpc(handle, {
-				jsonrpc: "2.0",
-				id,
-				method: "SendMessage",
-				params: { message: { messageId: id, parts: [{ text: "hello" }] }, metadata: { to: "Main", from: "peer" } },
-			});
+		const pending = rpc(handle, {
+			jsonrpc: "2.0",
+			id: "fast-1",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "fast-1", role: "ROLE_USER", parts: [{ text: "hello" }] },
+				metadata: { to: "Main", from: "peer" },
+			},
+		});
+		// The dispatch is parked inside `note` on an unresolved gate, so the
+		// bus send cannot have entered: the record is being made before delivery.
+		await notedFirst.promise;
+		expect(sendEntered).toBe(false);
+		gate.resolve();
+		const { status, json } = await pending;
+		expect(status).toBe(200);
+		expect(taskResult(json).metadata?.delivery).toMatchObject({ to: "Main", outcome: "woken" });
+		// The recipient saw and claimed the request before the receipt existed.
+		expect(claimedBeforeReceipt).toBe(true);
+		// Its correlated answer completed before the receipt resolved.
+		expect(replyDelivered).toContain("[A2A reply to your request fast-1");
+		expect(replyDelivered).toContain("the answer");
+		// The reply created no new incoming request on either side.
+		expect(await base.list("Main")).toEqual([]);
+		expect(await base.list("Peer")).toEqual([]);
+		await expect(base.consume({ to: "Main", from: "peer" })).resolves.toBeUndefined();
+	});
+
+	it("refused delivery discards only its incoming request", async () => {
+		const incoming = new IncomingRequests();
+		const bus = new FakeBus();
 		bus.outcome = "failed";
-		await send("failed");
-		expect(incoming).toEqual([]);
-		bus.outcome = "woken";
-		await send("delivered");
-		expect(incoming).toEqual(["peer:delivered->Main"]);
+		bus.error = "agent Main has no live session";
+		let lease: IncomingRequestLease | undefined;
+		bus.send = async msg => {
+			bus.sent.push({ from: msg.from, to: msg.to, body: msg.body });
+			lease = await incoming.consume({ to: "Main", from: "peer" });
+			return { to: msg.to, outcome: "failed", error: bus.error };
+		};
+		const { handle } = startServer({
+			refs: [makeRef({ id: "Main", kind: "main", status: "running" })],
+			bus,
+			incoming,
+		});
+		// An unrelated queued request from another peer must survive the rollback.
+		await incoming.note({ to: "Main", from: "other", messageId: "kept", at: 1 });
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "refused",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "refused-1", role: "ROLE_USER", parts: [{ text: "hello" }] },
+				metadata: { to: "Main", from: "peer" },
+			},
+		});
+		expect(status).toBe(200);
+		const error = errorResult(json);
+		expect(error.code).toBe(RPC_ERRORS.DELIVERY_FAILED);
+		expect(error.message).toContain("agent Main has no live session");
+		// The refused request was rolled back; the queued one is retained, and
+		// a discarded lease token cannot resurrect the removed record.
+		expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["kept"]);
+		await expect(incoming.consume({ to: "Main", from: "peer" })).resolves.toBeUndefined();
+		expect(lease).toBeDefined();
+		expect(await incoming.release(lease!.leaseId)).toBe(false);
+		expect(await incoming.confirm(lease!.leaseId)).toBe(false);
+		expect((await incoming.list("Main")).map(request => request.messageId)).toEqual(["kept"]);
+	});
+
+	it("throwing delivery invalidates a pending claim", async () => {
+		const incoming = new IncomingRequests();
+		const bus = new FakeBus();
+		let lease: IncomingRequestLease | undefined;
+		bus.send = async msg => {
+			bus.sent.push({ from: msg.from, to: msg.to, body: msg.body });
+			lease = await incoming.consume({ to: "Main", from: "peer" });
+			throw new Error("bus transport exploded");
+		};
+		const { handle } = startServer({
+			refs: [makeRef({ id: "Main", kind: "main", status: "running" })],
+			bus,
+			incoming,
+		});
+		const { status, json } = await rpc(handle, {
+			jsonrpc: "2.0",
+			id: "thrown",
+			method: "SendMessage",
+			params: {
+				message: { messageId: "thrown-1", role: "ROLE_USER", parts: [{ text: "hello" }] },
+				metadata: { to: "Main", from: "peer" },
+			},
+		});
+		expect(status).toBe(500);
+		expect(errorResult(json).message).toContain("bus transport exploded");
+		expect(await incoming.list("Main")).toEqual([]);
+		expect(lease).toBeDefined();
+		// The recipient claimed before the throw; the discard invalidates it.
+		expect(await incoming.release(lease!.leaseId)).toBe(false);
+		expect(await incoming.confirm(lease!.leaseId)).toBe(false);
 	});
 
 	it("marks bridge deliveries external: a repeated or bursty request is not agent-guarded", async () => {
@@ -1977,13 +2115,11 @@ describe("A2A reply envelope", () => {
 	it("labels metadata.inReplyTo as a reply without a new envelope or outstanding request", async () => {
 		const bodies: string[] = [];
 		const answers: Array<string | undefined> = [];
-		const incoming: A2aIncomingRequest[] = [];
+		const incoming = new IncomingRequests();
 		const handle = createA2aServer({
 			token: "reply-token-3",
 			port: 0,
-			onIncomingRequest: request => {
-				incoming.push(request);
-			},
+			incoming,
 			registry: {
 				list: () => [],
 				get: id => (id === "Main" ? makeRef({ id: "Main", displayName: "Main", status: "running" }) : undefined),
@@ -2020,7 +2156,7 @@ describe("A2A reply envelope", () => {
 		// No new reply envelope: a reply must not start an unbounded chain.
 		expect(bodies[0]).not.toContain("[A2A task from peer terminal");
 		expect(bodies[0]).not.toContain("spawning the agent");
-		expect(incoming).toEqual([]);
+		expect(await incoming.list("Main")).toEqual([]);
 		// The recipient's footer reads this mark: an answer owes no reply.
 		expect(answers).toEqual(["request-17"]);
 	});
@@ -2039,10 +2175,10 @@ describe("A2A outgoing reply correlation", () => {
 	}
 
 	function start() {
-		const incoming: A2aIncomingRequest[] = [];
+		const incoming = new IncomingRequests();
 		const started = startServer({
 			refs: [makeRef({ id: "Main", displayName: "Main Alias", kind: "main", status: "running" })],
-			onIncomingRequest: noted => incoming.push(noted),
+			incoming,
 		});
 		return { ...started, incoming };
 	}
@@ -2078,7 +2214,7 @@ describe("A2A outgoing reply correlation", () => {
 		expect(status).toBe(200);
 		expect(deliveryOutcome(json)).toBe("injected");
 		expect(bus.sent).toEqual([]);
-		expect(incoming).toEqual([]);
+		expect(await incoming.list()).toEqual([]);
 		expect(await waiting).toBe("exact reply");
 		expect(OutgoingRequests.global().hasOwner("owner-a")).toBe(false);
 	});
@@ -2098,7 +2234,7 @@ describe("A2A outgoing reply correlation", () => {
 			expect.stringContaining("missing sender"),
 			expect.stringContaining("unknown id"),
 		]);
-		expect(incoming).toEqual([]);
+		expect(await incoming.list()).toEqual([]);
 		let settled = false;
 		void waiting.then(
 			() => {

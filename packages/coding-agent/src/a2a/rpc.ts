@@ -14,12 +14,13 @@
  */
 
 import type { SpawnSubagentOptions } from "../extensibility/extensions/types";
-import type { OutgoingRequestsApi } from "./outgoing-requests";
 import { MAIN_AGENT_ID, type AgentRef, type AgentRegistryApi } from "../registry/agent-registry";
 import { PerCallModelError } from "../task/model-approval";
 import { SpawnRefusedError } from "../task/spawn-run";
 import { SpawnPendingError } from "../task/spawn-subagent";
 import { StructuredSubagentError } from "../task/structured-subagent";
+import type { IncomingRequestsApi } from "./incoming-requests";
+import type { OutgoingRequestsApi } from "./outgoing-requests";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -462,8 +463,13 @@ export interface A2aDispatchDeps {
 	createdTaskRefs?: Map<string, AgentRef | undefined>;
 	/** Client contextId persisted per spawned task, for ListTasks filtering. */
 	contextIds?: Map<string, string>;
-	/** Notified when a peer request with a reply identity is delivered here. */
-	noteIncomingRequest?: (request: A2aIncomingRequest) => void;
+	/**
+	 * Incoming-request ledger. A request with a reply identity is recorded
+	 * here before delivery and rolled back by exact match when the delivery is
+	 * refused. Absent only for dispatch callers that do no reply tracking;
+	 * the live server always passes the process-wide instance.
+	 */
+	incoming?: IncomingRequestsApi;
 	/**
 	 * Pending spawns created by this bridge. Absent only for callers that never
 	 * spawn; the live server always installs one ledger for every view.
@@ -742,22 +748,46 @@ export async function sendA2aMessage(params: unknown, deps: A2aDispatchDeps): Pr
 		sections.push(request.text);
 		const body = sections.join("\n\n");
 		const deliveredAt = Date.now();
-		const receipt = await deps.send({
-			from: deps.senderId ?? A2A_SENDER_ID,
-			to: target.id,
-			body,
-			external: true,
-			...(request.inReplyTo !== undefined
-				? { a2aInReplyTo: request.inReplyTo }
-				: { a2aMessageId: request.messageId }),
-		});
-		if (receipt.outcome !== "failed" && request.from !== undefined && request.inReplyTo === undefined) {
-			deps.noteIncomingRequest?.({
-				from: request.from,
-				messageId: request.messageId,
+		// A request with a reply identity is recorded BEFORE the delivery: a
+		// fast recipient wakes synchronously inside the bus send and may claim
+		// (or even answer) it before this function sees the receipt, so the
+		// record must already exist. A correlated reply records nothing.
+		const from = request.from;
+		const trackIncoming = from !== undefined && request.inReplyTo === undefined;
+		const incomingRecord = trackIncoming
+			? { from, messageId: request.messageId, to: target.id, at: deliveredAt }
+			: undefined;
+		if (incomingRecord !== undefined) {
+			try {
+				await deps.incoming?.note(incomingRecord);
+			} catch (error) {
+				// The bookkeeping failed: never deliver a request whose reply
+				// tracking is lost, or the sender would wait forever.
+				const reason = error instanceof Error ? error.message : String(error);
+				throw new RpcError(RPC_ERRORS.INTERNAL_ERROR, `Failed to record incoming request: ${reason}`);
+			}
+		}
+		let receipt: IrcDeliveryReceipt;
+		try {
+			receipt = await deps.send({
+				from: deps.senderId ?? A2A_SENDER_ID,
 				to: target.id,
-				at: deliveredAt,
+				body,
+				external: true,
+				...(request.inReplyTo !== undefined
+					? { a2aInReplyTo: request.inReplyTo }
+					: { a2aMessageId: request.messageId }),
 			});
+		} catch (error) {
+			// A fast recipient may already hold a claim on this request; the
+			// exact-record discard invalidates it without touching others.
+			if (incomingRecord !== undefined) await deps.incoming?.discard(incomingRecord);
+			throw error;
+		}
+		if (receipt.outcome === "failed" && incomingRecord !== undefined) {
+			// Refused delivery: the addressed agent never saw the request, so
+			// its record and any lease a fast claimant took on it must go.
+			await deps.incoming?.discard(incomingRecord);
 		}
 		const current = deps.registry.get(target.id) ?? target;
 		return persistTask(taskFor(current, deps, { delivery: receipt, requestedTo: request.to }), request, deps, false);

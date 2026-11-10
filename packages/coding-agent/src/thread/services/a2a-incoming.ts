@@ -46,6 +46,7 @@ function serveIncoming(threadId: ThreadId, state: PeerState): RpcServe<IncomingR
 			if (state.dead) return Promise.resolve(false);
 			return registry.release(leaseId, threadId);
 		},
+		discard: (registry, match) => registry.discard(match),
 		list: (registry, to) => registry.list(to),
 	};
 }

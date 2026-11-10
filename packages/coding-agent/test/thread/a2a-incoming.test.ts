@@ -198,4 +198,28 @@ describe("incoming A2A registry across workers", () => {
 		expect(leases).toHaveLength(1);
 		expect(leases[0]!.request.messageId).toBe("raced");
 	});
+
+	it("a worker discard removes open and leased records on main", async () => {
+		const first = await startWorker();
+		const second = await startWorker();
+		const main = IncomingRequests.global();
+		const a = { to: "agent", from: "peer", messageId: "a", at: 1 };
+		const b = { to: "agent", from: "peer", messageId: "b", at: 2 };
+		const foreign = { to: "agent", from: "other", messageId: "foreign", at: 3 };
+		await main.note(a);
+		await main.note(b);
+		await main.note(foreign);
+		const bLease = await first.probe.consume({ to: "agent", messageId: "b" });
+		expect(bLease?.request.messageId).toBe("b");
+
+		await second.probe.discard({ to: "agent", from: "peer", messageId: "b" });
+
+		// The leased record is gone, its token is spent, and the rest survive.
+		expect(await main.list("agent")).toEqual([a, foreign]);
+		expect(await first.probe.release(bLease!.leaseId)).toBe(false);
+		expect(await first.probe.confirm(bLease!.leaseId)).toBe(false);
+		expect(await main.list("agent")).toEqual([a, foreign]);
+		await first.probe.discard({ to: "agent", from: "peer", messageId: "a" });
+		expect(await main.list("agent")).toEqual([foreign]);
+	});
 });

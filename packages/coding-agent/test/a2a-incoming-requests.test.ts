@@ -130,4 +130,48 @@ describe("incoming A2A requests", () => {
 		expect(await registry.confirm(other!.leaseId, "w2")).toBe(true);
 		expect(await registry.list("agent")).toEqual([a, d]);
 	});
+
+	it("discards open and leased records by an exact match without touching others", async () => {
+		const registry = new IncomingRequests();
+		const open = { to: "agent", from: "peer", messageId: "open", at: 1 };
+		const leased = { to: "agent", from: "peer", messageId: "leased", at: 2 };
+		const foreign = { to: "agent", from: "other", messageId: "foreign", at: 3 };
+		const elsewhere = { to: "other-agent", from: "peer", messageId: "elsewhere", at: 4 };
+		await registry.note(open);
+		await registry.note(leased);
+		await registry.note(foreign);
+		await registry.note(elsewhere);
+		const claim = await registry.consume({ to: "agent", messageId: "leased" });
+		expect(claim).toBeDefined();
+
+		// An exact rollback match removes both open and leased records.
+		await registry.discard({ to: "agent", from: "peer", messageId: "leased" });
+		expect((await registry.list("agent")).map(request => request.messageId)).toEqual(["open", "foreign"]);
+		// The discarded lease token is spent: it can neither release nor
+		// confirm, so the removed record cannot resurrect.
+		expect(await registry.release(claim!.leaseId)).toBe(false);
+		expect(await registry.confirm(claim!.leaseId)).toBe(false);
+		expect((await registry.list("agent")).map(request => request.messageId)).toEqual(["open", "foreign"]);
+
+		await registry.discard({ to: "agent", from: "peer", messageId: "open" });
+		expect((await registry.list("agent")).map(request => request.messageId)).toEqual(["foreign"]);
+	});
+
+	it("discard by recipient removes every matching record", async () => {
+		const registry = new IncomingRequests();
+		const a = { to: "agent", from: "peer", messageId: "a", at: 1 };
+		const b = { to: "agent", from: "other", messageId: "b", at: 2 };
+		const kept = { to: "other-agent", from: "peer", messageId: "kept", at: 3 };
+		await registry.note(a);
+		await registry.note(b);
+		await registry.note(kept);
+		const claim = await registry.consume({ to: "agent", messageId: "a" });
+		expect(claim).toBeDefined();
+
+		await registry.discard({ to: "agent" });
+
+		expect(await registry.list()).toEqual([kept]);
+		expect(await registry.consume({ to: "agent" })).toBeUndefined();
+		expect(await registry.release(claim!.leaseId)).toBe(false);
+	});
 });

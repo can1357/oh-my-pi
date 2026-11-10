@@ -17,6 +17,7 @@ export interface IncomingProbe {
 	consume(match: IncomingRequestMatch): Promise<IncomingRequestLease | undefined>;
 	confirm(leaseId: string): Promise<boolean>;
 	release(leaseId: string): Promise<boolean>;
+	discard(match: IncomingRequestMatch): Promise<void>;
 	list(to?: string): Promise<A2aIncomingRequest[]>;
 }
 
@@ -32,6 +33,7 @@ const probe: IncomingProbe = {
 	consume: match => IncomingRequests.global().consume(match),
 	confirm: leaseId => IncomingRequests.global().confirm(leaseId),
 	release: leaseId => IncomingRequests.global().release(leaseId),
+	discard: match => IncomingRequests.global().discard(match),
 	list: to => IncomingRequests.global().list(to),
 };
 const probeService: ThreadService = {

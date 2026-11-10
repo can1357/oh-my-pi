@@ -38,8 +38,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/a2a/server";
 import { type AgentCard, buildAgentCard } from "@oh-my-pi/pi-coding-agent/a2a/card";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
-import { type A2aIncomingRequest, type A2aTask, TASK_STATE, sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
-import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
+import { type A2aTask, TASK_STATE, sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
+import { IncomingRequests, type IncomingRequestsApi } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { installA2aReplyRelay } from "@oh-my-pi/pi-coding-agent/a2a/reply-relay";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
 import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
@@ -1118,7 +1118,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 		/** Distinct cwd basenames give in-process terminals distinct auto names. */
 		cwd?: string;
 		inbox: Array<{ to: string; body: string; external?: boolean }>;
-		onIncomingRequest?: (request: A2aIncomingRequest) => void;
+		incoming?: IncomingRequestsApi;
 	}): Promise<A2aServerHandle> {
 		const settings = await Settings.loadIsolated({ inMemory: true, agentDir: options.agentDir });
 		return startA2aServer({
@@ -1126,7 +1126,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 			agentDir: options.agentDir,
 			port: 0,
 			...(options.name !== undefined ? { name: options.name } : {}),
-			...(options.onIncomingRequest !== undefined ? { onIncomingRequest: options.onIncomingRequest } : {}),
+			...(options.incoming !== undefined ? { incoming: options.incoming } : {}),
 			registry: conversationRegistry(),
 			bus: recordingBus(options.inbox),
 			session: { cwd: options.cwd ?? options.agentDir, getSessionAgents: () => [] },
@@ -1195,21 +1195,19 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 		await fs.mkdir(builderCwd, { recursive: true });
 		const senderInbox: Array<{ to: string; body: string; external?: boolean }> = [];
 		const remoteInbox: Array<{ to: string; body: string; external?: boolean }> = [];
-		const senderIncoming: A2aIncomingRequest[] = [];
+		const senderIncoming = new IncomingRequests();
 		const builderReplyBridge = new A2aAgentBridge();
 		const sender = await startTerminal({
 			agentDir: dir.path(),
 			cwd: alphaCwd,
 			inbox: senderInbox,
-			onIncomingRequest: request => {
-				senderIncoming.push(request);
-			},
+			incoming: senderIncoming,
 		});
 		const remote = await startTerminal({
 			agentDir: dir.path(),
 			cwd: builderCwd,
 			inbox: remoteInbox,
-			onIncomingRequest: request => void IncomingRequests.global().note(request),
+			incoming: IncomingRequests.global(),
 		});
 		try {
 			const alphaName = (await fetchAgentCard({ url: sender.url })).card.name;
@@ -1254,7 +1252,7 @@ describe("spawnA2aAgent reply channel (metadata.from/fromUrl)", () => {
 			// exchange cannot grow into an unbounded request/reply chain.
 			expect(answer.body).not.toContain("[A2A task from peer terminal");
 			expect(answer.body).not.toContain("spawning the agent");
-			expect(senderIncoming).toEqual([]);
+			expect(await senderIncoming.list("Main")).toEqual([]);
 		} finally {
 			remote.stop();
 			sender.stop();
@@ -1693,7 +1691,7 @@ async function deliverReply(options: {
 	from?: string;
 	text: string;
 	bus: Array<{ body: string }>;
-	incoming?: A2aIncomingRequest[];
+	incoming?: IncomingRequests;
 }): Promise<A2aTask> {
 	const main = localMainRef();
 	return sendA2aMessage(
@@ -1719,9 +1717,7 @@ async function deliverReply(options: {
 				options.bus.push({ body: message.body });
 				return { to: message.to, outcome: "injected" };
 			},
-			...(options.incoming !== undefined
-				? { noteIncomingRequest: (request: A2aIncomingRequest) => options.incoming?.push(request) }
-				: {}),
+			...(options.incoming !== undefined ? { incoming: options.incoming } : {}),
 			outgoing: OutgoingRequests.global(),
 		},
 	);
@@ -1909,7 +1905,7 @@ describe("addressed A2A reply jobs", () => {
 		try {
 			const call = await seen.promise;
 			const bus: Array<{ body: string }> = [];
-			const incoming: A2aIncomingRequest[] = [];
+			const incoming = new IncomingRequests();
 			await deliverReply({
 				messageId: messageIdOf(call),
 				from: "omp",
@@ -1918,7 +1914,7 @@ describe("addressed A2A reply jobs", () => {
 				incoming,
 			});
 			expect(bus).toEqual([]);
-			expect(incoming).toEqual([]);
+			expect(await incoming.list()).toEqual([]);
 			hold.resolve(rpcResult(1, { task: deliveryTask() }));
 			const result = await executing;
 			const jobId = replyJob(result)?.jobId;

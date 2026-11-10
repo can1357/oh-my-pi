@@ -96,13 +96,15 @@ A spawn of `a2a:<name>` goes through the task tool like any agent:
 1. The client resolves the bridge URL and sends a JSON-RPC `SendMessage` with
    `metadata` carrying the target skill, the sender's identity, and (for a
    batch spawn) the shared `context`. A reply adds `metadata.inReplyTo`.
-2. The server validates the bearer token, resolves the target agent, and
-   delivers the body into the peer's conversation through the IRC bus (marked
-   `external`, which the ingress guard exempts). A *request* is wrapped in a
-   reply envelope naming `a2a:<sender>` and telling the recipient that its
-   answer will be correlated automatically. The request is recorded as
-   outstanding for that peer; a *reply* is labelled as the answer to that
-   request with no new envelope.
+2. The server validates the bearer token, resolves the target agent, records
+   the request as outstanding, and only then delivers the body into the peer's
+   conversation through the IRC bus (marked `external`, which the ingress
+   guard exempts). A *request* is wrapped in a reply envelope naming
+   `a2a:<sender>` and telling the recipient that its answer will be correlated
+   automatically; a *reply* is labelled as the answer to that request with no
+   new envelope. If the bus refuses the delivery, the just-recorded request is
+   removed again — a fast recipient that already claimed it loses the record
+   and its claim — so a refused request never waits for an answer.
 3. For an addressed request, a successful delivery receipt leaves an owned
    reply job running. `wait` returns its answer when both the original message
    ID and expected peer match `metadata.inReplyTo` and the sender identity.

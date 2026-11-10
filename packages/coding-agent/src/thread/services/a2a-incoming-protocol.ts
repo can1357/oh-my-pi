@@ -10,5 +10,6 @@ export type IncomingRequestsProtocol = {
 	consume: RpcMethod<[match: IncomingRequestMatch], IncomingRequestLease | undefined>;
 	confirm: RpcMethod<[leaseId: string], boolean>;
 	release: RpcMethod<[leaseId: string], boolean>;
+	discard: RpcMethod<[match: IncomingRequestMatch], void>;
 	list: RpcMethod<[to?: string], A2aIncomingRequest[]>;
 };

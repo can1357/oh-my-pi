@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { IncomingRequests } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { sendA2aMessage } from "@oh-my-pi/pi-coding-agent/a2a/rpc";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -58,6 +59,63 @@ describe("IrcBridge wake-relay marking", () => {
 			a2aInReplyTo: "earlier-request",
 		});
 		expect((woken[1][0] as CustomMessage).details).not.toHaveProperty("a2aMessageId");
+	});
+
+	it("records the incoming request on the ledger before the recipient can finish its turn", async () => {
+		const { bridge, woken } = makeBridge();
+		const registry = new AgentRegistry();
+		registry.register({ id: "Main", displayName: "Main", kind: "main", status: "idle", session: null });
+		const incoming = new IncomingRequests();
+		// The recipient looks for the request from inside the synchronous wake the
+		// IRC bridge performs during delivery — before the send receipt exists.
+		let claimedByRecipient = false;
+		let wakeDone = false;
+		const wokenBridge = new IrcBridge({
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => false,
+			hasWakeRelay: () => true,
+			emitSessionEvent: async () => {},
+			wakeForIrc: (records: AgentMessage[]) => {
+				woken.push(records);
+				// The recipient looks for the request the moment it is woken —
+				// synchronously inside the IRC delivery, before any receipt.
+				void incoming.list("Main").then(open => {
+					claimedByRecipient = open.some(request => request.messageId === "origin-request");
+					wakeDone = true;
+				});
+			},
+		} as unknown as IrcBridgeHost);
+		const deps = {
+			registry,
+			incoming,
+			send: async (message: Omit<Parameters<typeof bridge.deliver>[0], "id" | "ts">) => {
+				const outcome = await wokenBridge.deliver({ ...message, id: "irc-bus-id", ts: 123 });
+				return { to: message.to, outcome };
+			},
+		};
+		const task = await sendA2aMessage(
+			{
+				message: { messageId: "origin-request", parts: [{ text: "question" }] },
+				metadata: { to: "Main", from: "peer" },
+			},
+			deps,
+		);
+		// End to end: the ledger held the origin request before the recipient's
+		// wake turn (let alone its answer) could finish, and the receipt reports
+		// the delivery the recipient already saw.
+		expect(claimedByRecipient).toBe(true);
+		expect(wakeDone).toBe(true);
+		expect(task.metadata?.delivery).toMatchObject({ to: "Main", outcome: "woken" });
+		expect((woken[0][0] as CustomMessage).details).toMatchObject({
+			id: "irc-bus-id",
+			external: true,
+			a2aMessageId: "origin-request",
+		});
+		// The record is still present after the recipient's turn ended without
+		// a reply: it stays open for a manual or later automatic answer.
+		const open = await incoming.list("Main");
+		expect(open.map(request => request.messageId)).toEqual(["origin-request"]);
 	});
 
 	it("marks relay messages so the peer never relays them back", async () => {

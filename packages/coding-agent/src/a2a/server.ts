@@ -28,11 +28,11 @@ import { discoverAgents } from "../task/discovery";
 import { cfgA2aPort, cfgA2aToken } from "../task/settings";
 import type { AgentDefinition } from "../task/types";
 import { buildAgentCard, type AgentCard } from "./card";
+import { IncomingRequests, type IncomingRequestsApi } from "./incoming-requests";
 import { OutgoingRequests } from "./outgoing-requests";
 import {
 	A2A_SENDER_ID,
 	type A2aDispatchDeps,
-	type A2aIncomingRequest,
 	type A2aTask,
 	type JsonRpcFailure,
 	type JsonRpcId,
@@ -70,8 +70,12 @@ export interface A2aServerOptions {
 	host?: string;
 	/** Public A2A identity: renames the main skill and resolves `to` by name. */
 	name?: string;
-	/** Notified when a peer request with a reply identity is delivered here (A2). */
-	onIncomingRequest?: (request: A2aIncomingRequest) => void;
+	/**
+	 * Incoming-request ledger shared with relays and workers. Omitted resolves
+	 * to the process-wide instance, so every bridge records requests in the
+	 * same ledger the reply paths read.
+	 */
+	incoming?: IncomingRequestsApi;
 	registry: Pick<AgentRegistryApi, "get" | "list" | "onChange" | "setStatus">;
 	bus: A2aBus;
 	spawn?: (options: SpawnSubagentOptions) => Promise<AgentRef>;
@@ -279,7 +283,7 @@ export function createA2aServer(options: A2aServerOptions): A2aServerHandle {
 		createdTaskRefs: new Map<string, AgentRef | undefined>(),
 		contextIds: new Map<string, string>(),
 		pendingSpawns,
-		...(options.onIncomingRequest !== undefined ? { noteIncomingRequest: options.onIncomingRequest } : {}),
+		incoming: options.incoming ?? IncomingRequests.global(),
 		outgoing: OutgoingRequests.global(),
 	};
 	const unsubscribe = options.registry.onChange(event => {

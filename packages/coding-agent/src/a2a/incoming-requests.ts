@@ -22,6 +22,13 @@ export interface IncomingRequestsApi {
 	confirm(leaseId: string): Promise<boolean>;
 	/** Return the claimed request to its original FIFO position; false for a stale or foreign token. */
 	release(leaseId: string): Promise<boolean>;
+	/**
+	 * Remove every matching record, open or leased. Unlike a lease settlement it
+	 * targets bookkeeping, not one claim: the exact rollback of a refused
+	 * delivery (`{to, from, messageId}`) or a recipient's whole queue
+	 * (`{to}`). Discarded lease ids are spent; the records cannot resurrect.
+	 */
+	discard(match: IncomingRequestMatch): Promise<void>;
 	list(to?: string): Promise<A2aIncomingRequest[]>;
 }
 
@@ -105,6 +112,27 @@ export class IncomingRequests implements IncomingRequestsApi {
 		return this.#entries
 			.filter(entry => entry.lease === undefined && (to === undefined || entry.request.to === to))
 			.map(entry => entry.request);
+	}
+
+	/**
+	 * Remove every matching record, open or leased. Unlike a lease settlement
+	 * this targets bookkeeping, not one claim: the exact rollback of a refused
+	 * delivery (`{to, from, messageId}`) or a recipient's whole queue (`{to}`).
+	 * Discarded lease ids are spent; the records cannot resurrect.
+	 */
+	async discard(match: IncomingRequestMatch): Promise<void> {
+		// In-place removal keeps the arrival order of every kept record; leased
+		// entries go too, so their tokens settle nothing afterwards.
+		const kept: LedgerEntry[] = [];
+		for (const entry of this.#entries) {
+			const matches =
+				entry.request.to === match.to &&
+				(match.from === undefined || entry.request.from === match.from) &&
+				(match.messageId === undefined || entry.request.messageId === match.messageId);
+			if (!matches) kept.push(entry);
+		}
+		this.#entries.length = 0;
+		this.#entries.push(...kept);
 	}
 
 	/**

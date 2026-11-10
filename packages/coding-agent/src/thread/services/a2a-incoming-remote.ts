@@ -27,6 +27,10 @@ export class RemoteIncomingRequests implements IncomingRequestsApi {
 		return this.#remote.call("release", leaseId);
 	}
 
+	discard(match: IncomingRequestMatch): Promise<void> {
+		return this.#remote.call("discard", match);
+	}
+
 	list(to?: string): Promise<A2aIncomingRequest[]> {
 		return this.#remote.call("list", to);
 	}
