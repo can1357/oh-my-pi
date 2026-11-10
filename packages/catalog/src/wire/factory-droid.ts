@@ -10,7 +10,7 @@ import { isRecord } from "../utils";
  * native request corpus with `packages/ai/scripts/capture-factory-droid-native.ts`
  * against the matching CLI binary and make `factory-droid-native-parity.test.ts` pass.
  */
-export const FACTORY_DROID_CLIENT_VERSION = "1.1.0";
+export const FACTORY_DROID_CLIENT_VERSION = "1.7.1";
 
 /** Wire protocols the Factory proxy multiplexes; `api-routes provider="factory-droid"` picks one per model. */
 export const FACTORY_DROID_WIRES = [
@@ -87,12 +87,15 @@ export function factoryDroidWireBaseUrl(wire: FactoryDroidWire, region: string |
 
 /**
  * Client identity headers shared by discovery, usage and inference requests.
- * Callers add their own auth, `Accept`, routing and SDK headers.
+ * `X-Factory-Request-Surface` attributes usage to the interactive CLI, the
+ * surface the CLI's terminal UI reports. Callers add their own auth, `Accept`,
+ * routing and SDK headers.
  */
 export function factoryDroidClientHeaders(orgId: string | undefined): Record<string, string> {
 	return {
 		"X-Client-Version": FACTORY_DROID_CLIENT_VERSION,
 		"X-Factory-Client": "cli",
+		"X-Factory-Request-Surface": "cli_tui",
 		...(orgId ? { "X-Factory-Org-Id": orgId } : {}),
 	};
 }
