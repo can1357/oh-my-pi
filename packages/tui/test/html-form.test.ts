@@ -60,6 +60,11 @@ const DB_FORM = `<form>
 </fieldset>
 </form>`;
 
+const SELECT_FORM = `<form><label>Region<select name="region">
+	<option value="us">US</option><option disabled>Unavailable</option>
+	<option value="eu">EU</option><option value="ap">AP</option>
+	</select></label><p>Choose a deployment region.</p></form>`;
+
 function dialog(html: string, overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
 	const onSubmit = vi.fn();
 	const onCancel = vi.fn();
@@ -83,6 +88,206 @@ describe("html form", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	describe("option notes", () => {
+		it("notes the highlighted dropdown option without selecting it and restores the open menu", () => {
+			const { form, onSubmit, onCancel } = dialog(SELECT_FORM);
+			form.handleInput(SPACE);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput("data residency");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "us" });
+			expect(form.debugState().open).toBe("region");
+			expect(form.render(100).join("\n")).toContain("✎ note");
+			form.handleInput("n");
+			form.handleInput(" changed");
+			form.handleInput(ESC);
+			expect(form.debugState().notes).toMatchObject({ region: { 2: "data residency" } });
+			expect(form.optionNotes()).toEqual([]);
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "eu" });
+			expect(form.render(100).join("\n")).toContain("✎ note");
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput(" edited");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([
+				{ name: "region", question: "Region", option: "EU", text: "data residency edited" },
+			]);
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("keeps notes tied to option indexes when submitted values are identical", () => {
+			const { form } = dialog(`<form><label><input type="radio" name="pick" value="same" checked>First</label>
+				<label><input type="radio" name="pick" value="same">Second</label></form>`);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("second option only");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toEqual([]);
+			form.handleInput(SPACE);
+			expect(form.data()).toEqual({ pick: "same" });
+			expect(form.optionNotes()).toEqual([
+				{ name: "pick", question: "pick", option: "Second", text: "second option only" },
+			]);
+			form.handleInput(DOWN);
+			form.handleInput("same");
+			expect(form.optionNotes()).toEqual([]);
+			expect(form.data()).toEqual({ pick: "same" });
+			form.dispose();
+		});
+
+		it("opens native dropdown row notes without choosing the row or accepting disabled targets", () => {
+			const { form } = dialog(SELECT_FORM);
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o2", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBe("region=eu");
+			form.handleInput("residency");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual({ region: "us" });
+			expect(JSON.stringify(form.describe(CX))).toContain("residency");
+			form.dispose();
+		});
+
+		it("edits and removes a focused radio note without changing answers or submitting", () => {
+			const { form, onSubmit, onCancel } = dialog(DB_FORM);
+			const before = form.data();
+			const pages = form.debugState().pages;
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			expect(form.render(100).join("\n")).toContain("Note for Postgres");
+			expect(form.debugState().pages).toBe(pages);
+			form.handleInput("why postgres");
+			form.handleInput(ENTER);
+			expect(form.data()).toEqual(before);
+			const rows = form.render(100);
+			expect(rows.find(row => row.includes("Postgres"))).toContain("✎ note");
+			expect(rows.find(row => row.includes("SQLite"))).not.toContain("✎ note");
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			form.handleInput("n");
+			form.handleInput("!");
+			form.handleInput(ESC);
+			expect(form.debugState().notes).toMatchObject({ db: { 1: "why postgres" } });
+			form.handleInput("n");
+			form.handleInput("\x01");
+			form.handleInput("\x0b");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toEqual({ db: {}, extras: {}, region: {} });
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(onCancel).not.toHaveBeenCalled();
+			form.dispose();
+		});
+
+		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleInput("n");
+			form.handleInput("sqlite draft");
+			form.handleInput(ENTER);
+			form.handleInput(DOWN);
+			form.handleInput(SPACE);
+			form.handleInput(TAB);
+			form.handleInput(DOWN);
+			form.handleInput("n");
+			form.handleInput("docker reason");
+			form.handleInput(ENTER);
+			expect(form.data().extras).toEqual(["ci"]);
+			form.handleInput(SPACE);
+			form.handleInput("\x1b[Z");
+			form.handleInput("n");
+			form.handleInput("\x05");
+			form.handleInput(" edited");
+			form.handleInput(ENTER);
+			expect(form.debugState().notes).toMatchObject({ db: { 0: "sqlite draft edited" } });
+			expect(form.optionNotes()).toEqual([
+				{ name: "extras", question: "Extras", option: "Docker", text: "docker reason" },
+			]);
+			form.dispose();
+		});
+
+		it("opens native menu notes on the exact shown row and ignores stale tabs", () => {
+			const { form } = dialog(DB_FORM);
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBe("db=pg");
+			form.handleInput("native reason");
+			form.handleInput(ENTER);
+			expect(form.data().db).toBe("sqlite");
+			form.handleNativeEvent({ type: "select", key: "head/tabs", item: "t1" });
+			form.handleNativeEvent({ type: "action", key: "body0/f0/o0", act: "note", mods: [] });
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.debugState().focus).toBe("extras=ci");
+			form.dispose();
+		});
+
+		it("defers inactivity submission until note editing closes, exactly once", () => {
+			vi.useFakeTimers();
+			const onTimeout = vi.fn();
+			const { form, onCancel } = dialog(DB_FORM, { timeout: 1000, onTimeout });
+			form.handleInput("n");
+			form.handleInput("draft");
+			vi.advanceTimersByTime(2000);
+			expect(onTimeout).not.toHaveBeenCalled();
+			form.handleInput(ESC);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			expect(onTimeout).toHaveBeenCalledWith(form.data());
+			expect(onCancel).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(2000);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			form.dispose();
+		});
+		it("mounts one native note editor and preserves its menu target through host edits", async () => {
+			const { form, onCancel } = dialog(DB_FORM);
+			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+				renderFrame: () => ({ viewport: [] }),
+				acknowledgeHistory: () => {},
+				describeSurface: () => ({ main: [], dock: [form] }),
+			};
+			const harness = await TspHarness.start(tui => {
+				tui.setFrameProvider(provider);
+				tui.setFocus(form);
+			});
+			try {
+				const target = harness.find(node => node.k === "item" && node.id.endsWith("/f0/o1"))!;
+				expect(target.p).toMatchObject({ actions: { menu: ["note"] } });
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: target.id, act: "note" });
+				await harness.render();
+				const editor = harness.find(node => node.k === "editor")!;
+				harness.event({
+					ev: "edit",
+					sf: harness.terminal.surface!,
+					id: editor.id,
+					from: 0,
+					to: 0,
+					text: "host reason",
+					cursor: 11,
+					len: 0,
+				});
+				form.handleNativeEvent({ type: "action", key: "", act: "save-note", mods: [] });
+				await harness.render();
+				expect(form.data().db).toBe("sqlite");
+				expect(form.debugState().notes).toMatchObject({ db: { 1: "host reason" } });
+				expect(harness.findAll(node => node.k === "editor")).toEqual([]);
+				expect(
+					JSON.stringify(harness.findAll(node => node.k === "item" && node.p?.detail !== undefined)),
+				).toContain("host reason");
+				harness.event({ ev: "action", sf: harness.terminal.surface!, id: target.id, act: "note" });
+				form.handleInput(" discarded");
+				form.handleNativeEvent({ type: "action", key: "", act: "cancel", mods: [] });
+				expect(form.debugState().noteEdit).toBeUndefined();
+				expect(form.debugState().notes).toMatchObject({ db: { 1: "host reason" } });
+				expect(onCancel).not.toHaveBeenCalled();
+				expect(harness.errors).toEqual([]);
+			} finally {
+				harness.stop();
+				form.dispose();
+			}
+		});
 	});
 
 	describe("parsing", () => {

@@ -5,7 +5,7 @@
  *   bun examples/html-form-demo.ts form.html
  *   bun examples/html-form-demo.ts runs.jsonl claude-opus perf
  *
- * Prints the submitted form data as JSON, or `cancelled`.
+ * Prints submitted form data as JSON and selected option notes separately, or `cancelled`.
  */
 import { HtmlFormDialog } from "../src/html-form/dialog";
 import { parseHtmlForm } from "../src/html-form/parse";
@@ -43,9 +43,16 @@ const finish = (output: string, code: number): never => {
 	console.log(output);
 	process.exit(code);
 };
-const dialog = new HtmlFormDialog(parseHtmlForm(html), {
+const form = parseHtmlForm(html);
+const dialog = new HtmlFormDialog(form, {
 	tui,
-	onSubmit: data => finish(JSON.stringify(data, null, 2), 0),
+	onSubmit: data => {
+		const notes = dialog.optionNotes();
+		finish(
+			`${JSON.stringify(data, null, 2)}${notes.length ? `\nOption notes:\n${JSON.stringify(notes, null, 2)}` : ""}`,
+			0,
+		);
+	},
 	onCancel: () => finish("cancelled", 1),
 });
 tui.addChild(dialog);

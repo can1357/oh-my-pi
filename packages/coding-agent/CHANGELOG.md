@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values
+
 ## [18.18.7] - 2026-11-10
 
 ### Added

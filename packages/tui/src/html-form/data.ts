@@ -28,6 +28,14 @@ export interface FormAnswer {
 	answer: string;
 }
 
+/** A note attached to one checked choice option, separate from submitted values. */
+export interface OptionNote {
+	name: string;
+	question: string;
+	option: string;
+	text: string;
+}
+
 /** Label of the free-text answer the UI adds to radio and checkbox groups ({@link ChoiceField.other}). */
 export const OTHER_LABEL = "Other";
 

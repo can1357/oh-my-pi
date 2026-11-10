@@ -18,8 +18,9 @@
  * Space toggles (or opens a dropdown), ←/→ change a dropdown, Enter picks a
  * radio (or leaves a field) and moves on, Enter on Submit validates and
  * submits, PgUp/PgDn (←/→ on choices) turn pages (question tabs natively),
- * `app.ask.hide` collapses the form to one row, Esc cancels. With a
- * `timeout`, inactivity submits the current values through `onTimeout`.
+ * `app.ask.hide` collapses the form to one row, Esc cancels. On a choice,
+ * `n` edits its note without selecting it. With a `timeout`, inactivity
+ * submits the current values through `onTimeout`.
  *
  * @example
  * const dialog = new HtmlFormDialog(parseHtmlForm(html), {
@@ -70,6 +71,7 @@ import {
 	formAnswers,
 	type HtmlFormData,
 	type HtmlFormValue,
+	type OptionNote,
 	OTHER_LABEL,
 	textValue,
 } from "./data";
@@ -263,6 +265,11 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #fieldIndex = new Map<FormField, number>();
 	readonly #checked = new Map<ChoiceField, Set<number>>();
 	readonly #inputs = new Map<TextField, Input>();
+	readonly #notes = new Map<ChoiceField, Map<number, string>>();
+	#noteEditor: { field: ChoiceField; option: number; editor: Editor } | undefined;
+	#savedNoteEditor: Editor | undefined;
+	#noteEditTimeout = false;
+	#useTerminalCursor = false;
 	/** The Other answer's text of each group that offers one. */
 	readonly #others = new Map<ChoiceField, Input>();
 	/** Each radio group's Other text as last seen, to notice typing from keys or the terminal. */
@@ -365,6 +372,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#useTerminalCursor = useTerminalCursor;
+		this.#savedNoteEditor?.setUseTerminalCursor(useTerminalCursor);
 		for (const input of this.#inputs.values()) input.setUseTerminalCursor(useTerminalCursor);
 		for (const input of this.#others.values()) input.setUseTerminalCursor(useTerminalCursor);
 		for (const editor of this.#editors.values()) editor.setUseTerminalCursor(useTerminalCursor);
@@ -382,8 +391,29 @@ export class HtmlFormDialog implements Component, Focusable {
 		return data;
 	}
 
+	/** Saved notes on selected options; unselected drafts stay private to the dialog. */
+	optionNotes(): OptionNote[] {
+		const selected: OptionNote[] = [];
+		for (const [field, notes] of this.#notes) {
+			if (!field.name) continue;
+			this.#otherChosen(field);
+			const checked = this.#checked.get(field)!;
+			field.options.forEach((option, index) => {
+				const text = notes.get(index)?.trim();
+				if (!text || option.disabled || !checked.has(index)) return;
+				selected.push({
+					name: field.name,
+					question: this.#questions.get(field) ?? field.name,
+					option: optionText(option) || option.value,
+					text,
+				});
+			});
+		}
+		return selected;
+	}
 	debugState(): Record<string, unknown> {
 		const stop = this.#stops[this.#focus];
+
 		return {
 			page: this.#page + 1,
 			pages: this.#pages.length,
@@ -402,12 +432,20 @@ export class HtmlFormDialog implements Component, Focusable {
 			remaining: this.#remaining ?? null,
 			errors: Object.fromEntries([...this.#errors].map(([field, error]) => [field.name, error])),
 			data: this.data(),
+			notes: Object.fromEntries([...this.#notes].map(([field, notes]) => [field.name, Object.fromEntries(notes)])),
+			noteEdit: this.#noteEditor
+				? `${this.#noteEditor.field.name}=${this.#noteEditor.field.options[this.#noteEditor.option]!.value}`
+				: undefined,
 		};
 	}
 
 	handleInput(data: string): void {
 		this.#resetCountdown();
 		this.#changed();
+		if (this.#noteEditor) {
+			this.#noteEditorInput(data);
+			return;
+		}
 		if (getKeybindings().matches(data, "app.ask.hide")) {
 			this.#setHidden(!this.#hidden);
 			return;
@@ -479,6 +517,10 @@ export class HtmlFormDialog implements Component, Focusable {
 			if (confirm) this.#submit();
 			return;
 		}
+		if (matchesKey(data, "n")) {
+			this.#startNote();
+			return;
+		}
 		if (matchesKey(data, "space")) {
 			this.#toggle(stop.field, stop.option);
 			return;
@@ -493,12 +535,18 @@ export class HtmlFormDialog implements Component, Focusable {
 	handleNativeEvent(event: NativeUiEvent): void {
 		this.#resetCountdown();
 		this.#changed();
+		if (this.#noteEditor) {
+			if (event.type === "action" && event.act === "save-note") this.#saveNote();
+			else if (event.type === "action" && event.act === "cancel") this.#closeNote();
+			return;
+		}
 		if (event.type === "action") {
 			if (event.act === "cancel") this.#cancel();
 			else if (event.act === "hide" || event.act === "show") this.#setHidden(event.act === "hide");
 			else if (this.#hidden) return;
 			else if (event.act === "submit") this.#submit();
 			else if (event.act === "next") this.#showTab(this.#tab + 1);
+			else if (event.act === "note") this.#noteFromPointer(event.key);
 			else if (event.act.startsWith(EDIT_ACT)) {
 				const field = this.#form.fields[Number(event.act.slice(EDIT_ACT.length))];
 				const stop = this.#stops.findIndex(candidate => candidate.kind === "text" && candidate.field === field);
@@ -581,6 +629,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	dispose(): void {
 		this.#stopCountdown();
+		if (this.#savedNoteEditor) this.#savedNoteEditor.focused = false;
 		this.#mediaAbort.abort();
 		for (const slot of this.#media.values()) {
 			if (slot.state === "ready" && slot.rows instanceof SvgFigure) slot.rows.dispose();
@@ -657,6 +706,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#initChoice(field: ChoiceField): void {
+		this.#notes.set(field, new Map());
 		const checked = new Set<number>();
 		field.options.forEach((option, index) => {
 			if (!option.checked) return;
@@ -809,7 +859,8 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#changed();
 		if (left <= 0) {
 			this.#stopCountdown();
-			this.#options.onTimeout?.(this.data());
+			if (this.#noteEditor) this.#noteEditTimeout = true;
+			else this.#options.onTimeout?.(this.data());
 			return;
 		}
 		this.#remaining = Math.ceil(left / 1000);
@@ -840,10 +891,79 @@ export class HtmlFormDialog implements Component, Focusable {
 		return `${editorKeys("tui.select.up", "tui.select.down")} answer · ${guard.hint}`;
 	}
 
+	#startNote(target?: number): void {
+		const stop = this.#stops[this.#focus];
+		if (this.#hidden || this.#guardBlocks() || (stop?.kind !== "option" && stop?.kind !== "select")) return;
+		const option =
+			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
+		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
+		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
+		editor.setBorderVisible(false);
+		editor.setMaxHeight(4);
+		editor.disableSubmit = true;
+		editor.setUseTerminalCursor(this.#useTerminalCursor);
+		editor.setText(this.#notes.get(stop.field)?.get(option) ?? "", { cursor: "start" });
+		this.#noteEditor = { field: stop.field, option, editor };
+		this.#syncControlFocus();
+	}
+
+	#noteEditorInput(data: string): void {
+		if (matchesSelectCancel(data)) this.#closeNote();
+		else if (getKeybindings().matches(data, "tui.input.submit")) this.#saveNote();
+		else this.#noteEditor!.editor.handleInput(data);
+	}
+
+	#saveNote(): void {
+		const active = this.#noteEditor!;
+		const note = active.editor.getExpandedText().trim();
+		const notes = this.#notes.get(active.field)!;
+		if (note) notes.set(active.option, note);
+		else notes.delete(active.option);
+		this.#closeNote();
+	}
+
+	#closeNote(): void {
+		this.#noteEditor?.editor.setText("");
+		this.#noteEditor = undefined;
+		this.#syncControlFocus();
+		this.#changed();
+		if (this.#noteEditTimeout) {
+			this.#noteEditTimeout = false;
+			this.#options.onTimeout?.(this.data());
+		}
+	}
+
+	#noteFromPointer(key: string): void {
+		if (this.#hidden || this.#guardBlocks()) return;
+		const [listKey, rowKey] = key.split("/").slice(-2);
+		if (listKey && /^f\d+$/.test(listKey)) {
+			if (!rowKey || !/^o\d+$/.test(rowKey)) return;
+			const field = this.#form.fields[Number(listKey.slice(1))];
+			const option = Number(rowKey.slice(1));
+			if (
+				field?.kind !== "choice" ||
+				field.options[option]?.disabled !== false ||
+				this.#fieldTab.get(field) !== this.#tab
+			)
+				return;
+			const index = this.#stops.findIndex(
+				stop =>
+					(stop.kind === "option" || stop.kind === "select") &&
+					stop.field === field &&
+					(stop.kind === "select" || stop.option === option),
+			);
+			if (index === -1) return;
+			this.#setFocus(index);
+			this.#startNote(option);
+			return;
+		} else if (leafKey(key) !== "note") return;
+		this.#startNote();
+	}
 	#textInput(field: TextField, data: string): void {
 		const up = matchesSelectUp(data);
 		const down = matchesSelectDown(data);
 		const editor = this.#editors.get(field);
+
 		if (!editor) {
 			if (up || down) {
 				this.#moveStop(down ? 1 : -1);
@@ -891,6 +1011,10 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** A closed dropdown: ←/→ change it, Space opens it, a letter jumps to a matching option. */
 	#selectInput(field: ChoiceField, data: string): void {
+		if (matchesKey(data, "n")) {
+			this.#startNote();
+			return;
+		}
 		const current = this.#current(field) ?? -1;
 		if (matchesSelectUp(data) || matchesSelectDown(data)) {
 			this.#moveStop(matchesSelectDown(data) ? 1 : -1);
@@ -916,6 +1040,10 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	/** An open dropdown owns the keys until a pick (Enter/Space), Esc or Tab closes it. */
 	#dropdownInput(open: { field: ChoiceField; highlight: number }, data: string): void {
+		if (matchesKey(data, "n")) {
+			this.#startNote(open.highlight);
+			return;
+		}
 		if (matchesSelectCancel(data)) {
 			this.#open = undefined;
 			return;
@@ -993,12 +1121,13 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	#syncControlFocus(): void {
 		const stop = this.#stops[this.#focus];
-		const live = this.#focused && !this.#hidden;
+		const live = this.#focused && !this.#hidden && !this.#noteEditor;
 		const active = stop?.kind === "text" ? stop.field : undefined;
 		const other = stop?.kind === "other" ? stop.field : undefined;
 		for (const [field, input] of this.#inputs) input.focused = live && field === active;
 		for (const [field, input] of this.#others) input.focused = live && field === other;
 		for (const [field, editor] of this.#editors) editor.focused = live && field === active;
+		if (this.#savedNoteEditor) this.#savedNoteEditor.focused = this.#focused && !this.#hidden && !!this.#noteEditor;
 	}
 
 	// ── Tabs and hiding ──────────────────────────────────────────────────────
@@ -1093,11 +1222,31 @@ export class HtmlFormDialog implements Component, Focusable {
 			lines.push(theme.fg("dim", truncateToWidth(`${continuation} (cont.)`, width, Ellipsis.Unicode)));
 		}
 		let anchor: { top: number; row: number } | undefined;
+		let noteRow: number | undefined;
 		for (let index = page.start; index < page.end; index++) {
 			const atom = atoms[index]!;
 			if (index > page.start) for (let gap = 0; gap < atom.gap; gap++) lines.push("");
 			if (dropdown?.atom === index) anchor = { top: lines.length, row: lines.length + dropdown.row };
+			if (this.#noteEditor && index === this.#stopAtoms[this.#focus]) noteRow = lines.length + atom.lines.length - 1;
 			lines.push(...atom.lines);
+		}
+		if (this.#noteEditor && noteRow !== undefined) {
+			const active = this.#noteEditor;
+			const inner = Math.max(1, width - FIELD_INDENT);
+			const start = Math.max(0, noteRow - Math.max(0, rows - 3));
+			const shown = lines.slice(start, start + rows);
+			const top = noteRow - start + 1;
+			active.editor.setMaxHeight(Math.max(1, Math.min(4, rows - top - 1)));
+			const header = theme.fg(
+				"muted",
+				truncateToWidth(
+					`Note for ${optionText(active.field.options[active.option]!)} · enter save · blank removes · esc keep`,
+					inner,
+				),
+			);
+			const editing = [header, ...active.editor.render(inner)].map(line => padding(FIELD_INDENT) + line);
+			shown.splice(top, editing.length, ...editing);
+			return shown.slice(0, rows);
 		}
 		const shown = lines.slice(0, rows);
 		if (anchor && this.#open && anchor.row < rows) this.#overlayDropdown(shown, anchor, rows, width);
@@ -1130,7 +1279,9 @@ export class HtmlFormDialog implements Component, Focusable {
 		const visible = Math.min(options.length, maxRows - 2);
 		if (visible < 1) return [];
 		const box = theme.boxRound;
-		const labels = options.map(optionText);
+		const labels = options.map(
+			(option, index) => optionText(option) + (this.#notes.get(open.field)?.has(index) ? "  ✎ note" : ""),
+		);
 		// Content columns: cursor (2) + label + gap (1) + current-value mark (1), padded by a column each side.
 		const inner = Math.max(
 			4,
@@ -1150,8 +1301,13 @@ export class HtmlFormDialog implements Component, Focusable {
 			const cursor = highlighted ? `${theme.nav.cursor} ` : "  ";
 			const mark = index === current ? theme.fg("success", "✓") : " ";
 			const color: ThemeColor = option.disabled ? "dim" : highlighted ? "accent" : "text";
-			const label = truncateToWidth(labels[index]!, Math.max(1, inner - 4), Ellipsis.Unicode);
-			const cell = `${theme.fg(color, `${cursor}${label}`)}${padding(inner - 3 - visibleWidth(label))}${mark}`;
+			const note = this.#notes.get(open.field)?.has(index) ? theme.fg("success", "  ✎ note") : "";
+			const label = truncateToWidth(
+				optionText(option),
+				Math.max(1, inner - 4 - visibleWidth(note)),
+				Ellipsis.Unicode,
+			);
+			const cell = `${theme.fg(color, `${cursor}${label}`)}${note}${padding(Math.max(0, inner - 3 - visibleWidth(label) - visibleWidth(note)))}${mark}`;
 			out.push(`${theme.fg("accent", `${box.vertical} `)}${cell}${theme.fg("accent", ` ${box.vertical}`)}`);
 		}
 		out.push(edge(box.bottomLeft, box.bottomRight, first + visible < options.length, "↓"));
@@ -1159,6 +1315,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#footerText(): string {
+		if (this.#noteEditor) return "enter save · blank removes · esc keep";
 		const hideKey = editorKey("app.ask.hide");
 		const cancel = `${editorKey("tui.select.cancel")} cancel${hideKey ? ` · ${hideKey} hide` : ""}`;
 		const guard = this.#options.inputGuard;
@@ -1166,7 +1323,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const stop = this.#stops[this.#focus]!;
 		const enter = formatKeyHint("enter");
 		const upDown = editorKeys("tui.select.up", "tui.select.down");
-		if (this.#open) return `${upDown} highlight · ${enter} choose · ${editorKey("tui.select.cancel")} close`;
+		if (this.#open) return `${upDown} highlight · ${enter} choose · n note · ${editorKey("tui.select.cancel")} close`;
 		let action: string;
 		if (stop.kind === "submit") action = `${enter} submit`;
 		else if (stop.kind === "text") action = `${enter} next`;
@@ -1175,6 +1332,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			action = `${formatKeyHint("space")} open · ${formatKeyHint("left")}/${formatKeyHint("right")} change · ${enter} next`;
 		else if (stop.field.multi) action = `${formatKeyHint("space")} toggle · ${enter} next`;
 		else action = `${enter} choose`;
+		if (stop.kind === "option" || stop.kind === "select") action += " · n note";
 		const hints = [action, `${upDown} move`, `${formatKeyHint("tab")} next field`, cancel];
 		if (this.#pages.length > 1) {
 			const keys =
@@ -1292,7 +1450,14 @@ export class HtmlFormDialog implements Component, Focusable {
 			const cursor = focused ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 			const marker = theme.fg(isChecked ? "success" : "dim", optionMarker(theme, field.multi, isChecked));
 			const color: ThemeColor = option.disabled ? "dim" : focused ? "accent" : isChecked ? "toolOutput" : "text";
-			const lines = hang(`${cursor}${marker} `, option.label, text => theme.fg(color, text), width);
+			const noteMarker = this.#notes.get(field)?.get(index) ? theme.fg("success", "  ✎ note") : "";
+			const lines = hang(
+				`${cursor}${marker} `,
+				option.label,
+				text => theme.fg(color, text),
+				Math.max(1, width - visibleWidth(noteMarker)),
+			);
+			lines[0] = `${lines[0] ?? ""}${noteMarker}`;
 			out.push([{ lines, gap: 0, breakRank: BreakRank.Inside }, !option.disabled]);
 		});
 		if (field.other)
@@ -1304,7 +1469,6 @@ export class HtmlFormDialog implements Component, Focusable {
 		return out;
 	}
 
-	/** `○ Other: <text>` — an inline input while focused, else the text or a dim prompt. */
 	#otherLine(field: ChoiceField, focused: boolean, width: number): string {
 		const chosen = this.#otherChosen(field);
 		const input = this.#others.get(field)!;
@@ -1341,7 +1505,9 @@ export class HtmlFormDialog implements Component, Focusable {
 	#dropdownFieldLines(field: ChoiceField, focused: boolean, width: number): string[] {
 		const current = this.#current(field);
 		const enabled = field.options.filter(option => !option.disabled).length;
-		const position = current === undefined ? "" : theme.fg("dim", `  ${current + 1}/${field.options.length}`);
+		const note = current !== undefined && this.#notes.get(field)?.has(current) ? theme.fg("success", "  ✎ note") : "";
+		const position =
+			(current === undefined ? "" : theme.fg("dim", `  ${current + 1}/${field.options.length}`)) + note;
 		const inner = Math.max(1, width - FIELD_INDENT - 4 - visibleWidth(position));
 		const value =
 			current === undefined
@@ -1564,6 +1730,13 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * whole form and opens the first answer that needs a fix.
 	 */
 	#describeActions(blocked: boolean, next: boolean, submit: boolean): NativeNode {
+		if (this.#noteEditor) {
+			return actionBar([
+				text("enter save · blank removes · esc keep", { role: "omp.ask.note" }),
+				actionButton("Keep", "cancel", { keys: "escape" }),
+				actionButton("Save", "save-note", { keys: "enter" }),
+			]);
+		}
 		const hideKey = getKeybindings().getKeys("app.ask.hide")[0];
 		const guard = this.#options.inputGuard;
 		const lead =
@@ -1578,6 +1751,9 @@ export class HtmlFormDialog implements Component, Focusable {
 			...(lead ? [null] : []),
 			actionButton("Cancel", "cancel", { keys: "escape" }),
 			...(next ? [actionButton("Next", "next", submit ? {} : { tone: "accent" })] : []),
+			...(!blocked && ["option", "select"].includes(this.#stops[this.#focus]!.kind)
+				? [actionButton("Note", "note", { keys: "n", title: "Add a note to the highlighted answer  n" })]
+				: []),
 			...(submit
 				? [actionButton(SUBMIT_LABEL, "submit", { ...(next ? {} : { keys: "enter" }), tone: "accent" })]
 				: []),
@@ -1688,12 +1864,15 @@ export class HtmlFormDialog implements Component, Focusable {
 			const role = field.multi ? "omp.ask.check" : "omp.ask.option";
 			const items = field.options.map((option, optionIndex) => {
 				const isChecked = checked.has(optionIndex);
+				const note = this.#notes.get(field)?.get(optionIndex);
 				return item(`o${optionIndex}`, {
 					label: nativeSpans(option.label),
 					role,
 					tone: isChecked ? "accent" : undefined,
 					icon: field.multi && isChecked ? "check" : undefined,
 					disabled: option.disabled || undefined,
+					detail: note ? [span("  ✎ ", "dim"), span(sanitize(note).replace(/\s+/g, " "), "em")] : undefined,
+					actions: !option.disabled ? { menu: ["note"] } : undefined,
 				});
 			});
 			if (field.other) {
@@ -1709,6 +1888,15 @@ export class HtmlFormDialog implements Component, Focusable {
 				);
 			}
 			children.push(list(items, { selected: focusedOption, role: "omp.ask.options" }, `f${index}`));
+			if (this.#noteEditor?.field === field) {
+				children.push(
+					text(`Note for ${optionText(field.options[this.#noteEditor.option]!)}`, {
+						role: "omp.ask.note",
+						wrap: "word",
+					}),
+					this.#noteEditor.editor,
+				);
+			}
 			// Typing the Other answer: its input is the form's one live editor, so the terminal focuses it.
 			if (focusedOption === OTHER_ITEM) children.push(this.#others.get(field)!);
 		}

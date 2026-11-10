@@ -21,6 +21,7 @@ import {
 	fieldError,
 	formAnswers,
 	type HtmlFormData,
+	type OptionNote,
 	OTHER_LABEL,
 	textValue,
 } from "@oh-my-pi/pi-tui/html-form/data";
@@ -443,7 +444,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			vocalizer.speak(named.map(field => questions.get(field) ?? field.name).join("\n"));
 		}
 
-		let answered: { data: HtmlFormData; timedOut?: boolean } | undefined;
+		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
@@ -460,16 +461,26 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!answered) return cancelAsk();
 
 		const json = JSON.stringify(answered.data, null, 2);
-		const details: AskToolDetails = { answers: formAnswers(form, answered.data) };
+		const notes = answered.notes?.length ? answered.notes : undefined;
+		const noteText = notes
+			? `\nOption notes:\n${notes.map(note => `- ${note.question}: ${note.option} — ${note.text.replace(/\s+/g, " ").trim()}`).join("\n")}`
+			: "";
+		const details: AskToolDetails = {
+			answers: formAnswers(form, answered.data),
+			...(notes ? { notes } : {}),
+		};
 		if (answered.timedOut) {
 			details.timedOut = true;
 			return {
 				content: [
-					{ type: "text", text: `No answer before the timeout; submitted the form's current values:\n${json}` },
+					{
+						type: "text",
+						text: `No answer before the timeout; submitted the form's current values:\n${json}${noteText}`,
+					},
 				],
 				details,
 			};
 		}
-		return { content: [{ type: "text", text: `User answers:\n${json}` }], details };
+		return { content: [{ type: "text", text: `User answers:\n${json}${noteText}` }], details };
 	}
 }

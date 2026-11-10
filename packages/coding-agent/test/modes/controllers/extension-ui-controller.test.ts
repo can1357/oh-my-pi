@@ -297,6 +297,30 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
 	});
+	it("returns notes for the selected option without changing form values", async () => {
+		const harness = makeHarness();
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		expect(dialog).toBeInstanceOf(HtmlFormDialog);
+
+		harness.handleInput("n");
+		harness.handleInput("unselected draft");
+		harness.handleInput("\r");
+		harness.handleInput("\x1b[B");
+		harness.handleInput("n");
+		harness.handleInput("shared cache");
+		harness.handleInput("\r");
+		harness.handleInput(" ");
+		harness.handleInput("\t");
+		harness.handleInput("\r");
+
+		expect(await pending).toEqual({
+			data: { db: "postgres" },
+			notes: [{ name: "db", question: "Database", option: "Postgres", text: "shared cache" }],
+		});
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
+	});
 
 	it("resolves undefined on Esc and restores the editor", async () => {
 		const harness = makeHarness();

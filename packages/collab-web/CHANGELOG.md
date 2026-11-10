@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Ask result cards render saved notes beneath their matching selected answers
+
 ## [18.18.3] - 2026-11-09
 
 ### Changed

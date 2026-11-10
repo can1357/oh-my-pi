@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Ask forms support `n` to add or edit notes on radio, checkbox, and select-menu options, with selected notes shown alongside submitted answers
+
 ## [18.18.7] - 2026-11-10
 
 ### Changed
