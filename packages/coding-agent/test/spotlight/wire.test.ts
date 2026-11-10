@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -22,6 +23,8 @@ import { SPOTLIGHT_ENTRY } from "@oh-my-pi/pi-coding-agent/spotlight/types";
 import { StencilCredential } from "@oh-my-pi/pi-coding-agent/stencil/credential";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { createBrowserPreludeDefinition } from "@oh-my-pi/pi-coding-agent/tools/browser/prelude-definition";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
@@ -627,6 +630,30 @@ describe("spotlight plain baseline", () => {
 			toolCallId: "b2",
 			stats: expect.not.objectContaining({ reasks: expect.anything() }),
 		});
+	});
+});
+
+describe("spotlight Eval guide delivery", () => {
+	it("shapes cell output without cutting the first-call guide", async () => {
+		const { session } = await experimentSession();
+		const output = Array.from({ length: 500 }, (_, i) => `record ${i}: ${"browser output ".repeat(12)}`).join("\n");
+		const definition = createBrowserPreludeDefinition(session, {
+			invoke: async () => ({ content: [{ type: "text", text: output }], details: [] }),
+		});
+		session.getEvalPreludes = () => [definition];
+		const guide = definition.firstCallDocumentation?.trim();
+		if (!guide) throw new Error("Expected browser guide");
+		try {
+			const result = await new EvalTool(session).execute("browser-guide", {
+				language: "js",
+				code: "await browser.tabs()",
+			});
+			expect(resultText(result)).toContain(guide);
+			expect(resultText(result).length).toBeLessThan(output.length);
+			expect(spotlightDetails(result.details)).toBeDefined();
+		} finally {
+			await disposeAllVmContexts();
+		}
 	});
 });
 

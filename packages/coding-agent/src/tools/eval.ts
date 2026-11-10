@@ -71,7 +71,7 @@ import {
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
-import { shapeToolResult } from "../spotlight";
+import { shapeToolResult, shapesOutput } from "../spotlight";
 import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
@@ -512,16 +512,28 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		const result = await this.#execute(toolCallId, params, signal, onUpdate, ctx);
-		if (!this.session) return result;
-		// Output shaped by the session's Spotlight experiment no longer matches the sink's line ranges.
-		return shapeToolResult(
+		if (!this.session || !shapesOutput(this.session, "eval")) return result;
+		// First-call docs are control text, not cell data for Spotlight to rank or shorten.
+		const guides: string[] = [];
+		const content = result.content.map(part => {
+			if (part.type !== "text") return part;
+			const text = part.text.replace(/(?:^|\n)<eval-guide name="[^"]+">[\s\S]*?<\/eval-guide>(?:\n|$)/g, guide => {
+				guides.push(guide.trim());
+				return "\n";
+			});
+			return text === part.text ? part : { ...part, text };
+		});
+		const shaped = await shapeToolResult(
 			this.session,
 			toolCallId,
 			{ tool: "eval", command: params.code, source: params.code, exitCode: result.isError ? 1 : 0 },
-			result,
+			{ ...result, content },
 			signal,
 			{ dropTruncation: true },
 		);
+		return guides.length > 0
+			? { ...shaped, content: [...shaped.content, { type: "text", text: guides.join("\n\n") }] }
+			: shaped;
 	}
 
 	async #execute(
