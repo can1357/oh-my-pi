@@ -106,6 +106,7 @@ function revivalParent(cwd: string, preparedExtensions: PreparedExtension[]): Ag
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
+			getSessionId: () => "parent-session-1",
 		},
 		effectiveExtensionRoots: {
 			explicit: ["/fixture/hostile-seance-extension.ts"],

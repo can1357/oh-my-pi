@@ -50,7 +50,11 @@ function makeModelRegistry(authStorage: AuthStorage, modelsPath: string, model: 
 
 function revivalParent(cwd: string): AgentSession {
 	return {
-		sessionManager: { getCwd: () => cwd, getArtifactManager: () => undefined },
+		sessionManager: {
+			getCwd: () => cwd,
+			getArtifactManager: () => undefined,
+			getSessionId: () => "parent-session-1",
+		},
 		effectiveExtensionRoots: {
 			explicit: [],
 			mode: "explicit-only",
