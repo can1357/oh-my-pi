@@ -373,21 +373,24 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	resetAccountLockKey,
 	defaultCodexAutoRedeemCoordinator,
-	headlessApprovedResetActions,
-	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
 	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	REDEEM_RETRY_DEFER_MS,
-	resetActionMode,
 	resetPlanSettings,
 	resetWindowModes,
 	SWEEP_MIN_INTERVAL_MS,
-	shouldEvaluateResetAutoRedeem,
 } from "./codex-auto-reset";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
+import {
+	actionConsent,
+	headlessApprovedResetActions,
+	type ResetProvider,
+	type ResetSettingKey,
+	shouldEvaluateResetAutoRedeem,
+} from "./reset-consent";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -1008,8 +1011,6 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
-type ResetProvider = "openai-codex" | "anthropic";
-
 /** The consent handle governing one saved-reset window, whatever its setting id. */
 interface ResetWindowSetting {
 	id: string;
@@ -1017,41 +1018,14 @@ interface ResetWindowSetting {
 	set(scope: Settings, value: ResetAutoRedeemMode): void;
 }
 
-/** Per-provider saved-reset consent handles, keyed by the window each one governs. */
-const resetAutoRedeemSettings: Record<ResetProvider, Record<string, ResetWindowSetting>> = {
-	"openai-codex": { "5h": cfgCodexResetsAutoRedeem5h, weekly: cfgCodexResetsAutoRedeemWeekly },
-	anthropic: {
-		"5h": cfgClaudeResetsAutoRedeem5h,
-		weekly: cfgClaudeResetsAutoRedeemWeekly,
-		fable: cfgClaudeResetsAutoRedeemFable,
-	},
+/** Saved-reset consent handles by the setting id that governs them. */
+const resetAutoRedeemSettings: Record<ResetSettingKey, ResetWindowSetting> = {
+	"codexResets.autoRedeem5h": cfgCodexResetsAutoRedeem5h,
+	"codexResets.autoRedeemWeekly": cfgCodexResetsAutoRedeemWeekly,
+	"claudeResets.autoRedeem5h": cfgClaudeResetsAutoRedeem5h,
+	"claudeResets.autoRedeemWeekly": cfgClaudeResetsAutoRedeemWeekly,
+	"claudeResets.autoRedeemFable": cfgClaudeResetsAutoRedeemFable,
 };
-
-/**
- * Windows whose settings keys govern one action: its governing window, or
- * every window an imminent credit restores (mirroring `resetActionMode`).
- */
-function resetActionSettingWindows<W extends string>(action: {
-	window: W;
-	restorableWindows: readonly W[];
-	expiresInMs?: number;
-}): readonly W[] {
-	return action.expiresInMs !== undefined && action.expiresInMs <= IMMINENT_RESET_EXPIRY_MS
-		? action.restorableWindows
-		: [action.window];
-}
-
-/** Settings keys that decide one `unset` action; all its governing keys when none is unset. */
-function resetAutoRedeemKeyHint<W extends string>(
-	provider: ResetProvider,
-	modes: Record<W, ResetAutoRedeemMode>,
-	action: { window: W; restorableWindows: readonly W[]; expiresInMs?: number },
-): string {
-	const handles = resetAutoRedeemSettings[provider];
-	const windows = resetActionSettingWindows(action);
-	const unset = windows.filter(window => modes[window] === "unset");
-	return [...new Set(unset.length > 0 ? unset : windows)].map(window => handles[window].id).join(" or ");
-}
 
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
@@ -15385,22 +15359,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const runner = this.#extensionRunner;
 		if (!runner?.hasUI() || !this.#interactivePrompts) {
 			// Nobody can be asked: spend only a credit that would otherwise be lost.
-			const approved = headlessApprovedResetActions(
-				actions.filter(action => resetActionMode(action, modes) !== "no"),
-			);
+			const approved = headlessApprovedResetActions(actions, modes);
 			const waiting = actions.find(action => !approved.some(spend => spend.attemptKey === action.attemptKey));
 			if (waiting && !coordinator.notifiedKeys.has(waiting.attemptKey)) {
 				coordinator.notifiedKeys.add(waiting.attemptKey);
 				this.emitNotice(
 					"warning",
-					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${resetAutoRedeemKeyHint(provider, modes, waiting)}.`,
+					`Saved ${providerLabel} resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run \`/usage reset\` or set ${actionConsent(waiting, modes).keys.join(" or ")}.`,
 					source,
 				);
 			}
 			for (const action of approved) {
 				this.emitNotice(
 					"info",
-					`Spending a saved ${providerLabel} reset for ${action.label} before it expires in ${formatDuration(action.expiresInMs ?? 0)}; auto-redeem is unset and no prompt UI is available. Set ${resetAutoRedeemKeyHint(provider, modes, action)} to no to let resets expire instead.`,
+					`Spending a saved ${providerLabel} reset for ${action.label} before it expires in ${formatDuration(action.expiresInMs ?? 0)}; auto-redeem is unset and no prompt UI is available. Set ${actionConsent(action, modes).keys.join(" or ")} to no to let resets expire instead.`,
 					source,
 				);
 			}
@@ -15439,14 +15411,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				},
 			]);
 			if (choice === "Yes" || choice === "No") {
-				const handles = resetAutoRedeemSettings[provider];
-				const windows = new Set<string>();
+				// A prompt answer belongs to the window that governs the spend; its restorable
+				// siblings stay untouched so one salvage cannot enable every window for good.
 				for (const action of actions) {
-					for (const window of resetActionSettingWindows(action)) windows.add(window);
-				}
-				for (const window of windows) {
-					const handle = handles[window] as ResetWindowSetting | undefined;
-					if (handle?.get(this.settings) === "unset") handle.set(this.settings, choice === "Yes" ? "yes" : "no");
+					const handle = resetAutoRedeemSettings[actionConsent(action, modes).saveKey];
+					if (handle.get(this.settings) === "unset") {
+						handle.set(this.settings, choice === "Yes" ? "yes" : "no");
+					}
 				}
 				if (choice === "Yes") return actions;
 			}
@@ -15467,8 +15438,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		actions: (CodexResetAction | ClaudeResetAction)[],
 		coordinator: CodexAutoRedeemCoordinator,
 	): Promise<{ restoredCredentialIds: number[]; poolLimited: boolean }> {
-		const approved = actions.filter(action => resetActionMode(action, modes) === "yes");
-		const prompted = actions.filter(action => resetActionMode(action, modes) === "unset");
+		const approved = actions.filter(action => actionConsent(action, modes).mode === "yes");
+		const prompted = actions.filter(action => actionConsent(action, modes).mode === "unset");
 		const spent = await this.#executeResetActions(provider, approved, coordinator);
 		if (prompted.length === 0) return spent;
 		// Keep confirmed objects: headless approval pins the exact credit in its target.

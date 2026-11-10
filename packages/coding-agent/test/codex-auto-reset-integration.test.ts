@@ -377,4 +377,29 @@ describe("Codex saved-reset consent without a prompt UI", () => {
 		expect(targets).toHaveLength(1);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
+
+	it("keeps a one-off imminent salvage from enabling both windows", async () => {
+		const account = {
+			accountId: "acct-a",
+			credentialId: 1,
+			weeklyUsed: 1,
+			limitReached: true,
+			creditExpiresInMs: 4 * MINUTE,
+		};
+		const { session, targets } = buildSession({
+			accounts: [account],
+			streamErrorFirst: true,
+			consent: async () => "Yes",
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("trigger a codex usage limit");
+		await session.waitForIdle();
+
+		// The credit also restores 5h, but only the governing weekly key records the answer.
+		expect(targets).toHaveLength(1);
+		expect(cfgCodexResetsAutoRedeemWeekly.get(session.settings)).toBe("yes");
+		expect(cfgCodexResetsAutoRedeem5h.get(session.settings)).toBe("unset");
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
 });

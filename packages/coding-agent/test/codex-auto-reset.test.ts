@@ -24,17 +24,18 @@ import {
 	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
-	headlessApprovedResetActions,
-	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
-	resetActionMode,
 	resetPlanSettings,
 	resetWindowModes,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
-	shouldEvaluateResetAutoRedeem,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
+import {
+	headlessApprovedResetActions,
+	IMMINENT_RESET_EXPIRY_MS,
+	shouldEvaluateResetAutoRedeem,
+} from "@oh-my-pi/pi-coding-agent/session/reset-consent";
 
 import { cfgCodexResetsAutoRedeem5h, cfgCodexResetsAutoRedeemWeekly } from "@oh-my-pi/pi-coding-agent/session/settings";
 
@@ -148,8 +149,7 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		provider: "openai-codex",
 		modelId: "gpt-5.3-codex",
 		settings: {
-			windows: { "5h": true, weekly: true },
-			approved: { "5h": true, weekly: true },
+			modes: { "5h": "yes", weekly: "yes" },
 			minBlockedMinutes: 60,
 			keepCredits: 0,
 			salvageHorizonMs: 12 * HOUR,
@@ -348,8 +348,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: true },
+					modes: { "5h": "yes", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 1,
 					salvageHorizonMs: 0,
@@ -364,8 +363,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ credits: 2 })], {
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: true },
+					modes: { "5h": "yes", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 1,
 					salvageHorizonMs: 0,
@@ -522,8 +520,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
 				settings: {
-					windows: { "5h": false, weekly: true },
-					approved: { "5h": false, weekly: true },
+					modes: { "5h": "no", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -542,8 +539,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
 				settings: {
-					windows: { "5h": false, weekly: true },
-					approved: { "5h": false, weekly: true },
+					modes: { "5h": "no", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -557,8 +553,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -577,8 +572,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ primaryUsed: 1.0, weeklyUsed: 0.8 })], {
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -592,8 +586,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -609,8 +602,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 		const plan = planCodexResetRedemptions(
 			input([report()], {
 				settings: {
-					windows: { "5h": false, weekly: false },
-					approved: { "5h": false, weekly: false },
+					modes: { "5h": "no", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -711,8 +703,7 @@ describe("planCodexResetRedemptions: blocked-account", () => {
 			input([dyingWeekly, dying5h], {
 				identity: undefined,
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "unset" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -882,8 +873,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: true },
+					modes: { "5h": "yes", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 5,
 					salvageHorizonMs: 12 * HOUR,
@@ -927,8 +917,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: true },
+					modes: { "5h": "yes", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -943,8 +932,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -964,8 +952,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.2, primaryUsed: 1.0, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -980,8 +967,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ weeklyUsed: 0.8, creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: false },
-					approved: { "5h": true, weekly: false },
+					modes: { "5h": "yes", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 0,
@@ -995,8 +981,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		const base = input([], {
 			trigger: "sweep",
 			settings: {
-				windows: { "5h": true, weekly: true },
-				approved: { "5h": true, weekly: true },
+				modes: { "5h": "yes", weekly: "yes" },
 				minBlockedMinutes: 60,
 				keepCredits: 5,
 				salvageHorizonMs: 0,
@@ -1043,8 +1028,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([zero, unknown], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": true, weekly: true },
-					approved: { "5h": true, weekly: true },
+					modes: { "5h": "yes", weekly: "yes" },
 					minBlockedMinutes: 60,
 					keepCredits: 5,
 					salvageHorizonMs: 0,
@@ -1073,8 +1057,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
 				trigger: "sweep",
 				settings: {
-					windows: { "5h": false, weekly: false },
-					approved: { "5h": false, weekly: false },
+					modes: { "5h": "no", weekly: "no" },
 					minBlockedMinutes: 60,
 					keepCredits: 0,
 					salvageHorizonMs: 12 * HOUR,
@@ -1151,40 +1134,6 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 });
 
 describe("reset window policy helpers", () => {
-	it("follows the governing window for a non-imminent action", () => {
-		const modes = resetWindowModes({ autoRedeem5h: "yes", autoRedeemWeekly: "unset" });
-		expect(resetActionMode({ window: "5h", restorableWindows: ["5h", "weekly"] }, modes)).toBe("yes");
-		expect(resetActionMode({ window: "weekly", restorableWindows: ["5h", "weekly"] }, modes)).toBe("unset");
-		expect(
-			resetActionMode(
-				{ window: "weekly", restorableWindows: ["5h", "weekly"], expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
-				modes,
-			),
-		).toBe("unset");
-	});
-
-	it("takes the most permissive restorable window for an imminent action", () => {
-		const imminent = {
-			window: "weekly",
-			restorableWindows: ["5h", "weekly"],
-			expiresInMs: IMMINENT_RESET_EXPIRY_MS,
-		} as const;
-		expect(resetActionMode(imminent, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "unset" }))).toBe(
-			"unset",
-		);
-		expect(resetActionMode(imminent, resetWindowModes({ autoRedeem5h: "yes", autoRedeemWeekly: "no" }))).toBe("yes");
-		expect(resetActionMode(imminent, resetWindowModes({ autoRedeem5h: "unset", autoRedeemWeekly: "no" }))).toBe(
-			"unset",
-		);
-		expect(resetActionMode(imminent, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "no" }))).toBe("no");
-	});
-
-	it("only consults windows the spent credit can restore", () => {
-		const juniper = { window: "weekly", restorableWindows: ["5h"], expiresInMs: 60_000 } as const;
-		expect(resetActionMode(juniper, resetWindowModes({ autoRedeem5h: "yes", autoRedeemWeekly: "no" }))).toBe("yes");
-		expect(resetActionMode(juniper, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "yes" }))).toBe("no");
-	});
-
 	it("evaluates the planner when any window is not explicitly off", () => {
 		expect(shouldEvaluateResetAutoRedeem(resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "no" }))).toBe(
 			false,
@@ -1207,8 +1156,7 @@ describe("reset window policy helpers", () => {
 				salvageHorizonHours: 2,
 			}),
 		).toEqual({
-			windows: { "5h": false, weekly: true },
-			approved: { "5h": false, weekly: false },
+			modes: { "5h": "no", weekly: "unset" },
 			minBlockedMinutes: 60,
 			keepCredits: 1,
 			salvageHorizonMs: 2 * HOUR,
@@ -1232,14 +1180,18 @@ describe("codexResets policy plumbing", () => {
 
 	it("approves only resets expiring within five minutes for a headless unset host, pinned to that credit", () => {
 		const target: ResetCreditTarget = { provider: "openai-codex", credentialId: CREDENTIAL_ID };
+		const windows = { window: "weekly", restorableWindows: ["5h", "weekly"] } as const;
 		const actions = [
-			{ target, creditId: "dying", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
-			{ target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
-			{ target, expiresInMs: undefined },
+			{ ...windows, target, creditId: "dying", expiresInMs: IMMINENT_RESET_EXPIRY_MS },
+			{ ...windows, target, creditId: "later", expiresInMs: IMMINENT_RESET_EXPIRY_MS + 1 },
+			{ ...windows, target, expiresInMs: undefined },
 		];
-		expect(headlessApprovedResetActions(actions)).toEqual([
-			{ ...actions[0], target: { ...target, creditId: "dying" } },
-		]);
+		expect(
+			headlessApprovedResetActions(actions, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "unset" })),
+		).toEqual([{ ...actions[0], target: { ...target, creditId: "dying" } }]);
+		expect(
+			headlessApprovedResetActions(actions, resetWindowModes({ autoRedeem5h: "no", autoRedeemWeekly: "no" })),
+		).toEqual([]);
 	});
 
 	it("migrates legacy boolean autoRedeem config into both window policies", () => {

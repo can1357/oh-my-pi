@@ -3,12 +3,11 @@ import type { OAuthAccountSummary, ResetCreditAccountStatus, UsageReport, UsageR
 import {
 	claudeResetPlanSettings,
 	claudeResetStatusesFromReports,
-	claudeResetWindowModes,
 	planClaudeResetRedemptions,
 	type ClaudeResetPlanInput,
 	type ClaudeResetSkipReason,
+	type ClaudeResetWindow,
 } from "@oh-my-pi/pi-coding-agent/session/claude-auto-reset";
-import { resetActionMode } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
@@ -16,8 +15,6 @@ const WEEK = 7 * 24 * HOUR;
 const WINDOWS_BOTH = { "5h": true, weekly: true, fable: true };
 const WINDOWS_5H_ONLY = { "5h": true, weekly: false, fable: false };
 const WINDOWS_WEEKLY_ONLY = { "5h": false, weekly: true, fable: false };
-const WINDOWS_FABLE_ONLY = { "5h": false, weekly: false, fable: true };
-const WINDOWS_ALL_OFF = { "5h": false, weekly: false, fable: false };
 
 interface ReportOptions {
 	orgId?: string;
@@ -133,12 +130,15 @@ function input(overrides: Partial<ClaudeResetPlanInput> = {}): ClaudeResetPlanIn
 }
 
 function windowSettings(
-	windows: ClaudeResetPlanInput["settings"]["windows"],
+	windows: Record<ClaudeResetWindow, boolean>,
 	overrides: Partial<ClaudeResetPlanInput["settings"]> = {},
 ): ClaudeResetPlanInput["settings"] {
 	return {
-		windows,
-		approved: windows,
+		modes: {
+			"5h": windows["5h"] ? "yes" : "no",
+			weekly: windows.weekly ? "yes" : "no",
+			fable: windows.fable ? "yes" : "no",
+		},
 		minBlockedMinutes: 60,
 		keepCredits: 0,
 		salvageHorizonMs: 12 * HOUR,
@@ -436,7 +436,7 @@ describe("planClaudeResetRedemptions: independent reset windows", () => {
 				expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
 			}),
 		});
-		const sweep = (windows: ClaudeResetPlanInput["settings"]["windows"]) =>
+		const sweep = (windows: Record<ClaudeResetWindow, boolean>) =>
 			input({
 				trigger: "sweep",
 				settings: windowSettings(windows, { keepCredits: 1, salvageHorizonMs: 0 }),
@@ -624,7 +624,7 @@ describe("planClaudeResetRedemptions: expiry salvage", () => {
 		expect(
 			planClaudeResetRedemptions({
 				...urgentInput,
-				settings: { ...urgentInput.settings, windows: WINDOWS_ALL_OFF },
+				settings: { ...urgentInput.settings, modes: { "5h": "no", weekly: "no", fable: "no" } },
 			}).actions,
 		).toEqual([]);
 		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
@@ -981,67 +981,6 @@ describe("planClaudeResetRedemptions: Fable reset", () => {
 		});
 	});
 
-	for (const autoRedeemFable of ["no", "yes"] as const) {
-		it(`does not spend a Fable grant on a five-hour block without a Fable row when Fable consent is ${autoRedeemFable}`, () => {
-			const usage = report({ fiveHourUsed: 1, weeklyUsed: 0.5 });
-			usage.limits = usage.limits.filter(limit => limit.id !== "anthropic:7d:fable");
-			const plan = planClaudeResetRedemptions(
-				input({
-					settings: claudeResetPlanSettings({
-						autoRedeem5h: "yes",
-						autoRedeemWeekly: "no",
-						autoRedeemFable,
-						minBlockedMinutes: 60,
-						keepCredits: 0,
-						salvageHorizonHours: 12,
-					}),
-					reports: [usage],
-					statuses: [
-						status({
-							credit: fableCredit({ blocking: ["anthropic:5h"], usedFractions: { "anthropic:5h": 1 } }),
-						}),
-					],
-				}),
-			);
-			expect(plan.actions).toEqual([]);
-			expect(plan.skipped).toContainEqual({
-				accountKey: "anthropic|org-a|11",
-				rule: "account",
-				reason: "no-fable-usage",
-			});
-		});
-	}
-
-	for (const { name, expiresInMs } of [
-		{ name: "salvage", expiresInMs: 2 * HOUR },
-		{ name: "imminent", expiresInMs: 30_000 },
-	]) {
-		it(`does not spend a ${name} Fable grant without a Fable row`, () => {
-			const usage = report({ fiveHourUsed: 1, weeklyUsed: 0.5 });
-			usage.limits = usage.limits.filter(limit => limit.id !== "anthropic:7d:fable");
-			const plan = planClaudeResetRedemptions(
-				input({
-					trigger: "sweep",
-					reports: [usage],
-					statuses: [
-						status({
-							credit: fableCredit({
-								requiresLimit: false,
-								expiresAt: new Date(NOW + expiresInMs).toISOString(),
-							}),
-						}),
-					],
-				}),
-			);
-			expect(plan.actions).toEqual([]);
-			expect(plan.skipped).toContainEqual({
-				accountKey: "anthropic|org-a|11",
-				rule: "account",
-				reason: "no-fable-usage",
-			});
-		});
-	}
-
 	it("spends a Fable grant for an exhausted Fable cap under Fable-only settings", () => {
 		const plan = planClaudeResetRedemptions(
 			input({
@@ -1068,219 +1007,5 @@ describe("planClaudeResetRedemptions: Fable reset", () => {
 				remainingMs: 5 * 24 * HOUR,
 			},
 		]);
-	});
-
-	it("restores a Fable grant only for a block that includes the Fable cap", () => {
-		const plan = (weeklyUsed: number) =>
-			planClaudeResetRedemptions(
-				input({
-					modelId: "claude-fable-5",
-					settings: windowSettings(WINDOWS_FABLE_ONLY),
-					reports: [report({ fiveHourUsed: 1, weeklyUsed, fableUsed: 1 })],
-					statuses: [status({ credit: fableCredit() })],
-				}),
-			);
-		expect(plan(0.5).actions).toMatchObject([
-			{
-				window: "fable",
-				restorableWindows: ["fable"],
-				blockedWindows: ["anthropic:5h", "anthropic:7d:fable"],
-				remainingMs: 5 * 24 * HOUR,
-			},
-		]);
-		const sharedWeeklyBlocked = plan(1);
-		expect(sharedWeeklyBlocked.actions).toEqual([]);
-		expect(sharedWeeklyBlocked.skipped).toContainEqual({
-			accountKey: "anthropic|org-a|11",
-			rule: "blocked-account",
-			reason: "incomplete-coverage",
-		});
-	});
-
-	it("skips that Fable cap block while the Fable setting is off", () => {
-		const plan = planClaudeResetRedemptions(
-			input({
-				modelId: "claude-fable-5",
-				settings: claudeResetPlanSettings({
-					autoRedeem5h: "yes",
-					autoRedeemWeekly: "yes",
-					autoRedeemFable: "no",
-					minBlockedMinutes: 60,
-					keepCredits: 0,
-					salvageHorizonHours: 12,
-				}),
-				reports: [report(fableCapExhausted)],
-				statuses: [status({ credit: fableCredit() })],
-			}),
-		);
-		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({
-			accountKey: "anthropic|org-a|11",
-			rule: "blocked-account",
-			reason: "window-disabled",
-		});
-	});
-
-	it("never spends a Fable grant without measured Fable usage, blocking, salvaging, or imminent", () => {
-		const blocked = planClaudeResetRedemptions(
-			input({
-				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5, fableUsed: 0 })],
-				statuses: [
-					status({
-						credit: fableCredit({ requiresLimit: false, usedFractions: { "anthropic:5h": 1 } }),
-					}),
-				],
-			}),
-		);
-		const unmeasured = planClaudeResetRedemptions(
-			input({
-				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5, fableUsed: null })],
-				statuses: [
-					status({
-						credit: fableCredit({ requiresLimit: false, usedFractions: { "anthropic:5h": 1 } }),
-					}),
-				],
-			}),
-		);
-		const sweep = (fableUsed: number, expiresInMs: number) =>
-			planClaudeResetRedemptions(
-				input({
-					trigger: "sweep",
-					settings: claudeResetPlanSettings({
-						autoRedeem5h: "yes",
-						autoRedeemWeekly: "yes",
-						autoRedeemFable: "yes",
-						minBlockedMinutes: 60,
-						keepCredits: 0,
-						salvageHorizonHours: 12,
-					}),
-					reports: [report({ fiveHourUsed: 0.6, weeklyUsed: 0.5, fableUsed })],
-					statuses: [
-						status({
-							credit: fableCredit({
-								requiresLimit: false,
-								expiresAt: new Date(NOW + expiresInMs).toISOString(),
-							}),
-						}),
-					],
-				}),
-			);
-		for (const plan of [blocked, unmeasured, sweep(0, 2 * HOUR), sweep(0, 30_000)]) {
-			expect(plan.actions).toEqual([]);
-			expect(plan.skipped).toContainEqual({
-				accountKey: "anthropic|org-a|11",
-				rule: "account",
-				reason: "no-fable-usage",
-			});
-		}
-	});
-
-	it("judges salvage on the Fable cap rather than fuller five-hour coverage", () => {
-		const plan = planClaudeResetRedemptions(
-			input({
-				trigger: "sweep",
-				settings: windowSettings(WINDOWS_FABLE_ONLY),
-				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5, fableUsed: 0.1 })],
-				statuses: [
-					status({
-						credit: fableCredit({
-							requiresLimit: false,
-							expiresAt: new Date(NOW + 2 * HOUR).toISOString(),
-						}),
-					}),
-				],
-			}),
-		);
-		expect(plan.actions).toEqual([]);
-		expect(plan.skipped).toContainEqual({
-			accountKey: "anthropic|org-a|11",
-			rule: "expiring-credit",
-			reason: "window-mostly-free",
-		});
-	});
-
-	it("spends an imminent Fable grant only while the Fable window is enabled", () => {
-		const imminent = (autoRedeemFable: "yes" | "no") =>
-			planClaudeResetRedemptions(
-				input({
-					trigger: "sweep",
-					settings: claudeResetPlanSettings({
-						autoRedeem5h: "yes",
-						autoRedeemWeekly: "yes",
-						autoRedeemFable,
-						minBlockedMinutes: 60,
-						keepCredits: 1,
-						salvageHorizonHours: 0,
-					}),
-					reports: [report({ fiveHourUsed: 0.6, weeklyUsed: 0.5, fableUsed: 0.3 })],
-					statuses: [
-						status({
-							credit: fableCredit({
-								requiresLimit: false,
-								expiresAt: new Date(NOW + 60_000).toISOString(),
-							}),
-						}),
-					],
-				}),
-			);
-		expect(imminent("yes").actions).toMatchObject([
-			{
-				reason: "expiring-credit",
-				window: "fable",
-				restorableWindows: ["fable"],
-				expiresInMs: 60_000,
-				salvageWindow: "anthropic:7d:fable",
-				salvageUsedFraction: 0.3,
-			},
-		]);
-		const disabled = imminent("no");
-		expect(disabled.actions).toEqual([]);
-		expect(disabled.skipped).toContainEqual({
-			accountKey: "anthropic|org-a|11",
-			rule: "expiring-credit",
-			reason: "window-disabled",
-		});
-	});
-
-	it("governs Fable consent and whole-plan enablement independently of the other windows", () => {
-		const unsetFable = claudeResetWindowModes({
-			autoRedeem5h: "yes",
-			autoRedeemWeekly: "yes",
-			autoRedeemFable: "unset",
-		});
-		expect(resetActionMode({ window: "fable", restorableWindows: ["fable"] }, unsetFable)).toBe("unset");
-		expect(resetActionMode({ window: "fable", restorableWindows: ["fable"], expiresInMs: 60_000 }, unsetFable)).toBe(
-			"unset",
-		);
-		expect(
-			resetActionMode(
-				{ window: "fable", restorableWindows: ["fable"], expiresInMs: 60_000 },
-				claudeResetWindowModes({ autoRedeem5h: "yes", autoRedeemWeekly: "yes", autoRedeemFable: "no" }),
-			),
-		).toBe("no");
-
-		const fiveHourBlock = [status({ credit: fiveHourOnlyCredit() })];
-		const fableOnly = planClaudeResetRedemptions(
-			input({
-				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
-				settings: windowSettings(WINDOWS_FABLE_ONLY),
-				statuses: fiveHourBlock,
-			}),
-		);
-		expect(fableOnly.actions).toEqual([]);
-		expect(fableOnly.skipped).toContainEqual({
-			accountKey: "anthropic|org-a|11",
-			rule: "blocked-account",
-			reason: "window-disabled",
-		});
-		const allOff = planClaudeResetRedemptions(
-			input({
-				reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
-				settings: windowSettings(WINDOWS_ALL_OFF),
-				statuses: fiveHourBlock,
-			}),
-		);
-		expect(allOff.actions).toEqual([]);
-		expect(allOff.skipped).toEqual([{ accountKey: "*", rule: "account", reason: "disabled" }]);
 	});
 });

@@ -4,7 +4,6 @@
  * warn about the accounts the salvage planners would act on.
  */
 import {
-	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
 	type UsageResetCredit,
@@ -21,10 +20,8 @@ import {
 	type ClaudeResetAction,
 	type ClaudeResetSkip,
 	type ClaudeResetWindow,
-	claudeCoveredLimits,
 	claudeResetPlanSettings,
 	claudeResetWindowModes,
-	fullestClaudeLimit,
 	planClaudeResetRedemptions,
 } from "./claude-auto-reset";
 import {
@@ -32,17 +29,13 @@ import {
 	type CodexResetSkip,
 	DEBOUNCE_BUCKET_MS,
 	fullestCodexChatWindow,
-	IMMINENT_RESET_EXPIRY_MS,
 	planCodexResetRedemptions,
 	resetAccountLockKey,
-	resetActionMode,
 	resetPlanSettings,
-	type ResetWindow,
 	resetWindowModes,
 	SALVAGE_MIN_USED_FRACTION,
-	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
+import { IMMINENT_RESET_EXPIRY_MS, actionConsent, classifyResetGrant } from "./reset-consent";
 import { cfgClaudeResets, cfgCodexResets, type ResetAutoRedeemMode } from "./settings";
 
 const SOON_MS = 7 * 24 * 3_600_000;
@@ -99,19 +92,11 @@ export function classifyResetExpiry(report: UsageReport, nowMs: number): ResetEx
 				? { limit: codexWindow.limit, usedFraction: codexWindow.usedFraction }
 				: undefined;
 		}
-		// A Fable grant restores only Fable weekly usage, so only that limit can make it worth salvaging.
-		// A report without the Fable row has no Fable usage to restore, however full the 5h window is.
-		if (credit.clears?.includes(FABLE_WEEKLY_LIMIT_ID)) {
-			const fable = fableClaudeLimit(report.limits, credit);
-			if (!fable) return undefined;
-			const used = resolveUsedFraction(fable);
-			return used !== undefined && Number.isFinite(used) && used >= SALVAGE_MIN_USED_FRACTION
-				? { limit: fable, usedFraction: Math.max(0, used) }
-				: undefined;
-		}
-		const covered = fullestClaudeLimit(claudeCoveredLimits(report.limits, credit), credit);
-		return covered && covered.used >= SALVAGE_MIN_USED_FRACTION
-			? { limit: covered.limit, usedFraction: covered.used }
+		// A Fable grant is worth salvaging only by its own measured Fable usage, whether the
+		// report row or the grant's own used fraction reports it.
+		const grant = classifyResetGrant(provider, credit, report);
+		return grant.fullest && grant.fullest.used >= SALVAGE_MIN_USED_FRACTION
+			? { limit: grant.fullest.limit, usedFraction: grant.fullest.used }
 			: undefined;
 	};
 	let warned: { credit: UsageResetCreditDetail; expiresAtMs: number } | undefined;
@@ -161,47 +146,19 @@ function spendableNow(
 }
 
 const FIVE_HOUR_LIMIT_ID = "anthropic:5h";
-/** The Fable weekly cap's limit id: a grant clearing it restores only that window. */
-const FABLE_WEEKLY_LIMIT_ID = "anthropic:7d:fable";
 
-/** The settings key governing each provider window. */
-const RESET_SETTING_KEY: {
-	"openai-codex": Record<ResetWindow, string>;
-	anthropic: Record<ClaudeResetWindow, string>;
-} = {
-	"openai-codex": { "5h": "codexResets.autoRedeem5h", weekly: "codexResets.autoRedeemWeekly" },
-	anthropic: {
-		"5h": "claudeResets.autoRedeem5h",
-		weekly: "claudeResets.autoRedeemWeekly",
-		fable: "claudeResets.autoRedeemFable",
-	},
-};
-
-/** The Fable limit row a Fable grant restores; absent rows mean no Fable usage to restore. */
-function fableClaudeLimit(limits: readonly UsageLimit[], credit: UsageResetCreditDetail): UsageLimit | undefined {
-	return claudeCoveredLimits(limits, credit).find(limit => limit.id === FABLE_WEEKLY_LIMIT_ID);
-}
-
-/** Windows a credit restores: a Codex credit restores both, a Claude grant only its covered limits. */
+/** Windows a credit restores, classified from the grant the warning identifies. */
 function restorableResetWindows(report: UsageReport, warning: ResetExpiryWarning): readonly ClaudeResetWindow[] {
-	if (warning.provider === "openai-codex") return ["5h", "weekly"];
+	if (warning.provider === "openai-codex") return classifyResetGrant("openai-codex", {}, report).restorableWindows;
 	// Several grants can share an expiry, so the warned grant is the one its id names, never an expiry match.
 	const credit =
 		warning.creditId === undefined
 			? undefined
 			: (report.resetCredits?.credits ?? []).find(candidate => candidate.id === warning.creditId);
-	// A Fable grant also clears the 5h window, but only the Fable key governs spending it.
-	if (credit?.clears?.includes(FABLE_WEEKLY_LIMIT_ID)) return ["fable"];
-	const covered = credit ? claudeCoveredLimits(report.limits, credit) : [warning.limit];
-	const windows = new Set<ClaudeResetWindow>(covered.map(claudeExpiryWindow));
-	windows.add(claudeExpiryWindow(warning.limit));
-	return [...windows];
-}
-
-/** The window a Claude limit belongs to; the Fable tier is its own window, never the shared weekly one. */
-function claudeExpiryWindow(limit: UsageLimit): ClaudeResetWindow {
-	if (limit.id === FIVE_HOUR_LIMIT_ID) return "5h";
-	return limit.scope.tier === "fable" ? "fable" : "weekly";
+	if (credit) return classifyResetGrant(warning.provider, credit, report).restorableWindows;
+	const window: ClaudeResetWindow =
+		warning.limit.id === FIVE_HOUR_LIMIT_ID ? "5h" : warning.limit.scope.tier === "fable" ? "fable" : "weekly";
+	return [window];
 }
 
 /**
@@ -232,20 +189,17 @@ export function resetSpendVerdict(
 			: { ...resetWindowModes(cfgCodexResets.get(settings)), fable: "no" };
 	const restorable = restorableResetWindows(report, warning);
 	// Last-chance spending happens at expiry, so judge consent by that moment's rule.
-	const mode = resetActionMode(
-		{ window: restorable[0] ?? "weekly", restorableWindows: restorable, expiresInMs: 0 },
+	const consent = actionConsent(
+		{
+			target: { provider: warning.provider },
+			window: restorable[0] ?? "weekly",
+			restorableWindows: restorable,
+			expiresInMs: 0,
+		},
 		modes,
 	);
-	const kind = !shouldEvaluateCodexAutoRedeem(mode) ? "off" : shouldPromptCodexAutoRedeem(mode) ? "ask" : "auto";
-	const deciding = restorable.filter(window => modes[window] === mode);
-	const decidingWindows = deciding.length > 0 ? deciding : restorable;
-	const setting =
-		warning.provider === "anthropic"
-			? decidingWindows.map(window => RESET_SETTING_KEY.anthropic[window]).join(" + ")
-			: decidingWindows
-					.filter((window): window is ResetWindow => window !== "fable")
-					.map(window => RESET_SETTING_KEY["openai-codex"][window])
-					.join(" + ");
+	const kind = consent.mode === "no" ? "off" : consent.mode === "unset" ? "ask" : "auto";
+	const setting = consent.keys.join(" + ");
 	const plan = planAsLastChance(report, warning, settings, nowMs);
 	// A stale report says nothing about eligibility: the sweep plans only after a fresh fetch.
 	const eligibleNow =
@@ -253,7 +207,7 @@ export function resetSpendVerdict(
 	return {
 		kind,
 		setting,
-		mode,
+		mode: consent.mode,
 		eligibleNow,
 	};
 }

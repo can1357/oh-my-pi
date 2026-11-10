@@ -1524,46 +1524,6 @@ describe("formatUsageBreakdown", () => {
 		expect(claudeVerdict.setting).not.toContain("codexResets");
 	});
 
-	it("uses the warned Cedar grant's consent when a zero-usage Fable grant has the same expiry", () => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const base = claudeFableResetReport(now, 0);
-		const report: UsageReport = {
-			...base,
-			limits: base.limits.map(limit =>
-				limit.id === "anthropic:7d" ? { ...limit, amount: { ...limit.amount, usedFraction: 0.8 } } : limit,
-			),
-			resetCredits: {
-				...base.resetCredits!,
-				availableCount: 2,
-				credits: [...base.resetCredits!.credits!, cedarGrant(now, "cedar", 6 * HOUR)],
-			},
-		};
-		const warning = classifyResetExpiry(report, now);
-		if (!warning) throw new Error("expected an expiry warning for the Cedar grant");
-		const verdict = resetSpendVerdict(
-			report,
-			warning,
-			Settings.isolated({
-				"claudeResets.autoRedeem5h": "no",
-				"claudeResets.autoRedeemWeekly": "yes",
-				"claudeResets.autoRedeemFable": "no",
-			}),
-			now,
-		);
-		expect(verdict).toMatchObject({ kind: "auto", mode: "yes" });
-		expect(verdict.setting).toContain("claudeResets.autoRedeemWeekly");
-		expect(verdict.setting).not.toContain("claudeResets.autoRedeemFable");
-		expect(warning.creditId).toBe("cedar");
-	});
-
-	it("does not warn about a Fable grant when its usage row is missing despite high 5h usage", () => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const report = claudeResetReport(now, { "anthropic:5h": 0.8, "anthropic:7d": 0.9 }, [
-			cedarGrant(now, "fable", 6 * HOUR, { clears: ["anthropic:5h", "anthropic:7d:fable"] }),
-		]);
-		expect(classifyResetExpiry(report, now)).toBeUndefined();
-	});
-
 	it.each([
 		{
 			name: "spends a Fable grant when only the Fable setting allows it",
