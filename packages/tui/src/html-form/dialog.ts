@@ -33,7 +33,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
 import { Editor } from "../components/editor";
-import { Image, type ImageBudget } from "../components/image";
+import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
 import { renderTableRow, type TableColumn } from "../components/table";
 import {
@@ -163,6 +163,11 @@ interface Layout {
 	stopAtoms: number[];
 	/** Where the open dropdown hangs from: its field's atom and the value row inside it. */
 	dropdown?: { atom: number; row: number };
+	/**
+	 * Picture atoms, measured under {@link measureRender} so a picture on another page claims no
+	 * image slot; `#renderPage` renders the shown ones again, in display order.
+	 */
+	pictures: Map<PageAtom, Component>;
 }
 
 /** A native question tab: indices of the sections it shows, and the fields in them. */
@@ -609,7 +614,8 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#media.set(block, { state: "loading" });
 		const signal = this.#mediaAbort.signal;
 		loadFormImage(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal }).then(
-			media => this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
+			// A picture landing after dispose must not take an image key nobody will release.
+			media => signal.aborted || this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
 			(error: unknown) => {
 				const reason = error instanceof Error ? error.message : String(error);
 				this.#settleMedia(block, { state: "failed", reason });
@@ -1103,7 +1109,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#renderPage(layout: Layout, page: Page, rows: number, width: number): string[] {
-		const { atoms, dropdown } = layout;
+		const { atoms, dropdown, pictures } = layout;
 		const lines: string[] = [];
 		const continuation = atoms[page.start]?.continuation;
 		if (continuation !== undefined) {
@@ -1114,7 +1120,8 @@ export class HtmlFormDialog implements Component, Focusable {
 			const atom = atoms[index]!;
 			if (index > page.start) for (let gap = 0; gap < atom.gap; gap++) lines.push("");
 			if (dropdown?.atom === index) anchor = { top: lines.length, row: lines.length + dropdown.row };
-			lines.push(...atom.lines);
+			// A picture measured off the display order is rendered again here, so only shown pictures take image slots.
+			lines.push(...(pictures.get(atom)?.render(width) ?? atom.lines));
 		}
 		const shown = lines.slice(0, rows);
 		if (anchor && this.#open && anchor.row < rows) this.#overlayDropdown(shown, anchor, rows, width);
@@ -1207,6 +1214,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const atoms: PageAtom[] = [];
 		const stopAtoms: number[] = [];
 		let dropdown: Layout["dropdown"];
+		const pictures: Layout["pictures"] = new Map();
 		let stop = 0;
 		const focusedStop = this.#focused ? this.#focus : -1;
 		this.#form.sections.forEach((section, sectionIndex) => {
@@ -1244,7 +1252,7 @@ export class HtmlFormDialog implements Component, Focusable {
 						dropdown = { atom: atoms.length, row: field.label.length > 0 ? blockAtoms[0]!.lines.length - 1 : 0 };
 					}
 				} else {
-					blockAtoms.push(...this.#contextAtoms(block, width));
+					blockAtoms.push(...this.#contextAtoms(block, width, pictures));
 				}
 				if (blockAtoms.length === 0) continue;
 				blockAtoms[0]!.gap = gap;
@@ -1271,7 +1279,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		const pending = this.#errors.size > 0 ? theme.fg("error", `  ${this.#errors.size} to fix`) : "";
 		stopAtoms[stop] = atoms.length;
 		atoms.push({ lines: [`${submit}${pending}`], gap: 1, breakRank: BreakRank.Block });
-		return { atoms, stopAtoms, dropdown };
+		return { atoms, stopAtoms, dropdown, pictures };
 	}
 
 	/** Atoms of one field, each flagged when it is a focus stop; stops are numbered from `firstStop`. */
@@ -1424,7 +1432,11 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	/** Atoms of a non-field block: one per wrapped line, list item or table row. */
-	#contextAtoms(block: Exclude<FormBlock, { kind: "field" }>, width: number): PageAtom[] {
+	#contextAtoms(
+		block: Exclude<FormBlock, { kind: "field" }>,
+		width: number,
+		pictures: Layout["pictures"],
+	): PageAtom[] {
 		const atom = (lines: string[], breakRank = BreakRank.Inside): PageAtom => ({ lines, gap: 0, breakRank });
 		switch (block.kind) {
 			case "text": {
@@ -1449,8 +1461,12 @@ export class HtmlFormDialog implements Component, Focusable {
 			case "image":
 			case "svg": {
 				const slot = this.#media.get(block)!;
-				const rows = slot.state === "ready" ? slot.rows.render(width) : [];
-				if (rows.length > 0) return [atom([...rows])];
+				const rows = slot.state === "ready" ? measureRender(() => slot.rows.render(width)).value : [];
+				if (rows.length > 0 && slot.state === "ready") {
+					const picture = atom([...rows]);
+					pictures.set(picture, slot.rows);
+					return [picture];
+				}
 				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
 			}
 			case "table": {

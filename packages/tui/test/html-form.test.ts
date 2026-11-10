@@ -306,6 +306,62 @@ describe("html form", () => {
 				setCellDimensions(originalCells);
 			}
 		});
+
+		it("spends image slots only on the pictures of the page shown", async () => {
+			// 10x200 px: 16 rows at 10 px cells, so two of them cannot share a page of a 30-row terminal.
+			const TALL_PNG =
+				"iVBORw0KGgoAAAANSUhEUgAAAAoAAADICAAAAAD0eS/eAAAAIElEQVR42mNsYIABJoZR5ihzlDnKHGWOMkeZo8wBZAIAC30CEMb50JQAAAAASUVORK5CYII=";
+			const terminalId = TERMINAL as unknown as { id: string };
+			const originalProtocol = TERMINAL.imageProtocol;
+			const originalId = terminalId.id;
+			terminalId.id = "xterm";
+			const originalGraphics = { ...getKittyGraphics() };
+			const originalCells = { ...getCellDimensions() };
+			setTerminalImageProtocol(ImageProtocol.Kitty);
+			setKittyGraphics({ unicodePlaceholders: false });
+			setCellDimensions({ widthPx: 10, heightPx: 10 });
+			const term = new VirtualTerminal(60, 30);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			// One live image: a picture on a later page must not take it from the one shown.
+			tui.setMaxInlineImages(1);
+			let loads = 0;
+			const loaded = Promise.withResolvers<void>();
+			const form = new HtmlFormDialog(
+				parseHtmlForm(`<form><img src="data:image/png;base64,${TALL_PNG}" alt="first">
+					<img src="data:image/png;base64,${TALL_PNG}" alt="second">
+					<label><input type="checkbox" name="ok"> OK</label></form>`),
+				{
+					onSubmit: vi.fn(),
+					onCancel: vi.fn(),
+					tui: {
+						terminal: tui.terminal,
+						imageBudget: tui.imageBudget,
+						requestRender: () => {
+							tui.requestRender();
+							if (++loads === 2) loaded.resolve();
+						},
+					},
+				},
+			);
+			tui.addChild(form);
+			try {
+				tui.start();
+				await loaded.promise;
+				await scheduler.settle(term);
+				expect(form.debugState()).toMatchObject({ page: 1, pages: 2 });
+				const screen = term.getViewport().join("\n");
+				expect(screen).not.toContain("[Image: first");
+				expect(screen).not.toContain("second");
+			} finally {
+				tui.stop();
+				form.dispose();
+				setTerminalImageProtocol(originalProtocol);
+				terminalId.id = originalId;
+				setKittyGraphics(originalGraphics);
+				setCellDimensions(originalCells);
+			}
+		});
 	});
 
 	describe("pagination", () => {
