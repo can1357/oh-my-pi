@@ -2020,6 +2020,52 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 		}
 	}, 30_000);
 
+	test("cleans up the click watcher when cancellation interrupts its detachment check", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent('<button id="target">Click</button>');
+			await page.evaluate(`(() => {
+				window.removed = [];
+				const remove = EventTarget.prototype.removeEventListener;
+				EventTarget.prototype.removeEventListener = function(type, ...args) {
+					if (["pointerdown", "mousedown", "click"].includes(type)) window.removed.push(type);
+					return remove.call(this, type, ...args);
+				};
+			})()`);
+			const handle = await page.locator("#target").waitHandle();
+			const controller = new AbortController();
+			const reason = new Error("cancel before dispatch");
+			const disposed = Promise.withResolvers<void>();
+			const evaluateHandle = handle.evaluateHandle.bind(handle);
+			spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
+				const watch = await evaluateHandle(...args);
+				const dispose = watch.dispose.bind(watch);
+				spyOn(watch, "evaluate").mockImplementationOnce(async () => {
+					controller.abort(reason);
+					throw reason;
+				});
+				spyOn(watch, "dispose").mockImplementationOnce(async () => {
+					await dispose();
+					disposed.resolve();
+				});
+				return watch;
+			});
+			expect(String(await rejectionOf(clickElement(handle, "tab.click", controller.signal)))).toContain(
+				"cancel before dispatch",
+			);
+			await disposed.promise;
+			expect(await page.evaluate("window.removed.sort()")).toEqual([
+				"click", "click", "mousedown", "mousedown", "pointerdown", "pointerdown",
+			]);
+			await handle.dispose();
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
 	test("re-resolves a selector replaced between the click probe and delivery watcher without sending stale input", async () => {
 		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");

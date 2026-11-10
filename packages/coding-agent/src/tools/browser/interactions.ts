@@ -453,11 +453,10 @@ export async function clickElement(
 			return state;
 		}),
 	);
-	if (await untilAborted(signal, () => watch.evaluate(state => state.detached))) {
-		await watch.dispose().catch(() => undefined);
-		throw new ElementDetachedError(label);
-	}
 	try {
+		if (await untilAborted(signal, () => watch.evaluate(state => state.detached))) {
+			throw new ElementDetachedError(label);
+		}
 		await clickPoint(handle.frame.page(), point.x, point.y, options, signal);
 	} catch (error) {
 		// The page may be stuck; tidy up without waiting on it.
