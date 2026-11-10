@@ -480,3 +480,28 @@ fn every_carrier_combination_has_a_sample() {
 		&missing[..missing.len().min(5)]
 	);
 }
+
+/// Prints every axis's variant names as JSON to stdout.
+///
+/// `tools/gen-fatal-sites.py` reads this output instead of parsing Rust source
+/// text.  AGENTS.md:314 bans source-grepping implementation files; this test
+/// provides the same information through the crate's own [`VariantNames`] derive.
+///
+/// Run with:
+/// ```text
+/// cargo test -p pi-shell --lib -- bash::vm::fatal_sites::print_enum_names --exact --nocapture
+/// ```
+#[test]
+fn print_enum_names() {
+    let enums = serde_json::json!({
+        "Opcode": Opcode::VARIANTS,
+        "DeclareKind": DeclareKind::VARIANTS,
+        "Stop": Stop::VARIANTS,
+        "FrameKind": FrameKind::VARIANTS,
+        "Carrier": Carrier::VARIANTS,
+        "FatalContext": FatalContext::VARIANTS,
+        "Raiser": Raiser::VARIANTS,
+        "TrapReplication": TrapReplication::VARIANTS,
+    });
+    println!("ENUM_VARIANTS_JSON:{}", enums);
+}

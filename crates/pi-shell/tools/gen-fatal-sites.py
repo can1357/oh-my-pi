@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Generate the fatal-jump site matrix pi-shell's coverage gate is measured from.
 
-The ENUMERATION is derived from the engine's own source.  The variant lists of
-`Opcode` (bash/ir/mod.rs), `DeclareKind` (vm/builtins/vars.rs), `Stop`
-(vm/expand.rs), `FrameKind` (vm/proc.rs) and of the three axes the gate itself
-declares -- `Carrier`, `FatalContext`, `Raiser` (vm/fatal_sites.rs) -- are
-parsed out of the Rust files, never written here.  What is written here is one
-SAMPLE per axis element: a syntactic construct, a substitution carrier, an
-error raiser, a catch context.  A variant with no sample ends this script
-non-zero, and `vm/fatal_sites.rs` fails the build's test run when the fixture
-was measured for a different variant list than the crate now has.
+The ENUMERATION is derived from the crate's own ``strum::VariantNames`` at
+compile time, not from source text.  A ``cargo test`` of the
+``print_enum_names`` test in ``vm/fatal_sites.rs`` emits the variant lists of
+`Opcode`, `DeclareKind`, `Stop`, `FrameKind`, `Carrier`, `FatalContext`,
+`Raiser` and `TrapReplication` as JSON; this script reads that output.  What is
+written here is one SAMPLE per axis element: a syntactic construct, a
+substitution carrier, an error raiser, a catch context.  A variant with no
+sample ends this script non-zero, and ``vm/fatal_sites.rs`` fails the build's
+test run when the fixture was measured for a different variant list than the
+crate now has.
 
 Two sub-matrices:
 
@@ -30,145 +31,37 @@ import itertools
 import json
 import re
 import shlex
+import subprocess
 import sys
 
 # ---------------------------------------------------------------- enumeration
 
 
-def _strip_noise(text: str) -> str:
-	"""`text` without comments or attributes, so delimiters can be counted.
+def enum_variants(tree: str) -> dict:
+	"""The variant lists of the fatal-site model's enums, from VariantNames.
 
-	A doc comment holding an unmatched `}` or `(`, and an attribute's own
-	parentheses, both moved the delimiter counter this parse depends on; an
-	`#[allow(dead_code)]` on the line above a variant hid that variant
-	entirely. Comments and attributes carry no variant, so they go first.
-	Conditional compilation is NOT evaluated: a `#[cfg(...)]` variant is
-	read as present, which is the safe direction for a coverage gate.
+	Instead of parsing Rust source text (which AGENTS.md:314 bans for test
+	infrastructure), compile the crate's own ``print_enum_names`` test and
+	read its JSON output.  Each enum already derives ``strum::VariantNames``.
 	"""
-	out, i, n = [], 0, len(text)
-
-	def skip_string(j: int) -> int:
-		"""Index just past the literal starting at `j`, or `j` if none starts."""
-		m = re.match(r'(?:br|rb|b|r)?(#*)"', text[j : j + 16])
-		if m and "r" in m.group(0):
-			close = '"' + m.group(1)
-			end = text.find(close, j + m.end())
-			return n if end < 0 else end + len(close)
-		if m:
-			k = j + m.end()
-			while k < n and text[k] != '"':
-				k += 2 if text[k] == "\\" else 1
-			return k + 1
-		if text[j] == '"':
-			k = j + 1
-			while k < n and text[k] != '"':
-				k += 2 if text[k] == "\\" else 1
-			return k + 1
-		# `'a` is a lifetime, `'x'` and `'\n'` are character literals.
-		if text[j] == "'":
-			if text[j + 1 : j + 2] == "\\":
-				end = text.find("'", j + 2)
-				return n if end < 0 else end + 1
-			if text[j + 2 : j + 3] == "'":
-				return j + 3
-		return j
-
-	while i < n:
-		two = text[i : i + 2]
-		if two == "//":
-			j = text.find("\n", i)
-			i = n if j < 0 else j
-		elif two == "/*":
-			j = text.find("*/", i + 2)
-			i = n if j < 0 else j + 2
-		elif text[i] == "#" and text[i + 1 : i + 2] in ("[", "!"):
-			# Skip the whole attribute, matching its brackets but stepping over
-			# any string literal inside, whose `]` is not a bracket.
-			j = text.find("[", i)
-			if j < 0:
-				out.append(text[i])
-				i += 1
-				continue
-			depth, j = 1, j + 1
-			while j < n and depth:
-				after = skip_string(j)
-				if after != j:
-					j = after
-					continue
-				if text[j] == "[":
-					depth += 1
-				elif text[j] == "]":
-					depth -= 1
-				j += 1
-			i = j
-		else:
-			after = skip_string(i)
-			if after != i:
-				out.append(" ")
-				i = after
-			else:
-				out.append(text[i])
-				i += 1
-	return "".join(out)
-
-
-def variants(path: str, enum: str) -> list[str]:
-	"""The variant names of a Rust enum, read from its declaration."""
-	src = _strip_noise(open(path, encoding="utf-8").read())
-	# Generic parameters and a `where` clause may stand between the name and
-	# the body: `enum Test<'a, T> where T: Copy { … }`.
-	m = re.search(
-		r"\benum\s+%s\s*(?:<[^>{]*>)?\s*(?:where[^{]*)?\{" % re.escape(enum), src
+	p = subprocess.run(
+		[
+			"cargo", "test", "-p", "pi-shell", "--lib", "--",
+			"bash::vm::fatal_sites::print_enum_names", "--exact", "--nocapture",
+		],
+		capture_output=True, text=True, cwd=tree, timeout=300,
 	)
-	if not m:
-		raise SystemExit(f"gen-fatal-sites: no `enum {enum}` in {path}")
-	i, depth = m.end(), 1
-	body_start = i
-	while depth:
-		if src[i] == "{":
-			depth += 1
-		elif src[i] == "}":
-			depth -= 1
-		i += 1
-	body = src[body_start : i - 1]
-	# At nesting depth zero a variant is a name closed by `,`, `(`, `{`, `=`
-	# or the end of the body; a variant's payload is skipped whole.
-	out, depth, token = [], 0, ""
-
-	def take() -> None:
-		nonlocal token
-		if re.fullmatch(r"[A-Z][A-Za-z0-9_]*", token):
-			out.append(token)
-		token = ""
-
-	for ch in body:
-		if depth:
-			if ch in "{(":
-				depth += 1
-			elif ch in "})":
-				depth -= 1
-			continue
-		if ch in "{(":
-			take()
-			depth += 1
-		elif ch in ",=":
-			take()
-		elif ch.isalnum() or ch == "_":
-			token += ch
-		else:
-			take()
-	take()
-	if not out:
-		raise SystemExit(f"gen-fatal-sites: no variants parsed from `enum {enum}`")
-	# A name may be seen twice only if the scan is wrong; fail loudly.
-	if len(set(out)) != len(out):
-		raise SystemExit(f"gen-fatal-sites: duplicate variant parsed from `enum {enum}`: {out}")
-	return out
-
-
-def snake(name: str) -> str:
-	"""`name` as strum's `serialize_all = "snake_case"` spells it."""
-	return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+	if p.returncode != 0:
+		raise SystemExit(
+			f"gen-fatal-sites: cargo test for enum names failed (rc={p.returncode}):\n"
+			+ p.stderr[-2000:]
+		)
+	for line in p.stdout.splitlines():
+		if line.startswith("ENUM_VARIANTS_JSON:"):
+			return json.loads(line[len("ENUM_VARIANTS_JSON:"):])
+	raise SystemExit(
+		"gen-fatal-sites: no ENUM_VARIANTS_JSON line in cargo test output"
+	)
 
 
 # -------------------------------------------------- samples: original matrix
@@ -374,20 +267,7 @@ def sq(text: str) -> str:
 
 def main() -> None:
 	tree, outp = sys.argv[1], sys.argv[2]
-	src = f"{tree}/crates/pi-shell/src/bash"
-	gate = f"{src}/vm/fatal_sites.rs"
-	enums = {
-		"Opcode": variants(f"{src}/ir/mod.rs", "Opcode"),
-		"DeclareKind": variants(f"{src}/vm/builtins/vars.rs", "DeclareKind"),
-		"Stop": variants(f"{src}/vm/expand.rs", "Stop"),
-		"FrameKind": variants(f"{src}/vm/proc.rs", "FrameKind"),
-		# The gate's own axes are spelled snake_case by strum, and that is
-		# what the fixture and the row ids record.
-		"Carrier": [snake(v) for v in variants(gate, "Carrier")],
-		"FatalContext": [snake(v) for v in variants(gate, "FatalContext")],
-		"Raiser": [snake(v) for v in variants(gate, "Raiser")],
-		"TrapReplication": [snake(v) for v in variants(gate, "TrapReplication")],
-	}
+	enums = enum_variants(tree)
 
 	for axis, samples in (
 		("DeclareKind", DECL_FORMS),
