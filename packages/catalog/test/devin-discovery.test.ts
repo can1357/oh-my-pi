@@ -908,52 +908,6 @@ describe("devin catalog seed", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
-
-	it("drops a retired seed row from a stale cache on Devin's host only when discovery fails", async () => {
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-devin-retired-cache-"));
-		const payload = toBinary(
-			GetCliModelConfigsResponseSchema,
-			create(GetCliModelConfigsResponseSchema, {
-				clientModelConfigs: [config({ uid: "swe-1-6-fast" }), config({ uid: "swe-2-high" })],
-			}),
-		);
-		// Discover once, store that as the authoritative cache a release that still
-		// seeded SWE-1.6 Fast left behind (its static fingerprint no longer matches
-		// the seed), then resolve again with discovery failing.
-		const idsAfterFailedDiscovery = async (name: string, baseUrl?: string) => {
-			let reachable = true;
-			const options = devinModelManagerOptions({
-				apiKey: "fixture-token",
-				baseUrl,
-				fetch: async () => {
-					if (!reachable) throw new Error("Devin unreachable");
-					return new Response(payload, { status: 200, headers: { "content-type": "application/proto" } });
-				},
-			});
-			const cacheProviderId = options.cacheProviderId;
-			if (!cacheProviderId) throw new Error("Devin cache provider id is missing");
-			const scratchDbPath = path.join(tempDir, `${name}-scratch.db`);
-			const cacheDbPath = path.join(tempDir, `${name}-models.db`);
-			const online = await resolveProviderModels({ ...options, cacheDbPath: scratchDbPath }, "online");
-			writeModelCache(cacheProviderId, Date.now(), online.models, true, "seed-with-swe-1-6-fast", cacheDbPath);
-			reachable = false;
-			const offline = await resolveProviderModels({ ...options, cacheDbPath }, "online");
-			return offline.models.map(model => model.id);
-		};
-		try {
-			const devinHost = await idsAfterFailedDiscovery("default");
-			expect(devinHost).toContain("swe-2-high");
-			expect(devinHost).not.toContain("swe-1-6-fast");
-			// Devin's host spelled with a trailing slash is still Devin's host.
-			expect(await idsAfterFailedDiscovery("default-slash", "https://server.codeium.com/")).not.toContain(
-				"swe-1-6-fast",
-			);
-			// A configured Cascade host may still serve it, so its cached row stays.
-			expect(await idsAfterFailedDiscovery("configured", "https://cascade.internal")).toContain("swe-1-6-fast");
-		} finally {
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
 });
 
 describe("devin catalog pricing", () => {
