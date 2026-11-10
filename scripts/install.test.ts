@@ -97,9 +97,11 @@ async function writeExecutable(file: string, content: string): Promise<void> {
 	await fs.chmod(file, 0o755);
 }
 
+/** Runs install.sh with `stubs` (command name → script) shadowing the host's commands. */
 async function runInstall(
 	buildUrl: string,
 	args: string[],
+	stubs: Record<string, string> = {},
 ): Promise<{
 	exitCode: number;
 	stdout: string;
@@ -112,6 +114,7 @@ async function runInstall(
 	const installDir = path.join(dir, "install");
 	await writeExecutable(path.join(binDir, "uname"), '#!/bin/sh\n[ "$1" = "-s" ] && echo Linux || echo x86_64\n');
 	await writeExecutable(path.join(binDir, "ldd"), "#!/bin/sh\necho 'musl libc (x86_64)'\n");
+	for (const name in stubs) await writeExecutable(path.join(binDir, name), stubs[name]);
 	const proc = Bun.spawn(["sh", "scripts/install.sh", ...args], {
 		cwd: repoRoot,
 		env: {
@@ -141,6 +144,15 @@ describe.skipIf(process.platform === "win32")("install.sh binary mode", () => {
 		expect(service.requests[0]).toBe("/api/products/omp/latest/linux-musl-x86_64?channel=stable");
 		expect(result.stdout).toContain("Using version: 1.0.0");
 		expect(await fs.readdir(result.installDir)).toEqual(["omp"]);
+		expect(await Bun.file(path.join(result.installDir, "omp")).text()).toBe(BINARY);
+	});
+
+	test("is the default even when the bun on PATH is too old for a source install", async () => {
+		const service = startService(sha256(BINARY));
+		const oldBun = '#!/bin/sh\ncase "$1" in\n\t-e) printf x64 ;;\n\t*) echo 1.0.0 ;;\nesac\n';
+		const result = await runInstall(service.url, [], { bun: oldBun });
+
+		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 		expect(await Bun.file(path.join(result.installDir, "omp")).text()).toBe(BINARY);
 	});
 
