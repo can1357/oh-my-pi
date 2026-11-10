@@ -10,7 +10,7 @@
 
 - Extension prompts shown from `session_before_*` handlers no longer time out after 30 seconds while the operator is still answering ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
 - A second exit request now skips pending `worktree.onExit` prompts and keeps those worktrees instead of waiting for an answer ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
-- In Tern, a settled task card now shows an agent as running, with its current tool, while it works again after the call ended (revived or woken by an IRC message or hub chat, or still running after a cancel); the row returns to its recorded status when that run ends
+- In Tern, a settled task card now shows an agent as running, with its current tool, while it works again after the call ended (revived or woken by an IRC message or hub chat, or still running after a cancel); the row returns to its recorded status when that run ends ([#18724](https://github.com/can1357/oh-my-pi/pull/18724) by [@matteoantoci](https://github.com/matteoantoci))
 ### Fixed
 
 - On Windows, the bash tool's shell resolves MSYS drive paths (`/c/Users/...`, `/mnt/c/...`) everywhere, so running `/c/.../tool.exe`, `cd /c/...`, `[ -f /c/... ]` and `< /c/...` reach drive C: like they already did for `ls` and other built-in utilities
