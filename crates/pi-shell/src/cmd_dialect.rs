@@ -4,15 +4,28 @@
 //! pi's GNU-style utilities, found before `C:\Windows\System32`'s programs of
 //! the same names, whose options are `/X` switches. A `/X` switch reads to a
 //! GNU utility as an MSYS drive path (`find /c /v ""` walks all of `C:`), so a
-//! command line in the program's own syntax goes to that program instead
-//! ([`crate::bash::Host::defers_to_path`]).
+//! command line written in the program's own syntax goes to that program
+//! instead ([`crate::bash::Host::defers_to_path`]).
 //!
-//! The syntax is decided from the arguments alone: the first is one of the
-//! program's switches, and nothing after it is GNU syntax (an `-option`, or
-//! `find`'s `(`, `)`, `!`). Values of switches that take one are skipped, so
-//! `timeout /T -1` stays cmd's. `find /c -name x` names a GNU expression and
-//! stays GNU. `hostname` has no switches; `fc` and `help` are bash's own
-//! builtins, which shadow the programs in every bash on Windows.
+//! The syntax is decided by markers, tokens only one side writes:
+//!
+//! - a cmd marker is one of the program's switches (`/c`, `/NOBREAK`), anywhere
+//!   on the line, as the programs accept them anywhere;
+//! - a GNU marker is GNU option or expression syntax: `-x`, `--x`, `(`, `)`,
+//!   `!`.
+//!
+//! Any GNU marker makes the line GNU. Otherwise a cmd marker makes it cmd,
+//! unless the line has more operands than the program takes (`timeout 5 sort
+//! /t x` is GNU `timeout` running `sort`). With neither marker it stays GNU:
+//! the shell is bash.
+//!
+//! Whether the GNU reading is valid is never consulted: `find /c` is valid
+//! GNU, a walk of all of `C:`, and still cmd. A cmd line missing a required
+//! operand (`find /c` has no search string) still goes to the program, which
+//! reports its own usage error.
+//!
+//! `hostname` has no switches; `fc` and `help` are bash's own builtins, which
+//! shadow the programs in every bash on Windows.
 
 /// A switch `/NAME`, accepted as any prefix of `NAME` at least `min` letters
 /// long, case-insensitively (`/OFF` for `/OFFLINE`); `value` when the next
@@ -31,84 +44,113 @@ const fn valued(name: &'static str, min: usize) -> Switch {
 	Switch { name, min, value: true }
 }
 
-/// The shadowed programs with `/` switches, as `PROGRAM /?` lists them.
-/// Every program also takes `/?`.
-const PROGRAMS: &[(&str, &[Switch])] = &[
-	("find", &[flag("V", 1), flag("C", 1), flag("N", 1), flag("I", 1), flag("OFFLINE", 3)]),
-	// `/+n` (the column to sort on) is matched apart.
-	("sort", &[
-		flag("REVERSE", 1),
-		valued("LOCALE", 1),
-		valued("MEMORY", 1),
-		valued("RECORD_MAXIMUM", 3),
-		valued("TEMPORARY", 1),
-		valued("OUTPUT", 1),
-	]),
-	("timeout", &[valued("T", 1), flag("NOBREAK", 7)]),
-	("whoami", &[
-		flag("UPN", 3),
-		flag("FQDN", 4),
-		flag("USER", 4),
-		flag("GROUPS", 6),
-		flag("CLAIMS", 6),
-		flag("PRIV", 4),
-		flag("LOGONID", 7),
-		flag("ALL", 3),
-		valued("FO", 2),
-		flag("NH", 2),
-	]),
+/// A shadowed program's cmd grammar, as `PROGRAM /?` gives it. Every
+/// program also takes `/?`.
+struct Program {
+	name:          &'static str,
+	switches:      &'static [Switch],
+	/// `sort`'s `/+n`, the column to sort on.
+	column:        bool,
+	/// Most operands the program takes; `None`: any number (`find`'s files).
+	most_operands: Option<usize>,
+}
+
+const PROGRAMS: &[Program] = &[
+	// `FIND [/V] [/C] [/N] [/I] [/OFF[LINE]] "string" [files…]`
+	Program {
+		name:          "find",
+		switches:      &[flag("V", 1), flag("C", 1), flag("N", 1), flag("I", 1), flag("OFFLINE", 3)],
+		column:        false,
+		most_operands: None,
+	},
+	// `SORT [/R] [/+n] [/M kilobytes] [/L locale] [/REC recordbytes] [file]
+	// [/T dir] [/O file]`
+	Program {
+		name:          "sort",
+		switches:      &[
+			flag("REVERSE", 1),
+			valued("LOCALE", 1),
+			valued("MEMORY", 1),
+			valued("RECORD_MAXIMUM", 3),
+			valued("TEMPORARY", 1),
+			valued("OUTPUT", 1),
+		],
+		column:        true,
+		most_operands: Some(1),
+	},
+	// `TIMEOUT [/T] timeout [/NOBREAK]`
+	Program {
+		name:          "timeout",
+		switches:      &[valued("T", 1), flag("NOBREAK", 7)],
+		column:        false,
+		most_operands: Some(1),
+	},
+	// `WHOAMI [/UPN | /FQDN | /LOGONID | /USER | /GROUPS | /CLAIMS | /PRIV |
+	// /ALL] [/FO format] [/NH]`
+	Program {
+		name:          "whoami",
+		switches:      &[
+			flag("UPN", 3),
+			flag("FQDN", 4),
+			flag("USER", 4),
+			flag("GROUPS", 6),
+			flag("CLAIMS", 6),
+			flag("PRIV", 4),
+			flag("LOGONID", 7),
+			flag("ALL", 3),
+			valued("FO", 2),
+			flag("NH", 2),
+		],
+		column:        false,
+		most_operands: Some(0),
+	},
 ];
+
+impl Program {
+	/// `Some(takes a value)` when `arg` is one of the program's switches,
+	/// `/?`, or `sort`'s `/+n`; `None` otherwise.
+	fn switch(&self, arg: &[u8]) -> Option<bool> {
+		let body = arg.strip_prefix(b"/")?;
+		if body == b"?" {
+			return Some(false);
+		}
+		if let Some(column) = body.strip_prefix(b"+") {
+			return (self.column && !column.is_empty() && column.iter().all(u8::is_ascii_digit))
+				.then_some(false);
+		}
+		self
+			.switches
+			.iter()
+			.find(|s| {
+				body.len() >= s.min
+					&& body.len() <= s.name.len()
+					&& body.eq_ignore_ascii_case(&s.name.as_bytes()[..body.len()])
+			})
+			.map(|s| s.value)
+	}
+}
 
 /// Whether `args` (the arguments after the command name) are written for the
 /// Windows program `name` shadows: see the module documentation.
 pub fn speaks_shadowed_program(name: &[u8], args: &[impl AsRef<[u8]>]) -> bool {
-	let Some(switches) = PROGRAMS
-		.iter()
-		.find(|(program, _)| program.as_bytes() == name)
-		.map(|(_, switches)| *switches)
-	else {
+	let Some(program) = PROGRAMS.iter().find(|p| p.name.as_bytes() == name) else {
 		return false;
 	};
-	if args
-		.first()
-		.is_none_or(|first| switch(switches, first.as_ref()).is_none())
-	{
-		return false;
-	}
+	let (mut switches, mut operands) = (0usize, 0usize);
 	let mut rest = args.iter().map(AsRef::as_ref);
 	while let Some(arg) = rest.next() {
-		match switch(switches, arg) {
-			Some(true) => {
-				rest.next();
+		match program.switch(arg) {
+			Some(takes_value) => {
+				switches += 1;
+				if takes_value {
+					rest.next();
+				}
 			},
-			Some(false) => {},
 			None if is_gnu_syntax(arg) => return false,
-			None => {},
+			None => operands += 1,
 		}
 	}
-	true
-}
-
-/// `Some(takes a value)` when `arg` is one of `switches`, `/?`, or `sort`'s
-/// `/+n`; `None` otherwise.
-fn switch(switches: &[Switch], arg: &[u8]) -> Option<bool> {
-	let body = arg.strip_prefix(b"/")?;
-	if body == b"?" {
-		return Some(false);
-	}
-	if let Some(column) = body.strip_prefix(b"+")
-		&& switches.iter().any(|s| s.name == "REVERSE")
-	{
-		return (!column.is_empty() && column.iter().all(u8::is_ascii_digit)).then_some(false);
-	}
-	switches
-		.iter()
-		.find(|s| {
-			body.len() >= s.min
-				&& body.len() <= s.name.len()
-				&& body.eq_ignore_ascii_case(&s.name.as_bytes()[..body.len()])
-		})
-		.map(|s| s.value)
+	switches > 0 && program.most_operands.is_none_or(|most| operands <= most)
 }
 
 /// GNU option or `find` expression syntax: `-x`, `--x`, `(`, `)`, `!`.
@@ -128,44 +170,53 @@ mod tests {
 	}
 
 	#[test]
-	fn cmd_syntax_goes_to_the_shadowed_program() {
+	fn cmd_markers_without_gnu_markers_go_to_the_shadowed_program() {
 		for line in [
+			// The common shapes in agent sessions.
 			"find /c /v \"\"",
-			"find /I node",
-			"find /off x file.txt",
-			"find /?",
-			// The first argument decides: cmd's `FIND` rejects this at once,
-			// where GNU `find` would list all of `C:`.
+			"find /c chrome",
+			"whoami /groups",
+			// Valid GNU, and still cmd: GNU would list all of `C:`.
 			"find /c",
-			"sort /r",
-			"sort /+3 in.txt",
-			"sort /REC 4096 /o out.txt",
-			"timeout /t 5",
+			// Switches anywhere, as the programs take them.
+			"find BANANA /i f.txt",
+			"find a f.txt /c",
+			"sort data.txt /r",
+			"timeout 5 /nobreak",
+			// Values of valued switches are not markers.
 			"timeout /T -1 /nobreak",
-			"whoami /all",
+			"sort /REC 4096 /o out.txt",
 			"whoami /fo csv /nh",
+			"sort /+3 in.txt",
+			"find /off x f.txt g.txt",
+			"find /?",
 		] {
 			assert!(speaks(line), "{line}");
 		}
 	}
 
 	#[test]
-	fn gnu_syntax_and_paths_stay_with_the_builtin() {
+	fn gnu_markers_extra_operands_and_unmarked_lines_stay_with_the_builtin() {
 		for line in [
-			// A GNU expression after a drive-root start point.
+			// A GNU marker anywhere.
 			"find /c -name x",
 			"find /c ( -name x )",
+			"find /c -x",
+			"sort -r /r",
+			// More operands than the program takes.
+			"timeout 5 sort /t x",
+			"sort a.txt b.txt /r",
+			"whoami /all extra",
+			// No cmd marker: paths and unknown switches are operands.
 			"find /c/Users -name x",
 			"find . -name x",
-			// Not one of the program's switches.
-			"sort /x",
+			"find test",
 			"sort /tmp/data.txt",
+			"sort /x",
 			"sort /+ in.txt",
-			"sort -r /r",
 			"timeout 5 sleep 10",
 			"whoami",
 			"whoami /us",
-			// No switches to shadow.
 			"hostname /a",
 			"ls /c",
 		] {
