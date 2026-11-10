@@ -82,6 +82,17 @@ describe("browser prelude", () => {
 		]);
 	});
 
+	it("names the call that opens a tab when a helper runs on one that is not open", async () => {
+		const session = makeSession();
+		const name = `missing-${crypto.randomUUID()}`;
+		await expect(
+			createBrowserPrelude(session).invoke(
+				{ action: "call", name, chain: [{ method: "title", args: [] }] },
+				{ session, toolCallId: "browser-call-missing" },
+			),
+		).rejects.toThrow(`Tab "${name}" is not alive. Open it first with browser.open({ name: "${name}" }).`);
+	});
+
 	it("gives a direct wait helper the budget its explicit timeout needs (#17617)", async () => {
 		const budgets: number[] = [];
 		spyOn(supervisor, "runInTab").mockImplementation(async (_name, opts) => {
