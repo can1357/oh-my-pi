@@ -112,6 +112,7 @@ import { buildOutputValidator, summarizeValidationFailure } from "../tools/outpu
 import { ToolAbortError } from "../tools/tool-errors";
 import { resetYieldTurnState } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
+import { truncateCodePoints } from "../utils/code-points";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { isMainThread } from "../thread/identity";
 import { runFollowUpTurnOnHome, runSubprocessPlaced } from "../thread/executor-routing";
@@ -3336,9 +3337,12 @@ async function relayA2aWakeTurnOutput(args: {
 	finalizeError: unknown;
 }): Promise<void> {
 	if (wakeTurnFailed(args)) return;
+	// The published answer is capped at the same code-point boundary as the
+	// artifact inline (A2A_ARTIFACT_MAX_CHARS Unicode code points); the plain
+	// final-text fallback below stays uncapped.
 	const answer =
 		args.yielded && args.result?.outputPath
-			? (await Bun.file(args.result.outputPath).text()).slice(0, A2A_ARTIFACT_MAX_CHARS)
+			? truncateCodePoints(await Bun.file(args.result.outputPath).text(), A2A_ARTIFACT_MAX_CHARS)
 			: args.turnText.trim();
 	if (!answer) return;
 	const ids = new Set<string>();

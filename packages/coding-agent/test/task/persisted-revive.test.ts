@@ -1950,6 +1950,66 @@ describe("persisted subagent revival", () => {
 			}
 		});
 
+		it("wake relay published output uses the same code-point cap", async () => {
+			const h = await externalHarness();
+			try {
+				await h.note("req-1");
+				// The wake harness publishes the yielded report inside a JSON
+				// envelope (`{\n  "report": "…"`), so the filler is sized to put
+				// the astral code point exactly at the 100_000th code point of
+				// the *published* text: a UTF-16-unit slice at the cap would cut
+				// the emoji in half and emit an unpaired high surrogate, the
+				// code-point cap keeps the whole 😀 and drops the trailing "z".
+				const envelopePrefixLength = [...JSON.stringify({ report: "" }, null, 2)].length - 3;
+				const fillerLength = A2A_ARTIFACT_MAX_CHARS - envelopePrefixLength - 1;
+				const report = "a".repeat(fillerLength) + "😀" + "z";
+				const expectedPrefix = "a".repeat(fillerLength) + "😀";
+				const localReply = IrcBus.global().wait("Main", { from: h.ref.id }, 5000);
+				await h.finish([externalRecord("req-1"), wakeRecord("Main")], { stopReason: "aborted" }, async () => {
+					h.handle.emit({
+						type: "tool_execution_end",
+						toolCallId: "yield-1",
+						toolName: "yield",
+						result: {
+							content: [{ type: "text", text: "Result submitted." }],
+							details: { status: "success", data: { report } },
+						},
+						isError: false,
+					} as AgentSessionEvent);
+				});
+				const local = await localReply;
+				expect(local?.body).toContain("agent://");
+				await h.called;
+				expect(h.calls).toHaveLength(1);
+				const published = await Bun.file(path.join(path.dirname(h.ref.sessionFile!), `${h.ref.id}.md`)).text();
+				// The published artifact keeps the whole report (the JSON envelope
+				// the schema-less wake harness writes around the yielded data).
+				expect(published).toContain(report);
+				const emitted = h.calls[0]?.params.message.parts[0]?.text;
+				// The emitted answer is the code-point prefix of the published
+				// JSON envelope: it must end in the complete 😀 (not its high
+				// surrogate half) and drop everything after the cap.
+				expect(emitted).toBe(`{\n  "report": "${expectedPrefix}`);
+				expect([...emitted ?? ""]).toHaveLength(A2A_ARTIFACT_MAX_CHARS);
+				expect(emitted).not.toContain("z");
+				// No new unpaired surrogate at the cut (the whole emoji survived).
+				expect(emitted?.endsWith("😀")).toBe(true);
+				for (let index = 0; index < (emitted?.length ?? 0); index++) {
+					const unit = emitted.charCodeAt(index);
+					if (unit >= 0xd800 && unit <= 0xdbff) {
+						const next = emitted.charCodeAt(index + 1);
+						expect(next >= 0xdc00 && next <= 0xdfff).toBe(true);
+						index += 1;
+					} else {
+						expect(unit < 0xdc00 || unit > 0xdfff).toBe(true);
+					}
+				}
+				await settleA2aReplies();
+			} finally {
+				h.server.stop(true);
+			}
+		});
+
 		it("settles the relay without waiting for an unresponsive peer", async () => {
 			const h = await externalHarness(true);
 			try {

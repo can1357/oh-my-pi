@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/a2a/incoming-requests";
 import { type OutgoingRequest, OutgoingRequests } from "@oh-my-pi/pi-coding-agent/a2a/outgoing-requests";
 import {
+	A2A_ARTIFACT_MAX_CHARS,
 	type A2aTask,
 	RPC_ERRORS,
 	TASK_STATE,
@@ -466,6 +467,81 @@ describe("A2A JSON-RPC methods", () => {
 		expect(task.status.state).toBe(TASK_STATE.WORKING);
 		const missing = await rpc(handle, { jsonrpc: "2.0", id: 11, method: "GetTask", params: { id: "nope" } });
 		expect(errorResult(missing.json).code).toBe(RPC_ERRORS.TASK_NOT_FOUND);
+	});
+
+	describe("output artifact cap is Unicode code points", () => {
+		/** Serve a ref whose published output is `text`, then GetTask it as an artifact. */
+		async function artifactFor(text: string): Promise<string> {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-a2a-cap-"));
+			try {
+				const outputPath = path.join(dir, "beta.md");
+				await fs.writeFile(outputPath, text, "utf8");
+				const registry = new FakeRegistry([
+					makeRef({
+						id: "beta",
+						status: "idle",
+						lifecycle: { terminalAt: 1 },
+						history: { outputPath },
+					}),
+				]);
+				const { handle } = startServer({ registry });
+				const { json } = await rpc(handle, { jsonrpc: "2.0", id: 30, method: "GetTask", params: { id: "beta" } });
+				const task = asObject(asObject(json, "response").result, "result") as unknown as A2aTask;
+				const artifacts = task.artifacts as Array<{ artifactId: string; parts: Array<{ text: string }> }>;
+				expect(artifacts).toHaveLength(1);
+				expect(artifacts[0]?.artifactId).toBe("beta:output");
+				return artifacts[0]?.parts[0]?.text ?? "";
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}
+
+		it("artifact cap preserves astral code point at boundary", async () => {
+			const report = "a".repeat(A2A_ARTIFACT_MAX_CHARS - 1) + "😀" + "z";
+			const emitted = await artifactFor(report);
+			// The cut lands exactly at the emoji: the full 😀 survives, "z" is
+			// gone, and no surrogate half-pair was introduced by the slice.
+			expect(emitted).toBe("a".repeat(A2A_ARTIFACT_MAX_CHARS - 1) + "😀");
+			expect([...emitted]).toHaveLength(A2A_ARTIFACT_MAX_CHARS);
+			expect(emitted).not.toContain("z");
+			expect(isWellFormed(emitted)).toBe(true);
+		});
+
+		it("caps ASCII over the limit and keeps under/exact-cap output identical", async () => {
+			// ASCII over cap stays capped at exactly the cap.
+			const over = "x".repeat(A2A_ARTIFACT_MAX_CHARS + 1000);
+			const capped = await artifactFor(over);
+			expect(capped).toBe("x".repeat(A2A_ARTIFACT_MAX_CHARS));
+			// Under and exactly at the cap flow through byte-for-byte.
+			const under = "a".repeat(A2A_ARTIFACT_MAX_CHARS - 1) + "😀";
+			expect(await artifactFor(under)).toBe(under);
+			const exact = "b".repeat(A2A_ARTIFACT_MAX_CHARS);
+			expect(await artifactFor(exact)).toBe(exact);
+		});
+
+		it("keeps exactly the cap of full emoji for all-astral output over the limit", async () => {
+			const emoji = "😀".repeat(A2A_ARTIFACT_MAX_CHARS + 2);
+			const emitted = await artifactFor(emoji);
+			expect([...emitted]).toHaveLength(A2A_ARTIFACT_MAX_CHARS);
+			expect(emitted.endsWith("😀")).toBe(true);
+			expect(isWellFormed(emitted)).toBe(true);
+		});
+
+		function isWellFormed(text: string): boolean {
+			for (let index = 0; index < text.length; index++) {
+				const unit = text.charCodeAt(index);
+				const high = unit >= 0xd800 && unit <= 0xdbff;
+				const low = unit >= 0xdc00 && unit <= 0xdfff;
+				if (high) {
+					const next = text.charCodeAt(index + 1);
+					if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+					index += 1;
+				} else if (low) {
+					return false;
+				}
+			}
+			return true;
+		}
 	});
 
 	it("ListTasks lists the registry with pagination metadata", async () => {

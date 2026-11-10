@@ -19,6 +19,7 @@ import { PerCallModelError } from "../task/model-approval";
 import { SpawnRefusedError } from "../task/spawn-run";
 import { SpawnPendingError } from "../task/spawn-subagent";
 import { StructuredSubagentError } from "../task/structured-subagent";
+import { truncateCodePoints } from "../utils/code-points";
 import type { IncomingRequestsApi } from "./incoming-requests";
 import type { OutgoingRequestsApi } from "./outgoing-requests";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -225,7 +226,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 		: undefined;
 }
 
-/** Largest published output inlined as a task artifact; the rest is a client-side read concern. */
+/** Largest published output inlined as a task artifact, in Unicode code points; the rest is a client-side read concern. */
 export const A2A_ARTIFACT_MAX_CHARS = 100_000;
 
 /**
@@ -253,7 +254,7 @@ export async function attachOutputArtifact(
 			{
 				artifactId: `${task.id}:output`,
 				name: "output",
-				parts: [{ text: text.slice(0, A2A_ARTIFACT_MAX_CHARS) }],
+				parts: [{ text: truncateCodePoints(text, A2A_ARTIFACT_MAX_CHARS) }],
 			},
 		],
 	};
