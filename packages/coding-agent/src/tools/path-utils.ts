@@ -311,6 +311,11 @@ function isInternalUrlPath(filePath: string): boolean {
 	return InternalUrlRouter.instance().canHandle(expandPath(filePath));
 }
 
+/** Whether `part` is an internal URL a search `;` list may name beside a local path. */
+function isMixedSearchListUrl(part: string): boolean {
+	return isInternalUrlPath(part) || InternalUrlRouter.instance().canResolve(part);
+}
+
 /**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths.
@@ -702,6 +707,12 @@ export async function splitDelimitedPathEntry(
 		routedUrlPredicate?: (entry: string) => boolean;
 		/** Let `!glob` exclusion parts sit beside URLs in a `;` list (grep's path syntax). */
 		exclusionParts?: boolean;
+		/**
+		 * Split a `;` list that starts with an internal URL and also names existing
+		 * local paths (`artifact://1;notes.txt`). Search tools opt in. Rewrite tools
+		 * leave this off so a `;` inside one internal URL cannot select an extra file.
+		 */
+		mixedLocalPaths?: boolean;
 	} = {},
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
@@ -713,6 +724,16 @@ export async function splitDelimitedPathEntry(
 		return parts?.every(part => routed(part) || (options.exclusionParts === true && isExclusionPart(part)))
 			? parts
 			: null;
+	}
+	if (options.mixedLocalPaths === true && isInternalUrlPath(normalizedEntry)) {
+		// Before the all-internal branch, which keeps the whole string when any
+		// part is not itself an internal URL. `splitMixedUrlPathList` declines
+		// unless every non-URL part is an existing literal path, so a URL whose
+		// own path contains `;` (`local://report;`) stays one resource.
+		const mixed = await splitMixedUrlPathList(normalizedEntry, cwd, part =>
+			isMixedSearchListUrl(part) || (options.exclusionParts === true && isExclusionPart(part)),
+		);
+		if (mixed && mixed.length > 1) return mixed;
 	}
 	if (isInternalUrlPath(normalizedEntry)) {
 		// A `;` list of internal URLs (`artifact://44;artifact://43`) names
@@ -791,7 +812,7 @@ export async function splitMixedUrlPathList(
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
 	cwd: string,
-	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean } = {},
+	options: { splitter?: PathEntrySplitter; exclusionParts?: boolean; mixedLocalPaths?: boolean } = {},
 ): Promise<string[]> {
 	const expanded: string[] = [];
 	for (const entry of entries) {

@@ -277,6 +277,43 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toContain("beta needle");
 	});
 
+	it("searches a mixed internal URL and local path semicolon list", async () => {
+		await Bun.write(path.join(artifactsDir, "1.python.log"), "artifact needle\n");
+		await Bun.write(path.join(tmpDir, "notes.txt"), "local needle\n");
+
+		const text = getResultText(
+			await new GrepTool(createSession()).execute("mixed-url-local", {
+				pattern: "needle",
+				path: "artifact://1;notes.txt",
+			}),
+		);
+
+		// Both targets are searched — the list is not one artifact URI.
+		expect(text).toContain("artifact://1");
+		expect(text).toContain("artifact needle");
+		expect(text).toContain("notes.txt");
+		expect(text).toContain("local needle");
+		expect(text).not.toContain("artifact://1;notes.txt");
+	});
+
+	it("globs a mixed internal URL and local path semicolon list", async () => {
+		const localRoot = path.join(artifactsDir, "local");
+		await fs.mkdir(localRoot, { recursive: true });
+		await Bun.write(path.join(localRoot, "PLAN.md"), "# Plan\n");
+		await Bun.write(path.join(tmpDir, "notes.txt"), "local\n");
+		LocalProtocolHandler.setOverride({ getArtifactsDir: () => artifactsDir, getSessionId: () => "session" });
+
+		const text = getResultText(
+			await new GlobTool(createSession()).execute("glob-mixed-url-local", {
+				path: "local://PLAN.md;notes.txt",
+			}),
+		);
+
+		expect(text).toContain("PLAN.md");
+		expect(text).toContain("notes.txt");
+		expect(text).not.toContain("local://PLAN.md;notes.txt");
+	});
+
 	it("keeps a single internal URL whose name ends in a semicolon whole", async () => {
 		const localRoot = path.join(artifactsDir, "local");
 		await fs.mkdir(localRoot, { recursive: true });

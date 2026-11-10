@@ -674,6 +674,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
 			const expandedEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
 				exclusionParts: true,
+				mixedLocalPaths: true,
 			});
 			// `!glob` entries exclude; the rest are what to search (all of cwd when only exclusions were given).
 			// A file or folder whose name really starts with `!` is still searched.
