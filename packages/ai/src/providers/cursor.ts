@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
+import * as path from "node:path";
 import { cursorModelParameters } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
@@ -45,6 +46,8 @@ import {
 	CursorRuleSource,
 	CursorRuleTypeGlobalSchema,
 	CursorRuleTypeSchema,
+	CustomSubagentPermissionMode,
+	CustomSubagentSchema,
 	DeleteErrorSchema,
 	DeleteRejectedSchema,
 	DeleteResultSchema,
@@ -121,6 +124,7 @@ import {
 	ReadSuccessSchema,
 	RecordScreenFailureSchema,
 	RecordScreenResultSchema,
+	RequestContextEnvSchema,
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
@@ -129,6 +133,7 @@ import {
 	ResumeActionSchema,
 	SelectedContextSchema,
 	SelectedImageSchema,
+	SelectedVideoSchema,
 	SetBlobResultSchema,
 	ShellAllowlistPrecheckResultSchema,
 	type ShellArgs,
@@ -210,6 +215,7 @@ import type {
 	CursorTodoSnapshotItem,
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
+	CursorVideoAttachment,
 	ImageContent,
 	Message,
 	Model,
@@ -462,6 +468,8 @@ export interface CursorOptions extends StreamOptions {
 	wireModelId?: string;
 	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
+	/** Videos the active user message carries; only Gemini models read them. */
+	videos?: readonly CursorVideoAttachment[];
 }
 
 type CursorWireMode = "normalized" | "discovered";
@@ -3025,6 +3033,7 @@ async function runExecServerMessage(
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
 	if (execCase === "requestContextArgs") {
+		const artifactsFolder = execHandlers?.artifactsFolder?.();
 		const requestContext = create(RequestContextSchema, {
 			rules: requestContextRules,
 			repositoryInfo: [],
@@ -3033,7 +3042,19 @@ async function runExecServerMessage(
 			projectLayouts: [],
 			mcpInstructions: [],
 			fileContents: {},
-			customSubagents: [],
+			...(artifactsFolder ? { env: create(RequestContextEnvSchema, { artifactsFolder }) } : {}),
+			customSubagents: (execHandlers?.customSubagents?.() ?? []).map(subagent =>
+				create(CustomSubagentSchema, {
+					name: subagent.name,
+					description: subagent.description,
+					model: subagent.model,
+					prompt: subagent.prompt,
+					permissionMode: subagent.readonly
+						? CustomSubagentPermissionMode.READONLY
+						: CustomSubagentPermissionMode.DEFAULT,
+					forceDefaultModel: subagent.forceDefaultModel === true,
+				}),
+			),
 		});
 
 		const requestContextResult = create(RequestContextResultSchema, {
@@ -3839,6 +3860,11 @@ async function runExecServerMessage(
 		}
 		case "subagentArgs": {
 			const args = execMsg.message.value;
+			log("exec", "subagent", {
+				subagentType: args.subagentType,
+				modelId: args.modelId,
+				videos: args.selectedContext?.selectedVideos.map(video => video.path),
+			});
 			const subagent = execHandlers?.subagent?.bind(execHandlers);
 			if (!subagent) {
 				log("exec", "subagentRejected", { subagentType: args.subagentType });
@@ -5875,7 +5901,18 @@ async function answerSubagent(
 	let outcome: CursorSubagentOutcome | undefined;
 	let failure = "";
 	try {
-		outcome = await handler({ toolCallId, subagentType: args.subagentType, prompt: args.prompt, signal });
+		const videos = (args.selectedContext?.selectedVideos ?? []).map(video => ({
+			path: video.path,
+			mimeType: video.mimeType,
+		}));
+		outcome = await handler({
+			toolCallId,
+			subagentType: args.subagentType,
+			prompt: args.prompt,
+			...(args.modelId ? { modelId: args.modelId } : {}),
+			...(videos.length > 0 ? { videos } : {}),
+			signal,
+		});
 	} catch (error) {
 		failure = error instanceof Error ? error.message : String(error);
 	} finally {
@@ -7258,15 +7295,25 @@ function createCursorUserMessage(
 	content: string | (TextContent | ImageContent)[],
 	text: string,
 	messageId = crypto.randomUUID(),
+	videos: readonly CursorVideoAttachment[] = [],
 ) {
 	const images = typeof content === "string" ? [] : extractImages(content);
 	return create(UserMessageSchema, {
 		text,
 		messageId,
-		...(images.length > 0
+		...(images.length > 0 || videos.length > 0
 			? {
 					selectedContext: create(SelectedContextSchema, {
 						selectedImages: images,
+						selectedVideos: videos.map(video =>
+							create(SelectedVideoSchema, {
+								uuid: crypto.randomUUID(),
+								path: video.path,
+								filename: path.basename(video.path),
+								mimeType: video.mimeType,
+								dataOrBlobId: { case: "data", value: video.data },
+							}),
+						),
 					}),
 				}
 			: {}),
@@ -7462,7 +7509,7 @@ async function buildGrpcRequestForWireMode(
 				? {
 						case: "userMessageAction",
 						value: create(UserMessageActionSchema, {
-							userMessage: createCursorUserMessage(userContent, userText),
+							userMessage: createCursorUserMessage(userContent, userText, undefined, options?.videos),
 						}),
 					}
 				: {

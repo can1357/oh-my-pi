@@ -91,6 +91,13 @@ export enum CursorRuleSource {
 	USER = 2,
 }
 
+/** Cursor agent enum CustomSubagentPermissionMode. */
+export enum CustomSubagentPermissionMode {
+	UNSPECIFIED = 0,
+	DEFAULT = 1,
+	READONLY = 2,
+}
+
 /** Cursor agent enum DegradationStatus. */
 export enum DegradationStatus {
 	UNSPECIFIED = 0,
@@ -1781,6 +1788,7 @@ export interface CustomSubagent extends ProtoMessage {
 	model: string;
 	prompt: string;
 	permissionMode: number;
+	forceDefaultModel: boolean;
 }
 
 export const CustomSubagentSchema: MessageCodec<CustomSubagent> = pb<CustomSubagent>("agent.v1.CustomSubagent", [
@@ -1791,6 +1799,7 @@ export const CustomSubagentSchema: MessageCodec<CustomSubagent> = pb<CustomSubag
 	{ no: 5, name: "model", kind: "string" },
 	{ no: 6, name: "prompt", kind: "string" },
 	{ no: 7, name: "permissionMode", kind: "int32" },
+	{ no: 13, name: "forceDefaultModel", kind: "bool" },
 ]);
 
 /** Cursor agent message agent.v1.DebugModeConfig. */
@@ -6018,6 +6027,7 @@ export interface RequestContextEnv extends ProtoMessage {
 	timeZone: string;
 	projectFolder: string;
 	agentTranscriptsFolder: string;
+	artifactsFolder?: string;
 }
 
 export const RequestContextEnvSchema: MessageCodec<RequestContextEnv> = pb<RequestContextEnv>("agent.v1.RequestContextEnv", [
@@ -6031,6 +6041,7 @@ export const RequestContextEnvSchema: MessageCodec<RequestContextEnv> = pb<Reque
 	{ no: 10, name: "timeZone", kind: "string" },
 	{ no: 11, name: "projectFolder", kind: "string" },
 	{ no: 12, name: "agentTranscriptsFolder", kind: "string" },
+	{ no: 13, name: "artifactsFolder", kind: "string", optional: true },
 ]);
 
 /** Cursor agent message agent.v1.RequestContextError. */
@@ -6244,6 +6255,7 @@ export interface SelectedContext extends ProtoMessage {
 	gitPrDiffSelections: SelectedGitPRDiffSelection[];
 	selectedPullRequests: SelectedPullRequest[];
 	selectedSubagents: SelectedSubagent[];
+	selectedVideos: SelectedVideo[];
 }
 
 export const SelectedContextSchema: MessageCodec<SelectedContext> = pb<SelectedContext>("agent.v1.SelectedContext", [
@@ -6269,6 +6281,7 @@ export const SelectedContextSchema: MessageCodec<SelectedContext> = pb<SelectedC
 	{ no: 20, name: "gitPrDiffSelections", kind: "message", T: () => SelectedGitPRDiffSelectionSchema, repeat: true },
 	{ no: 21, name: "selectedPullRequests", kind: "message", T: () => SelectedPullRequestSchema, repeat: true },
 	{ no: 22, name: "selectedSubagents", kind: "message", T: () => SelectedSubagentSchema, repeat: true },
+	{ no: 23, name: "selectedVideos", kind: "message", T: () => SelectedVideoSchema, repeat: true },
 ]);
 
 /** Cursor agent message agent.v1.SelectedCursorCommand. */
@@ -6534,6 +6547,37 @@ export const SelectedUIElementSchema: MessageCodec<SelectedUIElement> = pb<Selec
 	{ no: 4, name: "extra", kind: "string" },
 	{ no: 5, name: "component", kind: "string", optional: true },
 	{ no: 6, name: "componentPropsJson", kind: "string", optional: true },
+]);
+
+/** Cursor agent message agent.v1.SelectedVideo. */
+export interface SelectedVideo extends ProtoMessage {
+	uuid: string;
+	path: string;
+	fps?: number;
+	mimeType: string;
+	filename: string;
+	materializeToFilesystem: boolean;
+	dataOrBlobId:
+		| { case: undefined; value?: undefined }
+		| { case: "blobId"; value: Uint8Array }
+		| { case: "data"; value: Uint8Array };
+}
+
+export const SelectedVideoSchema: MessageCodec<SelectedVideo> = pb<SelectedVideo>("agent.v1.SelectedVideo", [
+	{ no: 2, name: "uuid", kind: "string" },
+	{ no: 3, name: "path", kind: "string" },
+	{ no: 4, name: "fps", kind: "float", optional: true },
+	{ no: 7, name: "mimeType", kind: "string" },
+	{ no: 10, name: "filename", kind: "string" },
+	{ no: 12, name: "materializeToFilesystem", kind: "bool" },
+	{
+		kind: "oneof",
+		name: "dataOrBlobId",
+		variants: [
+			{ no: 1, name: "blobId", kind: "bytes" },
+			{ no: 8, name: "data", kind: "bytes" },
+		],
+	},
 ]);
 
 /** Cursor agent message agent.v1.SemSearchToolArgs. */
@@ -7519,13 +7563,17 @@ export const StopRequestResponseSchema: MessageCodec<StopRequestResponse> = pb<S
 export interface SubagentArgs extends ProtoMessage {
 	toolCallId: string;
 	subagentType: string;
+	modelId: string;
 	prompt: string;
+	selectedContext?: SelectedContext;
 }
 
 export const SubagentArgsSchema: MessageCodec<SubagentArgs> = pb<SubagentArgs>("agent.v1.SubagentArgs", [
 	{ no: 1, name: "toolCallId", kind: "string" },
 	{ no: 2, name: "subagentType", kind: "string" },
+	{ no: 3, name: "modelId", kind: "string" },
 	{ no: 4, name: "prompt", kind: "string" },
+	{ no: 17, name: "selectedContext", kind: "message", T: () => SelectedContextSchema },
 ]);
 
 /** Cursor agent message agent.v1.SubagentAwaitArgs. */

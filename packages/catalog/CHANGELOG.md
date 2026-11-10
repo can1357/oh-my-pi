@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Cursor proto fields for video attachments and host-run subagents: `SelectedVideo` and `SelectedContext.selected_videos`, `SubagentArgs.model_id` and `selected_context`, `RequestContextEnv.artifacts_folder`, `CustomSubagent.force_default_model`
+
 ### Fixed
 
 - Morph (`api.morphllm.com`) requests now send `x-session-id`, keeping a conversation on the worker that holds its prompt cache ([#18704](https://github.com/can1357/oh-my-pi/pull/18704) by [@wolfiesch](https://github.com/wolfiesch))

@@ -14,6 +14,8 @@ import {
 	validateAgentToolArguments,
 } from "@oh-my-pi/pi-agent-core";
 import type {
+	CursorAttachedVideo,
+	CursorCustomSubagent,
 	CursorExecFrameContext,
 	CursorMcpCall,
 	CursorMcpResource,
@@ -24,6 +26,7 @@ import type {
 	CursorSubagentCall,
 	CursorSubagentOutcome,
 	CursorTodoSnapshot,
+	CursorVideoAttachment,
 	CursorExecHandlers as ICursorExecHandlers,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
@@ -42,6 +45,7 @@ import {
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import cursorVideoReviewPrompt from "./prompts/system/cursor-video-review.md" with { type: "text" };
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -167,6 +171,87 @@ interface CursorExecBridgeOptions {
 	 * which is indistinguishable from a server that advertises nothing.
 	 */
 	mcpResources?: CursorMcpResourceAdapter;
+	/**
+	 * Run Cursor's `videoReview` subagent: a video model reads the videos and
+	 * answers the prompt; the returned text is the subagent's report. Without
+	 * it, or without {@link getArtifactsDir}, the type is not advertised and
+	 * Cursor refuses it.
+	 */
+	reviewVideos?: (request: CursorVideoReviewRequest) => Promise<string>;
+	/** The session's artifacts directory: Cursor lets `Task` attach files from under it. */
+	getArtifactsDir?: () => string | undefined;
+}
+
+/** One `videoReview` run: {@link CursorExecBridgeOptions.reviewVideos} sends it to the video model. */
+export interface CursorVideoReviewRequest {
+	modelId: string;
+	systemPrompt: string;
+	prompt: string;
+	videos: CursorVideoAttachment[];
+	signal?: AbortSignal;
+}
+
+const VIDEO_REVIEW_SUBAGENT = "videoReview";
+/** The model Cursor's own `videoReview` runs on. */
+const VIDEO_REVIEW_MODEL = "gemini-3.1-pro";
+/** Cursor's limits for the videos a subagent reads inline. */
+const MAX_REVIEW_VIDEOS = 5;
+const MAX_REVIEW_VIDEO_BYTES = 35 * 1024 * 1024;
+
+/** The videos Cursor attached to a `videoReview` call, read within Cursor's count and size limits. */
+async function readReviewVideos(attached: readonly CursorAttachedVideo[]): Promise<CursorVideoAttachment[]> {
+	const videos = attached.filter(video => video.mimeType.startsWith("video/"));
+	if (videos.length === 0) {
+		throw new Error(`${VIDEO_REVIEW_SUBAGENT} needs at least one video in file_attachments`);
+	}
+	if (videos.length > MAX_REVIEW_VIDEOS) {
+		throw new Error(`${VIDEO_REVIEW_SUBAGENT} takes at most ${MAX_REVIEW_VIDEOS} videos`);
+	}
+	const sizes = await Promise.all(videos.map(async video => (await fs.promises.stat(video.path)).size));
+	if (sizes.reduce((total, size) => total + size, 0) > MAX_REVIEW_VIDEO_BYTES) {
+		throw new Error(`Videos exceed ${MAX_REVIEW_VIDEO_BYTES / 1024 / 1024} MB in total`);
+	}
+	return await Promise.all(videos.map(async video => ({ ...video, data: await Bun.file(video.path).bytes() })));
+}
+
+/**
+ * `videoReview`: the video model's answer is the subagent's report. A module
+ * function, not a `#private` method: the glyph codec calls handlers with its
+ * Proxy as `this`.
+ */
+async function reviewCursorVideos(
+	options: CursorExecBridgeOptions,
+	call: CursorSubagentCall,
+	reviewVideos: NonNullable<CursorExecBridgeOptions["reviewVideos"]>,
+): Promise<CursorSubagentOutcome> {
+	const { toolCallId } = call;
+	options.emitEvent?.({
+		type: "tool_execution_start",
+		toolCallId,
+		toolName: "task",
+		args: { agent: VIDEO_REVIEW_SUBAGENT, task: call.prompt },
+	});
+	let result: AgentToolResult<unknown>;
+	let report: string | undefined;
+	try {
+		report = await reviewVideos({
+			modelId: call.modelId ?? VIDEO_REVIEW_MODEL,
+			systemPrompt: cursorVideoReviewPrompt,
+			prompt: call.prompt,
+			videos: await readReviewVideos(call.videos ?? []),
+			signal: call.signal,
+		});
+		result = { content: [{ type: "text", text: report }], details: undefined };
+	} catch (error) {
+		result = buildToolErrorResult(error instanceof Error ? error.message : String(error));
+	}
+	const isError = report === undefined;
+	options.emitEvent?.({ type: "tool_execution_end", toolCallId, toolName: "task", result, isError });
+	return {
+		toolResult: createToolResultMessage(toolCallId, "task", result, isError),
+		finalMessage: report,
+		background: false,
+	};
 }
 
 /**
@@ -1172,10 +1257,35 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		return result;
 	}
 
+	/** Folder Cursor lets `Task` attach files from; set only while `videoReview` can run. */
+	artifactsFolder(): string | undefined {
+		return this.options.reviewVideos ? this.options.getArtifactsDir?.() : undefined;
+	}
+
+	/** `videoReview`, advertised once there is a folder its videos can come from. */
+	customSubagents(): CursorCustomSubagent[] {
+		const folder = this.artifactsFolder();
+		if (!folder) return [];
+		return [
+			{
+				name: VIDEO_REVIEW_SUBAGENT,
+				description:
+					`Watch videos with a video model (${VIDEO_REVIEW_MODEL}) and answer questions about them: picture, on-screen text, speech, music and sound. ` +
+					`Pass the video files in file_attachments: up to ${MAX_REVIEW_VIDEOS} videos, ${MAX_REVIEW_VIDEO_BYTES / 1024 / 1024} MB in total. ` +
+					`Cursor accepts only files under ${folder}, so copy or download the user's video there first (create the folder if missing). ` +
+					"Say in the prompt what to look or listen for.",
+				model: VIDEO_REVIEW_MODEL,
+				prompt: cursorVideoReviewPrompt,
+				readonly: true,
+				forceDefaultModel: true,
+			},
+		];
+	}
+
 	/**
 	 * Cursor's native `Task`, run on the session's `task` tool. Cursor's
-	 * `explore` maps to the read-only `scout`; every other type runs the
-	 * session's default agent.
+	 * `explore` maps to the read-only `scout`; `videoReview` goes to the video
+	 * model; every other type runs the session's default agent.
 	 *
 	 * Cursor models treat `Task` as blocking and end the turn when it returns
 	 * without a report, so a spawn `async.enabled` backgrounded is awaited here.
@@ -1183,6 +1293,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * the call is aborted stays a background job that {@link subagentAwait} reads.
 	 */
 	async subagent(call: CursorSubagentCall): Promise<CursorSubagentOutcome> {
+		const reviewVideos = this.options.reviewVideos;
+		if (reviewVideos && call.subagentType === VIDEO_REVIEW_SUBAGENT) {
+			return await reviewCursorVideos(this.options, call, reviewVideos);
+		}
 		const toolResult = await executeTool(
 			this.options,
 			"task",

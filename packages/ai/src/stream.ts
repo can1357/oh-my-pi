@@ -2326,6 +2326,7 @@ function mapOptionsForApi<TApi extends Api>(
 				execHandlers,
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
+				videos: options?.cursorVideos,
 				wireModelId: resolveWireModelId(cursorModel, effort),
 			});
 		}

@@ -836,6 +836,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	cursorOnToolResult?: CursorToolResultHandler;
 	/** The caller's client runs every tool: Cursor offers them all as MCP tools and hands each call off to it. */
 	cursorExternalToolExecutor?: boolean;
+	/** Videos the Cursor request's user message carries; only Gemini models read them. */
+	cursorVideos?: readonly CursorVideoAttachment[];
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take
@@ -1469,7 +1471,34 @@ export interface CursorSubagentCall {
 	/** Cursor's subagent type, e.g. `explore` or `generalPurpose`. */
 	subagentType: string;
 	prompt: string;
+	/** The model Cursor picked for the subagent type, when it names one. */
+	modelId?: string;
+	/** Videos `Task` attached (`file_attachments`); Cursor forwards only paths under a trusted folder. */
+	videos?: CursorAttachedVideo[];
 	signal?: AbortSignal;
+}
+
+/** A video file Cursor attached to a `Task` call, by path. */
+export interface CursorAttachedVideo {
+	path: string;
+	mimeType: string;
+}
+
+/** A video a Cursor request sends in its user message. Cursor reads videos only on Gemini models. */
+export interface CursorVideoAttachment extends CursorAttachedVideo {
+	data: Uint8Array;
+}
+
+/** A subagent type the host runs itself, advertised so Cursor's `Task` accepts it. */
+export interface CursorCustomSubagent {
+	name: string;
+	description: string;
+	/** Model the subagent runs on; Cursor sends it back as {@link CursorSubagentCall.modelId}. */
+	model: string;
+	prompt: string;
+	readonly?: boolean;
+	/** Keep {@link model} even when the caller asks for another. */
+	forceDefaultModel?: boolean;
 }
 
 export interface CursorSubagentOutcome {
@@ -1679,6 +1708,13 @@ export interface CursorExecHandlers {
 	 */
 	subagent?: (call: CursorSubagentCall) => Promise<CursorSubagentOutcome>;
 	subagentAwait?: (call: CursorSubagentAwaitCall) => Promise<CursorSubagentAwaitOutcome>;
+	/** Subagent types {@link subagent} runs beyond Cursor's built-ins; `Task` refuses any type not advertised. */
+	customSubagents?: () => readonly CursorCustomSubagent[];
+	/**
+	 * Folder whose files `Task` may attach (`file_attachments`). Cursor refuses
+	 * any other path the user did not attach to the conversation.
+	 */
+	artifactsFolder?: () => string | undefined;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	/**

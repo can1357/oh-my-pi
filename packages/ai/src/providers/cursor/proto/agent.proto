@@ -2572,6 +2572,8 @@ message RequestContextEnv {
    string project_folder = 11;
    // Folder where agent conversation transcripts are stored
    string agent_transcripts_folder = 12;
+   // Folder whose files `Task` may attach (file_attachments) without the user attaching them
+   optional string artifacts_folder = 13;
 }
 
 message DebugModeConfig {
@@ -2852,6 +2854,21 @@ message SelectedContext {
    repeated SelectedGitPRDiffSelection git_pr_diff_selections = 20;
    repeated SelectedPullRequest selected_pull_requests = 21;
    repeated SelectedSubagent selected_subagents = 22;
+   repeated SelectedVideo selected_videos = 23;
+}
+
+// A video the user message carries; Cursor reads it only on Gemini models.
+message SelectedVideo {
+   oneof data_or_blob_id {
+      bytes blob_id = 1;
+      bytes data = 8;
+   }
+   string uuid = 2;
+   string path = 3;
+   optional float fps = 4;
+   string mime_type = 7;
+   string filename = 10;
+   bool materialize_to_filesystem = 12;
 }
 
 // InvocationContext represents the context from the external app/integration that triggered this agent request.
@@ -3201,6 +3218,8 @@ message CustomSubagent {
    string prompt = 6;
    // default permission mode for subagent execution
    int32 permission_mode = 7;
+   // run on `model` even when the caller asks for another
+   bool force_default_model = 13;
 }
 
 message SwitchModeArgs {
@@ -4057,7 +4076,9 @@ enum ForceBackgroundSubagentStatus {
 message SubagentArgs {
    string tool_call_id = 1;
    string subagent_type = 2;
+   string model_id = 3;
    string prompt = 4;
+   SelectedContext selected_context = 17;
 }
 
 message SubagentSuccess {

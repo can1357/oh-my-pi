@@ -28,7 +28,7 @@ import {
 import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import type { AsyncJobManagerApi } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
+import { CursorExecHandlers, type CursorVideoReviewRequest } from "@oh-my-pi/pi-coding-agent/cursor";
 import { registerArtifactsDir } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import {
 	bridgeToolMap,
@@ -2882,5 +2882,86 @@ describe("CursorExecHandlers native Task", () => {
 
 		expect(outcome).toMatchObject({ agentId: "job-1", finalMessage: "background report", background: false });
 		expect(consumed).toEqual(["job-1"]);
+	});
+});
+
+describe("CursorExecHandlers videoReview", () => {
+	let artifacts: string;
+
+	beforeEach(async () => {
+		artifacts = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-video-review-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(artifacts);
+	});
+
+	// The provider reaches the handlers through the glyph codec's Proxy, which calls them with the proxy as `this`.
+	const videoHandlers = (reviewVideos: (request: CursorVideoReviewRequest) => Promise<string>) =>
+		new Proxy(
+			new CursorExecHandlers({ cwd: ".", tools: new Map(), reviewVideos, getArtifactsDir: () => artifacts }),
+			{},
+		);
+
+	it("advertises videoReview with its folder only while a video model can run it", () => {
+		const handlers = videoHandlers(async () => "");
+		expect(handlers.artifactsFolder()).toBe(artifacts);
+		const [subagent, ...rest] = handlers.customSubagents();
+		expect(rest).toEqual([]);
+		expect(subagent).toMatchObject({ name: "videoReview", model: "gemini-3.1-pro", readonly: true });
+		expect(subagent?.description).toContain(artifacts);
+
+		const withoutModel = new CursorExecHandlers({ cwd: ".", tools: new Map(), getArtifactsDir: () => artifacts });
+		expect(withoutModel.customSubagents()).toEqual([]);
+		expect(withoutModel.artifactsFolder()).toBeUndefined();
+		const withoutFolder = new CursorExecHandlers({ cwd: ".", tools: new Map(), reviewVideos: async () => "" });
+		expect(withoutFolder.customSubagents()).toEqual([]);
+	});
+
+	it("sends the attached videos to the video model and reports its answer", async () => {
+		const videoPath = path.join(artifacts, "clip.mp4");
+		await Bun.write(videoPath, Uint8Array.of(7, 8, 9));
+		const requests: CursorVideoReviewRequest[] = [];
+		const outcome = await videoHandlers(async request => {
+			requests.push(request);
+			return "00:01 a red ball bounces; a beep plays throughout.";
+		}).subagent({
+			toolCallId: "task-1",
+			subagentType: "videoReview",
+			prompt: "What happens?",
+			modelId: "gemini-3.1-pro",
+			videos: [{ path: videoPath, mimeType: "video/mp4" }],
+		});
+
+		expect(requests).toHaveLength(1);
+		expect(requests[0]).toMatchObject({ modelId: "gemini-3.1-pro", prompt: "What happens?" });
+		expect(requests[0]?.videos.map(video => ({ ...video, data: Array.from(video.data) }))).toEqual([
+			{ path: videoPath, mimeType: "video/mp4", data: [7, 8, 9] },
+		]);
+		expect(outcome.finalMessage).toBe("00:01 a red ball bounces; a beep plays throughout.");
+		expect(outcome.toolResult).toMatchObject({ toolCallId: "task-1", toolName: "task", isError: false });
+	});
+
+	it("refuses a call with no video or past Cursor's size limit without asking the model", async () => {
+		let asked = false;
+		const handlers = videoHandlers(async () => {
+			asked = true;
+			return "";
+		});
+		const call = { toolCallId: "task-2", subagentType: "videoReview", prompt: "What happens?" };
+
+		const imageOnly = await handlers.subagent({
+			...call,
+			videos: [{ path: path.join(artifacts, "shot.png"), mimeType: "image/png" }],
+		});
+		expect(imageOnly.toolResult.isError).toBe(true);
+		expect(imageOnly.finalMessage).toBeUndefined();
+
+		const bigPath = path.join(artifacts, "big.mp4");
+		await Bun.write(bigPath, "");
+		await fs.truncate(bigPath, 36 * 1024 * 1024);
+		const tooBig = await handlers.subagent({ ...call, videos: [{ path: bigPath, mimeType: "video/mp4" }] });
+		expect(tooBig.toolResult.isError).toBe(true);
+		expect(asked).toBe(false);
 	});
 });

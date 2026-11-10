@@ -12,17 +12,18 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type {
-	Context,
-	CredentialDisabledEvent,
+import {
+	type Context,
+	type CredentialDisabledEvent,
+	completeSimple,
 	Effort,
-	Message,
-	Model,
-	ModelUsageHealth,
-	ProviderSessionState,
-	ServiceTier,
-	ServiceTierByFamily,
-	SimpleStreamOptions,
+	type Message,
+	type Model,
+	type ModelUsageHealth,
+	type ProviderSessionState,
+	type ServiceTier,
+	type ServiceTierByFamily,
+	type SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
@@ -4176,6 +4177,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(toolSession.isToolActive?.("write") === true &&
 					toolRegistry.has("write") &&
 					toolSession.deviceOnlyWrite !== true),
+			getArtifactsDir: () => sessionManager.getArtifactsDir() ?? undefined,
+			reviewVideos: async ({ modelId, systemPrompt, prompt, videos, signal }) => {
+				const reviewModel = modelRegistry.find("cursor", modelId);
+				if (!reviewModel) throw new Error(`Cursor model ${modelId} is not available`);
+				const sessionId = sessionManager.getSessionId();
+				const response = await completeSimple(
+					reviewModel,
+					{ systemPrompt: [systemPrompt], messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+					{
+						apiKey: modelRegistry.resolver(reviewModel, sessionId),
+						sessionId,
+						reasoning: Effort.High,
+						cursorVideos: videos,
+						signal,
+					},
+				);
+				if (response.stopReason === "error" || response.stopReason === "aborted") {
+					throw new Error(response.errorMessage ?? `Video review ${response.stopReason}`);
+				}
+				return response.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+			},
 		});
 
 		// Resolve the live inline-descriptors setting against the active model.

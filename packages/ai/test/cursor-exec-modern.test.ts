@@ -7,7 +7,12 @@ import {
 	processInteractionUpdate,
 	type ToolCallState,
 } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { AssistantMessage, CursorExecHandlers, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	CursorExecHandlers,
+	CursorSubagentCall,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
@@ -30,6 +35,7 @@ import {
 	ConversationStateStructureSchema,
 	ConversationTokenDetailsSchema,
 	type CursorRule,
+	CustomSubagentPermissionMode,
 	type ExecServerMessage,
 	ExecServerMessageSchema,
 	ExecuteHookArgsSchema,
@@ -59,6 +65,8 @@ import {
 	ReadMcpResourceExecArgsSchema,
 	RecordScreenArgsSchema,
 	RequestContextArgsSchema,
+	SelectedContextSchema,
+	SelectedVideoSchema,
 	ShellAllowlistPrecheckArgsSchema,
 	ShellArgsSchema,
 	SmartModeClassifierArgsSchema,
@@ -234,6 +242,51 @@ describe("Cursor requestContext rules", () => {
 		expect(rules).toHaveLength(2);
 		expect(rules[1]?.content).toContain(canary);
 		expect(rules[1]?.type?.type.case).toBe("global");
+	});
+
+	const requestContextFor = async (execHandlers?: CursorExecHandlers) => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "requestContextArgs", value: create(RequestContextArgsSchema, {}) }),
+			{ execHandlers },
+		);
+		const result = soleResult(frames);
+		if (result.case !== "requestContextResult" || result.value.result.case !== "success") {
+			throw new Error("expected a successful requestContextResult");
+		}
+		return result.value.result.value.requestContext;
+	};
+
+	it("advertises the host's own subagent types and the folder Task may attach from", async () => {
+		const requestContext = await requestContextFor({
+			customSubagents: () => [
+				{
+					name: "videoReview",
+					description: "Watch videos",
+					model: "gemini-3.1-pro",
+					prompt: "You watch videos.",
+					readonly: true,
+					forceDefaultModel: true,
+				},
+			],
+			artifactsFolder: () => "/work/artifacts",
+		});
+		expect(requestContext?.customSubagents).toEqual([
+			expect.objectContaining({
+				name: "videoReview",
+				description: "Watch videos",
+				model: "gemini-3.1-pro",
+				prompt: "You watch videos.",
+				permissionMode: CustomSubagentPermissionMode.READONLY,
+				forceDefaultModel: true,
+			}),
+		]);
+		expect(requestContext?.env?.artifactsFolder).toBe("/work/artifacts");
+	});
+
+	it("sends no environment and no custom subagents when the host has none", async () => {
+		const requestContext = await requestContextFor();
+		expect(requestContext?.customSubagents).toEqual([]);
+		expect(requestContext?.env).toBeUndefined();
 	});
 });
 
@@ -654,6 +707,41 @@ describe("Cursor native Task runs on the host's subagents", () => {
 		const block = output.content.find(item => item.type === "toolCall");
 		expect(block?.type === "toolCall" && block.name).toBe("task");
 		expect(results.map(result => result.toolCallId)).toEqual(["c1"]);
+	});
+
+	it("hands the handler the model Cursor picked and the videos Task attached", async () => {
+		const calls: CursorSubagentCall[] = [];
+		await dispatchExec(
+			buildExecMessage({
+				case: "subagentArgs",
+				value: create(SubagentArgsSchema, {
+					toolCallId: "c1",
+					subagentType: "videoReview",
+					modelId: "gemini-3.1-pro",
+					prompt: "What happens?",
+					selectedContext: create(SelectedContextSchema, {
+						selectedVideos: [
+							create(SelectedVideoSchema, { path: "/work/artifacts/clip.mp4", mimeType: "video/mp4" }),
+						],
+					}),
+				}),
+			}),
+			{
+				execHandlers: {
+					subagent: async call => {
+						calls.push(call);
+						return { toolResult: taskResult("A cat jumps."), finalMessage: "A cat jumps.", background: false };
+					},
+				},
+			},
+		);
+		expect(calls).toEqual([
+			expect.objectContaining({
+				subagentType: "videoReview",
+				modelId: "gemini-3.1-pro",
+				videos: [{ path: "/work/artifacts/clip.mp4", mimeType: "video/mp4" }],
+			}),
+		]);
 	});
 
 	it("reports a failed subagent as an error, not a success without a report", async () => {

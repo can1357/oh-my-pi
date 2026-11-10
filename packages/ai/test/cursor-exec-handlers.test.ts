@@ -4,6 +4,7 @@ import {
 	buildCursorHistoryForTest,
 	buildCursorRequestContextRules,
 	buildCursorSystemPromptJsons,
+	type CursorOptions,
 	emptyGrepPatternRejection,
 	handleServerMessage,
 	processInteractionUpdate,
@@ -92,9 +93,14 @@ function cursorAssistant(
 	};
 }
 
-function captureCursorPayload(context: Context, model: Model<"cursor-agent"> = cursorModel): Promise<AgentRunRequest> {
+function captureCursorPayload(
+	context: Context,
+	model: Model<"cursor-agent"> = cursorModel,
+	options: Pick<CursorOptions, "videos"> = {},
+): Promise<AgentRunRequest> {
 	const { promise, resolve, reject } = Promise.withResolvers<AgentRunRequest>();
 	streamCursor(model, context, {
+		...options,
 		apiKey: "test-token",
 		onPayload: payload => {
 			if (isAgentRunRequest(payload)) {
@@ -516,6 +522,29 @@ describe("Cursor request action encoding", () => {
 			throw new Error("Expected Cursor selected image data");
 		}
 		expect(Array.from(selectedImage.dataOrBlobId.value)).toEqual(Array.from(Buffer.from(imageData, "base64")));
+	});
+
+	it("sends requested videos inline in the user message's selected context", async () => {
+		const payload = await captureCursorPayload(
+			{ messages: [{ role: "user", content: "What happens in the clip?", timestamp: 0 }] },
+			cursorModel,
+			{ videos: [{ path: "/work/artifacts/clip.mp4", mimeType: "video/mp4", data: Uint8Array.of(1, 2, 3) }] },
+		);
+
+		if (payload.action?.action.case !== "userMessageAction") {
+			throw new Error("Expected Cursor userMessageAction");
+		}
+		const userMessage = payload.action.action.value.userMessage;
+		expect(userMessage?.text).toBe("What happens in the clip?");
+		const videos = userMessage?.selectedContext?.selectedVideos ?? [];
+		expect(videos).toHaveLength(1);
+		expect(videos[0]).toMatchObject({
+			path: "/work/artifacts/clip.mp4",
+			filename: "clip.mp4",
+			mimeType: "video/mp4",
+		});
+		if (videos[0]?.dataOrBlobId.case !== "data") throw new Error("Expected inline video data");
+		expect(Array.from(videos[0].dataOrBlobId.value)).toEqual([1, 2, 3]);
 	});
 });
 
