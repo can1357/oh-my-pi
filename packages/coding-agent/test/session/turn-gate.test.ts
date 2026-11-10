@@ -139,44 +139,24 @@ describe("TurnGate", () => {
 		expect(log).toEqual(["fresh"]);
 	});
 
-	it("refuses a holder claim while another claim's reservation is open, and admits it after that reservation ends, its undo having run first", async () => {
+	it("refuses a holder claim while another claim's reservation is open, and admits it once that reservation ends", async () => {
 		const gate = new TurnGate(createHost().host);
 		const hold = gate.hold();
 		const holder: TurnClaim = { kind: "holder", hold };
 		const log: string[] = [];
-		const undone = Promise.withResolvers<void>();
-		const reservation = gate.reserve({ kind: "background" }, async () => {
-			log.push("undo started");
-			await undone.promise;
-			log.push("undo finished");
-		});
+		const reservation = gate.reserve({ kind: "background" });
 		const own = gate.reserve(holder);
 
 		expect(gate.admits(holder)).toBe(false);
 		const admissible = gate.whenAdmissible(holder, hold.cancel.signal).then(() => log.push("holder admissible"));
-		const ended = reservation.end();
 		await scheduler.yield();
-		expect(gate.admits(holder)).toBe(false);
-		undone.resolve();
-		await ended;
+		expect(log).toEqual([]);
+		reservation.end();
 		await admissible;
 
-		expect(log).toEqual(["undo started", "undo finished", "holder admissible"]);
+		expect(log).toEqual(["holder admissible"]);
 		expect(await gate.start(holder, undefined, dispatched(log, "holder"))).toBe("holder");
-		await own.end();
-	});
-
-	it("skips the undo of a reservation whose turn started", async () => {
-		const gate = new TurnGate(createHost().host);
-		let undone = false;
-		const reservation = gate.reserve({ kind: "user" }, () => {
-			undone = true;
-		});
-
-		reservation.started();
-		await reservation.end();
-
-		expect(undone).toBe(false);
+		own.end();
 	});
 
 	it("reports dispatching only inside start's synchronous dispatch call", async () => {

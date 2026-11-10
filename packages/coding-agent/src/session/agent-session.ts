@@ -1613,7 +1613,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// count to a newer turn; with none in flight it still settles, since a turn begun while abort() was
 		// finishing has its bracket reset by it and ends here.
 		if (bracket.epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
-		void bracket.reservation.end();
+		bracket.reservation.end();
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
