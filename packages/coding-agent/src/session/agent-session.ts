@@ -145,7 +145,7 @@ import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
 import { WorkPoolRegistry } from "../task/workpool";
-import { type BashResult, releaseShellSessions } from "../exec/bash-executor";
+import { type BashResult, drainAbortedShells, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -1105,6 +1105,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
+	/** Bumped at every `agent_start`; lets a late settle tell it was overtaken by a newer run. */
+	#runEpoch = 0;
+	/** {@link #runEpoch} each `agent_end` was dispatched under; read by {@link #settleAgentEnd}. */
+	#agentEndRunEpochs = new WeakMap<AgentEndEvent, number>();
 	/** The last `agent_end` that {@link #settleAgentEnd} published; a failed maintenance pass settles any other. */
 	#settledAgentEnd: AgentEndEvent | undefined;
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
@@ -4168,6 +4172,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 			}
 		}
+		if (event.type === "agent_end") this.#agentEndRunEpochs.set(event, this.#runEpoch);
 		if (event.type !== "agent_end") {
 			const processing = this.#processAgentEvent(event);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
@@ -4614,6 +4619,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
 			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
+			this.#runEpoch++;
 			this.#emitRunState("running");
 			this.#maintenance.noteTurnStarted();
 		}
@@ -5901,7 +5907,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: AgentEndSettleOptions,
 	): Promise<void> {
 		this.#settledAgentEnd = event;
-		this.#emitRunState("idle");
+		// Maintenance awaits before settling, and a wake, steer, or scheduled
+		// continuation can start the next run in the meantime. That run already
+		// reported `running`; a late `idle` from this one would leave the session
+		// (and its registry ref) showing idle while it streams.
+		const runEpoch = this.#agentEndRunEpochs.get(event);
+		if (runEpoch === undefined || runEpoch === this.#runEpoch) this.#emitRunState("idle");
 		// Tagged isTerminal so subscribers can tell final settles from scheduled
 		// continuations, and `yielded` so they can tell the agent's own follow-up
 		// work (retries, reminders, compaction) from a finished turn that only
@@ -6890,6 +6901,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} catch (error) {
 			logger.warn("Active agent run still settling at dispose deadline", { error: String(error) });
 		}
+		// The agent turn can finish before the native shell's delayed KILL wave.
+		// Keep that wave alive through this session's process teardown, including
+		// commands that started under a session id this one has since replaced.
+		await Promise.all([drainAbortedShells(this.sessionManager.getSessionId()), this.#bash.drainCancelled()]);
 		// Forwarding stays connected through the drain above so a tool that
 		// settles inside it still reaches subscribers (issue #18450); detach now
 		// so events past the deadline are neither forwarded nor persisted.
@@ -7691,7 +7706,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.refreshBaseSystemPrompt(commitIf);
 	}
 
-	/** Replaces connected MCP tools and enables them immediately. */
+	/** Replaces connected MCP tools, enabling new names without changing existing selections. */
 	refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		return this.#tools.refreshMCPTools(mcpTools);
 	}

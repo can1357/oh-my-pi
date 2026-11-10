@@ -15,6 +15,7 @@ use std::{
 	time::Duration,
 };
 
+use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::{
 	AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType,
 };
@@ -22,6 +23,7 @@ use objc2_core_foundation::{
 	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFRange, CFRetained, CFString,
 	CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
 };
+use objc2_foundation::ns_string;
 pub(super) use selection::select_dragged;
 
 use super::{
@@ -320,6 +322,18 @@ pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	window_id(&window)
 }
 
+/// `WindowServer` id of `pid`'s `AXFocusedWindow` when it is a sheet
+/// (`AXSheet`), such as an Open panel or Go to Folder on a document window;
+/// `None` for any other window.
+pub(super) fn focused_sheet_id(pid: libc::pid_t) -> Option<u32> {
+	let app = probe_application(pid)?;
+	let window = copy_element(&app, "AXFocusedWindow")?;
+	if copy_string(&window, "AXRole").as_deref() != Some("AXSheet") {
+		return None;
+	}
+	window_id(&window)
+}
+
 /// An application's `AXFocusedWindow`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum FocusedWindow {
@@ -485,7 +499,7 @@ fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement
 /// The first window id `_AXUIElementGetWindow` maps on `element` or, through
 /// a bounded `AXParent` ascent, its nearest ancestor, and whether it is the
 /// element's own.
-fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
+pub(super) fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
 	let mut current = element.retain();
 	for depth in 0..MAX_ANCESTRY_DEPTH {
 		if let Some(id) = window_id(&current) {
@@ -610,6 +624,36 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 			let window = copy_element(&app, attribute)?;
 			window_id(&window)
 		})
+}
+
+/// The key window and outside-window focus from one application probe and
+/// one `AXFocusedWindow` read. The main window still takes precedence over
+/// an unmapped focused element, as it does in [`key_window_id`].
+pub(super) fn restoration_window(pid: libc::pid_t) -> (Option<u32>, bool) {
+	let Some(app) = probe_application(pid) else {
+		return (None, false);
+	};
+	let focused = copy_element(&app, "AXFocusedWindow");
+	let key = focused
+		.as_ref()
+		.and_then(|window| window_id(window))
+		.or_else(|| copy_element(&app, "AXMainWindow").and_then(|window| window_id(&window)));
+	if key.is_some() || GET_WINDOW_ID.is_none() {
+		return (key, false);
+	}
+	let finder = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+		.and_then(|app| app.bundleIdentifier())
+		.is_some_and(|bundle| bundle.isEqualToString(ns_string!("com.apple.finder")));
+	let outside = focused.as_ref().is_some_and(|focused| {
+		is_outside_windows(finder, false, copy_string(focused, "AXRole").as_deref())
+	});
+	(key, outside)
+}
+
+/// [`restoration_window`]'s desktop decision: a generic scroll area in any
+/// other app proves nothing, even when its window id cannot be mapped.
+fn is_outside_windows(finder: bool, mapped: bool, role: Option<&str>) -> bool {
+	finder && !mapped && role == Some("AXScrollArea")
 }
 
 /// `AXFrontmost` as `pid`'s application reports it. `AppKit` answers from the
@@ -2466,9 +2510,9 @@ mod tests {
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
 		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
-		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
-		takes_inserted_text, target_window, window_records_of,
+		focused_window, is_outside_windows, may_borrow_focus, menu_window, perform_choosing,
+		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
+		select_attached, stringify_value, takes_inserted_text, target_window, window_records_of,
 	};
 	use crate::desktop::error::{CoreResult, ErrorCode};
 
@@ -3227,6 +3271,19 @@ mod tests {
 		// cannot map it; the system-wide element is unmappable the same way.
 		let records = window_records_of(&[create_system_wide()]);
 		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
+	}
+
+	#[test]
+	fn only_finders_unmapped_scroll_area_is_focus_outside_windows() {
+		// Finder's desktop after a click on it.
+		assert!(is_outside_windows(true, false, Some("AXScrollArea")));
+		// Another app's unmappable scroll view is not a verified desktop.
+		assert!(!is_outside_windows(false, false, Some("AXScrollArea")));
+		// A window that maps, a real window that fails to, or anything else.
+		assert!(!is_outside_windows(true, true, Some("AXScrollArea")));
+		assert!(!is_outside_windows(true, false, Some("AXWindow")));
+		assert!(!is_outside_windows(true, false, Some("AXUnknown")));
+		assert!(!is_outside_windows(true, false, None));
 	}
 
 	#[test]
