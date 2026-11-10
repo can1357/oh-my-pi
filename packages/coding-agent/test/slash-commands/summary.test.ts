@@ -67,92 +67,83 @@ const run = (ctx: InteractiveModeContext, args = "") =>
 	} as TuiSlashCommandRuntime);
 
 describe("/summary", () => {
-	it.each([true, false])(
-		"orders retained replies without duplicates or mutations (live consult=%s)",
-		async liveConsult => {
-			const main = path.join(dir.path(), "root.jsonl");
-			const child = path.join(dir.path(), "root", "child.jsonl");
-			const nested = path.join(dir.path(), "root", "child", "nested.jsonl");
-			const outside = path.join(dir.path(), "other-root", "child.jsonl");
-			const liveFile = path.join(dir.path(), "root", "live.jsonl");
-			const entries = [
-				answer("tie first", 100),
-				answer("tie later", 100),
-				answer("same words", 50),
-				answer("same words", 60),
-			];
-			await transcript(main, entries);
-			const childReply = answer("child tie", 100);
-			const nestedReply = answer("nested newest", 120);
-			await transcript(child, [...entries, childReply]);
-			const consult = await SessionManager.forkFrom(child, dir.path(), dir.path(), undefined, {
-				seance: true,
-				suppressBreadcrumb: true,
-				sessionFile: nested,
-			});
-			managers.push(consult);
-			consult.appendSessionInit({ systemPrompt: [], task: "", tools: [] });
-			consult.appendMessage(nestedReply.message);
-			await consult.flush();
-			await transcript(path.join(dir.path(), "root", "sibling.jsonl"), [answer("sibling branch", 90)]);
-			await transcript(path.join(dir.path(), "root", "__advisor.review.jsonl"), [answer("private review", 200)]);
-			await transcript(outside, [answer("outside root", 300)]);
-			await transcript(liveFile, [answer("superseded disk reply", 400)]);
-			const live = SessionManager.inMemory();
-			managers.push(live);
-			live.appendMessage(answer("unsaved child reply", 130).message);
-			const registry = new AgentRegistry();
-			registry.register({
-				id: "child",
-				displayName: "child",
-				kind: "sub",
-				session: null,
-				sessionFile: outside,
-				status: "parked",
-			});
-			registry.register({
-				id: "nested",
-				displayName: "nested",
-				kind: "sub",
-				session: liveConsult ? createSessionStub(consult, Settings.isolated()) : null,
-				sessionFile: nested,
-				status: liveConsult ? "idle" : "parked",
-			});
-			registry.register({
-				id: "live",
-				displayName: "live",
-				kind: "sub",
-				session: createSessionStub(live, Settings.isolated()),
-				sessionFile: liveFile,
-				status: "idle",
-			});
-			const beforeRefs = structuredClone(registry.list().map(ref => ({ ...ref, session: null })));
-			const beforeEntries = structuredClone(live.getEntries());
-			const beforeBytes = await Bun.file(liveFile).text();
-			const result = await listSessionSummaries(root(entries, main), registry);
-			expect(
-				result.map(item => [
-					item.agentName,
-					path.basename(item.source),
-					item.entryIndex,
-					item.timestamp,
-					item.text,
-				]),
-			).toEqual([
-				["live", "live.jsonl", 0, 130, "unsaved child reply"],
-				["nested", "nested.jsonl", 7, 120, "nested newest"],
-				["main", "root.jsonl", 1, 100, "tie later"],
-				["main", "root.jsonl", 0, 100, "tie first"],
-				["child", "child.jsonl", 5, 100, "child tie"],
-				["sibling", "sibling.jsonl", 1, 90, "sibling branch"],
-				["main", "root.jsonl", 3, 60, "same words"],
-				["main", "root.jsonl", 2, 50, "same words"],
-			]);
-			expect(registry.list().map(ref => ({ ...ref, session: null }))).toEqual(beforeRefs);
-			expect(live.getEntries()).toEqual(beforeEntries);
-			expect(await Bun.file(liveFile).text()).toBe(beforeBytes);
-		},
-	);
+	it.each([true, false])("deduplicates inherited replies (live consult=%s)", async liveConsult => {
+		const main = path.join(dir.path(), "root.jsonl");
+		const child = path.join(dir.path(), "root", "child.jsonl");
+		const nested = path.join(dir.path(), "root", "child", "nested.jsonl");
+		const outside = path.join(dir.path(), "other-root", "child.jsonl");
+		const liveFile = path.join(dir.path(), "root", "live.jsonl");
+		const entries = [
+			answer("tie first", 100),
+			answer("tie later", 100),
+			answer("same words", 50),
+			answer("same words", 60),
+		];
+		await transcript(main, entries);
+		const childReply = answer("child tie", 100);
+		const nestedReply = answer("nested newest", 120);
+		await transcript(child, [...entries, childReply]);
+		const consult = await SessionManager.forkFrom(child, dir.path(), dir.path(), undefined, {
+			seance: true,
+			suppressBreadcrumb: true,
+			sessionFile: nested,
+		});
+		managers.push(consult);
+		consult.appendSessionInit({ systemPrompt: [], task: "", tools: [] });
+		consult.appendMessage(nestedReply.message);
+		await consult.flush();
+		await transcript(path.join(dir.path(), "root", "sibling.jsonl"), [answer("sibling branch", 90)]);
+		await transcript(path.join(dir.path(), "root", "__advisor.review.jsonl"), [answer("private review", 200)]);
+		await transcript(outside, [answer("outside root", 300)]);
+		await transcript(liveFile, [answer("superseded disk reply", 400)]);
+		const live = SessionManager.inMemory();
+		managers.push(live);
+		live.appendMessage(answer("unsaved child reply", 130).message);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "child",
+			displayName: "child",
+			kind: "sub",
+			session: null,
+			sessionFile: outside,
+			status: "parked",
+		});
+		registry.register({
+			id: "nested",
+			displayName: "nested",
+			kind: "sub",
+			session: liveConsult ? createSessionStub(consult, Settings.isolated()) : null,
+			sessionFile: nested,
+			status: liveConsult ? "idle" : "parked",
+		});
+		registry.register({
+			id: "live",
+			displayName: "live",
+			kind: "sub",
+			session: createSessionStub(live, Settings.isolated()),
+			sessionFile: liveFile,
+			status: "idle",
+		});
+		const beforeRefs = structuredClone(registry.list().map(ref => ({ ...ref, session: null })));
+		const beforeEntries = structuredClone(live.getEntries());
+		const beforeBytes = await Bun.file(liveFile).text();
+		const result = await listSessionSummaries(root(entries, main), registry);
+		expect(
+			result.map(item => [item.agentName, path.basename(item.source), item.entryIndex, item.timestamp, item.text]),
+		).toEqual([
+			["live", "live.jsonl", 0, 130, "unsaved child reply"],
+			["nested", "nested.jsonl", 7, 120, "nested newest"],
+			["main", "root.jsonl", 1, 100, "tie later"],
+			["main", "root.jsonl", 0, 100, "tie first"],
+			["child", "child.jsonl", 5, 100, "child tie"],
+			["sibling", "sibling.jsonl", 1, 90, "sibling branch"],
+			["main", "root.jsonl", 3, 60, "same words"],
+			["main", "root.jsonl", 2, 50, "same words"],
+		]);
+		expect(registry.list().map(ref => ({ ...ref, session: null }))).toEqual(beforeRefs);
+		expect(live.getEntries()).toEqual(beforeEntries);
+		expect(await Bun.file(liveFile).text()).toBe(beforeBytes);
+	});
 
 	it("extracts visible final text and orders legacy replies using timestamp fallbacks without persisting", async () => {
 		const legacy = answer("legacy", Number.NaN);
