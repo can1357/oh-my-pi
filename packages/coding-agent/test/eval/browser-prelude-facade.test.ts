@@ -371,14 +371,15 @@ describe("browser facade in real Eval runtimes", () => {
 			element: ["id", "role", "name", "value", "description", "keyshortcuts", "states"],
 			length: 150,
 		});
-		expect((await run("print({ o: await tab.observe(), n: 1 });")).split("\n")).toEqual([
-			"{",
-			"  o: Observation {",
-			...lines.map(line => `    ${line}`),
-			"  },",
-			"  n: 1",
-			"}",
-		]);
+		const nested = ["{", "  o: Observation {", ...lines.map(line => `    ${line}`), "  },", "  n: 1", "}"];
+		expect((await run("print({ o: await tab.observe(), n: 1 });")).split("\n")).toEqual(nested);
+		expect(
+			(
+				await run(
+					'print(require("node:util").inspect({ o: await tab.observe(), n: 1 }, { depth: null, breakLength: 120 }));',
+				)
+			).split("\n"),
+		).toEqual(nested);
 		expect((await run("print([(await tab.observe()).elements]);")).split("\n")).toEqual([
 			"[",
 			"  [",

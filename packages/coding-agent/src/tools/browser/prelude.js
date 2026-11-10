@@ -35,13 +35,15 @@
 	// A printed `tab.observe()` result, or one left as a cell's last value, shows every element, one line each,
 	// through util.inspect's custom hook; the object, `.elements` and every field stay as they are for code.
 	// Nested in another value (a smaller `depth` than the top level's), the same lines sit inside brackets, so
-	// the outer value's keys stay apart; with `elements` replaced by a non-array it prints as plain inspect.
+	// the outer value's keys stay apart. An unlimited `depth` (`null`, `Infinity`) is the same at every level, so
+	// the bracketed form is used there too. With `elements` replaced by a non-array it prints as plain inspect.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
 	const showField = value =>
 		typeof value === "number" || typeof value === "boolean"
 			? String(value)
 			: (JSON.stringify(value) ?? String(value));
+	const printedAtTop = (depth, options) => Number.isFinite(depth) && depth === options.depth;
 	const elementLine = element => {
 		if (element === null || typeof element !== "object") return showField(element);
 		const role =
@@ -66,7 +68,9 @@
 			value: (depth, options) => {
 				if (elements.length === 0) return "[]";
 				const lines = elements.map(elementLine);
-				return depth < options.depth ? ["[", ...lines.map(line => `  ${line}`), "]"].join("\n") : lines.join("\n");
+				return printedAtTop(depth, options)
+					? lines.join("\n")
+					: ["[", ...lines.map(line => `  ${line}`), "]"].join("\n");
 			},
 		});
 		Object.defineProperty(observation, inspectCustom, {
@@ -78,9 +82,9 @@
 				}
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
 				for (const element of observation.elements) lines.push(elementLine(element));
-				return depth < options.depth
-					? ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n")
-					: lines.join("\n");
+				return printedAtTop(depth, options)
+					? lines.join("\n")
+					: ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n");
 			},
 		});
 		return observation;
