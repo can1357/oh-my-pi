@@ -242,17 +242,23 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 }
 
 /**
- * Tool budget in seconds for a call chain's trailing `{ timeout }` (ms), or `undefined`
- * when it passes none. `invokeBrowser` uses it for `call` actions, which carry no
- * timeout of their own. Wait helpers clamp to the budget less
- * {@link CELL_BUDGET_SLACK_MS}; disable sentinels use the browser tool's maximum
- * bounded budget. Never below the tool default for positive finite timeouts.
+ * Tool budget in seconds for a `run` or `call` that passes no `timeout` of its own, or `undefined` for the
+ * tool default. The eval cell's timeout (`cellTimeoutMs`) counts, since the cell's watchdog is suspended while
+ * the call runs; so does a call chain's trailing `{ timeout }` (ms), which wait helpers clamp to the budget
+ * less {@link CELL_BUDGET_SLACK_MS}, with disable sentinels taking the browser tool's maximum bounded budget.
+ * The larger applies, never below the tool default.
  */
-export function tabCallBudgetSeconds(chain: readonly TabCallStep[] | undefined): number | undefined {
+export function tabCallBudgetSeconds(
+	chain: readonly TabCallStep[] | undefined,
+	cellTimeoutMs?: number,
+): number | undefined {
+	const budgets: number[] = [];
+	if (cellTimeoutMs !== undefined && cellTimeoutMs > 0) budgets.push(Math.ceil(cellTimeoutMs / 1000));
 	const options = chain?.at(-1)?.args.at(-1);
 	const timeout = isRecord(options) ? options.timeout : undefined;
-	if (typeof timeout !== "number") return undefined;
-	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) return TOOL_TIMEOUTS.browser.max;
-	if (!Number.isFinite(timeout) || timeout < 0) return undefined;
-	return Math.max(TOOL_TIMEOUTS.browser.default, Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
+	if (timeout === 0 || timeout === Number.POSITIVE_INFINITY) budgets.push(TOOL_TIMEOUTS.browser.max);
+	else if (typeof timeout === "number" && Number.isFinite(timeout) && timeout >= 0) {
+		budgets.push(Math.ceil((timeout + CELL_BUDGET_SLACK_MS) / 1000));
+	}
+	return budgets.length > 0 ? Math.max(TOOL_TIMEOUTS.browser.default, ...budgets) : undefined;
 }

@@ -49,6 +49,8 @@ await tab.close();
 
 `close` and `run` resolve `timeout` like `open`: seconds, default 30, capped by positive `tools.maxTimeout`, then clamped to 1–300. `waitFor*` helpers take `timeout` in milliseconds and cannot outlast the enclosing call's `timeout`.
 
+A `run` without `timeout`, and every direct helper call (`tab.evaluate(…)`, `tab.click(…)`, …), gets the Eval cell's `timeout` instead when that is longer: the cell's own timer is suspended while a browser call runs. A call that runs out of time fails, and omp reattaches the tab to a new worker without reloading its page, which resets the tab state set since it was opened (routes, emulation, init scripts, element ids, run globals); a worker that does not stop within 750 ms of the deadline is released with its tab.
+
 ### Open options
 
 | Option                | Contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |

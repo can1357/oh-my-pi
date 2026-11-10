@@ -36,7 +36,12 @@ fixture = _FixturePrelude()
 del _FixturePrelude`,
 		exports: ["fixture"],
 		async invoke(parameters, context) {
-			calls.push({ parameters, session: context.session, toolCallId: context.toolCallId });
+			calls.push({
+				parameters,
+				session: context.session,
+				toolCallId: context.toolCallId,
+				cellTimeoutMs: context.cellTimeoutMs,
+			});
 			return {
 				content: [{ type: "text", text: `host-${version}` }, ...images],
 				details: { version },
@@ -91,9 +96,11 @@ describe("eval prelude runtime", () => {
 				language === "js"
 					? `await fixture.invoke({});\n${printImages.join("\n")}`
 					: `import json\nawait fixture.invoke()\n${printImages.join("\n")}`;
-			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 30 });
+			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 45 });
 			expect(result.details?.cells?.[0]?.status).toBe("complete");
 			expect(calls).toHaveLength(1);
+			// The cell's timeout reaches the prelude, which sizes calls that set no timeout from it.
+			expect(calls[0]).toMatchObject({ cellTimeoutMs: 45_000 });
 			const model = getBundledModels("openai")[0];
 			if (!model) throw new Error("Missing bundled OpenAI model");
 			const messages: Message[] = [

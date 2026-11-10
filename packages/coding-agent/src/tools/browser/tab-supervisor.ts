@@ -291,6 +291,9 @@ const WORKER_RESETS =
 	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
+// How to give a call that ran out of time a longer budget.
+const LONGER_BUDGET_HINT =
+	"To give long page work more time, raise the Eval cell's `timeout` or pass `tab.run(fn, { timeout })` (seconds, at most 300).";
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
@@ -1264,7 +1267,7 @@ async function runInTabWithSnapshot(
 			const result = await raceWithTimeout(
 				promise,
 				opts.timeoutMs + GRACE_MS,
-				"Browser code execution hung past grace; tab killed",
+				`Browser code execution hung past its ${opts.timeoutMs}ms budget, so omp released tab ${JSON.stringify(name)} (closing its page if omp opened it); open it again with browser.open(). ${LONGER_BUDGET_HINT}`,
 				async reason => await forceKillTab(name, reason),
 			);
 			if (result.recoverTab) {
@@ -1365,7 +1368,14 @@ async function runInTabWithSnapshot(
 				const reason = runTimedOut
 					? "Browser code execution timed out; tab killed"
 					: "Browser request interception cleanup failed; tab killed";
-				await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
+				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
+				if (runTimedOut) {
+					throw new ToolError(
+						reattached
+							? `${error.message}. omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS} ${LONGER_BUDGET_HINT}`
+							: `${error.message}. The tab could not be reattached and was released; open it again with browser.open(). ${LONGER_BUDGET_HINT}`,
+					);
+				}
 			}
 			throw error;
 		}

@@ -406,7 +406,11 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const requested = parsed.timeout ?? (parsed.action === "call" ? tabCallBudgetSeconds(parsed.chain) : undefined);
+		const requested =
+			parsed.timeout ??
+			(parsed.action === "call" || parsed.action === "run"
+				? tabCallBudgetSeconds(parsed.chain, context.cellTimeoutMs)
+				: undefined);
 		const timeoutSeconds = clampTimeout("browser", requested, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
