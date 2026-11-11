@@ -1127,14 +1127,6 @@ export class ExtensionRunner {
 		this.#sessionApprovals.add(`${this.sessionId}\0${key}`);
 	}
 
-	/** Every key {@link hasSessionApproval} holds for the current session, in grant order. */
-	sessionApprovalKeys(): string[] {
-		const prefix = `${this.sessionId}\0`;
-		const keys: string[] = [];
-		for (const entry of this.#sessionApprovals) if (entry.startsWith(prefix)) keys.push(entry.slice(prefix.length));
-		return keys;
-	}
-
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
 	}

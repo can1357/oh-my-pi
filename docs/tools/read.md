@@ -403,3 +403,4 @@ Notes: ...
 - Raw SQLite `q=` execution is not keyword-restricted beyond “no bound parameters”; `PRAGMA query_only = ON` prevents database writes.
 - The file snapshot store is not a read acceleration cache. It exists to verify and recover hashline edits when the file changed after the read.
 - From the third identical successful text result for the same path, a per-session loop-breaking hint advises narrowing the selector or proceeding with the edit; tracking resets when the output changes.
+- A read that runs beside an earlier call of the same message that may write (its approval, asked with its arguments and no context, is not `read`, e.g. `bash`) gets `ctx.toolCall.earlierEffectsSettled` from the agent loop. `execute()` waits for those calls before reading, so it returns the file as they left it; an abort during the wait rejects the read. A single web URL (no `;`) does not wait.

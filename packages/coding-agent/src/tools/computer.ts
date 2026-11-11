@@ -134,19 +134,9 @@ export function createComputerPrelude(
 	// Eval-first-use boundary: source/declaration assets stay unloaded until a
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
-	let closed = false;
-	const lifetime: ComputerLifetime = {
-		isClosed: () => closed,
-		close: async () => {
-			if (closed) return;
-			closed = true;
-			unregisterOwner();
-			unregisterDisposal?.();
-			await controller.close();
-		},
-	};
-	const unregisterDisposal = session.registerDisposeCallback?.(() => {
-		void lifetime.close();
+	session.registerDisposeCallback?.(() => {
+		unregisterOwner();
+		void controller.close();
 	});
 
 	return {
@@ -164,7 +154,7 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
-			return await invokeComputer(session, controller, parsed, context, lifetime);
+			return await invokeComputer(session, controller, parsed, context);
 		},
 		status: describeComputerCall,
 	};
@@ -185,29 +175,20 @@ function describeComputerCall(parameters: unknown): string | undefined {
 	}
 }
 
-interface ComputerLifetime {
-	isClosed(): boolean;
-	close(): Promise<void>;
-}
-
 async function invokeComputer(
 	session: ToolSession,
 	controller: ComputerController,
 	params: ComputerParams,
 	context: EvalPreludeContext,
-	lifetime: ComputerLifetime,
 ): Promise<AgentToolResult<unknown>> {
 	throwIfAborted(context.signal);
 
 	switch (params.action) {
 		case "run":
 		case "call":
-			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
 			return await runComputer(session, controller, params, context);
 		case "capabilities": {
-			const capabilities = lifetime.isClosed()
-				? undefined
-				: await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
+			const capabilities = await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
 			throwIfAborted(context.signal);
 			return {
 				content: [
@@ -220,7 +201,7 @@ async function invokeComputer(
 			};
 		}
 		case "close":
-			await lifetime.close();
+			await controller.reset();
 			throwIfAborted(context.signal);
 			return { content: [{ type: "text", text: "Closed computer session" }] };
 	}
