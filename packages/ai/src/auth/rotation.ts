@@ -139,7 +139,7 @@ export class RateLimits implements LimitsApi {
 			siblingBlockScopes,
 		};
 	}
-	#blockCredentialForRotation(
+	async #blockCredentialForRotation(
 		provider: string,
 		sessionId: string | undefined,
 		credentialType: AuthCredential["type"],
@@ -147,7 +147,8 @@ export class RateLimits implements LimitsApi {
 		blockedUntil: number,
 		routing: CredentialBlockRouting,
 		providerTimed: boolean,
-	): UsageLimitMarkResult {
+		probe: { baseUrl?: string; signal?: AbortSignal } = {},
+	): Promise<UsageLimitMarkResult> {
 		// Snapshot the live block deadline BEFORE this call's mark: the merged
 		// value below masks a pre-existing block shorter than this call's own
 		// request (longest-wins), and recovery that replaces this call's
@@ -194,32 +195,76 @@ export class RateLimits implements LimitsApi {
 					this.#deps.affinity.allows(provider, sessionId, entry.credential),
 			);
 
-		let retryAtMs: number | undefined;
-		for (const candidate of remainingCredentials) {
-			// Sibling availability must use the same scope set selection reads, or
-			// this reports a sibling as free that selection will then refuse.
-			const candidateBlockedUntil = this.#deps.blocks.blockedUntil(
-				provider,
-				routing.providerKey,
-				candidate.index,
-				routing.siblingBlockScopes,
-			);
-			if (candidateBlockedUntil === undefined)
-				return {
-					switched: true,
+		let availability = this.#siblingAvailability(provider, routing, remainingCredentials);
+		// Selection re-checks live usage for a blocked account whose block a
+		// healthy report may lift; rotation must judge siblings the same way, or
+		// a stale block reports "no sibling" while the next resolve would happily
+		// serve that account.
+		if (!availability.free && (await this.#probeHealableSiblings(provider, routing, remainingCredentials, probe))) {
+			availability = this.#siblingAvailability(provider, routing, remainingCredentials);
+		}
+		return availability.free
+			? { switched: true, blockedUntilMs: mergedBlockedUntil, priorBlockedUntilMs, priorBlockedUntilTimed }
+			: {
+					switched: false,
+					retryAtMs: availability.retryAtMs,
 					blockedUntilMs: mergedBlockedUntil,
 					priorBlockedUntilMs,
 					priorBlockedUntilTimed,
 				};
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+	}
+
+	/** Whether any sibling is unblocked under the scopes selection reads; else the earliest unblock. */
+	#siblingAvailability(
+		provider: string,
+		routing: CredentialBlockRouting,
+		siblings: readonly { credential: AuthCredential; index: number }[],
+	): { free: boolean; retryAtMs?: number } {
+		let retryAtMs: number | undefined;
+		for (const sibling of siblings) {
+			// Sibling availability must use the same scope set selection reads, or
+			// this reports a sibling as free that selection will then refuse.
+			const siblingBlockedUntil = this.#deps.blocks.blockedUntil(
+				provider,
+				routing.providerKey,
+				sibling.index,
+				routing.siblingBlockScopes,
+			);
+			if (siblingBlockedUntil === undefined) return { free: true };
+			if (retryAtMs === undefined || siblingBlockedUntil < retryAtMs) retryAtMs = siblingBlockedUntil;
 		}
-		return {
-			switched: false,
-			retryAtMs,
-			blockedUntilMs: mergedBlockedUntil,
-			priorBlockedUntilMs,
-			priorBlockedUntilTimed,
-		};
+		return { free: false, retryAtMs };
+	}
+
+	/**
+	 * Re-check blocked OAuth siblings whose block a healthy live report can
+	 * lift, exactly as selection does. Returns whether any probe ran.
+	 */
+	async #probeHealableSiblings(
+		provider: string,
+		routing: CredentialBlockRouting,
+		siblings: readonly { credential: AuthCredential; index: number }[],
+		probe: { baseUrl?: string; signal?: AbortSignal },
+	): Promise<boolean> {
+		const reports = await raceSignal(
+			Promise.all(
+				siblings
+					.filter(sibling => sibling.credential.type === "oauth")
+					.map(sibling =>
+						this.#deps.usage.probeBlocked(
+							provider,
+							routing.providerKey,
+							sibling.index,
+							sibling.credential,
+							routing.siblingBlockScopes,
+							probe,
+						),
+					),
+			),
+			probe.signal,
+			"usage fetch aborted",
+		);
+		return reports.some(report => report !== undefined);
 	}
 
 	/**
@@ -293,7 +338,7 @@ export class RateLimits implements LimitsApi {
 		const targetIndex = this.#deps.pool
 			.entries(provider)
 			.findIndex(entry => entry.id === targetCredentialId && entry.credential.type === credentialType);
-		const rotation = this.#blockCredentialForRotation(
+		const rotation = await this.#blockCredentialForRotation(
 			provider,
 			sessionId,
 			credentialType,
@@ -301,6 +346,7 @@ export class RateLimits implements LimitsApi {
 			blockedUntil,
 			routing,
 			providerTimed,
+			{ baseUrl: options?.baseUrl, signal: options?.signal },
 		);
 		return {
 			...rotation,
@@ -459,7 +505,7 @@ export class RateLimits implements LimitsApi {
 			) {
 				this.#deps.affinity.clear(provider, sessionId);
 			}
-			const mark = this.#blockCredentialForRotation(
+			const mark = await this.#blockCredentialForRotation(
 				provider,
 				sessionId,
 				sessionCredential.type,
@@ -467,6 +513,7 @@ export class RateLimits implements LimitsApi {
 				Date.now() + DEFAULT_BLOCK_MS,
 				routing,
 				false,
+				{ signal: options?.signal },
 			);
 			return awaitSiblingUnblock(mark, options?.signal, options?.waitForSibling);
 		}
