@@ -30,6 +30,44 @@ pub(super) fn verdict(
 	text_readback(expected, expected, pattern.or(legacy), secure)
 }
 
+/// Whether a rich edit that reads `actual` holds `expected`: it reports every
+/// line break as one `\r` and adds its final paragraph mark, so a stored `abc`
+/// reads back as `abc\r`.
+pub(super) fn rich_edit_holds(class: &str, expected: &str, actual: &str) -> bool {
+	class
+		.as_bytes()
+		.windows(8)
+		.any(|name| name.eq_ignore_ascii_case(b"richedit"))
+		&& actual.strip_suffix('\r').is_some_and(|lines| {
+			lines.split('\r').eq(
+				expected
+					.split('\n')
+					.map(|line| line.strip_suffix('\r').unwrap_or(line)),
+			)
+		})
+}
+
+/// Whether a hidden value's length confirms a write of `sent`: it must have
+/// changed to the sent length, since an equal length before proves nothing.
+pub(super) fn length_confirms(sent: &str, before: Option<usize>, after: Option<usize>) -> bool {
+	let sent = sent.encode_utf16().count();
+	after == Some(sent) && before.is_some_and(|before| before != sent)
+}
+
+/// UTF-16 length of a native control's text; `None` when it does not answer.
+#[cfg(target_os = "windows")]
+pub(super) fn text_length(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<usize> {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{
+		SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_GETTEXTLENGTH,
+	};
+	let mut length = 0;
+	// SAFETY: WM_GETTEXTLENGTH carries no pointer the target could outlive.
+	let answered = unsafe {
+		SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG, 3000, &mut length)
+	};
+	(answered != 0).then_some(length)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ComboPlan {
 	Refuse,
@@ -181,6 +219,13 @@ pub(super) fn set_combo(
 		));
 	}
 	let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+	let mut actual = vec![0_u16; wide.len() + 1];
+	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?;
+	if usize::try_from(length).ok() == Some(wide.len() - 1)
+		&& actual[..wide.len() - 1] == wide[..wide.len() - 1]
+	{
+		return Ok(());
+	}
 	// The native search is case-insensitive. It only supplies a candidate:
 	// exact post-write text and index readback decide success. Never query
 	// item names through MSAA (unbounded provider calls) or CB_GETLBTEXT
@@ -233,12 +278,14 @@ pub(super) fn set_combo(
 			// A native message can bypass an edit child's read-only policy.
 			// Refuse before clearing the combo's existing selection.
 			// SAFETY: GetWindowLongW only queries the identified edit handle.
-			if unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) }
-				& windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY
-				!= 0
+			if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowEnabled(info.hwndItem) }
+				== 0
+				|| unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) }
+					& windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY
+					!= 0
 			{
 				return Err(DesktopError::ax_failed(
-					"the combo box edit is read-only; nothing was written",
+					"the combo box edit is disabled or read-only; nothing was written",
 				));
 			}
 			// Typed text that matches no item leaves the combo with no list
@@ -263,7 +310,7 @@ pub(super) fn set_combo(
 	// WM_GETTEXT takes the buffer capacity, unlike CB_GETLBTEXT. One extra
 	// code unit beyond the expected text distinguishes a longer value from
 	// an exact match even when the read is truncated.
-	let mut actual = vec![0_u16; wide.len() + 1];
+	actual.fill(0);
 	let length =
 		usize::try_from(send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?)
 			.map_err(|_| failed())?;
@@ -310,6 +357,57 @@ mod tests {
 		let secure = verdict("secret", Some("different"), None, true).unwrap_err();
 		assert!(!secure.message.contains("secret"));
 		assert!(!secure.message.contains("different"));
+	}
+
+	#[test]
+	fn rich_edit_paragraph_marks_and_a_changed_hidden_length_confirm_a_write() {
+		let rich = "WindowsForms10.RichEdit20W.app.0.141b42a_r8_ad1";
+		assert!(rich_edit_holds(rich, "abc", "abc\r"));
+		assert!(rich_edit_holds("RICHEDIT50W", "a\r\nb\n", "a\rb\r\r"));
+		assert!(!rich_edit_holds("RICHEDIT50W", "abc", "ABC\r"));
+		assert!(!rich_edit_holds("RICHEDIT50W", "abc", "abc\rd\r"));
+		assert!(!rich_edit_holds("Edit", "abc", "abc\r"));
+		assert!(length_confirms("hünter2", Some(0), Some(7)));
+		for (before, after) in
+			[(Some(7), Some(7)), (Some(0), Some(6)), (None, Some(7)), (Some(0), None)]
+		{
+			assert!(!length_confirms("hünter2", before, after));
+		}
+	}
+
+	#[cfg(target_os = "windows")]
+	#[test]
+	fn a_native_password_edit_answers_for_its_length() {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{
+			CreateWindowExW, DestroyWindow, ES_PASSWORD, SetWindowTextW, WS_OVERLAPPED,
+		};
+		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+		let (class, empty, secret) = (wide("EDIT"), wide(""), wide("hunter2"));
+		// SAFETY: the strings are NUL-terminated and outlive the calls; the edit
+		// belongs to this thread, so its messages run synchronously.
+		unsafe {
+			let edit = CreateWindowExW(
+				0,
+				class.as_ptr(),
+				empty.as_ptr(),
+				WS_OVERLAPPED | ES_PASSWORD as u32,
+				0,
+				0,
+				100,
+				30,
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			);
+			assert!(!edit.is_null());
+			let before = text_length(edit);
+			assert_eq!(before, Some(0));
+			assert_ne!(SetWindowTextW(edit, secret.as_ptr()), 0);
+			assert!(length_confirms("hunter2", before, text_length(edit)));
+			DestroyWindow(edit);
+			assert_eq!(text_length(edit), None);
+		}
 	}
 
 	#[test]
@@ -505,6 +603,11 @@ mod tests {
 				};
 				NOTIFICATIONS
 					.with(|notifications| assert_eq!(notifications.borrow().as_slice(), expected));
+				if destroy_on == u32::MAX {
+					NOTIFICATIONS.with(|notifications| notifications.borrow_mut().clear());
+					set_combo(combo, "green", true, false).unwrap();
+					NOTIFICATIONS.with(|notifications| assert!(notifications.borrow().is_empty()));
+				}
 				if IsWindow(combo) != 0 {
 					DestroyWindow(combo);
 				}
@@ -769,6 +872,11 @@ mod tests {
 			let length = GetWindowTextW(hwnd, unchanged.as_mut_ptr(), unchanged.len() as i32);
 			assert_eq!(String::from_utf16_lossy(&unchanged[..length as usize]), "green");
 			SendMessageW(info.hwndItem, windows_sys::Win32::UI::Controls::EM_SETREADONLY, 0, 0);
+			windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(info.hwndItem, 0);
+			let error = set_combo(combo_target(info.hwndItem), "purple", true, false).unwrap_err();
+			assert!(error.to_string().contains("disabled"));
+			assert_eq!(SendMessageW(hwnd, CB_GETCURSEL, 0, 0), 1);
+			windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow(info.hwndItem, 1);
 
 			set_combo(combo_target(info.hwndItem), "purple", true, false).unwrap();
 

@@ -480,9 +480,18 @@ impl AxBackend for Win32Ax {
 
 	fn set_value(&mut self, handle: &AxHandle, text: &str) -> CoreResult<()> {
 		let element = Self::element(handle)?;
-		let secure = element.is_password().unwrap_or(true);
+		let password = element.is_password().ok();
+		let secure = password.unwrap_or(true);
 		let hwnd = native_window(element).map(super::value_write::combo_target);
 		let class = hwnd.map_or_default(window::class_name);
+		// UI Automation hides a password field's text; a native one still
+		// answers for its length.
+		let length = || {
+			hwnd
+				.filter(|_| password == Some(true))
+				.and_then(super::value_write::text_length)
+		};
+		let before = length();
 		match super::value_write::route(&class) {
 			super::value_write::ValueRoute::Combo => {
 				return super::value_write::set_combo(
@@ -515,6 +524,12 @@ impl AxBackend for Win32Ax {
 		} else {
 			None
 		};
+		let read = pattern.as_deref().or(legacy.as_deref());
+		if read.is_some_and(|read| super::value_write::rich_edit_holds(&class, text, read))
+			|| super::value_write::length_confirms(text, before, length())
+		{
+			return Ok(());
+		}
 		super::value_write::verdict(text, pattern.as_deref(), legacy.as_deref(), secure)
 	}
 
