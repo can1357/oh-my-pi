@@ -18,6 +18,8 @@ use x11rb::{
 
 use crate::desktop::error::{CoreResult, DesktopError};
 
+const DEVICE_PREFIX: &str = "OMP MPX ";
+
 pub(crate) struct Listener {
 	stop:    Option<UnixStream>,
 	thread:  Option<JoinHandle<()>>,
@@ -195,7 +197,7 @@ pub(crate) fn source_of(conn: &RustConnection, device: u16) -> CoreResult<Source
 
 fn classify(kind: DeviceType, name: &[u8]) -> Source {
 	if !matches!(kind, DeviceType::SLAVE_KEYBOARD | DeviceType::SLAVE_POINTER)
-		|| name.starts_with(super::mpx::DEVICE_PREFIX.as_bytes())
+		|| name.starts_with(DEVICE_PREFIX.as_bytes())
 	{
 		Source::Other
 	} else if name.starts_with(b"Virtual core XTEST ") {

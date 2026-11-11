@@ -82,7 +82,6 @@ const KEY_SETTLE: Duration = Duration::from_millis(30);
 const WARM_UP_KEYCODE: u8 = 240 + X_KEYCODE_OFFSET;
 /// Gives clients time to process the hierarchy change after the warm-up.
 const WARM_UP_SETTLE: Duration = Duration::from_millis(120);
-pub(super) const DEVICE_PREFIX: &str = "OMP MPX ";
 /// Master names that encode an owner incarnation (see [`Owner`]). omp
 /// versions that removed pairs also remove every `v1.` master whose creator
 /// has died, which is now a held pair's normal state; new pairs are `v2.`.
