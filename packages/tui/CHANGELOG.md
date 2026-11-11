@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Agent Hub status scopes (All, Running, Done, Parked) send icons, so Tern no longer draws an empty icon slot beside each one ([#18880](https://github.com/can1357/oh-my-pi/pull/18880) by [@a-glapinski](https://github.com/a-glapinski))
+- Agent Hub status scopes (All, Running, Done, Parked) show icons in Tern instead of empty squares ([#18880](https://github.com/can1357/oh-my-pi/pull/18880) by [@a-glapinski](https://github.com/a-glapinski))
 
 ## [18.18.8] - 2026-11-11
 
