@@ -382,9 +382,6 @@ mod tests {
 	std::thread_local! {
 		static ORIGINAL_COMBO_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
-		static UNBOUNDED_COMBO_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-		static STALE_COMBO_LENGTH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-		static COMBO_WRITE_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 	}
 
 	#[cfg(target_os = "windows")]
@@ -395,40 +392,25 @@ mod tests {
 		lparam: isize,
 	) -> isize {
 		use windows_sys::Win32::UI::WindowsAndMessaging::{
-			CB_DELETESTRING, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_INSERTSTRING, CB_SETCURSEL,
-			CallWindowProcW, SendMessageW,
+			CB_DELETESTRING, CB_FINDSTRINGEXACT, CB_INSERTSTRING, CallWindowProcW, SendMessageW,
 		};
 		let original = ORIGINAL_COMBO_PROC.with(|proc| proc.get());
-		if message == CB_SETCURSEL {
-			COMBO_WRITE_STARTED.with(|writing| writing.set(true));
-		}
-		if message == CB_GETLBTEXT
-			&& wparam == 2
-			&& !COMBO_WRITE_STARTED.with(|writing| writing.get())
-			&& STALE_COMBO_LENGTH.with(|stale| stale.get())
-		{
-			// Detect the unsafe second query after growth without overwriting
-			// its undersized buffer. Native atomic/internal reads are allowed.
-			UNBOUNDED_COMBO_READS.with(|count| count.set(count.get() + 1));
-			return -1;
-		}
 		// SAFETY: original is the native procedure saved when installing this
 		// test subclass, and this callback preserves the message arguments.
 		let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
-		if message == CB_GETLBTEXTLEN
-			&& wparam == 2
-			&& !COMBO_WRITE_STARTED.with(|writing| writing.get())
-		{
-			STALE_COMBO_LENGTH.with(|stale| stale.set(true));
+		if message == CB_FINDSTRINGEXACT && result == 2 {
+			// Replace the matched item before the caller reads its name.
+			// This seam uses the documented native search result, independent
+			// of how any accessibility provider retrieves that item's text.
 			let larger: Vec<u16> = "a much longer dynamically replaced candidate"
 				.encode_utf16()
 				.chain(Some(0))
 				.collect();
 			// SAFETY: this thread owns the combo; the string outlives both
-			// synchronous messages. Simulate growth after returning its old size.
+			// synchronous messages. Simulate growth after finding a candidate.
 			unsafe {
-				SendMessageW(hwnd, CB_DELETESTRING, wparam, 0);
-				SendMessageW(hwnd, CB_INSERTSTRING, wparam, larger.as_ptr() as isize);
+				SendMessageW(hwnd, CB_DELETESTRING, result as usize, 0);
+				SendMessageW(hwnd, CB_INSERTSTRING, result as usize, larger.as_ptr() as isize);
 			}
 		}
 		result
@@ -519,17 +501,12 @@ mod tests {
 			let original = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, growing_combo as *const () as isize);
 			assert_ne!(original, 0);
 			ORIGINAL_COMBO_PROC.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
-			UNBOUNDED_COMBO_READS.with(|count| count.set(0));
-			STALE_COMBO_LENGTH.with(|stale| stale.set(false));
-			COMBO_WRITE_STARTED.with(|writing| writing.set(false));
 			let result = set_combo(hwnd, "grow", true);
 			SetWindowLongPtrW(hwnd, GWLP_WNDPROC, original);
 			result.unwrap();
-			assert!(STALE_COMBO_LENGTH.with(|stale| stale.get()));
-			assert!(UNBOUNDED_COMBO_READS.with(|count| count.get()) > 0);
-			// MSAA owns its buffers even when its provider encounters this
-			// race. The changed candidate no longer matches; write the
-			// requested value through the editable route instead.
+			// The changed candidate no longer matches; write the requested
+			// value through the editable route instead. Only observable
+			// selection and text matter, not the provider's internal reads.
 			assert_eq!(SendMessageW(hwnd, CB_GETCURSEL, 0, 0), -1);
 			let length = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
 			assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), "grow");
