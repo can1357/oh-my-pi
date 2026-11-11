@@ -85,7 +85,7 @@ pub struct X11Capture {
 	selector:    DisplaySelector,
 	/// The selection a compositing manager owns on this screen (EWMH).
 	compositor:  Atom,
-	/// Render defines alpha independently of the core TrueColor RGB masks.
+	/// Render defines alpha independently of the core `TrueColor` RGB masks.
 	pictformats: Option<Arc<QueryPictFormatsReply>>,
 }
 
@@ -889,7 +889,6 @@ mod tests {
 
 	use x11rb::{
 		CURRENT_TIME,
-		connection::RequestConnection as _,
 		protocol::xproto::{ColormapAlloc, ConfigureWindowAux, CreateWindowAux, PropMode, StackMode},
 		wrapper::ConnectionExt as _,
 	};
