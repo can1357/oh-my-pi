@@ -1047,7 +1047,7 @@ fn claim_pair(
 		let value = read_holder(conn, holder, info.deviceid);
 		if !is_claimable(value.as_deref(), pointer, owner, process_start)
 			|| devices.iter().any(|slave| {
-				(slave.attachment == info.deviceid || slave.attachment == info.attachment)
+				[info.deviceid, info.attachment].contains(&slave.attachment)
 					&& (slave.name.ends_with(b" uinput pointer")
 						|| slave.name.ends_with(b" uinput keyboard"))
 			}) {
