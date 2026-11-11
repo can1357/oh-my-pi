@@ -38,12 +38,28 @@ export interface BlobUploadRequest {
 	extension: string;
 	/** Preferred remote filename when a backend supports naming. */
 	filename?: string;
+	/**
+	 * Relative remote folder (slash-separated) under the destination's key
+	 * prefix, for uploaders that key objects by path; others ignore it.
+	 */
+	folder?: string;
 }
 
 /** A configured destination capable of publishing blobs. */
 export interface BlobUploader {
 	/** Registry destination implemented by this uploader. */
 	readonly destination: BlobDestinationId;
+	/**
+	 * Uploads keyed by `folder`/`filename`: uploading the same key again
+	 * replaces the served object at the same URL. Hosted pages require it.
+	 */
+	readonly overwrites?: boolean;
 	/** Publish one blob and return its durable publication metadata. */
 	upload(request: BlobUploadRequest): Promise<BlobPublication>;
+	/**
+	 * Delete a publication this destination produced, signing with live
+	 * credentials. Preferred over replaying {@link BlobPublication.delete},
+	 * whose captured signature may have expired.
+	 */
+	remove?(publication: BlobPublication): Promise<void>;
 }

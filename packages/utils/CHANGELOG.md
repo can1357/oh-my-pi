@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getPublishedDir()` for the published web page store (`~/.omp/agent/published`) ([#18806](https://github.com/can1357/oh-my-pi/pull/18806) by [@H4vC](https://github.com/H4vC))
+
 ### Removed
 
 - Removed `getConfigAgentDirName()`; use `getAgentDir()`, which also honors `PI_CODING_AGENT_DIR` ([#18684](https://github.com/can1357/oh-my-pi/issues/18684))

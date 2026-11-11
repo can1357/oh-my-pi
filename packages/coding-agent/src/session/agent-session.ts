@@ -8083,6 +8083,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/**
+	 * Re-derive what depends on stored credentials after a sign-in or sign-out:
+	 * the scoped model list and credential-gated built-in tools (`publish`).
+	 * Logs failures instead of throwing, like {@link refreshScopedModels}.
+	 */
+	async refreshAfterCredentialChange(): Promise<void> {
+		await this.refreshScopedModels();
+		try {
+			await this.reconcileBuiltinTools();
+		} catch (error) {
+			logger.warn("Built-in tool reconcile after a credential change failed", { error: String(error) });
+		}
+	}
+
 	/** Prompt templates */
 	getPlanModeState(): PlanModeState | undefined {
 		return this.#planModeState;

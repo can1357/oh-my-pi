@@ -1010,6 +1010,11 @@ export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");
 }
 
+/** Get the published web page store directory (~/.omp/agent/published). */
+export function getPublishedDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "published", "data");
+}
+
 /** Get the custom themes directory (~/.omp/agent/themes). */
 export function getCustomThemesDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "themes");

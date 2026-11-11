@@ -126,7 +126,7 @@ export async function listLogoutAccounts(
  * names the auth source that still authenticates the provider, if any.
  */
 export async function logoutCredential(
-	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshScopedModels">,
+	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshAfterCredentialChange">,
 	loginProvider: string,
 	credentialId: number,
 ): Promise<{ removed: boolean; remainingSource?: string }> {
@@ -142,6 +142,6 @@ export async function logoutCredential(
 	// authoritative cache row and keep showing models the credential
 	// unlocked (#5780). Other providers are left untouched.
 	await modelRegistry.refreshProvider(provider, "online");
-	await session.refreshScopedModels();
+	await session.refreshAfterCredentialChange();
 	return { removed: true, remainingSource: authStorage.keys.describe(provider, session.sessionId) };
 }
