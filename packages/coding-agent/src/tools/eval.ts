@@ -21,7 +21,7 @@ import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
+import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes, preserveEvalGuides } from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -512,28 +512,18 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		const result = await this.#execute(toolCallId, params, signal, onUpdate, ctx);
-		if (!this.session || !shapesOutput(this.session, "eval")) return result;
-		// First-call docs are control text, not cell data for Spotlight to rank or shorten.
-		const guides: string[] = [];
-		const content = result.content.map(part => {
-			if (part.type !== "text") return part;
-			const text = part.text.replace(/(?:^|\n)<eval-guide name="[^"]+">[\s\S]*?<\/eval-guide>(?:\n|$)/g, guide => {
-				guides.push(guide.trim());
-				return "\n";
-			});
-			return text === part.text ? part : { ...part, text };
-		});
-		const shaped = await shapeToolResult(
-			this.session,
-			toolCallId,
-			{ tool: "eval", command: params.code, source: params.code, exitCode: result.isError ? 1 : 0 },
-			{ ...result, content },
-			signal,
-			{ dropTruncation: true },
+		const session = this.session;
+		if (!session || !shapesOutput(session, "eval")) return result;
+		return preserveEvalGuides(result, output =>
+			shapeToolResult(
+				session,
+				toolCallId,
+				{ tool: "eval", command: params.code, source: params.code, exitCode: result.isError ? 1 : 0 },
+				output,
+				signal,
+				{ dropTruncation: true },
+			),
 		);
-		return guides.length > 0
-			? { ...shaped, content: [...shaped.content, { type: "text", text: guides.join("\n\n") }] }
-			: shaped;
 	}
 
 	async #execute(

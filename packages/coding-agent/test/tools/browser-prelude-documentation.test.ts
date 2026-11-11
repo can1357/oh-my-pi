@@ -27,10 +27,12 @@ describe("browserDocumentation", () => {
 			invoke: async () => ({ content: [] }),
 		});
 		expect(definition.documentation).not.toContain(X11_NOTE);
-		expect(definition.guidance).toBeUndefined();
+		expect(definition.guidance ?? "").not.toContain(X11_NOTE);
+		expect(definition.guidance).toContain("# Browser user sessions");
 		cfgBrowserCdpUrl.set(settings, "http://10.0.0.5:9222");
 		expect(definition.documentation).toContain(X11_NOTE);
 		expect(definition.guidance).toContain(X11_NOTE);
+		expect(definition.guidance).toContain("# Browser user sessions");
 	});
 });
 

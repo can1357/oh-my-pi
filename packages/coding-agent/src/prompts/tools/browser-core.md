@@ -47,6 +47,4 @@ print(await tab.title());
   (inserting controls, writing app state, revealing hidden elements); when a step cannot be done through the page, say so.
   When the user asks you to change the page with a script, do it.
 - `tab.run` has full Bun/Node and tool-bridge access; it is not sandboxed.
-- Relay and CDP actions operate on real user sessions.
-- `app.target` borrows the user's own tab or Tern block: NEVER navigate it (`url`, `goto`) without authorization.
 </critical>

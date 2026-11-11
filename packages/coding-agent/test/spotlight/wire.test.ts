@@ -655,6 +655,32 @@ describe("spotlight Eval guide delivery", () => {
 			await disposeAllVmContexts();
 		}
 	});
+
+	it("keeps the complete first-call guide inline when Eval output spills to an artifact", async () => {
+		const run = await toolSession({
+			"tools.artifactSpillThreshold": 1,
+			"tools.artifactHeadBytes": 0,
+			"tools.artifactTailBytes": 1,
+		});
+		const definition = createBrowserPreludeDefinition(run.session, {
+			invoke: async () => ({ content: [{ type: "text", text: "cell output\n".repeat(1000) }], details: [] }),
+		});
+		run.session.getEvalPreludes = () => [definition];
+		const guide = definition.firstCallDocumentation?.trim();
+		if (!guide) throw new Error("Expected browser guide");
+		try {
+			const tool = wrapToolWithMetaNotice(new EvalTool(run.session));
+			const result = await agentCall(tool, run, "spilled-browser-guide", {
+				language: "js",
+				code: "await browser.tabs()",
+			});
+			expect(resultText(result)).toContain(guide);
+			expect(result.details).toMatchObject({ meta: { truncation: { artifactId: expect.any(String) } } });
+			expect(resultText(result).length).toBeLessThan(12000);
+		} finally {
+			await disposeAllVmContexts();
+		}
+	});
 });
 
 describe("spotlight column-capped output", () => {
