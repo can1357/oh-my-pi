@@ -1433,6 +1433,107 @@ describe("ACP agent", () => {
 		await harness.agent.dispose();
 	});
 
+	it("does not duplicate streamed child text on message end", async () => {
+		const airCapabilities = {
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: airCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-7",
+			agent: "task",
+			agentSource: "bundled",
+			description: "Do the thing",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		const message = {
+			role: "assistant",
+			content: [{ type: "text", text: "hello" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "m",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-7",
+			event: { type: "message_update", message, assistantMessageEvent: { type: "text_delta", delta: "hello" } },
+		});
+		await flushBusDelivery();
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-7",
+			event: { type: "message_end", message },
+		});
+		await flushBusDelivery();
+		const childChunks = harness.updates.filter(
+			update =>
+				update.sessionId !== "worker-7" &&
+				(update.update as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk" &&
+				(
+					(update.update as { _meta?: unknown })._meta as
+						| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+						| undefined
+				)?.jetbrains?.air?.subagentSessionId === "worker-7",
+		);
+		expect(childChunks).toHaveLength(1);
+		await harness.agent.dispose();
+	});
+
+	it("cancels nested grandchildren via registry ancestry", async () => {
+		const harness = await createHarness({ clientCapabilities: { subagents: {} }, subagentEventBus: true });
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const ownerId = harness.findSession(created.sessionId)?.getAgentId?.() ?? "acp-test";
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "worker-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// A grandchild whose immediate parent is another child, not the root agent.
+		const registry = AgentRegistry.global();
+		const refs: Array<{ id: string; ref: unknown }> = [];
+		for (const [id, parentId] of [
+			["mid-1", ownerId],
+			["leaf-1", "mid-1"],
+		] as const) {
+			refs.push({
+				id,
+				ref: registry.register({
+					id,
+					displayName: id,
+					kind: "sub",
+					parentId,
+					session: null,
+					sessionFile: null,
+					status: "running",
+				}),
+			});
+		}
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "leaf-1",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 0,
+		});
+		await flushBusDelivery();
+		// Must resolve via the child path (owned descendant), not throw "not found".
+		await harness.agent.cancel({ sessionId: "leaf-1" });
+		for (const { id, ref } of refs) registry.unregister(id, ref as never);
+		await harness.agent.dispose();
+	});
+
 	it("delivers the thinking config update before resolving the command", async () => {
 		const blocked = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

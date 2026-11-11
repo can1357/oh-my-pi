@@ -431,6 +431,15 @@ type ManagedSessionRecord = {
 	rfdSubagentTracker: RfdSubagentTracker | undefined;
 	/** Registry status feed for the RFD tracker; released with the record. */
 	rfdRegistryUnsubscribe: (() => void) | undefined;
+	/**
+	 * Per-child live assistant-message state for transcript forwarding.
+	 * The parent turn streams one message at a time; each child does too,
+	 * so progress tracking is keyed by child id instead of a single slot.
+	 */
+	childMessageState: Map<
+		string,
+		{ messageId: string | undefined; progress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined }
+	>;
 	/** Child-event forwarding subscription for the AIR tracker; released with the record. */
 	airChildEventUnsubscribe: (() => void) | undefined;
 	/** Child-event forwarding subscription for the RFD tracker; released with the record. */
@@ -1651,7 +1660,7 @@ export class AcpAgent implements Agent {
 			const registry = AgentRegistry.global();
 			const ref = registry.get(sessionId);
 			if (ref?.kind !== "sub") return true;
-			if (ownerId !== undefined && ref.parentId !== undefined && ref.parentId !== ownerId) continue;
+			if (!this.#isOwnedDescendant(ref, ownerId)) continue;
 			try {
 				if (ref.status === "running" && ref.session) {
 					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
@@ -1665,6 +1674,26 @@ export class AcpAgent implements Agent {
 				);
 			}
 			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Whether the child ref belongs to this connection's tree: its registry
+	 * ancestry reaches the owning root agent. Nested children have their
+	 * immediate spawner as `parentId`, so a direct comparison would wrongly
+	 * refuse grandchildren the tracker advertised cancel for. Cycles and
+	 * missing refs deny.
+	 */
+	#isOwnedDescendant(ref: { parentId?: string | undefined }, ownerId: string | undefined): boolean {
+		if (ownerId === undefined) return true;
+		if (ref.parentId === undefined) return true;
+		const seen = new Set<string>();
+		let current: string | undefined = ref.parentId;
+		while (current !== undefined && !seen.has(current)) {
+			if (current === ownerId) return true;
+			seen.add(current);
+			current = AgentRegistry.global().get(current)?.parentId;
 		}
 		return false;
 	}
@@ -2087,8 +2116,11 @@ export class AcpAgent implements Agent {
 	async #forwardAirChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
 		const tracker = record.subagentTracker;
 		if (!tracker || !tracker.children.has(payload.id)) return;
+		this.#prepareChildMessage(record, payload.id, payload.event);
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, record.protocolSessionId, {
-			cwd: record.session.sessionManager.getCwd(),
+			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
+			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			cwd: this.#childCwd(payload.id, record),
 		})) {
 			const tagged = {
 				...notification,
@@ -2096,6 +2128,58 @@ export class AcpAgent implements Agent {
 			};
 			await this.#connection.sessionUpdate(tagged);
 		}
+		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
+	}
+
+	/** Resolve the emitting child's workspace for tool locations, falling back to the parent cwd. */
+	#childCwd(childId: string, record: ManagedSessionRecord): string | undefined {
+		const cwd = AgentRegistry.global().get(childId)?.session?.sessionManager.getCwd();
+		return typeof cwd === "string" && cwd.length > 0 ? cwd : record.session.sessionManager.getCwd();
+	}
+
+	/** Per-child equivalent of `#prepareLiveAssistantMessage`: one message streams at a time per child. */
+	#prepareChildMessage(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (
+			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
+			event.message.role === "assistant"
+		) {
+			let state = record.childMessageState.get(childId);
+			if (!state) {
+				state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+				record.childMessageState.set(childId, state);
+			}
+		}
+	}
+
+	/** Per-child equivalent of `#clearLiveAssistantMessageAfterEvent`. */
+	#clearChildMessageAfterEvent(record: ManagedSessionRecord, childId: string, event: AgentSessionEvent): void {
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			record.childMessageState.delete(childId);
+		}
+	}
+
+	#getChildMessageId(record: ManagedSessionRecord, childId: string, message: unknown): string | undefined {
+		if (typeof message !== "object" || message === null) return undefined;
+		let state = record.childMessageState.get(childId);
+		if (!state) {
+			state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+			record.childMessageState.set(childId, state);
+		}
+		return state.messageId;
+	}
+
+	#getChildMessageProgress(
+		record: ManagedSessionRecord,
+		childId: string,
+		message: unknown,
+	): { textEmitted: boolean; thoughtEmitted: boolean } | undefined {
+		if (typeof message !== "object" || message === null) return undefined;
+		let state = record.childMessageState.get(childId);
+		if (!state) {
+			state = { messageId: crypto.randomUUID(), progress: { textEmitted: false, thoughtEmitted: false } };
+			record.childMessageState.set(childId, state);
+		}
+		return state.progress;
 	}
 
 	/**
@@ -2129,11 +2213,15 @@ export class AcpAgent implements Agent {
 	async #forwardChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
 		const tracker = record.rfdSubagentTracker;
 		if (!tracker || !tracker.children.has(payload.id)) return;
+		this.#prepareChildMessage(record, payload.id, payload.event);
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, payload.id, {
-			cwd: record.session.sessionManager.getCwd(),
+			getMessageId: message => this.#getChildMessageId(record, payload.id, message),
+			getMessageProgress: message => this.#getChildMessageProgress(record, payload.id, message),
+			cwd: this.#childCwd(payload.id, record),
 		})) {
 			await this.#connection.sessionUpdate(notification);
 		}
+		this.#clearChildMessageAfterEvent(record, payload.id, payload.event);
 	}
 
 	/**
@@ -2211,6 +2299,7 @@ export class AcpAgent implements Agent {
 			subagentTracker: undefined,
 			rfdSubagentTracker: undefined,
 			rfdRegistryUnsubscribe: undefined,
+			childMessageState: new Map(),
 			airChildEventUnsubscribe: undefined,
 			rfdChildEventUnsubscribe: undefined,
 		};
@@ -3720,6 +3809,7 @@ export class AcpAgent implements Agent {
 		record.rfdSubagentTracker = undefined;
 		record.rfdRegistryUnsubscribe?.();
 		record.rfdRegistryUnsubscribe = undefined;
+		record.childMessageState.clear();
 		record.airChildEventUnsubscribe?.();
 		record.airChildEventUnsubscribe = undefined;
 		record.rfdChildEventUnsubscribe?.();
