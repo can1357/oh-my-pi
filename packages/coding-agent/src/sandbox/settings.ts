@@ -184,6 +184,20 @@ export const cfgSandboxReadScope = register({
 	},
 });
 
+export const cfgSandboxListDrives = register({
+	id: "sandbox.filesystem.windowsListDrives",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Sandbox",
+		label: "Sandbox Drive Listing (Windows)",
+		condition: "windows",
+		description:
+			"Let contained commands list directories and read file metadata (names, sizes, times) across every drive holding a sandbox path, not file contents. Node, npm and npx need it to run scripts. A project config cannot turn it on",
+	},
+});
+
 export const cfgSandboxAllowWrite = register({
 	id: "sandbox.filesystem.allowWrite",
 	type: "array",

@@ -13,6 +13,7 @@ import {
 	setSandboxListMember,
 } from "@oh-my-pi/pi-coding-agent/modes/sandbox-panel";
 import { SandboxRuntime, sandboxAccessEffect } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import {
 	cfgSandboxAllowedHosts,
 	cfgSandboxAllowWrite,
@@ -64,6 +65,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });

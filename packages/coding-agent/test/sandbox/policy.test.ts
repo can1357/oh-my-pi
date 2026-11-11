@@ -55,6 +55,7 @@ function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
 		denyRead: [],
 		networkMode: "deny",
 		allowedHosts: [],
+		listDrives: false,
 		ignored: [],
 		...overrides,
 	};
@@ -405,6 +406,13 @@ describe("readSandboxConfig: project may only tighten", () => {
 			{ sandbox: { network: { allowedHosts: ["a.test", "exfil.test"] } } },
 			{ allowedHosts: ["a.test"] },
 			"sandbox.network.allowedHosts",
+		],
+		[
+			"windowsListDrives",
+			{ sandbox: { enabled: true } },
+			{ sandbox: { filesystem: { windowsListDrives: true } } },
+			{ listDrives: false },
+			"sandbox.filesystem.windowsListDrives",
 		],
 		// A project `null` resets a setting to its default; it must not bypass the clamp.
 		[

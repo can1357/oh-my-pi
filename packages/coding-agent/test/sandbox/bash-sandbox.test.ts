@@ -453,6 +453,12 @@ describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("agent bash in the sandbox
 		expect(toolText(result)).toContain("1");
 		expect(createTerminal).not.toHaveBeenCalled();
 	});
+});
+
+describe.skipIf(!supported)("system prompt with the sandbox active", () => {
+	beforeEach(() => {
+		cfgSandboxEnabled.set(settings, true);
+	});
 
 	it("adds the sandbox block to the system prompt while active and rebuilds on a change", async () => {
 		const active = await buildSandboxPrompt(settings, workspace);

@@ -98,6 +98,13 @@ describe("bash results run in the sandbox", () => {
 		]);
 	});
 
+	it("tell a program that cannot start in the Windows sandbox apart from a denial", () => {
+		const startFailed = { ...SANDBOX, blockedHosts: undefined, denied: undefined, startFailed: true };
+		expect(warnings(bashToolRenderer.describeResult(bashResult(startFailed), done).body)).toEqual([
+			"cannot start in the Windows sandbox (0xC0000142)",
+		]);
+	});
+
 	it("clean hostile host names and wrap the warning within a narrow card", () => {
 		const hostile = { ...SANDBOX, blockedHosts: ["a\tb\x1b[31m.test", "second-very-long-host-name.example.org"] };
 		const notes = warnings(bashToolRenderer.describeResult(bashResult(hostile), done).body);

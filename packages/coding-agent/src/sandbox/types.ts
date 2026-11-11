@@ -15,6 +15,8 @@ export interface SandboxConfig {
 	denyRead: readonly string[];
 	networkMode: SandboxNetworkMode;
 	allowedHosts: readonly string[];
+	/** Windows: drive roots of the policy paths are enumerable (whole-volume listing and metadata). */
+	listDrives: boolean;
 	/** Project-layer values that were dropped because they would loosen the sandbox. */
 	ignored: readonly { id: string; reason: string }[];
 }

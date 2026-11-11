@@ -1,7 +1,8 @@
 /**
  * Tool-card presentation of a run contained by the OS sandbox, shared by the
  * bash and eval renderers: the head badge, and the warnings for hosts the
- * egress proxy refused and a likely filesystem denial.
+ * egress proxy refused, a likely filesystem denial, and a program the
+ * Windows sandbox cannot start.
  */
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { keyed } from "../native/describe";
@@ -19,6 +20,8 @@ export interface ToolSandboxMeta {
 	blockedHosts?: string[];
 	/** The output looks like a filesystem denial by the sandbox. */
 	denied?: boolean;
+	/** Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start. */
+	startFailed?: boolean;
 }
 
 /** The `sandboxed` head badge; its title names backend, mode and network. */
@@ -30,13 +33,14 @@ export function sandboxBadge(meta: ToolSandboxMeta): { text: string; tone: TspTo
 	};
 }
 
-/** Plain, sanitized warning texts: refused hosts, then a likely denial. */
+/** Plain, sanitized warning texts: refused hosts, a likely denial, then a program that cannot start contained. */
 function sandboxNotes(meta: ToolSandboxMeta | undefined): string[] {
 	if (!meta) return [];
 	const notes: string[] = [];
 	const hosts = (meta.blockedHosts ?? []).map(host => plainLine(host)).filter(host => host.length > 0);
 	if (hosts.length > 0) notes.push(`blocked by sandbox: ${hosts.length === 1 ? "host" : "hosts"} ${hosts.join(", ")}`);
 	if (meta.denied === true) notes.push("possible sandbox denial");
+	if (meta.startFailed === true) notes.push("cannot start in the Windows sandbox (0xC0000142)");
 	return notes;
 }
 

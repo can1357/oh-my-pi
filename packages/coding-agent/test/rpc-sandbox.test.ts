@@ -12,6 +12,7 @@ import {
 import type { RpcSandboxFrame, RpcSandboxState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { EgressProxy, type EgressProxyOptions } from "@oh-my-pi/pi-coding-agent/sandbox/egress-proxy";
 import { SandboxRuntime, sandboxAccessEffect } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import {
 	cfgSandboxAllowedHosts,
 	cfgSandboxAllowWrite,
@@ -74,6 +75,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });

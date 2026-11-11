@@ -38,6 +38,7 @@ import {
 	cfgSandboxDenyRead,
 	cfgSandboxEnabled,
 	cfgSandboxFallback,
+	cfgSandboxListDrives,
 	cfgSandboxMode,
 	cfgSandboxNetworkMode,
 	cfgSandboxReadScope,
@@ -166,6 +167,7 @@ const cfgSandboxAll = combine({
 	denyRead: cfgSandboxDenyRead,
 	networkMode: cfgSandboxNetworkMode,
 	allowedHosts: cfgSandboxAllowedHosts,
+	listDrives: cfgSandboxListDrives,
 });
 
 /** Output fragments that point at a filesystem denial by the sandbox (shell, Node/Bun and Python spellings). */
@@ -880,9 +882,9 @@ export class SandboxRuntime {
 		const tempDir = this.tempDir();
 		if (network === "allowlist") {
 			const proxy = await ensureProxy(this, this.#settings);
-			policy = { ...fsPolicy, network: "proxy", proxyUrl: proxy.url };
+			policy = { ...fsPolicy, network: "proxy", proxyUrl: proxy.url, listVolumeRoots: config.listDrives };
 		} else {
-			policy = { ...fsPolicy, network };
+			policy = { ...fsPolicy, network, listVolumeRoots: config.listDrives };
 		}
 		return spawnSandboxChild({
 			argv: request.argv,

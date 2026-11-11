@@ -15,6 +15,7 @@ import {
 	cfgSandboxEnabled,
 	cfgSandboxFallback,
 	cfgSandboxMode,
+	cfgSandboxListDrives,
 	cfgSandboxNetworkMode,
 	cfgSandboxReadScope,
 	cfgSandboxScope,
@@ -94,6 +95,7 @@ export function readSandboxConfig(settings: Settings): SandboxConfig {
 		denyRead: noRemovals(cfgSandboxDenyRead, settings, ignored),
 		networkMode: atLeastAsStrict(cfgSandboxNetworkMode, ["allow", "allowlist", "deny"], settings, ignored),
 		allowedHosts: noAdditions(cfgSandboxAllowedHosts, settings, ignored),
+		listDrives: atLeastAsStrict(cfgSandboxListDrives, [true, false], settings, ignored),
 		ignored,
 	};
 }

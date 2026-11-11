@@ -170,7 +170,10 @@ fn probe_host_support() -> HostSupport {
 					host_loopback_allow = entry
 						.capabilities
 						.contains(&BackendCapability::IngressHostLoopbackAllow);
-					enumerate_paths = process_container_enumerates();
+					warnings.extend(entry.warnings);
+					enumerate_paths = entry
+						.capabilities
+						.contains(&BackendCapability::FilesystemEnumeratePaths);
 				},
 				None => {
 					unavailable = Some("MXC reported no processcontainer backend".to_owned());
@@ -211,19 +214,6 @@ fn probe_host_support() -> HostSupport {
 	}
 }
 
-/// Whether the processcontainer's native tier enforces `enumeratePaths`. Only
-/// then is it requested: MXC would otherwise push the request to a fallback
-/// tier omp refuses.
-#[cfg(target_os = "windows")]
-fn process_container_enumerates() -> bool {
-	v1::probe(None).is_ok_and(|output| output.probes.base_container_supports_enumerate_paths)
-}
-
-#[cfg(not(target_os = "windows"))]
-const fn process_container_enumerates() -> bool {
-	false
-}
-
 /// The volume root (`C:\`, `\\server\share\`) of a Windows path, if it has one.
 fn windows_volume_root(path: &str) -> Option<String> {
 	let bytes = path.as_bytes();
@@ -245,13 +235,13 @@ fn windows_volume_root(path: &str) -> Option<String> {
 	Some(format!(r"\\{server}\{share}\"))
 }
 
-/// processcontainer: the volume roots of every granted path, as query-only
-/// `enumeratePaths`. The OS grants neither read nor query on a root no policy
-/// path names, so `lstat("C:\")` fails, and with it every realpath that walks
-/// from the root (Node runs no script file without one). Enumeration is
-/// query-only and grants no file reads below the root; the roots themselves
-/// are never in the read or write lists (a path in both lists would lose its
-/// file reads).
+/// processcontainer: the volume roots of every granted path as
+/// `enumeratePaths`. The OS grants nothing on a root no policy path names, so
+/// `lstat("C:\")` fails, and with it every realpath that walks from the root
+/// (Node runs no script file without one). PSEC applies the grant to the whole
+/// volume: every directory on it can be listed and every entry's metadata read
+/// (no file contents), so it is opt-in. The roots are never in the read or
+/// write lists (a path in both lists would lose its file reads).
 fn volume_root_enumeration(policy: &SandboxPolicy, cwd: Option<&str>) -> Containment {
 	let mut roots: Vec<String> = Vec::new();
 	let paths = policy
@@ -384,16 +374,20 @@ fn push_unique(into: &mut Vec<String>, paths: Vec<String>) {
 #[napi(object, object_to_js = false)]
 pub struct SandboxPolicy {
 	/// Read-write grants.
-	pub readwrite_paths: Vec<String>,
+	pub readwrite_paths:   Vec<String>,
 	/// Read-only grants.
-	pub readonly_paths:  Vec<String>,
+	pub readonly_paths:    Vec<String>,
 	/// No read, no write; outranks the other two lists.
-	pub denied_paths:    Vec<String>,
+	pub denied_paths:      Vec<String>,
 	/// Network posture.
 	#[napi(ts_type = "\"allow\" | \"deny\" | \"proxy\"")]
-	pub network:         String,
+	pub network:           String,
 	/// Required when network is "proxy": `http://127.0.0.1:<port>`.
-	pub proxy_url:       Option<String>,
+	pub proxy_url:         Option<String>,
+	/// Windows: make the volume roots of the granted paths enumerable, which
+	/// lets contained processes list and stat the whole volume (Node needs it to
+	/// resolve script paths). Ignored where the native tier cannot enforce it.
+	pub list_volume_roots: Option<bool>,
 }
 
 /// Options for [`SandboxProcess::spawn`].
@@ -607,7 +601,7 @@ fn build_request(
 	};
 	let mode = NetworkMode::parse(&policy.network)?;
 	let network = network_policy(mode, policy.proxy_url.as_deref(), backend, host_loopback_allow)?;
-	let containment = if windows && enumerate_paths {
+	let containment = if windows && enumerate_paths && policy.list_volume_roots == Some(true) {
 		volume_root_enumeration(&policy, cwd.as_deref())
 	} else {
 		Containment::Process
@@ -1163,11 +1157,12 @@ mod tests {
 			cwd:    Some("/work".to_owned()),
 			env:    HashMap::from([("PATH".to_owned(), "/bin".to_owned())]),
 			policy: SandboxPolicy {
-				readwrite_paths: args(&["/work"]),
-				readonly_paths:  args(&["/usr"]),
-				denied_paths:    args(&["/home/u/.ssh"]),
-				network:         "deny".to_owned(),
-				proxy_url:       None,
+				readwrite_paths:   args(&["/work"]),
+				readonly_paths:    args(&["/usr"]),
+				denied_paths:      args(&["/home/u/.ssh"]),
+				network:           "deny".to_owned(),
+				proxy_url:         None,
+				list_volume_roots: None,
 			},
 		};
 		let request = build_request(options, Backend::Seatbelt, false, false, false).unwrap();
@@ -1189,11 +1184,12 @@ mod tests {
 			cwd:    None,
 			env:    HashMap::new(),
 			policy: SandboxPolicy {
-				readwrite_paths: Vec::new(),
-				readonly_paths:  Vec::new(),
-				denied_paths:    Vec::new(),
-				network:         "allow".to_owned(),
-				proxy_url:       None,
+				readwrite_paths:   Vec::new(),
+				readonly_paths:    Vec::new(),
+				denied_paths:      Vec::new(),
+				network:           "allow".to_owned(),
+				proxy_url:         None,
+				list_volume_roots: None,
 			},
 		};
 		let request = build_request(options, Backend::ProcessContainer, false, true, false).unwrap();
@@ -1209,30 +1205,39 @@ mod tests {
 	}
 
 	#[test]
-	fn windows_requests_make_the_volume_roots_of_granted_paths_queryable() {
-		let options = || SandboxSpawnOptions {
+	fn windows_volume_root_listing_is_opt_in_and_needs_native_support() {
+		let options = |list_volume_roots: Option<bool>| SandboxSpawnOptions {
 			argv:   args(&["node.exe", "app.js"]),
 			cwd:    Some("D:\\work\\sub".to_owned()),
 			env:    HashMap::new(),
 			policy: SandboxPolicy {
 				readwrite_paths: args(&["D:\\work", "C:\\Users\\u\\AppData\\Local\\Temp\\omp-sb-1"]),
-				readonly_paths:  args(&["c:\\Users\\u", "\\\\server\\share\\tools"]),
-				denied_paths:    args(&["C:\\Users\\u\\.ssh"]),
-				network:         "deny".to_owned(),
-				proxy_url:       None,
+				readonly_paths: args(&["c:\\Users\\u", "\\\\server\\share\\tools"]),
+				denied_paths: args(&["C:\\Users\\u\\.ssh"]),
+				network: "deny".to_owned(),
+				proxy_url: None,
+				list_volume_roots,
 			},
 		};
-		let request = build_request(options(), Backend::ProcessContainer, false, true, true).unwrap();
+		let request =
+			build_request(options(Some(true)), Backend::ProcessContainer, false, true, true).unwrap();
 		let Containment::ProcessContainer(config) = &request.containment else {
 			panic!("expected explicit processcontainer containment, got {:?}", request.containment);
 		};
 		let filesystem = config.filesystem.as_ref().expect("enumerate paths");
 		assert_eq!(filesystem.enumerate_paths, args(&["D:\\", "C:\\", "\\\\server\\share\\"]));
 
+		// The grant exposes every directory listing on the volume: never without
+		// the opt-in.
+		for opt_out in [None, Some(false)] {
+			let request =
+				build_request(options(opt_out), Backend::ProcessContainer, false, true, true).unwrap();
+			assert_eq!(request.containment, Containment::Process);
+		}
 		// Requesting enumeration where PSEC cannot enforce it would push MXC to a
 		// fallback tier that rewrites host ACLs.
 		let request =
-			build_request(options(), Backend::ProcessContainer, false, true, false).unwrap();
+			build_request(options(Some(true)), Backend::ProcessContainer, false, true, false).unwrap();
 		assert_eq!(request.containment, Containment::Process);
 	}
 

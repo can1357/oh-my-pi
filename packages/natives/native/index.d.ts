@@ -3594,6 +3594,12 @@ export interface SandboxPolicy {
   network: "allow" | "deny" | "proxy"
   /** Required when network is "proxy": `http://127.0.0.1:<port>`. */
   proxyUrl?: string
+  /**
+   * Windows: make the volume roots of the granted paths enumerable, which
+   * lets contained processes list and stat the whole volume (Node needs it to
+   * resolve script paths). Ignored where the native tier cannot enforce it.
+   */
+  listVolumeRoots?: boolean
 }
 
 /** Options for [`SandboxProcess::spawn`]. */
