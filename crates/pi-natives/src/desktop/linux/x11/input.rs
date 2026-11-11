@@ -1081,17 +1081,15 @@ fn ensure_mpx<'a>(
 	}
 	let mpx = match slot.take() {
 		Some(mpx) => mpx,
-		None => Mpx::create().map_err(|error| remember_mpx_failure(error, unavailable))?,
+		None => Mpx::create().map_err(|error| {
+			if error.code == ErrorCode::InputBusy || control::check().is_err() {
+				error.message
+			} else {
+				unavailable.insert(error.message).clone()
+			}
+		})?,
 	};
 	Ok(slot.insert(mpx))
-}
-
-fn remember_mpx_failure(error: DesktopError, unavailable: &mut Option<String>) -> String {
-	if error.code == ErrorCode::InputBusy || control::check().is_err() {
-		error.message
-	} else {
-		unavailable.insert(error.message).clone()
-	}
 }
 
 /// Delivers a background pointer event through the virtual master pointer,
@@ -1287,12 +1285,18 @@ mod tests {
 	use super::*;
 
 	#[test]
+	#[ignore = "needs an isolated Xorg display with uinput hotplug"]
 	fn temporary_pair_contention_does_not_disable_mpx_for_the_session() {
+		let first = Mpx::create().unwrap();
+		let _second = Mpx::create().unwrap();
+		let mut slot = None;
 		let mut unavailable = None;
-		remember_mpx_failure(DesktopError::input_busy("all pairs held"), &mut unavailable);
-		assert!(unavailable.is_none(), "the next action must retry pair acquisition");
-		remember_mpx_failure(DesktopError::input_failed("no uinput access"), &mut unavailable);
-		assert!(unavailable.is_some(), "permanent capability failures stay cached");
+		assert!(ensure_mpx(&mut slot, &mut unavailable).is_err(), "both pairs are held");
+		drop(first);
+		assert!(
+			ensure_mpx(&mut slot, &mut unavailable).is_ok(),
+			"a later action takes the freed pair"
+		);
 	}
 
 	#[test]

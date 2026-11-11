@@ -1030,6 +1030,12 @@ fn claim_pair(
 		.check()
 		.map_err(mpx_failed)?;
 	let _grab = Grab(conn);
+	let xtest = conn
+		.intern_atom(true, b"XTEST Device")
+		.map_err(mpx_failed)?
+		.reply()
+		.map_err(mpx_failed)?
+		.atom;
 	let mut taken = None;
 	let mut pairs = 0;
 	let devices = query_devices(conn)?;
@@ -1048,8 +1054,8 @@ fn claim_pair(
 		if !is_claimable(value.as_deref(), pointer, owner, process_start)
 			|| devices.iter().any(|slave| {
 				[info.deviceid, info.attachment].contains(&slave.attachment)
-					&& (slave.name.ends_with(b" uinput pointer")
-						|| slave.name.ends_with(b" uinput keyboard"))
+					&& matches!(slave.type_, DeviceType::SLAVE_POINTER | DeviceType::SLAVE_KEYBOARD)
+					&& !is_xtest_slave(conn, xtest, slave.deviceid)
 			}) {
 			continue;
 		}
@@ -1073,6 +1079,19 @@ fn claim_pair(
 	};
 	write_holder(conn, holder, pair.0, name.as_bytes())?;
 	Ok(pair)
+}
+
+/// The server marks its XTEST slaves with a read-only property; names do not
+/// distinguish another application's devices from ours.
+fn is_xtest_slave(conn: &RustConnection, xtest: Atom, slave: u16) -> bool {
+	if xtest == NONE {
+		return false;
+	}
+	conn
+		.xinput_xi_get_property(slave, false, xtest, AtomEnum::INTEGER.into(), 0, 1)
+		.ok()
+		.and_then(|cookie| cookie.reply().ok())
+		.is_some_and(|reply| matches!(reply.items, XIGetPropertyItems::Data8(value) if value == [1]))
 }
 
 /// Hands a pair back: its cursor parked, its keyboard focusing nothing, free
@@ -1393,6 +1412,25 @@ mod tests {
 		assert_eq!(query_devices(&conn).unwrap().len(), before, "refusal adds no devices");
 		let pair = pairs[0];
 		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);
+		let xtest = conn
+			.intern_atom(true, b"XTEST Device")
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let foreign = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| {
+				info.type_ == DeviceType::SLAVE_KEYBOARD && !is_xtest_slave(&conn, xtest, info.deviceid)
+			})
+			.expect("the isolated server has a non-XTEST keyboard");
+		attach(&conn, foreign.deviceid, pair.1).unwrap();
+		assert!(
+			claim_pair(&conn, holder, &owner.master_name(4), Some(&owner), root, park).is_err(),
+			"a released pair carrying someone else's keyboard is not safe to retarget"
+		);
+		attach(&conn, foreign.deviceid, foreign.attachment).unwrap();
 		assert_eq!(
 			claim_pair(&conn, holder, &owner.master_name(4), Some(&owner), root, park).unwrap(),
 			pair,
