@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- RPC `select` requests carry `initialIndex`, `selectionMarker`, `checkedIndices` and `markableCount`, so hosts can show which `ask` checkbox options are already checked instead of letting users toggle them blind ([#18929](https://github.com/can1357/oh-my-pi/pull/18929) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.19.0] - 2026-11-12
 
 ### Breaking Changes
