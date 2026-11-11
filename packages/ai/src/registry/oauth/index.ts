@@ -2,7 +2,7 @@
 // High-level API
 // ============================================================================
 
-import { authPolicyFor, providerDisabledReason } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor, providerDisabledReason, providerLoginWarning } from "@oh-my-pi/pi-catalog/compat/auth";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
@@ -18,13 +18,14 @@ export * from "./anthropic";
 export * from "./device-code";
 export type * from "./types";
 
-// A provider turned off in its auth rules (`disabled "<reason>"`) is no login choice.
+// A provider turned off in its auth rules (`disabled "<reason>"`) is no login choice;
+// one whose login carries an account risk (`login-warning`) says so in its label.
 const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
 	provider =>
 		provider.login && provider.showInLoginList !== false && providerDisabledReason(provider.id) === undefined,
 ).map(provider => ({
 	id: provider.id,
-	name: provider.name,
+	name: providerLoginWarning(provider.id) === undefined ? provider.name : `${provider.name} (at your own risk)`,
 	available: provider.available ?? true,
 	storeCredentialsAs: provider.storeCredentialsAs,
 }));
@@ -65,6 +66,15 @@ export function providerPauseReason(provider: string): string | undefined {
 export function assertProviderEnabled(provider: string): void {
 	const reason = providerPauseReason(provider);
 	if (reason !== undefined) throw new AIError.ProviderDisabledError(provider, reason);
+}
+
+/**
+ * The account risk a new built-in login of `provider` must accept first
+ * (`login-warning "<text>"`), or undefined. An extension that registers its
+ * own OAuth login under the id owns that prompt instead.
+ */
+export function loginRiskWarning(provider: string): string | undefined {
+	return customOAuthProviders.has(provider) ? undefined : providerLoginWarning(provider);
 }
 
 /**
@@ -185,7 +195,8 @@ export function getOAuthProviders(): OAuthProviderInfo[] {
 		available: true,
 		storeCredentialsAs: provider.storeCredentialsAs,
 	}));
-	return [...builtInOAuthProviders, ...customProviders];
+	// A built-in entry an extension took over is listed once, as the extension's.
+	return [...builtInOAuthProviders.filter(provider => !customOAuthProviders.has(provider.id)), ...customProviders];
 }
 
 /** Provider id that stores `providerId`'s credentials: login aliases (`openai-codex-device`) map to their target (`openai-codex`). */

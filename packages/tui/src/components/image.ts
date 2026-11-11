@@ -301,7 +301,15 @@ export class ImageBudget {
 	 */
 	release(key: string): void {
 		const id = this.#keyToId.get(key);
-		if (id !== undefined) this.#released.add(id);
+		if (id !== undefined) this.releaseId(id);
+	}
+
+	/**
+	 * {@link release} by id, for an owner holding the component: an image retired by the
+	 * residency sweep and transmitted again keeps its id but no longer maps from its key.
+	 */
+	releaseId(id: number): void {
+		this.#released.add(id);
 	}
 
 	/**
@@ -760,6 +768,11 @@ export class Image implements Component {
 	releaseRenderCaches(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/** Retire this image's graphic as soon as no frame shows it: for an owner closing it for good. */
+	release(): void {
+		if (this.#imageId != null) this.#budget?.releaseId(this.#imageId);
 	}
 
 	/**

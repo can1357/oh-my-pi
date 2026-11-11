@@ -105,6 +105,7 @@ class CdpConnection {
 	readonly claims = new Set<string>();
 	/** Real child session id → the session it was announced on; its events and detach go there. */
 	readonly childParents = new Map<string, string>();
+	readonly explicitChildren = new Set<string>();
 
 	constructor(
 		readonly id: number,
@@ -907,7 +908,12 @@ export class RelayBridge {
 		for (const ref of conn.sessions.values()) touched.add(ref.tabKey);
 		const departed = [...conn.sessions.values()];
 		conn.sessions.clear();
-		for (const ref of departed) this.#releaseSwitches(ref);
+		const armedTabs = new Set<string>();
+		for (const ref of departed) {
+			this.#releaseSwitches(ref);
+			if (ref.autoAttach) armedTabs.add(ref.tabKey);
+		}
+		for (const tabKey of armedTabs) this.#releaseAutoAttach(tabKey);
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
 		// connection holds sessions on every tab without driving any of them.
@@ -955,9 +961,9 @@ export class RelayBridge {
 			return;
 		}
 		const realTabKey = this.#realSessionTabs.get(sessionId);
-		if (realTabKey !== undefined) {
+		if (realTabKey !== undefined && conn.childParents.has(sessionId)) {
 			const announce =
-				msg.method === "Target.setAutoAttach" && msg.params?.autoAttach === true && conn.childParents.has(sessionId)
+				msg.method === "Target.setAutoAttach" && msg.params?.autoAttach === true
 					? () => this.#announceChildren(conn, realTabKey, sessionId, sessionId)
 					: undefined;
 			await this.#forwardToTab(conn, msg, realTabKey, sessionId, announce);
@@ -984,18 +990,30 @@ export class RelayBridge {
 		}
 		if (msg.method !== "Runtime.enable") {
 			if (msg.method === "Target.setAutoAttach") {
-				// Armed while in flight (Chrome reports existing children before it
-				// answers); a failed request restores the previous state.
-				const previous = ref.autoAttach;
-				ref.autoAttach = msg.params?.autoAttach === true;
-				const announce = () => {
-					const parent = conn.childTargetSessionForTab(ref.tabKey);
-					if (parent && conn.sessions.get(sessionId) === ref)
-						this.#announceChildren(conn, ref.tabKey, undefined, parent);
-				};
-				if (!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))) {
-					ref.autoAttach = previous;
-				}
+				await this.#serializeSwitches(ref.tabKey, "Target.setAutoAttach", async () => {
+					if (conn.sessions.get(sessionId) !== ref) {
+						this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+						return;
+					}
+					// Arm before sending: Chrome reports existing children before answering.
+					const previous = ref.autoAttach;
+					ref.autoAttach = msg.params?.autoAttach === true;
+					const announce = () => {
+						const parent = conn.childTargetSessionForTab(ref.tabKey);
+						if (parent) this.#announceChildren(conn, ref.tabKey, undefined, parent);
+					};
+					if (!ref.autoAttach && this.#autoAttaches(ref.tabKey)) {
+						this.#reply(conn, msg, {});
+					} else if (
+						!(await this.#forwardToTab(conn, msg, ref.tabKey, undefined, ref.autoAttach ? announce : undefined))
+					) {
+						ref.autoAttach = previous;
+						if (previous && conn.sessions.get(sessionId) !== ref) this.#releaseAutoAttach(ref.tabKey);
+						return;
+					}
+					const tab = this.#tabs.get(ref.tabKey);
+					if (tab && !conn.childTargetSessionForTab(ref.tabKey)) this.#forgetConnectionChildren(conn, tab, true);
+				});
 				return;
 			}
 			if (isTabWideSwitch(msg.method)) {
@@ -1198,8 +1216,14 @@ export class RelayBridge {
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
+			const response = (result as Record<string, unknown> | undefined) ?? {};
+			// An explicit attach grants ownership even when this connection did not arm auto-attach.
+			if (msg.method === "Target.attachToTarget" && msg.sessionId && typeof response.sessionId === "string") {
+				conn.childParents.set(response.sessionId, msg.sessionId);
+				conn.explicitChildren.add(response.sessionId);
+			}
 			beforeReply?.();
-			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
+			this.#reply(conn, msg, response);
 			return true;
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -1561,8 +1585,12 @@ export class RelayBridge {
 			for (const conn of this.#conns.values()) {
 				if (!conn.childParents.has(sourceSessionId)) continue;
 				conn.socket.send(payload);
-				if (nested && method === "Target.attachedToTarget") conn.childParents.set(nested, sourceSessionId);
-				else if (nested && method === "Target.detachedFromTarget") conn.childParents.delete(nested);
+				if (nested && method === "Target.attachedToTarget" && !conn.childParents.has(nested))
+					conn.childParents.set(nested, sourceSessionId);
+				else if (nested && method === "Target.detachedFromTarget") {
+					conn.childParents.delete(nested);
+					conn.explicitChildren.delete(nested);
+				}
 			}
 			return;
 		}
@@ -1610,10 +1638,11 @@ export class RelayBridge {
 				let parent: string | undefined;
 				if (method === "Target.attachedToTarget") {
 					parent = conn.childTargetSessionForTab(tabKey);
-					if (parent) conn.childParents.set(child, parent);
+					if (parent && !conn.childParents.has(child)) conn.childParents.set(child, parent);
 				} else {
 					parent = conn.childParents.get(child);
 					conn.childParents.delete(child);
+					conn.explicitChildren.delete(child);
 				}
 				if (parent) conn.socket.send(JSON.stringify({ sessionId: parent, method, params }));
 			}
@@ -1916,6 +1945,11 @@ export class RelayBridge {
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
 		this.#releaseSwitches(ref);
+		if (ref.autoAttach) this.#releaseAutoAttach(ref.tabKey);
+		if (ref.kind === "page" && !conn.childTargetSessionForTab(ref.tabKey)) {
+			const tab = this.#tabs.get(ref.tabKey);
+			if (tab) this.#forgetConnectionChildren(conn, tab, true);
+		}
 		const targetId = ref.kind === "tab" ? tabTargetIdFromKey(ref.tabKey) : pageTargetIdFromKey(ref.tabKey);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
@@ -1964,15 +1998,8 @@ export class RelayBridge {
 	 * connection told of one its detach; nested children go first, while their parent is still known.
 	 */
 	#forgetChildren(tab: TabState): void {
-		for (const child of [...tab.realSessions.keys()].reverse()) {
-			this.#realSessionTabs.delete(child);
-			for (const conn of this.#conns.values()) {
-				const parent = conn.childParents.get(child);
-				if (parent === undefined) continue;
-				conn.childParents.delete(child);
-				this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, parent);
-			}
-		}
+		for (const conn of this.#conns.values()) this.#forgetConnectionChildren(conn, tab);
+		for (const child of tab.realSessions.keys()) this.#realSessionTabs.delete(child);
 		tab.realSessions.clear();
 	}
 
@@ -1983,6 +2010,46 @@ export class RelayBridge {
 			if (conn.sessionsForTab(tabKey).length > 0) out.push(conn);
 		}
 		return out;
+	}
+	#autoAttaches(tabKey: string): boolean {
+		for (const conn of this.#conns.values()) {
+			if (conn.childTargetSessionForTab(tabKey)) return true;
+		}
+		return false;
+	}
+
+	#forgetConnectionChildren(conn: CdpConnection, tab: TabState, automaticOnly = false): void {
+		for (const child of [...tab.realSessions.keys()].reverse()) {
+			const parent = conn.childParents.get(child);
+			if (!parent) continue;
+			if (automaticOnly) {
+				let ancestor = child;
+				while (!conn.explicitChildren.has(ancestor)) {
+					const next = conn.childParents.get(ancestor);
+					if (!next) break;
+					ancestor = next;
+				}
+				if (conn.explicitChildren.has(ancestor)) continue;
+			}
+			conn.childParents.delete(child);
+			conn.explicitChildren.delete(child);
+			this.#emit(conn, "Target.detachedFromTarget", { sessionId: child }, parent);
+		}
+	}
+
+	/** A departed holder must not leave auto-attach enabled on a registry-held tab. */
+	#releaseAutoAttach(tabKey: string): void {
+		void this.#serializeSwitches(tabKey, "Target.setAutoAttach", async () => {
+			if (this.#autoAttaches(tabKey)) return;
+			const tab = this.#tabs.get(tabKey);
+			const inst = tab?.attached ? this.#instances.get(tab.instanceId) : undefined;
+			if (!tab || !inst) return;
+			await this.#send(tab, inst, "Target.setAutoAttach", {
+				autoAttach: false,
+				waitForDebuggerOnStart: false,
+				flatten: true,
+			}).catch(() => {});
+		});
 	}
 
 	/** Whether any live session on a tab, across connections, has `method` switched on. */
@@ -2029,7 +2096,11 @@ export class RelayBridge {
 	 * The extension starts RPCs independently, so overlapping transitions could settle out of order; a failed one's
 	 * rollback would then restore a state another transition had already changed on the tab.
 	 */
-	#serializeSwitches(tabKey: string, method: TabWideSwitch, run: () => Promise<void>): Promise<void> {
+	#serializeSwitches(
+		tabKey: string,
+		method: TabWideSwitch | "Target.setAutoAttach",
+		run: () => Promise<void>,
+	): Promise<void> {
 		const key = `${tabKey} ${method}`;
 		const pending = this.#switchTransitions.get(key);
 		const result = pending ? pending.then(run) : run();

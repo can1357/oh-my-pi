@@ -77,6 +77,27 @@ describe("ask native view", () => {
 		expect(nodes(view?.body).at(-1)?.p).toMatchObject({ role: "omp.tool.notice" });
 	});
 
+	it("renders persisted option notes under their matching answer", () => {
+		const view = askToolRenderer.describeResult(
+			{
+				content: [],
+				details: {
+					answers: [
+						{ name: "unrelated", question: "Unrelated?", answer: "First" },
+						{ name: "db", question: "Database?", answer: "First" },
+					],
+					notes: [{ name: "db", question: "Database?", option: "Second", value: "second", text: "Team standard" }],
+				},
+			},
+			opts,
+		);
+		const sections = nodes(view?.body).filter(node => node.k === "section");
+		expect(nodes(sections[0]!.c).some(node => node.p?.role === "omp.tool.answer.note")).toBe(false);
+		const note = nodes(sections[1]!.c).at(-1)!;
+		expect(note.p?.role).toBe("omp.tool.answer.note");
+		expect(JSON.stringify(note)).toContain("Second: Team standard");
+	});
+
 	it("falls back to the result text when details carry no answers", () => {
 		const view = askToolRenderer.describeResult(
 			{ content: [{ type: "text", text: "The form needs at least one named control" }] },

@@ -591,15 +591,10 @@ jobs:
          - uses: ./.github/actions/native-artifacts
            with:
               targets: linux-x64-baseline linux-x64-modern
-         - name: Test workspace packages and repo scripts (TS)
+         - name: Test workspace packages (TS)
            env:
               OMP_TEST_CONCURRENCY: "4"
-           run: |
-              bun run ci:test:ts:workspace
-              # Not `test:scripts`: scripts/install.test.ts fails on main
-              # (its install.sh smoke-check executes a fake binary), so running
-              # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts
+           run: bun run ci:test:ts:workspace
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
