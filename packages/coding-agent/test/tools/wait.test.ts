@@ -1,12 +1,18 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Agent,
 	type AgentMessage,
 	type AgentToolResult,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -14,9 +20,11 @@ import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { USER_AWAIT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-awaits";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -191,6 +199,82 @@ describe("wait", () => {
 		expect((await woke).useless).toBeUndefined();
 		await elapse(tool, 60_000);
 		build.resolve("done");
+	});
+
+	test("SDK waits recognize checkpoint-only context usage without input counters", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-wait-context-"));
+		const authStorage = await AuthStorage.create(join(directory, "auth.db"));
+		let agentSession: AgentSession | undefined;
+		const build = Promise.withResolvers<string>();
+		try {
+			const model = getBundledModel("openai", "gpt-4o-mini");
+			if (!model) throw new Error("Expected bundled test model");
+			({ session: agentSession } = await createAgentSession({
+				cwd: directory,
+				agentDir: directory,
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				model,
+				settings: Settings.isolated({
+					"browser.enabled": false,
+					"archive.enabled": false,
+					"launch.enabled": false,
+				}),
+				sessionManager: SessionManager.inMemory(),
+				toolNames: ["wait"],
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			}));
+			agentSession.agent.appendMessage({
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "toolUse",
+				timestamp: 0,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					contextTokens: 100_001,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			const manager = agentSession.asyncJobManager;
+			if (!manager) throw new Error("Expected SDK async job manager");
+			manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+			const tool = agentSession.agent.state.tools.find(tool => tool.name === "wait");
+			if (!tool) throw new Error("Expected SDK wait tool");
+			vi.useFakeTimers();
+			let settled = false;
+			const started = Promise.withResolvers<void>();
+			const waiting = tool
+				.execute("checkpoint-wait", {}, undefined, () => started.resolve())
+				.finally(() => {
+					settled = true;
+				});
+			await started.promise;
+			vi.advanceTimersByTime(59_999);
+			await flushMicrotasks();
+			expect(settled).toBe(false);
+			vi.advanceTimersByTime(1);
+			expect(report(await waiting)).toContain("within 1m");
+		} finally {
+			vi.useRealTimers();
+			build.resolve("done");
+			await agentSession?.dispose();
+			authStorage.close();
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 
 	test("news or a minute away from wait restarts the ladder at the floor", async () => {
