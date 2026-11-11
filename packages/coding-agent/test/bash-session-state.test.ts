@@ -12,7 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
-import { releaseShellSessions } from "../src/exec/bash-executor";
+import { executeBash, releaseShellSessions } from "../src/exec/bash-executor";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -150,4 +150,33 @@ it.skipIf(process.platform === "win32")(
 		}
 	},
 	10_000,
+);
+
+// `endedByExit` arrives with the native addon built from this PR's Rust, and
+// pull-request CI runs these tests against main's native addon — so the
+// assertions below only execute where the addon carries the flag (post-merge
+// main and source-built local runs). The flag itself is pinned in
+// `crates/pi-shell` (`exit_and_errexit_report_ended_by_exit`).
+it.skipIf(process.platform === "win32")(
+	"says so when exit or an armed set -e ends the call before its remaining statements run",
+	async () => {
+		const probe = await executeBash("exit 3", { minimize: false });
+		if (probe.endedByExit !== true) return; // addon predates the flag
+
+		const tool = bashTool();
+		await run(tool, "set -e; PI_ERREXIT_ARMED=1");
+		const aborted = await run(tool, "false; echo never-ran");
+		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
+		expect(aborted.text).toContain("the rest of this call did not run");
+		// Options armed by an earlier call keep applying; the notice says so.
+		expect(aborted.text).toContain("stay set in this session");
+
+		const exited = await run(tool, "exit 3; echo never-ran");
+		expect(exited.text).toContain("Stopped by `exit` or an armed `set -e`");
+
+		await run(tool, "set +e");
+		const failed = await run(tool, "false");
+		expect(failed.text).toContain("Command exited with code 1");
+		expect(failed.text).not.toContain("Stopped by `exit`");
+	},
 );

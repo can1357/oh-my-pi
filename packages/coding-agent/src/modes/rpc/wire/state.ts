@@ -178,6 +178,10 @@ export const stateDefs = {
 		"artifactError?": JSON_OBJECT,
 		"minimized?": JSON_OBJECT,
 		"workingDir?": "string",
+		"endedByExit?": doc(
+			"boolean",
+			"Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run.",
+		),
 		"images?": "ImageContent[]",
 		"trace?": doc(
 			JSON_OBJECT,

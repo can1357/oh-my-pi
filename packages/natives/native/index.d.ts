@@ -3904,6 +3904,12 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+  /**
+   * Whether `exit` or `set -e` ended the run before its input was exhausted:
+   * whatever followed the abort did not run. The session stays usable, with
+   * its state (including armed options) intact.
+   */
+  endedByExit: boolean
 }
 
 /** Native non-executing visualization transformations. */

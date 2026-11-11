@@ -928,6 +928,73 @@ async fn exit_and_errexit_keep_session_state() {
 	assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
 }
 
+/// A run cut short by `exit` or errexit says so in its result, so a caller
+/// can tell "the last statement failed" from "the rest of the call never
+/// ran" (#18879).
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_and_errexit_report_ended_by_exit() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(!run("true").await.ended_by_exit);
+	assert!(!run("false").await.ended_by_exit, "a failing last statement is not an abort");
+	assert_eq!(run("set -e; PI_ARMED=1").await.exit_code, Some(0));
+	let aborted = run("false; echo never").await;
+	assert_eq!(aborted.exit_code, Some(1));
+	assert!(aborted.ended_by_exit, "errexit hid the statements after the failing one");
+	assert!(!run("echo $PI_ARMED").await.ended_by_exit);
+	assert!(run("exit 3").await.ended_by_exit);
+	assert!(
+		run("exit 0; echo never").await.ended_by_exit,
+		"statements after an explicit exit never ran"
+	);
+	assert!(
+		run("true; exit 0").await.ended_by_exit,
+		"the unsegmented path cannot tell a trailing exit from a cutting one"
+	);
+}
+
+/// In a segmented chain, `exit` on the last segment that would run ends the
+/// command where it would have ended anyway, so only an abort that hides
+/// later segments is reported.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_exit_reports_ended_by_exit_only_with_later_segments() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("chain directory");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let run = async |command: &str| {
+		shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run")
+	};
+
+	assert!(!run("printf hello").await.ended_by_exit);
+	let cut = run("exit 1; printf hello").await;
+	assert_eq!(cut.exit_code, Some(1));
+	assert!(cut.ended_by_exit, "the printf segment after exit never ran");
+	assert!(
+		!run("printf hello; exit 0").await.ended_by_exit,
+		"exit on the last segment ends nothing early"
+	);
+}
+
 /// An EXIT trap belongs to one run, while signal traps persist in the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_trap_fires_once_per_session_run() {

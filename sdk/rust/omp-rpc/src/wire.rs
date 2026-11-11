@@ -3209,6 +3209,9 @@ pub struct BashResult {
 	pub minimized: Option<Map<String, Value>>,
 	#[serde(rename = "workingDir", default, skip_serializing_if = "Option::is_none")]
 	pub working_dir: Option<String>,
+	/// Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run.
+	#[serde(rename = "endedByExit", default, skip_serializing_if = "Option::is_none")]
+	pub ended_by_exit: Option<bool>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.

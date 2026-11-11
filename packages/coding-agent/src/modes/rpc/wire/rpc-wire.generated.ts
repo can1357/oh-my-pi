@@ -556,6 +556,8 @@ export interface BashResult {
 	artifactError?: Record<string, unknown>;
 	minimized?: Record<string, unknown>;
 	workingDir?: string;
+	/** Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run. */
+	endedByExit?: boolean;
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;

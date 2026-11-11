@@ -149,6 +149,12 @@ export interface BashResult extends OutputSummary {
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;
+	/**
+	 * True when `exit` or an armed `set -e` ended the run before its input was
+	 * exhausted (whatever followed the abort did not run). Only set by the
+	 * embedded-shell path; PTY runs never set it.
+	 */
+	endedByExit?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
 }
@@ -1013,6 +1019,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			endedByExit: winner.result.endedByExit === true,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...settleTrace(),
 			...(await dump()),

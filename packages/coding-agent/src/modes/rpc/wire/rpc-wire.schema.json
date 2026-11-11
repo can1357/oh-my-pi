@@ -2849,6 +2849,10 @@
 				"workingDir": {
 					"type": "string"
 				},
+				"endedByExit": {
+					"type": "boolean",
+					"description": "Whether `exit` or an armed `set -e` ended the run before its input was exhausted: whatever followed the abort did not run."
+				},
 				"images": {
 					"type": "array",
 					"items": {
