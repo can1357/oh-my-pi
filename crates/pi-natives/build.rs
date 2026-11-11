@@ -29,6 +29,9 @@ fn main() {
 	build_syntax_set();
 	build_oauth_callback_helper();
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+		// Without an explicit install name, ld64 records cargo's build-dir path,
+		// which varies per build (and per Nix sandbox).
+		println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libpi_natives.dylib");
 		build_darwin_native_helper(
 			"src/desktop/macos/capture/helper.m",
 			"omp-capture-helper",
@@ -88,7 +91,13 @@ fn build_applefm_bridge() {
 	for file in ["build-bridge.sh", "bridge.swift"] {
 		println!("cargo:rerun-if-changed={}", sources.join(file).display());
 	}
-	for variable in ["OMP_APPLEFM_SWIFTC", "OMP_APPLEFM_MODULE_CACHE", "SDKROOT", "DEVELOPER_DIR"] {
+	for variable in [
+		"OMP_APPLEFM_SWIFTC",
+		"OMP_APPLEFM_DISABLE",
+		"OMP_APPLEFM_MODULE_CACHE",
+		"SDKROOT",
+		"DEVELOPER_DIR",
+	] {
 		println!("cargo:rerun-if-env-changed={variable}");
 	}
 	// SDK installs and upgrades change which toolchain is detected. Watch files,
@@ -130,7 +139,7 @@ fn build_applefm_bridge() {
 		println!("cargo:rerun-if-changed={}", swiftc.display());
 		println!("cargo:rerun-if-changed={}", sdk.join("SDKSettings.plist").display());
 		command.arg(swiftc).arg(sdk);
-	} else if architecture == "arm64" {
+	} else if architecture == "arm64" && env::var("OMP_APPLEFM_DISABLE").as_deref() != Ok("1") {
 		println!(
 			"cargo:warning=no Swift 6.4+ toolchain with the macOS 27 SDK; Apple Foundation Models \
 			 support is stubbed out"
