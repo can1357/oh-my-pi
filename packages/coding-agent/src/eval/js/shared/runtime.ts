@@ -580,6 +580,9 @@ export class JsRuntime {
 				// value is whatever statement ran last (an `if` body, the expression before a trailing
 				// `const`); as in Python, that is not the cell's result.
 				if (wrapped.asyncWrapped) return await awaitMaybePromise(value);
+				// Discard the displayed value, not its failure: assigned promises must still
+				// settle inside this run instead of rejecting unhandled in a persistent worker.
+				await awaitMaybePromise(value);
 				return undefined;
 			});
 		} finally {

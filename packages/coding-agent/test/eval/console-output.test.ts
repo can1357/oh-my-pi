@@ -131,6 +131,13 @@ describe("JS console output", () => {
 		expect(await runtime.run("await", undefined, hooks)).toBe(2);
 	});
 
+	it("reports rejected assigned promises as run errors without echoing their value", async () => {
+		const { hooks } = collect();
+		await expect(
+			runtime.run("globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))", undefined, hooks),
+		).rejects.toThrow("assignment failed");
+	});
+
 	it("prints an image record as a placeholder and emits the image with its metadata", async () => {
 		const { hooks, displays, texts } = collect();
 		runtime.echo({ ...PNG_IMAGE, detail: "high", url: "https://images.example/a.png" }, hooks);
