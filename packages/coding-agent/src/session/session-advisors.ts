@@ -1500,7 +1500,7 @@ export class SessionAdvisors {
 				return baseAdvisorStreamFn(requestModel, context, options);
 			};
 			const transformProviderContext = this.#createTransformProviderContext?.();
-			advisorAgent = new Agent({
+			const advisorAgent = new Agent({
 				initialState: {
 					systemPrompt,
 					model: advisorModel,
