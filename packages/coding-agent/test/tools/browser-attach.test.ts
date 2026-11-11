@@ -1037,7 +1037,7 @@ describe("pickElectronTarget relay path", () => {
 		expect(served).toBe(2);
 	});
 
-	it("lists relay page ids and recommends omp's own tab when a target is missing", async () => {
+	it("lists relay page ids with their URLs when a target id is missing", async () => {
 		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "PAGE_MISSING" }));
 
 		expect(error).toBeInstanceOf(Error);
@@ -1045,8 +1045,6 @@ describe("pickElectronTarget relay path", () => {
 		expect(message).toContain('No page target matched "PAGE_MISSING"');
 		expect(message).toContain("PAGE10  Docs  https://docs.example.com");
 		expect(message).toContain("PAGE11  Whole Foods Market Shopping Cart  https://www.amazon.com/cart/localmarket");
-		// Relay opens without a target get omp's own tab; omitting it no longer adopts the active one.
-		expect(message).toContain("omit app.target to open omp's own tab");
 	});
 
 	it("waits for Puppeteer to see a tab that /json already lists", async () => {
