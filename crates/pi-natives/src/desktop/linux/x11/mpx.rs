@@ -103,7 +103,7 @@ pub(super) struct Mpx {
 	/// Replaces only raw-event polling in typing regressions; emission, keymap,
 	/// focus, error mapping and the session gate still run normally.
 	#[cfg(test)]
-	release_events: Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event>>>>,
+	release_events:  Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event>>>>,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
@@ -594,7 +594,9 @@ impl Mpx {
 			}
 			#[cfg(test)]
 			let event = if let Some(events) = &self.release_events {
-				events.borrow_mut()().ok_or(x11rb::errors::ConnectionError::UnknownError).map(Some)
+				events.borrow_mut()()
+					.ok_or(x11rb::errors::ConnectionError::UnknownError)
+					.map(Some)
 			} else {
 				self.conn.poll_for_event()
 			};
@@ -1339,11 +1341,20 @@ mod tests {
 			("abc", vec![0, 1, 2], true, false),
 		] {
 			let mut mpx = typing_fixture();
-			let codes: Vec<u32> = mpx.keyboard_keymap().unwrap().plan_text(text).unwrap()
-				.iter().filter(|step| !step.press).map(|step| u32::from(step.keycode)).collect();
+			let codes: Vec<u32> = mpx
+				.keyboard_keymap()
+				.unwrap()
+				.plan_text(text)
+				.unwrap()
+				.iter()
+				.filter(|step| !step.press)
+				.map(|step| u32::from(step.keycode))
+				.collect();
 			let device = mpx.master_keyboard;
-			let mut events: std::collections::VecDeque<_> = indices.into_iter()
-				.enumerate().map(|(at, index)| {
+			let mut events: std::collections::VecDeque<_> = indices
+				.into_iter()
+				.enumerate()
+				.map(|(at, index)| {
 					if foreign && at == 1 {
 						release(device + 100, device + 100, codes[index])
 					} else if at % 2 == 0 {
@@ -1351,7 +1362,8 @@ mod tests {
 					} else {
 						release(device + 100, device, codes[index])
 					}
-				}).collect();
+				})
+				.collect();
 			mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || events.pop_front())));
 			let result = mpx.type_text(mpx.root, text);
 			if succeeds {
@@ -1362,8 +1374,10 @@ mod tests {
 				assert_eq!(error.code, ErrorCode::InputFailed);
 				assert!(error.message.contains("key releases"));
 				assert!(mpx.uncertain);
-				assert_eq!(mpx.type_text(mpx.root, text).unwrap_err().code,
-					ErrorCode::BackgroundUnavailable);
+				assert_eq!(
+					mpx.type_text(mpx.root, text).unwrap_err().code,
+					ErrorCode::BackgroundUnavailable
+				);
 			}
 		}
 	}
@@ -1373,8 +1387,15 @@ mod tests {
 	fn typing_deadline_bounds_busy_events_and_rejects_late_releases() {
 		use crate::desktop::error::ErrorCode;
 		let mut mpx = typing_fixture();
-		let code = mpx.keyboard_keymap().unwrap().plan_text("a").unwrap()
-			.into_iter().find(|step| !step.press).unwrap().keycode;
+		let code = mpx
+			.keyboard_keymap()
+			.unwrap()
+			.plan_text("a")
+			.unwrap()
+			.into_iter()
+			.find(|step| !step.press)
+			.unwrap()
+			.keycode;
 		let device = mpx.master_keyboard;
 		let mut started = None;
 		mpx.release_events = Some(std::cell::RefCell::new(Box::new(move || {
