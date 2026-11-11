@@ -15,7 +15,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getPublishedDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getPublishedDir, isEnoent, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "../blob-broker/destinations";
 import type { BlobPublication, BlobUploader, BlobUploadRequest } from "../blob-broker/publication";
 import { destinationRuntimeConfig } from "../blob-broker/service";
@@ -32,6 +32,15 @@ const PAGE_FILE = "index.html";
 const HTML_MIME = "text/html; charset=utf-8";
 const MARKDOWN_EXTENSIONS: Readonly<Record<string, true>> = { ".md": true, ".markdown": true };
 const HTML_EXTENSIONS: Readonly<Record<string, true>> = { ".html": true, ".htm": true };
+
+/** Upper bound for one publish operation's network round trips. */
+const OPERATION_TIMEOUT_MS = 120_000;
+
+/** The caller's cancellation, bounded so a stalled host cannot hang the tool. */
+function operationSignal(signal: AbortSignal | undefined): AbortSignal {
+	const timeout = AbortSignal.timeout(OPERATION_TIMEOUT_MS);
+	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
 
 /** One published revision of a page. */
 export interface PageVersion {
@@ -103,7 +112,8 @@ export function renderPageSource(
 	if (!HTML_EXTENSIONS[extension]) {
 		throw new Error(`Only .html, .htm, .md and .markdown files can be published, got ${path.basename(source)}`);
 	}
-	const ownTitle = /<title[^>]*>([^<]*)<\/title>/i.exec(text)?.[1]?.trim();
+	// A <title> may span lines; the record and listings keep one line.
+	const ownTitle = /<title[^>]*>([^<]*)<\/title>/i.exec(text)?.[1]?.replace(/\s+/g, " ").trim();
 	return { html: text, title: title ?? (ownTitle || path.basename(source, extension)) };
 }
 
@@ -219,22 +229,31 @@ export class PagePublisher {
 	}
 
 	/** Upload to one destination; failures name it, since a page never moves to another. */
-	async #uploadTo(destination: BlobDestinationId, request: BlobUploadRequest): Promise<BlobPublication> {
+	async #uploadTo(
+		destination: BlobDestinationId,
+		request: BlobUploadRequest,
+		signal: AbortSignal,
+	): Promise<BlobPublication> {
 		try {
-			return await this.#uploader(destination).upload(request);
+			const uploader = this.#uploader(destination);
+			return await untilAborted(signal, () => uploader.upload(request));
 		} catch (error) {
 			throw new Error(`${destination}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
 		}
 	}
 
 	/** Place a new page on the first destination in the chain that accepts it. */
-	async #uploadNew(request: BlobUploadRequest): Promise<{ destination: BlobDestinationId; object: BlobPublication }> {
+	async #uploadNew(
+		request: BlobUploadRequest,
+		signal: AbortSignal,
+	): Promise<{ destination: BlobDestinationId; object: BlobPublication }> {
 		const chain = cfgPublishBackends.get(this.#settings) as BlobDestinationId[];
 		const failures: string[] = [];
 		for (const destination of chain) {
 			try {
-				return { destination, object: await this.#uploadTo(destination, request) };
+				return { destination, object: await this.#uploadTo(destination, request, signal) };
 			} catch (error) {
+				if (signal.aborted) throw error;
 				failures.push((error as Error).message);
 			}
 		}
@@ -254,7 +273,9 @@ export class PagePublisher {
 		projectDir: string;
 		existing?: PublishedPage;
 		force?: boolean;
+		signal?: AbortSignal;
 	}): Promise<{ page: PublishedPage; version: PageVersion }> {
+		const signal = operationSignal(options.signal);
 		const page: PublishedPage = options.existing ?? {
 			id: crypto.getRandomValues(new Uint8Array(16)).toHex(),
 			title: options.title,
@@ -280,6 +301,7 @@ export class PagePublisher {
 				title: options.title,
 				content: html,
 				force: options.force,
+				signal,
 			});
 			page.claudeSlug = deployment.slug;
 			page.claudeOwner = deployment.owner;
@@ -293,8 +315,8 @@ export class PagePublisher {
 				folder: page.id,
 			};
 			const placed = page.destination
-				? { destination: page.destination, object: await this.#uploadTo(page.destination, request) }
-				: await this.#uploadNew(request);
+				? { destination: page.destination, object: await this.#uploadTo(page.destination, request, signal) }
+				: await this.#uploadNew(request, signal);
 			page.destination = placed.destination;
 			page.object = placed.object;
 			hosted = { url: placed.object.url };
@@ -309,19 +331,23 @@ export class PagePublisher {
 	}
 
 	/** Upload a file beside `page`, replacing a same-named asset in place. */
-	async uploadAsset(page: PublishedPage, name: string, bytes: Uint8Array, mimeType: string): Promise<PageAsset> {
+	async uploadAsset(
+		page: PublishedPage,
+		name: string,
+		bytes: Uint8Array,
+		mimeType: string,
+		signal?: AbortSignal,
+	): Promise<PageAsset> {
 		if (!page.destination) {
 			throw new Error(
 				"claude.ai pages take no separate assets; inline them in the HTML (<style>, <script>, data: URIs)",
 			);
 		}
-		const publication = await this.#uploadTo(page.destination, {
-			bytes,
-			mimeType,
-			extension: path.extname(name).slice(1),
-			filename: name,
-			folder: page.id,
-		});
+		const publication = await this.#uploadTo(
+			page.destination,
+			{ bytes, mimeType, extension: path.extname(name).slice(1), filename: name, folder: page.id },
+			operationSignal(signal),
+		);
 		const asset: PageAsset = { name, publication };
 		page.assets = [...page.assets.filter(existing => existing.name !== name), asset];
 		page.updatedAt = Date.now();
@@ -330,8 +356,10 @@ export class PagePublisher {
 	}
 
 	/** Pin or unpin locally; claude.ai pages also pin to the claude.ai sidebar. */
-	async setPinned(page: PublishedPage, pinned: boolean): Promise<void> {
-		if (page.claudeSlug) await this.#requireClaude().setPinned(page.claudeSlug, page.claudeOwner, pinned);
+	async setPinned(page: PublishedPage, pinned: boolean, signal?: AbortSignal): Promise<void> {
+		if (page.claudeSlug) {
+			await this.#requireClaude().setPinned(page.claudeSlug, page.claudeOwner, pinned, operationSignal(signal));
+		}
 		page.pinned = pinned;
 		await this.store.save(page);
 	}
@@ -340,7 +368,8 @@ export class PagePublisher {
 	 * Delete every remote copy of `page`, then its local record. The record
 	 * stays when a deletion fails so the call can be retried.
 	 */
-	async remove(page: PublishedPage): Promise<PageRemoval> {
+	async remove(page: PublishedPage, signal?: AbortSignal): Promise<PageRemoval> {
+		const bounded = operationSignal(signal);
 		const result: PageRemoval = { removed: false, deleted: [], errors: [] };
 		const attempt = async (url: string, run: () => Promise<void>): Promise<void> => {
 			try {
@@ -352,7 +381,7 @@ export class PagePublisher {
 		};
 		if (page.claudeSlug) {
 			const slug = page.claudeSlug;
-			await attempt(claudeArtifactUrl(slug), () => this.#requireClaude().remove(slug, page.claudeOwner));
+			await attempt(claudeArtifactUrl(slug), () => this.#requireClaude().remove(slug, page.claudeOwner, bounded));
 		}
 		if (page.destination) {
 			const objects = [...(page.object ? [page.object] : []), ...page.assets.map(asset => asset.publication)];
@@ -363,7 +392,9 @@ export class PagePublisher {
 				result.errors.push(`${page.destination}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 			if (uploader) {
-				for (const object of objects) await attempt(object.url, () => uploader.remove(object));
+				for (const object of objects) {
+					await attempt(object.url, () => untilAborted(bounded, () => uploader.remove(object)));
+				}
 			}
 		}
 		if (result.errors.length === 0) {

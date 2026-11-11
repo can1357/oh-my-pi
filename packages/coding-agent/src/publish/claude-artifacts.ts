@@ -54,6 +54,7 @@ export class ClaudeArtifactsClient {
 
 	async #request(
 		owner: ClaudeAccount | undefined,
+		signal: AbortSignal | undefined,
 		method: string,
 		route: string,
 		body?: unknown,
@@ -69,6 +70,7 @@ export class ClaudeArtifactsClient {
 		const response = await this.#fetch(`${FRAME_API}${route}`, {
 			method,
 			redirect: "manual",
+			signal,
 			headers: {
 				Authorization: `Bearer ${access.token}`,
 				"anthropic-beta": OAUTH_BETA,
@@ -97,6 +99,7 @@ export class ClaudeArtifactsClient {
 		title: string;
 		content: string;
 		force?: boolean;
+		signal?: AbortSignal;
 	}): Promise<ClaudeDeployment> {
 		const body = {
 			...(options.slug ? { slug: options.slug } : {}),
@@ -104,7 +107,7 @@ export class ClaudeArtifactsClient {
 			title: options.title,
 			content: options.content,
 		};
-		let { response, account } = await this.#request(options.owner, "POST", "/deploy/direct", body);
+		let { response, account } = await this.#request(options.owner, options.signal, "POST", "/deploy/direct", body);
 		if (response.status === 409 && options.slug) {
 			const conflict = (await response.json().catch(() => ({}))) as { live?: unknown };
 			const live = typeof conflict.live === "string" ? conflict.live : undefined;
@@ -113,7 +116,7 @@ export class ClaudeArtifactsClient {
 					`The artifact changed on claude.ai since omp last published it${live ? ` (live version ${live})` : ""}; publish with force to overwrite that version`,
 				);
 			}
-			({ response, account } = await this.#request(account, "POST", "/deploy/direct", {
+			({ response, account } = await this.#request(account, options.signal, "POST", "/deploy/direct", {
 				...body,
 				baseVersion: live,
 			}));
@@ -127,16 +130,22 @@ export class ClaudeArtifactsClient {
 	}
 
 	/** Delete an artifact. The API answers 204 for an already deleted one, so 404 is a failure. */
-	async remove(slug: string, owner: ClaudeAccount | undefined): Promise<void> {
-		const { response } = await this.#request(owner, "DELETE", `/${encodeURIComponent(slug)}`);
+	async remove(slug: string, owner: ClaudeAccount | undefined, signal?: AbortSignal): Promise<void> {
+		const { response } = await this.#request(owner, signal, "DELETE", `/${encodeURIComponent(slug)}`);
 		if (!response.ok) throw await failure("delete", response);
 		await response.body?.cancel();
 	}
 
 	/** Pin to or unpin from the owner's claude.ai sidebar. */
-	async setPinned(slug: string, owner: ClaudeAccount | undefined, pinned: boolean): Promise<void> {
+	async setPinned(
+		slug: string,
+		owner: ClaudeAccount | undefined,
+		pinned: boolean,
+		signal?: AbortSignal,
+	): Promise<void> {
 		const { response } = await this.#request(
 			owner,
+			signal,
 			pinned ? "POST" : "DELETE",
 			`/favorite/${encodeURIComponent(slug)}`,
 		);

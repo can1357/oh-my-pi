@@ -97,22 +97,26 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		this.#publisher = new PagePublisher(session.settings, { claude });
 	}
 
-	async execute(_toolCallId: string, params: PublishParams): Promise<AgentToolResult<PublishToolDetails>> {
+	async execute(
+		_toolCallId: string,
+		params: PublishParams,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<PublishToolDetails>> {
 		const action = params.action ?? "publish";
 		switch (action) {
 			case "publish":
-				return this.#publish(params);
+				return this.#publish(params, signal);
 			case "upload_asset":
-				return this.#uploadAsset(params);
+				return this.#uploadAsset(params, signal);
 			case "list":
 				return this.#list(params);
 			case "read":
 				return this.#read(params);
 			case "delete":
-				return this.#delete(params);
+				return this.#delete(params, signal);
 			case "pin":
 			case "unpin":
-				return this.#pin(params, action === "pin");
+				return this.#pin(params, action === "pin", signal);
 		}
 	}
 
@@ -128,7 +132,10 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		return resolveToCwd(params.path, this.session.cwd);
 	}
 
-	async #publish(params: PublishParams): Promise<AgentToolResult<PublishToolDetails>> {
+	async #publish(
+		params: PublishParams,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<PublishToolDetails>> {
 		const absolute = this.#sourcePath(params, "publish");
 		const existing = params.page ? await this.#requirePage(params.page, "publish") : undefined;
 		const text = await readSource(Bun.file(absolute), params.path!, file => file.text());
@@ -140,6 +147,7 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 			projectDir: path.resolve(this.session.cwd),
 			existing,
 			force: params.force,
+			signal,
 		});
 		const lines = [`Published "${page.title}" v${version.version} (${page.id}): ${version.url}`];
 		if (page.claudeSlug && !existing) {
@@ -151,12 +159,15 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		};
 	}
 
-	async #uploadAsset(params: PublishParams): Promise<AgentToolResult<PublishToolDetails>> {
+	async #uploadAsset(
+		params: PublishParams,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<PublishToolDetails>> {
 		const absolute = this.#sourcePath(params, "upload_asset");
 		const page = await this.#requirePage(params.page, "upload_asset");
 		const file = Bun.file(absolute);
 		const bytes = await readSource(file, params.path!, source => source.bytes());
-		const asset = await this.#publisher.uploadAsset(page, assetName(absolute), bytes, file.type);
+		const asset = await this.#publisher.uploadAsset(page, assetName(absolute), bytes, file.type, signal);
 		return {
 			content: [{ type: "text", text: `Uploaded ${asset.name} to page ${page.id}: ${asset.publication.url}` }],
 			details: { action: "upload_asset", pageId: page.id, url: asset.publication.url },
@@ -193,10 +204,10 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		};
 	}
 
-	async #delete(params: PublishParams): Promise<AgentToolResult<PublishToolDetails>> {
+	async #delete(params: PublishParams, signal: AbortSignal | undefined): Promise<AgentToolResult<PublishToolDetails>> {
 		const page = await this.#requirePage(params.page, "delete");
 		if (page.pinned) throw new ToolError(`Page ${page.id} is pinned; unpin it before deleting`);
-		const result = await this.#publisher.remove(page);
+		const result = await this.#publisher.remove(page, signal);
 		const lines = [
 			result.removed
 				? `Deleted "${page.title}" (${page.id}).`
@@ -211,9 +222,13 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		};
 	}
 
-	async #pin(params: PublishParams, pinned: boolean): Promise<AgentToolResult<PublishToolDetails>> {
+	async #pin(
+		params: PublishParams,
+		pinned: boolean,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<PublishToolDetails>> {
 		const page = await this.#requirePage(params.page, pinned ? "pin" : "unpin");
-		await this.#publisher.setPinned(page, pinned);
+		await this.#publisher.setPinned(page, pinned, signal);
 		return {
 			content: [{ type: "text", text: `${pinned ? "Pinned" : "Unpinned"} "${page.title}" (${page.id}).` }],
 			details: { action: pinned ? "pin" : "unpin", pageId: page.id },

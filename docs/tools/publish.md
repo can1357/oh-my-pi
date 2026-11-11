@@ -62,3 +62,4 @@ images:
 
 - Page ids are 128-bit random hex, so object-storage URLs are unguessable but readable by anyone holding the link.
 - Pinned pages list first and refuse `delete` until unpinned; pinning a claude.ai page also pins it to the claude.ai sidebar.
+- Network operations follow the tool call's cancellation and give up after 120 seconds.
