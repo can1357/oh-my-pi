@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Fixed Anthropic OAuth turns ending on a model-specific `404 not_found_error` instead of switching to another logged-in Anthropic account that serves the model while keeping the denied account available for other models ([#18799](https://github.com/can1357/oh-my-pi/issues/18799), [#18807](https://github.com/can1357/oh-my-pi/pull/18807) by [@alphastorm](https://github.com/alphastorm))
 
 ### Fixed
 

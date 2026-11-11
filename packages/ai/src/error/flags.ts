@@ -14,6 +14,7 @@ import {
 	isOpaqueStatusBody,
 	isUsageLimitStatus,
 	matchesUsageLimitText,
+	parseJsonBody,
 	parseRateLimitReason,
 } from "./rate-limit";
 
@@ -912,6 +913,45 @@ export function isCodexChatGPTAccountPolicyError(
 	const deniedIdentity = normalizeCodexChatGPTAccountPolicyModel(deniedModel);
 	const requestedIdentity = normalizeCodexChatGPTAccountPolicyModel(modelId);
 	return provider === "openai-codex" && deniedIdentity !== undefined && deniedIdentity === requestedIdentity;
+}
+
+/** Model id from Anthropic's HTTP 404 model-not-found envelope, not a thread or endpoint failure. */
+export function anthropicModelNotFoundId(error: unknown, depth = 0): string | undefined {
+	if (depth > 6 || !error || typeof error !== "object") return undefined;
+	const message =
+		"errorMessage" in error && typeof error.errorMessage === "string"
+			? error.errorMessage
+			: "message" in error && typeof error.message === "string"
+				? error.message
+				: undefined;
+	if (status(error) === 404 && message !== undefined) {
+		const body = parseJsonBody(message);
+		if (body?.type === "error") {
+			const detail = body.error;
+			if (
+				detail &&
+				typeof detail === "object" &&
+				"type" in detail &&
+				detail.type === "not_found_error" &&
+				"message" in detail &&
+				typeof detail.message === "string" &&
+				detail.message.startsWith("model: ")
+			) {
+				return detail.message.slice("model: ".length);
+			}
+		}
+	}
+	return "cause" in error ? anthropicModelNotFoundId(error.cause, depth + 1) : undefined;
+}
+
+/** Whether Anthropic's exact model-not-found envelope names this request's model. */
+export function isAnthropicModelNotFoundError(error: unknown, provider: string, modelId: string | undefined): boolean {
+	return (
+		provider === "anthropic" &&
+		typeof modelId === "string" &&
+		modelId.length > 0 &&
+		anthropicModelNotFoundId(error) === modelId
+	);
 }
 
 /** Whether Cursor returned a non-retryable plan entitlement denial for this account. */
