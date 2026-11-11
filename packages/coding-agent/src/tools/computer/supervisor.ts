@@ -326,6 +326,12 @@ export class ComputerSupervisor implements ComputerController {
 					const reported =
 						result.error.message.includes(ESCAPE_STOPPED_MESSAGE) ||
 						result.error.message.includes(ESCAPE_AFTER_CALL_MESSAGE);
+					if (!reported && result.error.isAbort) {
+						return {
+							...result,
+							error: { name: "ToolError", message: ESCAPE_STOPPED_MESSAGE, isToolError: true, isAbort: false },
+						};
+					}
 					return reported
 						? result
 						: {
