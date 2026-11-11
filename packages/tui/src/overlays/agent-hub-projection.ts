@@ -251,6 +251,8 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 		liveRate ??
 		(hasLiveSession ? liveTps : undefined) ??
 		observedTps ??
+		// A park-stamped history rate is newer than any retained cache, so it outranks it.
+		(ref.history?.tokensPerSecondSource === "park" ? ref.history.tokensPerSecond : undefined) ??
 		retainedTps ??
 		ref.history?.tokensPerSecond ??
 		ref.history?.metrics?.tokensPerSecond;
@@ -259,6 +261,7 @@ function projectRowMetrics<TMetrics extends AgentCostSnapshot>(
 	if (tokensPerSecond !== undefined) result.tokensPerSecond = tokensPerSecond;
 	return result;
 }
+
 /** Full Agent Hub row metrics; see {@link projectRowMetrics} for source precedence. */
 export function hubRowMetrics<TRecord extends AgentRecordLike>(
 	ref: TRecord,

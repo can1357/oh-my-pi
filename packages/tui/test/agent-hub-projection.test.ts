@@ -466,6 +466,24 @@ describe("hubRowMetrics tokensPerSecond", () => {
 		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
 		expect(metrics?.tokensPerSecond).toBe(150.0);
 	});
+
+	it("prefers a park-stamped history rate over a stale retained rate", () => {
+		const ref = {
+			id: "worker",
+			session: null,
+			history: {
+				tokensPerSecond: 150.0,
+				tokensPerSecondSource: "park",
+				metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 150.0 },
+			},
+		} as unknown as AgentRecordLike;
+		const sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
+		sessionMetrics.set(ref, {
+			metrics: { tokens: 100, requests: 1, tools: 0, cost: 0.01, durationMs: 1000, tokensPerSecond: 75.0 },
+		});
+		const metrics = hubRowMetrics(ref, undefined, sessionMetrics);
+		expect(metrics?.tokensPerSecond).toBe(150.0);
+	});
 });
 
 describe("sessionThroughput", () => {
