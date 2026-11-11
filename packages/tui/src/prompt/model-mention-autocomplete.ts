@@ -17,6 +17,10 @@ const MODEL_MENTION_CONTEXT_RE = /(?:^|\s)(\^[^\s]*)$/;
 const MAX_MODEL_MENTION_SUGGESTIONS = 20;
 const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
+interface ModelMentionItem extends AutocompleteItem {
+	modelSelector?: string;
+}
+
 /**
  * Supplies picker-ranked model candidates for the query after `^`. `availableModelIds`
  * lists every available model's selector, in or out of the picker scope.
@@ -106,7 +110,7 @@ export function applyModelMentionCompletion(
 	lines: string[],
 	cursorLine: number,
 	cursorCol: number,
-	item: AutocompleteItem,
+	item: ModelMentionItem,
 	prefix: string,
 ): { lines: string[]; cursorLine: number; cursorCol: number } {
 	const currentLine = lines[cursorLine] ?? "";
@@ -114,7 +118,7 @@ export function applyModelMentionCompletion(
 	const liveMatch = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE);
 	const livePrefix = liveMatch?.[1] ?? prefix;
 	const prefixStart = liveMatch ? textBeforeCursor.length - livePrefix.length : Math.max(0, cursorCol - prefix.length);
-	const replacement = `^${item.value} `;
+	const replacement = `^${item.modelSelector ?? item.value} `;
 	const newLines = [...lines];
 	newLines[cursorLine] = currentLine.slice(0, prefixStart) + replacement + currentLine.slice(cursorCol);
 	return {
@@ -153,8 +157,8 @@ export function createModelMentionSource(host: {
 		return ranker.rank(query);
 	};
 	let roleScope: readonly ModelBrowserItem[] | undefined;
-	let roleItems: AutocompleteItem[] = [];
-	const roles = (): ReadonlyArray<AutocompleteItem> => {
+	let roleItems: ModelMentionItem[] = [];
+	const roles = (): ReadonlyArray<ModelMentionItem> => {
 		const { SessionModelScopeCache } = loadModelBrowser();
 		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
 		const scope = scopeCache.get(host.scopedModels());
@@ -174,8 +178,8 @@ export function createModelMentionSource(host: {
 				if (effort && availableModelIds().has(value)) continue;
 				const name = modelMentionDisplayName(model);
 				roleItems.push({
-					...mentionRow(value, effort ? modelMentionName(name, effort) : name),
-					label: `@${role}`,
+					...mentionRow(`@${role}`, effort ? modelMentionName(name, effort) : name),
+					modelSelector: value,
 				});
 			}
 		}

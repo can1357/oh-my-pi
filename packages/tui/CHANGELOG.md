@@ -4,7 +4,7 @@
 
 ### Added
 
-- The composer's `^` autocomplete lists chat model roles alongside models; choosing a role inserts its resolved model through the existing model-mention flow
+- The composer's `^` autocomplete lists chat model roles alongside models; roles remain independently selectable in Tern even when they resolve to the same model, and choosing one inserts its concrete model selector
 
 ### Fixed
 

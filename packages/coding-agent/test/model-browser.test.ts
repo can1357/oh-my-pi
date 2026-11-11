@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import {
 	buildBrowserItems,
 	buildSearchAffinity,
@@ -18,7 +19,7 @@ import {
 	resolveRoleAssignments,
 	sortModelItems,
 } from "@oh-my-pi/pi-tui/overlays/model-browser";
-import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { getSelectListTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	applyModelMentionCompletion,
 	createModelMentionSource,
@@ -170,7 +171,6 @@ describe("createModelMentionSource", () => {
 		};
 		const all = suggestions("");
 		const role = all.find(item => item.label === "@smol");
-		expect(role).toMatchObject({ label: "@smol", value: "demo/worker:high" });
 		expect(all.map(item => item.value)).toContain("demo/worker");
 		expect(all.map(item => item.label)).not.toContain("@image");
 		expect(suggestions("smol")).toContainEqual(role!);
@@ -180,9 +180,49 @@ describe("createModelMentionSource", () => {
 		expect(completed.lines).toEqual(["use ^demo/worker:high "]);
 
 		settings.setModelRole("smol", "demo/other");
-		expect(suggestions("@smol")).toEqual([expect.objectContaining({ value: "demo/other" })]);
+		const updated = applyModelMentionCompletion([draft], 0, draft.length, suggestions("@smol")[0]!, "^@sm");
+		expect(updated.lines).toEqual(["use ^demo/other "]);
 		scoped = [worker];
 		expect(suggestions("@smol")).toEqual([]);
+	});
+
+	test("navigates native role suggestions that resolve to the same model", async () => {
+		await initTheme();
+		const worker = makeModel("demo", "worker");
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(
+				Settings.isolated({ modelRoles: { default: "demo/worker", smol: "demo/worker" } }),
+			),
+			registry: { getError: () => undefined, getAvailable: () => [worker], getAll: () => [worker] },
+			scopedModels: () => [],
+		});
+		const completion = getModelMentionSuggestions("^@", candidates);
+		if (completion.kind !== "matched") throw new Error("Expected role suggestions");
+		const list = new SelectList(completion.suggestions.items, 10, getSelectListTheme());
+		const selectedRow = () => {
+			const nativeList = list.describe({
+				cols: 80,
+				reduceMotion: false,
+				dark: true,
+				supports: () => true,
+				feature: () => true,
+			}).c?.[0];
+			if (!nativeList || !("k" in nativeList) || !nativeList.p || !("selected" in nativeList.p)) {
+				throw new Error("Expected a native selection list");
+			}
+			const selected = nativeList.p.selected;
+			return nativeList.c?.find(child => "k" in child && child.key === selected);
+		};
+
+		expect(selectedRow()).toMatchObject({ p: { label: [{ t: "@default" }] } });
+		list.handleInput("\x1b[B");
+		expect(selectedRow()).toMatchObject({ p: { label: [{ t: "@smol" }] } });
+		list.handleInput("\x1b[B");
+		expect(selectedRow()).toMatchObject({ p: { label: [{ t: "@slow" }] } });
+		list.handleInput("\x1b[A");
+		expect(selectedRow()).toMatchObject({ p: { label: [{ t: "@smol" }] } });
+		const accepted = applyModelMentionCompletion(["^@"], 0, 2, list.getSelectedItem()!, "^@");
+		expect(accepted.lines).toEqual(["^demo/worker "]);
 	});
 
 	test("hides an effort row whose selector names an available model outside the picker scope", async () => {
