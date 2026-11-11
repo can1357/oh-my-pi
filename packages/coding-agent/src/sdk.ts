@@ -12,7 +12,6 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { calculatePromptTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Context,
 	CredentialDisabledEvent,
@@ -2716,10 +2715,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
 			getLastAssistantText: () => session?.getLastAssistantText(),
-			getLastPromptTokens: () => {
-				const message = session?.messages.findLast(message => message.role === "assistant");
-				return message ? calculatePromptTokens(message.usage) : 0;
-			},
+			getLastPromptTokens: () => session?.lastPromptTokens() ?? 0,
 			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {

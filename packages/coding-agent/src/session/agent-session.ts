@@ -6305,13 +6305,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return scan.observation;
 	}
 
-	/** Prompt size (input + cacheRead + cacheWrite) of the most recent real provider response. */
+	/** Normalized prompt size of the most recent real provider response, including provider context counts. */
 	lastPromptTokens(): number {
 		const messages = this.messages;
 		for (let index = messages.length - 1; index >= 0; index--) {
 			const message = messages[index];
-			if (message.role === "assistant")
-				return message.usage.input + message.usage.cacheRead + message.usage.cacheWrite;
+			if (message.role === "assistant") return calculatePromptTokens(message.usage);
 		}
 		return 0;
 	}

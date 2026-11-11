@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	type Agent,
 	type AgentMessage,
@@ -152,13 +152,14 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
 	});
 
-	test("back-to-back idle waits climb the ladder and, from the 10s rung on, send the agent back to work", async () => {
+	test("back-to-back idle waits climb one rung even when context crosses the large-context threshold", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
 		const context = session(manager);
-		context.getLastPromptTokens = () => 100_000;
+		let promptTokens = 100_000;
+		context.getLastPromptTokens = () => promptTokens;
 		const tool = new WaitTool(context);
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
@@ -166,6 +167,7 @@ describe("wait", () => {
 		expect(notice(first)).toBeUndefined();
 		expect(report(first)).toContain("within 5.0s");
 		expect(report(first)).toContain("up to 10.0s");
+		promptTokens = 100_001;
 		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
 		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
 		await elapse(tool, 60_000);
@@ -202,8 +204,8 @@ describe("wait", () => {
 	});
 
 	test("SDK waits recognize checkpoint-only context usage without input counters", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "pi-wait-context-"));
-		const authStorage = await AuthStorage.create(join(directory, "auth.db"));
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-wait-context-"));
+		const authStorage = await AuthStorage.create(path.join(directory, "auth.db"));
 		let agentSession: AgentSession | undefined;
 		const build = Promise.withResolvers<string>();
 		try {
@@ -249,6 +251,7 @@ describe("wait", () => {
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 			});
+			expect(agentSession.lastPromptTokens()).toBe(100_001);
 			const manager = agentSession.asyncJobManager;
 			if (!manager) throw new Error("Expected SDK async job manager");
 			manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
@@ -273,7 +276,7 @@ describe("wait", () => {
 			build.resolve("done");
 			await agentSession?.dispose();
 			authStorage.close();
-			await rm(directory, { recursive: true, force: true });
+			await fs.rm(directory, { recursive: true, force: true });
 		}
 	});
 
