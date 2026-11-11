@@ -2057,7 +2057,12 @@ return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(c
 			);
 			await disposed.promise;
 			expect(await page.evaluate("window.removed.sort()")).toEqual([
-				"click", "click", "mousedown", "mousedown", "pointerdown", "pointerdown",
+				"click",
+				"click",
+				"mousedown",
+				"mousedown",
+				"pointerdown",
+				"pointerdown",
 			]);
 			await handle.dispose();
 		} finally {
