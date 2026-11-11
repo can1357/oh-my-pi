@@ -228,9 +228,11 @@ pub struct HoldOptions {
 	pub refuse_menu:  Option<bool>,
 }
 
-/// Where focus ended after a takeover input call, as the window server
-/// reports it. Input calls resolve to it on macOS and Windows when they took
-/// over; other backends and background delivery resolve to `null`.
+/// Where focus ended after a takeover input call.
+///
+/// Input calls resolve to it on macOS and Windows when they took over, as
+/// the window server reports it; other backends and background delivery
+/// resolve to `null`.
 #[napi(object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopFocusReturn {

@@ -447,6 +447,20 @@ mod tests {
 		let typed = Windows::text(windows.target);
 		assert!(typed != TARGET && typed.contains('x'), "target text {typed:?}");
 		assert_eq!(Windows::text(windows.user), USER);
+
+		// With the target already in front nothing is handed back.
+		// SAFETY: a window handle this test created.
+		unsafe { SetForegroundWindow(windows.target) };
+		assert!(window::wait_for_foreground(windows.target, Duration::from_secs(2)).unwrap());
+		let input = ElementInput::Chord(vec![KeyName::End]);
+		backend
+			.element_input(&element, &input, DeliveryMode::ForegroundReturnFocus, &token)
+			.unwrap();
+		let pid = Some(std::process::id());
+		assert_eq!(
+			control::take_focus_return(),
+			Some(DesktopFocusReturn { handed_back: false, previous_pid: pid, front_pid: pid })
+		);
 	}
 
 	/// 240 characters, each block numbered so a dropped one shows.
