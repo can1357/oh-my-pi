@@ -512,13 +512,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	/**
 	 * Only ever called on the caller's own session, which is homed on the
-	 * caller's thread; draining another thread's queue from a mirror would
-	 * consume records its owner is about to inject.
+	 * caller's thread; a mirror does not track its owner's IRC queue.
 	 */
-	drainPendingIrcInboxMessages(_agentId: string, _opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		throw new Error(
-			`drainPendingIrcInboxMessages must run on the session's home thread (${this.home}), not on a mirror`,
-		);
+	hasIrcInterrupts(): boolean {
+		throw new Error(`hasIrcInterrupts must run on the session's home thread (${this.home}), not on a mirror`);
 	}
 
 	emitIrcRelayObservation(record: CustomMessage): void {
