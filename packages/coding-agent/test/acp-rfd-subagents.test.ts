@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import {
-	isStandardSubagentClient,
-	RfdSubagentTracker,
-} from "@oh-my-pi/pi-coding-agent/modes/acp/acp-rfd-subagents";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
+import { isStandardSubagentClient, RfdSubagentTracker } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-rfd-subagents";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 
-function lifecycle(status: string, extra: Record<string, unknown> = {}) {
+function lifecycle(
+	status: SubagentLifecyclePayload["status"],
+	extra: Partial<SubagentLifecyclePayload> = {},
+): SubagentLifecyclePayload {
 	return {
 		id: "worker-1",
 		agent: "task",
@@ -18,10 +19,15 @@ function lifecycle(status: string, extra: Record<string, unknown> = {}) {
 	};
 }
 
+function sentNotifications() {
+	const sent: SessionNotification[] = [];
+	return { sent, send: async (v: SessionNotification) => void sent.push(v) };
+}
+
 describe("rfd subagent tracker", () => {
 	test("spawn emits announce then running state", async () => {
-		const sent: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
-		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send: async v => void sent.push(v) });
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send });
 		await tracker.handleLifecycle(lifecycle("started"));
 		expect(sent).toHaveLength(2);
 		expect(sent[0]?.update).toEqual({
@@ -39,8 +45,8 @@ describe("rfd subagent tracker", () => {
 	});
 
 	test("duplicate spawn is idempotent; terminal emits idle and revokes cancel", async () => {
-		const sent: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
-		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send: async v => void sent.push(v) });
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send });
 		await tracker.handleLifecycle(lifecycle("started"));
 		await tracker.handleLifecycle(lifecycle("started"));
 		expect(sent).toHaveLength(2);
@@ -56,13 +62,13 @@ describe("rfd subagent tracker", () => {
 	});
 
 	test("aborted maps to cancelled; failed carries error stop", async () => {
-		const sent: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
-		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send: async v => void sent.push(v) });
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send });
 		await tracker.handleLifecycle(lifecycle("started", { id: "a" }));
 		await tracker.handleLifecycle(lifecycle("started", { id: "b" }));
 		await tracker.handleLifecycle(lifecycle("aborted", { id: "a" }));
 		await tracker.handleLifecycle(lifecycle("failed", { id: "b" }));
-		const states = sent.map(e => (e.update as { state?: { state?: string; stopReason?: string } }).state);
+		const states = sent.map(e => (e.update as { state?: unknown }).state);
 		expect(states).toEqual([
 			undefined,
 			{ state: "running" },
@@ -74,8 +80,8 @@ describe("rfd subagent tracker", () => {
 	});
 
 	test("parked clears state; revived re-emits running", async () => {
-		const sent: Array<{ sessionId: string; update: Record<string, unknown> }> = [];
-		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send: async v => void sent.push(v) });
+		const { sent, send } = sentNotifications();
+		const tracker = new RfdSubagentTracker({ parentSessionId: "p", send });
 		await tracker.handleLifecycle(lifecycle("started"));
 		expect(sent).toHaveLength(2);
 		tracker.handleRegistryStatus({ id: "worker-1", status: "parked" });

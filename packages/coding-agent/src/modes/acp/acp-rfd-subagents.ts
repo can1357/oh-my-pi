@@ -12,15 +12,16 @@
  * `initialize` (`isStandardSubagentClient`). Unstable and experimental.
  */
 
+import type { SessionNotification } from "@oh-my-pi/pi-utils/acp";
 import type { EventBus } from "../../utils/event-bus";
 import type { SubagentLifecyclePayload } from "../../task/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../task/types";
-import type { AcpRawUpdateSender } from "./acp-subagent-tracker";
+
+/** Sender for typed `subagent_update` notifications on the parent session. */
+export type RfdUpdateSender = (notification: SessionNotification) => Promise<void>;
 
 /** Minimal RFD client detection: `subagents` advertised as an object. */
-export function isStandardSubagentClient(
-	clientCapabilities: { subagents?: unknown } | undefined,
-): boolean {
+export function isStandardSubagentClient(clientCapabilities: { subagents?: unknown } | undefined): boolean {
 	const subagents = clientCapabilities?.subagents;
 	return typeof subagents === "object" && subagents !== null && !Array.isArray(subagents);
 }
@@ -52,11 +53,11 @@ interface RfdChild {
 export class RfdSubagentTracker {
 	readonly #children = new Map<string, RfdChild>();
 	readonly #parentSessionId: string;
-	readonly #send: AcpRawUpdateSender;
+	readonly #send: RfdUpdateSender;
 	#unsubscribers: Array<() => void> = [];
 	#disposed = false;
 
-	constructor(options: { parentSessionId: string; send: AcpRawUpdateSender }) {
+	constructor(options: { parentSessionId: string; send: RfdUpdateSender }) {
 		this.#parentSessionId = options.parentSessionId;
 		this.#send = options.send;
 	}
