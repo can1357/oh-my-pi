@@ -8,7 +8,7 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
 import { AskTool } from "../src/tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
-import { askResultPayload } from "./helpers/ask-result";
+import { askResultPayload, askResultText } from "./helpers/ask-result";
 
 type AskExecutionResult = AgentToolResult<AskToolDetails>;
 type AskSelect = (
@@ -179,6 +179,7 @@ describe("AskTool timeout", () => {
 		const result = outcome.result;
 		if (!result) throw new Error("ask did not settle");
 		expect(askResultPayload(result)).toEqual({ db: "sqlite", auth: "jwt", notes: "none" });
+		expect(askResultText(result)).toMatch(/timed?\s*out/i);
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "db", question: "Which database?", answer: "SQLite" },

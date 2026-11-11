@@ -110,6 +110,7 @@ describe("AskTool form dialog", () => {
 
 		expect(formDialog.mock.calls[0]?.[0]).toBe(DB_FORM);
 		expect(askResultPayload(result)).toEqual({ store: "redis", ttl: 7 });
+		expect(text(result)).not.toMatch(/timed?\s*out/i);
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "store", question: "Session store", answer: "Redis" },
@@ -130,7 +131,7 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(askResultPayload(result)).toEqual({ store: "redis" });
-		expect(text(result)).toContain("shared cache");
+		expect(text(result)).toMatch(/Session store.*Redis.*shared cache/);
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "store", question: "Session store", answer: "Redis" },
@@ -181,7 +182,8 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(askResultPayload(result)).toEqual({ store: "sqlite", ttl: 30 });
-		expect(text(result)).toContain("no service needed");
+		expect(text(result)).toMatch(/timed?\s*out/i);
+		expect(text(result)).toMatch(/Session store.*SQLite.*no service needed/);
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "store", question: "Session store", answer: "SQLite" },
