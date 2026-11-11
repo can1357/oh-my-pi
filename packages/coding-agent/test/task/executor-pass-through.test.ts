@@ -218,7 +218,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
 	});
 
-	it("grants wait only to unrestricted subagents that can start background work, and requires write for peers", async () => {
+	it("grants wait only to unrestricted subagents that can start background work, and grants peers to write holders and read-only agents (agent://-only write)", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
 
@@ -261,9 +261,13 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const readOnlyPrompt = promptText(0);
 		const writablePrompt = promptText(1);
 		const spawningPrompt = promptText(2);
-		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
+		// Read-only agents get the agent://-only write (createTools), so they need
+		// their own ID and the peer roster to address the lead.
+		expect(readOnlyPrompt.includes("# Peers")).toBe(true);
 		expect(writablePrompt.includes("# Peers")).toBe(true);
 		expect(spawningPrompt.includes("# Peers")).toBe(false);
+		// Restricted sessions own their exact list: no synthetic write, no peers.
+		expect(promptText(3).includes("# Peers")).toBe(false);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
