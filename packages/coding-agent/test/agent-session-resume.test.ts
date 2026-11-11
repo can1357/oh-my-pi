@@ -249,14 +249,18 @@ describe("AgentSession.resume", () => {
 		});
 	}
 
-	it("does not accept a continue rejected while the session is busy", async () => {
-		const stall = stalledResponse();
-		const { session } = createSession([stall.handler]);
+	it("accepts a continue that interrupts a running turn once the continuation is live", async () => {
+		const running = stalledResponse();
+		const resumed = stalledResponse();
+		const { session } = createSession([running.handler, resumed.handler]);
 		const pending = session.prompt("still running");
-		await stall.started;
+		await running.started;
 		let accepted = 0;
-		await expect(session.resume({ onAccepted: () => accepted++ })).rejects.toThrow();
-		expect(accepted).toBe(0);
-		await abortDuring(session, pending, stall.started);
+		const resuming = session.resume({ onAccepted: () => accepted++ });
+		await resumed.started;
+		expect(accepted).toBe(1);
+		await pending;
+		await abortDuring(session, resuming, resumed.started);
+		expect(accepted).toBe(1);
 	});
 });
