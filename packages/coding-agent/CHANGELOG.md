@@ -176,6 +176,10 @@
 
 - Added a report of native windows to browser results on macOS for visible managed/spawned browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Native-window frame probes cancel their timeout timers when the read completes ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

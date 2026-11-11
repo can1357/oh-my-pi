@@ -1,5 +1,6 @@
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
 import { desktopWindowRoster } from "@oh-my-pi/pi-natives/desktop";
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import type { Browser, Page } from "puppeteer-core";
 
 /** Longest a call waits to read where the tab's window is on screen. */
@@ -50,7 +51,7 @@ export async function readTabFrame(page: Pick<Page, "mainFrame">): Promise<TabVi
 			};
 		})
 		.catch(() => undefined);
-	return await Promise.race([read, Bun.sleep(FRAME_TIMEOUT_MS).then(() => undefined)]);
+	return await withTimeout(read, FRAME_TIMEOUT_MS, "Timed out reading the tab frame").catch(() => undefined);
 }
 
 /** Page-backed browser windows are not native dialogs; an unreadable target leaves their identity uncertain. */
@@ -62,7 +63,7 @@ export async function readBrowserPageFrames(browser: Pick<Browser, "pages">): Pr
 			frames.some(frame => frame === undefined) ? undefined : frames.filter(frame => frame !== undefined),
 		)
 		.catch(() => undefined);
-	return await Promise.race([read, Bun.sleep(FRAME_TIMEOUT_MS).then(() => undefined)]);
+	return await withTimeout(read, FRAME_TIMEOUT_MS, "Timed out reading browser page frames").catch(() => undefined);
 }
 
 /**
