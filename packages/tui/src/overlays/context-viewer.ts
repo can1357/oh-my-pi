@@ -53,6 +53,7 @@ import {
 	mapRowLine,
 	mapRowSpans,
 	type OverviewRow,
+	overviewLabel,
 	planMapRows,
 } from "./context-viewer-overview";
 
@@ -168,7 +169,7 @@ export class ContextViewer implements Component {
 			? describeContextMeter({
 					...breakdown,
 					categories: data.categories.map(category => ({
-						label: safeText(category.label),
+						label: safeText(overviewLabel(category)),
 						tokens: drawable.get(category)!,
 						color: CONTEXT_PRESENTATION[category.id].color,
 					})),

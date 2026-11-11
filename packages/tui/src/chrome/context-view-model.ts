@@ -4,6 +4,10 @@ import type { ContextBreakdown } from "../status-line/context-usage";
 interface ContextCategoryDescriptor {
 	readonly id: string;
 	readonly label: string;
+	/** Overview row label when the Overview weight differs from the category's content. */
+	readonly overviewLabel?: string;
+	/** Listed with its weight but never opened. */
+	readonly openable?: false;
 }
 
 /** Context categories in display order. */
@@ -21,6 +25,15 @@ export const CONTEXT_CATEGORIES = [
 ] as const satisfies readonly ContextCategoryDescriptor[];
 
 export type ContextCategoryId = (typeof CONTEXT_CATEGORIES)[number]["id"];
+
+const DESCRIPTORS_BY_ID = new Map<ContextCategoryId, ContextCategoryDescriptor>(
+	CONTEXT_CATEGORIES.map(descriptor => [descriptor.id, descriptor]),
+);
+
+/** Descriptor of a category id: its label, optional Overview label, and whether it can be opened. */
+export function contextCategoryDescriptor(id: ContextCategoryId): ContextCategoryDescriptor {
+	return DESCRIPTORS_BY_ID.get(id)!;
+}
 
 export interface ContextThinkingGroup {
 	readonly id: string;

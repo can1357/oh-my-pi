@@ -14,7 +14,6 @@
 ### Removed
 
 - Removed `estimateSkillsTokens()` and the `skillful` context-usage option; Skills tokens come from the built prompt's sources ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
-- Removed `contextCategoryDescriptor()` and `overviewLabel()` with the descriptor `overviewLabel`/`openable` fields; every context category now opens and uses its own label ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ## [18.18.8] - 2026-11-11
 
