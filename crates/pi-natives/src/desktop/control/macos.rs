@@ -25,11 +25,19 @@ const SOURCE_UNIX_PID: u32 = 41;
 /// hardware key presses and left clicks, from a USB keyboard and a VNC pointer;
 /// right and other clicks were not exercised.
 const TARGET_UNIX_PID: u32 = 40;
+/// `kCGMouseEventWindowUnderMousePointer`: the window under the pointer,
+/// filled in for an event `WindowServer` placed by the pointer, hardware or
+/// posted to the HID or session event tap, and zero for one posted to a
+/// process.
+const WINDOW_UNDER_POINTER: u32 = 91;
 const KEYBOARD_KEYCODE: u32 = 9;
 const LEFT_MOUSE_DOWN: u32 = 1;
+const LEFT_MOUSE_UP: u32 = 2;
 const RIGHT_MOUSE_DOWN: u32 = 3;
+const RIGHT_MOUSE_UP: u32 = 4;
 const KEY_DOWN: u32 = 10;
 const OTHER_MOUSE_DOWN: u32 = 25;
+const OTHER_MOUSE_UP: u32 = 26;
 const SESSION_TAP: u32 = 1;
 const ANNOTATED_SESSION_TAP: u32 = 2;
 type Ref = *mut c_void;
@@ -197,6 +205,11 @@ pub(crate) const fn is_pointer_press(kind: u32) -> bool {
 		i += 1;
 	}
 	false
+}
+
+/// Mouse releases, which the user-input tap sees only to place clicks.
+const fn is_pointer_release(kind: u32) -> bool {
+	matches!(kind, LEFT_MOUSE_UP | RIGHT_MOUSE_UP | OTHER_MOUSE_UP)
 }
 
 /// F1-F20, home of Mission Control, Launchpad, Show Desktop and the
@@ -426,9 +439,15 @@ const fn foreign_input(tag: i64, source_pid: i64, own_pid: i64, kind: u32, point
 }
 
 /// The event types the user-input monitor's tap listens to: key presses and
-/// every pointer press.
-const USER_INPUT_MASK: u64 =
-	(1 << KEY_DOWN) | (1 << LEFT_MOUSE_DOWN) | (1 << RIGHT_MOUSE_DOWN) | (1 << OTHER_MOUSE_DOWN);
+/// every pointer press, which are the user's input, and pointer releases,
+/// which only place the click their press began.
+const USER_INPUT_MASK: u64 = (1 << KEY_DOWN)
+	| (1 << LEFT_MOUSE_DOWN)
+	| (1 << RIGHT_MOUSE_DOWN)
+	| (1 << OTHER_MOUSE_DOWN)
+	| (1 << LEFT_MOUSE_UP)
+	| (1 << RIGHT_MOUSE_UP)
+	| (1 << OTHER_MOUSE_UP);
 
 /// Where a foreign event the annotated tap names no target for lands.
 enum Untargeted {
@@ -453,7 +472,9 @@ const _: () = {
 	let mut kind = 0;
 	while kind < 64 {
 		assert!(
-			USER_INPUT_MASK & (1 << kind) == 0 || untargeted(kind).is_some(),
+			USER_INPUT_MASK & (1 << kind) == 0
+				|| untargeted(kind).is_some()
+				|| is_pointer_release(kind),
 			"a user-input type has no rule"
 		);
 		kind += 1;
@@ -462,12 +483,16 @@ const _: () = {
 
 /// The process a foreign key press or click lands in: the target the
 /// annotated tap names, else what [`untargeted`] says for its type, and the
-/// front process for a type without a rule.
+/// front process for a type without a rule. A release lands nowhere: it ends
+/// a click its press counted already.
 fn input_target(
 	kind: u32,
 	target: i64,
 	front: impl FnOnce() -> Option<libc::pid_t>,
 ) -> Option<libc::pid_t> {
+	if is_pointer_release(kind) {
+		return None;
+	}
 	if let Ok(pid) = libc::pid_t::try_from(target)
 		&& pid > 0
 	{
@@ -484,11 +509,36 @@ fn input_target(
 	}
 }
 
+/// What the user-input tap does with a mouse button event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonRecord {
+	/// The user's press or release: hardware, or posted for them by a remote
+	/// control or remapping tool to the HID or session event tap.
+	User,
+	/// This process's own post to the HID event tap, which the HID counters
+	/// count but which is no click of the user's.
+	Counted,
+	/// An event posted to a process, this one's background clicks from any omp
+	/// process included: no pointer placed it, and the HID counters skip it.
+	Skipped,
+}
+
+const fn button_record(tag: i64, source_pid: i64, own_pid: i64, window: i64) -> ButtonRecord {
+	if source_pid != 0 && window == 0 {
+		ButtonRecord::Skipped
+	} else if foreign(tag, source_pid, own_pid) {
+		ButtonRecord::User
+	} else {
+		ButtonRecord::Counted
+	}
+}
+
 unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
 	// SAFETY: the monitor thread retains this stack context through
 	// invalidation.
 	let context = unsafe { &*(user.cast::<TapContext<Arc<UserInputs>>>()) };
 	if kind == u32::MAX || kind == u32::MAX - 1 {
+		context.inner.clicks().lost();
 		// SAFETY: the event tap remains alive until this callback returns.
 		unsafe {
 			CGEventTapEnable(context.tap, true);
@@ -497,15 +547,24 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 	}
 	if !event.is_null() {
 		// SAFETY: documented read-only CGEvent fields.
-		let (tag, source, target, point) = unsafe {
+		let (tag, source, target, window, point) = unsafe {
 			(
 				CGEventGetIntegerValueField(event, SOURCE_USER_DATA),
 				CGEventGetIntegerValueField(event, SOURCE_UNIX_PID),
 				CGEventGetIntegerValueField(event, TARGET_UNIX_PID),
+				CGEventGetIntegerValueField(event, WINDOW_UNDER_POINTER),
 				CGEventGetLocation(event),
 			)
 		};
-		if foreign_input(tag, source, i64::from(std::process::id()), kind, point)
+		let own = i64::from(std::process::id());
+		if is_pointer_press(kind) || is_pointer_release(kind) {
+			match button_record(tag, source, own, window) {
+				ButtonRecord::User => context.inner.clicks().record(kind, target, window),
+				ButtonRecord::Counted => context.inner.clicks().count(kind),
+				ButtonRecord::Skipped => {},
+			}
+		}
+		if foreign_input(tag, source, own, kind, point)
 			&& let Some(pid) = input_target(kind, target, front_pid)
 		{
 			context.inner.record(pid, Instant::now());
@@ -814,6 +873,30 @@ mod tests {
 		// A type without a rule counts against the front process rather than
 		// being dropped.
 		assert_eq!(input_target(11, 0, || Some(12)), Some(12));
+		// A release the tap sees to place its click is no input of its own.
+		for kind in [LEFT_MOUSE_UP, RIGHT_MOUSE_UP, OTHER_MOUSE_UP] {
+			assert_ne!(USER_INPUT_MASK & (1 << kind), 0, "the tap listens for {kind}");
+			assert_eq!(input_target(kind, 77, unread), None);
+		}
+	}
+
+	#[test]
+	fn the_users_clicks_are_placed_with_their_remote_tools_and_omps_own_only_counted() {
+		let own = 900;
+		let window = 64;
+		// Hardware, and a remote-control tool's post to the HID event tap under
+		// its own process id and tag (RustDesk's is 100).
+		assert_eq!(button_record(0, 0, own, window), ButtonRecord::User);
+		assert_eq!(button_record(100, 4242, own, window), ButtonRecord::User);
+		// Any omp process's tagged post to the HID event tap, and this one's
+		// untagged.
+		assert_eq!(button_record(SYNTHETIC_EVENT_TAG, own, own, window), ButtonRecord::Counted);
+		assert_eq!(button_record(SYNTHETIC_EVENT_TAG, 4242, own, window), ButtonRecord::Counted);
+		assert_eq!(button_record(0, own, own, window), ButtonRecord::Counted);
+		// A post to a process, no window under it: another omp process's
+		// untagged make-key record, or anyone's background click.
+		assert_eq!(button_record(0, 4242, own, 0), ButtonRecord::Skipped);
+		assert_eq!(button_record(SYNTHETIC_EVENT_TAG, own, own, 0), ButtonRecord::Skipped);
 	}
 
 	#[test]
