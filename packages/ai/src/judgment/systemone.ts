@@ -17,6 +17,9 @@
  * - `liquid-systemone`: Liquid AI's `POST {baseUrl}/decisions/v1/systemone`.
  *   Same body, verbatim model, plus a top-level array of base64 data URLs
  *   when images are supplied.
+ * - `nace-systemone`: Nace's Drex at `POST {baseUrl}/v1/systemone`. The
+ *   `liquid-systemone` body: Drex rejects TypeSafe's `assets` map, so images
+ *   go in a top-level array of base64 data URLs.
  */
 import { parseCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { $env, isRecord } from "@oh-my-pi/pi-utils";
@@ -209,6 +212,16 @@ export const workersAiWire: JudgmentWire = {
 	decode: payload => (isRecord(payload) ? decodeSystemOne(payload.result) : undefined),
 };
 
+/** The verbatim body plus, when images are supplied, a top-level array of their base64 data URLs. */
+function encodeWithImageDataUrls(request: JudgmentRequest, model: string): Record<string, unknown> {
+	return {
+		state: request.state,
+		model,
+		questions: wireQuestions(request.questions),
+		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
+	};
+}
+
 /** Liquid AI decision models (`d1.1`, `d1-ultra`). */
 export const liquidWire: JudgmentWire = {
 	...systemOneWire("/decisions/v1/systemone"),
@@ -220,10 +233,20 @@ export const liquidWire: JudgmentWire = {
 		maxTotalBytes: 3_000_000,
 		maxTotalPatches: 10_000,
 	},
-	encode: (request, model) => ({
-		state: request.state,
-		model,
-		questions: wireQuestions(request.questions),
-		...(request.images?.length ? { images: request.images.map(embeddedImageDataUrl) } : {}),
-	}),
+	encode: encodeWithImageDataUrls,
+};
+
+/** Nace Drex decision models (`drex-max-v1.1`, `drex-max-finance`, `drex-v2.0`). */
+export const naceWire: JudgmentWire = {
+	...systemOneWire("/v1/systemone"),
+	// https://console.nace.ai/docs/drex/api-reference/systemone: at most 8 images of at most 40 megapixels,
+	// with state, questions and images serialized together at most 4 MiB; 3 MB of images is 4 MB as base64,
+	// leaving room for state and questions.
+	images: {
+		mimeTypes: ["image/png", "image/jpeg", "image/webp"],
+		maxCount: 8,
+		maxTotalBytes: 3_000_000,
+		maxPixels: 40_000_000,
+	},
+	encode: encodeWithImageDataUrls,
 };
