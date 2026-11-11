@@ -55,7 +55,7 @@ use crate::desktop::{
 const SLAVE_BIND_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the server gets to report an emitted pointer event back.
 const POINTER_CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
-/// How long the server gets to report the last emitted key back.
+/// How long the server gets to report every key release of a run back.
 const KEY_CONFIRM_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Press → release hold, so toolkits see two distinct frames.
 const PRESS_HOLD: Duration = Duration::from_millis(12);
@@ -120,6 +120,35 @@ enum Raw {
 	Wheel,
 	KeyPress(u8),
 	KeyRelease(u8),
+}
+
+/// Counts the server's raw key releases against the releases a run sent, in
+/// order: a release that is not the next one sent is not counted, so a lost
+/// key stops the count however many keys follow it.
+struct ReleaseOrder<'a> {
+	/// The run's steps from the next release still expected on.
+	steps:   &'a [KeyStep],
+	matched: usize,
+}
+
+impl<'a> ReleaseOrder<'a> {
+	const fn new(steps: &'a [KeyStep]) -> Self {
+		Self { steps, matched: 0 }
+	}
+
+	fn observe(&mut self, keycode: u32) {
+		let Some(at) = self.steps.iter().position(|step| !step.press) else {
+			return;
+		};
+		if u32::from(self.steps[at].keycode) == keycode {
+			self.steps = &self.steps[at + 1..];
+			self.matched += 1;
+		}
+	}
+
+	fn done(&self) -> bool {
+		self.steps.iter().all(|step| step.press)
+	}
 }
 
 impl Mpx {
@@ -495,8 +524,12 @@ impl Mpx {
 	}
 
 	/// Emits `steps` through the keyboard slave and waits until the server
-	/// reports the last one. Once the last press is out, a cancel no longer
-	/// fails the call: the releases and the server's report follow anyway.
+	/// reports each release, in order, or with no release the last press.
+	/// Every release is counted: when the server stalls, the kernel drops the
+	/// oldest queued uinput events, and the run's last key, or an earlier
+	/// transition of the same key, still arrives. Once the last press is out,
+	/// a cancel no longer fails the call: the releases and the server's
+	/// report follow anyway.
 	fn emit_keys(&mut self, steps: &[KeyStep]) -> CoreResult<()> {
 		self.drain();
 		self.sent = true;
@@ -518,21 +551,52 @@ impl Mpx {
 			index += 1;
 			keyboard.device.key(step.keycode, step.press)
 		})?;
-		let Some(last) = steps.last() else {
+		let releases = steps.iter().filter(|step| !step.press).count();
+		if releases == 0 {
+			let Some(last) = steps.last() else {
+				return Ok(());
+			};
+			return control::cleanup(|| self.wait_raw(slave, Raw::KeyPress(last.keycode), 1))?
+				.ok_or_else(|| {
+					DesktopError::input_failed(format!(
+						"the X server did not confirm the virtual keyboard's last key within {}ms; the \
+						 keys may not have been delivered",
+						KEY_CONFIRM_TIMEOUT.as_millis()
+					))
+				});
+		}
+		let confirmed = control::cleanup(|| self.wait_releases(slave, steps));
+		if confirmed == releases {
 			return Ok(());
-		};
-		let raw = if last.press {
-			Raw::KeyPress(last.keycode)
-		} else {
-			Raw::KeyRelease(last.keycode)
-		};
-		control::cleanup(|| self.wait_raw(slave, raw, 1))?.ok_or_else(|| {
-			DesktopError::input_failed(format!(
-				"the X server did not confirm the virtual keyboard's last key within {}ms; the keys \
-				 may not have been delivered",
-				KEY_CONFIRM_TIMEOUT.as_millis()
-			))
-		})
+		}
+		Err(DesktopError::input_failed(format!(
+			"the X server confirmed {confirmed} of the virtual keyboard's {releases} key releases \
+			 within {}ms, so keys were lost or are still on their way, and background input stays \
+			 off for this session; read the target before sending more",
+			KEY_CONFIRM_TIMEOUT.as_millis()
+		)))
+	}
+
+	/// How many of the releases in `steps` the server reported from `device`,
+	/// in order, within [`KEY_CONFIRM_TIMEOUT`].
+	fn wait_releases(&self, device: u16, steps: &[KeyStep]) -> usize {
+		let deadline = Instant::now() + KEY_CONFIRM_TIMEOUT;
+		let mut order = ReleaseOrder::new(steps);
+		while !order.done() {
+			match self.conn.poll_for_event() {
+				Ok(Some(Event::XinputRawKeyRelease(raw)))
+					if raw.deviceid == device || raw.sourceid == device =>
+				{
+					order.observe(raw.detail);
+				},
+				Ok(Some(_)) => {},
+				Ok(None) if Instant::now() < deadline => {
+					std::thread::sleep(Duration::from_millis(2));
+				},
+				Ok(None) | Err(_) => break,
+			}
+		}
+		order.matched
 	}
 
 	/// Points the virtual keyboard's own focus at `window`; the core focus is
@@ -1196,6 +1260,31 @@ mod tests {
 			.iter()
 			.fold((10, 10), |(x, y), &(dx, dy)| (x + dx, y + dy));
 		assert_eq!(end, (58, 22));
+	}
+
+	#[test]
+	fn a_lost_key_stops_the_release_count_however_many_keys_follow() {
+		let count = |expected: &[u8], reported: &[u32]| {
+			// Each key pressed then released, as text plans it.
+			let steps: Vec<KeyStep> = expected
+				.iter()
+				.flat_map(|&keycode| {
+					[KeyStep { keycode, press: true }, KeyStep { keycode, press: false }]
+				})
+				.collect();
+			let mut order = ReleaseOrder::new(&steps);
+			for &keycode in reported {
+				order.observe(keycode);
+			}
+			(order.matched, order.done())
+		};
+		assert_eq!(count(&[38, 56, 54], &[38, 56, 54]), (3, true));
+		// A release the server added on resync, between the run's own.
+		assert_eq!(count(&[38, 56, 54], &[38, 50, 56, 54]), (3, true));
+		// "aa" with one `a` lost: the last key alone confirmed it on `main`.
+		assert_eq!(count(&[38, 38], &[38]), (1, false));
+		assert_eq!(count(&[38, 56, 54], &[38, 54]), (1, false));
+		assert_eq!(count(&[38, 56, 54], &[56, 54]), (0, false));
 	}
 
 	#[test]
