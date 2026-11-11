@@ -218,11 +218,7 @@ impl Backend for Win32Backend {
 
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
-	use std::{
-		sync::mpsc,
-		thread,
-		time::{Duration, Instant},
-	};
+	use std::{sync::mpsc, thread, time::Duration};
 
 	use windows_sys::Win32::{
 		Foundation::HWND,
@@ -235,14 +231,14 @@ mod tests {
 	};
 
 	use super::*;
-	use crate::desktop::{control::CancellationSource, keys::parse_key};
+	use crate::desktop::control::CancellationSource;
 
 	fn wide(text: &str) -> Vec<u16> {
 		text.encode_utf16().chain(Some(0)).collect()
 	}
 
-	/// Two top-level edit windows on a thread that pumps their messages, as
-	/// another app's would: the user's window and the takeover target.
+	/// Two empty top-level edit windows on a thread that pumps their messages,
+	/// as another app's would: the user's window and the takeover target.
 	struct Windows {
 		user:   HWND,
 		target: HWND,
@@ -253,15 +249,15 @@ mod tests {
 		fn open() -> Self {
 			let (sender, receiver) = mpsc::channel();
 			thread::spawn(move || {
-				let create = |title: &str| {
-					let (class, title) = (wide("EDIT"), wide(title));
+				let create = || {
+					let (class, text) = (wide("EDIT"), wide(""));
 					// SAFETY: both strings are NUL-terminated and outlive the call;
 					// EDIT is a system class, so no instance handle is needed.
 					unsafe {
 						CreateWindowExW(
 							0,
 							class.as_ptr(),
-							title.as_ptr(),
+							text.as_ptr(),
 							WS_OVERLAPPEDWINDOW | WS_VISIBLE,
 							CW_USEDEFAULT,
 							CW_USEDEFAULT,
@@ -274,8 +270,8 @@ mod tests {
 						)
 					}
 				};
-				let user = create("omp test: user window") as usize;
-				let target = create("omp test: takeover target") as usize;
+				let user = create() as usize;
+				let target = create() as usize;
 				// SAFETY: no preconditions.
 				let thread = unsafe { GetCurrentThreadId() };
 				sender.send((user, target, thread)).unwrap();
@@ -311,18 +307,6 @@ mod tests {
 		}
 	}
 
-	fn wait_foreground(window: HWND) -> bool {
-		let deadline = Instant::now() + Duration::from_secs(2);
-		// SAFETY: no preconditions.
-		while unsafe { GetForegroundWindow() } != window {
-			if Instant::now() > deadline {
-				return false;
-			}
-			thread::sleep(Duration::from_millis(10));
-		}
-		true
-	}
-
 	#[test]
 	#[ignore = "moves the foreground between windows it opens; run with --ignored from a focused \
 	            terminal in a signed-in desktop session"]
@@ -339,12 +323,13 @@ mod tests {
 		let token = CancellationSource::default().token();
 		for input in [
 			ElementInput::Text("typed".to_string()),
-			ElementInput::Chord(vec![parse_key("end").unwrap()]),
+			ElementInput::Chord(vec![KeyName::Home]),
+			ElementInput::Text("x".to_string()),
 		] {
 			// SAFETY: a window handle this test created.
 			unsafe { SetForegroundWindow(windows.user) };
 			assert!(
-				wait_foreground(windows.user),
+				window::wait_for_foreground(windows.user, Duration::from_secs(2)).unwrap(),
 				"this process cannot take the foreground; run it from a focused terminal"
 			);
 			backend
@@ -353,6 +338,7 @@ mod tests {
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
 		}
-		assert_eq!(windows.text(windows.target), "typed");
+		assert_eq!(windows.text(windows.target), "xtyped");
+		assert_eq!(windows.text(windows.user), "");
 	}
 }
