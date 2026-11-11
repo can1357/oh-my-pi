@@ -224,9 +224,9 @@ mod tests {
 		Foundation::HWND,
 		System::Threading::GetCurrentThreadId,
 		UI::WindowsAndMessaging::{
-			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow,
-			GetMessageW, MSG, PostThreadMessageW, SendMessageW, SetForegroundWindow,
-			TranslateMessage, WM_GETTEXT, WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+			CW_USEDEFAULT, CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG,
+			PostThreadMessageW, SendMessageW, SetForegroundWindow, TranslateMessage, WM_GETTEXT,
+			WM_QUIT, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 		},
 	};
 
@@ -293,9 +293,8 @@ mod tests {
 		fn text(&self, window: HWND) -> String {
 			let mut buffer = [0u16; 256];
 			// SAFETY: `buffer` holds the length WM_GETTEXT is told.
-			let length = unsafe {
-				SendMessageW(window, WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize)
-			};
+			let length =
+				unsafe { SendMessageW(window, WM_GETTEXT, buffer.len(), buffer.as_mut_ptr() as isize) };
 			String::from_utf16_lossy(&buffer[..length as usize])
 		}
 	}
