@@ -261,12 +261,12 @@ export class RemoteMnemopiSessionState implements MnemopiSessionStateApi {
 		return this.#remote.callSync("editScopedMemory", op, id, options);
 	}
 
-	collectScopedRecallResults(query: string): Promise<RecallResult[]> {
-		return this.#remote.call("collectScopedRecallResults", query);
+	collectScopedRecallResults(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
+		return this.#remote.call("collectScopedRecallResults", query, signal);
 	}
 
-	recallResultsScoped(query: string): Promise<RecallResult[]> {
-		return this.#remote.call("collectScopedRecallResults", query);
+	recallResultsScoped(query: string, signal?: AbortSignal): Promise<RecallResult[]> {
+		return this.#remote.call("collectScopedRecallResults", query, signal);
 	}
 
 	formatScopedRecallContext(results: readonly RecallResult[], format?: "bullet" | "json"): string | undefined {

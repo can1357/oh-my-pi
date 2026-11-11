@@ -123,21 +123,14 @@ export async function executeRerank(
 			maxAttempts: options.maxAttempts ?? 3,
 			defaultDelayMs: options.maxAttempts !== undefined ? () => 100 : attempt => 2 ** attempt * 1000,
 			onHttpError: async response => {
-				if (response.status !== 401) return undefined;
 				const detail = (await response.text().catch(() => "")).trim();
-				return new ProviderHttpError(detail || "mnemopi rerank request unauthorized (401)", 401, {
-					headers: response.headers,
-				});
+				return new ProviderHttpError(
+					`mnemopi rerank request failed (${response.status}): ${detail || response.statusText}`,
+					response.status,
+					{ headers: response.headers },
+				);
 			},
 		});
-		if (!response.ok) {
-			logger.warn("mnemopi rerank request failed", {
-				status: response.status,
-				url: targetUrl,
-				model: options.model,
-			});
-			return null;
-		}
 
 		const data = (await response.json()) as
 			| { results?: Array<{ index: number; relevance_score?: number; score?: number }> }

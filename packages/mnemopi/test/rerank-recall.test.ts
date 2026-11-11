@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { clipRecallContent, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
+import { clipRecallContent, gatherCandidates, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
 import { createReranker, executeRerank, type RerankFunction } from "@oh-my-pi/pi-mnemopi/core/rerank";
@@ -424,6 +424,18 @@ describe("Cross-encoder rerank in Mnemopi recall", () => {
 		expect(first[0]?.id).not.toBe(second[0]?.id);
 		expect(beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1 });
 	});
+	it("keeps gathered candidates separate from finalized recall cache entries", async () => {
+		const beam = makeTestBeam({ enhancedRecall: true });
+		const longContent = `deployment notes ${"detail ".repeat(100)}`;
+		insertWorking(beam, "cache-stage", longContent);
+
+		await gatherCandidates(beam, "deployment", 1);
+		const recalled = await recallEnhanced(beam, "deployment", 1);
+
+		expect(recalled[0]?.content.length).toBeLessThanOrEqual(500);
+		expect(recalled[0]?.truncated).toBe(true);
+		expect(recalled[0]?.full_length).toBe(longContent.length);
+	});
 	it("reuses cached candidates for similar queries with derived embeddings", async () => {
 		const firstQuery = "deployment migration notes";
 		setEmbeddingProviderForTests({
@@ -515,6 +527,29 @@ describe("executeRerank HTTP client", () => {
 			});
 			expect(scores?.[0]?.relevanceScore).toBeCloseTo(0.1192, 4);
 			expect(scores?.[1]?.relevanceScore).toBeCloseTo(0.8808, 4);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("rotates resolver credentials after a rerank 403", async () => {
+		const originalFetch = globalThis.fetch;
+		const authorization: Array<string | null> = [];
+		globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+			authorization.push(new Headers(init?.headers).get("authorization"));
+			if (authorization.length === 1) return new Response("account has no access", { status: 403 });
+			return Response.json({ results: [{ index: 0, relevance_score: 0.9 }] });
+		}) as unknown as typeof fetch;
+
+		try {
+			const scores = await executeRerank("query", ["document"], {
+				apiUrl: "http://127.0.0.1:9999",
+				apiKey: async ({ error }: { error: unknown }) => (error ? "sibling-key" : "primary-key"),
+				maxAttempts: 1,
+			});
+
+			expect(authorization).toEqual(["Bearer primary-key", "Bearer sibling-key"]);
+			expect(scores).toEqual([{ index: 0, relevanceScore: 0.9 }]);
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

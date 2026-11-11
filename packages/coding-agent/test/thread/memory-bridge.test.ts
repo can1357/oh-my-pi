@@ -19,6 +19,7 @@ import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { WorkerPeer } from "../../src/thread/services";
 import { memoryThreadService } from "../../src/thread/services/memory";
 import type { MemoryProbe, MemoryTestGlobals } from "../fixtures/memory-bridge-worker";
+import type { RecallResult } from "@oh-my-pi/pi-mnemopi";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 function mnemopiConfig(dbPath: string): MnemopiBackendConfig {
@@ -185,6 +186,36 @@ describe("memory thread service", () => {
 			// An edit from the worker mutates main's row.
 			expect(await probe.mnemopiForget(report.storedId)).toBe("deleted");
 			expect(parent.getScopedMemory(report.storedId)).toBeNull();
+		} finally {
+			await parent.dispose({ consolidate: false });
+		}
+	});
+	it("forwards recall cancellation through the worker memory bridge", async () => {
+		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+		const parent = new MnemopiSessionState({
+			sessionId: "parent-session",
+			config: mnemopiConfig(path.join(tempDir, "mnemopi.db")),
+			session: parentSession,
+		});
+		const controller = new AbortController();
+		const forwarded = Promise.withResolvers<AbortSignal | undefined>();
+		vi.spyOn(parent, "collectScopedRecallResults").mockImplementation((_query, signal) => {
+			forwarded.resolve(signal);
+			const recalled = Promise.withResolvers<RecallResult[]>();
+			if (!signal) {
+				recalled.resolve([]);
+				return recalled.promise;
+			}
+			signal.addEventListener("abort", () => recalled.resolve([]), { once: true });
+			return recalled.promise;
+		});
+		try {
+			const recalling = probe.mnemopiChild(parent, "worker cancellation probe", controller.signal);
+			const remoteSignal = await forwarded.promise;
+			expect(remoteSignal).toBeDefined();
+			controller.abort();
+			await recalling;
+			expect(remoteSignal?.aborted).toBe(true);
 		} finally {
 			await parent.dispose({ consolidate: false });
 		}

@@ -1095,7 +1095,7 @@ async function recallWithoutReranker(
 			cache.invalidate();
 			beam.caches.queryCacheToken = token;
 		}
-		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic);
+		scope = enhancedRecallCacheScope(beam, topK, options, polyphonic, "final");
 		const cached = cache.get(query, queryEmbedding, scope);
 		if (cached !== null) {
 			const results = structuredClone(cached) as RecallResult[];
@@ -1199,7 +1199,7 @@ export async function gatherCandidates(
 				cache.invalidate();
 				beam.caches.queryCacheToken = token;
 			}
-			scope = enhancedRecallCacheScope(beam, pool, options, polyphonic);
+			scope = enhancedRecallCacheScope(beam, pool, options, polyphonic, "candidates");
 			const cached = cache.get(query, queryEmbedding, scope);
 			if (cached !== null) return structuredClone(cached) as RecallResult[];
 		}
@@ -1342,20 +1342,22 @@ function countRecallsKeepingCache(
 }
 
 /**
- * Cache scope for one `recallEnhanced` call: every input except the query text, so
- * no cache tier can serve a ranking computed for a different limit, filter,
- * visibility channel, anchor time, bank or ranking mode.
+ * Cache scope for one recall stage: every input except the query text, so no cache
+ * tier can serve a ranking computed for a different limit, filter, visibility channel,
+ * anchor time, bank, ranking mode, or stage.
  */
 function enhancedRecallCacheScope(
 	beam: BeamMemoryState,
 	topK: number,
 	options: RecallEnhancedOptions & RecallOptionsInternal,
 	polyphonic: boolean,
+	stage: "candidates" | "final",
 ): string {
 	const scope: Record<string, unknown> = {
 		bank: beam.dbPath ?? null,
 		sessionId: beam.sessionId,
 		polyphonic,
+		stage,
 		topK,
 	};
 	const record = options as Record<string, unknown>;

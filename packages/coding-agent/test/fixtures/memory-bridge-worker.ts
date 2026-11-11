@@ -44,7 +44,7 @@ export interface MnemopiChildReport {
 /** Worker-side operations the test drives; each crosses to main as an async function. */
 export interface MemoryProbe {
 	hindsightChild(parent: HindsightSessionStateApi, fact: string, query: string): Promise<HindsightChildReport>;
-	mnemopiChild(parent: MnemopiSessionStateApi, fact: string): Promise<MnemopiChildReport>;
+	mnemopiChild(parent: MnemopiSessionStateApi, fact: string, signal?: AbortSignal): Promise<MnemopiChildReport>;
 	mnemopiForget(id: string): Promise<string>;
 }
 
@@ -107,7 +107,7 @@ function buildProbe(): MemoryProbe {
 			await session.dispose();
 			return report;
 		},
-		mnemopiChild: async (parent, fact) => {
+		mnemopiChild: async (parent, fact, signal) => {
 			const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 			const session = childSession(settings);
 			mnemopiChild = session;
@@ -123,7 +123,7 @@ function buildProbe(): MemoryProbe {
 			if (!alias) throw new Error("mnemopi alias was not installed");
 			// The retain tool's write path.
 			const storedId = alias.rememberScoped(fact, { source: "worker-test", scope: "bank", extract: false });
-			const recalled = await alias.recallResultsScoped(fact);
+			const recalled = await alias.recallResultsScoped(fact, signal);
 			const status = await mnemopiBackend.status?.({ agentDir: "/tmp", cwd: "/tmp", session });
 			return {
 				aliasesRemoteParent: alias.aliasOf === parent && parent instanceof RemoteMnemopiSessionState,
