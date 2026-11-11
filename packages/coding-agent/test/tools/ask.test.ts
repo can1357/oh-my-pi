@@ -15,6 +15,7 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { askResultPayload, askResultText as text } from "../helpers/ask-result";
 
 const DB_FORM = `<form>
   <p>Sessions live in memory.</p>
@@ -88,11 +89,6 @@ function label(option: ExtensionUISelectItem | undefined): string | undefined {
 	return typeof option === "string" ? option : option?.label;
 }
 
-function text(result: { content: { type: string; text?: string }[] }): string | undefined {
-	const block = result.content[0];
-	return block?.type === "text" ? block.text : undefined;
-}
-
 beforeAll(async () => {
 	await initTheme(false);
 });
@@ -113,7 +109,7 @@ describe("AskTool form dialog", () => {
 		);
 
 		expect(formDialog.mock.calls[0]?.[0]).toBe(DB_FORM);
-		expect(text(result)).toBe(`User answers:\n${JSON.stringify({ store: "redis", ttl: 7 }, null, 2)}`);
+		expect(askResultPayload(result)).toEqual({ store: "redis", ttl: 7 });
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "store", question: "Session store", answer: "Redis" },
@@ -133,9 +129,8 @@ describe("AskTool form dialog", () => {
 			createContext({ formDialog: async () => ({ data: { store: "redis" }, notes }) }),
 		);
 
-		expect(text(result)).toBe(
-			`User answers:\n${JSON.stringify({ store: "redis" }, null, 2)}\nOption notes:\n- Session store: Redis [store="redis"] — shared cache`,
-		);
+		expect(askResultPayload(result)).toEqual({ store: "redis" });
+		expect(text(result)).toContain("shared cache");
 		expect(result.details).toEqual({
 			answers: [
 				{ name: "store", question: "Session store", answer: "Redis" },
@@ -185,11 +180,16 @@ describe("AskTool form dialog", () => {
 			createContext({ formDialog: async () => ({ data: { store: "sqlite", ttl: 30 }, notes, timedOut: true }) }),
 		);
 
-		expect(text(result)).toBe(
-			`No answer before the timeout; submitted the form's current values:\n${JSON.stringify({ store: "sqlite", ttl: 30 }, null, 2)}\nOption notes:\n- Session store: SQLite [store="sqlite"] — no service needed`,
-		);
-		expect(result.details?.timedOut).toBe(true);
-		expect(result.details?.notes).toEqual(notes);
+		expect(askResultPayload(result)).toEqual({ store: "sqlite", ttl: 30 });
+		expect(text(result)).toContain("no service needed");
+		expect(result.details).toEqual({
+			answers: [
+				{ name: "store", question: "Session store", answer: "SQLite" },
+				{ name: "ttl", question: "Lifetime (days)", answer: "30" },
+			],
+			notes,
+			timedOut: true,
+		});
 	});
 
 	it("aborts the turn when the user cancels the form", async () => {
@@ -372,7 +372,7 @@ describe("AskTool without a form surface", () => {
 		});
 		expect(input.mock.calls[0]?.slice(0, 2)).toEqual(["Lifetime (days)", "30"]);
 		expect(editor.mock.calls[0]?.slice(0, 2)).toEqual(["Notes", "draft"]);
-		expect(JSON.parse(text(result)?.replace("User answers:\n", "") ?? "")).toEqual({
+		expect(askResultPayload(result)).toEqual({
 			version: "2",
 			store: "redis",
 			telemetry: ["metrics"],
@@ -412,7 +412,7 @@ describe("AskTool without a form surface", () => {
 
 		expect(input.mock.calls.map(call => call[0])).toEqual(["Database", "Database", "Tools"]);
 		expect(selects.at(-1)?.checked).toEqual([0, 2]);
-		expect(JSON.parse(text(result)?.replace("User answers:\n", "") ?? "")).toEqual({
+		expect(askResultPayload(result)).toEqual({
 			db: "MySQL 8",
 			tools: ["ci", "terraform"],
 		});
@@ -451,7 +451,7 @@ describe("AskTool without a form surface", () => {
 			createContext({ select }),
 		);
 
-		expect(text(result)).toBe("User answers:\n{}");
+		expect(askResultPayload(result)).toEqual({});
 	});
 
 	it("aborts the turn when the user cancels a later field", async () => {

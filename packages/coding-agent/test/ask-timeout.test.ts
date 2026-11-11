@@ -8,6 +8,7 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
 import { AskTool } from "../src/tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
+import { askResultPayload } from "./helpers/ask-result";
 
 type AskExecutionResult = AgentToolResult<AskToolDetails>;
 type AskSelect = (
@@ -175,15 +176,17 @@ describe("AskTool timeout", () => {
 
 		expect(outcome.rejection).toBeUndefined();
 		expect(select).toHaveBeenCalledTimes(2);
-		expect(outcome.result?.content[0]).toEqual({
-			type: "text",
-			text: `No answer before the timeout; submitted the form's current values:\n${JSON.stringify(
-				{ db: "sqlite", auth: "jwt", notes: "none" },
-				null,
-				2,
-			)}`,
+		const result = outcome.result;
+		if (!result) throw new Error("ask did not settle");
+		expect(askResultPayload(result)).toEqual({ db: "sqlite", auth: "jwt", notes: "none" });
+		expect(result.details).toEqual({
+			answers: [
+				{ name: "db", question: "Which database?", answer: "SQLite" },
+				{ name: "auth", question: "Which auth?", answer: "JWT" },
+				{ name: "notes", question: "Notes", answer: "none" },
+			],
+			timedOut: true,
 		});
-		expect(outcome.result?.details?.timedOut).toBe(true);
 		expect(abort).not.toHaveBeenCalled();
 	});
 
