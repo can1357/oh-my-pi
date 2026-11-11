@@ -2451,8 +2451,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			setHindsightSessionState: state => this.setHindsightSessionState(state),
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
-			setBaseSystemPrompt: prompt => {
-				this.#tools.setBaseSystemPrompt(prompt);
+			restoreBaseSystemPromptBeforeMemoryPromotion: prompt => {
+				this.#tools.restoreBaseSystemPrompt(prompt, this.#tools.systemPromptSources);
 				this.agent.setSystemPrompt(prompt);
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
