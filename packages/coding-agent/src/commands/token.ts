@@ -104,12 +104,14 @@ export default class Token extends Command {
 			}
 		}
 
-		// A paused provider keeps its stored logins but resolves no key. Report the
-		// rule's reason as a normal failure instead of letting the key lookup throw
-		// an internal ProviderDisabledError stack trace (#18697). Listing accounts
-		// does not resolve a credential, so `--list` continues to auth storage.
+		// A paused provider keeps its stored logins but resolves no key: its pool
+		// is empty by design (`CredentialPool.replace`, #18697), so letting `--list`
+		// through would print the misleading "no accounts found" message. Report the
+		// rule's reason as a normal failure instead of an internal
+		// ProviderDisabledError stack trace. MCP credential ids are not providers,
+		// so they bypass the pause check.
 		const pauseReason = managedMcpOAuth ? undefined : providerPauseReason(provider);
-		if (!flags.list && pauseReason !== undefined) {
+		if (pauseReason !== undefined) {
 			process.stderr.write(`${chalk.red(`${providerName} is paused: ${pauseReason}`)}\n`);
 			process.exitCode = 1;
 			return;
