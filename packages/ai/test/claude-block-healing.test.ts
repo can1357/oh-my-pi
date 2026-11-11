@@ -374,6 +374,28 @@ describe("claude usage-block healing", () => {
 		expect(blocks.has("1:tier:fable")).toBe(false);
 	});
 
+	it("rotates a usage-limited session onto a sibling whose stale block live usage lifts", async () => {
+		// Every sibling looked blocked, so rotation reported no switch and the turn
+		// waited out the provider's multi-day retry-after, though the next resolve
+		// would have served the recovered account.
+		const { storage } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		storage.sessions.pin("anthropic", "s-rotate", 2);
+
+		const mark = await storage.limits.markReached("anthropic", "s-rotate", {
+			modelId: "claude-sonnet-5-5",
+			retryAfterMs: 38 * 60 * 60_000,
+			providerTimed: true,
+		});
+
+		expect(mark.switched).toBe(true);
+		expect(await storage.keys.get("anthropic", "s-rotate", { modelId: "claude-sonnet-5-5" })).toBe("access-1");
+	});
+
 	describe("an account with no running 5-hour window", () => {
 		it("heals a stale account-wide block", async () => {
 			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(55)), "");
