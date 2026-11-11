@@ -568,6 +568,7 @@ impl AtSpiAx {
 				child_count,
 				identity: None,
 				partial: false,
+				label_complete: false,
 				selected: false,
 				role_name: None,
 			})

@@ -2915,6 +2915,7 @@ mod capture_tests {
 				native_role: role.to_string(),
 				identity: (!partial).then(|| ax::test_identity((role, &title))),
 				partial,
+				label_complete: !partial,
 				title,
 				value,
 				description: None,

@@ -1162,7 +1162,7 @@ impl AxBackend for MacAx {
 				.as_deref()
 				.and_then(window_id)
 				.unwrap_or_default();
-			entry_front.require_behind(skylight::front_pid(), pid, wid)?;
+			entry_front.require_behind(skylight::front_pid, pid, || wid)?;
 			// A popup's value is chosen from its menu, not written. This runs
 			// before the text-target refusals: nothing is typed or written, and
 			// the verdict is the popup's own read-back after a real menu press.
@@ -1312,8 +1312,22 @@ fn element_props(
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
 	// A field with no label of its own is named by its placeholder ("Add
 	// Date"), as an accessible name falls back to it.
-	let description = nonempty(string(DESCRIPTION))
-		.or_else(|| nonempty(string(PLACEHOLDER)).filter(|_| title.is_none()));
+	let description = nonempty(string(DESCRIPTION));
+	let uses_placeholder = title.is_none() && description.is_none();
+	let description = description.or_else(|| {
+		if title.is_none() {
+			nonempty(string(PLACEHOLDER))
+		} else {
+			None
+		}
+	});
+	let label_complete = label_answered(values, TITLE)
+		&& (title.is_some()
+			|| (label_answered(values, DESCRIPTION)
+				&& (!uses_placeholder || label_answered(values, PLACEHOLDER))
+				&& (description.is_some()
+					|| native_role != "AXButton"
+					|| label_answered(values, SUBROLE))));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
 	let role_name = window_control_name(&native_role, [&title, &description], string(SUBROLE));
 	let selected = selected(values, &native_role);
@@ -1334,10 +1348,21 @@ fn element_props(
 		actions: Vec::new(),
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
 		partial: identity.is_none(),
+		label_complete,
 		identity,
 		selected,
 		role_name: role_name.map(str::to_owned),
 	})
+}
+
+/// An absent string is an answer; an error or a value of another type is
+/// not. Only fields that can choose the displayed label use this verdict.
+fn label_answered(values: &NodeValues, index: usize) -> bool {
+	match values.get(index) {
+		Ok(Some(value)) => value.downcast::<CFString>().is_ok(),
+		Ok(None) | Err(AXError::NoValue | AXError::AttributeUnsupported) => true,
+		Err(_) => false,
+	}
 }
 
 /// Whether the element reports itself selected. Only list and table rows and
@@ -1481,11 +1506,8 @@ fn perform_choosing(
 			let pid = element_pid(element)?;
 			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
 			let perform = || {
-				entry_front.require_behind(
-					skylight::front_pid(),
-					pid,
-					window_id(element).unwrap_or_default(),
-				)?;
+				entry_front
+					.require_behind(skylight::front_pid, pid, || window_id(element).unwrap_or_default())?;
 				press_into_view(native, scroll, |action| send_action(element, action))
 			};
 			// A menu that a background application opens takes the keyboard from
@@ -2735,7 +2757,10 @@ mod tests {
 
 	#[test]
 	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
-		use super::{HELP, answered, read_identity};
+		use super::{
+			HELP, MacAx, WalkBounds, answered, element_props, read_identity, require_read_as,
+		};
+		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
 
 		let error = |mut code: AXError| {
 			// SAFETY: An AXError-typed AXValue copies the one AXError it points
@@ -2751,11 +2776,11 @@ mod tests {
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
-		let walk = |help: &CFType| {
+		let walk_as = |title: &CFType, help: &CFType| {
 			let entries: [&CFType; 15] = [
 				null,
 				&role,
-				&title,
+				title,
 				&no_value,
 				null,
 				null,
@@ -2775,6 +2800,7 @@ mod tests {
 				|_| unreachable!("an answered batch needs no lone reads"),
 			)
 		};
+		let walk = |help: &CFType| walk_as(&title, help);
 		let go = Some("Go".to_string());
 		let identity = |values: &NodeValues| read_identity(values, "AXButton", [&go, &None, &None]);
 		// Missing and unsupported attributes are the same answer.
@@ -2788,6 +2814,37 @@ mod tests {
 		assert_eq!(identity(&walk(&failed)), Some(failing));
 		// One the app was too busy to answer leaves no identity.
 		assert!(identity(&walk(&busy)).is_none());
+
+		// HELP can be unanswered while the role and chosen title are known.
+		// Both the original ref and the action-time check use those labels,
+		// not the broader identity's completeness.
+		let stop = CFString::from_static_str("Stop");
+		for help in [&no_value, &busy] {
+			let registered = element_props(&walk(help), 0, WalkBounds::Skip).unwrap();
+			assert!(registered.label_complete);
+			let changed = element_props(&walk_as(&stop, &busy), 0, WalkBounds::Skip).unwrap();
+			assert!(changed.partial);
+			assert!(changed.label_complete);
+			let mut registry = AxRegistry::default();
+			let reference = registry.register(
+				&mut MacAx,
+				"fixture",
+				1,
+				AxHandle::Test(1),
+				&registered,
+				Uniqueness::Unknown,
+			);
+			let scope = registry.expect_read_as(&reference).unwrap();
+			let error = require_read_as(|| Ok(Some(changed))).unwrap_err();
+			assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
+			assert!(scope.finish());
+		}
+		// An unanswered higher-priority title really can hide the label.
+		assert!(
+			!element_props(&walk_as(&busy, &no_value), 0, WalkBounds::Skip)
+				.unwrap()
+				.label_complete
+		);
 
 		// A batch that fails as a whole falls back to lone reads without the
 		// identity-only attributes, so the element has no identity.

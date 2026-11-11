@@ -94,29 +94,32 @@ impl Hash for AxHandle {
 
 #[derive(Debug, Clone)]
 pub struct AxProps {
-	pub role:        String,
-	pub native_role: String,
-	pub title:       Option<String>,
-	pub value:       Option<String>,
-	pub description: Option<String>,
-	pub enabled:     bool,
-	pub focused:     bool,
-	pub bounds:      Option<AxBounds>,
-	pub actions:     Vec<String>,
-	pub child_count: u32,
+	pub role:           String,
+	pub native_role:    String,
+	pub title:          Option<String>,
+	pub value:          Option<String>,
+	pub description:    Option<String>,
+	pub enabled:        bool,
+	pub focused:        bool,
+	pub bounds:         Option<AxBounds>,
+	pub actions:        Vec<String>,
+	pub child_count:    u32,
 	/// Hash of the fields that tell the element apart in its window, compared
 	/// to name the one element left with them once the app has destroyed it;
 	/// `None` where the backend reads none or could not read them all.
-	pub identity:    Option<u64>,
+	pub identity:       Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
-	pub partial:     bool,
+	pub partial:        bool,
+	/// The backend answered the role and every field needed to choose the
+	/// displayed label. Unrelated identity fields may still be unanswered.
+	pub label_complete: bool,
 	/// Whether a row, cell, button or file icon reports itself selected.
-	pub selected:    bool,
+	pub selected:       bool,
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
-	pub role_name:   Option<String>,
+	pub role_name:      Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,9 +177,8 @@ struct Registered {
 	fingerprint: u64,
 	proof:       Option<Proof>,
 	/// Whether an action through the ref is held to the label it was read
-	/// with ([`require_read_as`]): not when the app left a field unanswered,
-	/// so the label may be missing one, nor for a window, whose title names
-	/// its document and changes as it is used.
+	/// with ([`require_read_as`]): not when its role or chosen label was
+	/// unanswered, nor for a window, whose title names its document.
 	#[cfg(any(target_os = "macos", test))]
 	held:        bool,
 }
@@ -285,7 +287,7 @@ impl AxRegistry {
 			fingerprint,
 			proof,
 			#[cfg(any(target_os = "macos", test))]
-			held: !props.partial && props.role != "window",
+			held: props.label_complete && props.role != "window",
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -438,14 +440,14 @@ fn read_as_state() -> Option<bool> {
 
 /// Compares the element `props` reads with the current request's ref: what
 /// it reads as now when that is another role or label. A read the app did
-/// not answer, or left a field of unanswered, cannot tell, so it passes, as
-/// on an app that never reuses elements.
+/// not answer, or left the role or a field needed for its label unanswered,
+/// cannot tell, so it passes.
 #[cfg(any(target_os = "macos", test))]
 fn check_read_as(props: Option<&AxProps>) -> Option<String> {
 	READ_AS.with_borrow_mut(|read_as| {
 		let read_as = read_as.as_mut()?;
 		read_as.checked = true;
-		let props = props.filter(|props| !props.partial)?;
+		let props = props.filter(|props| props.label_complete)?;
 		if read_as.fingerprint == fingerprint(props) {
 			return None;
 		}
@@ -1356,8 +1358,8 @@ pub fn find_read_as(
 	let mut stack: Vec<_> = tree.into_iter().collect();
 	while let Some(node) = stack.pop() {
 		stack.extend(node.children);
-		// A node the app left a field of unanswered may lack its label.
-		if node.handle != handle && !node.props.partial && fingerprint(&node.props) == read_as {
+		// Identity-only failures do not hide a definite role/label match.
+		if node.handle != handle && node.props.label_complete && fingerprint(&node.props) == read_as {
 			matches.push((node.handle, node.props));
 		}
 	}
@@ -1781,20 +1783,21 @@ mod tests {
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
-			role:        role.into(),
-			native_role: role.into(),
-			title:       title.map(str::to_string),
-			value:       None,
-			description: None,
-			enabled:     true,
-			focused:     false,
-			bounds:      None,
-			actions:     Vec::new(),
-			child_count: 0,
-			identity:    Some(test_identity((role, title))),
-			partial:     false,
-			selected:    false,
-			role_name:   None,
+			role:           role.into(),
+			native_role:    role.into(),
+			title:          title.map(str::to_string),
+			value:          None,
+			description:    None,
+			enabled:        true,
+			focused:        false,
+			bounds:         None,
+			actions:        Vec::new(),
+			child_count:    0,
+			identity:       Some(test_identity((role, title))),
+			partial:        false,
+			label_complete: true,
+			selected:       false,
+			role_name:      None,
 		}
 	}
 	fn window() -> DesktopWindow {
