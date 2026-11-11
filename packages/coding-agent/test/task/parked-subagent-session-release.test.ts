@@ -333,7 +333,7 @@ it("retains report receipts and persisted metrics without retaining a parked sub
 		expect((await collector.collect()).text).toContain(`### “${AGENT_ID}”`);
 		receipt.commit();
 		expect((await collector.collect()).text).not.toContain(`### “${AGENT_ID}”`);
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 		expect(cfgContextPromotionEnabled.get(revived)).toBe(true);
 	} finally {
 		let remainingTodoListeners: number | undefined;

@@ -5,6 +5,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentKind } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { ACTIVE_TIME_CUSTOM_TYPE, readActiveTime } from "@oh-my-pi/pi-coding-agent/session/active-time";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -446,7 +447,7 @@ describe("durable true running-window telemetry", () => {
 			rootSessionId: "owning-main-session",
 			session: null,
 		});
-		const attached: AgentSession[] = [];
+		const attached: AgentSessionHandle[] = [];
 		registry.onChange(event => {
 			if (event.type === "metadata_changed" && event.ref === ref && ref.session) attached.push(ref.session);
 		});
