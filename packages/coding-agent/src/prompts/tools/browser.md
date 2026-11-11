@@ -75,7 +75,7 @@ Browser choice:
   2. `browser.cdpUrl`
   3. Tern inside a Tern pane
   4. cmux
-  5. omp's own browser: headless WebKit when installed (off with the `browser.webkit` setting or `PI_BROWSER_WEBKIT=0`),
+  5. omp's own browser: headless WebKit when installed, downloaded first when no browser is (off with the `browser.webkit` setting or `PI_BROWSER_WEBKIT=0`),
      else managed Chromium (installs on first use)
 - The open result names the browser and any fallback it took.
 - `app` is one string:
@@ -94,7 +94,7 @@ WebKit (open result: `omp's headless WebKit browser`, or `omp's WebKit browser (
 - Off screen unless shown (there the user can click and type too); the page always sees a visible, focused window and no automation flag.
 - `target` names nothing there. Engine cannot start → Chromium.
 - `app: "chromium"`: managed Chromium for this open.
-- `app: "webkit"`: require WebKit; fails when the engine is not installed and, with `headed: true`, where it ships no viewer.
+- `app: "webkit"`: require WebKit, downloading a missing engine; fails when that download fails and, with `headed: true`, where it ships no viewer.
 - Has WebGL, WebGPU, silent video and audio playback (no sound leaves the machine), Web Audio, WebRTC; camera and microphone requests are denied.
 - A page misbehaves (DRM-protected video, speech synthesis)? Reopen it with `app: "chromium"`.
 - The page cannot tell it is driven:

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getWebKitHostPath()`, where the WebKit browser engine's host executable is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows; shared with Tern)
+- Exported `BROWSER_ARCHIVE_LIMITS` from `@oh-my-pi/pi-utils/browsers`: the extraction ceilings for trusted browser engine archives
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

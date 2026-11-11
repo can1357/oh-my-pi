@@ -16,7 +16,7 @@ import {
 	type PuppeteerBrowserKind,
 	releaseBrowser,
 } from "./browser/registry";
-import { ensureChromiumExecutable } from "./browser/launch";
+import { chromiumNeedsDownload, ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
 import { relayExtensionNotice } from "./browser/relay/probe";
@@ -25,7 +25,8 @@ import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import { ownsTerminal } from "./browser/terminal-owner";
 import { WebKitUnavailableError } from "./browser/webkit/host";
-import { resolveWebKitKind } from "./browser/webkit/kind";
+import { installWebKitEngine } from "./browser/webkit/install";
+import { resolveWebKitKind, VIEWER_PLATFORMS, webKitEngineToInstall } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -441,8 +442,9 @@ async function invokeBrowser(
  *   window, an unsupported platform, a refused or failed connection — goes to
  *   omp's own browser, as an open outside Tern would. Adopting a Tern block
  *   (`target`) never falls back: no other browser has that page.
- * - omp's WebKit host (not forced with `app: "webkit"`) that cannot start
- *   or cannot open its first tab goes to managed Chromium.
+ * - omp's WebKit host (not forced with `app: "webkit"`) that cannot start,
+ *   cannot open its first tab, or could not be downloaded
+ *   ({@link installWebKitForOpen}) goes to managed Chromium.
  *
  * A tab that already fell back keeps its browser.
  */
@@ -454,6 +456,7 @@ async function openBrowser(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<unknown>> {
+	const webkitDownloadFailure = await installWebKitForOpen(session, params, signal);
 	const resolved = resolveBrowserKind(params, session);
 	const autoTern = resolved.kind === "tern" && params.app !== "tern" && params.target === undefined;
 	const autoWebKit = params.app !== "webkit";
@@ -468,7 +471,8 @@ async function openBrowser(
 	}
 	const startedAt = performance.now();
 	/** Why each browser tried before `kind` could not take the open. */
-	const failures: Array<{ backend: "tern" | "webkit"; reason: string }> = [];
+	const failures: Array<{ backend: "tern" | "webkit"; reason: string }> =
+		webkitDownloadFailure === undefined ? [] : [{ backend: "webkit", reason: webkitDownloadFailure }];
 	for (;;) {
 		const opened = kind.kind === "webkit" ? "omp's WebKit browser" : "Chromium";
 		const notes = failures.map(failure =>
@@ -503,6 +507,47 @@ async function openBrowser(
 			});
 			kind = next;
 		}
+	}
+}
+
+/**
+ * Download omp's WebKit engine before an open that needs it while it is
+ * missing from its default location ({@link webKitEngineToInstall}): an open
+ * with `app: "webkit"`, or one that otherwise ends at managed Chromium
+ * (headless, or visible where released engines ship a viewer) while Chromium
+ * itself would first be downloaded. With no browser installed, omp's own engine
+ * comes before Chrome for Testing. Like that download, it runs before the
+ * open's deadline starts.
+ *
+ * Returns why an automatic download failed, for the open to go on to Chromium
+ * saying so; for `app: "webkit"` a failed download throws.
+ */
+async function installWebKitForOpen(
+	session: ToolSession,
+	params: BrowserParams,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const explicit = params.app === "webkit";
+	const engineDir = webKitEngineToInstall({
+		settingEnabled: explicit || cfgBrowserWebKit.get(session.settings),
+		settingPath: cfgBrowserWebKitPath.get(session.settings),
+	});
+	if (engineDir === null) return undefined;
+	if (!explicit) {
+		const kind = resolveBrowserKind(params, session);
+		if (kind.kind !== "headless" || params.app === "chromium") return undefined;
+		if (!kind.headless && !VIEWER_PLATFORMS.includes(process.platform)) return undefined;
+		if (!(await chromiumNeedsDownload())) return undefined;
+	}
+	try {
+		await untilAborted(signal, () => installWebKitEngine(engineDir));
+		return undefined;
+	} catch (error) {
+		if (signal?.aborted) throw error;
+		const cause = error instanceof Error ? error.message : String(error);
+		if (explicit)
+			throw new ToolError(`app: "webkit" requires omp's WebKit engine, which could not be downloaded: ${cause}`);
+		return `its engine could not be downloaded: ${cause}`;
 	}
 }
 
