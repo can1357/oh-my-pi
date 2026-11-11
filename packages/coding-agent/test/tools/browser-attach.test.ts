@@ -1037,7 +1037,7 @@ describe("pickElectronTarget relay path", () => {
 		expect(served).toBe(2);
 	});
 
-	it("lists relay page ids with their URLs when a target id is missing", async () => {
+	it("lists relay page ids and recommends omp's own tab when a target is missing", async () => {
 		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "PAGE_MISSING" }));
 
 		expect(error).toBeInstanceOf(Error);
