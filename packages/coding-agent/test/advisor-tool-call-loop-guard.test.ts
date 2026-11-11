@@ -4,8 +4,10 @@ import {
 	Agent,
 	type AgentMessage,
 	type AgentTool,
+	type AgentToolContext,
 	type AgentTurnEndContext,
 	type StreamFn,
+	type ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Context, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -181,6 +183,7 @@ describe("advisor tool-call loop guard", () => {
 			modelRegistry,
 			advisorTools: [failingReadTool],
 			advisorStreamFn,
+			advisorGetToolContext: toolCall => ({ toolCall }) as AgentToolContext,
 			advisorConfigs:
 				advisorConfig === undefined ? undefined : Array.isArray(advisorConfig) ? advisorConfig : [advisorConfig],
 		});
@@ -191,6 +194,62 @@ describe("advisor tool-call loop guard", () => {
 		advisor.setModel(advisorMock);
 		return { advisor, contexts, reviewStarts };
 	}
+
+	it("lets an advisor read observe an earlier shared writer's final state", async () => {
+		const { advisor } = createAdvisor({}, 0);
+		const readStarted = Promise.withResolvers<void>();
+		let bytes = "old";
+		const mock = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "writer", name: "bash", arguments: {} },
+						{ type: "toolCall", id: "reader", name: "read", arguments: {} },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		advisor.streamFn = mock.stream;
+		advisor.setTools([
+			{
+				name: "bash",
+				label: "Bash",
+				description: "Changes bytes",
+				parameters: type({}),
+				approval: "exec",
+				async execute() {
+					await readStarted.promise;
+					for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+					bytes = "new";
+					return { content: [] };
+				},
+			},
+			{
+				name: "read",
+				label: "Read",
+				description: "Reconciles bytes",
+				parameters: type({}),
+				approval: "read",
+				async execute(_id, _args, _signal, _update, context) {
+					let result = bytes;
+					readStarted.resolve();
+					const call = (context as (AgentToolContext & { toolCall?: ToolCallContext }) | undefined)?.toolCall;
+					if (call?.earlierEffectsSettled) {
+						await call.earlierEffectsSettled;
+						result = bytes;
+					}
+					return { content: [{ type: "text", text: result }] };
+				},
+			},
+		]);
+		await advisor.prompt("run the writer and read");
+		const read = advisor.state.messages.find(
+			(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "reader",
+		);
+		expect(read?.content).toEqual([{ type: "text", text: "new" }]);
+	});
 
 	it("redirects the advisor's own repeated tool call and reaches its next request", async () => {
 		const { advisor, contexts } = createAdvisor(

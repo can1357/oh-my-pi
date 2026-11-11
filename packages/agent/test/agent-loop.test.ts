@@ -2640,7 +2640,8 @@ describe("agentLoop with AgentMessage", () => {
 			label: "Op",
 			description: "Op tool",
 			parameters: toolSchema,
-			approval: (...[, context]: [unknown, AgentToolContext?]) => (context?.toolCall ? "write" : "read"),
+			approval: (...[, context]: [unknown, AgentToolContext?]) =>
+				context && "toolCall" in context && context.toolCall ? "write" : "read",
 			async execute(_toolCallId, params) {
 				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
 			},

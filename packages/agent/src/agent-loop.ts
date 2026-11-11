@@ -3958,7 +3958,11 @@ async function executeToolCalls(
 			// those calls conservatively without invoking host code early.
 			const approval = record.tool?.approval;
 			const tier =
-				typeof approval === "function" ? "exec" : typeof approval === "string" ? approval : (approval?.tier ?? "exec");
+				typeof approval === "function"
+					? "exec"
+					: typeof approval === "string"
+						? approval
+						: (approval?.tier ?? "exec");
 			if (tier !== "read") sharedEffects.push(task);
 		}
 	}
