@@ -399,6 +399,29 @@ describe("Settings", () => {
 			});
 		});
 
+		it("keeps a `*` deletion staged while a save of the string shorthand is being written", async () => {
+			await writeSettings({ setupVersion: 1 });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const rename = fs.promises.rename.bind(fs.promises);
+			let deleted = false;
+			vi.spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+				// The whole-setting `low` save is mid atomic write when the default is deleted.
+				if (!deleted) {
+					deleted = true;
+					cfgTaskMaxEffort.setEntry(settings, "*", undefined);
+				}
+				return rename(source, target);
+			});
+
+			cfgTaskMaxEffort.set(settings, "low");
+			await settings.flush();
+			await settings.flush();
+
+			expect(deleted).toBe(true);
+			expect((await readSettings()).task).toBeUndefined();
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBeUndefined();
+		});
+
 		it("clears a string shorthand by deleting its `*` entry", async () => {
 			await writeSettings({ task: { maxEffort: "low" }, setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
