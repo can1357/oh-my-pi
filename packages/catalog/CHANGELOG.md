@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
+- Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+
 ## [18.18.8] - 2026-11-11
 
 ### Added
@@ -12,6 +17,9 @@
 ### Fixed
 
 - Fixed regenerating the catalog marking 18 reasoning models as non-reasoning when NanoGPT's `<id>:thinking` sibling row had larger limits ([#18673](https://github.com/can1357/oh-my-pi/issues/18673), [#18728](https://github.com/can1357/oh-my-pi/pull/18728))
+### Added
+
+- Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
 
 ## [18.18.7] - 2026-11-10
 
