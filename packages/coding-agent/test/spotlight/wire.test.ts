@@ -13,6 +13,7 @@ import { type CalledToolResult, shapeCalledTool } from "@oh-my-pi/pi-coding-agen
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import {
+	NO_CREDENTIAL_NOTICE,
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
 	startSpotlightExperiment,
@@ -271,7 +272,7 @@ describe("spotlight shaping hooks", () => {
 		const scorer = new RecordingScorer(client, "low");
 		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
 		expect(await scorer.score(["a", "b"], ctx)).toBeNull();
-		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1 });
+		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1, failureCauses: { timeout: 1 } });
 
 		const { session, manager } = await experimentSession(client);
 		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
@@ -280,8 +281,40 @@ describe("spotlight shaping hooks", () => {
 		expect(result.isError).toBeUndefined();
 		expect(resultText(result)).toContain(LONG_LOG.slice(LONG_LOG.lastIndexOf("\n") + 1));
 		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
-		expect(entry.spotlight).toMatchObject({ failures: 1 });
+		expect(entry.spotlight).toMatchObject({ failures: 1, failureCauses: { timeout: 1 } });
 		expect(entry.error).toBeUndefined();
+	});
+
+	it("warns the session once per lost Stencil credential, not on warm-up, and again after a re-sign-in", async () => {
+		const credential = new StencilCredential();
+		const tokens: (string | null)[] = [null, null, null, "test-token", null];
+		vi.spyOn(credential, "resolve").mockImplementation(async () => tokens.shift() ?? null);
+		const client = new SpotlightClient({
+			url: "http://spotlight.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: fakeSpotlight({ score: () => 0.5 }),
+		});
+		const experiment = new SpotlightExperiment(client, "low", SessionManager.inMemory(await tmpDir()));
+		const notices: string[] = [];
+		experiment.setNotify(message => notices.push(message));
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		// The warm-up finds no credential too, but leaves it to the first ranking: one notice below, not two.
+		client.warm();
+		const unsigned = await score();
+		expect(unsigned.scores).toBeNull();
+		expect(unsigned.usage.failureCauses).toEqual({ no_credential: 1 });
+		expect(notices).toEqual([NO_CREDENTIAL_NOTICE]);
+		expect((await score()).scores).toBeNull();
+		expect(notices).toHaveLength(1);
+		expect((await score()).scores).toEqual([0.5]);
+		expect((await score()).scores).toBeNull();
+		expect(notices).toEqual([NO_CREDENTIAL_NOTICE, NO_CREDENTIAL_NOTICE]);
 	});
 });
 

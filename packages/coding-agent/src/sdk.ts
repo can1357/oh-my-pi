@@ -5329,7 +5329,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// advisor transcript size (issue #9553).
 		session.beginInitialAdvisorCostRestore();
 		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
-		if (spotlightExperiment) session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
+		if (spotlightExperiment) {
+			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
+			spotlightExperiment.setNotify(message => session.emitNotice("warning", message, "spotlight"));
+		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live

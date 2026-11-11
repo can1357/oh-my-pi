@@ -1,6 +1,6 @@
 import { TriangleAlert } from "lucide-react";
 import { formatCost, formatDurationMs, formatInteger } from "../data/formatters";
-import type { SpotlightDashboardStats, SpotlightOverhead } from "../types";
+import type { SpotlightDashboardStats, SpotlightFailureCause, SpotlightOverhead } from "../types";
 import { Badge, Card, type Column, errorRateTone, Table } from "../ui";
 import { formatShare } from "./meta";
 
@@ -11,6 +11,37 @@ function Percentiles({ p50, p90 }: { p50: number | null; p90: number | null }) {
 		<span className="num">
 			{formatDurationMs(p50)}
 			<span className="dim"> / {formatDurationMs(p90)}</span>
+		</span>
+	);
+}
+
+const CAUSE_LABELS: Record<string, string> = {
+	no_credential: "not signed in",
+	timeout: "timeout",
+	transport: "network",
+	rate_limited: "rate limited",
+	bad_reply: "bad reply",
+	unrecorded: "unrecorded",
+};
+
+/** A failure cause as the card names it: `http_502` reads "HTTP 502", an unknown code its words. */
+function causeLabel(cause: string): string {
+	const http = /^http_(\d+)$/.exec(cause);
+	if (http) return `HTTP ${http[1]}`;
+	return CAUSE_LABELS[cause] ?? cause.replaceAll("_", " ");
+}
+
+/** Each cause with its share of the results that called Spotlight; its result count on hover. */
+function FailureCauses({ causes }: { causes: readonly SpotlightFailureCause[] }) {
+	if (causes.length === 0) return <span className="dim">–</span>;
+	return (
+		<span>
+			{causes.map(({ cause, results, share }, i) => (
+				<span key={cause} className="spot-nowrap" title={`${formatInteger(results)} results`}>
+					{i > 0 && <span className="dim"> · </span>}
+					{causeLabel(cause)} <span className="num">{formatShare(share)}</span>
+				</span>
+			))}
 		</span>
 	);
 }
@@ -30,6 +61,14 @@ const COLUMNS: Column<SpotlightOverhead>[] = [
 					{formatShare(row.failureRate)}
 				</Badge>
 			),
+	},
+	{
+		key: "causes",
+		header: "Failure causes",
+		align: "right",
+		sort: row => row.failureCauses[0]?.share ?? -1,
+		title: "Why the calls failed, as shares of the results that called Spotlight. A result whose calls failed two ways counts under both; unrecorded results were journaled before pi recorded causes",
+		render: row => <FailureCauses causes={row.failureCauses} />,
 	},
 	{
 		key: "failedWait",
@@ -87,6 +126,7 @@ function FailureCallout({ overhead }: { overhead: SpotlightOverhead }) {
 	const tone = errorRateTone(rate);
 	if (tone === "ok") return null;
 	const waitedMs = overhead.failedWaitMs;
+	const unsigned = overhead.failureCauses.find(c => c.cause === "no_credential");
 	return (
 		<div className="spot-callout" data-tone={tone} role="note">
 			<TriangleAlert size={16} aria-hidden="true" />
@@ -101,6 +141,13 @@ function FailureCallout({ overhead }: { overhead: SpotlightOverhead }) {
 						<>
 							{" "}
 							Tool calls waited <span className="num">{formatDurationMs(waitedMs)}</span> on those failures.
+						</>
+					)}
+					{unsigned && (
+						<>
+							{" "}
+							<span className="num">{formatShare(unsigned.share)}</span> had no Stencil sign-in: run{" "}
+							<code>/login</code> and choose Stencil, or set <code>STENCIL_API_KEY</code>, to restore ranking.
 						</>
 					)}
 				</p>

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Spotlight dashboard's Overhead card breaks failed results down by cause (not signed in, timeout, rate limited, HTTP status, …) and, when results failed for lack of a Stencil sign-in, says how to sign in
+
 ## [18.18.4] - 2026-11-09
 
 ### Fixed

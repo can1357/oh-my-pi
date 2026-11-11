@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`)
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed

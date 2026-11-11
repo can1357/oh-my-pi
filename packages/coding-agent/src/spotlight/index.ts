@@ -17,7 +17,7 @@ import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/outp
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { buildCallContext, callSummary } from "./context";
-import { RecordingScorer, SCORE_FREE_SCORER } from "./scorer";
+import { RecordingScorer, SCORE_FREE_SCORER, type ScorerUsage } from "./scorer";
 import { SpotlightExperiment } from "./session";
 import { countTokens, shapeResult, syncSeen } from "./shape";
 import {
@@ -150,7 +150,7 @@ export async function shapeToolText(
 		inTokens,
 		outTokens,
 		ms: Math.round(performance.now() - started),
-		spotlight: { ...scorer.usage, costUsd: Number(scorer.usage.costUsd.toFixed(8)) },
+		spotlight: journalUsage(scorer.usage),
 		stats: outcome?.stats ?? {},
 		plainChars: plain.length,
 		plainTokens: plainTokensOrIn,
@@ -198,6 +198,15 @@ export async function shapeToolText(
 		}
 	}
 	return { text, spotlight };
+}
+
+/** A scorer's usage as journaled: the cost rounded, the failure causes only when a request failed. */
+function journalUsage({ failureCauses, ...usage }: ScorerUsage): Record<string, unknown> {
+	return {
+		...usage,
+		costUsd: Number(usage.costUsd.toFixed(8)),
+		...(usage.failures > 0 ? { failureCauses } : {}),
+	};
 }
 
 /** Options of {@link shapeToolResult}. */

@@ -69,6 +69,10 @@ export interface SpotlightExperimentOptions extends Partial<SpotlightShares> {
 	tools?: readonly string[];
 }
 
+/** The warning a session shows when Spotlight finds no Stencil credential. */
+export const NO_CREDENTIAL_NOTICE =
+	"No Stencil credential: Spotlight ranking is off, and tool output is cut by the unranked fallback rules. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.";
+
 /**
  * The experiment's state for one session: the Spotlight client, the coin shares, and the per-session shaping state
  * (lines already shown, cuts made) shaping reads and updates.
@@ -87,6 +91,8 @@ export class SpotlightExperiment implements SpotlightSession {
 	#shapedCalls = new Set<string>();
 	readonly #sessionManager: SessionManager;
 	readonly #random: () => number;
+	/** Shows a warning to the user; unset until the agent session exists (rankings only run inside its tool calls). */
+	#notify: ((message: string) => void) | undefined;
 
 	constructor(
 		client: SpotlightClient,
@@ -108,6 +114,12 @@ export class SpotlightExperiment implements SpotlightSession {
 		this.#sessionManager = sessionManager;
 		this.#random = random;
 		this.sink = new ArtifactShapeSink(sessionManager);
+		client.onCredentialMissing = () => this.#notify?.(NO_CREDENTIAL_NOTICE);
+	}
+
+	/** Routes the experiment's warnings (a missing Stencil credential) to the user, typically the session's notices. */
+	setNotify(notify: (message: string) => void): void {
+		this.#notify = notify;
 	}
 
 	/** Whether the session shapes and journals the results of `tool` (`spotlight.experiment.tools`). */
