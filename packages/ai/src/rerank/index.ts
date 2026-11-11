@@ -4,6 +4,7 @@ import { rerankOpenRouter, type RerankOptions } from "./openrouter-rerank";
 import type { RerankRequest, RerankResult } from "./types";
 
 export * from "./openrouter-rerank";
+export * from "./transport";
 export * from "./types";
 
 /** Dispatch reranking through the transport selected by the catalog model. */

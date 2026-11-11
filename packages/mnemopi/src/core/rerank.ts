@@ -1,7 +1,7 @@
-import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, getOpenRouterHeaders, postRerankRequest } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { fetchWithRetry, logger, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { combineSignals } from "@oh-my-pi/pi-utils/ptree";
 import { rerankApiKey, rerankApiUrl, rerankCandidates, rerankModel, rerankScoreMode } from "../config";
 
@@ -76,12 +76,6 @@ export interface RerankExecutionOptions {
 	maxAttempts?: number;
 }
 
-function isLogitRerankModel(model?: string): boolean {
-	if (!model) return false;
-	const lower = model.toLowerCase();
-	return lower.includes("bge-") || lower.includes("bce-") || lower.includes("cross-encoder");
-}
-
 /**
  * Execute a cross-encoder rerank call against an external HTTP endpoint.
  *
@@ -118,35 +112,24 @@ export async function executeRerank(
 
 	try {
 		const apiKey = options.apiKey ?? "";
-		const response = await withAuth(
+		const response = await postRerankRequest(targetUrl, body, {
 			apiKey,
-			async key => {
-				const headers: Record<string, string> = {
-					"Content-Type": "application/json",
-					Accept: "application/json",
-					...(hostMatchesUrl(baseUrl, "openrouter") ? getOpenRouterHeaders() : {}),
-				};
-				if (key && key !== "N/A") {
-					headers.Authorization = `Bearer ${key}`;
-				}
-				const res = await fetchWithRetry(targetUrl, {
-					method: "POST",
-					headers,
-					body,
-					signal,
-					maxAttempts: options.maxAttempts ?? 3,
-					defaultDelayMs: options.maxAttempts !== undefined ? () => 100 : attempt => 2 ** attempt * 1000,
-				});
-				if (res.status === 401) {
-					const detail = (await res.text().catch(() => "")).trim();
-					throw new ProviderHttpError(detail || "mnemopi rerank request unauthorized (401)", 401, {
-						headers: res.headers,
-					});
-				}
-				return res;
+			headers: {
+				"Content-Type": "application/json",
+				Accept: "application/json",
+				...(hostMatchesUrl(baseUrl, "openrouter") ? getOpenRouterHeaders() : {}),
 			},
-			{ signal },
-		);
+			signal,
+			maxAttempts: options.maxAttempts ?? 3,
+			defaultDelayMs: options.maxAttempts !== undefined ? () => 100 : attempt => 2 ** attempt * 1000,
+			onHttpError: async response => {
+				if (response.status !== 401) return undefined;
+				const detail = (await response.text().catch(() => "")).trim();
+				return new ProviderHttpError(detail || "mnemopi rerank request unauthorized (401)", 401, {
+					headers: response.headers,
+				});
+			},
+		});
 		if (!response.ok) {
 			logger.warn("mnemopi rerank request failed", {
 				status: response.status,
@@ -164,14 +147,14 @@ export async function executeRerank(
 			const list = Array.isArray(data) ? data : Array.isArray(data.results) ? data.results : [];
 			if (list.length === 0) return null;
 
-			// Use an explicit consistent scoring mode: models known to emit raw unbounded
-			// logits (e.g. BGE, BCE) or configured as such always map through logistic sigmoid,
-			// ensuring scores from different banks (such as singletons) remain strictly comparable.
+			// Auto mode normalizes the whole response if any score falls outside probability range.
+			const rawScores = list.map(item => Number(item.relevance_score ?? item.score));
+			const scoreMode = options.scoreMode ?? rerankScoreMode();
 			const useSigmoid =
-				options.scoreMode === "logit" || (options.scoreMode !== "probability" && isLogitRerankModel(options.model));
+				scoreMode === "logit" || (scoreMode === "auto" && rawScores.some(score => score < 0 || score > 1));
 
-			return list.map(item => {
-				const rawScore = Number(item.relevance_score ?? item.score);
+			return list.map((item, index) => {
+				const rawScore = rawScores[index]!;
 				const relevanceScore = useSigmoid && Number.isFinite(rawScore) ? 1 / (1 + Math.exp(-rawScore)) : rawScore;
 				return {
 					index: Number(item.index),

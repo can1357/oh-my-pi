@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mnemopi recall supports optional cross-encoder reranking through `mnemopi.rerank*` settings ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
+
 ### Fixed
 
 - Claude auto-redeem now spends a full saved reset on an account blocked by its weekly limit when the reset also clears the Fable cap; such resets were treated as Fable-only and skipped while Fable usage had room ([#18801](https://github.com/can1357/oh-my-pi/pull/18801))
@@ -24,7 +28,6 @@
 
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and every models.yml provider with `discovery.type: litellm`, unless listed in `disabledProviders` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 - Extensions can ask the operator before an interactive quit, or cancel it, with `session_before_shutdown`; a further `/exit` or Ctrl+D skips the pending prompts and closes ([#18424](https://github.com/can1357/oh-my-pi/pull/18424) by [@aw1cks](https://github.com/aw1cks))
-- Added `mnemopi.rerankApiUrl`, `mnemopi.rerankModel`, `mnemopi.rerankApiKey`, and `mnemopi.rerankCandidates` settings to configure cross-encoder reranking for Mnemopi recall ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
 
 ### Changed
 

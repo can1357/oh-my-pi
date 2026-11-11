@@ -266,7 +266,7 @@ export const cfgMnemopiRerankCandidates = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi Rerank Candidates",
-		description: "Number of initial recall candidates to send to the reranker before MMR diversity filtering",
+		description: "Target candidates to score; raised to the requested topK when that limit is larger",
 		condition: "mnemopiActive",
 	},
 });
@@ -282,7 +282,7 @@ export const cfgMnemopiRerankScoreMode = register({
 		group: "Mnemopi",
 		label: "Mnemopi Rerank Score Mode",
 		description:
-			"How to interpret reranker output: auto (logit for BGE/BCE, probability for Cohere), logit (sigmoid normalized), or probability",
+			"auto applies sigmoid if any response score is outside 0..1; logit always applies sigmoid; probability keeps scores unchanged",
 		condition: "mnemopiActive",
 	},
 });

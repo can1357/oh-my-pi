@@ -6,6 +6,7 @@ import type { BeamMemoryState } from "@oh-my-pi/pi-mnemopi/core/beam/types";
 import { createReranker, executeRerank, type RerankFunction } from "@oh-my-pi/pi-mnemopi/core/rerank";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { rerankApiKey } from "@oh-my-pi/pi-mnemopi/config";
+import { resetEmbeddingProviderForTests, setEmbeddingProviderForTests } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { mmrRerank } from "@oh-my-pi/pi-mnemopi/core/mmr";
 import { orchestrateRecall } from "@oh-my-pi/pi-mnemopi/core/orchestrator";
 import { POLYPHONIC_MAX_COMBINED_SCORE } from "@oh-my-pi/pi-mnemopi/core/polyphonic-recall";
@@ -17,6 +18,7 @@ afterEach(() => {
 	for (const beam of openBeams.splice(0, openBeams.length)) {
 		beam.close();
 	}
+	resetEmbeddingProviderForTests();
 });
 
 function makeTestBeam(config: Partial<BeamMemoryState["config"]> & { rerankFn?: RerankFunction } = {}): TestBeam {
@@ -393,6 +395,17 @@ describe("Cross-encoder rerank in Mnemopi recall", () => {
 		expect(rerankCalled).toBe(true);
 		expect(results[0]?.score).toBe(0.99);
 	});
+	it("keeps topK capacity when rerankCandidates is smaller and scoring falls back", async () => {
+		const reranker = createReranker({ candidates: 2, fn: async () => null });
+		const beam = makeTestBeam({ reranker });
+		for (let index = 0; index < 6; index++) {
+			insertWorking(beam, `candidate-${index}`, `deployment candidate ${index}`, { importance: 0.9 - index * 0.1 });
+		}
+
+		const results = await recallEnhanced(beam, "deployment", 5, { useCache: false });
+
+		expect(results).toHaveLength(5);
+	});
 
 	it("caches first-stage candidates but reranks on each recall", async () => {
 		let calls = 0;
@@ -410,6 +423,24 @@ describe("Cross-encoder rerank in Mnemopi recall", () => {
 		expect(calls).toBe(2);
 		expect(first[0]?.id).not.toBe(second[0]?.id);
 		expect(beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1 });
+	});
+	it("reuses cached candidates for similar queries with derived embeddings", async () => {
+		const firstQuery = "deployment migration notes";
+		setEmbeddingProviderForTests({
+			embed: async function* (texts) {
+				yield texts.map(text => (text === firstQuery ? [1, 0] : [0.99, 0.1]));
+			},
+		});
+		const beam = makeTestBeam({
+			enhancedRecall: true,
+			rerankFn: async (_query, documents) => documents.map((_, index) => ({ index, relevanceScore: 0.8 })),
+		});
+		insertWorking(beam, "cache-semantic", "deployment migration runbook");
+
+		await recallEnhanced(beam, firstQuery, 1);
+		await recallEnhanced(beam, "deployment migration details", 1);
+
+		expect(beam.caches.queryCache?.stats()).toMatchObject({ hits: 1, misses: 1, tier2_hits: 1 });
 	});
 
 	it("resolves cohere fallback api key against effective url", () => {
@@ -458,12 +489,32 @@ describe("executeRerank HTTP client", () => {
 		try {
 			const scores = await executeRerank("cats", ["dogs", "cats purr"], {
 				apiUrl: "http://127.0.0.1:9999",
-				model: "bge-reranker-v2-m3",
+				model: "custom-reranker-alias",
+				scoreMode: "logit",
 			});
 			expect(scores?.[0]?.index).toBe(1);
 			expect(scores?.[0]?.relevanceScore).toBeCloseTo(0.37, 2);
 			expect(scores?.[1]?.index).toBe(0);
 			expect(scores?.[1]?.relevanceScore).toBeCloseTo(0.03, 2);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+	it("normalizes out-of-range auto scores without inspecting model names", async () => {
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			Response.json([
+				{ index: 0, score: -2 },
+				{ index: 1, score: 2 },
+			])) as unknown as typeof fetch;
+
+		try {
+			const scores = await executeRerank("query", ["a", "b"], {
+				apiUrl: "http://127.0.0.1:9999",
+				model: "custom-reranker-alias",
+			});
+			expect(scores?.[0]?.relevanceScore).toBeCloseTo(0.1192, 4);
+			expect(scores?.[1]?.relevanceScore).toBeCloseTo(0.8808, 4);
 		} finally {
 			globalThis.fetch = originalFetch;
 		}

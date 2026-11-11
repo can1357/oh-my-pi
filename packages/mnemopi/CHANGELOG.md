@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added optional cross-encoder reranking support to Mnemopi recall via `rerankApiUrl`, `rerankModel`, and `rerankApiKey` settings and environment variables (`MNEMOPI_RERANK_API_URL`, `MNEMOPI_RERANK_MODEL`, `MNEMOPI_RERANK_API_KEY`). Recall expands initial candidate retrieval to evaluate with the neural cross-encoder, updating candidate relevance scores before MMR diversity filtering, with seamless fallback to first-stage ranking if the reranker endpoint is unavailable or times out ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
+- Mnemopi recall supports optional cross-encoder reranking through `mnemopi.rerank*` settings and `MNEMOPI_RERANK_*` variables ([#18747](https://github.com/can1357/oh-my-pi/pull/18747) by [@anagnorisis2peripeteia](https://github.com/anagnorisis2peripeteia))
 
 ## [18.18.4] - 2026-11-09
 

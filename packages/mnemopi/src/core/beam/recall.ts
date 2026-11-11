@@ -1199,7 +1199,7 @@ export async function gatherCandidates(
 				cache.invalidate();
 				beam.caches.queryCacheToken = token;
 			}
-			scope = enhancedRecallCacheScope(beam, pool, runOptions, polyphonic);
+			scope = enhancedRecallCacheScope(beam, pool, options, polyphonic);
 			const cached = cache.get(query, queryEmbedding, scope);
 			if (cached !== null) return structuredClone(cached) as RecallResult[];
 		}
@@ -1251,7 +1251,7 @@ export async function finalizeRecall(
 	if (topK <= 0) return [];
 	let ranked = [...candidates].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 	if (reranker && ranked.length && query.trim() && !options.signal?.aborted) {
-		ranked = ranked.slice(0, reranker.candidates);
+		ranked = ranked.slice(0, Math.max(topK, reranker.candidates));
 		const documents = ranked.map(candidate =>
 			clipToWindow(
 				candidate.tier_label === "fact" && candidate.subject && candidate.predicate
