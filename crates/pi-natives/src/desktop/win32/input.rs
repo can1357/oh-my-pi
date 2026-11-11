@@ -747,11 +747,13 @@ mod background {
 			.into_iter()
 			.map(|key| (key, virtual_key(key).map_or(0, |(_, implicit)| implicit)));
 		posted_modifiers_dropped(keys).map_or(Ok(()), |reason| {
-			let class = window::class_name(hwnd);
+			// Name the top-level window the caller selected, not the control.
+			let root = window::root(hwnd);
+			let class = window::class_name(root);
 			Err(DesktopError::background_unavailable(format!(
 				"window {} ({class}) drops background input that holds a modifier: {reason}; no input \
 				 was sent",
-				hwnd as usize,
+				root as usize,
 			)))
 		})
 	}
@@ -772,9 +774,11 @@ mod background {
 				EventKind::Keystroke
 			};
 			if let Some(reason) = drop_reason(hwnd, &class, kind) {
+				let root = window::root(hwnd);
 				return Err(DesktopError::background_unavailable(format!(
-					"window {} ({class}) drops held background keys: {reason}; no input was sent",
-					hwnd as usize,
+					"window {} ({}) drops held background keys: {reason}; no input was sent",
+					root as usize,
+					window::class_name(root),
 				)));
 			}
 		}
