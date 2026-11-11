@@ -5,7 +5,6 @@ declare const devicePixelRatio: number;
 declare const window: { open(url: string, target: string, features: string): unknown };
 
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { hoverElement } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -23,7 +22,7 @@ import {
 	runInTab,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import type { CDPSession, ElementHandle } from "puppeteer-core";
+import type { CDPSession } from "puppeteer-core";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -346,189 +345,81 @@ describe("OMP-owned browser input", () => {
 		45_000,
 	);
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"checks a hover target the way it checks a click target, on selectors and handles",
+		"waits for a hover target's layout box, then hovers it as Puppeteer does",
 		async () => {
 			const browser = headless();
-			const name = `hover-actionable-${process.pid}`;
+			const name = `hover-layout-${process.pid}`;
 			const session = {
 				cwd: process.cwd(),
 				hasUI: false,
 				settings: Settings.isolated(),
 				getSessionFile: () => null,
 			} as unknown as ToolSession;
+			const mark = `onmouseover="this.dataset.hovered = 'yes'"`;
 			// Responsive markup: the first `.menu` is the hidden desktop copy. A row's actions show only on hover.
 			const fixture = `<style>.del { opacity: 0 } .row:hover .del { opacity: 1 }
 				.edit { visibility: hidden } #edit-row:hover .edit { visibility: visible }
-				#over-row { position: absolute; left: 0; top: 300px; width: 120px; height: 30px }
-				#over-row .act { position: absolute; left: 0; top: 0; width: 60px; height: 30px; visibility: hidden }
-				#over-row:hover .act { visibility: visible }
-				#wrap { position: absolute; left: 0; top: 340px; display: block; width: 40px; height: 40px }
-				#wrap::after { content: ""; position: absolute; inset: 0; z-index: 1 }</style>
-				<div id="over-row"><span id="under">Name</span><button class="act">Act</button></div>
-				<label id="wrap"><input id="nested" type="checkbox" style="margin:0"></label>
+				@keyframes drift { from { transform: translateX(0) } to { transform: translateX(200px) } }</style>
 				<a class="menu" href="#" style="display:none">Menu</a>
-				<a class="menu" id="mobile" href="#" onmouseover="this.dataset.hovered = 'yes'">Menu</a>
-				<div class="row">Row <button class="del" onmouseover="this.dataset.hovered = 'yes'">Delete</button></div>
-				<button id="covered" style="position:absolute;left:0;top:80px;width:120px;height:40px">Covered</button>
-				<div id="overlay" style="position:fixed;left:0;top:80px;width:120px;height:40px;z-index:1"></div>
-				<div id="edit-row" style="position:absolute;left:0;top:160px">Row <button class="edit">Edit</button></div>
-				<span id="icon-host" style="position:absolute;left:0;top:200px" onmouseover="this.dataset.hovered = 'yes'"><svg id="icon" width="20" height="20" style="pointer-events:none"><rect width="20" height="20"/></svg></span>
-				<input id="box" type="checkbox" style="position:absolute;left:0;top:240px;margin:0">
-				<label for="box" style="position:absolute;left:0;top:240px;width:40px;height:40px;z-index:1">Box</label>`;
+				<a class="menu" id="mobile" href="#" ${mark}>Menu</a>
+				<div class="row">Row <button class="del" ${mark}>Delete</button></div>
+				<div id="edit-row">Row <button class="edit">Edit</button></div>
+				<span id="icon-host" ${mark}><svg id="icon" width="20" height="20" style="pointer-events:none"><rect width="20" height="20"/></svg></span>
+				<div><button id="drifting" style="animation: drift 1s linear infinite" ${mark}>Drifting</button></div>
+				<div style="margin-top:1500px"><button id="low" ${mark}>Low</button></div>
+				<div style="margin-top:2000px"><button id="far" ${mark}>Far</button></div>
+				<nav id="drawer" style="position:fixed;left:-300px;top:0;width:200px;height:100px">Drawer</nav>`;
 			try {
 				await acquireTab(name, browser, {
 					url: `data:text/html,${encodeURIComponent(fixture)}`,
 					timeoutMs: 30_000,
 				});
-				const message = async (code: string, timeoutMs: number): Promise<unknown> =>
+				const run = async (code: string, timeoutMs = 10_000): Promise<unknown> =>
 					(
 						await runInTab(name, {
-							code: `try { ${code} return "hovered"; } catch (error) { return error instanceof Error ? error.message : String(error); }`,
+							code: `try { ${code} } catch (error) { return error instanceof Error ? error.message : String(error); }`,
 							timeoutMs,
 							session,
 						})
 					).returnValue;
 
-				expect(await message(`await tab.hover(".menu");`, 3_000)).toBe(
-					'tab.hover(".menu") timed out after 2000ms; the element never became clickable (last check: display:none; selector matches 2 element(s))',
+				// A hidden match waits for a box, then says why it never got one, through a handle too.
+				expect(await run(`await tab.hover(".menu"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: display:none; selector matches 2 element(s))",
 				);
-				expect(await message(`await tab.hover("#covered");`, 10_000)).toBe(
-					'tab.hover("#covered") blocked: covered by <div#overlay>',
+				const viaHandle = await run(`await (await tab.waitForSelector(".menu")).hover(); return "hovered";`, 3_000);
+				expect(viaHandle).toContain("handle.hover() timed out");
+				expect(viaHandle).toContain("never became clickable (last check: display:none)");
+				// So does a copy parked off-canvas, where no scroll can bring it into view.
+				expect(await run(`await tab.hover("#drawer"); return "hovered";`, 3_000)).toContain(
+					"never became clickable (last check: off-viewport; selector matches 1 element(s))",
 				);
-				expect(await message(`await (await tab.waitForSelector("#covered")).hover();`, 10_000)).toBe(
-					"handle.hover() blocked: covered by <div#overlay>",
+				// What hovering may reveal is hovered at once.
+				expect(await run(`await tab.hover("#mobile"); return await tab.attr("#mobile", "data-hovered");`)).toBe(
+					"yes",
 				);
+				expect(await run(`await tab.hover(".del"); return await tab.attr(".del", "data-hovered");`)).toBe("yes");
+				expect(await run(`await tab.hover(".edit"); return await tab.isVisible(".edit");`)).toBe(true);
+				expect(await run(`await tab.hover("#icon"); return await tab.attr("#icon-host", "data-hovered");`)).toBe(
+					"yes",
+				);
+				// A target that keeps moving is not held back until it stops.
+				expect(await run(`await tab.hover("#drifting"); return "hovered";`)).toBe("hovered");
+				// Puppeteer scrolls only a target that is not fully in view, through a handle too.
 				expect(
-					await message(
-						`await tab.hover("#mobile"); if ((await tab.attr("#mobile", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
-						10_000,
-					),
-				).toBe("hovered");
+					await run(`const before = await tab.evaluate(() => {
+						const low = document.querySelector("#low");
+						window.scrollTo(0, low.offsetTop + low.offsetHeight + 8 - innerHeight);
+						return scrollY;
+					});
+					await tab.hover("#low");
+					return (await tab.evaluate(() => scrollY)) === before && before > 0;`),
+				).toBe(true);
 				expect(
-					await message(
-						`await tab.hover(".del"); if ((await tab.attr(".del", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
-						10_000,
-					),
-				).toBe("hovered");
-				// A `visibility:hidden` or `pointer-events:none` target is hovered through the ancestor the pointer lands on.
-				expect(
-					await message(
-						`await tab.hover(".edit"); if (!(await tab.isVisible(".edit"))) throw new Error("not revealed");`,
-						10_000,
-					),
-				).toBe("hovered");
-				expect(
-					await message(
-						`await tab.hover("#icon"); if ((await tab.attr("#icon-host", "data-hovered")) !== "yes") throw new Error("no mouseover");`,
-						10_000,
-					),
-				).toBe("hovered");
-				// A label forwards a click to its control, not the pointer: an overlaid or wrapping label is a cover.
-				expect(await message(`await tab.hover("#box");`, 10_000)).toContain("covered by <label>");
-				expect(await message(`await tab.hover("#nested");`, 10_000)).toContain("covered by <label#wrap>");
-				// An action placed over another child of its row shows once the row is hovered.
-				expect(
-					await message(
-						`await tab.hover("#over-row .act"); if (!(await tab.isVisible("#over-row .act"))) throw new Error("not revealed");`,
-						10_000,
-					),
-				).toBe("hovered");
-				const page = (await browser.browser.pages()).find(page => page.url().startsWith("data:text/html,"));
-				if (!page) throw new Error("Missing hover test page");
-				// Reveal only after the first post-move hit test has found the underlying row.
-				await page.evaluate(`(() => {
-					const row = document.createElement("div");
-					row.style.cssText = "position:absolute;left:200px;top:300px;width:120px;height:30px";
-					row.innerHTML = '<button id="delayed" style="visibility:hidden">Delayed</button>';
-					document.body.append(row);
-				})()`);
-				const delayed = await page.$("#delayed");
-				if (!delayed) throw new Error("Missing delayed target");
-				const hitChecked = Promise.withResolvers<void>();
-				const evaluate = delayed.evaluate.bind(delayed);
-				const evaluateSpy = spyOn(delayed, "evaluate").mockImplementation((...args) => {
-					const result = evaluate(...args);
-					if (
-						typeof args[0] === "function" &&
-						args[0].name === "anonymous" &&
-						typeof args[1] === "object" &&
-						args[1] !== null &&
-						"x" in args[1]
-					) {
-						void result.then(() => hitChecked.resolve(), hitChecked.reject);
-					}
-					return result;
-				});
-				try {
-					const hovering = hoverElement(delayed, "delayed target");
-					await hitChecked.promise;
-					await page.evaluate('document.querySelector("#delayed").style.visibility = "visible"');
-					await hovering;
-				} finally {
-					evaluateSpy.mockRestore();
-					await delayed.dispose();
-				}
-				expect(
-					await message(
-						`await tab.evaluate(() => {
-							const row = document.createElement("div");
-							row.style.cssText = "position:absolute;left:400px;top:300px;width:120px;height:30px";
-							row.innerHTML = '<button id="moving" style="opacity:0">Moving</button>';
-							row.onmouseenter = () => {
-								row.firstElementChild.style.opacity = "1";
-								row.firstElementChild.style.transform = "translateX(150px)";
-							};
-							document.body.append(row);
-						});
-						await tab.hover("#moving");`,
-						10_000,
-					),
-				).toContain("covered by <div>");
-				// Closed roots still expose their browser hit test through a handle to the target.
-				const inner = (
-					await page.evaluateHandle(`(() => {
-					const host = document.createElement("div");
-					host.style.cssText = "position:absolute;left:200px;top:350px";
-					document.body.append(host);
-					const root = host.attachShadow({ mode: "closed" });
-					root.innerHTML = "<button>Closed target</button>";
-					return root.firstElementChild;
-				})()`)
-				).asElement();
-				if (!inner) throw new Error("Missing closed-root target");
-				try {
-					await hoverElement(inner as ElementHandle, "closed target");
-				} finally {
-					await inner.dispose();
-				}
-				const vanishing = await page.$("#mobile");
-				if (!vanishing) throw new Error("Missing vanishing target");
-				const boundingBox = vanishing.boundingBox.bind(vanishing);
-				let boxes = 0;
-				const boxSpy = spyOn(vanishing, "boundingBox").mockImplementation(async () => {
-					if (++boxes === 3) {
-						await vanishing.evaluate(el => {
-							el.remove();
-						});
-						return null;
-					}
-					return boundingBox();
-				});
-				const moveSpy = spyOn(page.mouse, "move");
-				try {
-					let error: unknown;
-					try {
-						await hoverElement(vanishing, "vanishing target");
-					} catch (caught) {
-						error = caught;
-					}
-					expect(String(error)).toContain("detached or has no layout box");
-					expect(moveSpy).not.toHaveBeenCalled();
-				} finally {
-					boxSpy.mockRestore();
-					moveSpy.mockRestore();
-					await vanishing.dispose();
-				}
+					await run(`await tab.evaluate(() => window.scrollTo(0, 0));
+					await (await tab.waitForSelector("#far")).hover();
+					return [await tab.attr("#far", "data-hovered"), await tab.evaluate(() => scrollY > 0)];`),
+				).toEqual(["yes", true]);
 			} finally {
 				await releaseTab(name, { kill: true });
 			}

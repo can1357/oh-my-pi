@@ -246,18 +246,12 @@ export function composedContains(ancestor: unknown, descendant: unknown): boolea
 
 interface ClickFlags {
 	viaLabel: boolean;
-	/**
-	 * Checking a hover target: an `opacity:0`, `visibility:hidden` or `pointer-events:none` element may be one only
-	 * hovering reveals (a row's actions), so only what keeps the pointer off its box is refused here, and the hit
-	 * test runs after the pointer arrives ({@link hoverElement}).
-	 */
-	hover: boolean;
 }
 
 /** Page half of {@link isClickActionable}; `contains` is {@link composedContains}, bound in by `clickActionableInPage`. */
 function checkClickActionable(
 	el: unknown,
-	{ viaLabel, hover }: ClickFlags,
+	{ viaLabel }: ClickFlags,
 	contains: typeof composedContains,
 ): ActionabilityResult {
 	const element = el as unknown as PageElement;
@@ -272,13 +266,12 @@ function checkClickActionable(
 	}
 	const style = page.getComputedStyle(element);
 	if (style.display === "none") return { ok: false as const, reason: "display:none" };
-	if (!hover && (style.visibility === "hidden" || style.visibility === "collapse")) {
+	if (style.visibility === "hidden" || style.visibility === "collapse") {
 		return { ok: false as const, reason: `visibility:${style.visibility}` };
 	}
-	if (!hover && style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
+	if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
 	// A custom checkbox or radio keeps its real control at opacity:0 under the box it draws; the hit test below decides.
 	if (
-		!hover &&
 		Number(style.opacity) === 0 &&
 		!element.matches(
 			'input[type="checkbox"], input[type="radio"], [role="checkbox" i], [role="radio" i], [role="switch" i]',
@@ -306,8 +299,6 @@ function checkClickActionable(
 	if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
 	const x = Math.floor((left + right) / 2);
 	const y = Math.floor((top + bottom) / 2);
-	// The exact centre: a floored one can fall outside a target under 2px wide, onto its parent.
-	if (hover) return { ok: true as const, x: (left + right) / 2 - rect.left, y: (top + bottom) / 2 - rect.top };
 	let topElement = page.document.elementFromPoint(x, y);
 	for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
 		const nested = topElement.shadowRoot.elementFromPoint(x, y);
@@ -357,9 +348,9 @@ const clickActionableInPage = new Function(
 export async function isClickActionable(
 	handle: ElementHandle,
 	signal?: AbortSignal,
-	options: Pick<ClickAtOptions, "button"> & { hover?: boolean } = {},
+	options: Pick<ClickAtOptions, "button"> = {},
 ): Promise<ActionabilityResult> {
-	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left", hover: options.hover === true };
+	const flags: ClickFlags = { viaLabel: (options.button ?? "left") === "left" };
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
@@ -367,7 +358,7 @@ async function actionableClickPoint(
 	handle: ElementHandle,
 	label: string,
 	signal: AbortSignal | undefined,
-	options: ClickAtOptions & { hover?: boolean },
+	options: ClickAtOptions,
 ): Promise<ClickPoint> {
 	await untilAborted(signal, () =>
 		handle.evaluate(el => {
@@ -495,88 +486,50 @@ export async function clickElement(
 }
 
 /**
- * Page half of {@link hoverElement}, run at the dispatched frame-local pointer coordinate: `null` when the hit
- * there is `el` or inside it (or, for a target that takes no pointer events, an element it sits in), else that hit
- * as `<tag#id.class>`. A label is a cover here: it forwards clicks to its control, not the pointer.
+ * Page half of {@link hoverElement}: why the pointer cannot be put on `el` at all, or `null` once it has a layout box.
+ * `opacity:0`, `visibility:hidden` and `pointer-events:none` pass, since hovering may be what shows the element.
  */
-function checkHoverHit(el: unknown, point: { x: number; y: number }, contains: typeof composedContains): string | null {
+function hoverLayoutRefusal(el: unknown): string | null {
 	const element = el as unknown as PageElement;
-	const page = globalThis as unknown as PageGlobals;
-	const { x, y } = point;
-	let hit = page.document.elementFromPoint(x, y);
-	for (let depth = 0; hit && depth < 16; depth++) {
-		let root = hit.shadowRoot;
-		// A closed root is not exposed on its host, but the target still exposes its own root.
-		// Keep using the browser's hit test inside it rather than treating every host as a hit.
-		for (
-			let targetRoot = element.getRootNode();
-			!root && targetRoot.host;
-			targetRoot = targetRoot.host.getRootNode()
-		) {
-			if (targetRoot.host === hit) {
-				root = targetRoot as PageRoot & PageShadowRoot;
-				break;
-			}
-		}
-		if (!root) break;
-		const nested = root.elementFromPoint(x, y);
-		if (!nested || nested === hit) break;
-		hit = nested;
-	}
-	if (!hit) return "nothing";
-	if (contains(element, hit)) return null;
-	if (page.getComputedStyle(element).pointerEvents === "none" && contains(hit, element)) return null;
-	const classes = Array.from(hit.classList)
-		.slice(0, 2)
-		.map(name => `.${name}`)
-		.join("");
-	return `<${hit.tagName.toLowerCase()}${hit.id ? `#${hit.id}` : ""}${classes}>`;
+	if (!element.isConnected) return "detached (the page replaced this element; look it up again)";
+	if ((globalThis as unknown as PageGlobals).getComputedStyle(element).display === "none") return "display:none";
+	const rects = Array.from(element.getClientRects());
+	if (rects.length === 0) return "no layout box";
+	return rects.some(rect => rect.width >= 1 && rect.height >= 1) ? null : "zero-size";
 }
 
-/** {@link checkHoverHit} with {@link composedContains} bound in, as one self-contained page function. */
-const hoverHitInPage = new Function(
-	"el",
-	"point",
-	`return (${checkHoverHit.toString()})(el, point, ${composedContains.toString()});`,
-) as (el: unknown, point: { x: number; y: number }) => string | null;
-
 /**
- * Move the pointer onto an element at the point a click would use, once it can take one there: a hidden match
- * waits and then fails with the reason, like a click. An `opacity:0`, `visibility:hidden` or `pointer-events:none`
- * element is not refused, since hovering may be what shows it; an initially hidden target waits for its reveal
- * after the pointer arrives. Other covered targets, including controls under labels, fail at once.
+ * Hover an element with Puppeteer's own `hover()` once it has a layout box: a hidden, detached or off-canvas match
+ * waits and then fails with the reason, like a click. Past that it is Puppeteer's hover, as before: a covered target
+ * is hovered through its cover, and resolving means the pointer moved, not that the page reacted.
  */
-export async function hoverElement(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
-	const point = await actionableClickPoint(handle, label, signal, { hover: true });
-	const box = await untilAborted(signal, () => handle.boundingBox());
-	if (!box) throw new ToolError(`${label} blocked: the element is detached or has no layout box`);
-	const { revealable, framePoint } = await untilAborted(signal, () =>
-		handle.evaluate(
-			(el, offset) => {
-				const element = el as unknown as PageElement;
-				const visibility = (globalThis as unknown as PageGlobals).getComputedStyle(element).visibility;
-				const rect = element.getBoundingClientRect();
-				return {
-					revealable: visibility === "hidden" || visibility === "collapse",
-					framePoint: { x: rect.left + offset.x, y: rect.top + offset.y },
-				};
-			},
-			{ x: point.x - box.x, y: point.y - box.y },
-		),
-	);
-	await untilAborted(signal, () => handle.frame.page().mouse.move(point.x, point.y));
-	for (;;) {
-		const coveredBy = (await untilAborted(signal, () => handle.evaluate(hoverHitInPage, framePoint))) as
-			| string
-			| null;
-		if (coveredBy === null) return;
-		if (!revealable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
-		try {
-			await untilAborted(signal, () => Bun.sleep(16));
-		} catch (error) {
-			if (signal?.aborted) throw new ClickRefusedError(`covered by ${coveredBy}`, { cause: signal.reason });
-			throw error;
+export async function hoverElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	// Handles from `toActionableHandle` replace `hover` with a call to this function; the prototype's is Puppeteer's.
+	const hover = Object.getPrototypeOf(handle).hover as ElementHandle["hover"];
+	// Why the pointer could not be put on it yet. A layout refusal clears once the box is back; `off-viewport` is what
+	// Puppeteer's own last attempt found, so it stands while the next attempt runs.
+	let refusal: string | undefined;
+	try {
+		for (;;) {
+			const reason = await untilAborted(signal, () => handle.evaluate(hoverLayoutRefusal));
+			if (reason !== null) {
+				refusal = reason;
+			} else {
+				if (refusal !== "off-viewport") refusal = undefined;
+				try {
+					return await untilAborted(signal, () => hover.call(handle));
+				} catch (error) {
+					// Puppeteer scrolled and still found no part of the box in view (an off-canvas drawer): wait as for a hidden one.
+					if (!(error instanceof Error) || error.message !== "Node is either not clickable or not an Element")
+						throw error;
+					refusal = "off-viewport";
+				}
+			}
+			await untilAborted(signal, () => Bun.sleep(50));
 		}
+	} catch (error) {
+		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
+		throw error;
 	}
 }
 
