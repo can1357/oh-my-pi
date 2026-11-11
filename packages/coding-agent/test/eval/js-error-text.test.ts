@@ -96,6 +96,39 @@ describe("uncaught JavaScript cell errors", () => {
 		expect(result.output).not.toContain(REPO_ROOT);
 	});
 
+	it("annotates a rejection with an empty message", async () => {
+		const result = await executeJs(
+			"Promise.reject(new Error()); const { promise, resolve } = Promise.withResolvers(); setImmediate(resolve); await promise;",
+			options,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("Error: Unhandled rejection (missing await?): ");
+	});
+
+	it("annotates cached rejection stacks without losing old or current diagnostics", async () => {
+		const oldMessage = "old\n    at map (native:1:11)\nlast";
+		const currentMessage = "new $& $$\n    at eval (unknown)\ncurrent";
+		const result = await executeJs(
+			`const error = new Error(${JSON.stringify(oldMessage)}); void error.stack; error.message = ${JSON.stringify(currentMessage)}; Promise.reject(error); const { promise, resolve } = Promise.withResolvers(); setImmediate(resolve); await promise;`,
+			options,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain(`Error: ${oldMessage}\n`);
+		expect(result.output).toContain(`Error: Unhandled rejection (missing await?): ${currentMessage}`);
+		expect(result.output).not.toContain("omp frames hidden");
+	});
+
+	it("does not rewrite a current header embedded in a stale rejection diagnostic", async () => {
+		const oldMessage = "old\nError: new\n    at map (native:1:11)\nlast";
+		const result = await executeJs(
+			`const error = new Error(${JSON.stringify(oldMessage)}); void error.stack; error.message = "new"; Promise.reject(error); const { promise, resolve } = Promise.withResolvers(); setImmediate(resolve); await promise;`,
+			options,
+		);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain(`Error: ${oldMessage}\n`);
+		expect(result.output).toContain("Error: Unhandled rejection (missing await?): new");
+	});
+
 	it("take omp's tree from its own code, not from PI_PACKAGE_DIR", async () => {
 		const script = `import { formatCellError } from ${JSON.stringify(ERROR_TEXT)};
 console.log(formatCellError("Error: x\\n    at f (/home/me/project/lib.ts:1:2)", { filename: "js-cell-1.js", cwd: "/tmp" }));`;
