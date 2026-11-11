@@ -33,6 +33,7 @@
 ### Fixed
 
 - Fixed an `ask` HTML form in Tern not taking typing after a click on its Other row or a text well while a composer draft held the keyboard: the click now hands the keys to the form, as ↑/↓ does, instead of every key still editing the draft
+- In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
 
 ## [18.18.6] - 2026-11-09
 
