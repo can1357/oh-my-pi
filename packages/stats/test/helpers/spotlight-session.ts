@@ -53,18 +53,18 @@ export interface ShapeSpec {
 	ms?: number;
 	/** Spotlight calls that failed (the no-score fallback shaped the result). */
 	failures?: number;
+	/** The failed calls by cause, as pi journals them; omitted, the entry predates causes. */
+	failureCauses?: Record<string, number>;
 	/**
 	 * Held out: the model saw the result unshaped (`text`), while the counts and `original` describe the would-be cut
 	 * and `shapedUrl` names its text.
 	 */
 	holdout?: { shapedUrl: string };
 	/**
-	 * Kept whole by the edit gate: like a held-out result, the model saw `text` (plain's page) while the counts and
-	 * `original` describe the would-be cut.
+	 * Kept whole by pi's former edit gate: like a held-out result, the model saw `text` (plain's page) while the
+	 * counts and `original` describe the would-be cut.
 	 */
 	gated?: boolean;
-	/** pi's edit-likely mark of a read; omitted, the trace predates it. */
-	editLikely?: boolean;
 	/** Journal the `spotlight:shape` entry (default true). */
 	shapeEntry?: boolean;
 	/** Persist `details.spotlight` on the result (default true). */
@@ -86,12 +86,9 @@ function outChars(spec: ShapeSpec, text: string): number {
 	return spec.original ? text.length : spec.inTokens * 4;
 }
 
-/** The trace's edit-gate fields, when the spec sets them. */
+/** The trace's `gated` flag, when the spec sets it. */
 function gateFields(spec: ShapeSpec): Record<string, boolean> {
-	return {
-		...(spec.gated ? { gated: true } : {}),
-		...(spec.editLikely === undefined ? {} : { editLikely: spec.editLikely }),
-	};
+	return spec.gated ? { gated: true } : {};
 }
 
 /** The trace's `plainChars`/`plainTokens`, when the spec sets them. */
@@ -178,7 +175,6 @@ export class SpotlightSessionBuilder {
 				urlHost: "cloud.stencil.so",
 				piVersion: "18.15.0",
 				holdout: 0.1,
-				editGate: 0.5,
 				scoreFree: 0.1,
 			},
 		});
@@ -200,7 +196,6 @@ export class SpotlightSessionBuilder {
 				urlHost: "cloud.stencil.so",
 				piVersion: "18.14.0",
 				holdout: 0.1,
-				editGate: 0.5,
 				scoreFree: 0.1,
 			},
 		});
@@ -308,8 +303,9 @@ export class SpotlightSessionBuilder {
 				...(spec.scoreFree ? { scoreFree: true } : {}),
 				...gateFields(spec),
 				spotlight: {
-					calls: spec.costUsd ? 1 : 0,
+					calls: (spec.costUsd ? 1 : 0) + (spec.failures ?? 0),
 					failures: spec.failures ?? 0,
+					...(spec.failureCauses ? { failureCauses: spec.failureCauses } : {}),
 					ms: spec.ms ?? 120,
 					tokens: spec.inTokens,
 					costUsd: spec.costUsd ?? 0,

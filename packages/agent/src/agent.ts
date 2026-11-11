@@ -423,6 +423,7 @@ export class Agent {
 	#tokenizer = new Tokenizer(this.#state.model);
 	#listeners = new Set<(e: AgentEvent) => void>();
 	#queueListeners = new Set<() => void>();
+	#pauseListeners = new Set<(paused: boolean) => void>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -1014,6 +1015,12 @@ export class Agent {
 		return () => this.#queueListeners.delete(listener);
 	}
 
+	/** Notify a session when this agent parks or resumes at a safe process-pause boundary. */
+	onPauseChange(listener: (paused: boolean) => void): () => void {
+		this.#pauseListeners.add(listener);
+		return () => this.#pauseListeners.delete(listener);
+	}
+
 	/** Register an independently removable hook that runs before queued messages are consumed. */
 	addBeforeQueuedMessageDequeueHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
 		const registration = (signal?: AbortSignal) => hook(signal);
@@ -1125,6 +1132,7 @@ export class Agent {
 		// Live steering was taken before anything the run still holds undelivered.
 		this.#liveSteered = this.#liveSteered.filter(entry => {
 			if (entry.controller !== controller) return true;
+			if (entry.message.role === "user") delete entry.message.liveSteered;
 			restored.steering.push(entry.message);
 			return false;
 		});
@@ -1377,6 +1385,19 @@ export class Agent {
 		}
 	}
 
+	/** Report a safe-boundary park/resume transition; a throwing observer never disrupts the loop. */
+	#emitPauseChanged(paused: boolean): void {
+		for (const listener of this.#pauseListeners) {
+			try {
+				listener(paused);
+			} catch (err) {
+				logger.warn("Agent pause listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+	}
+
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
 		this.#steeringQueue = steering.slice();
 		this.#followUpQueue = followUp.slice();
@@ -1529,6 +1550,19 @@ export class Agent {
 	peekSteeringQueue(): readonly AgentMessage[] {
 		const claim = this.#queuedMessageClaims.steering;
 		return claim ? [...claim.messages, ...this.#steeringQueue] : this.#steeringQueue;
+	}
+
+	#isUndeliveredQueuedMessage(message: AgentMessage): boolean {
+		for (const entry of this.#liveSteered) {
+			if (entry.message === message || entry.additional?.includes(message)) return true;
+		}
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.additional.includes(message)) return true;
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				if (delivery.messages[i] === message) return true;
+			}
+		}
+		return false;
 	}
 
 	/** Dequeued messages not yet in the transcript, e.g. steering a provider
@@ -1951,7 +1985,11 @@ export class Agent {
 					try {
 						const updated = await transform(message);
 						if (updated) entry.toolResult = updated;
-					} catch {}
+					} catch (error) {
+						logger.warn("agent: cursor tool result transform failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 				})();
 				entry.pending = pending;
 				await pending;
@@ -2064,7 +2102,9 @@ export class Agent {
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			onPauseChange: paused => {
+				if (this.#isPaused === paused) return;
 				this.#isPaused = paused;
+				this.#emitPauseChanged(paused);
 			},
 			getToolChoice,
 			softToolRequirementState: this.#softToolRequirementState,
@@ -2082,6 +2122,7 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
+			isUndeliveredQueuedMessage: message => this.#isUndeliveredQueuedMessage(message),
 			hasSteeringMessages: () =>
 				steeringQueueState(
 					this.#steeringQueue,

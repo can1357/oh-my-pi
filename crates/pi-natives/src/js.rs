@@ -326,7 +326,10 @@ pub fn into_string(value: JsString<'_>) -> Result<String> {
 /// inputs are ASCII, so this is the encoding that avoids a transcode at the
 /// point of use. Use [`utf16`] for text whose consumer works in code units.
 #[derive(Clone)]
-pub struct InlineStr<const N: usize>(heapless::Vec<u8, N, u8>);
+pub struct InlineStr<const N: usize> {
+	buf: [u8; N],
+	len: u8,
+}
 
 impl<const N: usize> InlineStr<N> {
 	/// Usable bytes, excluding the NUL slot Node-API requires.
@@ -337,9 +340,10 @@ impl<const N: usize> InlineStr<N> {
 		if text.len() > Self::CAPACITY {
 			return Err(too_long(text.len(), Self::CAPACITY));
 		}
-		heapless::Vec::from_slice(text.as_bytes())
-			.map(Self)
-			.map_err(|_| too_long(text.len(), Self::CAPACITY))
+		let len = u8::try_from(text.len()).map_err(|_| too_long(text.len(), Self::CAPACITY))?;
+		let mut buf = [0; N];
+		buf[..text.len()].copy_from_slice(text.as_bytes());
+		Ok(Self { buf, len })
 	}
 }
 
@@ -353,7 +357,7 @@ impl<const N: usize> Deref for InlineStr<N> {
 	fn deref(&self) -> &str {
 		// SAFETY: both constructors validate the bytes as UTF-8 before storing
 		// them, and the buffer is immutable afterwards.
-		unsafe { str::from_utf8_unchecked(&self.0) }
+		unsafe { str::from_utf8_unchecked(&self.buf[..usize::from(self.len)]) }
 	}
 }
 
@@ -387,9 +391,7 @@ impl<const N: usize> FromNapiValue for InlineStr<N> {
 			return Err(too_long(len, Self::CAPACITY));
 		}
 
-		let mut buf: heapless::Vec<u8, N, u8> = heapless::Vec::new();
-		buf.resize_default(N)
-			.map_err(|_| too_long(len, Self::CAPACITY))?;
+		let mut buf = [0u8; N];
 		let mut written = 0;
 		// SAFETY: same string, and `buf` is filled to `N`, which holds the
 		// measured length plus the NUL terminator Node-API writes.
@@ -397,11 +399,11 @@ impl<const N: usize> FromNapiValue for InlineStr<N> {
 			sys::napi_get_value_string_utf8(env, napi_val, buf.as_mut_ptr().cast(), N, &mut written)
 		};
 		napi::check_status!(status, "Failed to read JavaScript string")?;
-		buf.truncate(written);
-		if let Err(error) = str::from_utf8(&buf) {
+		if let Err(error) = str::from_utf8(&buf[..written]) {
 			return Err(Error::new(Status::InvalidArg, error.to_string()));
 		}
-		Ok(Self(buf))
+		let len = u8::try_from(written).map_err(|_| too_long(written, Self::CAPACITY))?;
+		Ok(Self { buf, len })
 	}
 }
 

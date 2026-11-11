@@ -37,6 +37,7 @@ import { decodeDataUri } from "./openai-data-uri";
 import {
 	type OpenAIResponsesComputerCallItem,
 	type OpenAIResponsesComputerCallOutputItem,
+	type OpenAIResponsesCustomToolCallItem,
 	type OpenAIResponsesCustomToolCallOutputItem,
 	type OpenAIResponsesFunctionCallItem,
 	type OpenAIResponsesFunctionCallOutputItem,
@@ -472,13 +473,14 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					id: call.call_id,
 					name: call.name,
 					arguments: args,
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
 				continue;
 			}
 			if (effectiveType === "custom_tool_call") {
-				const call = item as { id?: string; call_id: string; name: string; input: string };
+				const call = item as OpenAIResponsesCustomToolCallItem;
 				// Custom tools carry a raw input string. We stash it in `arguments.input`
 				// matching pi-ai's openai-shared convention, and tag the call
 				// with `customWireName` so encoders re-emit it as `custom_tool_call`.
@@ -488,6 +490,7 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					name: call.name,
 					arguments: { input: call.input ?? "" },
 					customWireName: call.name,
+					...(call.namespace ? { namespace: call.namespace } : {}),
 					...(call.id ? { thoughtSignature: call.id } : {}),
 				};
 				ensureAssistantPlaceholder(messages, data.model, now).content.push(toolCall);
@@ -553,6 +556,17 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 					isError: false,
 					timestamp: now,
 				});
+				continue;
+			}
+			if (effectiveType === "additional_tools") {
+				const nativeItem = structuredCloneJSON(item) as unknown as Record<string, unknown>;
+				messages.push({
+					role: "developer",
+					content: "",
+					providerPayload: { type: "openaiResponsesHistory", items: [nativeItem], dt: true },
+					timestamp: now,
+				});
+				continue;
 			}
 			// Other item types are tolerated but not bridged.
 		}
@@ -654,6 +668,7 @@ type FunctionCallOutputItem = {
 	id: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	arguments: string;
 	status: "completed";
 };
@@ -663,6 +678,7 @@ type CustomToolCallOutputItem = {
 	id: string;
 	call_id: string;
 	name: string;
+	namespace?: string;
 	input: string;
 	status: "completed";
 };
@@ -808,6 +824,7 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 					id: part.thoughtSignature ?? makeCustomCallId(),
 					call_id: wireCallId(part.id),
 					name: part.customWireName,
+					...(part.namespace ? { namespace: part.namespace } : {}),
 					input: rawInput,
 					status: "completed",
 				});
@@ -817,6 +834,7 @@ function buildOutputItems(message: AssistantMessage): OutputItem[] {
 					id: part.thoughtSignature ?? makeFuncCallId(),
 					call_id: wireCallId(part.id),
 					name: part.name,
+					...(part.namespace ? { namespace: part.namespace } : {}),
 					arguments: JSON.stringify(part.arguments ?? {}),
 					status: "completed",
 				});
@@ -902,6 +920,7 @@ interface OpenFunctionCall {
 	argsText: string;
 	/** Set when the underlying ToolCall is a custom-tool emission. */
 	customWireName?: string;
+	namespace?: string;
 }
 interface OpenComputerCall {
 	kind: "computer_call";
@@ -1057,12 +1076,15 @@ export function encodeStream(
 				const itemId = tc?.thoughtSignature ?? (isCustom ? makeCustomCallId() : makeFuncCallId());
 				const callId = wireCallId(tc?.id ?? "");
 				const name = customWireName ?? tc?.name ?? "";
+				const namespace =
+					tc && typeof tc.namespace === "string" && tc.namespace.length > 0 ? tc.namespace : undefined;
 				const item = isCustom
 					? {
 							type: "custom_tool_call" as const,
 							id: itemId,
 							call_id: callId,
 							name,
+							...(namespace ? { namespace } : {}),
 							input: "",
 							status: "in_progress",
 						}
@@ -1071,6 +1093,7 @@ export function encodeStream(
 							id: itemId,
 							call_id: callId,
 							name,
+							...(namespace ? { namespace } : {}),
 							arguments: "",
 							status: "in_progress",
 						};
@@ -1084,6 +1107,7 @@ export function encodeStream(
 					name,
 					argsText: "",
 					...(isCustom ? { customWireName } : {}),
+					...(namespace ? { namespace } : {}),
 				};
 				openToolCalls.set(contentIndex, next);
 				openItemsByContentIndex.set(contentIndex, next);
@@ -1115,6 +1139,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.customWireName,
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						input: text,
 						status: "completed",
 					};
@@ -1124,6 +1149,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.customWireName,
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						input: text,
 						status: "completed",
 					});
@@ -1133,6 +1159,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.name ?? "",
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						arguments: text,
 						status: "completed",
 					};
@@ -1142,6 +1169,7 @@ export function encodeStream(
 						id: call.itemId,
 						call_id: call.callId ?? "",
 						name: call.name ?? "",
+						...(call.namespace ? { namespace: call.namespace } : {}),
 						arguments: text,
 						status: "completed",
 					});
@@ -1357,6 +1385,7 @@ export function encodeStream(
 							}
 							// Promote possibly-late info from the canonical ToolCall.
 							if (tc.customWireName && !cur.customWireName) cur.customWireName = tc.customWireName;
+							if (tc.namespace) cur.namespace = tc.namespace;
 							if (tc.thoughtSignature) cur.itemId = tc.thoughtSignature;
 							cur.callId = wireCallId(tc.id);
 							cur.name = cur.customWireName ?? tc.name;

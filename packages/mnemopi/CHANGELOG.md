@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
+- Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed recall returning episodic summaries for working memories that had been invalidated.
+
+## [18.18.1] - 2026-11-08
+
+### Fixed
+
+- Fixed recall scoring memories against vectors from a previous embedding model while a model-change rebuild was still running or had failed: dense search now only uses vectors stamped with the active model, falling back to lexical matching for memories awaiting re-embedding ([#18442](https://github.com/can1357/oh-my-pi/pull/18442) by [@eggpeat](https://github.com/eggpeat))
+- Fixed model-change embedding rebuilds overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18441](https://github.com/can1357/oh-my-pi/pull/18441) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed embedding rebuilds failing on hosted APIs that cap the inputs per request: `embed()` now splits large lists into requests of at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default 64; set `10` for DashScope) or the `embeddings.batchSize` runtime option, and returns `null` when the API returns a different number of vectors than texts ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed an embedding model change deleting every stored vector when the new provider had no key, did not answer, or rejected a batch partway through: the store now embeds the whole corpus with the new model before replacing anything, keeps the old vectors if any request fails, and tries again on the next open ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed rejected embedding API requests leaving no trace: the status and the first 300 characters of the response body now go to the log at `debug`, or at `warn` when runtime debug is on ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+
+## [18.17.0] - 2026-11-06
+
+### Changed
+
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed

@@ -1,0 +1,20 @@
+### ": word\u{14}"
+% : word
+zsh: do you wish to see all 60 possibilities (6 lines)?
+@ 1,56
+### "n"
+% : word
+@ 0,8
+### "\u{18}d"
+% : word
+zsh: do you wish to see all 60 possibilities (6 lines)?
+@ 1,56
+### "y"
+% : word
+word01  word07  word13  word19  word25  word31  word37  word43  word49  word55
+word02  word08  word14  word20  word26  word32  word38  word44  word50  word56
+word03  word09  word15  word21  word27  word33  word39  word45  word51  word57
+word04  word10  word16  word22  word28  word34  word40  word46  word52  word58
+word05  word11  word17  word23  word29  word35  word41  word47  word53  word59
+word06  word12  word18  word24  word30  word36  word42  word48  word54  word60
+@ 0,8

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.18.8] - 2026-11-11
+
+### Changed
+
+- Ask result cards render saved notes beneath their matching selected answers ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+
+## [18.18.3] - 2026-11-09
+
+### Changed
+
+- `ask` tool cards show the HTML form's fieldset legends and field count while pending, and each question with its submitted answer (or "(no answer)") once answered, flagging submissions made by the timeout
+
 ## [18.15.0] - 2026-11-01
 
 ### Changed

@@ -55,6 +55,17 @@ provider "muse-code" {
 	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
 	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
 	supports-tool-choice #false
+	// Same >200K Muse Ember card as Meta Model API; on a subscription it burns
+	// plan usage faster (dev.meta.ai/docs/muse-ember, 2026-11-10).
+	models "muse-ember-1.0" {
+		long-context-cost {
+			input-threshold 200000
+			input 0.3
+			output 1.5
+			cache-read 0.012
+			cache-write 0
+		}
+	}
 	// Results can be stored so a dropped stream is recovered: verified 2026-09-29
 	// against api.meta.ai/v1, a stored run keeps generating after the client
 	// socket dies and `GET /responses/{id}` returns it once finished (~60s for
@@ -67,7 +78,23 @@ provider "muse-code" {
 	// `custom` tools are rejected with 400 "`custom` tools are not supported
 	// on this endpoint", so apply-patch must stay a function tool here.
 	edit-prompt-variant "compact"
+	// A Muse Code subscription key answers 403 `client_attestation_denied` when
+	// the request declares a tool with certain exact, case-sensitive names:
+	// `bash`, `shell`, `web_search`, `web_fetch`, `apply_patch`, `read_file`
+	// and `update_plan` (measured 2026-10-31, still 2026-11-03; `Bash`,
+	// `run_shell`, `local_shell` and omp's other built-in names pass, and the
+	// list is not exhaustive). Only declared names count: a replayed `bash`
+	// call in history is accepted. Prefixing every function tool with `_` was
+	// accepted with all of omp's built-in tools declared. Meta pay-as-you-go
+	// keys are not attested and keep plain names.
+	tool-name-prefix "_"
 	on-api "openai-responses" {
+		// api.meta.ai answers 400 "name must be at most 64 characters" for a longer
+		// tool name (#9130), and omp caps MCP names at exactly 64 for it. Scoped by
+		// provider and API so it outranks the 128 Responses default in
+		// tool-call-names.kdl. A name the `_` prefix would push past it goes out
+		// unprefixed.
+		tool-call-name-max-length 64
 		// Spark 1.3 Contributor warmed siblings hit 10/10 vs 0/10 with per-child keys (2026-10-12).
 		// Meta documents shared-prefix prompt_cache_key routing; keep the opt-in on these exact Muse Code IDs.
 		models "muse-spark-1.3" "muse-spark-1.3-contributor" "muse-wonder-1.0" "muse-wonder-1.0-contributor" "muse-wonder-full-1.0" "muse-wonder-full-1.0-contributor" {

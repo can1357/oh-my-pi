@@ -40,6 +40,8 @@ pub struct Aliases {
 	suffix:   HashMap<BString, BString>,
 	/// zsh reserved words turned off by `disable -r`.
 	reswords: Vec<BString>,
+	/// zsh/param/private is loaded: `private` is a reserved word.
+	private:  bool,
 }
 
 impl Aliases {
@@ -48,6 +50,7 @@ impl Aliases {
 			&& self.global.is_empty()
 			&& self.suffix.is_empty()
 			&& self.reswords.is_empty()
+			&& !self.private
 	}
 }
 
@@ -66,6 +69,10 @@ impl AliasLookup for Aliases {
 
 	fn reserved_disabled(&self, word: &[u8]) -> bool {
 		self.reswords.iter().any(|w| w.as_slice() == word)
+	}
+
+	fn module_reserved(&self, word: &[u8]) -> bool {
+		self.private && word == b"private"
 	}
 }
 
@@ -109,8 +116,11 @@ fn zsh_alias_table(
 			_ => Vec::new(),
 		})
 	}
-	let mut table =
-		Aliases { reswords: words(cx, vp, MiscKey::ZshDisabledReswords)?, ..Aliases::default() };
+	let mut table = Aliases {
+		reswords: words(cx, vp, MiscKey::ZshDisabledReswords)?,
+		private: super::zsh_module::loaded(cx.store, vp, b"zsh/param/private")?,
+		..Aliases::default()
+	};
 	if state::zsh_option(&mut k.root, cx.store, vp, crate::bash::zshopt::ZshOpt::Aliases)? {
 		let off = words(cx, vp, MiscKey::ZshDisabledAliases)?;
 		let off_suffix = words(cx, vp, MiscKey::ZshDisabledSuffixAliases)?;
@@ -305,7 +315,25 @@ pub fn flush_hash(
 	for (key, _) in state::scan(root, store, vp, Table::CmdHash)? {
 		state::store_record(root, store, vp, key, None);
 	}
+	// zsh: the emptied table is filled again from the start of `$path`.
+	if state::record(
+		store,
+		vp,
+		crate::bash::store::Key::Misc(crate::bash::store::MiscKey::ZshPathChecked),
+	)?
+	.is_some()
+	{
+		let key = crate::bash::store::KeyBuf::Misc(crate::bash::store::MiscKey::ZshPathChecked);
+		state::store_record(root, store, vp, key, None);
+	}
 	Ok(())
+}
+
+/// Whether assigning or unsetting `name` empties the command hash table
+/// ([`flush_hash`]): `PATH`, and on Windows `PATHEXT`, whose extensions
+/// change the same answers.
+pub fn resets_hash(platform: crate::bash::ids::Platform, name: &[u8]) -> bool {
+	name == b"PATH" || (platform == crate::bash::ids::Platform::Windows && name == b"PATHEXT")
 }
 
 /// The `PATH` a lookup of `name` searches: bash's standard path for
@@ -347,18 +375,13 @@ fn kinds(
 			}
 		}
 		if let Some(Record::Func { source, .. }) = ctx.function(name)? {
-			found.push(Kind::Function(source));
+			found.push(Kind::Function((*source).clone()));
 		}
 		if !found.is_empty() && !all {
 			return Ok(found);
 		}
-		let path = search_path(ctx, std_path)?;
 		let mode = mode_of(ctx.vp);
-		let rctx = ResolveCtx {
-			has_slash: name.contains(&b'/'),
-			via:       Via::Type,
-			path_var:  BStr::new(&path),
-		};
+		let rctx = ResolveCtx { has_slash: name.contains(&b'/'), via: Via::Type };
 		let resolved = ctx.cx.host.resolve(BStr::new(name), mode, rctx);
 		// `enable -n` hides a builtin; `enable -f` makes `strmatch` one.
 		let intrinsic = match resolved {

@@ -21,33 +21,10 @@
 
 use bstr::BString;
 
-use crate::bash::{store::Attrs, syntax::zsh::tok::metafy};
+use crate::bash::store::{Attrs, zsh_bucket as bucket};
 
 /// Initial buckets of a parameter hash table (zsh `newparamtable(17, …)`).
 const INITIAL_BUCKETS: usize = 17;
-
-/// zsh `hasher`: `h += (h << 5) + c` over the (metafied) key.
-fn hasher(key: &[u8]) -> u32 {
-	let mut h: u32 = 0;
-	for &c in key {
-		h = h.wrapping_add((h << 5).wrapping_add(u32::from(c)));
-	}
-	h
-}
-
-/// The bucket of `key` (raw bytes, metafied for hashing as zsh stores
-/// parameter names) in a table of `hsize` buckets.
-fn bucket(key: &[u8], hsize: usize) -> usize {
-	let h = if key
-		.iter()
-		.any(|&c| crate::bash::syntax::zsh::tok::is_meta(c))
-	{
-		hasher(&metafy(key))
-	} else {
-		hasher(key)
-	};
-	(h as usize).checked_rem(hsize).unwrap_or(0)
-}
 
 /// A zsh parameter hash table rebuilt from a stored associative array.
 #[derive(Clone, Debug)]
@@ -75,15 +52,66 @@ impl ZHash {
 	/// The table a stored associative array stands for: `items` in zsh
 	/// iteration order, the bucket count from `attrs` ([`Attrs::base`]).
 	pub fn from_stored(items: &[(BString, BString)], attrs: Attrs) -> Self {
-		let grown = attrs.base().min(8);
-		let hsize = INITIAL_BUCKETS << (2 * u32::from(grown));
+		Self::from_items(items.iter().cloned(), INITIAL_BUCKETS, attrs.base())
+	}
+
+	/// Rebuild a stored associative array by moving its owned entries.
+	pub fn from_owned(items: Vec<(BString, BString)>, attrs: Attrs) -> Self {
+		Self::from_items(items, INITIAL_BUCKETS, attrs.base())
+	}
+
+	/// An empty table of `initial` buckets (zsh `newhashtable(initial, …)`).
+	pub fn with_buckets(initial: usize) -> Self {
+		Self { buckets: vec![Vec::new(); initial.max(1)], count: 0, grown: 0 }
+	}
+
+	/// The table of a hash table created with `initial` buckets that grew
+	/// `grown` times, `items` being its entries in iteration order.
+	pub fn from_items(
+		items: impl IntoIterator<Item = (BString, BString)>,
+		initial: usize,
+		grown: u8,
+	) -> Self {
+		let grown = grown.min(8);
+		let hsize = initial.max(1) << (2 * u32::from(grown));
 		let mut buckets = vec![Vec::new(); hsize];
+		let mut count = 0;
 		for (k, v) in items {
-			if let Some(chain) = buckets.get_mut(bucket(k, hsize)) {
-				chain.push((k.clone(), v.clone()));
+			if let Some(chain) = buckets.get_mut(bucket(&k, hsize)) {
+				chain.push((k, v));
+				count += 1;
 			}
 		}
-		Self { buckets, count: items.len(), grown }
+		Self { buckets, count, grown }
+	}
+
+	/// Growth steps since creation (the bucket count is the initial one
+	/// times `4^grown`).
+	pub const fn grown(&self) -> u8 {
+		self.grown
+	}
+
+	/// The entries in zsh iteration order (`scanhashtable`, unsorted).
+	pub fn iter(&self) -> impl Iterator<Item = &(BString, BString)> {
+		self.buckets.iter().flatten()
+	}
+
+	/// zsh `emptyhashtable`: every entry removed, the bucket count kept.
+	pub fn clear(&mut self) {
+		for chain in &mut self.buckets {
+			chain.clear();
+		}
+		self.count = 0;
+	}
+
+	/// Number of entries.
+	pub const fn len(&self) -> usize {
+		self.count
+	}
+
+	/// Whether the table has no entries.
+	pub const fn is_empty(&self) -> bool {
+		self.count == 0
 	}
 
 	/// zsh `addhashnode2`: replace the value of a known key in place, link
@@ -152,6 +180,21 @@ impl ZHash {
 	}
 }
 
+/// The bucket count of the stored table (`attrs`, [`Attrs::base`]) of
+/// `len` entries a new key is added to, at the front of its bucket's chain
+/// ([`AssocArray::insert_front`](crate::bash::store::AssocArray::insert_front)).
+/// `None` when adding it grows the table, which reorders every entry
+/// ([`ZHash::insert`] then rebuilds it).
+pub const fn insert_buckets(len: usize, attrs: Attrs) -> Option<usize> {
+	let base = if attrs.base() > 8 { 8 } else { attrs.base() };
+	let hsize = INITIAL_BUCKETS << (2 * base as u32);
+	if len + 1 >= hsize * 2 {
+		None
+	} else {
+		Some(hsize)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -192,5 +235,30 @@ mod tests {
 		let k1: Vec<_> = items.iter().map(|e| &e.0).collect();
 		let k2: Vec<_> = items2.iter().map(|e| &e.0).collect();
 		assert_eq!(k1, k2, "replacing a value keeps the order");
+	}
+
+	/// Adding each new key at the front of its bucket in place
+	/// ([`insert_buckets`], `AssocArray::insert_front`; rebuilding only when
+	/// the table grows) keeps exactly the order zsh's table iterates in.
+	#[test]
+	fn front_inserts_follow_the_table() {
+		let mut items = crate::bash::store::AssocArray::default();
+		let mut attrs = Attrs::NONE;
+		let mut table = ZHash::new();
+		for i in 0..2000 {
+			let key = BString::from(format!("k{i}"));
+			table.insert(key.clone(), BString::from("v"));
+			if let Some(buckets) = insert_buckets(items.len(), attrs) {
+				items.insert_front(buckets, key, BString::from("v"));
+			} else {
+				let mut h = ZHash::from_stored(&items, attrs);
+				h.insert(key, BString::from("v"));
+				let (stored, grown) = h.into_stored(attrs);
+				(items, attrs) = (stored.into(), grown);
+			}
+		}
+		let (want, want_attrs) = table.into_stored(Attrs::NONE);
+		assert_eq!(&*items, want.as_slice());
+		assert_eq!(attrs.base(), want_attrs.base());
 	}
 }

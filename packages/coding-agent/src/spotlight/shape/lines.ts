@@ -4,8 +4,7 @@
  */
 
 /** A line of earlier shaping (fold, gap, dump marker, note): cheap and says what is where, so never hidden or collapsed. */
-export const MARKER =
-	/^\s*(?:… \[|…\[|\[(?:display only|folded|sections folded|exit code|outline|cut|uniform|intent)|\(\d+ rows\))/;
+export const MARKER = /^\s*(?:… \[|…\[|\[(?:display only|exit code|outline|cut|uniform)|\(\d+ rows\))/;
 
 /** Lines shorter than this (normalised) are too generic to count as already seen, or as hidden by a cut. */
 export const WITNESS_CHARS = 12;
@@ -16,6 +15,11 @@ export const AGAIN_CHARS = 24;
 /** A line without its `N:` / `cat -n` / `path:N:` prefix and surrounding blanks: the key lines are compared by. */
 export function norm(line: string): string {
 	return line.replace(/^(?:[\w./-]+:)?\s*\d+[\t:|-]\s?/, "").trim();
+}
+
+/** Key of normalised line `next` right after `prev` in one text: the order seen lines collapse in ({@link norm}). */
+export function pairKey(prev: string, next: string): string {
+	return `${prev}\n${next}`;
 }
 
 /** Words too generic in intents to say anything about a line. */

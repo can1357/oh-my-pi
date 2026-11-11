@@ -145,7 +145,7 @@ describe("SessionMemory mental-model boundary reload", () => {
 			setHindsightSessionState: () => {},
 			getMnemopiSessionState: () => undefined,
 			takeMnemopiSessionState: () => undefined,
-			setBaseSystemPrompt: () => {},
+			restoreBaseSystemPromptBeforeMemoryPromotion: () => {},
 			refreshBaseSystemPrompt: publishReset,
 			replaceMemoryTools: async () => {},
 		} as unknown as SessionMemoryHost;

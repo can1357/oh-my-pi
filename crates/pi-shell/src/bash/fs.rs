@@ -45,6 +45,58 @@ pub fn url_root_len(path: &[u8]) -> Option<usize> {
 	path[colon..].starts_with(b"://").then_some(colon + 3)
 }
 
+/// An MSYS drive alias (`/c/x`, `/mnt/c/x`) in the engine's Windows spelling
+/// `C:/x`; `None` for any other path.
+///
+/// The engine applies it on Windows wherever it makes a name absolute, so
+/// command names, redirections, `test` and `cd` reach the drive the alias
+/// names ([`pi_vfs::msys_drive`] parses it).
+pub fn msys_drive_path(path: &[u8]) -> Option<BString> {
+	let (letter, tail) = pi_vfs::msys_drive(path)?;
+	let mut out = BString::from(vec![letter, b':', b'/']);
+	out.extend_from_slice(tail);
+	Some(out)
+}
+
+/// A Windows path without the verbatim prefix `canonicalize` puts on drive
+/// and share paths, as a user and `$PWD` spell it.
+///
+/// `\\?\C:\x` becomes `C:\x`, `\\?\UNC\srv\share\x` becomes
+/// `\\srv\share\x`. The prefix stays where the plain spelling names another
+/// file or none: other verbatim forms (`\\?\Volume{…}\x`), a component
+/// Windows rewrites in a plain path (a device name such as `nul` or `com1`,
+/// a trailing `.` or space), a path over `MAX_PATH`.
+pub fn plain_windows_path(path: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+	use std::borrow::Cow;
+	let plain = if let Some(unc) = path.strip_prefix(br"\\?\UNC\") {
+		[br"\\".as_slice(), unc].concat()
+	} else if let Some(rest) = path.strip_prefix(br"\\?\")
+		&& let [drive, b':', b'\\', ..] = rest
+		&& drive.is_ascii_alphabetic()
+	{
+		rest.to_vec()
+	} else {
+		return Cow::Borrowed(path);
+	};
+	/// Device names Windows finds in any directory of a plain path.
+	const DEVICES: [&[u8]; 4] = [b"con", b"prn", b"aux", b"nul"];
+	let rewritten = |c: &&[u8]| {
+		let base = c.split(|&b| b == b'.').next().unwrap_or_default();
+		let base = base.trim_ascii_end();
+		matches!(c.last(), Some(b'.' | b' '))
+			|| DEVICES.iter().any(|d| base.eq_ignore_ascii_case(d))
+			|| (base.len() == 4
+				&& (base[..3].eq_ignore_ascii_case(b"com") || base[..3].eq_ignore_ascii_case(b"lpt"))
+				&& matches!(base[3], b'1'..=b'9'))
+	};
+	// `MAX_PATH` counts the terminating NUL.
+	if plain.len() >= 260 || plain.split(|&b| b == b'\\').any(|c| rewritten(&c)) {
+		Cow::Borrowed(path)
+	} else {
+		Cow::Owned(plain)
+	}
+}
+
 /// Result of starting a filesystem operation.
 pub enum FsPoll<T> {
 	/// The answer is available now.
@@ -96,6 +148,135 @@ pub trait Fs {
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode>;
 	/// Validate a `cd` target; the engine itself owns the cwd.
 	fn chdir_check(&mut self, path: &BStr) -> FsPoll<()>;
+	/// `unlink(2)` (HISTFILE lock and `.new` files). Hosts that cannot
+	/// remove files refuse with `Unsupported`.
+	fn unlink(&mut self, _path: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `rename(2)`: replace `to` by `from` (HISTFILE save by copy).
+	fn rename(&mut self, _from: &BStr, _to: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `symlink(2)`: create `path` as a symbolic link holding `target`
+	/// (zsh's HISTFILE `.LOCK`); `AlreadyExists` when `path` exists.
+	fn symlink(&mut self, _target: &BStr, _path: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `link(2)`: create the hard link `to` of `from`; `AlreadyExists`
+	/// when `to` exists.
+	fn link(&mut self, _from: &BStr, _to: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// Open `path` for reading and writing and take an exclusive
+	/// whole-file record lock on it without waiting (`fcntl(F_SETLK)`
+	/// with `F_WRLCK`, zsh's `histfcntllock`): `WouldBlock` while another
+	/// process holds one. The lock lasts as long as the returned file.
+	fn lock(&mut self, _path: &BStr) -> FsPoll<Box<dyn File>> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// Take (or release) a whole-file record lock on the open file `file`
+	/// without waiting (`fcntl(F_SETLK)`, zsh's `zsystem flock`):
+	/// `WouldBlock` while another process holds a conflicting lock. The
+	/// lock lasts until it is released or the process closes a descriptor
+	/// of the file.
+	fn lock_fd(&mut self, _file: OsHandle, _lock: FdLock) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `mkdir(2)` of `path` with exactly the permission bits `mode` (zsh's
+	/// `mkdir` builtin clears the umask around the call, so no mask applies);
+	/// `AlreadyExists` when `path` exists.
+	fn mkdir(&mut self, _path: &BStr, _mode: u32) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `rmdir(2)`: remove the empty directory `path`.
+	fn rmdir(&mut self, _path: &BStr) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `chmod(2)`: set the permission bits (`0o7777`) of `path`, following
+	/// symbolic links.
+	fn chmod(&mut self, _path: &BStr, _mode: u32) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `chown(2)` (`follow`) or `lchown(2)`: set the owner and/or group of
+	/// `path`; `None` leaves that id unchanged.
+	fn chown(
+		&mut self,
+		_path: &BStr,
+		_uid: Option<u32>,
+		_gid: Option<u32>,
+		_follow: bool,
+	) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `sync(2)`: schedule every buffered write to reach its device.
+	fn sync(&mut self) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `getxattr(2)`: the value of the extended attribute `name` of `path`
+	/// (`follow = false`: of a symbolic link itself, `XATTR_NOFOLLOW`).
+	fn getxattr(&mut self, _path: &BStr, _name: &BStr, _follow: bool) -> FsPoll<BString> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `setxattr(2)`: create or replace the extended attribute `name`.
+	fn setxattr(&mut self, _path: &BStr, _name: &BStr, _value: &[u8], _follow: bool) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `removexattr(2)`: remove the extended attribute `name`.
+	fn removexattr(&mut self, _path: &BStr, _name: &BStr, _follow: bool) -> FsPoll<()> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// `listxattr(2)`: the names of the extended attributes of `path`, in
+	/// the order the system lists them.
+	fn listxattr(&mut self, _path: &BStr, _follow: bool) -> FsPoll<Vec<BString>> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+	/// The user and group database (`getpwnam`, `getpwuid`, `getgrnam`,
+	/// `getgrgid`, the `getpwent` walk): the matching entries, none when
+	/// there is no such user or group.
+	fn user_db(&mut self, _query: &PwQuery) -> FsPoll<Vec<PwEntry>> {
+		FsPoll::Ready(Err(io::ErrorKind::Unsupported.into()))
+	}
+}
+
+/// A lookup in the user or group database ([`Fs::user_db`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PwQuery {
+	/// `getpwnam`: the user called this.
+	UserName(BString),
+	/// `getpwuid`: the user with this uid.
+	Uid(u32),
+	/// `getgrnam`: the group called this.
+	GroupName(BString),
+	/// `getgrgid`: the group with this gid.
+	Gid(u32),
+	/// `setpwent`/`getpwent`: every user, in database order.
+	AllUsers,
+}
+
+/// A user or group database entry ([`Fs::user_db`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PwEntry {
+	/// User or group name.
+	pub name:  BString,
+	/// The uid of a user, the gid of a group.
+	pub id:    u32,
+	/// A user's primary group; a group's own gid.
+	pub gid:   u32,
+	/// A user's home directory (empty for a group).
+	pub dir:   BString,
+	/// A user's login shell (empty for a group).
+	pub shell: BString,
+}
+
+/// A whole-file record lock operation of [`Fs::lock_fd`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FdLock {
+	/// A shared lock (`F_RDLCK`).
+	Shared,
+	/// An exclusive lock (`F_WRLCK`).
+	Exclusive,
+	/// Release the process's lock (`F_UNLCK`).
+	Unlock,
 }
 
 /// Directory listing iterator.
@@ -128,6 +309,37 @@ pub trait File: Send {
 	fn kind(&self) -> FileKind;
 	/// OS handle to give an external directly; `None` makes the host pump.
 	fn os_handle(&self) -> Option<OsHandle>;
+	/// The OS handle an external writes through, when it is not
+	/// [`Self::os_handle`]: a Windows console reads `CONIN$` and writes
+	/// `CONOUT$` (a Unix terminal fd does both).
+	fn os_output_handle(&self) -> Option<OsHandle> {
+		self.os_handle()
+	}
+	/// `fstat(2)` of the open object (`zstat -f`); objects with no host
+	/// metadata refuse with `Unsupported`.
+	fn stat(&self) -> io::Result<Stat> {
+		Err(io::ErrorKind::Unsupported.into())
+	}
+	/// Whether writes must pass through the engine to observe visible output.
+	fn observes_output(&self) -> bool {
+		false
+	}
+	/// Opaque run-generation/capture identity for sharing an external relay
+	/// when stdout and stderr lead to the same visible byte stream.
+	fn output_key(&self) -> Option<(usize, i32)> {
+		None
+	}
+	/// Write with an execution identity. Visible stream implementations
+	/// observe accepted bytes under the same lock that orders their writes;
+	/// ordinary files and pipeline buffers simply forward the operation.
+	fn poll_write_tagged(
+		&mut self,
+		cx: &mut Context<'_>,
+		bytes: &[u8],
+		_tag: Option<crate::bash::ids::CmdTag>,
+	) -> Poll<io::Result<usize>> {
+		self.poll_write(cx, bytes)
+	}
 	/// Duplicate (`n>&m` into an external, `exec 3>&1`).
 	fn dup(&self) -> io::Result<Box<dyn File>>;
 }
@@ -161,8 +373,18 @@ impl OpenFlags {
 	pub const CREATE: Self = Self(1 << 2);
 	/// Fail if it exists (`set -o noclobber`).
 	pub const EXCL: Self = Self(1 << 5);
+	/// Do not update the access time (`O_NOATIME`; Linux, ignored
+	/// elsewhere).
+	pub const NOATIME: Self = Self(1 << 8);
+	/// Fail on a symbolic link as last component (`O_NOFOLLOW`; zsh's
+	/// `sysopen -o nofollow`).
+	pub const NOFOLLOW: Self = Self(1 << 6);
+	/// Non-blocking open and I/O (`O_NONBLOCK`).
+	pub const NONBLOCK: Self = Self(1 << 9);
 	/// Open for reading.
 	pub const READ: Self = Self(1);
+	/// Synchronous writes (`O_SYNC`).
+	pub const SYNC: Self = Self(1 << 7);
 	/// Truncate to zero length.
 	pub const TRUNC: Self = Self(1 << 3);
 	/// Open for writing.
@@ -261,6 +483,11 @@ pub struct Stat {
 	/// Allocated 512-byte blocks, as `st_blocks` (`GLOBSORT=blocks`). On
 	/// Windows `ceil(size / 512)`.
 	pub blocks:   u64,
+	/// Device id a character or block device node stands for (`st_rdev`,
+	/// `zstat +rdev`); 0 for anything else.
+	pub rdev:     u64,
+	/// Preferred I/O block size (`st_blksize`, `zstat +blksize`).
+	pub blksize:  u64,
 }
 
 /// One directory entry.
@@ -316,6 +543,64 @@ pub enum FsOp {
 	MkTemp,
 	/// [`Fs::chdir_check`]
 	ChdirCheck,
+	/// A history file step (read, write, lock, rename, a lock backoff).
+	HistFile,
+	/// [`Fs::mkdir`]
+	Mkdir,
+	/// [`Fs::rmdir`]
+	Rmdir,
+	/// [`Fs::unlink`]
+	Unlink,
+	/// [`Fs::rename`]
+	Rename,
+	/// [`Fs::symlink`]
+	Symlink,
+	/// [`Fs::link`]
+	Link,
+	/// [`Fs::chmod`]
+	Chmod,
+	/// [`Fs::chown`]
+	Chown,
+	/// [`Fs::sync`]
+	Sync,
+	/// [`Fs::getxattr`], [`Fs::setxattr`], [`Fs::removexattr`],
+	/// [`Fs::listxattr`]
+	Xattr,
+	/// [`Fs::user_db`]
+	UserDb,
+	/// A whole-file write through [`Fs::open`] (zsh/mapfile assignment).
+	Write,
 }
 
 crate::bash::packed_names::packed_names!(FsOp);
+
+#[cfg(test)]
+mod tests {
+	use super::plain_windows_path;
+
+	/// `cd` and `pwd -P` showed `\\?\C:\…`. Dropping the prefix must not
+	/// change which file the path names: a device-named component, a
+	/// trailing dot or space, an over-long path, or another verbatim form
+	/// keeps it.
+	#[test]
+	fn verbatim_prefixes_go_only_where_the_plain_path_is_the_same_file() {
+		let plain =
+			|p: &str| String::from_utf8(plain_windows_path(p.as_bytes()).into_owned()).unwrap();
+		assert_eq!(plain(r"\\?\C:\Users\b"), r"C:\Users\b");
+		assert_eq!(plain(r"\\?\UNC\srv\share\d"), r"\\srv\share\d");
+		assert_eq!(plain(r"C:\already"), r"C:\already");
+		for kept in [
+			r"\\?\C:\dir\nul",
+			r"\\?\C:\dir\COM1.txt",
+			r"\\?\C:\dir\aux \x",
+			r"\\?\C:\dot.",
+			r"\\?\C:\space ",
+			r"\\?\Volume{0e1c}\x",
+		] {
+			assert_eq!(plain(kept), kept);
+		}
+		assert_eq!(plain(r"\\?\C:\dir\com10"), r"C:\dir\com10");
+		let long = format!(r"\\?\C:\{}", "a".repeat(260));
+		assert_eq!(plain(&long), long);
+	}
+}

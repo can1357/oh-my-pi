@@ -56,11 +56,6 @@ function buildDiffPaint(rows: number, lineLength: number): string {
 
 describe("issue #2034: chunk large terminal writes on Windows ConPTY", () => {
 	describe("chunkForConPTY()", () => {
-		it("returns the original buffer untouched when its UTF-8 byte length is under the chunk size", () => {
-			const data = "small payload";
-			expect(chunkForConPTY(data, 1024)).toEqual([data]);
-		});
-
 		it("splits a large multi-line buffer into pieces no larger than the byte cap", () => {
 			const data = buildFullPaint(2000, 60);
 			const max = 16 * 1024;

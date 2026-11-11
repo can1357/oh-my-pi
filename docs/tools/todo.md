@@ -27,7 +27,7 @@ The params object **is** a single op — the discriminator and its fields live a
 | `block`   | `task` or `phase`            | `reason`                                                                 | Marks actionable target tasks `blocked`; completed/abandoned tasks are left closed. Whitespace in `reason` is collapsed to one line.                                   |
 | `unblock` | `task` or `phase`            | None                                                                     | Returns blocked target tasks to `pending` and clears their blocker notes.                                                                                              |
 | `rm`      | `task` or `phase` or neither | None                                                                     | Removes the target task, clears the phase's task list, or clears all task lists.                                                                                       |
-| `append`  | `phase`, `items`             | None                                                                     | Appends new `pending` tasks to a phase; creates the phase if missing.                                                                                                  |
+| `append`  | `items`                      | `phase` (defaults to the active/next task's phase, then the last phase, then `Tasks`) | Appends new `pending` tasks to the selected phase; creates the phase if missing. |
 | `view`    | None                         | None                                                                     | Echoes the current list. A `view` call is read-only: no normalization, no state write.                                                                                 |
 
 ### Fields
@@ -37,9 +37,13 @@ The params object **is** a single op — the discriminator and its fields live a
 | `op`     | `"init" \| "start" \| "done" \| "rm" \| "drop" \| "block" \| "unblock" \| "append" \| "view"` | Yes in the schema                                                                                 | Operation discriminator. At execution time, an omitted op is repaired only for unambiguous `list`/`items` payloads (see Flow).                                                   |
 | `list`   | `{ phase: string; items: string[] }[]`                                                        | For `init` (unless a flat `items` list is given)                                                  | Full replacement payload. Each phase's `items` has `minItems: 1`; an explicit `list: []` clears all phases.                                                                      |
 | `task`   | `string`                                                                                      | For `start`; for task-targeted `done`/`drop`/`block`/`unblock`/`rm`                               | Exact task content match.                                                                                                                                                        |
-| `phase`  | `string`                                                                                      | For `append`; for phase-targeted `done`/`drop`/`block`/`unblock`/`rm`; optional for a flat `init` | Exact phase name match, except `append` lazily creates a missing phase and a flat `init` synthesizes one (default `Tasks`).                                                      |
+| `phase`  | `string` | For phase-targeted `done`/`drop`/`block`/`unblock`/`rm`; optional for `append` and flat `init` | Exact phase name match. `append` creates a named phase if missing; omitted names use the selection rules below. Flat `init` defaults to `Tasks`. |
 | `items`  | `string[]`                                                                                    | For `append`; or as a flat `init` payload                                                         | Tasks to append, or the full task list for a flat `init`. Op-specific validation requires at least one item; a stray empty array on an unrelated op is schema-valid and ignored. |
 | `reason` | `string`                                                                                      | No                                                                                                | Optional blocker note for `block`; normalized to a single trimmed line.                                                                                                          |
+
+For `init`, an absent or empty phase name becomes `Tasks`; duplicate phase names are rejected after this default applies.
+
+For `append`, an omitted `phase` selects the in-progress task's phase, otherwise the first pending task's phase. If no task is actionable (including when all tasks are blocked), it uses the last phase; if no phases exist, it creates `Tasks`. An explicit phase overrides this selection, but an explicit empty string is rejected. Omitting `op` as well as `phase` remains ambiguous when a list exists and is not inferred as `append`.
 
 ## Outputs
 
@@ -155,7 +159,7 @@ The same file also exposes non-tool helpers used by `/todo`:
    - `Task "..." not found` with an extra empty-list hint when applicable, or a hint that tasks are referenced by content (not `task-N` IDs) when the missing content looks like an ID
    - `Missing phase name`
    - `Phase "..." not found`
-   - `Missing phase name for append operation`
+   - `Missing phase name for append operation` (an explicit empty `phase`, not an omitted one)
    - `block requires a task or phase target`
    - `unblock requires a task or phase target`
    - `Missing items for append operation`

@@ -235,9 +235,12 @@ describe("spotlight shaping hooks", () => {
 		expect(trace.savedTokens).toBeGreaterThan(0);
 		const id = trace.original.url.replace("artifact://", "");
 		expect(manager.getArtifactContent(id)).toBe(LONG_LOG);
-		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not.
-		expect(trace.original.heat[200]).toBe("9");
-		expect(trace.original.heat[0]).toBe("1");
+		// Line 201 is the error: the hottest line, and shown to the agent; most of the log was not. The rest tie, so
+		// they share one rank.
+		const heat = trace.original.heat;
+		expect(heat[200]).toBe("9");
+		expect(new Set([...heat.slice(0, 200), ...heat.slice(201)])).toEqual(new Set([heat[0]]));
+		expect(heat[0]).not.toBe("9");
 		const kept = trace.original.kept;
 		expect(kept.some(([from, to]) => from <= 201 && 201 <= to)).toBe(true);
 		expect(kept.reduce((n, [from, to]) => n + to - from + 1, 0)).toBeLessThan(200);
@@ -268,7 +271,7 @@ describe("spotlight shaping hooks", () => {
 		const scorer = new RecordingScorer(client, "low");
 		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
 		expect(await scorer.score(["a", "b"], ctx)).toBeNull();
-		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1 });
+		expect(scorer.usage).toMatchObject({ calls: 1, failures: 1, failureCauses: { timeout: 1 } });
 
 		const { session, manager } = await experimentSession(client);
 		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
@@ -277,8 +280,39 @@ describe("spotlight shaping hooks", () => {
 		expect(result.isError).toBeUndefined();
 		expect(resultText(result)).toContain(LONG_LOG.slice(LONG_LOG.lastIndexOf("\n") + 1));
 		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
-		expect(entry.spotlight).toMatchObject({ failures: 1 });
+		expect(entry.spotlight).toMatchObject({ failures: 1, failureCauses: { timeout: 1 } });
 		expect(entry.error).toBeUndefined();
+	});
+
+	it("reports a lost Stencil credential once per loss, not on warm-up, and again after a re-sign-in", async () => {
+		const credential = new StencilCredential();
+		const tokens: (string | null)[] = [null, null, null, "test-token", null];
+		vi.spyOn(credential, "resolve").mockImplementation(async () => tokens.shift() ?? null);
+		const client = new SpotlightClient({
+			url: "http://spotlight.test/v1/spotlight",
+			timeoutMs: 2_000,
+			credential,
+			fetch: fakeSpotlight({ score: () => 0.5 }),
+		});
+		let missing = 0;
+		client.onCredentialMissing = () => missing++;
+		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
+		const score = async () => {
+			const scorer = new RecordingScorer(client, "low");
+			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
+		};
+
+		// The warm-up finds no credential too, but leaves it to the first ranking: one report below, not two.
+		client.warm();
+		const unsigned = await score();
+		expect(unsigned.scores).toBeNull();
+		expect(unsigned.usage.failureCauses).toEqual({ no_credential: 1 });
+		expect(missing).toBe(1);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(1);
+		expect((await score()).scores).toEqual([0.5]);
+		expect((await score()).scores).toBeNull();
+		expect(missing).toBe(2);
 	});
 });
 
@@ -373,7 +407,7 @@ describe("spotlight holdout", () => {
 });
 
 describe("spotlight whole reads", () => {
-	it("shows a Markdown read and one line range as plain does, but still cuts a multi-range read", async () => {
+	it("shows a Markdown read and bounded line ranges as plain does, but still cuts an open-ended range", async () => {
 		const shaped = await experimentSession(undefined, {}, { scoreFree: 1 });
 		const plain = await plainSession();
 		// Every line is past the 400-character cap a cut read applies.
@@ -385,105 +419,18 @@ describe("spotlight whole reads", () => {
 		const read = async ({ session }: { session: ToolSession }, target: string) =>
 			resultText(await new ReadTool(session).execute("r1", { path: target }));
 
-		for (const target of ["wide.md", "wide.md:1-10,20-30", "wide.ts:5-40", "wide.ts:5+30"]) {
+		for (const target of [
+			"wide.md",
+			"wide.md:1-10,20-30",
+			"wide.ts:5-40",
+			"wide.ts:5+30",
+			"wide.ts:1-10,20-30",
+			"wide.ts:raw:5-40",
+			"wide.ts:-20",
+		]) {
 			expect(await read(shaped, target)).toBe(await read(plain, target));
 		}
-		for (const target of ["wide.ts:1-10,20-30", "wide.ts:raw:5-40"]) {
-			expect(await read(shaped, target)).not.toBe(await read(plain, target));
-		}
-	});
-});
-
-describe("spotlight edit gate", () => {
-	it("marks a read edit-likely for a code file read by a main session, or one a subagent already read or edited", async () => {
-		const main = await experimentSession();
-		const sub = await experimentSession(undefined, {}, { subagent: true });
-		for (const { session } of [main, sub]) {
-			await Bun.write(path.join(session.cwd, "src/app.ts"), "export const app = 1;\nexport const b = 2;\n");
-			await Bun.write(path.join(session.cwd, "lib.py"), "def run():\n    return 1\n");
-			await Bun.write(path.join(session.cwd, "util.go"), "package util\n");
-			await Bun.write(path.join(session.cwd, "notes.md"), "# Notes\n\nNothing to edit here.\n");
-		}
-		const edit = wrapToolWithMetaNotice({
-			name: "edit",
-			label: "edit",
-			description: "fake edit",
-			parameters: {},
-			// A patch payload names its files in headers only the tool reads.
-			matcherPaths: () => ["util.go"],
-			async execute() {
-				return { content: [{ type: "text", text: "edited" }] };
-			},
-		} as unknown as AgentTool);
-
-		await new ReadTool(main.session).execute("m1", { path: "src/app.ts" });
-		await new ReadTool(main.session).execute("m2", { path: "notes.md" });
-		await new ReadTool(sub.session).execute("s1", { path: "src/app.ts:1-2" });
-		await new ReadTool(sub.session).execute("s2", { path: "./src/app.ts" });
-		await agentCall(fakeTool("write", "written"), sub, "w1", { path: "lib.py", content: "x = 1\n" });
-		await new ReadTool(sub.session).execute("s3", { path: "lib.py" });
-		await agentCall(edit, sub, "e1", { input: "*** Update File: util.go" });
-		await new ReadTool(sub.session).execute("s4", { path: "util.go" });
-		await new ReadTool(sub.session).execute("s5", { path: "notes.md" });
-		await new ReadTool(sub.session).execute("s6", { path: "notes.md" });
-
-		const likely = (manager: SessionManager) =>
-			entries(manager, SPOTLIGHT_ENTRY.shape)
-				.filter(entry => entry.tool === "read")
-				.map(entry => [entry.toolCallId, entry.editLikely]);
-		expect(likely(main.manager)).toEqual([
-			["m1", true],
-			["m2", false],
-		]);
-		// A subagent's first read of a code file is not; a second (selector and `./` aside), or one after an edit, is.
-		expect(likely(sub.manager)).toEqual([
-			["s1", false],
-			["s2", true],
-			["s3", true],
-			["s4", true],
-			["s5", false],
-			["s6", false],
-		]);
-	});
-
-	it("gives a gated read plain's page and traces the would-be cut, saving nothing", async () => {
-		const gated = await experimentSession(undefined, {}, { editGate: 1 });
-		const plain = await plainSession();
-		for (const { session } of [gated, plain]) await Bun.write(path.join(session.cwd, "big.ts"), BIG_SOURCE);
-
-		const result = await new ReadTool(gated.session).execute("r1", { path: "big.ts" });
-		const plainResult = await new ReadTool(plain.session).execute("r1", { path: "big.ts" });
-
-		expect(resultText(result)).toBe(resultText(plainResult));
-		const [entry] = entries(gated.manager, SPOTLIGHT_ENTRY.shape);
-		expect(entry).toMatchObject({ toolCallId: "r1", tool: "read", gated: true, editLikely: true });
-		expect(entry.holdout).toBeUndefined();
-		expect(entry.steps).toContain("outline");
-		const trace = spotlightDetails(result.details);
-		const shapedUrl = trace?.original?.shapedUrl;
-		if (!trace || !shapedUrl) throw new Error("a gated read keeps its would-be cut");
-		expect(trace).toMatchObject({ gated: true, editLikely: true, savedTokens: 0 });
-		expect(trace.holdout).toBeUndefined();
-		// The sizes are the would-be cut's: smaller than the page the model got.
-		expect(trace.outTokens).toBeLessThan(trace.plainTokens ?? 0);
-		expect(gated.manager.getArtifactContent(shapedUrl.replace("artifact://", ""))).toMatch(/… \[lines \d+-\d+\]/);
-	});
-
-	it("applies the cuts it does not gate: a subagent's first read of a code file, and every other tool's", async () => {
-		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("ERROR") ? 1 : 0) }));
-		const run = await experimentSession(client, {}, { editGate: 1, subagent: true });
-		await Bun.write(path.join(run.session.cwd, "big.ts"), BIG_SOURCE);
-		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
-
-		const read = await new ReadTool(run.session).execute("r1", { path: "big.ts" });
-		const bash = await new BashTool(run.session).execute("b1", { command: "./ingest.sh" });
-
-		expect(resultText(read)).toMatch(/… \[lines \d+-\d+\]/);
-		expect(resultText(bash).length).toBeLessThan(LONG_LOG.length);
-		const traces = [spotlightDetails(read.details), spotlightDetails(bash.details)];
-		expect(traces.map(trace => trace?.gated)).toEqual([undefined, undefined]);
-		expect(traces.map(trace => trace?.editLikely)).toEqual([false, undefined]);
-		expect(traces.every(trace => (trace?.savedTokens ?? 0) > 0)).toBe(true);
+		expect(await read(shaped, "wide.ts:5-")).not.toBe(await read(plain, "wide.ts:5-"));
 	});
 });
 
@@ -619,33 +566,27 @@ describe("spotlight column-capped output", () => {
 });
 
 describe("spotlight score-free coin", () => {
-	it("draws holdout, then the edit gate for edit-likely reads only, then score-free, stopping at the first landed", async () => {
+	it("draws holdout, then score-free, stopping at the first landed", async () => {
 		const draws: number[] = [];
 		let calls = 0;
 		const experiment = new SpotlightExperiment(
 			spotlightClient(fakeSpotlight({})),
 			"low",
 			SessionManager.inMemory(await tmpDir()),
-			{ holdout: 0.15, editGate: 0.8, scoreFree: 0.5 },
+			{ holdout: 0.15, scoreFree: 0.5 },
 			() => draws[calls++] ?? 1,
 		);
-		const draw = (editLikely: boolean, coins: number[]) => {
+		const draw = (coins: number[]) => {
 			draws.splice(0, draws.length, ...coins);
 			calls = 0;
-			return { coins: experiment.drawCoins(editLikely), drawn: calls };
+			return { coins: experiment.drawCoins(), drawn: calls };
 		};
 
-		// A landed holdout coin draws nothing more, edit-likely or not.
-		expect(draw(true, [0.1])).toEqual({ coins: { holdout: true, gate: false, scoreFree: false }, drawn: 1 });
-		// Not held out: an edit-likely read draws the gate next, and a landed gate skips score-free.
-		expect(draw(true, [0.9, 0.5])).toEqual({ coins: { holdout: false, gate: true, scoreFree: false }, drawn: 2 });
-		expect(draw(true, [0.9, 0.9, 0.3])).toEqual({
-			coins: { holdout: false, gate: false, scoreFree: true },
-			drawn: 3,
-		});
-		// Any other result never draws the gate: its second coin is score-free's.
-		expect(draw(false, [0.9, 0.5])).toEqual({ coins: { holdout: false, gate: false, scoreFree: false }, drawn: 2 });
-		expect(draw(false, [0.9, 0.3])).toEqual({ coins: { holdout: false, gate: false, scoreFree: true }, drawn: 2 });
+		// A landed holdout coin draws nothing more.
+		expect(draw([0.1])).toEqual({ coins: { holdout: true, scoreFree: false }, drawn: 1 });
+		// Not held out: score-free is drawn next.
+		expect(draw([0.9, 0.5])).toEqual({ coins: { holdout: false, scoreFree: false }, drawn: 2 });
+		expect(draw([0.9, 0.3])).toEqual({ coins: { holdout: false, scoreFree: true }, drawn: 2 });
 	});
 
 	const DOC = ["# Service", ""]
@@ -807,9 +748,7 @@ describe("spotlight shaping of any tool", () => {
 		expect(text.length).toBeLessThan(OUTPUT.length / 4);
 		expect(sources).toContain(callSummary("grep", ARGS));
 		// Every hidden run reads back from the saved copy the last line names.
-		const footer = /\[cut: … \[A-B\] are lines A-B of (artifact:\/\/(\d+)) \(read artifact:\/\/\d+:A-B\)\]$/.exec(
-			text,
-		);
+		const footer = /\[cut: (artifact:\/\/(\d+))\]$/.exec(text);
 		if (!footer) throw new Error("a cut names where its hidden lines are");
 		const saved = run.manager.getArtifactContent(footer[2]) ?? "";
 		expect(saved).toBe(OUTPUT);

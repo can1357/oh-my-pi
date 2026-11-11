@@ -39,7 +39,6 @@ import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
 	compactionThresholdSettings,
-	createMCPProxyTools,
 	createSubagentSettings,
 	followMCPTools,
 	replayRevivedAgentStart,
@@ -112,6 +111,24 @@ export interface PersistedReviveSpec {
 	readonly enableLsp: boolean;
 	readonly eventBus: EventBus | undefined;
 	readonly subagentEventBus: EventBus | undefined;
+}
+
+/**
+ * Durable agent definition name (`scout`, `reviewer`, …) of a persisted subagent.
+ * Cold-revived refs register with `displayName: id` (`registry/persisted-agents.ts`),
+ * so a generated task id would silently drop agent-scoped rules and budgets.
+ * `init.agent` carries the real name; only files predating that field fall back to
+ * `displayName`. A parked transcript may also predate the `main`/`sub` definition-name
+ * reservation (`discovery/helpers.ts`): a persisted `init.agent` of either sentinel
+ * value from such a legacy custom agent must not masquerade as that sentinel, so it
+ * falls back to `displayName` too, keeping it scoped as an ordinary subagent under its
+ * generated id instead of `main` or the shared `sub` bucket.
+ */
+export function persistedAgentName(displayName: string, init: PersistedSessionInit): string {
+	const normalized = init.agent?.trim().toLowerCase();
+	return init.agent && normalized !== MAIN_AGENT_RULE_NAME && normalized !== SUB_AGENT_RULE_NAME
+		? init.agent
+		: displayName;
 }
 
 /**
@@ -410,8 +427,9 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const structured = revivedToolNames.includes("yield");
 	const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 	// Subscribe before minting proxies so a manager change during startup is replayed on bind.
-	const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
-	const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+	// The revived session reopens its own view, keeping the tools its earlier requests rendered.
+	const mcpFollower = mcpManager ? followMCPTools(mcpManager, { scope: reopened.getSessionId() }) : undefined;
+	const mcpProxyTools = mcpFollower?.proxyTools() ?? [];
 
 	let session: AgentSession;
 	try {
@@ -430,24 +448,8 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			sessionManager: reopened,
 			agentId: ref.id,
 			agentDisplayName: ref.displayName,
-			// `agents` rule scoping keys on the durable definition name (`scout`,
-			// `reviewer`, …), not the registry display label — cold-revived refs
-			// register with `displayName: id` (registry/persisted-agents.ts), so a
-			// generated task id would silently drop every agent-scoped rule.
-			// `init.agent` carries the real name; only files predating that field
-			// fall back to the display label. A parked transcript may also predate
-			// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
-			// persisted `init.agent` of either sentinel value from such a legacy
-			// custom agent must not masquerade as that sentinel here, so it falls
-			// back to the display label too, keeping it scoped as an ordinary
-			// subagent under its generated id instead of `main` or the shared `sub`
-			// bucket.
-			agentName:
-				init.agent &&
-				init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
-				init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
-					? init.agent
-					: ref.displayName,
+			// `agents` rule scoping keys on the durable definition name (see `persistedAgentName`).
+			agentName: persistedAgentName(ref.displayName, init),
 			parentTaskPrefix: ref.id,
 			asyncJobManager: spec.asyncJobManager,
 			parentAgentId: ref.parentId,
@@ -495,6 +497,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 						enableMCP: !mcpManager,
 						mcpManager,
 						mcpTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+						mcpToolScope: mcpFollower?.scope,
 					}),
 			...seanceOptions,
 		}));
@@ -550,7 +553,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
-		...softRequestBudgetFor(ref.displayName, spec.settings),
+		...softRequestBudgetFor(persistedAgentName(ref.displayName, init), spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
 		sessionFile,

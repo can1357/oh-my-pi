@@ -42,7 +42,7 @@ import {
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { type GeneratedProvider, getBundledModels, getEffectiveTokenCost } from "@oh-my-pi/pi-catalog/models";
-import { type ModelKind, modelKind } from "@oh-my-pi/pi-catalog/types";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -55,7 +55,7 @@ import {
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
 } from "../session/auth-broker-config";
-import { runAuthGatewayStdio } from "./auth-gateway-stdio";
+import { GATEWAY_MODEL_KINDS, runAuthGatewayStdio } from "./auth-gateway-stdio";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthGatewayAction = "serve" | "stdio" | "token" | "status" | "check";
@@ -207,25 +207,6 @@ export function createAuthGatewayClientsReloader(
 		return inFlight;
 	};
 }
-
-/**
- * Catalog kinds the gateway has a route for: chat (`/v1/chat/completions`,
- * `/v1/messages`, `/v1/responses`, `/v1/pi/stream`), judge (`/v1/systemone`),
- * image (`/v1/images/*`), tts (`/v1/audio/speech`), stt
- * (`/v1/audio/transcriptions`), embedding (`/v1/embeddings`), rerank
- * (`/v1/rerank`), video (`/v1/videos/*`). Other kinds (tiny, search) have no
- * wire and stay off the served catalog so `/v1/models` never advertises them.
- */
-const GATEWAY_MODEL_KINDS: readonly ModelKind[] = [
-	"chat",
-	"judge",
-	"image",
-	"tts",
-	"stt",
-	"embedding",
-	"rerank",
-	"video",
-];
 
 /** Every registry model of a kind the gateway can route, bundled catalog order within each kind. */
 export function gatewayRoutableModels(registry: ModelRegistry): Model<Api>[] {

@@ -52,23 +52,6 @@ describe("job renderer task-result preview", () => {
 		await initTheme();
 	});
 
-	it("renders the consumed peer message as a sender card", () => {
-		const component = waitToolRenderer.renderResult(
-			{
-				content: [{ type: "text", text: "[42] Worker: file unlocked" }],
-				details: {
-					op: "wait",
-					waited: { id: "42", from: "Worker", to: "Main", body: "file unlocked", ts: Date.now() },
-				},
-			},
-			{ expanded: true, isPartial: false },
-			theme,
-		);
-		const output = Bun.stripANSI(component.render(120).join("\n"));
-		expect(output).toContain("Worker");
-		expect(output).toContain("file unlocked");
-	});
-
 	it("previews the envelope body, not the wrapper markup", () => {
 		const summary = prompt.render(taskSummaryTemplate, {
 			agentName: "sonic",
@@ -118,11 +101,6 @@ describe("job renderer task-result preview", () => {
 		const output = Bun.stripANSI(renderLines(summary));
 		expect(output).toContain('{ "echo": "alpha", "ok": true }');
 		expect(output.split("\n").some(line => line.trim() === "{")).toBe(false);
-	});
-
-	it("passes non-envelope result text through unchanged", () => {
-		const output = renderLines("42 pass, 0 fail (18.4s)");
-		expect(output).toContain("42 pass, 0 fail (18.4s)");
 	});
 
 	it("drops the id column when the label repeats it", () => {

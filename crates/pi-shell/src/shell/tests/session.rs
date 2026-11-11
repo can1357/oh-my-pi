@@ -1,5 +1,75 @@
 use super::*;
 
+/// Brace expansion must not turn a large sequence into one literal word or
+/// silently shorten a comma product. Goldens agree in Bash 5.2 and 5.3.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn brace_limit_preserves_complete_expansions() {
+	let mut failures = Vec::new();
+	for (command, expected) in [
+		("echo {1..2000000} | wc -w", "2000000"),
+		("a=( {1..1048577} ); echo ${#a[@]}", "1048577"),
+		("for i in {1..3000000}; do :; done; echo \"i=$i\"", "i=3000000"),
+		("a=( {x,{1..1024}}{1..1024} ); echo ${#a[@]}", "1049600"),
+		// Refused only where the word runs.
+		("if false; then echo {1..5000000}; fi; echo after", "after"),
+		("f() { echo {1..5000000}; }; echo defined", "defined"),
+	] {
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(120),
+			command,
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("large brace expansion must finish");
+		if result.exit_code != Some(0) || output.trim() != expected {
+			failures.push(format!(
+				"{command:?}: status={:?}, output={output:?}, expected={expected:?}",
+				result.exit_code
+			));
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Refusing an expansion must stop the command, not execute its literal or
+/// partially expanded arguments. Includes run-time compound-value parsing.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn brace_limit_reports_oversized_expansions() {
+	let mut failures = Vec::new();
+	for (command, status) in [
+		("echo {1..5000000}", 2),
+		("f() { echo {1..5000000}; }; f", 2),
+		("a=( {x,{1..2048}}{1..2048} ); echo ${#a[@]}", 2),
+		// The sequence is counted before its items are built.
+		(": {1..4194304}{1,2}", 2),
+		("a=( \"${x:-\"{1..2049}\"}${x:-\"{1..2048}\"}\" ); echo ${#a[@]}", 2),
+		("declare -a a='({1..5000000})'", 1),
+	] {
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(120),
+			command,
+			None,
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("oversized brace expansion must fail promptly");
+		if result.exit_code != Some(status)
+			|| output.lines().count() != 1
+			|| !output.contains("brace expansion:")
+			|| !output.contains("over the limit of 4194304")
+			|| output.contains("not supported")
+		{
+			failures.push(format!("{command:?}: status={:?}, output={output:?}", result.exit_code));
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn uutils_diff_reads_process_substitution_fds() {
@@ -931,8 +1001,8 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	.await
 	.expect("in-flight run never reported a pid");
 	assert_eq!(pids.len(), 1, "exactly the sleep child: {pids:?}");
-	let child = process::Process::from_pid(pids[0]).expect("reported pid is alive");
-	assert_eq!(child.status(), process::ProcessStatus::Running);
+	let child = proctree::Process::from_pid(pids[0]).expect("reported pid is alive");
+	assert_eq!(child.status(), proctree::ProcessStatus::Running);
 
 	shell.abort().await;
 	let result = time::timeout(Duration::from_secs(5), run)
@@ -942,6 +1012,205 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 		.expect("run result");
 	assert!(result.cancelled, "run was aborted");
 	assert!(shell.pids().is_empty(), "pids cleared once the run returns");
+}
+
+/// A fork taken while a command runs starts from the state that command
+/// started from (variables, functions, cwd), without waiting for it; what the
+/// fork sets stays in the fork; sibling forks draw different `$RANDOM`s.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn fork_starts_from_the_state_before_the_running_command() {
+	async fn run(shell: &Shell, command: &str) -> String {
+		let (tx, rx) = flume::unbounded();
+		let result = shell
+			.run(
+				ShellRunOptions { command: command.into(), ..Default::default() },
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run");
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		rx.drain().collect()
+	}
+
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("scratch directory");
+	let dir_path = dir.path().canonicalize().expect("canonical dir");
+	let started = dir_path.join("started");
+	let gate = dir_path.join("gate");
+	let shell = Arc::new(Shell::new(None));
+	run(
+		&shell,
+		&format!(
+			"PI_FORK_VAR=before; pi_fork_fn() {{ printf 'fn:%s' \"$1\"; }}; cd {}; RANDOM=7",
+			quote_arg(&dir_path.to_string_lossy())
+		),
+	)
+	.await;
+
+	let owner = tokio::spawn({
+		let shell = shell.clone();
+		let command = format!(
+			"PI_FORK_VAR=during; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
+			quote_arg(&started.to_string_lossy()),
+			quote_arg(&gate.to_string_lossy())
+		);
+		async move { run(&shell, &command).await }
+	});
+	time::timeout(Duration::from_secs(5), async {
+		while !started.exists() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("owner command never started");
+
+	let fork = shell.fork();
+	let seen = time::timeout(
+		Duration::from_secs(5),
+		run(
+			&fork,
+			"printf '%s|%s|%s' \"$PI_FORK_VAR\" \"$(pi_fork_fn x)\" \"$PWD\"; PI_FORK_VAR=fork",
+		),
+	)
+	.await
+	.expect("fork waited for the running command");
+	assert_eq!(seen, format!("before|fn:x|{}", dir_path.display()));
+	let random = "echo $RANDOM $RANDOM $RANDOM";
+	assert_ne!(run(&shell.fork(), random).await, run(&shell.fork(), random).await);
+
+	fs::write(&gate, "").expect("open gate");
+	time::timeout(Duration::from_secs(5), owner)
+		.await
+		.expect("owner finishes")
+		.expect("owner task");
+	assert_eq!(run(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn segmented_minimizer_trace_spans_submissions_without_early_completion() {
+	use crate::bash::{
+		event::NodeKind,
+		trace::{RunTrace, history::HistoryData},
+	};
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("trace chain directory");
+	let gate = root.path().join("gate");
+	let minimizer = printf_minimizer(&root.path().join("minimizer.toml"), None);
+	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
+	let gate_command =
+		format!("/bin/sh -c 'while [ ! -e \"{}\" ]; do sleep 0.01; done'", gate.display());
+	let command =
+		format!("{repeated}; {gate_command}; {repeated}; false && printf skipped; {repeated}; false");
+	let trace = Arc::new(RunTrace::new(command.as_str()));
+	let shell = Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
+	let (tx, rx) = flume::unbounded::<String>();
+	let options = ShellRunOptions {
+		command: command.clone(),
+		trace: Some(trace.clone()),
+		..Default::default()
+	};
+	let probe = async {
+		loop {
+			let snapshot = trace.snapshot();
+			if snapshot.history.iter().any(|entry| entry.segment == Some(1)
+				&& matches!(&entry.data, HistoryData::CmdExpanded { argv, .. } if argv.first().is_some_and(|arg| arg.as_slice() == b"/bin/sh")))
+			{
+				assert_eq!(snapshot.status, None, "first segment RunEnd cannot end the logical call");
+				assert!(snapshot.history.iter().any(|entry| entry.segment == Some(0)
+					&& matches!(entry.data, HistoryData::RunEnd { status: 0 }) && !entry.logical_end));
+				std::fs::write(&gate, []).expect("release second segment");
+				break;
+			}
+			tokio::task::yield_now().await;
+		}
+	};
+	let (result, ()) = time::timeout(Duration::from_secs(10), async {
+		tokio::join!(shell.run(options, Some(tx), CancelToken::default()), probe)
+	})
+	.await
+	.expect("segmented trace completes");
+	let result = result.expect("real segmented run");
+	assert_eq!(result.exit_code, Some(1));
+	assert_eq!(rx.drain().collect::<String>(), "hello\n".repeat(600));
+	let minimized = result
+		.minimized
+		.expect("segmentation/minimization stays active");
+	assert_eq!(minimized.filter, "chain");
+	assert_eq!(minimized.text, "HI\n".repeat(600));
+	let snapshot = trace.snapshot();
+	assert_eq!(snapshot.status, Some(1));
+	let output: String = snapshot
+		.history
+		.iter()
+		.filter_map(|entry| match &entry.data {
+			HistoryData::Output { text, .. } => Some(String::from_utf8_lossy(text).into_owned()),
+			_ => None,
+		})
+		.collect();
+	assert_eq!(output, "hello\n".repeat(600));
+	let mut source_offsets = std::collections::HashSet::new();
+	for entry in &snapshot.history {
+		if matches!(entry.data, HistoryData::Output { .. }) {
+			let unit = &snapshot.units[entry.u.expect("exact segment unit") as usize];
+			let node = &unit.nodes[entry.n.expect("exact segment producer") as usize];
+			let at = unit.at.expect("AST-planned source location") as usize;
+			assert_eq!(
+				&command.as_bytes()[at + node.lo as usize..at + node.hi as usize],
+				repeated.as_bytes()
+			);
+			source_offsets.insert(at);
+		}
+	}
+	assert_eq!(
+		source_offsets.len(),
+		3,
+		"identical repeated commands before and after a skipped operand have distinct authoritative \
+		 spans"
+	);
+	let boundaries: Vec<_> = snapshot
+		.history
+		.iter()
+		.filter(|entry| {
+			matches!(entry.data, HistoryData::RunEnd { .. }) && entry.vpid == snapshot.root_vpid
+		})
+		.collect();
+	assert_eq!(
+		boundaries.len(),
+		6,
+		"skipped && operand is never submitted, but later semicolon operands continue"
+	);
+	assert!(boundaries[..5].iter().all(|entry| !entry.logical_end));
+	assert!(boundaries[5].logical_end);
+	assert_eq!(boundaries[5].logical_status, Some(1));
+	assert_eq!(snapshot.history.first().unwrap().t_ns, 0);
+	assert!(
+		snapshot
+			.history
+			.windows(2)
+			.filter(|entries| entries[0].segment != entries[1].segment)
+			.all(|entries| entries[1].t_ns >= entries[0].t_ns),
+		"actual segment transitions share one measured clock"
+	);
+	assert!(
+		snapshot.history.iter().any(|entry| entry.segment == Some(3)
+			&& matches!(entry.data, HistoryData::CmdEnd { status: 1, .. })
+			&& entry.n.zip(entry.u).is_some_and(|(n, u)| {
+				let unit = &snapshot.units[u as usize];
+				let node = &unit.nodes[n as usize];
+				node.k == NodeKind::Simple
+					&& unit.at.is_some_and(|at| {
+						&command.as_bytes()
+							[at as usize + node.lo as usize..at as usize + node.hi as usize]
+							== b"false"
+					})
+			})),
+		"known brace wrapper maps false back to its original bytes"
+	);
+	assert!(!snapshot.history.iter().any(|entry| matches!(&entry.data,
+		HistoryData::CmdExpanded { argv, .. } if argv.iter().any(|arg| arg.as_slice() == b"skipped"))));
 }
 
 #[cfg(unix)]

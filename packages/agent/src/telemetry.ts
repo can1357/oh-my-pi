@@ -39,6 +39,7 @@ import {
 	type ToolChoice,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { $otelEnv } from "@oh-my-pi/pi-utils";
 import {
 	type Attributes,
 	type AttributeValue,
@@ -453,7 +454,7 @@ export function resolveTelemetry(
 let contentCaptureEnvCache: ResolvedTelemetryContentCapture | undefined;
 function readContentCaptureEnv(): ResolvedTelemetryContentCapture {
 	if (contentCaptureEnvCache !== undefined) return contentCaptureEnvCache;
-	const raw = process.env[CONTENT_CAPTURE_ENV];
+	const raw = $otelEnv(CONTENT_CAPTURE_ENV);
 	if (!raw) {
 		contentCaptureEnvCache = "none";
 		return "none";
@@ -1836,7 +1837,7 @@ export interface InstrumentedChatSpanOptions {
 export async function instrumentedCompleteSimple<TApi extends Api>(
 	model: Model<TApi>,
 	ctx: Context,
-	options: SimpleStreamOptions,
+	options: SimpleStreamOptions & { onAttempt?: (message: AssistantMessage) => void },
 	span: InstrumentedChatSpanOptions,
 ): Promise<AssistantMessage> {
 	const { telemetry, parent, oneshotKind } = span;

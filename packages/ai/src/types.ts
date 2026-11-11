@@ -659,6 +659,8 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** Called after the provider slot is acquired, before each model dispatch; throwing refuses that attempt. */
+	beforeDispatch?: () => void;
 	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
 	waitForTerminalDrain?: boolean;
 	/**
@@ -1072,6 +1074,8 @@ export interface ToolCall {
 	 * JSON function tools.
 	 */
 	customWireName?: string;
+	/** Responses API namespace for namespaced function and custom tools. */
+	namespace?: string;
 	/** Provider-native metadata required to execute and faithfully replay this call. */
 	providerMetadata?: ToolCallProviderMetadata;
 }
@@ -1194,11 +1198,25 @@ export interface CursorHistoryPayload {
 	records: string[];
 }
 
+/**
+ * The `candidates[0].content` a Gemini model streamed for one turn, every part
+ * (thought text, signatures, call ids) merged in arrival order. Written and read
+ * by the Factory Droid Gemini transport, which replays it unchanged to the same
+ * model while the turn's content still matches `digest`.
+ */
+export interface GeminiNativeContentPayload {
+	type: "geminiNativeContent";
+	/** Digest of the turn's text, thinking and tool calls when recorded; a rewritten turn rebuilds instead. */
+	digest: string;
+	content: { role?: string; parts: Record<string, unknown>[]; [key: string]: unknown };
+}
+
 export type ProviderPayload =
 	| OpenAIResponsesHistoryPayload
 	| AnthropicMessagePayload
 	| AnthropicCompactionPayload
-	| CursorHistoryPayload;
+	| CursorHistoryPayload
+	| GeminiNativeContentPayload;
 
 /** Provider-reported rewrite applied to request content before inference. */
 export interface ProviderInputTransformation {
@@ -1211,6 +1229,8 @@ export interface ProviderInputTransformation {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
+	/** Original sender and body of a parent-agent IRC steer, for transcript presentation only. */
+	parentIrc?: { from: string; body: string };
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -1541,11 +1561,22 @@ export interface CursorMcpResourceContent {
 	downloadPath?: string;
 }
 
+/** What the provider knows about an exec frame beyond its arguments. */
+export interface CursorExecFrameContext {
+	/**
+	 * The frame materializes a native StrReplace or Write: Cursor reads the
+	 * whole file and writes it back under the edit's call id. The streamed
+	 * `edit` block owns that id, so the frame surfaces no call of its own, and
+	 * the write reports as `edit` with the diff it made.
+	 */
+	editMaterialization?: boolean;
+}
+
 export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
+	read?: (args: ReadArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
+	write?: (args: WriteArgs, frame?: CursorExecFrameContext) => Promise<CursorExecHandlerResult<WriteResult>>;
 	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
 	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
 	shellStream?: (
@@ -1568,6 +1599,16 @@ export interface CursorExecHandlers {
 	 * handler is registered the provider refuses, since it cannot decide.
 	 */
 	mcpApprovalPreflight?: (call: CursorMcpCall) => Promise<boolean>;
+	/**
+	 * How a locally executed MCP call is ordered against the run's other exec
+	 * frames: `"exclusive"` waits for every unfinished earlier frame and holds
+	 * later frames until it finishes, mirroring the agent loop's scheduling of
+	 * the same tool. Resolve it from the tool the call will actually run — the
+	 * frame's name may be an alias the host rewrites onto another tool.
+	 * Without it every MCP call is `"shared"`. Approval probes execute
+	 * nothing, so they are never classified.
+	 */
+	mcpConcurrency?: (call: CursorMcpCall) => "shared" | "exclusive";
 	/**
 	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51). They are a
 	 * distinct frame family from the legacy `readArgs`/`shellArgs`/... set, not
@@ -1601,6 +1642,12 @@ export interface CursorExecHandlers {
 	}) => Promise<CursorMcpResourceContent | null>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
+	/**
+	 * Settle a native StrReplace or Write the server completed without a
+	 * materializing write (a failed match, a refusal). Its read surfaced no
+	 * call, so nothing else ends the live card.
+	 */
+	editSettled?: (result: ToolResultMessage) => void;
 	onToolResult?: CursorToolResultHandler;
 }
 

@@ -52,16 +52,32 @@ pub enum CallKind {
 	/// name (no arguments) or, under `extdebug`, its arguments.
 	Source {
 		/// `BASH_SOURCE` entry: the file name as given.
-		file: BString,
+		file:    BString,
 		/// `BASH_LINENO` entry: the line of the `.` command.
-		line: u32,
+		line:    u32,
 		/// What was pushed onto `BASH_ARGV`.
-		argv: Option<Vec<BString>>,
+		argv:    Option<Vec<BString>>,
+		/// What the end of the file puts back (`. file args`).
+		restore: Option<Box<SourceSave>>,
+		/// zsh `FUNCTION_ARGZERO` at the `.`: `$0` while the file runs (the
+		/// file name as given).
+		argzero: Option<BString>,
 	},
 	/// bash's `init_bash_argv`: the positional parameters pushed onto
 	/// `BASH_ARGV` once, before the first function call (or `.` with
 	/// arguments) under `extdebug`.
 	Args(Vec<BString>),
+}
+
+/// The positional parameters a `.` file with arguments replaced: put back
+/// when it ends (zsh `bin_dot`, bash `source` with `maybe_pop_dollar_vars`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSave {
+	/// The caller's positional parameters.
+	pub args:      Vec<BString>,
+	/// bash outside any function: the arguments the file got. A file that
+	/// changed them keeps its own (bash keeps a top-level `set --`).
+	pub installed: Option<Vec<BString>>,
 }
 
 impl CallKind {
@@ -317,6 +333,8 @@ pub fn push_source(
 	file: BString,
 	line: u32,
 	args: &[BString],
+	restore: Option<Box<SourceSave>>,
+	argzero: Option<BString>,
 ) -> Result<(), StoreError> {
 	let argv = if args.is_empty() {
 		Some(vec![file.clone()])
@@ -329,15 +347,45 @@ pub fn push_source(
 	};
 	let depth = vp.frames.len() as u32;
 	vp.calls
-		.push(Call { kind: CallKind::Source { file, line, argv }, depth });
+		.push(Call { kind: CallKind::Source { file, line, argv, restore, argzero }, depth });
 	Ok(())
 }
 
 /// End the pushes of frames beyond the first `frames` (popped, or a `.`
-/// file whose RETURN trap runs in its caller's context). Called by
+/// file whose RETURN trap runs in its caller's context), putting back the
+/// positional parameters a `.` file with arguments replaced. Called by
 /// `pop_frame`.
-pub fn truncate(vp: &mut Vproc, frames: usize) {
+pub fn truncate(root: &mut state::Root, store: &mut dyn StateStore, vp: &mut Vproc, frames: usize) {
+	while vp.calls.last().is_some_and(|c| c.depth as usize > frames) {
+		let Some(Call { kind: CallKind::Source { restore: Some(save), .. }, .. }) = vp.calls.pop()
+		else {
+			continue;
+		};
+		let SourceSave { args, installed } = *save;
+		if let Some(installed) = installed {
+			match state::positional_ref(root, store, vp) {
+				Ok(now) if now != installed.as_slice() => continue,
+				Ok(_) => {},
+				Err(err) => {
+					root.fail(err);
+					continue;
+				},
+			}
+		}
+		state::set_positional(root, store, vp, args);
+	}
 	vp.calls.retain(|c| c.depth as usize <= frames);
+}
+
+/// zsh `$0` inside a `.` file run under `FUNCTION_ARGZERO`, when no function
+/// call is nearer: the file name as given. `None` when a function call
+/// (or nothing) is the innermost level.
+pub fn source_argzero(vp: &Vproc) -> Option<&BString> {
+	vp.calls.iter().rev().find_map(|c| match &c.kind {
+		CallKind::Source { argzero, .. } => Some(argzero.as_ref()),
+		CallKind::Function { .. } => Some(None),
+		CallKind::Args(_) => None,
+	})?
 }
 
 /// The calls a subshell of `vp` starts with: all of them, none tied to its

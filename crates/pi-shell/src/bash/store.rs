@@ -34,7 +34,7 @@
 //! drops what it derived from the store (option bits, the locale, the
 //! root's working directory) when it changed.
 
-use std::{hash::BuildHasher, ops::Deref};
+use std::{hash::BuildHasher, ops::Deref, sync::OnceLock};
 
 use bstr::{BStr, BString};
 use hashbrown::{DefaultHashBuilder, HashTable};
@@ -59,6 +59,14 @@ pub trait StateStore {
 	/// # Errors
 	/// [`StoreError`] when the backend fails or a record cannot be decoded.
 	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError>;
+	/// Whether some root scope may hold a local `name` ([`Key::Local`]).
+	/// A store that indexes local names answers `false` for a name no scope
+	/// declares, and a lookup then goes straight to the global; the default
+	/// `true` makes it read each scope that may bind one.
+	fn may_have_local(&mut self, _name: &[u8]) -> bool {
+		true
+	}
+
 	/// Install a scalar default whose host lookup can wait until observation.
 	///
 	/// Return `true` only when the store accepted the initializer. Reads,
@@ -377,8 +385,9 @@ pub enum Record {
 		/// zsh sticky emulation: set when it was defined while `emulate
 		/// MODE -c` ran; a call applies it (zsh `doshfunc`).
 		sticky: Option<Box<Sticky>>,
-		/// Canonical `declare -f` text, alias-free.
-		source: BString,
+		/// Canonical `declare -f` text, alias-free and materialized on first
+		/// read.
+		source: crate::bash::ir::FuncText,
 		/// Compiled body.
 		unit:   UnitId,
 		/// `-t`, `-x`.
@@ -446,25 +455,36 @@ pub struct Sticky {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZshScope {
 	/// The caller's mode.
-	pub mode:           ModeId,
+	pub mode:            ModeId,
 	/// Every zsh option at entry, env options included: restored on return
 	/// under `localoptions` or after a sticky switch.
-	pub opts:           ZshOpts,
+	pub opts:            ZshOpts,
 	/// The caller's sticky emulation (zsh's global `sticky`).
-	pub sticky:         Option<Sticky>,
+	pub sticky:          Option<Sticky>,
 	/// The call applied a sticky emulation: options, mode and sticky come
 	/// back unconditionally.
-	pub restore_sticky: bool,
+	pub restore_sticky:  bool,
 	/// Traps as they were before this call first changed them, for
 	/// `localtraps` (`None`: unset then).
-	pub traps:          Vec<(TrapKey, Option<Record>)>,
+	pub traps:           Vec<(TrapKey, Option<Record>)>,
 	/// [`LossyKind`] bits already reported through `Diag::ModeLossy` during
 	/// this call (one report per kind per crossing).
-	pub lossy:          u8,
+	pub lossy:           u8,
 	/// The pattern features `disable -p` had turned off at entry
 	/// ([`MiscKey::ZshPatDisables`]), restored on return under
 	/// `localpatterns` (zsh `startpatternscope`/`endpatternscope`).
-	pub pat_disables:   Vec<BString>,
+	pub pat_disables:    Vec<BString>,
+	/// A zsh function call (`runshfunc`): `$_` comes back on return, as it
+	/// was at entry ([`Self::underscore`]).
+	#[serde(default)]
+	pub keep_underscore: bool,
+	/// `$_` ([`MiscKey::LastArg`]) at entry, `None` when unset.
+	#[serde(default)]
+	pub underscore:      Option<BString>,
+	/// The computed specials made local in this scope
+	/// ([`Attrs::ZSH_LOCAL_SPECIAL`]), whose values come back on return.
+	#[serde(default)]
+	pub specials:        Vec<BString>,
 }
 
 /// Kinds of lossy mode crossing (`Diag::ModeLossy`), as bits
@@ -565,100 +585,206 @@ pub enum VarValue {
 	Assoc(AssocArray),
 }
 
-/// Ordered associative entries with a hash index over their keys.
+/// Associative entries in a listing order, with a hash index over their
+/// keys.
 ///
-/// Only the ordered entries are serialized, so snapshots retain the same
-/// representation and rebuilding the index never changes iteration order.
-#[derive(Clone, Debug, Default)]
+/// Entries stay where they arrived, each with an order key; the listing
+/// order ([`Deref`], serialization, equality) ascends by it, built when
+/// first read after a change that moved an entry. So adding a key anywhere
+/// in the order moves no other entry ([`Self::insert_front`]: zsh's hash
+/// order). Only the listed entries are serialized, so snapshots keep the
+/// same representation and rebuilding the index never changes the order.
+#[derive(Clone, Default)]
 pub struct AssocArray(Box<AssocData>);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 struct AssocData {
-	entries: Vec<(BString, BString)>,
-	index:   HashTable<usize>,
-	hasher:  DefaultHashBuilder,
+	/// Entries in arrival order.
+	slots:    Vec<(BString, BString)>,
+	/// Each slot's order key.
+	order:    Vec<u64>,
+	/// Whether `order` fails to ascend with the slots (else they are the
+	/// listing).
+	unsorted: bool,
+	/// Key → slot: the first one in listing order holding the key.
+	index:    HashTable<usize>,
+	hasher:   DefaultHashBuilder,
+	/// The zsh bucket count the order keys group by
+	/// ([`AssocArray::insert_front`]); `0`: they order only.
+	buckets:  usize,
+	/// Order key above every entry's (an entry added after all others).
+	tail:     u64,
+	/// Rank of the next entry added at the front of its bucket, counting
+	/// down from below [`RANK_BASE`].
+	front:    u64,
+	/// The listing when the slots are not it, built when first read.
+	listed:   OnceLock<Vec<(BString, BString)>>,
+}
+
+/// Rank of the first entry a regroup keys ([`AssocArray::insert_front`]):
+/// entries keep `RANK_BASE + position` within their bucket, new ones count
+/// down from `RANK_BASE - 1`, all below `1 << 32`.
+const RANK_BASE: u64 = 1 << 31;
+
+/// zsh `hasher` (`h += (h << 5) + c` over the metafied key).
+fn zsh_hash(key: &[u8]) -> u32 {
+	key.iter()
+		.fold(0u32, |h, &c| h.wrapping_add(h.wrapping_shl(5)).wrapping_add(u32::from(c)))
+}
+
+/// The bucket of `key` (raw bytes, hashed metafied as zsh stores parameter
+/// names) in a zsh hash table of `buckets` buckets.
+pub fn zsh_bucket(key: &[u8], buckets: usize) -> usize {
+	use crate::bash::syntax::zsh::tok::{is_meta, metafy};
+	let h = if key.iter().any(|&c| is_meta(c)) {
+		zsh_hash(&metafy(key))
+	} else {
+		zsh_hash(key)
+	};
+	(h as usize).checked_rem(buckets).unwrap_or(0)
 }
 
 impl AssocArray {
-	fn position(&self, key: &[u8]) -> Option<usize> {
+	fn slot(&self, key: &[u8]) -> Option<usize> {
 		let hash = self.0.hasher.hash_one(key);
 		self
 			.0
 			.index
-			.find(hash, |&i| self.0.entries[i].0.as_slice() == key)
+			.find(hash, |&i| self.0.slots[i].0.as_slice() == key)
 			.copied()
+	}
+
+	/// Number of entries.
+	pub const fn len(&self) -> usize {
+		self.0.slots.len()
+	}
+
+	/// Whether there are no entries.
+	pub const fn is_empty(&self) -> bool {
+		self.0.slots.is_empty()
 	}
 
 	/// The value belonging to `key`.
 	pub fn get(&self, key: &[u8]) -> Option<&BString> {
-		self.position(key).map(|i| &self.0.entries[i].1)
+		self.slot(key).map(|i| &self.0.slots[i].1)
 	}
 
 	/// The mutable value belonging to `key`, without exposing mutable keys.
 	pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut BString> {
-		let i = self.position(key)?;
-		Some(&mut self.0.entries[i].1)
+		let i = self.slot(key)?;
+		self.0.listed.take();
+		Some(&mut self.0.slots[i].1)
 	}
 
-	/// The mutable value at `key`, inserting an empty value when absent.
+	/// The mutable value at `key`, added empty after every entry when
+	/// absent.
 	pub fn value_mut(&mut self, key: &[u8]) -> &mut BString {
-		let data = &mut *self.0;
-		let hash = data.hasher.hash_one(key);
-		let i = if let Some(&i) = data
-			.index
-			.find(hash, |&i| data.entries[i].0.as_slice() == key)
-		{
+		let i = if let Some(i) = self.slot(key) {
 			i
 		} else {
-			let i = data.entries.len();
-			data.entries.push((BString::from(key), BString::default()));
-			data
-				.index
-				.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
-			i
+			let tail = self.0.tail;
+			self.push(BString::from(key), BString::default(), tail)
 		};
-		&mut data.entries[i].1
+		self.0.listed.take();
+		&mut self.0.slots[i].1
 	}
 
-	/// Insert a value, retaining the position of an existing key.
+	/// Insert a value, retaining the position of an existing key; a new
+	/// key goes after every entry.
 	pub fn insert(&mut self, key: BString, value: BString) {
 		if let Some(dst) = self.get_mut(&key) {
 			*dst = value;
 		} else {
-			let data = &mut *self.0;
-			let hash = data.hasher.hash_one(key.as_slice());
-			let i = data.entries.len();
-			data.entries.push((key, value));
-			data
-				.index
-				.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+			let tail = self.0.tail;
+			self.push(key, value, tail);
 		}
+	}
+
+	/// zsh's `addhashnode2` in a table of `buckets` buckets that does not
+	/// grow: a new `key` goes before every entry of its bucket
+	/// ([`zsh_bucket`]), the entries being listed bucket by bucket; a key
+	/// already there takes `value` in its place instead. No entry moves:
+	/// the order keys are regrouped (in their present order within each
+	/// bucket) only when `buckets` changes.
+	pub fn insert_front(&mut self, buckets: usize, key: BString, value: BString) {
+		if let Some(dst) = self.get_mut(&key) {
+			*dst = value;
+			return;
+		}
+		if self.0.buckets != buckets || self.0.front == 0 {
+			self.regroup(buckets);
+		}
+		let rank = self.0.front;
+		self.0.front -= 1;
+		let bucket = u64::try_from(zsh_bucket(&key, buckets)).unwrap_or(u64::MAX >> 32);
+		self.push(key, value, (bucket << 32) | rank);
 	}
 
 	/// Remove one key without changing the relative order of other entries.
 	pub fn remove(&mut self, key: &[u8]) {
-		if let Some(i) = self.position(key) {
-			self.0.entries.remove(i);
+		if let Some(i) = self.slot(key) {
+			self.0.slots.swap_remove(i);
+			self.0.order.swap_remove(i);
+			self.0.unsorted = !self.0.order.is_sorted();
 			self.reindex();
 		}
 	}
 
+	/// Add an entry at order key `at`; its slot.
+	fn push(&mut self, key: BString, value: BString, at: u64) -> usize {
+		let d = &mut *self.0;
+		d.listed.take();
+		d.unsorted |= d.order.last().is_some_and(|&last| last > at);
+		d.tail = d.tail.max(at + 1);
+		let hash = d.hasher.hash_one(key.as_slice());
+		let i = d.slots.len();
+		d.slots.push((key, value));
+		d.order.push(at);
+		d.index
+			.insert_unique(hash, i, |&i| d.hasher.hash_one(d.slots[i].0.as_slice()));
+		i
+	}
+
+	/// The slots in listing order.
+	fn listing(&self) -> Vec<usize> {
+		let mut slots: Vec<usize> = (0..self.0.slots.len()).collect();
+		if self.0.unsorted {
+			slots.sort_by_key(|&i| self.0.order[i]);
+		}
+		slots
+	}
+
+	/// Key every entry by its bucket among `buckets`, keeping the present
+	/// listing order within each bucket (a zsh table's own order, kept
+	/// bucket by bucket, is unchanged).
+	fn regroup(&mut self, buckets: usize) {
+		let listing = self.listing();
+		let d = &mut *self.0;
+		for (pos, &i) in listing.iter().enumerate() {
+			let bucket = u64::try_from(zsh_bucket(&d.slots[i].0, buckets)).unwrap_or(u64::MAX >> 32);
+			let pos = u64::try_from(pos).unwrap_or(RANK_BASE - 1);
+			d.order[i] = (bucket << 32) | (RANK_BASE + pos);
+		}
+		d.buckets = buckets;
+		d.front = RANK_BASE - 1;
+		d.tail = d.order.iter().max().map_or(0, |&m| m + 1);
+		d.unsorted = !d.order.is_sorted();
+		d.listed.take();
+	}
+
 	fn reindex(&mut self) {
-		let data = &mut *self.0;
-		data.index.clear();
-		data
-			.index
-			.reserve(data.entries.len(), |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
-		for (i, (key, _)) in data.entries.iter().enumerate() {
-			let hash = data.hasher.hash_one(key.as_slice());
-			if data
-				.index
-				.find(hash, |&i| data.entries[i].0 == *key)
-				.is_none()
-			{
-				data
-					.index
-					.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+		let listing = self.listing();
+		let d = &mut *self.0;
+		d.listed.take();
+		d.index.clear();
+		d.index
+			.reserve(d.slots.len(), |&i| d.hasher.hash_one(d.slots[i].0.as_slice()));
+		for i in listing {
+			let key = &d.slots[i].0;
+			let hash = d.hasher.hash_one(key.as_slice());
+			if d.index.find(hash, |&j| d.slots[j].0 == *key).is_none() {
+				d.index
+					.insert_unique(hash, i, |&j| d.hasher.hash_one(d.slots[j].0.as_slice()));
 			}
 		}
 	}
@@ -668,21 +794,42 @@ impl Deref for AssocArray {
 	type Target = [(BString, BString)];
 
 	fn deref(&self) -> &Self::Target {
-		&self.0.entries
+		if !self.0.unsorted {
+			return &self.0.slots;
+		}
+		self.0.listed.get_or_init(|| {
+			self
+				.listing()
+				.into_iter()
+				.map(|i| self.0.slots[i].clone())
+				.collect()
+		})
+	}
+}
+
+impl std::fmt::Debug for AssocArray {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_list().entries(self.iter()).finish()
 	}
 }
 
 impl PartialEq for AssocArray {
 	fn eq(&self, other: &Self) -> bool {
-		self.0.entries == other.0.entries
+		**self == **other
 	}
 }
 
 impl Eq for AssocArray {}
 
 impl From<Vec<(BString, BString)>> for AssocArray {
-	fn from(entries: Vec<(BString, BString)>) -> Self {
-		let mut result = Self(Box::new(AssocData { entries, ..AssocData::default() }));
+	fn from(slots: Vec<(BString, BString)>) -> Self {
+		let n = u64::try_from(slots.len()).unwrap_or(u64::MAX);
+		let mut result = Self(Box::new(AssocData {
+			order: (0..n).collect(),
+			tail: n,
+			slots,
+			..AssocData::default()
+		}));
 		result.reindex();
 		result
 	}
@@ -696,7 +843,7 @@ impl FromIterator<(BString, BString)> for AssocArray {
 
 impl Serialize for AssocArray {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-		self.0.entries.serialize(serializer)
+		(**self).serialize(serializer)
 	}
 }
 
@@ -751,6 +898,15 @@ impl Attrs {
 	pub const TRACE: Self = Self(1 << 9);
 	/// `-u`
 	pub const UPPER: Self = Self(1 << 4);
+	/// zsh function `PM_ABSPATH_USED`: loaded from a directory named by an
+	/// absolute path (`autoload /dir/name`, or inherited from such a
+	/// caller); a bare `autoload name` it runs looks in that directory
+	/// first. Shares its bit with the variable-only [`Self::ZSH_FLOAT_F`].
+	pub const ZSH_ABSPATH_USED: Self = Self(1 << 14);
+	/// zsh function `autoload -d` (`PM_CUR_FPATH`): a definition not in
+	/// its load directory is looked for in `$fpath` too. Shares its bit
+	/// with the variable-only [`Self::ZSH_FLOAT_E`].
+	pub const ZSH_CUR_FPATH: Self = Self(1 << 13);
 	/// zsh `PM_DEFAULTED` beside [`Self::INVISIBLE`]: named by `typeset`
 	/// under `TYPESET_TO_UNSET` and not set yet (listed by name); an
 	/// invisible variable without it was unset (`unset` clears zsh's
@@ -768,8 +924,20 @@ impl Attrs {
 	pub const ZSH_KSHSTORED: Self = Self(1 << 48);
 	/// zsh `-L`: left-justify to the width.
 	pub const ZSH_LEFT: Self = Self(1 << 15);
+	/// zsh on a variable: the binding of a computed special made local
+	/// (`local SECONDS`, zsh `typeset_single`'s `newspecial`); the special
+	/// stays itself and the variable holds its value from before, put
+	/// back when the scope ends. Shares its bit with the function-only
+	/// [`Self::ZSH_TRACE_ONCE`].
+	pub const ZSH_LOCAL_SPECIAL: Self = Self(1 << 50);
 	/// Every zsh-only attribute (bash writes do not apply them).
 	pub const ZSH_ONLY: Self = Self(0x3f_e000);
+	/// zsh/param/private on a variable: a private parameter (`private`,
+	/// `local -P`), visible only in the function scope binding it, not in
+	/// the functions that function calls. Shares its bit with the
+	/// function-only [`Self::ZSH_UNALIASED`] (every flag bit is taken; a
+	/// variable and a function never carry each other's attributes).
+	pub const ZSH_PRIVATE: Self = Self(1 << 23);
 	/// zsh `-R`: right-justify with blanks.
 	pub const ZSH_RIGHT_B: Self = Self(1 << 16);
 	/// zsh `-Z`: right-justify with zeros.
@@ -959,6 +1127,19 @@ pub enum MiscKey {
 	/// number (bash's `history_base`) and `1` when the last entry is the
 	/// current input line, which `history -s` replaces.
 	HistoryCounts,
+	/// bash: the start time of each `history` entry (`Record::Words` of
+	/// decimal seconds, parallel to [`MiscKey::History`]; empty: unknown).
+	HistoryTimes,
+	/// zsh: the history events, oldest first (`Record::Misc`, postcard).
+	ZshHistory,
+	/// zsh: the rest of the history state (`Record::Misc`, postcard).
+	ZshHistoryState,
+	/// zsh: the event being read (`chline` and its state; `Record::Misc`,
+	/// postcard); absent between events.
+	ZshHistoryLine,
+	/// zsh: the `fc -p` history stack (`Record::Words`, one postcard level
+	/// each, bottom first).
+	ZshHistoryStack,
 	/// Environment strings whose names are not identifiers (`v[0]=x`),
 	/// as `name=value` (`Record::Words`): bash passes them on to the
 	/// commands it runs.
@@ -966,6 +1147,11 @@ pub enum MiscKey {
 	/// Signals ignored when a script run as a new shell (`ENOEXEC`) started
 	/// (`Record::Words` of signal names): bash will not trap or reset them.
 	HardIgnored,
+	/// zsh: signals whose `''` trap is the one recorded when the shell
+	/// started with them ignored (`QUIT`, zsh `init_signals`'s
+	/// `ZSIG_IGNORED` without trap text; `Record::Words` of signal names):
+	/// `localtraps` does not bring it back.
+	ZshEntryIgnored,
 	/// The vpid of the in-engine nested shell (`bash`/`sh` run through
 	/// `Resolved::SelfShell`) whose state a vproc's overlay holds: that
 	/// vproc is the nested shell itself, its children are its subshells.
@@ -1001,6 +1187,128 @@ pub enum MiscKey {
 	/// `ulimit` values set in the root shell (`Record::Words`, one
 	/// `resource:soft:hard` per limit, `-` for unlimited/unset).
 	Rlimits,
+	/// zsh's named directory table (`Record::Words`): the table's growth
+	/// count (decimal), then one name and one value per entry in zsh's
+	/// iteration order, the value being a flags byte (`ND_USERNAME`,
+	/// `ND_NOABBREV`) followed by the directory
+	/// ([`crate::bash::vm::zsh::nameddir`]).
+	ZshNamedDirs,
+	/// bash's `current_command_number` (decimal; absent: 1), the prompt's
+	/// `\#`: an interactive reader adds one per top-level command it runs.
+	BashCommandNumber,
+	/// zsh's `txtattrmask` (decimal): the text attributes prompt escapes
+	/// (`%B`, `%F{…}`, …) left set, which later expansions re-apply.
+	ZshTxtAttr,
+	/// zsh's module tables (`modulestab`, autoloadable builtins,
+	/// conditions, math functions and parameters) when they differ from
+	/// the ones zsh boots with (`Record::Misc`, postcard;
+	/// [`crate::bash::vm::builtins::zsh_module`]).
+	ZshModules,
+	/// zsh/mathfunc's `signgam`: the sign of Γ the last `lgamma()` left
+	/// (`Record::Misc`, decimal; absent: 0).
+	ZshSigngam,
+	/// zsh/net/tcp's session table (`ztcp_sessions`, `Record::Words`):
+	/// one entry per session in creation order, `FD TYPE LOCALIP LOCALPORT
+	/// PEERIP PEERPORT` with `TYPE` one of `L` (listener), `I` (inbound),
+	/// `O` (outbound), `Z` (zftp) ([`crate::bash::vm::builtins`]'s
+	/// `zsh_mod_tcp`).
+	ZshTcpSessions,
+	/// zsh's `procsubstpid`: the vproc id of the last process
+	/// substitution (`Record::Misc`, decimal; absent: 0).
+	ZshProcsubstPid,
+	/// The C `errno` the last failing zsh module builtin left
+	/// (`syserror` without arguments; `Record::Misc`, decimal; absent: 0).
+	ZshErrno,
+	/// zsh/rlimits' `current_limits` where they differ from the host's:
+	/// what `limit -s`/`ulimit` applied to the shell (`Record::Words`,
+	/// `resource:soft:hard`, `-` for unlimited).
+	ZshRlimits,
+	/// zsh/sched's events (`Record::Words`, `time flags command` per
+	/// event, in order).
+	ZshSched,
+	/// zsh/watch's last login table and check times (`Record::Words`).
+	ZshWatch,
+	/// zsh/zprof's profile; present exactly while zsh/zprof is loaded
+	/// (`Record::Words`).
+	ZshZprof,
+	/// zsh/example's parameters `exint`, `exstr`, `exarr`
+	/// (`Record::Words`).
+	ZshExample,
+	/// zsh/zutil's style table (`zstyle`; `Record::Misc`, postcard of
+	/// `zsh_mod_zutil::StyleTab`).
+	ZshStyles,
+	/// zsh/zutil builtins waiting for shell code they pushed (`zstyle -e`
+	/// values, `zregexparse` guards and actions): their progress by frame
+	/// depth (`Record::Misc`, postcard).
+	ZshCodePending,
+	/// An error ended the last `ScriptKind::Code` frame (zsh's `errflag`
+	/// after `execode`); the builtin that pushed it takes it
+	/// (`Record::Misc`).
+	ZshCodeError,
+	/// zsh/pcre's compiled pattern (`pcre_compile`): `Record::Words` of
+	/// the PCRE option bits (decimal) and the pattern; absent when none
+	/// was compiled or the last compile failed
+	/// ([`crate::bash::vm::builtins::zsh_mod_pcre`]).
+	ZshPcre,
+	/// zsh/zftp's sessions and connection state between commands
+	/// (`Record::Misc`, postcard;
+	/// [`crate::bash::vm::builtins::zsh_mod_zftp`]).
+	Zftp,
+	/// zsh/zftp's status files shared with subshells (zsh's `zfstatfd`;
+	/// `Record::Misc`, postcard), kept in the root store.
+	ZftpStatus,
+	/// The terminal ncurses holds for zsh/terminfo and zsh/termcap
+	/// (`cur_term`: the last `$TERM` set up successfully, or the exported
+	/// `TERM` when a module booted), whose capabilities `${(k)terminfo}`
+	/// and `${(k)termcap}` list (`Record::Misc`: a byte telling how ncurses
+	/// set it up, `S` `setupterm` only, `T` `tgetent`, `F` `tgetent` then a
+	/// failed one, then the terminal name;
+	/// [`crate::bash::vm::builtins::zsh_mod_terminfo`]).
+	ZshCurTerm,
+	/// `unset mapfile` left zsh/mapfile's special unset (zsh's `PM_UNSET`)
+	/// until the next assignment to it or a module unload (`Record::Misc`,
+	/// `1`; [`crate::bash::vm::builtins::zsh_mod_mapfile`]).
+	ZshMapfileUnset,
+	/// zsh/computil's `compdescribe` state between `-i`/`-I` and the `-g`
+	/// calls (`cd_state`; `Record::Misc`, postcard;
+	/// `crate::bash::vm::zle::comp::computil`).
+	ZshCompDescribe,
+	/// zsh/computil's `comparguments` state (`ca_laststate` and its
+	/// definitions; `Record::Misc`, postcard).
+	ZshCompArguments,
+	/// zsh/computil's `compvalues` state (`cv_laststate` and its
+	/// definitions; `Record::Misc`, postcard).
+	ZshCompValues,
+	/// zsh/computil's tag sets by function level (`comptags`,
+	/// `lasttaglevel`; `Record::Misc`, postcard).
+	ZshCompTags,
+	/// zsh/compctl's definitions (`compctltab`, the pattern compctls, the
+	/// `-C`/`-D`/`-T` compctls and the global matchers; `Record::Misc`,
+	/// postcard; `crate::bash::vm::zle::comp::compctl`).
+	ZshCompctl,
+	/// zsh's type of `SECONDS` (`setsecondstype`; `Record::Misc`): `i`, `E`
+	/// or `F`, then the base or precision (decimal); absent: an integer.
+	ZshSecondsType,
+	/// zsh started emulating sh or ksh (`Record::Misc` `1`; absent: it did
+	/// not): `createparamtable` left out the zsh-only specials and tied
+	/// none of the colon arrays (`special_params_sh`).
+	ZshStartedSh,
+	/// zsh's user-defined math functions (`functions -M`; zsh's
+	/// `MFF_USERFUNC` entries of `mathfuncs`; `Record::Words`): five words
+	/// per function, newest first as zsh lists them: the name, `s` for a
+	/// string function (`-Ms`) or empty, the fewest and most arguments
+	/// (decimal, -1 for no limit), and the shell function it calls (empty:
+	/// the same name) ([`crate::bash::vm::zsh::arith`]).
+	ZshMathFuncs,
+	/// The `PATH` whose directories zsh's command table holds every
+	/// command of (zsh `pathchecked` at the end of `path`, after
+	/// `fillcmdnamtable`; `Record::Misc`); absent once the table was
+	/// emptied (`PATH` assigned, `hash -r`).
+	ZshPathChecked,
+	/// `tool` for a shell created with [`crate::bash::Profile::Tool`]
+	/// (`Record::Misc`); absent for a user's shell. Nested shells see the
+	/// root's record.
+	Profile,
 }
 
 crate::bash::packed_names::packed_names!(MiscKey);
@@ -1042,6 +1350,12 @@ pub enum Change<'a> {
 	/// new element when absent. Shape, ordering and attributes follow
 	/// [`Change::SetElem`]; existing value buffers are reused.
 	AppendElem(Key<'a>, Elem<'a>, &'a BStr),
+	/// Insert a key absent from an existing associative array at the front
+	/// of its bucket in a zsh hash table of `.1` buckets ([`zsh_bucket`]),
+	/// its entries being listed bucket by bucket (zsh keeps its hash
+	/// table's iteration order; [`AssocArray::insert_front`]); a key already
+	/// there takes the value in its place instead.
+	InsertElem(Key<'a>, usize, &'a BStr, &'a BStr),
 	/// Remove one element of an existing array variable (absent: no
 	/// effect); the others keep their order.
 	DelElem(Key<'a>, Elem<'a>),

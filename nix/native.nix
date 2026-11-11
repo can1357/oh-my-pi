@@ -1,4 +1,5 @@
 {
+  apple-sdk_27 ? null,
   cmake,
   craneLib,
   lib,
@@ -8,14 +9,17 @@
   rustPlatform,
   source,
   stdenv,
+  swiftPackages,
   writeText,
   withWaylandScreencast ? false,
   withFatLto ? true,
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
 }:
 let
   rootCargoToml = builtins.readFile (source + "/Cargo.toml");
   lockText = builtins.readFile (source + "/Cargo.lock");
-  workspaceVersion = (builtins.fromTOML rootCargoToml).workspace.package.version;
+  rootManifest = builtins.fromTOML rootCargoToml;
+  workspaceVersion = rootManifest.workspace.package.version;
   platform =
     {
       aarch64-darwin = {
@@ -69,7 +73,8 @@ let
       pkg-config
       rustPlatform.bindgenHook
     ];
-    buildInputs = lib.optionals withWaylandScreencast [ pipewire ];
+    buildInputs =
+      lib.optionals withWaylandScreencast [ pipewire ] ++ lib.optional withAppleFm apple-sdk_27;
     strictDeps = true;
     doCheck = false;
     # Stamping, patching, and signing belong to the downstream package.
@@ -161,11 +166,15 @@ let
       (map (versionEntry placeholderVersion) workspaceCrates)
       lockText
   );
-  # Crane writes a workspace root as its cleaned Cargo.toml, so only the
-  # version differs from what mkDummySrc would produce.
+  # Crane writes a workspace root as its cleaned Cargo.toml. Its filter drops
+  # `workspace.lints`, but the real vendored crates still inherit them, so
+  # restore those alongside the placeholder version.
   dependencyCargoToml = craneLib.writeTOML "Cargo.toml" (
     lib.recursiveUpdate (craneLib.cleanCargoToml { cargoTomlContents = rootCargoToml; }) {
-      workspace.package.version = placeholderVersion;
+      workspace = {
+        package.version = placeholderVersion;
+        inherit (rootManifest.workspace) lints;
+      };
     }
   );
   dependencySource = craneLib.mkDummySrc {
@@ -201,10 +210,34 @@ let
     }
   );
 in
+assert lib.assertMsg (
+  withAppleFm -> apple-sdk_27 != null
+) "Apple Foundation Models requires apple-sdk_27; provide it or set withAppleFm = false.";
 craneLib.buildPackage (
   commonArgs
   // {
     cargoArtifacts = dependencyArtifacts;
+    # Only real sources compile the bridge; Swift must not invalidate the
+    # dummy dependency artifacts. build.rs fails instead of substituting a
+    # host Xcode/CLT compiler or a stub when this compiler is unusable.
+    env =
+      commonArgs.env
+      // lib.optionalAttrs withAppleFm {
+        OMP_APPLEFM_SWIFTC = lib.getExe' swiftPackages.swift "swiftc";
+      };
+    # The final package compresses the addon, so Nix reference scanning cannot
+    # see a /nix/store dylib or rpath that the Swift wrapper leaves in the
+    # embedded bridge; it would fail to load after garbage collection.
+    postBuild = lib.optionalString withAppleFm ''
+      for bridge in target/release/build/pi-natives-*/out/libomp_applefm.dylib; do
+        bridgeLoadCommands="$(otool -l "$bridge")"
+        if grep -q /nix/store/ <<<"$bridgeLoadCommands"; then
+          echo "Apple Foundation Models bridge load commands reference /nix/store:" >&2
+          echo "$bridgeLoadCommands" >&2
+          exit 1
+        fi
+      done
+    '';
     passthru = {
       inherit platform dependencyArtifacts;
     };

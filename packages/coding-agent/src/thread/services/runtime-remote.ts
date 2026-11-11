@@ -25,10 +25,14 @@ export const AGENT_STORAGE_KIND = "agent-storage";
 /** Protocol of kind {@link COST_GATE_KIND}. */
 export type CostGateProtocol = {
 	spent: RpcMethod<[], number>;
-	capped: RpcMethod<[], boolean>;
 	check: RpcMethod<[], CostCapRefusal | undefined>;
 	record: RpcMethod<[cost: number], void>;
-	onCapChange: RpcMethod<[listener: WireCallback<[]>], WireUnsubscribe>;
+	/**
+	 * Subscribe `listener` to `session.maxCost` changes, each carrying whether a cap is set
+	 * afterwards; returns whether one is set now. Main drops the subscription once the listener
+	 * returns `false` (its worker gate was collected) or the worker exits.
+	 */
+	watchCap: RpcMethod<[listener: (capped: boolean) => boolean | Promise<boolean>], boolean>;
 };
 
 /** Protocol of kind {@link EVENT_BUS_KIND}. */
@@ -64,9 +68,16 @@ export type AgentStorageProtocol = {
 	claimNotice: RpcMethod<[key: string, expiresAtMs: number], boolean>;
 };
 
-/** Worker-side {@link CostGateApi}: the spend total and cap live on main's gate. */
+/**
+ * Worker-side {@link CostGateApi}: the spend total and cap live on main's gate. Whether a cap
+ * is set is mirrored here by one watch on main, made on first use, so an uncapped tree (the
+ * default) checks every request without a blocking call; a capped one asks main each time.
+ */
 export class RemoteCostGate implements CostGateApi {
 	readonly #remote: RemoteObject<CostGateProtocol>;
+	/** Main's {@link CostGateApi.capped}, kept current by the cap watch; `undefined` before it. */
+	#capped: boolean | undefined;
+	readonly #capListeners = new Set<() => void>();
 
 	constructor(remote: RemoteObject<CostGateProtocol>) {
 		this.#remote = remote;
@@ -77,14 +88,40 @@ export class RemoteCostGate implements CostGateApi {
 	}
 
 	get capped(): boolean {
-		return this.#remote.callSync("capped");
+		return this.#capped ?? this.#watchCap();
 	}
 
+	#watchCap(): boolean {
+		// Weak: main holds the listener until the worker exits; a collected gate ends the watch.
+		const gate = new WeakRef(this);
+		this.#capped = this.#remote.callSync("watchCap", capped => {
+			const target = gate.deref();
+			if (!target) return false;
+			target.#capped = capped;
+			for (const listener of Array.from(target.#capListeners)) {
+				try {
+					listener();
+				} catch (error) {
+					logger.warn("Cost cap listener failed", { error: String(error) });
+				}
+			}
+			return true;
+		});
+		return this.#capped;
+	}
+
+	/** Listeners run after {@link capped} has adopted the change. */
 	onCapChange(onChange: () => void): () => void {
-		return localUnsubscribe(this.#remote.callSync("onCapChange", onChange));
+		if (this.#capped === undefined) this.#watchCap();
+		this.#capListeners.add(onChange);
+		return () => {
+			this.#capListeners.delete(onChange);
+		};
 	}
 
 	check(): CostCapRefusal | undefined {
+		// No cap, no refusal: `CostGate.check` reads only the spend once a cap is set.
+		if (!this.capped) return undefined;
 		return this.#remote.callSync("check");
 	}
 

@@ -279,6 +279,12 @@ provider "factory-droid" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=1000000 max-tokens=65536
 		}
+		model "gemini-4-argon" name="Gemini 4 Argon" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=934464 max-tokens=65536
+		}
 		model "gemini-3.1-pro-preview" name="Gemini 3.1 Pro" {
 			reasoning #true
 			input "text" "image"
@@ -388,6 +394,12 @@ provider "factory-droid" {
 			limits context=908928 max-tokens=131072
 		}
 		model "muse-spark-1.2" name="Muse Spark 1.2" {
+			reasoning #true
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=908928 max-tokens=131072
+		}
+		model "muse-spark-1.3" name="Muse Spark 1.3" {
 			reasoning #true
 			input "text"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -509,6 +521,7 @@ provider "factory-droid" {
 		upstream-rotation "anthropic" "vertex_anthropic" "bedrock_anthropic"
 		region-upstreams-eu "vertex_anthropic"
 		credit-rates { input 4; output 5; cache-read 0.025 }
+		list-price-from "anthropic" "claude-fable-5-1"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #false
 		thinking-default-level "high"
@@ -937,6 +950,32 @@ provider "factory-droid" {
 		thinking-default-level "high"
 		entitlement { feature-flag "garnet_0715" }
 	}
+	// Launches Global-only: Factory serves it from neither US nor EU inference.
+	models "gemini-4-argon" {
+		routing-family "google"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates {
+			input 1.6
+			output 5
+			cache-read 0.05
+			effective-rates {
+				promotion {
+					effective-from "2026-10-13T16:00:00Z"
+					input 0.8
+				}
+				standard {
+					effective-from "2026-12-01T08:00:00Z"
+					input 1.6
+				}
+			}
+		}
+		list-price-from "google"
+		thinking-efforts "low" "medium" "high"
+		thinking-requires-effort #true
+		thinking-default-level "medium"
+		entitlement { feature-flag "gemini_4_argon" }
+	}
 	models "gemini-3.1-pro-preview" {
 		routing-family "google"
 		upstream-rotation "google"
@@ -1109,6 +1148,7 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.84; output 3.2 }
+		list-price-from "fireworks"
 		policy-aliases "glm-5p2-fast"
 		thinking-efforts "high" "max"
 		thinking-requires-effort #false
@@ -1156,6 +1196,7 @@ provider "factory-droid" {
 		routing-family "factory"
 		upstream-rotation "baseten"
 		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		list-price-from "meta" "muse-spark-1.2"
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		thinking-requires-effort #true
 		thinking-default-level "high"
@@ -1170,6 +1211,19 @@ provider "factory-droid" {
 		thinking-efforts "low" "medium" "high" "xhigh"
 		thinking-requires-effort #true
 		thinking-default-level "high"
+	}
+	// Vertex Model Garden serves 1.3 on its global endpoint only and rejects the
+	// `none` and `max` tiers; the ladder outranks the Meta class ladder as 1.2's does.
+	models "muse-spark-1.3" priority=1 {
+		routing-family "factory"
+		upstream-rotation "google"
+		region-upstreams-us
+		credit-rates { input 0.5; output 3.4; cache-read 0.12 }
+		list-price-from "meta"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+		thinking-default-level "high"
+		entitlement { feature-flag "muse_spark_1_3" }
 	}
 	models "beam-1.0" {
 		routing-family "factory"
@@ -1448,9 +1502,9 @@ provider "factory-droid" {
 			server-side-fallback-models "claude-opus-5"
 		}
 	}
-	// With tools, Anthropic and Vertex stream tool input eagerly and advertise
-	// fine-grained tool streaming; Bedrock takes the beta alone.
-	on-upstream "anthropic" "vertex_anthropic" {
+	// With tools, Anthropic, Vertex and Azure Foundry stream tool input eagerly
+	// and advertise fine-grained tool streaming; Bedrock takes the beta alone.
+	on-upstream "anthropic" "vertex_anthropic" "azure_anthropic" {
 		supports-eager-tool-input-streaming #true
 		anthropic-tool-streaming-beta #true
 	}
@@ -1515,12 +1569,27 @@ provider "factory-droid" {
 	models "grok-*" {
 		supports-reasoning-summary #false
 	}
+	// Muse Spark 1.3 rides Responses through Vertex. Native asks for encrypted
+	// reasoning but never replays it: Factory-served models fall outside the
+	// reasoning it carries across Responses turns. It requests the model's full
+	// output cap, above the generic Responses clamp.
+	models "muse-spark-1.3" {
+		filter-reasoning-history #true
+		clamp-output-to-model-max #true
+	}
 	models "gemini-*" "garnet-07-15" {
 		omit-max-output-tokens #true
 		google-thinking "level"
 	}
-	models "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
+	models "gemini-4-argon" "gemini-3.1-pro-preview" "gemini-3.7-flash" "gemini-3.8-flash" {
 		google-thinking "level-medium"
+	}
+	// Argon's request policy: no sampling parameters, the output cap pinned
+	// to the model maximum, and its own model turns replayed as Gemini sent them.
+	models "gemini-4-argon" {
+		google-omit-sampling #true
+		google-pin-max-output-tokens #true
+		google-native-replay #true
 	}
 	// FACTORY_API_KEY is a control-plane key, not a subscription proxy token.
 }

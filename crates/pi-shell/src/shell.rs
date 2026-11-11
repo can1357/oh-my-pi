@@ -28,11 +28,15 @@ use tokio_util::sync::CancellationToken;
 
 pub use crate::git::GIT_REPO_LOCATION_ENV_VARS;
 use crate::{
+	bash::trace::{RunTrace, SegmentSource},
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::is_git_repo_location_var,
 	minimizer,
 	output_decode::CaptureDecoder,
-	session::{Children, RunOptions, RunOutcome, RunStdio, Session, SessionConfig, SessionError},
+	session::{
+		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
+		SessionError,
+	},
 	taps::PipeTaps,
 	vfs::VfsFs,
 };
@@ -136,6 +140,9 @@ struct ShellConfig {
 	snapshot_path: Option<String>,
 	minimizer:     Option<minimizer::MinimizerConfig>,
 	filesystem:    Fs,
+	/// The state a forked shell's session starts from ([`Shell::fork`]);
+	/// it replaces the env fallback and snapshot sourcing of a new session.
+	seed:          Option<Image>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -156,6 +163,8 @@ struct ShellRunConfig {
 	filesystem: Option<Fs>,
 	/// Mirrors the run's pipeline pipes.
 	pipe_taps:  Option<Arc<PipeTaps>>,
+	/// Folds the run's engine events.
+	trace:      Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,6 +177,9 @@ pub struct ShellRunOptions {
 	pub filesystem: Option<Fs>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub pipe_taps:  Option<Arc<PipeTaps>>,
+	/// Folds the run's engine events into a live model of `command`
+	/// (built over the same command text).
+	pub trace:      Option<Arc<RunTrace>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -203,16 +215,29 @@ pub struct ShellExecuteOptions {
 
 pub type ShellExecuteResult = ShellRunResult;
 
-/// The live externals of the session's run in flight, readable apart from the
-/// session mutex (held for the whole command) so [`Shell::pids`] never waits
-/// for it. Replaced when a new session is created.
-type ActiveChildren = Arc<parking_lot::Mutex<Option<Children>>>;
+/// Handles of the live session readable apart from the session mutex (held
+/// for the whole command), so [`Shell::pids`] and [`Shell::fork`] never wait
+/// for it. Set when a session is created, cleared when it is dropped.
+type ActiveSession = Arc<parking_lot::Mutex<Option<SessionHandles>>>;
+
+struct SessionHandles {
+	/// The live externals of the session's run in flight.
+	children: Children,
+	/// The session's state at its last command boundary.
+	image:    LatestImage,
+}
+
+impl SessionHandles {
+	fn of(session: &Session) -> Self {
+		Self { children: session.children(), image: session.latest_image() }
+	}
+}
 
 pub struct Shell {
 	session:     Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
 	config:      ShellConfig,
-	children:    ActiveChildren,
+	active:      ActiveSession,
 }
 
 impl Shell {
@@ -224,6 +249,7 @@ impl Shell {
 				snapshot_path: None,
 				minimizer:     None,
 				filesystem:    Fs::native(),
+				seed:          None,
 			},
 			Some(opt) => {
 				let minimizer = opt
@@ -235,15 +261,36 @@ impl Shell {
 					snapshot_path: opt.snapshot_path,
 					minimizer,
 					filesystem: opt.filesystem,
+					seed: None,
 				}
 			},
 		};
+		Self::with_config(config)
+	}
+
+	fn with_config(config: ShellConfig) -> Self {
 		Self {
 			session: Arc::new(TokioMutex::new(None)),
 			abort_state: ShellAbortState::default(),
 			config,
-			children: ActiveChildren::default(),
+			active: ActiveSession::default(),
 		}
+	}
+
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork. Never waits for a running command. Before this shell has a
+	/// session, the fork starts from this shell's own seed, or as a new
+	/// shell.
+	#[must_use]
+	pub fn fork(&self) -> Self {
+		let latest = self.active.lock().as_ref().map(|active| active.image.get());
+		Self::with_config(ShellConfig {
+			seed: latest.or_else(|| self.config.seed.clone()),
+			..self.config.clone()
+		})
 	}
 
 	pub async fn run(
@@ -259,11 +306,12 @@ impl Shell {
 			minimizer:  self.config.minimizer.clone(),
 			filesystem: options.filesystem,
 			pipe_taps:  options.pipe_taps,
+			trace:      options.trace,
 		};
 		run_shell_session(
 			self.session.clone(),
 			self.abort_state.clone(),
-			self.children.clone(),
+			self.active.clone(),
 			self.config.clone(),
 			run_config,
 			on_chunk,
@@ -286,10 +334,10 @@ impl Shell {
 	#[must_use]
 	pub fn pids(&self) -> Vec<i32> {
 		self
-			.children
+			.active
 			.lock()
 			.as_ref()
-			.map_or_else(Vec::new, Children::pids)
+			.map_or_else(Vec::new, |active| active.children.pids())
 	}
 
 	/// Number of live external background jobs tracked by the persistent
@@ -324,6 +372,7 @@ pub async fn execute_shell(
 		snapshot_path: options.snapshot_path,
 		minimizer:     minimizer.clone(),
 		filesystem:    options.filesystem,
+		seed:          None,
 	};
 	let run_config = ShellRunConfig {
 		command: options.command,
@@ -332,6 +381,7 @@ pub async fn execute_shell(
 		minimizer,
 		filesystem: None,
 		pipe_taps: None,
+		trace: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -363,6 +413,7 @@ pub async fn execute_shell_streams(
 		snapshot_path: options.snapshot_path,
 		minimizer:     None,
 		filesystem:    options.filesystem,
+		seed:          None,
 	};
 	let run_config = ShellRunConfig {
 		command:    options.command,
@@ -371,6 +422,7 @@ pub async fn execute_shell_streams(
 		minimizer:  None,
 		filesystem: None,
 		pipe_taps:  None,
+		trace:      None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -434,7 +486,7 @@ const fn cancelled_result(reason: AbortReason) -> ShellRunResult {
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
-	children: ActiveChildren,
+	active: ActiveSession,
 	config: ShellConfig,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
@@ -444,6 +496,7 @@ async fn run_shell_session(
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
 		let abort_state = abort_state.clone();
+		let active = active.clone();
 		let tokio_cancel = tokio_cancel.clone();
 		let at = ct.emplace_abort_token();
 		async move {
@@ -452,7 +505,7 @@ async fn run_shell_session(
 				core
 			} else {
 				let core = create_session_for_run(&config, Some(&tokio_cancel)).await?;
-				*children.lock() = Some(core.session.children());
+				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
 			abort_state.set(at).await;
@@ -476,6 +529,7 @@ async fn run_shell_session(
 			// holding task finishes.
 			if let Ok(mut guard) = session.try_lock() {
 				*guard = None;
+				*active.lock() = None;
 			}
 			return Ok(cancelled_result(reason));
 		}
@@ -489,6 +543,7 @@ async fn run_shell_session(
 	// built so far. Only a failed run leaves the shell in an unknown state.
 	if res.is_err() {
 		*session.lock().await = None;
+		*active.lock() = None;
 	}
 	Ok(res?.into_run_result())
 }
@@ -599,7 +654,7 @@ const fn normalize_env_key(key: &str) -> &str {
 /// case-sensitive shell. Per-command env keeps the narrower
 /// [`normalize_env_key`]: a lowercase `tmp` there is an ordinary variable.
 #[cfg(windows)]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	if key.eq_ignore_ascii_case("TEMP") {
 		"TEMP"
 	} else if key.eq_ignore_ascii_case("TMP") {
@@ -612,7 +667,7 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 }
 
 #[cfg(not(windows))]
-const fn normalize_inherited_env_key(key: &str) -> &str {
+pub(crate) const fn normalize_inherited_env_key(key: &str) -> &str {
 	key
 }
 
@@ -624,7 +679,7 @@ const fn normalize_inherited_env_key(key: &str) -> &str {
 /// are expanded with the same `GetLongPathNameW` routine `cd` uses (symlinks
 /// and junctions kept); anything else, or a failed expansion, passes through.
 #[cfg(windows)]
-fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+pub(crate) fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
 	let path = Path::new(value);
 	if !matches!(key, "TEMP" | "TMP" | "TMPDIR") || !path.is_absolute() {
 		return std::borrow::Cow::Borrowed(value);
@@ -639,7 +694,10 @@ fn inherited_env_value<'a>(key: &str, value: &'a str) -> std::borrow::Cow<'a, st
 }
 
 #[cfg(not(windows))]
-const fn inherited_env_value<'a>(_key: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
+pub(crate) const fn inherited_env_value<'a>(
+	_key: &str,
+	value: &'a str,
+) -> std::borrow::Cow<'a, str> {
 	std::borrow::Cow::Borrowed(value)
 }
 
@@ -784,9 +842,9 @@ fn initial_cwd() -> BString {
 	home.map_or_else(|| BString::from("/"), |home| path_bytes(&home))
 }
 
-/// Start a session for `config`. Setup (the `env` fallback, snapshot
-/// sourcing) belongs to the creating run, so its processes and provider
-/// calls stop with `cancel_token`.
+/// Start a session for `config`, from its seed when it has one. Setup (the
+/// `env` fallback, snapshot sourcing) belongs to the creating run, so its
+/// processes and provider calls stop with `cancel_token`.
 async fn create_session_for_run(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
@@ -800,32 +858,39 @@ async fn create_session_for_run(
 		.into_iter()
 		.map(|(key, value)| (BString::from(key), BString::from(value)))
 		.collect();
-	let cwd = initial_cwd();
+	let cwd = config.seed.as_ref().map_or_else(initial_cwd, Image::cwd);
 	// The pi utilities (and their `PI_DISABLE_*` gates), the process
 	// builtins, `nohup`, `timeout` and the `git` layers are the session's
 	// commands (`crate::tools`), configured from this environment; `exec`
 	// and `suspend` never act on this process.
-	let session = Session::new(SessionConfig {
+	let session_config = SessionConfig {
 		env,
 		cwd: cwd.clone(),
 		fs: Box::new(slot.clone()),
 		vfs: Some(slot.clone()),
 		runtime,
 		output_decoding: None,
-	})
+	};
+	let session = match &config.seed {
+		Some(image) => Session::restore(session_config, image),
+		None => Session::new(session_config),
+	}
 	.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
 	let mut core = ShellSessionCore { session, slot, filesystem: config.filesystem.clone(), cwd };
 
-	if !has_env_var {
-		apply_env_fallback(&mut core, &cancel)
-			.await
-			.map_err(|err| Error::msg(format!("Failed to set env fallback: {err}")))?;
-	}
-	if let Some(snapshot_path) = config.snapshot_path.as_ref() {
-		let escaped = snapshot_path.replace('\'', "'\\''");
-		run_setup(&mut core, format!("source '{escaped}'"), &cancel)
-			.await
-			.map_err(|err| Error::msg(format!("Failed to source snapshot: {err}")))?;
+	// A seed already holds both.
+	if config.seed.is_none() {
+		if !has_env_var {
+			apply_env_fallback(&mut core, &cancel)
+				.await
+				.map_err(|err| Error::msg(format!("Failed to set env fallback: {err}")))?;
+		}
+		if let Some(snapshot_path) = config.snapshot_path.as_ref() {
+			let escaped = snapshot_path.replace('\'', "'\\''");
+			run_setup(&mut core, format!("source '{escaped}'"), &cancel)
+				.await
+				.map_err(|err| Error::msg(format!("Failed to source snapshot: {err}")))?;
+		}
 	}
 	restore_session_filesystem(&core);
 	if cancel.is_cancelled() {
@@ -976,6 +1041,11 @@ impl CommandScope<'_> {
 				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
 			reported_error,
 			text_capture: false,
+			events: self
+				.options
+				.trace
+				.as_ref()
+				.map(|trace| Arc::clone(trace) as Arc<dyn crate::bash::EventSink>),
 		}
 	}
 }
@@ -1115,9 +1185,16 @@ async fn run_shell_command_single(
 		minimizer::engine::MinimizerMode::SegmentedChain => CommandCaptureMode::Streaming,
 	};
 
-	let command_run =
-		run_shell_command_once(session, scope, options.command.clone(), cwd, on_chunk, capture_mode)
-			.await?;
+	let command_run = run_shell_command_once(
+		session,
+		scope,
+		options.command.clone(),
+		cwd,
+		on_chunk,
+		capture_mode,
+		None,
+	)
+	.await?;
 	let status = command_run.outcome.status;
 
 	let mut minimized_out = None;
@@ -1220,9 +1297,23 @@ async fn run_shell_command_segmented_chain(
 
 		// Only the first segment moves the shell; later ones start wherever
 		// the earlier ones left it.
-		let command_run =
-			run_shell_command_once(session, scope, source, cwd.take(), on_chunk.clone(), capture_mode)
-				.await?;
+		let events = options.trace.as_ref().map(|trace| {
+			trace.segment(SegmentSource {
+				at:     segment.source_at,
+				len:    segment.source_len,
+				prefix: if segment.suppress_errexit { 2 } else { 0 },
+			})
+		});
+		let command_run = run_shell_command_once(
+			session,
+			scope,
+			source,
+			cwd.take(),
+			on_chunk.clone(),
+			capture_mode,
+			events,
+		)
+		.await?;
 
 		let exit = command_run.outcome.status;
 		previous_succeeded = exit == 0;
@@ -1267,6 +1358,10 @@ async fn run_shell_command_segmented_chain(
 		return Err(Error::msg("Segmented chain executed no segments"));
 	};
 
+	if let Some(trace) = options.trace.as_ref() {
+		trace.finish_segments(status);
+	}
+
 	let minimized_out = aggregate
 		// Only surface telemetry when the segmented chain actually rewrote the
 		// output; a `chain-noop` capture (`changed == false`) must yield `None`,
@@ -1303,6 +1398,7 @@ async fn run_shell_command_once(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	capture_mode: CommandCaptureMode,
+	events: Option<Arc<dyn crate::bash::EventSink>>,
 ) -> Result<CommandRunOutput> {
 	let cancel_token = scope.cancel.clone();
 	let (reader_file, writer_file) = pipe_to_files("output")?;
@@ -1355,6 +1451,9 @@ async fn run_shell_command_once(
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let mut run = scope.run_options(command, cwd, reported_error.clone());
+	if let Some(events) = events {
+		run.events = Some(events);
+	}
 	// Stdout and stderr are one pipe read as text: externals' output is
 	// decoded per program before it joins what the builtins wrote.
 	run.text_capture = true;
@@ -1828,7 +1927,8 @@ async fn read_output_buffered(
 		// large output.
 		if !exceeded && captured_bytes.saturating_add(n) > max_capture_bytes {
 			exceeded = true;
-			captured = String::new();
+			captured.clear();
+			captured.shrink_to_fit();
 		}
 		captured_bytes = captured_bytes.saturating_add(n);
 

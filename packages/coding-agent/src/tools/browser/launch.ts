@@ -100,6 +100,18 @@ export function stealthIgnoreDefaultArgs(executablePath: string | undefined): st
 /** Launch arg that keeps `navigator.webdriver` false; pair with {@link stealthIgnoreDefaultArgs}. */
 export const DISABLE_AUTOMATION_CONTROLLED_ARG = "--disable-blink-features=AutomationControlled";
 
+/**
+ * Chromium switches that keep every renderer at normal scheduling priority. On macOS, Chromium up
+ * to M152 moves the renderers of background tabs and spare processes into the Darwin background
+ * band (priority 4) behind `MacAllowBackgroundingRenderProcesses`, ignoring Puppeteer's
+ * `--disable-renderer-backgrounding`. On a busy host the kernel then barely runs them: Tracing.start
+ * waits out Chromium's 10s ack timeout for them, and CDP calls into a tab opened beside another
+ * stall. Unknown feature names are ignored, so builds without the feature are unaffected; Puppeteer
+ * merges every `--disable-features` switch it is given.
+ */
+export const RENDERER_PRIORITY_ARGS: readonly string[] =
+	process.platform === "darwin" ? ["--disable-features=MacAllowBackgroundingRenderProcesses"] : [];
+
 const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
@@ -627,6 +639,7 @@ export function buildHeadlessLaunchArgs(
 		"--hide-scrollbars",
 		"--enable-features=WebMCPTesting,DevToolsWebMCPSupport",
 		`--window-size=${viewport.width},${viewport.height}`,
+		...RENDERER_PRIORITY_ARGS,
 	];
 	if (features.ignoreHttpsErrors) launchArgs.push("--ignore-certificate-errors");
 	if (features.allowFileAccess) launchArgs.push("--allow-file-access-from-files");
@@ -762,10 +775,13 @@ async function readActivePort(file: BunFile): Promise<string | undefined> {
  * Pin automation-safe preferences in a Chromium profile OMP owns. Password leak
  * detection answers a password form submit with a tab-modal "Change your
  * password" dialog; while it is open Chromium drops `Input.dispatchMouseEvent`
- * input for the tab, and a hidden browser offers no way to close it. Chromium
- * reads `Preferences` only at startup and rewrites it from memory, so call this
- * before a Chromium process starts on the profile. Best-effort: the preference
- * only suppresses a dialog, so a failure is logged and never blocks the launch.
+ * input for the tab, and a hidden browser offers no way to close it. A page's
+ * `window.print()` opens Chrome's print preview, which holds the page's script
+ * until someone closes it, so input, navigation and most evaluations stall;
+ * with printing off, `print()` returns at once and `Page.printToPDF` still works.
+ * Chromium reads `Preferences` only at startup and rewrites it from memory, so
+ * call this before a Chromium process starts on the profile. Best-effort: the
+ * preferences only suppress dialogs, so a failure is logged and never blocks the launch.
  */
 export async function seedOwnedProfilePreferences(userDataDir: string): Promise<void> {
 	try {
@@ -788,9 +804,12 @@ async function writeOwnedProfilePreferences(file: string): Promise<void> {
 		if (!isEnoent(error) && !(error instanceof SyntaxError)) throw error;
 	}
 	const profile = isRecord(prefs.profile) ? prefs.profile : {};
-	if (profile.password_manager_leak_detection === false) return;
+	const printing = isRecord(prefs.printing) ? prefs.printing : {};
+	if (profile.password_manager_leak_detection === false && printing.enabled === false) return;
 	profile.password_manager_leak_detection = false;
+	printing.enabled = false;
 	prefs.profile = profile;
+	prefs.printing = printing;
 	const staged = `${file}.omp-${process.pid}`;
 	try {
 		await Bun.write(staged, JSON.stringify(prefs));

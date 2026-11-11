@@ -12,14 +12,17 @@ use bstr::{BStr, BString};
 
 use super::{
 	Cx, Kernel,
+	builtins::history::io::{ErrKind, HistErr, HistOp},
 	glob::Walk,
 	proc::{Live, PathSearch, Probe, ProbeResult, Scratch, Vproc},
 };
 use crate::bash::{
 	diag,
 	event::WaitKey,
-	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind},
+	fd::FdRef,
+	fs::{Access, FileKind, FsOp, FsPoll, OpenFlags, Stat, StatKind, msys_drive_path},
 	host::Deadline,
+	ids::Platform,
 };
 
 /// The cached answer to `p`.
@@ -45,7 +48,7 @@ pub fn dev_fd(path: &[u8]) -> Option<i32> {
 }
 
 /// A synthesized `stat` of an engine fd.
-fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
+pub(super) fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 	let h = vp.fds.get(fd)?;
 	let kind = match h.kind()? {
 		FileKind::Regular => StatKind::File,
@@ -66,6 +69,40 @@ fn fd_stat(vp: &Vproc, fd: i32) -> Option<Stat> {
 		atime_ns: 0,
 		ctime_ns: 0,
 		blocks: 0,
+		rdev: 0,
+		blksize: 0,
+	})
+}
+
+/// `stat` (`follow`: not `lstat`) of `path`, continuing the one in flight
+/// in `sc`; `None` when it fails.
+fn poll_stat(
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	sc: &mut Scratch,
+	tcx: &mut Context<'_>,
+	path: &[u8],
+	follow: bool,
+) -> Poll<Option<Stat>> {
+	if let Some(fd) = dev_fd(path) {
+		return Poll::Ready(fd_stat(vp, fd));
+	}
+	let polled = match &mut sc.live {
+		Live::Stat(fut) => fut.poll(tcx),
+		_ => match cx.host.fs().stat(BStr::new(path), follow) {
+			FsPoll::Ready(polled) => Poll::Ready(polled),
+			FsPoll::Pending(mut fut) => {
+				let polled = fut.poll(tcx);
+				if polled.is_pending() {
+					sc.live = Live::Stat(fut);
+				}
+				polled
+			},
+		},
+	};
+	polled.map(|r| {
+		sc.live = Live::None;
+		r.ok()
 	})
 }
 
@@ -77,35 +114,28 @@ pub fn perform(
 	sc: &mut Scratch,
 	probe: &Probe,
 ) -> Result<ProbeResult, WaitKey> {
-	let io = sc.io();
-	if io.probing.as_ref() != Some(probe) {
-		io.probing = Some(probe.clone());
-		io.search = None;
-		io.walk = None;
-		io.input.clear();
-		sc.live = Live::None;
-	}
+	begin(sc, probe);
 	let mut tcx = Context::from_waker(&k.waker);
 	let res = match probe {
-		Probe::Stat { path, follow } => {
-			if let Some(fd) = dev_fd(path) {
-				return Ok(finish(sc, ProbeResult::Stat(fd_stat(vp, fd))));
-			}
-			let polled = match &mut sc.live {
-				Live::Stat(fut) => fut.poll(&mut tcx),
-				_ => match cx.host.fs().stat(BStr::new(path), *follow) {
-					FsPoll::Ready(polled) => Poll::Ready(polled),
-					FsPoll::Pending(mut fut) => {
-						let polled = fut.poll(&mut tcx);
-						if polled.is_pending() {
-							sc.live = Live::Stat(fut);
-						}
-						polled
-					},
-				},
+		Probe::Stat { path, follow } => match poll_stat(cx, vp, sc, &mut tcx, path, *follow) {
+			Poll::Ready(st) => ProbeResult::Stat(st),
+			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
+		},
+		Probe::StatAll { paths, ends } => loop {
+			let done = sc.io().zsh().stats.len();
+			let Some(path) = paths.get(done) else {
+				break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
 			};
-			match polled {
-				Poll::Ready(polled) => ProbeResult::Stat(polled.ok()),
+			match poll_stat(cx, vp, sc, &mut tcx, path, true) {
+				Poll::Ready(st) => {
+					let file = st.as_ref().is_some_and(|s| s.kind != StatKind::Dir)
+						&& u32::try_from(done).is_ok_and(|d| ends.binary_search(&d).is_ok());
+					sc.io().zsh().stats.push(st);
+					// Later paths are asked only if the search goes on.
+					if file {
+						break ProbeResult::Stats(std::mem::take(&mut sc.io().zsh().stats));
+					}
+				},
 				Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Stat, path: path.clone() }),
 			}
 		},
@@ -167,14 +197,27 @@ pub fn perform(
 		Probe::Path { name, path } => {
 			let io = sc.io();
 			if io.search.is_none() {
+				let extensions = executable_extensions(k, cx, vp);
 				io.search = Some(PathSearch {
-					cands:         candidates(path, name, &vp.cwd),
+					cands:         candidates(
+						path,
+						name,
+						&vp.cwd,
+						k.engine.config().platform,
+						&extensions,
+					),
 					idx:           0,
 					checking_exec: false,
 					nonexec:       None,
 				});
 			}
 			match path_search(&mut tcx, cx, sc) {
+				// Windows reports the probed path: `shown_candidate` splits PATH
+				// on `:` and its `idx` stops addressing one entry once every
+				// entry expands to a name plus its PATHEXT candidates.
+				Search::Found(found) if k.engine.config().platform == Platform::Windows => {
+					ProbeResult::Path(Some(found))
+				},
 				// bash shows `dir/name` as built (`./e` for an empty entry).
 				Search::Found(_) => {
 					let idx = sc
@@ -213,6 +256,27 @@ pub fn perform(
 				}
 			}
 		},
+		Probe::DumpHas(q) => {
+			let (path, name) = (&q.path, &q.name);
+			let stamp = (q.mtime_ns, q.size);
+			let funcs = match k.dump_funcs(path, stamp) {
+				Some(funcs) => funcs,
+				None => match read_file(&mut tcx, cx, sc, path) {
+					Poll::Ready(Ok(data)) => {
+						let funcs = super::zsh::zwc::DumpHeader::parse(&data).map_or_else(
+							|_| std::collections::HashSet::new(),
+							|head| head.loadable(&data),
+						);
+						let funcs = std::sync::Arc::new(funcs);
+						k.cache_dump_funcs(path, stamp, std::sync::Arc::clone(&funcs));
+						funcs
+					},
+					Poll::Ready(Err(_)) => std::sync::Arc::default(),
+					Poll::Pending => return Err(WaitKey::Fs { op: FsOp::Open, path: path.clone() }),
+				},
+			};
+			ProbeResult::Ok(funcs.contains(name.as_slice()))
+		},
 		Probe::RealPath { path } => {
 			let polled = match &mut sc.live {
 				Live::Path(fut) => fut.poll(&mut tcx),
@@ -246,14 +310,46 @@ pub fn perform(
 				},
 			}
 		},
+		// fd-level probes change the fd table: only a builtin asks for them,
+		// and its probes go through `perform_mut`.
+		Probe::Fd(_) => ProbeResult::Fd(Box::new(super::fdprobe::FdAnswer::Err(
+			super::fsprobe::FsErr::of(&std::io::Error::from(std::io::ErrorKind::Unsupported)),
+		))),
+		Probe::Fs { req, .. } => ProbeResult::Fs(super::fsprobe::perform(&mut tcx, cx, vp, sc, req)?),
+		// Only the `zftp` builtin asks, through `perform_mut`.
+		Probe::Zftp { .. } => {
+			ProbeResult::Zftp(Box::new(super::builtins::zsh_mod_zftp::ZftpAns::Done))
+		},
+		// A program's shell has no history files
+		// ([`crate::bash::Profile::Tool`]): reads find none, writes fail; only
+		// the clock steps run.
+		Probe::Hist { op, .. }
+			if !matches!(**op, HistOp::Now | HistOp::Sleep { .. })
+				&& super::is_tool(cx.store, vp).unwrap_or(true) =>
+		{
+			ProbeResult::Hist(Box::new(Err(HistErr {
+				kind: ErrKind::Other,
+				msg:  BString::from("history files are not available in this shell"),
+			})))
+		},
+		Probe::Hist { op, .. } => match super::builtins::history::io::perform(&mut tcx, cx, sc, op) {
+			Poll::Ready(answer) => ProbeResult::Hist(Box::new(answer)),
+			Poll::Pending => return Err(WaitKey::Fs { op: FsOp::HistFile, path: op.path() }),
+		},
 		Probe::Ready { fd } => {
 			// `read -t 0`: is input available, without consuming it.
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			ProbeResult::Ok(handle.is_open() && handle.poll_read(&mut tcx, &mut []).is_ready())
 		},
 		Probe::Input { fd, delim, lines, nchars, timeout_ns, .. } => {
-			let handle = vp.fds.handle(*fd);
+			let handle = input_handle(k, vp, *fd);
 			let seekable = handle.kind() == Some(FileKind::Regular);
+			// A Windows console in line mode ends a line with `\r\n`; a Unix
+			// terminal maps the `\r` to `\n` itself (ICRNL). Pipes and files
+			// keep their `\r`, as zsh does.
+			let console_lines = delim == &Some(b'\n')
+				&& handle.kind() == Some(FileKind::Tty)
+				&& k.engine.config().platform == Platform::Windows;
 			// The bytes so far, beside `sc.live` (the timer).
 			let input = &mut sc.io.get_or_insert_with(Box::default).input;
 			let lines = (*lines).max(1) as usize;
@@ -265,29 +361,40 @@ pub fn perform(
 				let done_delim = delim.is_some() && seen >= lines;
 				if done_len || done_delim {
 					break ProbeResult::Input {
-						data:      BString::from(std::mem::take(input)),
+						data:      line_input(std::mem::take(input), console_lines),
 						eof:       false,
 						timed_out: false,
 					};
 				}
-				let mut buf = [0u8; 4096];
-				let want = if seekable { buf.len() } else { 1 };
+				// On seekable fds read ahead, then give back what follows
+				// the last delimiter wanted. A line mostly fits the first,
+				// short read: what is read past it is only given back.
+				let want = match (seekable, input.is_empty()) {
+					(false, _) => 1,
+					(true, true) => 256,
+					(true, false) => 4096,
+				};
 				let want = nchars.map_or(want, |n| want.min(n - input.len()));
-				match handle.poll_read(&mut tcx, &mut buf[..want]) {
+				let start = input.len();
+				input.resize(start + want, 0);
+				let polled = handle.poll_read(&mut tcx, &mut input[start..]);
+				let got = match &polled {
+					Poll::Ready(Ok(n)) => *n,
+					_ => 0,
+				};
+				input.truncate(start + got);
+				match polled {
 					Poll::Ready(Ok(0) | Err(_)) => {
 						break ProbeResult::Input {
-							data:      BString::from(std::mem::take(input)),
+							data:      line_input(std::mem::take(input), console_lines),
 							eof:       true,
 							timed_out: false,
 						};
 					},
 					Poll::Ready(Ok(n)) => {
-						let got = &buf[..n];
-						// On seekable fds read ahead, then give back what
-						// follows the last delimiter wanted.
 						let mut cut = None;
 						if let Some(d) = *delim {
-							for (i, _) in got.iter().enumerate().filter(|&(_, &c)| c == d) {
+							for (i, _) in input[start..].iter().enumerate().filter(|&(_, &c)| c == d) {
 								seen += 1;
 								if seen == lines {
 									cut = Some(i + 1);
@@ -295,13 +402,11 @@ pub fn perform(
 								}
 							}
 						}
-						match cut {
-							Some(c) if c < n => {
-								input.extend_from_slice(&got[..c]);
-								let _ =
-									handle.seek(crate::bash::fs::SeekFrom::Current(c as i64 - n as i64));
-							},
-							_ => input.extend_from_slice(got),
+						if let Some(c) = cut
+							&& c < n
+						{
+							input.truncate(start + c);
+							let _ = handle.seek(crate::bash::fs::SeekFrom::Current(c as i64 - n as i64));
 						}
 					},
 					Poll::Pending => {
@@ -330,7 +435,73 @@ pub fn perform(
 	Ok(finish(sc, res))
 }
 
-fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
+/// The fd an input probe reads: `fd` of the table, or the shell's
+/// terminal for [`Probe::TERMINAL_FD`] (a closed fd when there is none).
+fn input_handle(k: &Kernel, vp: &Vproc, fd: i32) -> FdRef {
+	if fd == Probe::TERMINAL_FD {
+		return super::jobctl::open_key_terminal(k, vp).unwrap_or_else(|| vp.fds.handle(fd));
+	}
+	vp.fds.handle(fd)
+}
+
+/// Input read, with each `\r\n` turned into `\n` for a `console`'s lines.
+fn line_input(mut data: Vec<u8>, console: bool) -> BString {
+	if !console {
+		return data.into();
+	}
+	let mut w = 0;
+	for r in 0..data.len() {
+		if data[r] == b'\r' && data.get(r + 1) == Some(&b'\n') {
+			continue;
+		}
+		data[w] = data[r];
+		w += 1;
+	}
+	data.truncate(w);
+	BString::from(data)
+}
+
+/// [`perform`] for a builtin's probe ([`Need::Probe`](super::builtins::Need)):
+/// the fd-level probes ([`Probe::Fd`]) may install descriptors in `vp`'s
+/// fd table ([`super::fdprobe`]); everything else is [`perform`].
+pub fn perform_mut(
+	k: &Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	sc: &mut Scratch,
+	probe: &Probe,
+) -> Result<ProbeResult, WaitKey> {
+	if let Probe::Zftp { op, .. } = probe {
+		begin(sc, probe);
+		let answer = super::builtins::zsh_mod_zftp::io::perform(k, cx, vp, sc, op)?;
+		return Ok(finish(sc, ProbeResult::Zftp(Box::new(answer))));
+	}
+	let Probe::Fd(fp) = probe else {
+		return perform(k, cx, vp, sc, probe);
+	};
+	begin(sc, probe);
+	let answer = super::fdprobe::perform(k, cx, vp, sc, fp)?;
+	Ok(finish(sc, ProbeResult::Fd(Box::new(answer))))
+}
+
+/// Start `probe` unless it is the one in flight: forget the progress of
+/// another.
+pub(super) fn begin(sc: &mut Scratch, probe: &Probe) {
+	let io = sc.io();
+	if io.probing.as_ref() != Some(probe) {
+		io.probing = Some(probe.clone());
+		io.search = None;
+		io.walk = None;
+		io.input.clear();
+		if let Some(z) = io.zsh.as_mut() {
+			z.stats.clear();
+		}
+		sc.live = Live::None;
+	}
+}
+
+/// Cache `r` as the answer of the probe in flight.
+pub(super) fn finish(sc: &mut Scratch, r: ProbeResult) -> ProbeResult {
 	sc.live = Live::None;
 	let io = sc.io();
 	io.search = None;
@@ -387,27 +558,73 @@ fn read_file(
 pub const fn standard_path(platform: crate::bash::ids::Platform) -> &'static str {
 	match platform {
 		crate::bash::ids::Platform::MacOs => "/usr/bin:/bin:/usr/sbin:/sbin",
-		crate::bash::ids::Platform::Linux | crate::bash::ids::Platform::Windows => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Linux => "/bin:/usr/bin",
+		crate::bash::ids::Platform::Windows => "/bin;/usr/bin",
 	}
 }
 
-/// `dir/name` for every `$PATH` entry (empty entries mean the cwd).
-pub fn candidates(path: &[u8], name: &[u8], cwd: &[u8]) -> Vec<BString> {
-	path
-		.split(|&c| c == b':')
-		.map(|dir| {
-			let mut p = if dir.is_empty() {
-				BString::from(cwd)
-			} else {
-				absolute(cwd, dir)
-			};
-			if !p.ends_with(b"/") {
-				p.push(b'/');
-			}
-			p.extend_from_slice(name);
-			p
-		})
-		.collect()
+/// The `$PATH` list separator on `platform`.
+pub const fn path_separator(platform: Platform) -> u8 {
+	if matches!(platform, Platform::Windows) {
+		b';'
+	} else {
+		b':'
+	}
+}
+
+/// `dir/name` for every `$PATH` entry; on Windows each is followed by the
+/// `extensions` (`PATHEXT`) spellings unless `name` already ends in one.
+pub fn candidates(
+	path: &[u8],
+	name: &[u8],
+	cwd: &[u8],
+	platform: Platform,
+	extensions: &[String],
+) -> Vec<BString> {
+	let has_extension = extensions.iter().any(|ext| {
+		name.len() >= ext.len() && name[name.len() - ext.len()..].eq_ignore_ascii_case(ext.as_bytes())
+	});
+	let suffixes = if has_extension { &[] } else { extensions };
+	let windows = platform == Platform::Windows;
+	let mut out = Vec::new();
+	for dir in path.split(|&c| c == path_separator(platform)) {
+		let mut base = if dir.is_empty() {
+			BString::from(cwd)
+		} else {
+			absolute_on(cwd, dir, platform)
+		};
+		if !(base.ends_with(b"/") || windows && base.ends_with(b"\\")) {
+			base.push(b'/');
+		}
+		base.extend_from_slice(name);
+		// The bare name first, then its PATHEXT spellings.
+		let at = out.len();
+		out.push(base);
+		for ext in suffixes {
+			let base = &out[at];
+			let mut p = BString::from(Vec::with_capacity(base.len() + ext.len()));
+			p.extend_from_slice(base);
+			p.extend_from_slice(ext.as_bytes());
+			out.push(p);
+		}
+	}
+	out
+}
+
+/// The shell's `PATHEXT` suffixes, normalized as the exec check reads them
+/// ([`Pathext`](crate::sys::pathext::Pathext)); empty off Windows.
+pub fn executable_extensions(k: &Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> Vec<String> {
+	if k.engine.config().platform != Platform::Windows {
+		return Vec::new();
+	}
+	let var = super::state::lookup(&k.root, cx.store, vp, b"PATHEXT")
+		.ok()
+		.flatten();
+	let raw = var
+		.as_ref()
+		.and_then(|v| v.as_scalar())
+		.map(String::from_utf8_lossy);
+	crate::sys::pathext::Pathext::parse(raw.as_deref().map(std::ffi::OsStr::new)).into_extensions()
 }
 
 /// The `idx`th `$PATH` candidate as bash prints it (`type -p`,
@@ -427,7 +644,30 @@ pub use crate::bash::fs::url_root_len;
 /// `name` made absolute against `cwd`: a name starting with `/` or a URL
 /// path ([`url_root_len`]) is already absolute.
 pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
+	absolute_on(
+		cwd,
+		name,
+		if cfg!(windows) {
+			Platform::Windows
+		} else {
+			Platform::Linux
+		},
+	)
+}
+
+/// [`absolute`] for the configured shell platform: the Windows drive, UNC
+/// and MSYS drive-alias (`/c/x` → `C:/x`) rules stay testable on any host
+/// instead of compiling only on Windows.
+pub fn absolute_on(cwd: &[u8], name: &[u8], platform: Platform) -> BString {
+	if platform == Platform::Windows
+		&& let Some(native) = msys_drive_path(name)
+	{
+		return native;
+	}
 	if name.first() == Some(&b'/') || url_root_len(name).is_some() {
+		return name.into();
+	}
+	if platform == Platform::Windows && is_windows_absolute(name) {
 		return name.into();
 	}
 	let mut p = BString::from(cwd);
@@ -436,6 +676,12 @@ pub fn absolute(cwd: &[u8], name: &[u8]) -> BString {
 	}
 	p.extend_from_slice(name);
 	p
+}
+
+/// A Windows drive (`C:\x`, `C:/x`) or UNC (`\\srv\share`) path.
+pub const fn is_windows_absolute(name: &[u8]) -> bool {
+	matches!(name, [b'\\' | b'/', b'\\' | b'/', ..])
+		|| matches!(name, [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
 }
 
 pub enum Search {
@@ -527,12 +773,59 @@ mod tests {
 
 	#[test]
 	fn path_candidates_resolve_empty_and_relative_entries_against_cwd() {
-		let c = candidates(b"/bin::rel", b"ls", b"/home/u");
+		let c = candidates(b"/bin::rel", b"ls", b"/home/u", Platform::Linux, &[]);
 		assert_eq!(c, vec![
 			BString::from("/bin/ls"),
 			BString::from("/home/u/ls"),
 			BString::from("/home/u/rel/ls")
 		]);
+	}
+
+	#[test]
+	fn windows_path_search_tries_the_bare_name_then_pathext_spellings() {
+		let exts = [".exe".to_owned(), ".cmd".to_owned()];
+		let win = |path: &[u8], name: &[u8]| -> Vec<String> {
+			candidates(path, name, br"C:\project", Platform::Windows, &exts)
+				.into_iter()
+				.map(|p| String::from_utf8_lossy(&p).into_owned())
+				.collect()
+		};
+		assert_eq!(win(br"C:\Tools;;rel", b"tool"), [
+			r"C:\Tools/tool",
+			r"C:\Tools/tool.exe",
+			r"C:\Tools/tool.cmd",
+			r"C:\project/tool",
+			r"C:\project/tool.exe",
+			r"C:\project/tool.cmd",
+			r"C:\project/rel/tool",
+			r"C:\project/rel/tool.exe",
+			r"C:\project/rel/tool.cmd",
+		]);
+		// A name already carrying a PATHEXT suffix is not re-suffixed; any other
+		// dot is.
+		assert_eq!(win(b"", b"tool.EXE"), [r"C:\project/tool.EXE"]);
+		assert_eq!(win(b"", b"my.tool"), [
+			r"C:\project/my.tool",
+			r"C:\project/my.tool.exe",
+			r"C:\project/my.tool.cmd"
+		]);
+	}
+
+	#[test]
+	fn windows_absolute_paths_are_not_prefixed_with_the_shell_cwd() {
+		assert_eq!(
+			absolute_on(br"C:\project", br"D:\Tools\app.exe", Platform::Windows),
+			br"D:\Tools\app.exe".as_slice()
+		);
+		assert_eq!(
+			absolute_on(br"C:\project", br"\\server\share\app.exe", Platform::Windows),
+			br"\\server\share\app.exe".as_slice()
+		);
+		assert_eq!(
+			absolute_on(br"C:\project", b"/d/Tools/app.exe", Platform::Windows),
+			b"D:/Tools/app.exe".as_slice()
+		);
+		assert_eq!(absolute_on(b"/", b"/c/x", Platform::Linux), b"/c/x".as_slice());
 	}
 
 	#[test]
@@ -563,6 +856,16 @@ mod tests {
 		assert_eq!(absolute(b"virtual://d", b"a.txt"), "virtual://d/a.txt");
 		assert_eq!(absolute(b"virtual://", b"a"), "virtual://a");
 		assert_eq!(absolute(b"virtual://d", b"/etc"), "/etc");
+	}
+
+	/// A cooked Windows console ends a typed line with `\r\n`; kept, the
+	/// `\r` ended up in the command name (`ls^M: command not found`). A lone
+	/// `\r` is the user's own byte and stays.
+	#[test]
+	fn console_line_ends_drop_the_cr_of_crlf_only() {
+		assert_eq!(line_input(b"ls\r\n".to_vec(), true), "ls\n");
+		assert_eq!(line_input(b"a\rb\r\n\r\n".to_vec(), true), "a\rb\n\n");
+		assert_eq!(line_input(b"partial\r".to_vec(), true), "partial\r");
 	}
 
 	#[test]

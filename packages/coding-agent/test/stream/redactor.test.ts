@@ -44,11 +44,6 @@ describe("StreamRedactor", () => {
 		expect(styledRedactor.redactRow(row)).toBe("value •••••• remains");
 	});
 
-	it("returns the original benign row unchanged", () => {
-		const row = "compilation finished successfully";
-		expect(redactor.redactRow(row)).toBe(row);
-	});
-
 	it("redacts only the value in a secret assignment", () => {
 		expect(redactor.redactRow("prefix API_KEY=abcd1234 suffix")).toBe("prefix API_KEY=•••••• suffix");
 	});

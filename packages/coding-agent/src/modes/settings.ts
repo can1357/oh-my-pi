@@ -445,6 +445,19 @@ export const cfgTuiTextSizing = register({
 	},
 });
 
+export const cfgTuiColorfulMarkdown = register({
+	id: "tui.colorfulMarkdown",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Colorful Markdown",
+		description:
+			"Color headings by level, bold and italic text, inline code, and table headers from the theme's ANSI palette. Off uses one heading color and plain bold/italic.",
+	},
+});
+
 export const cfgTuiRenderMermaid = register({
 	id: "tui.renderMermaid",
 	type: "boolean",
@@ -639,7 +652,7 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
 		},
 	},
 });
@@ -751,7 +764,8 @@ export const cfgDisplaySmoothStreaming = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Smooth Streaming",
-		description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
+		description:
+			"Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)",
 	},
 });
 
@@ -803,6 +817,18 @@ export const cfgDisplayCacheMissMarker = register({
 	},
 });
 
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
 export const cfgDisplayAdvisorCollapsedLines = register({
 	id: "display.advisorCollapsedLines",
 	type: "number",
@@ -825,6 +851,7 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
+		shellVisualization: cfgDisplayShellVisualization,
 		readToolResultPreview: cfgReadToolResultPreview,
 		showImages: cfgTerminalShowImages,
 		cacheMissMarker: cfgDisplayCacheMissMarker,
@@ -1279,6 +1306,24 @@ export const cfgUpdateChannel = register({
 			{ value: "stable", label: "Stable" },
 			{ value: "canary", label: "Canary" },
 		],
+	},
+});
+
+/**
+ * Background self-update: a launch that finds a newer release installs it the
+ * way `omp update` would, showing progress beside the welcome banner's version;
+ * the next launch runs it. Ignored where omp cannot update itself (Tern, Nix, a
+ * source checkout). Offered by the setup wizard.
+ */
+export const cfgUpdateAuto = register({
+	id: "update.auto",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto Update",
+		description: "Install omp updates in the background on startup; the next launch runs the new version",
 	},
 });
 
