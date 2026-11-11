@@ -1567,7 +1567,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	#resolveModelMentionChip(selector: string): { label: string; selector: string } | undefined {
 		const resolved = this.session.resolveModelMention(selector);
-		return resolved && { label: modelMentionChipLabel(resolved.name), selector: resolved.selector };
+		if (!resolved) return undefined;
+		const role = selector.startsWith("@");
+		const name = resolved.warning ? `${resolved.name} · ${resolved.warning}` : resolved.name;
+		return {
+			label: modelMentionChipLabel(role ? `${selector} → ${name}` : name),
+			selector: role ? selector : resolved.selector,
+		};
 	}
 	/** Idle stand-in for the working row: the last tok/s reading and the
 	 * band-mode title stay readable between turns, docked where the loader's

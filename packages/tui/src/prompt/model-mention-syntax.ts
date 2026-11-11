@@ -21,7 +21,9 @@ export interface ModelMention {
 	thinkingLevel?: Effort;
 }
 
-/** Expand a composer atom back into its canonical model selector. */
+export type ResolvedModelMention = Omit<ModelMention, "agent"> & { warning?: string };
+
+/** Expand a composer atom back into its editable model or role token. */
 export function modelMentionToken(selector: string): string {
 	return `^${selector}`;
 }

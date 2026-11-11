@@ -81,8 +81,8 @@ export function collapseSkillTokens(
 }
 
 /**
- * Replaces mentionable model selectors with their display chips and registers
- * each chip's canonical `^selector` as its atomic editor expansion.
+ * Replaces accepted model and role mentions with display chips and registers
+ * each chip's editable `^selector` as its atomic editor expansion.
  */
 export function collapseModelMentions(
 	text: string,

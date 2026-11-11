@@ -4,13 +4,14 @@
 
 ### Added
 
-- The composer's `^` autocomplete includes model roles such as `@smol`; selecting one inserts its resolved model ([#18926](https://github.com/can1357/oh-my-pi/pull/18926) by [@royce-mathew](https://github.com/royce-mathew))
+- The composer's `^` autocomplete includes model roles such as `@smol`; typed or selected roles stay editable and bind to a concrete model on submit ([#18926](https://github.com/can1357/oh-my-pi/pull/18926) by [@royce-mathew](https://github.com/royce-mathew))
 - Added the Sofya label for `sofya` web search results ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
 ### Fixed
 
+- Refreshing model-role chips preserves text attachments and Unicode model names ([#18926](https://github.com/can1357/oh-my-pi/pull/18926) by [@royce-mathew](https://github.com/royce-mathew))
 - In Tern, an `ask` question outside a `<fieldset>` gets its own tab instead of sharing the tab of the question before it ([#18660](https://github.com/can1357/oh-my-pi/pull/18660) by [@DocksDocks](https://github.com/DocksDocks))
 - The `/resume` picker shows dates of sessions older than a week in the locale from `LC_ALL`, `LC_TIME` or `LANG` instead of always using `MM/DD/YYYY` ([#18863](https://github.com/can1357/oh-my-pi/pull/18863) by [@raoulkent](https://github.com/raoulkent))
 - Fixed an `ask` HTML form in Tern not taking typing after a click on its Other row or a text well while a composer draft held the keyboard: the click now hands the keys to the form, as ↑/↓ does, instead of every key still editing the draft

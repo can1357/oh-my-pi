@@ -1,11 +1,10 @@
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { AutocompleteItem, ModelMentionCompletion } from "../index";
-import type { ModelBrowserRegistry, ModelBrowserSource, SessionModelScope } from "../overlays/model-browser";
-import { sameItems } from "../native/memo";
+import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model-browser";
 import { subsequenceMatch } from "../autocomplete";
-import { modelMentionDisplayName, modelMentionName } from "./model-mention-syntax";
+import type { ResolvedModelMention } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
 	ModelBrowserItem,
@@ -18,18 +17,10 @@ const MODEL_MENTION_CONTEXT_RE = /(?:^|\s)(\^[^\s]*)$/;
 const MAX_MODEL_MENTION_SUGGESTIONS = 20;
 const MAX_EFFORT_CANDIDATE_MODELS = 3;
 
-/** A model or role choice with the concrete selector inserted on acceptance. */
-export interface ModelMentionItem extends AutocompleteItem {
-	modelSelector?: string;
-}
-
-/**
- * Supplies picker-ranked model candidates for the query after `^`. `availableModelIds`
- * lists every available model's selector, in or out of the picker scope.
- */
+/** Supplies picker-ranked candidates and the session's mention acceptance boundary. */
 export type ModelMentionCandidateSource = ((query: string) => ReadonlyArray<ModelBrowserItem>) & {
-	availableModelIds?: () => ReadonlySet<string>;
-	roles?: () => ReadonlyArray<ModelMentionItem>;
+	resolveMention: (selector: string) => ResolvedModelMention | undefined;
+	roles?: (query?: string) => ReadonlyArray<AutocompleteItem>;
 };
 
 interface ModelBrowserModules {
@@ -52,6 +43,10 @@ function mentionRow(value: string, description: string): AutocompleteItem {
 	return { value, label: value, description, icon: theme.symbol("icon.model"), iconName: "model" };
 }
 
+function resolvedRow(value: string, resolved: ResolvedModelMention): AutocompleteItem {
+	return mentionRow(value, resolved.warning ? `${resolved.name} · ${resolved.warning}` : resolved.name);
+}
+
 /**
  * Some provider model ids contain a colon or end in a level name (`qwen3:8b`, `glm-4.7:max`),
  * so literal matches are listed before level rows.
@@ -64,9 +59,9 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 		for (const { selector, model } of candidates(query.slice(0, colon)).slice(0, MAX_EFFORT_CANDIDATE_MODELS)) {
 			for (const effort of getSupportedEfforts(model)) {
 				if (!effort.startsWith(typed)) continue;
-				levelRows.push(
-					mentionRow(`${selector}:${effort}`, modelMentionName(modelMentionDisplayName(model), effort)),
-				);
+				const value = `${selector}:${effort}`;
+				const resolved = candidates.resolveMention(value);
+				if (resolved?.thinkingLevel === effort) levelRows.push(resolvedRow(value, resolved));
 			}
 		}
 		if (levelRows.length > 0) {
@@ -74,21 +69,21 @@ function mentionRows(query: string, candidates: ModelMentionCandidateSource): Au
 			const literalRows: AutocompleteItem[] = [];
 			for (const item of candidates(query)) {
 				if (literalRows.length === MAX_MODEL_MENTION_SUGGESTIONS) break;
-				if (item.selector.toLowerCase().includes(lowered)) {
-					literalRows.push(mentionRow(item.selector, modelMentionDisplayName(item.model)));
-				}
+				if (!item.selector.toLowerCase().includes(lowered)) continue;
+				const resolved = candidates.resolveMention(item.selector);
+				if (resolved) literalRows.push(resolvedRow(item.selector, resolved));
 			}
 			const literalValues = new Set(literalRows.map(row => row.value));
-			const available = candidates.availableModelIds?.();
-			return [
-				...literalRows,
-				...levelRows.filter(row => !literalValues.has(row.value) && !available?.has(row.value)),
-			];
+			return [...literalRows, ...levelRows.filter(row => !literalValues.has(row.value))];
 		}
 	}
-	return candidates(query)
-		.slice(0, MAX_MODEL_MENTION_SUGGESTIONS)
-		.map(item => mentionRow(item.selector, modelMentionDisplayName(item.model)));
+	const rows: AutocompleteItem[] = [];
+	for (const item of candidates(query)) {
+		const resolved = candidates.resolveMention(item.selector);
+		if (resolved) rows.push(resolvedRow(item.selector, resolved));
+		if (rows.length === MAX_MODEL_MENTION_SUGGESTIONS) break;
+	}
+	return rows;
 }
 
 /** Build model mention choices for the whitespace-delimited token at the cursor. */
@@ -100,18 +95,17 @@ export function getModelMentionSuggestions(
 	const prefix = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE)?.[1];
 	if (!prefix) return { kind: "unhandled" };
 	const query = prefix.slice(1);
-	const roleQuery = query.toLowerCase();
-	const roleRows = (candidates.roles?.() ?? []).filter(item => subsequenceMatch(roleQuery, item.label.toLowerCase()));
+	const roleRows = candidates.roles?.(query) ?? [];
 	const items = [...roleRows, ...mentionRows(query, candidates)].slice(0, MAX_MODEL_MENTION_SUGGESTIONS);
 	return items.length > 0 ? { kind: "matched", suggestions: { items, prefix } } : { kind: "no-match" };
 }
 
-/** Replace the live mention token with the selected canonical selector and a trailing space. */
+/** Replace the live mention token with the selected selector and a trailing space. */
 export function applyModelMentionCompletion(
 	lines: string[],
 	cursorLine: number,
 	cursorCol: number,
-	item: ModelMentionItem,
+	item: AutocompleteItem,
 	prefix: string,
 ): { lines: string[]; cursorLine: number; cursorCol: number } {
 	const currentLine = lines[cursorLine] ?? "";
@@ -119,7 +113,7 @@ export function applyModelMentionCompletion(
 	const liveMatch = textBeforeCursor.match(MODEL_MENTION_CONTEXT_RE);
 	const livePrefix = liveMatch?.[1] ?? prefix;
 	const prefixStart = liveMatch ? textBeforeCursor.length - livePrefix.length : Math.max(0, cursorCol - prefix.length);
-	const replacement = `^${item.modelSelector ?? item.value} `;
+	const replacement = `^${item.value} `;
 	const newLines = [...lines];
 	newLines[cursorLine] = currentLine.slice(0, prefixStart) + replacement + currentLine.slice(cursorCol);
 	return {
@@ -137,6 +131,7 @@ export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
 	registry: ModelBrowserRegistry;
 	scopedModels: () => ReadonlyArray<Model>;
+	resolveMention: (selector: string) => ResolvedModelMention | undefined;
 }): ModelMentionCandidateSource {
 	let scopeCache: SessionModelScopeCacheClass | undefined;
 	let ranker: ModelItemRankerClass | undefined;
@@ -157,59 +152,29 @@ export function createModelMentionSource(host: {
 		}
 		return ranker.rank(query);
 	};
-	let roleCache:
-		| {
-				scope: SessionModelScope;
-				availableIds: ReadonlySet<string>;
-				items: ReadonlyArray<ModelMentionItem>;
-		  }
-		| undefined;
-	const roles = (): ReadonlyArray<ModelMentionItem> => {
-		const { SessionModelScopeCache } = loadModelBrowser();
-		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
-		const scope = scopeCache.get(host.scopedModels());
-		const availableIds = availableModelIds();
-		if (roleCache?.scope === scope && roleCache.availableIds === availableIds) return roleCache.items;
-
-		const scopedSelectors = new Set<string>();
-		for (const item of scope.items) scopedSelectors.add(item.selector);
-		const items: ModelMentionItem[] = [];
+	const roles = (query = ""): ReadonlyArray<AutocompleteItem> => {
+		const colon = query.lastIndexOf(":");
+		const roleQuery = (colon > 0 ? query.slice(0, colon) : query).toLowerCase();
+		const typedEffort = colon > 0 ? query.slice(colon + 1).toLowerCase() : undefined;
+		const items: AutocompleteItem[] = [];
 		for (const role of host.source.knownRoleIds) {
 			const info = host.source.getRoleInfo(role);
 			if (info.hidden || info.section !== "chat") continue;
-			const assignment = scope.roles[role];
-			if (!assignment) continue;
-			const { model } = assignment;
-			const thinkingLevel =
-				assignment.thinkingLevel === ThinkingLevel.Inherit ? undefined : assignment.thinkingLevel;
-			const selector = `${model.provider}/${model.id}`;
-			if (!scopedSelectors.has(selector)) continue;
-			const effort = getSupportedEfforts(model).find(level => level === thinkingLevel);
-			const value = effort ? `${selector}:${effort}` : selector;
-			if (effort && availableIds.has(value)) continue;
-			const name = modelMentionDisplayName(model);
-			const description = effort
-				? modelMentionName(name, effort)
-				: thinkingLevel && thinkingLevel !== "auto"
-					? `${name} · ${thinkingLevel} unsupported; effort omitted`
-					: name;
-			items.push({
-				...mentionRow(`@${role}`, description),
-				modelSelector: value,
-			});
+			const value = `@${role}`;
+			if (!subsequenceMatch(roleQuery, value.toLowerCase())) continue;
+			if (typedEffort !== undefined) {
+				for (const effort of [...THINKING_EFFORTS, "auto"]) {
+					if (!effort.startsWith(typedEffort)) continue;
+					const selector = `${value}:${effort}`;
+					const resolved = host.resolveMention(selector);
+					if (resolved) items.push(resolvedRow(selector, resolved));
+				}
+			} else {
+				const resolved = host.resolveMention(value);
+				if (resolved) items.push(resolvedRow(value, resolved));
+			}
 		}
-		roleCache = { scope, availableIds, items };
 		return items;
 	};
-	let availableModels: readonly Model[] | undefined;
-	let availableIds: ReadonlySet<string> = new Set();
-	const availableModelIds = (): ReadonlySet<string> => {
-		const models = host.registry.getAvailable();
-		if (!sameItems(availableModels, models)) {
-			availableModels = models;
-			availableIds = new Set(models.map(model => `${model.provider}/${model.id}`));
-		}
-		return availableIds;
-	};
-	return Object.assign(rank, { availableModelIds, roles });
+	return Object.assign(rank, { resolveMention: host.resolveMention, roles });
 }

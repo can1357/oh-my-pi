@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { ModelMentionRegistry } from "@oh-my-pi/pi-coding-agent/session/model-mentions";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import {
@@ -124,16 +125,29 @@ describe("resolveRoleAssignments", () => {
 });
 
 describe("createModelMentionSource", () => {
+	function makeSource(settings: Settings, available: () => Model[], scopedModels: () => Model[] = () => []) {
+		const registry = { getError: () => undefined, getAvailable: available, getAll: available };
+		const mentions = new ModelMentionRegistry({
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: registry,
+			scopedModels,
+		});
+		const candidates = createModelMentionSource({
+			source: createModelBrowserSource(settings),
+			registry,
+			scopedModels,
+			resolveMention: selector => mentions.resolve(selector),
+		});
+		return { candidates, mentions };
+	}
+
 	test("refreshes candidates when role settings or availability change between queries", () => {
 		const a = makeModel("a", "example-2");
 		const b = makeModel("b", "example-2");
 		const available = [a, b];
 		const settings = Settings.isolated({ modelRoles: { default: "b/example-2" } });
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(settings),
-			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...available] },
-			scopedModels: () => [],
-		});
+		const { candidates } = makeSource(settings, () => [...available]);
 		const selectors = (query: string) => candidates(query).map(item => item.selector);
 
 		expect(selectors("example")).toEqual(["b/example-2", "a/example-2"]);
@@ -145,61 +159,25 @@ describe("createModelMentionSource", () => {
 		expect(selectors("example")).toContain("c/example-3");
 	});
 
-	test("completes the configured role model independently of picker display ordering", async () => {
+	test("keeps the configured role as draft text independently of picker display ordering", async () => {
 		await initTheme();
 		const first = makeModel("demo", "worker-1");
 		const second = makeModel("demo", "worker-2");
-		const models = [first, second];
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(
-				Settings.isolated({ modelRoles: { default: "demo/worker-2", smol: "worker" } }),
-			),
-			registry: { getError: () => undefined, getAvailable: () => [...models], getAll: () => [...models] },
-			scopedModels: () => [],
-		});
+		const settings = Settings.isolated({ modelRoles: { default: "demo/worker-2", smol: "worker" } });
+		const { candidates, mentions } = makeSource(settings, () => [first, second]);
 
 		const completion = getModelMentionSuggestions("^@smol", candidates);
 		if (completion.kind !== "matched") throw new Error("Expected the smol role");
 		const role = completion.suggestions.items.find(item => item.value === "@smol");
 		if (!role) throw new Error("Expected the smol role");
-		expect(applyModelMentionCompletion(["^@smol"], 0, 6, role, "^@smol").lines).toEqual(["^demo/worker-1 "]);
-		expect(role.description).not.toMatch(/inherit|unsupported/);
+		const completed = applyModelMentionCompletion(["^@smol"], 0, 6, role, "^@smol");
+		expect(completed.lines).toEqual(["^@smol "]);
+		expect(role.description).toBe("worker-1");
+		expect(mentions.expandMentions(completed.lines[0])).toBe('<model agent="m1" name="worker-1"/> ');
+		expect(mentions.mentions).toEqual([{ agent: "m1", selector: "demo/worker-1", name: "worker-1" }]);
 	});
 
-	test("refreshes effort-role eligibility when an outside-scope literal model appears or disappears", async () => {
-		await initTheme();
-		const worker = buildModel({
-			...makeModel("demo", "worker"),
-			reasoning: true,
-			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
-		});
-		const literal = makeModel("demo", "worker:high");
-		const all = [worker, literal];
-		let available = [worker];
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(Settings.isolated({ modelRoles: { smol: "demo/worker:high" } })),
-			registry: { getError: () => undefined, getAvailable: () => [...available], getAll: () => [...all] },
-			scopedModels: () => [worker],
-		});
-		const smol = () => {
-			const completion = getModelMentionSuggestions("^@smol", candidates);
-			return completion.kind === "matched"
-				? completion.suggestions.items.find(item => item.value === "@smol")
-				: undefined;
-		};
-
-		const initial = smol();
-		if (!initial) throw new Error("Expected the configured high-effort role");
-		expect(applyModelMentionCompletion(["^@smol"], 0, 6, initial, "^@smol").lines).toEqual(["^demo/worker:high "]);
-		available = [worker, literal];
-		expect(smol()).toBeUndefined();
-		available = [worker];
-		const restored = smol();
-		if (!restored) throw new Error("Expected the role after the literal model disappears");
-		expect(applyModelMentionCompletion(["^@smol"], 0, 6, restored, "^@smol").lines).toEqual(["^demo/worker:high "]);
-	});
-
-	test("offers roles beside models and completes them through the existing model selector flow", async () => {
+	test("offers roles before models and refreshes their descriptions and eligibility", async () => {
 		await initTheme();
 		const worker = buildModel({
 			...makeModel("demo", "worker"),
@@ -210,120 +188,69 @@ describe("createModelMentionSource", () => {
 		const image = makeModel("demo", "image", { kind: "image" });
 		const settings = Settings.isolated({ modelRoles: { smol: "demo/worker:high", image: "demo/image" } });
 		let scoped: Model[] = [];
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(settings),
-			registry: {
-				getError: () => undefined,
-				getAvailable: () => [worker, other, image],
-				getAll: () => [worker, other, image],
-			},
-			scopedModels: () => scoped,
-		});
+		const { candidates, mentions } = makeSource(
+			settings,
+			() => [worker, other, image],
+			() => scoped,
+		);
 		const suggestions = (query: string) => {
 			const completion = getModelMentionSuggestions(`^${query}`, candidates);
 			return completion.kind === "matched" ? completion.suggestions.items : [];
 		};
 		const all = suggestions("");
-		const role = all.find(item => item.label === "@smol");
+		const role = all.find(item => item.value === "@smol");
+		if (!role) throw new Error("Expected the smol role");
 		expect(all.map(item => item.value)).toContain("demo/worker");
+		expect(all.findIndex(item => item.value === "@smol")).toBeLessThan(
+			all.findIndex(item => item.value === "demo/worker"),
+		);
 		expect(all.map(item => item.label)).not.toContain("@image");
-		expect(suggestions("smol")).toContainEqual(role!);
-		expect(suggestions("@smol")).toContainEqual(role!);
+		expect(suggestions("smol")).toContainEqual(role);
+		expect(suggestions("@smol")).toContainEqual(role);
+		expect(role.description).toBe("worker · high");
 
 		const draft = "use ^@sm";
-		const completed = applyModelMentionCompletion([draft], 0, draft.length, role!, "^@sm");
-		expect(completed.lines).toEqual(["use ^demo/worker:high "]);
+		const completed = applyModelMentionCompletion([draft], 0, draft.length, role, "^@sm");
+		expect(completed.lines).toEqual(["use ^@smol "]);
 
 		settings.setModelRole("smol", "demo/other");
-		const updated = applyModelMentionCompletion([draft], 0, draft.length, suggestions("@smol")[0]!, "^@sm");
-		expect(updated.lines).toEqual(["use ^demo/other "]);
+		const updated = suggestions("@smol").find(item => item.value === "@smol");
+		if (!updated) throw new Error("Expected the updated smol role");
+		expect(updated.description).toBe("other");
+		expect(mentions.expandMentions(completed.lines[0])).toBe('use <model agent="m1" name="other"/> ');
+		expect(mentions.mentions).toEqual([{ agent: "m1", selector: "demo/other", name: "other" }]);
 		scoped = [worker];
 		expect(suggestions("@smol")).toEqual([]);
 	});
 
-	test("keeps roles and their inheritors selectable when a configured effort is unsupported", async () => {
+	test("completes a role effort override without binding the draft to its model", async () => {
 		await initTheme();
 		const worker = buildModel({
 			...makeModel("demo", "worker"),
 			reasoning: true,
 			thinking: { mode: "budget", efforts: [Effort.Low, Effort.High] },
 		});
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(Settings.isolated({ modelRoles: { smol: "demo/worker:off" } })),
-			registry: { getError: () => undefined, getAvailable: () => [worker], getAll: () => [worker] },
-			scopedModels: () => [],
-		});
-
-		for (const role of ["smol", "tiny", "memory", "widget"]) {
-			const prefix = `^@${role}`;
-			const completion = getModelMentionSuggestions(prefix, candidates);
-			if (completion.kind !== "matched") throw new Error(`Expected ${role} role suggestion`);
-			const item = completion.suggestions.items.find(item => item.value === `@${role}`);
-			if (!item) throw new Error(`Expected ${role} role`);
-			expect(item.description).toMatch(/off.*unsupported/);
-			expect(applyModelMentionCompletion([prefix], 0, prefix.length, item, prefix).lines).toEqual(["^demo/worker "]);
-		}
-	});
-
-	test("only offers OpenRouter route roles when the literal route is in the mention scope", async () => {
-		await initTheme();
-		const base = buildModel({
-			...makeModel("openrouter", "z-ai/glm-4.7-20251222"),
-			api: "openai-completions",
-			baseUrl: "https://openrouter.ai/api/v1",
-		});
-		const routed = buildModel({ ...base, id: `${base.id}:nitro` });
-		const available = [base];
-		let scoped: Model[] = [];
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(
-				Settings.isolated({
-					modelRoles: {
-						default: `openrouter/${base.id}`,
-						smol: `openrouter/${routed.id}`,
-					},
-				}),
-			),
-			registry: {
-				getError: () => undefined,
-				getAvailable: () => [...available],
-				getAll: () => [...available],
-			},
-			scopedModels: () => scoped,
-		});
-		const roles = () => {
-			const completion = getModelMentionSuggestions("^@", candidates);
-			return completion.kind === "matched" ? completion.suggestions.items : [];
-		};
-
-		const defaultRole = roles().find(item => item.value === "@default");
-		if (!defaultRole) throw new Error("Expected the scoped base model role");
-		expect(applyModelMentionCompletion(["^@default"], 0, 9, defaultRole, "^@default").lines).toEqual([
-			"^openrouter/z-ai/glm-4.7-20251222 ",
+		const settings = Settings.isolated({ modelRoles: { smol: "demo/worker:low" } });
+		const { candidates, mentions } = makeSource(settings, () => [worker]);
+		const prefix = "^@smol:hi";
+		const completion = getModelMentionSuggestions(prefix, candidates);
+		if (completion.kind !== "matched") throw new Error("Expected a role effort suggestion");
+		const role = completion.suggestions.items.find(item => item.value === "@smol:high");
+		if (!role) throw new Error("Expected the high-effort smol role");
+		expect(role.description).toBe("worker · high");
+		const completed = applyModelMentionCompletion([prefix], 0, prefix.length, role, prefix);
+		expect(completed.lines).toEqual(["^@smol:high "]);
+		expect(mentions.expandMentions(completed.lines[0])).toBe('<model agent="m1" name="worker · high"/> ');
+		expect(mentions.mentions).toEqual([
+			{ agent: "m1", selector: "demo/worker:high", name: "worker · high", thinkingLevel: Effort.High },
 		]);
-		expect(roles().find(item => item.value === "@smol")).toBeUndefined();
-
-		available.push(routed);
-		const role = roles().find(item => item.value === "@smol");
-		if (!role) throw new Error("Expected the scoped literal route role");
-		expect(applyModelMentionCompletion(["^@smol"], 0, 6, role, "^@smol").lines).toEqual([
-			"^openrouter/z-ai/glm-4.7-20251222:nitro ",
-		]);
-
-		scoped = [base];
-		expect(roles().find(item => item.value === "@smol")).toBeUndefined();
 	});
 
 	test("navigates native role suggestions that resolve to the same model", async () => {
 		await initTheme();
 		const worker = makeModel("demo", "worker");
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(
-				Settings.isolated({ modelRoles: { default: "demo/worker", smol: "demo/worker" } }),
-			),
-			registry: { getError: () => undefined, getAvailable: () => [worker], getAll: () => [worker] },
-			scopedModels: () => [],
-		});
+		const settings = Settings.isolated({ modelRoles: { default: "demo/worker", smol: "demo/worker" } });
+		const { candidates } = makeSource(settings, () => [worker]);
 		const completion = getModelMentionSuggestions("^@", candidates);
 		if (completion.kind !== "matched") throw new Error("Expected role suggestions");
 		const list = new SelectList(completion.suggestions.items, 10, getSelectListTheme());
@@ -350,7 +277,7 @@ describe("createModelMentionSource", () => {
 		list.handleInput("\x1b[A");
 		expect(selectedRow()).toMatchObject({ p: { label: [{ t: "@smol" }] } });
 		const accepted = applyModelMentionCompletion(["^@"], 0, 2, list.getSelectedItem()!, "^@");
-		expect(accepted.lines).toEqual(["^demo/worker "]);
+		expect(accepted.lines).toEqual(["^@smol "]);
 	});
 
 	test("hides an effort row whose selector names an available model outside the picker scope", async () => {
@@ -369,11 +296,11 @@ describe("createModelMentionSource", () => {
 			maxTokens: 1024,
 		});
 		const glmMax = makeModel("a", "glm:max");
-		const candidates = createModelMentionSource({
-			source: createModelBrowserSource(Settings.isolated()),
-			registry: { getError: () => undefined, getAvailable: () => [glm, glmMax], getAll: () => [glm, glmMax] },
-			scopedModels: () => [glm],
-		});
+		const { candidates } = makeSource(
+			Settings.isolated(),
+			() => [glm, glmMax],
+			() => [glm],
+		);
 
 		const completion = getModelMentionSuggestions("^a/glm:", candidates);
 		expect(completion.kind === "matched" && completion.suggestions.items.map(item => item.value)).toEqual([
