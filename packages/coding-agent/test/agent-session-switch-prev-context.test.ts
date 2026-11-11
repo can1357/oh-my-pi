@@ -292,7 +292,14 @@ describe("AgentSession.switchSession previous-context build", () => {
 			sources: {
 				blocks: [text],
 				sources: [
-					{ id: "rules", kind: "instruction-files" as const, label: "rules", block: 0, start: 0, end: text.length },
+					{
+						id: "rules",
+						kind: "instruction-files" as const,
+						label: "rules",
+						block: 0,
+						start: 0,
+						end: text.length,
+					},
 				],
 			},
 		});

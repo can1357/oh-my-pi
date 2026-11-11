@@ -646,7 +646,12 @@ export class TemplateEngine {
 			const root = context ?? {};
 			const frame: Frame = { context: root, parents: [], root, data: { root, ...runtime.data } };
 			const output: Output = { text: "", marks: [] };
-			renderInto(nodes, frame, { helpers: this.#helpers, partials: this.#partials, options, runtime, tracked }, output);
+			renderInto(
+				nodes,
+				frame,
+				{ helpers: this.#helpers, partials: this.#partials, options, runtime, tracked },
+				output,
+			);
 			return output;
 		};
 	}

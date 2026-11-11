@@ -105,7 +105,8 @@ describe("helpers: join", () => {
 });
 
 describe("renderTracked", () => {
-	const template = "<list>\n{{#each items}}\n{{#unless @first}}\n\n{{/unless}}\n<i>\n{{body}}\n</i>\n{{/each}}\n</list>\n\n\n| x  |  y |";
+	const template =
+		"<list>\n{{#each items}}\n{{#unless @first}}\n\n{{/unless}}\n<i>\n{{body}}\n</i>\n{{/each}}\n</list>\n\n\n| x  |  y |";
 	const texts = (result: prompt.TrackedRender) =>
 		result.ranges.map(ranges => ranges.map(({ start, end }) => result.text.slice(start, end)));
 

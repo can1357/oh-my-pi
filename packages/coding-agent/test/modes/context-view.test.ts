@@ -260,7 +260,10 @@ describe("context snapshot prompt sources", () => {
 	});
 
 	it.each<{ listing: string; attributed: string[] }>([
-		{ listing: "{{#each skills}}\n* {{name}} — {{description}}\n{{/each}}", attributed: ["* fixture — Use <T> & {{literal}} without expansion"] },
+		{
+			listing: "{{#each skills}}\n* {{name}} — {{description}}\n{{/each}}",
+			attributed: ["* fixture — Use <T> & {{literal}} without expansion"],
+		},
 		// Iterations that share a line cannot be isolated; the listing stays in System Prompt.
 		{ listing: "Skills: {{#each skills}}{{name}} {{/each}}", attributed: [] },
 	])("attributes skills a custom template lists on their own lines: $listing", async ({ listing, attributed }) => {

@@ -235,7 +235,10 @@ export function format(content: string, options: PromptFormatOptions = {}): stri
  * {@link format} over lines. An atomic line passes through unchanged and keeps its identity, except
  * inside a code fence, where its source lines replace it, as they would stay verbatim in place.
  */
-function formatLines<A extends AtomicLine = never>(lines: (string | A)[], options: PromptFormatOptions): (string | A)[] {
+function formatLines<A extends AtomicLine = never>(
+	lines: (string | A)[],
+	options: PromptFormatOptions,
+): (string | A)[] {
 	const {
 		renderPhase = "post-render",
 		replaceAsciiSymbols = false,

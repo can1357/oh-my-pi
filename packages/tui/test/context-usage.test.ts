@@ -289,10 +289,18 @@ describe("computeNonMessageBreakdown prompt sources", () => {
 		blocks,
 		sources: [
 			{ id: "skill-0", kind: "skills" as const, label: "vis", block: 0, start: 18, end: 18 + skillLine.length },
-			{ id: "instruction-0", kind: "instruction-files" as const, label: "/r/AGENTS.md", block: 1, start: 9, end: 9 + file.length },
+			{
+				id: "instruction-0",
+				kind: "instruction-files" as const,
+				label: "/r/AGENTS.md",
+				block: 1,
+				start: 9,
+				end: 9 + file.length,
+			},
 		],
 	};
-	const session = (systemPrompt: string[]) => ({ systemPrompt, agent: { state: { tools: [] } }, systemPromptSources }) as never;
+	const session = (systemPrompt: string[]) =>
+		({ systemPrompt, agent: { state: { tools: [] } }, systemPromptSources }) as never;
 
 	it("counts recorded sources apart from their blocks", () => {
 		const b = computeNonMessageBreakdown(session(blocks), tokenizer);

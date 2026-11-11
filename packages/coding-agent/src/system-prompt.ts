@@ -651,7 +651,9 @@ function trimTracked(rendered: prompt.TrackedRender): prompt.TrackedRender {
 	return {
 		text,
 		ranges: rendered.ranges.map(ranges =>
-			ranges.filter(range => range.start >= lead).map(range => ({ start: range.start - lead, end: range.end - lead })),
+			ranges
+				.filter(range => range.start >= lead)
+				.map(range => ({ start: range.start - lead, end: range.end - lead })),
 		),
 	};
 }

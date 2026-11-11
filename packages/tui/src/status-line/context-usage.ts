@@ -534,7 +534,12 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 		systemContextTokens = nonMessage.systemContextTokens;
 		systemPromptTokens = nonMessage.systemPromptTokens;
 		usedTokens =
-			skillsTokens + instructionFilesTokens + toolsTokens + systemContextTokens + systemPromptTokens + messagesTokens;
+			skillsTokens +
+			instructionFilesTokens +
+			toolsTokens +
+			systemContextTokens +
+			systemPromptTokens +
+			messagesTokens;
 	}
 
 	const categories: CategoryInfo[] = [

@@ -46,7 +46,6 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { SystemPromptSources } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { BuildSystemPromptResult } from "../system-prompt";
 import type { ToolSession } from "../tools";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
@@ -352,7 +351,7 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. */
 	rebuildSystemPrompt?: SystemPromptRebuilder;
-	/** Sources of the initial base prompt; see {@link BuildSystemPromptResult.sources}. */
+	/** Sources of the initial base prompt, as returned by `buildSystemPrompt`. */
 	systemPromptSources?: SystemPromptSources;
 	/** Tools mounted under `xd://`, for `/tools` display. */
 	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
