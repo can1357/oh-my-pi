@@ -2089,7 +2089,7 @@ mod tests {
 			drop(server);
 			(top_levels.map(|items| items.into_iter().map(path).collect::<Vec<_>>()), owners)
 		});
-		assert_eq!(top_levels, Ok(vec!["/dialog".to_owned(), "/frame".to_owned()]));
+		assert_eq!(top_levels.unwrap(), vec!["/dialog".to_owned(), "/frame".to_owned()]);
 		assert_eq!(owners, [Some("/dialog".into()), Some("/dialog".into()), Some("/frame".into())]);
 	}
 
