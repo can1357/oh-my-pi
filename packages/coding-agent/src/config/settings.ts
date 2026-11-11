@@ -249,6 +249,18 @@ function expandShorthandRecords(layer: RawSettings, expandStrings = true): RawSe
 }
 
 /**
+ * {@link getByPath} reading an entry of a string shorthand as its record form would hold it
+ * (`task.maxEffort: low` holds `"*"` = `low` and no other entry).
+ */
+function getEntryByPath(obj: RawSettings, segments: readonly string[]): unknown {
+	const recordSegments = segments.slice(0, -1);
+	const key = lookupSetting(recordSegments.join("."))?.stringShorthandKey;
+	const stored = key === undefined ? undefined : getByPath(obj, recordSegments);
+	if (typeof stored !== "string") return getByPath(obj, segments);
+	return segments[segments.length - 1] === key ? stored : undefined;
+}
+
+/**
  * Expands, in `obj`, a string shorthand holding the record entry at `segments`, so writing that entry
  * keeps the string as its shorthand-key entry.
  */
@@ -327,7 +339,7 @@ function pendingChangeApplies(
 ): boolean {
 	if (mutation === undefined || mutation.generation.kind === "unreadable") return false;
 	if (yamlGenerationsMatch(mutation.generation, generation)) return true;
-	const onDisk: RawSettings = { value: getByPath(current, segments) };
+	const onDisk: RawSettings = { value: getEntryByPath(current, segments) };
 	const captured: RawSettings = { value: mutation.baseValue };
 	for (const writtenPath of written) {
 		if (isPathPrefix(writtenPath, segments)) return true;
@@ -4260,7 +4272,7 @@ export class Settings {
 						other => isPathPrefix(other, segments) || isPathPrefix(segments, other),
 					);
 					if (!overlapping) continue;
-					const written = getByPath(current, segments);
+					const written = getEntryByPath(current, segments);
 					const mutation = this.#modifiedPathMutations.get(modKey);
 					if (settingValuesEqual(getByPath(this.#global, segments), written)) {
 						this.#modified.delete(modKey);
@@ -4354,6 +4366,7 @@ export class Settings {
 		}
 		for (const segments of this.#modified.values()) {
 			const value = getByPath(this.#global, segments);
+			expandShorthandAroundEntry(target, segments);
 			if (value === undefined) deleteByPath(target, segments);
 			else setByPath(target, segments, value);
 		}
