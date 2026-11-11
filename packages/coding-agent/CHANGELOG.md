@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- `git worktree add` in the bash tool succeeds with Git older than 2.36, including when no post-checkout hook is installed ([#18928](https://github.com/can1357/oh-my-pi/issues/18928)).
 - Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
 - Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
 

@@ -154,6 +154,22 @@ export async function copyGitObjects(isolationRoot, sourceRoot) {
  * null old HEAD and branch-switch flag as `git worktree add`.
  */
 export async function runPostCheckoutHook(worktreeRoot, head) {
+	const version = await $`git --version`.cwd(worktreeRoot).quiet().text();
+	const match = /^git version (\d+)\.(\d+)/.exec(version);
+	const legacyGit = match && (Number(match[1]) < 2 || (Number(match[1]) === 2 && Number(match[2]) < 36));
+	if (legacyGit && process.platform !== "win32") {
+		const repository = requireGit(worktreeRoot);
+		const hook = await repository.hookPath("post-checkout");
+		if (!hook) return { exitCode: 0, stdout: new Uint8Array(), stderr: new Uint8Array() };
+		const nullOid = "0".repeat(head.length);
+		const info = repository.info();
+		const result = await $`${hook} ${nullOid} ${head} 1`
+			.cwd(worktreeRoot)
+			.env({ ...process.env, GIT_DIR: info.gitDir, GIT_WORK_TREE: info.repoRoot })
+			.quiet()
+			.nothrow();
+		return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+	}
 	const nullOid = "0".repeat(head.length);
 	const result = await $`git hook run --ignore-missing post-checkout -- ${nullOid} ${head} 1`
 		.cwd(worktreeRoot)

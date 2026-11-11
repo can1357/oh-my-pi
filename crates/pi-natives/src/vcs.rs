@@ -740,6 +740,15 @@ impl VcsGitRepo {
 		self.inner.linked_worktree().map(Into::into)
 	}
 
+	/// Resolve an executable Git hook using the repository's hook configuration.
+	#[napi]
+	pub fn hook_path(&self, name: String, signal: Option<Unknown>) -> Promise<Option<String>> {
+		blocking("vcs.hookPath", self.inner.clone(), signal, move |r| {
+			r.hook_path(&name)
+				.map(|path| path.map(|path| path_string(&path)))
+		})
+	}
+
 	/// Resolve HEAD synchronously.
 	#[napi]
 	pub fn head_sync(&self, env: Env) -> Result<VcsHeadState> {

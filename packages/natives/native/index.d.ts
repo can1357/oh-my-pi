@@ -771,6 +771,8 @@ export declare class VcsGitRepo {
   primaryRoot(): string
   /** Linked-worktree metadata. */
   linkedWorktree(): VcsLinkedWorktree | null
+  /** Resolve an executable Git hook using the repository's hook configuration. */
+  hookPath(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
   /** Resolve HEAD synchronously. */
   headSync(): VcsHeadState
   /** Worktree-relative prefix of a directory. */

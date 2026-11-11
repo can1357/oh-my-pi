@@ -48,6 +48,43 @@ describe.skipIf(process.platform === "win32")("worktree add checkout hooks", () 
 		expect(result.stderr.toString()).toContain("hook-output");
 	});
 
+	it("runs the hook when Git predates the hook subcommand", async () => {
+		const bin = path.join(root, "bin");
+		await fs.mkdir(bin);
+		const git = (await $`which git`.text()).trim();
+		const shim = path.join(bin, "git");
+		await Bun.write(
+			shim,
+			'#!/bin/sh\nif [ "$1" = --version ]; then\n  echo "git version 2.34.1"\n  exit 0\nfi\nif [ "$1" = hook ]; then\n  echo "git: \'hook\' is not a git command" >&2\n  exit 1\nfi\nexec "$OMP_TEST_REAL_GIT" "$@"\n',
+		);
+		await fs.chmod(shim, 0o755);
+		hooks = path.join(root, "hooks");
+		await fs.mkdir(hooks);
+		await $`git -C ${repo} config core.hooksPath ../hooks`.quiet();
+		await hook('printf "%s\\n" "$1" "$2" "$3" > .post-checkout-ran');
+		const worktree = path.join(root, "legacy");
+		const result = await $`bun ${cli} worktree add --detach ${worktree} HEAD`
+			.cwd(repo)
+			.env({ ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, OMP_TEST_REAL_GIT: git })
+			.quiet()
+			.nothrow();
+		const head = (await $`git -C ${repo} rev-parse HEAD`.text()).trim();
+
+		expect(result.exitCode).toBe(0);
+		expect((await Bun.file(path.join(worktree, ".post-checkout-ran")).text()).trim().split("\n")).toEqual([
+			"0".repeat(head.length),
+			head,
+			"1",
+		]);
+		await fs.rm(path.join(hooks, "post-checkout"));
+		const noHook = await $`bun ${cli} worktree add --detach ${path.join(root, "without-hook")} HEAD`
+			.cwd(repo)
+			.env({ ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, OMP_TEST_REAL_GIT: git })
+			.quiet()
+			.nothrow();
+		expect(noHook.exitCode).toBe(0);
+	});
+
 	it("preserves a refusing hook's failure status and stderr", async () => {
 		await hook("echo checkout-refused >&2; exit 17");
 		const { result } = await add("refused");
