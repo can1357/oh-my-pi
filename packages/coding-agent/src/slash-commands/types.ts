@@ -110,6 +110,20 @@ export interface SlashCommandRuntime {
 	 */
 	runCommandInBackground?: (task: () => Promise<void>) => void;
 	/**
+	 * Run `change` inside the host's session-change bracket (goal quiesce and
+	 * reconcile, subagent registry reset, transcript-adjacent teardown). RPC
+	 * provides this because it owns session-scoped state outside AgentSession;
+	 * ACP and print mode omit it and the command calls through directly (ACP's
+	 * stable handle remaps via `registerSessionChangeCallback` inside
+	 * `AgentSession.newSession`). `detachesRun` marks a change that stops the
+	 * running agent; `isCancelled` reports a completed change that left the
+	 * transcript in place.
+	 */
+	changeSession?: <T>(
+		change: () => Promise<T>,
+		options: { detachesRun: boolean; isCancelled: (result: T | undefined) => boolean },
+	) => Promise<T>;
+	/**
 	 * Ask the host to reconnect one live-manager MCP server by name after its
 	 * credentials changed (e.g. `/mcp reauth`), and report the post-reconnect
 	 * state. Returns `undefined` when this host keeps no live manager for the

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,11 +7,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runRpcChangeSession } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { readSessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -53,7 +55,10 @@ describe("/session delete detaches the live session (issue #18665)", () => {
 			"todo.reminders": false,
 			"async.enabled": false,
 		});
-		const sessionManager = SessionManager.create(tempDir, sessionDir);
+		// Injected (not default-constructed) so a test can fail the backend's
+		// delete and prove the command reports the failure.
+		const storage = new FileSessionStorage();
+		const sessionManager = SessionManager.create(tempDir, sessionDir, storage);
 		const mock = createMockModel({
 			responses: [{ content: ["one"] }, { content: ["two"] }],
 		});
@@ -87,7 +92,7 @@ describe("/session delete detaches the live session (issue #18665)", () => {
 				titleNotifications += 1;
 			},
 		} as unknown as SlashCommandRuntime;
-		return { session, runtime, output, titleNotifications: () => titleNotifications };
+		return { session, runtime, output, storage, titleNotifications: () => titleNotifications };
 	}
 
 	it("rotates the session identity and the next turn writes a resumable file", async () => {
@@ -156,6 +161,110 @@ describe("/session delete detaches the live session (issue #18665)", () => {
 		} finally {
 			await session.abort();
 			await flight.catch(() => undefined);
+			await session.dispose();
+		}
+	});
+
+	it("runs the host session-change bracket around headless delete", async () => {
+		const { session, runtime, output } = await startSession();
+		try {
+			await session.prompt("Reply with the single word: one");
+			await session.flushToDisk();
+			const oldFile = session.sessionFile;
+			if (!oldFile) throw new Error("expected the first turn to persist a session file");
+
+			// The real RPC bracket with recording stand-ins for the host-owned
+			// halves (dictation, btw, goal, registry, gate, prompts, commands).
+			const events: string[] = [];
+			const changeSession: SlashCommandRuntime["changeSession"] = (change, options) =>
+				runRpcChangeSession(
+					{
+						stopDictation: async () => {
+							events.push("stopDictation");
+						},
+						closeBtw: async () => {
+							events.push("btw.close");
+						},
+						goalController: {
+							beginSessionChange: async () => {
+								events.push("goal.begin");
+							},
+							endSessionChange: async endOptions => {
+								events.push(`goal.end:detachedRun=${endOptions?.detachedRun === true}`);
+							},
+							settled: async () => {
+								events.push("goal.settled");
+							},
+						},
+						subagentRegistry: {
+							clear: () => {
+								events.push("registry.clear");
+							},
+						},
+						commitSessionChange: () => {
+							events.push("gate.commit");
+						},
+						abortOpenPrompts: () => {
+							events.push("prompts.abortOpen");
+						},
+						recheckSettlement: () => {
+							events.push("settle.check");
+						},
+						emitAvailableCommandsUpdate: async () => {
+							events.push("commands.update");
+						},
+						runExclusive: change => change(),
+					},
+					change,
+					options,
+				);
+			const result = await executeAcpBuiltinSlashCommand("/session delete", { ...runtime, changeSession });
+			expect(result).toEqual({ consumed: true });
+			expect(output.join("\n")).toContain(`Session deleted: ${oldFile}`);
+			expect(fs.existsSync(oldFile)).toBe(false);
+			// The detach ran inside the bracket: teardown before the change,
+			// reconcile and host notifications after it.
+			expect(events).toEqual([
+				"stopDictation",
+				"btw.close",
+				"goal.begin",
+				"goal.end:detachedRun=true",
+				"goal.settled",
+				"registry.clear",
+				"gate.commit",
+				"prompts.abortOpen",
+				"settle.check",
+				"commands.update",
+			]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports a storage failure instead of claiming the session was deleted", async () => {
+		const { session, runtime, output, storage } = await startSession();
+		try {
+			await session.prompt("Reply with the single word: one");
+			await session.flushToDisk();
+			const oldFile = session.sessionFile;
+			if (!oldFile) throw new Error("expected the first turn to persist a session file");
+
+			// The file cannot be removed (locked, permission denied): the drop
+			// records the error instead of throwing, and the command must
+			// surface it rather than print the success line.
+			vi.spyOn(storage, "deleteSessionWithArtifacts").mockRejectedValue(
+				new Error(`EACCES: permission denied, unlink '${oldFile}'`),
+			);
+			const result = await executeAcpBuiltinSlashCommand("/session delete", runtime);
+			expect(result).toEqual({ consumed: true, failed: true });
+			const text = output.join("\n");
+			expect(text).toContain("Failed to delete session: EACCES");
+			expect(text).not.toContain("Session deleted: ");
+			// The failed drop left the file in place; the successor session is
+			// already live (drop is lazy), so the run is not stuck.
+			expect(fs.existsSync(oldFile)).toBe(true);
+			expect(session.sessionManager.getSessionFile()).not.toBe(oldFile);
+		} finally {
 			await session.dispose();
 		}
 	});
