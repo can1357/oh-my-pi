@@ -41,22 +41,27 @@
 	// of reading as fields of the last element.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
-	const showField = value =>
-		typeof value === "number" || typeof value === "boolean"
-			? String(value)
-			: (JSON.stringify(value) ?? String(value));
+	const showField = (value, inspect) => {
+		if (typeof value === "number" || typeof value === "boolean") return String(value);
+		try {
+			return JSON.stringify(value) ?? String(value);
+		} catch {
+			// Annotations may contain BigInts or cycles; do not recurse into our own print hook.
+			return inspect(value, { customInspect: false, depth: null, compact: true, breakLength: Infinity });
+		}
+	};
 	const printedAtTop = (depth, options) => Number.isFinite(depth) && depth === options.depth;
-	const elementLine = element => {
-		if (element === null || typeof element !== "object") return showField(element);
+	const elementLine = (element, inspect) => {
+		if (element === null || typeof element !== "object") return showField(element, inspect);
 		const role =
-			typeof element.role === "string" && /^\S+$/.test(element.role) ? element.role : showField(element.role);
+			typeof element.role === "string" && /^\S+$/.test(element.role) ? element.role : showField(element.role, inspect);
 		let line = `[${element.id}] ${role}`;
-		if (element.name !== undefined) line += ` ${showField(element.name)}`;
+		if (element.name !== undefined) line += ` ${showField(element.name, inspect)}`;
 		for (const key of ["value", "description", "keyshortcuts"]) {
-			if (element[key] !== undefined) line += ` ${key}=${showField(element[key])}`;
+			if (element[key] !== undefined) line += ` ${key}=${showField(element[key], inspect)}`;
 		}
 		for (const [key, value] of Object.entries(element)) {
-			if (!knownElementKeys.has(key) && value !== undefined) line += ` ${key}=${showField(value)}`;
+			if (!knownElementKeys.has(key) && value !== undefined) line += ` ${key}=${showField(value, inspect)}`;
 		}
 		if (Array.isArray(element.states) && element.states.length > 0) line += ` ${element.states.join(" ")}`;
 		return line;
@@ -67,23 +72,23 @@
 		}
 		const elements = observation.elements;
 		Object.defineProperty(elements, inspectCustom, {
-			value: (depth, options) => {
+			value: (depth, options, inspect) => {
 				if (elements.length === 0) return "[]";
-				const lines = elements.map(elementLine);
+				const lines = elements.map(element => elementLine(element, inspect));
 				return printedAtTop(depth, options)
 					? `${lines.join("\n")}\n`
 					: ["[", ...lines.map(line => `  ${line}`), "]"].join("\n");
 			},
 		});
 		Object.defineProperty(observation, inspectCustom, {
-			value: (depth, options) => {
+			value: (depth, options, inspect) => {
 				if (!Array.isArray(observation.elements)) return observation;
 				const lines = [];
 				for (const [key, value] of Object.entries(observation)) {
-					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value)}`);
+					if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value, inspect)}`);
 				}
 				lines.push(`elements (${observation.elements.length}; tab.id(n) acts on [n]):`);
-				for (const element of observation.elements) lines.push(elementLine(element));
+				for (const element of observation.elements) lines.push(elementLine(element, inspect));
 				return printedAtTop(depth, options)
 					? `${lines.join("\n")}\n`
 					: ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n");

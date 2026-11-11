@@ -399,6 +399,25 @@ describe("browser facade in real Eval runtimes", () => {
 		);
 	});
 
+	it.each([
+		["observation BigInt", "o.extra = 1n", "extra: 1n"],
+		["observation cycle", "o.self = o", "[Circular"],
+		["element BigInt", "o.elements[0].extra = 1n", "extra=1n"],
+		["element cycle", "o.elements[0].self = o.elements[0]", "[Circular"],
+		["throwing toJSON", 'o.extra = { toJSON() { throw new Error("not JSON"); } }', "extra:"],
+	])("prints non-JSON annotations: %s", async (_name, annotation, expected) => {
+		let definitions: readonly EvalPreludeDefinition[] = [];
+		const session = makeSession(() => definitions);
+		definitions = [recorderDefinition(session, [])];
+		const result = await executeJs(
+			`const tab = await browser.open(); const o = await tab.observe(); ${annotation}; print(o); print(o.elements);`,
+			{ cwd: process.cwd(), sessionId: `browser-facade-annotation-${crypto.randomUUID()}`, session },
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain(expected);
+		expect(result.output).toContain('[5] button "Save"');
+	});
+
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
 		const calls: unknown[] = [];
 		let definitions: readonly EvalPreludeDefinition[] = [];
