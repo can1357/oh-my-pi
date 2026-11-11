@@ -6,6 +6,8 @@ The setup commands below assume a POSIX shell (Linux, macOS or WSL). The CLI res
 
 ## One-time setup
 
+Run every command in this README from the repository root, in the order shown; no block changes the working directory.
+
 ```sh
 C=~/.cache/omp-memory-eval
 
@@ -16,9 +18,9 @@ uv venv --python 3.12 $C/venv-lme
 uv pip install --python $C/venv-lme/bin/python 'numpy<2'
 
 # Pinned sources
-mkdir -p $C/src && cd $C/src
-git clone https://github.com/mnemosyne-oss/mnemosyne && git -C mnemosyne checkout e871f39480b9b9156faa4396162f7ec1f3b11525
-git clone https://github.com/xiaowu0162/LongMemEval && git -C LongMemEval checkout 9e0b455f4ef0e2ab8f2e582289761153549043fc
+mkdir -p $C/src
+git clone https://github.com/mnemosyne-oss/mnemosyne $C/src/mnemosyne && git -C $C/src/mnemosyne checkout e871f39480b9b9156faa4396162f7ec1f3b11525
+git clone https://github.com/xiaowu0162/LongMemEval $C/src/LongMemEval && git -C $C/src/LongMemEval checkout 9e0b455f4ef0e2ab8f2e582289761153549043fc
 ```
 
 Check: `$C/venv-engine/bin/python -c "import mnemosyne, fastembed; print(mnemosyne.__version__)"` prints `4.0.0b4`. Results record the `fastembed` and `onnxruntime` versions that produced the vectors (Mnemosyne, and Mnemopi with `--embedder python`), since another numerical runtime can reorder near-ties. Mnemopi with `--embedder js` records the versions of the installation Mnemopi's fastembed loader actually resolved, `fastembed`, `onnxruntime` and `tokenizers` (`@anush008/tokenizers`; the workspace lockfile and the on-demand runtime install pin different releases).
@@ -113,6 +115,7 @@ Never run real engines under `bun test`: with `NODE_ENV=test` Mnemopi's local em
 ## LongMemEval check against the official evaluator (Layer 0 check 4)
 
 ```sh
+R="bun packages/coding-agent/bench/memory-eval/run.ts"; O=~/.cache/omp-memory-eval/results
 V="$HOME/.cache/omp-memory-eval/venv-lme/bin/python -I"; P=packages/coding-agent/bench/memory-eval/py
 $R run --dataset lme-s-dev --engine oracle --protocol standard --out $O/lme-oracle.json
 $V $P/lme_official_check.py $O/lme-oracle.json                      # exit 0 iff every metric matches within 1e-12
