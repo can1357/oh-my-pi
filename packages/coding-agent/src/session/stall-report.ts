@@ -2,15 +2,16 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
-import type { AsyncJob } from "../async/job-manager";
+import type { AsyncJob, AsyncJobManager, AsyncJobManagerApi } from "../async/job-manager";
 import { type DaemonBrokerClient, daemonClientForProject } from "../launch/client";
 import { registerServiceObservationBarrier } from "../launch/diagnostic-observers";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import stallReportPrompt from "../prompts/system/stall-report.md" with { type: "text" };
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { cfgLaunchEnabled } from "../tools/settings";
 import { ACTIVE_TIME_CUSTOM_TYPE, type ActiveTimeSummary, readActiveTime } from "./active-time";
 import type { AgentSession } from "./agent-session";
+import { type AgentSessionHandle, isAgentViewSession, isLocalAgentSession } from "./agent-session-handle";
 import type { SessionEntry } from "./session-entries";
 import { loadEntriesFromFile, visitEntriesFromFileStream } from "./session-loader";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -217,9 +218,34 @@ function boundedRows(rows: string[], empty = "None."): string[] {
 	return retained;
 }
 
+/** Whether an idle reminder, not real work, owns the session's turn (known only for sessions homed on this thread). */
+function isDiagnosticTurn(session: AgentSessionHandle): boolean {
+	return isLocalAgentSession(session) && session.isStallDiagnosticTurn?.() === true;
+}
+
+/** Live transcript branch of a registered session: local sessions and main-thread mirrors of worker-homed ones. */
+function liveBranch(session: AgentSessionHandle): SessionEntry[] | undefined {
+	return isLocalAgentSession(session) || isAgentViewSession(session) ? session.sessionManager.getBranch() : undefined;
+}
+
+/** Session identity of a registered session; a worker-homed mirror exposes no header, so its parent is unknown. */
+function liveHeader(session: AgentSessionHandle): { id?: string; cwd?: string; parentSession?: string } {
+	if (!isLocalAgentSession(session))
+		return { id: session.sessionManager.getSessionId(), cwd: session.sessionManager.getCwd() };
+	const header = session.sessionManager.getHeader();
+	return { id: header?.id, cwd: header?.cwd, parentSession: header?.parentSession };
+}
+
+/** Settlement observation is offered by the root's local manager, not by worker proxies. */
+function observesSettlements(
+	manager: AsyncJobManagerApi,
+): manager is AsyncJobManagerApi & Pick<AsyncJobManager, "onSettled"> {
+	return typeof Reflect.get(manager, "onSettled") === "function";
+}
+
 function agentStatus(ref: AgentRef, removed = false): string {
 	if (removed) return "removed";
-	if (ref.session?.isStreaming) return ref.session.isStallDiagnosticTurn?.() ? "active (diagnostic-only)" : "active";
+	if (ref.session?.isStreaming) return isDiagnosticTurn(ref.session) ? "active (diagnostic-only)" : "active";
 	return ref.session ? "idle" : ref.status;
 }
 
@@ -227,6 +253,7 @@ function agentStatus(ref: AgentRef, removed = false): string {
 function snapshotAgentRef(ref: AgentRef): AgentRef {
 	return {
 		id: ref.id,
+		generation: ref.generation,
 		displayName: ref.displayName,
 		kind: ref.kind,
 		parentId: ref.parentId,
@@ -300,25 +327,28 @@ function snapshotHistory(history: History): ReportHistory {
 /** Session-owned diagnostic sampling. No lifecycle action or result consumption occurs here. */
 export class StallReportCollector {
 	readonly #session: AgentSession;
-	readonly #registry: AgentRegistry;
+	readonly #registry: AgentRegistryApi;
 	readonly #startedAt = Date.now();
 	readonly #events = new StallEventJournal<Event>();
 	readonly #disposers: (() => void)[] = [];
-	readonly #liveHistory = new WeakMap<AgentSession, History>();
+	readonly #liveHistory = new WeakMap<AgentSessionHandle, History>();
 	readonly #parkedHistory = new WeakMap<AgentRef, { file: string | null; history: ReportHistory }>();
-	readonly #watchedSessions = new WeakSet<AgentSession>();
+	readonly #watchedSessions = new WeakSet<AgentSessionHandle>();
 	readonly #serviceSources = new Map<string, ServiceSource>();
 	readonly #owners = new Set<string>();
 	readonly #serviceEventIds = new Set<string>();
 	readonly #agentOwners = new Set<string>();
-	readonly #workActivity = new WeakMap<AgentSession, number>();
+	readonly #workActivity = new WeakMap<AgentSessionHandle, number>();
 	readonly #agentChanges = new Map<string, { ref: AgentRef; at: number; sequence: number; removed: boolean }>();
 	readonly #serviceMetadata = new Map<string, { sessionId?: string; cwd?: string; error?: string }>();
 	readonly #serviceOwnerDiscoveries = new Set<Promise<void>>();
 	#agentChangeSequence = 0;
 	#agentSnapshotsEvicted = 0;
 	#committedAgentEvictions = 0;
-	readonly #activitySubscriptions = new Map<AgentSession, () => void>();
+	readonly #activitySubscriptions = new Map<
+		AgentSessionHandle,
+		{ agentId: string | undefined; unsubscribe: () => void }
+	>();
 	#todos: TodoRow[];
 	#baseline?: Baseline;
 	#disposed = false;
@@ -335,18 +365,18 @@ export class StallReportCollector {
 		this.#disposers.push(
 			this.#registry.onChange(event => {
 				if (!this.#inScope(event.ref)) return;
-				for (const [observed, unsubscribe] of this.#activitySubscriptions) {
+				for (const [observed, subscription] of this.#activitySubscriptions) {
 					if (
-						observed.getAgentId() === event.ref.id &&
+						subscription.agentId === event.ref.id &&
 						(event.type === "removed" || observed !== event.ref.session)
 					) {
-						unsubscribe();
+						subscription.unsubscribe();
 						this.#activitySubscriptions.delete(observed);
 					}
 				}
 				this.#parkedHistory.delete(event.ref);
 				this.#agentOwners.add(event.ref.id);
-				this.#watchSession(event.ref.session);
+				this.#watchSession(event.ref.session, event.ref.id);
 				if (!event.ref.session) {
 					const discovery = this.#watchRefServiceOwner(snapshotAgentRef(event.ref));
 					this.#serviceOwnerDiscoveries.add(discovery);
@@ -354,10 +384,11 @@ export class StallReportCollector {
 				}
 				if (event.type === "registered" || event.type === "removed" || event.type === "status_changed") {
 					const snapshot = snapshotAgentRef(event.ref);
-					if (event.type === "removed" && event.ref.session) {
+					const branch = event.type === "removed" && event.ref.session ? liveBranch(event.ref.session) : undefined;
+					if (event.ref.session && branch) {
 						this.#parkedHistory.set(snapshot, {
 							file: snapshot.sessionFile,
-							history: snapshotHistory(this.#sessionHistory(event.ref.session)),
+							history: snapshotHistory(this.#sessionHistory(event.ref.session, branch)),
 						});
 					}
 					this.#agentChanges.delete(agentKey(event.ref));
@@ -381,7 +412,7 @@ export class StallReportCollector {
 			}),
 		);
 		const manager = session.asyncJobManager;
-		if (manager)
+		if (manager && observesSettlements(manager))
 			this.#disposers.push(
 				manager.onSettled(job => {
 					if (this.#ownerInScope(job.ownerId))
@@ -392,11 +423,11 @@ export class StallReportCollector {
 						});
 				}),
 			);
-		this.#watchSession(session);
+		this.#watchSession(session, session.getAgentId());
 		for (const ref of this.#registry.list())
 			if (this.#inScope(ref)) {
 				this.#agentOwners.add(ref.id);
-				this.#watchSession(ref.session);
+				this.#watchSession(ref.session, ref.id);
 			}
 	}
 
@@ -427,20 +458,24 @@ export class StallReportCollector {
 		return ref ? this.#inScope(ref) : this.#agentOwners.has(owner);
 	}
 
-	#watchSession(session: AgentSession | null): void {
+	#watchSession(session: AgentSessionHandle | null, agentId: string | undefined): void {
 		if (!session || this.#watchedSessions.has(session)) return;
 		this.#watchedSessions.add(session);
-		const unsubscribe = session.subscribe?.(event => {
-			if (session.isStallDiagnosticTurn?.()) return;
-			if (
-				(event.type === "message_end" && event.message.role === "assistant") ||
-				event.type === "tool_execution_update" ||
-				event.type === "tool_execution_end"
-			)
-				this.#workActivity.set(session, Date.now());
-		});
-		if (unsubscribe) this.#activitySubscriptions.set(session, unsubscribe);
-		const tool = session.getStallReportToolSession();
+		// Minimal host doubles may not expose events; they still contribute transcript state.
+		if (typeof session.subscribe === "function") {
+			const unsubscribe = session.subscribe(event => {
+				if (isDiagnosticTurn(session)) return;
+				if (
+					(event.type === "message_end" && event.message.role === "assistant") ||
+					event.type === "tool_execution_update" ||
+					event.type === "tool_execution_end"
+				)
+					this.#workActivity.set(session, Date.now());
+			});
+			this.#activitySubscriptions.set(session, { agentId, unsubscribe });
+		}
+		// A worker-homed mirror has no tool session here; its owner is discovered from its ref.
+		const tool = isLocalAgentSession(session) ? session.getStallReportToolSession() : undefined;
 		if (!tool || !cfgLaunchEnabled.get(tool.settings)) return;
 		const owner = tool.getSessionId?.() ?? tool.getAgentId?.();
 		if (owner) this.#watchServiceOwner(tool.cwd, owner);
@@ -503,7 +538,7 @@ export class StallReportCollector {
 	async #watchRefServiceOwner(ref: AgentRef): Promise<void> {
 		const rootTool = this.#session.getStallReportToolSession();
 		if (this.#disposed || !rootTool || !cfgLaunchEnabled.get(rootTool.settings)) return;
-		const header = ref.session?.sessionManager.getHeader();
+		const header = ref.session ? liveHeader(ref.session) : undefined;
 		const cached = this.#parkedHistory.get(ref)?.history;
 		const owner = header?.id ?? cached?.sessionId;
 		const cwd = header?.cwd ?? cached?.cwd;
@@ -564,10 +599,10 @@ export class StallReportCollector {
 		this.#todos = next;
 	}
 
-	#sessionHistory(session: AgentSession): History {
-		const summary = scanEntries(session.sessionManager.getBranch(), this.#liveHistory.get(session), this.#quote);
+	#sessionHistory(session: AgentSessionHandle, branch: readonly SessionEntry[]): History {
+		const summary = scanEntries(branch, this.#liveHistory.get(session), this.#quote);
 		this.#liveHistory.set(session, summary);
-		const header = session.sessionManager.getHeader();
+		const header = liveHeader(session);
 		summary.sessionId = header?.id;
 		summary.cwd = header?.cwd;
 		summary.parentSession = header?.parentSession;
@@ -575,9 +610,10 @@ export class StallReportCollector {
 	}
 
 	async #history(ref: AgentRef): Promise<ReportHistory | undefined> {
-		if (ref.session) {
+		const liveEntries = ref.session ? liveBranch(ref.session) : undefined;
+		if (ref.session && liveEntries) {
 			this.#parkedHistory.delete(ref);
-			return snapshotHistory(this.#sessionHistory(ref.session));
+			return snapshotHistory(this.#sessionHistory(ref.session, liveEntries));
 		}
 		const cached = this.#parkedHistory.get(ref);
 		if (cached?.file === ref.sessionFile) return cached.history;
@@ -628,6 +664,7 @@ export class StallReportCollector {
 		if (!refs.some(ref => ref.session === this.#session))
 			refs.unshift({
 				id: this.#session.getAgentId() ?? this.#session.sessionManager.getSessionId(),
+				generation: 0,
 				displayName: "Main",
 				kind: "main",
 				status: this.#session.isStreaming ? "running" : "idle",
@@ -644,7 +681,7 @@ export class StallReportCollector {
 		for (const [key, change] of agentChanges) if (!currentKeys.has(key)) refs.push(change.ref);
 		for (const ref of refs) {
 			this.#agentOwners.add(ref.id);
-			this.#watchSession(ref.session);
+			this.#watchSession(ref.session, ref.id);
 		}
 		const candidates = refs
 			.filter(ref => {
@@ -784,7 +821,7 @@ export class StallReportCollector {
 				!history.incompleteAncestry &&
 				(old.leaf === null ||
 					old.leaf === history.leaf ||
-					ref.session?.sessionManager.getBranch().some(entry => entry.id === old.leaf))
+					(ref.session ? liveBranch(ref.session) : undefined)?.some(entry => entry.id === old.leaf))
 					? `; since reminder turns +${history.turns - (old.turns ?? history.turns)}, tools +${history.tools - (old.tools ?? history.tools)}${old.activeMs !== undefined && sample.activeMs !== undefined ? `, active +${age(sample.activeMs - old.activeMs)}` : ""}`
 					: "; since-reminder counters unavailable (no comparable baseline)";
 			nextAgents.set(key, {
@@ -940,7 +977,7 @@ export class StallReportCollector {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		for (const dispose of this.#disposers.splice(0)) dispose();
-		for (const unsubscribe of this.#activitySubscriptions.values()) unsubscribe();
+		for (const subscription of this.#activitySubscriptions.values()) subscription.unsubscribe();
 		this.#activitySubscriptions.clear();
 		for (const source of this.#serviceSources.values()) source.unsubscribe?.();
 		this.#serviceSources.clear();
