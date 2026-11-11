@@ -12,9 +12,9 @@
 #       is the SDK for every candidate, so the bridge never links against a
 #       different SDK than the rest of the addon. Probes versions only; never
 #       compiles.
-#       OMP_APPLEFM_DISABLE=1 selects nothing without probing any toolchain, so
-#       an opted-out build never compiles the bridge with host tools; setting
-#       it together with $OMP_APPLEFM_SWIFTC is an error.
+#       $OMP_APPLEFM_DISABLE=1 selects nothing without probing any toolchain,
+#       so an opted-out build never compiles the bridge with host tools;
+#       setting it together with $OMP_APPLEFM_SWIFTC is an error.
 #
 #   build-bridge.sh build <out.dylib> <arch> [<swiftc> <sdk> [<swiftc arg>...]]
 #       Compiles bridge.swift into a standalone <out.dylib> with the given
