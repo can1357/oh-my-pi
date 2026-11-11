@@ -5,7 +5,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { resolveMarkdownLinkHrefs } from "@oh-my-pi/pi-coding-agent/internal-urls/hyperlink-targets";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { tryFileUri } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { resolveFileLink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
@@ -25,8 +25,8 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 		const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const release = bindEffects(settings);
 		try {
-			expect(tryFileUri("/mnt/projects/a.ts")).toBe("file:///Z:/a.ts");
-			expect(tryFileUri("/srv/a.ts")).toBe("file:///srv/a.ts");
+			expect(resolveFileLink({ path: "/mnt/projects/a.ts", kind: "file" })).toBe("file:///Z:/a.ts");
+			expect(resolveFileLink({ path: "/srv/a.ts", kind: "file" })).toBe("file:///srv/a.ts");
 		} finally {
 			release();
 			settings.cancelPendingSaves();
@@ -51,8 +51,8 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 			const shown = host.get("tui.linkMap");
 			expect(shown).toEqual({ "/work": "file:///W:/" });
 			host.set("tui.linkMap", Object.assign({}, shown, { "/mnt/projects": "file:///Z:/" }));
-			expect(tryFileUri("/mnt/projects/a.ts")).toBe("file:///Z:/a.ts");
-			expect(tryFileUri("/srv/a.ts")).toBe("file:///srv/a.ts");
+			expect(resolveFileLink({ path: "/mnt/projects/a.ts", kind: "file" })).toBe("file:///Z:/a.ts");
+			expect(resolveFileLink({ path: "/srv/a.ts", kind: "file" })).toBe("file:///srv/a.ts");
 		} finally {
 			restoreSettingsTestState(state);
 			AgentStorage.close();
@@ -62,9 +62,16 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 	it("sends a resolved Markdown link to the mapped target with its fragment", async () => {
 		using dir = TempDir.createSync("@pi-link-map-markdown-");
 		await Bun.write(dir.join("guide.md"), "# Guide\n");
-		applyLinkMapSetting({ [dir.path()]: "https://git.contoso.example/handbook/blob/main" });
+		await Bun.write(dir.join("src", "lib", "a.ts"), "");
+		applyLinkMapSetting({
+			[dir.path()]: "https://git.contoso.example/handbook/blob/main",
+			[dir.join("src")]: "vscode://vscode-remote/ssh-remote+devbox/src",
+		});
 		const href = `${dir.join("guide.md")}#L3`;
-		const targets = await resolveMarkdownLinkHrefs([href]);
+		const folder = dir.join("src", "lib");
+		const targets = await resolveMarkdownLinkHrefs([href, folder]);
 		expect(targets.get(href)).toBe("https://git.contoso.example/handbook/blob/main/guide.md#L3");
+		// A directory opens as a folder: VS Code would open a remote target ending in `:<line>` as a file.
+		expect(targets.get(folder)).toBe("vscode://vscode-remote/ssh-remote+devbox/src/lib");
 	});
 });

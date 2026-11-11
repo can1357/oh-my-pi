@@ -4,7 +4,6 @@
  * Provides tools for debugging, bug report generation, and system diagnostics.
  */
 import * as fs from "node:fs/promises";
-import * as url from "node:url";
 import { getWorkProfile } from "@oh-my-pi/pi-natives";
 import {
 	isNotificationSuppressed,
@@ -24,6 +23,7 @@ import { OverlayPanel } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getSelectListTheme, getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import { fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
@@ -66,10 +66,7 @@ const DEBUG_MENU_ITEMS: SelectItem[] = [
 	{ value: "clear-cache", label: "Clear: artifact cache", description: "Remove old session artifacts" },
 ];
 
-const formatFileHyperlink = (path: string): string => {
-	const fileUrl = url.pathToFileURL(path).href;
-	return `\x1b]8;;${fileUrl}\x07${path}\x1b]8;;\x07`;
-};
+const formatFileHyperlink = (path: string): string => fileHyperlink({ path, kind: "file" }, path);
 
 /**
  * Debug selector component.

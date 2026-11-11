@@ -2145,7 +2145,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		this.editor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
-		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
+		this.editor.fileHyperlink = (filePath, text) => fileHyperlink({ path: filePath, kind: "file", line: 1 }, text);
 		this.#ownsStartedUi = wasStarted;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
@@ -8620,7 +8620,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
 		nextEditor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
-		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
+		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink({ path: filePath, kind: "file", line: 1 }, text);
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
 		};
@@ -8705,9 +8705,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#renderDeferredCommandNotice();
 		this.ui.requestRender();
 	}
-	showSessionInfo(info: string, context?: ContextUsage): void {
+	showSessionInfo(info: string, context?: ContextUsage, sessionFile?: string): void {
 		this.#hideSessionInfo();
-		const overlay = new SessionInfoOverlay(this.ui, info, () => this.#hideSessionInfo(), context);
+		const overlay = new SessionInfoOverlay(this.ui, info, () => this.#hideSessionInfo(), context, sessionFile);
 		this.#sessionInfoOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",

@@ -9,7 +9,7 @@ import { editorKey } from "../chrome/keybinding-hints";
 import { SelectFormField, TextFormField } from "../components/form";
 import { Text } from "../components/text";
 import { Container, type SelectItem, type SgrMouseEvent } from "../index";
-import { fileUriForTerminal } from "../render/hyperlink";
+import { resolveFileLink } from "../render/hyperlink";
 import { isLinkMapKey, matchLinkEntry, parseLinkTarget } from "../render/link-map";
 import { TERMINAL } from "../terminal-capabilities";
 import { getSelectListTheme } from "../theme/theme";
@@ -234,7 +234,8 @@ export class LinkMapSubmenu extends Container {
 					} catch {
 						match = undefined;
 					}
-					const uri = fileUriForTerminal(target, undefined, TERMINAL.id) ?? "no link";
+					const kind = target.endsWith("/") ? "dir" : "unknown";
+					const uri = resolveFileLink({ path: target, kind }, TERMINAL.id) ?? "no link";
 					this.#backToList(`${target} → ${match ? `entry ${match.key}` : "no entry"} → ${uri}`);
 				},
 				onCancel: () => this.#backToList(),

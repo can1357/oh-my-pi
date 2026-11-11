@@ -119,7 +119,7 @@ function grepSubject(
 	searchPath?: string,
 ): string | undefined {
 	let scope = details?.scopePath || undefined;
-	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
+	if (scope && searchPath) scope = fileHyperlink({ path: searchPath, kind: "unknown" }, scope);
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
 	return formatScopedSubject(subject, scope, uiTheme);
 }

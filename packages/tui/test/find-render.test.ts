@@ -68,7 +68,7 @@ describe("findToolRenderer", () => {
 			.render(200);
 		const uris = extractLinkUris(lines.join("\n"));
 		// One link per hit row plus one per range row; line positions are
-		// terminal-specific (see fileUriForTerminal), so only the target is asserted.
+		// terminal-specific (see resolveFileLink), so only the target is asserted.
 		expect(uris.filter(uri => uri.endsWith("/repo/src/retry.ts"))).toHaveLength(3);
 		expect(uris.filter(uri => uri.endsWith("/repo/src/other.ts"))).toHaveLength(2);
 	});

@@ -447,8 +447,11 @@ export interface InteractiveModeContext {
 	 * duplicate rows into terminal scrollback.
 	 */
 	presentCommandOutput(content: Component | readonly Component[]): void;
-	/** Show session information in a focused transient overlay; `context` adds a context-window meter natively. */
-	showSessionInfo(info: string, context?: ContextUsage): void;
+	/**
+	 * Show session information in a focused transient overlay; natively, `context` adds a context-window meter
+	 * and `sessionFile` links the File field.
+	 */
+	showSessionInfo(info: string, context?: ContextUsage, sessionFile?: string): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
 	/**

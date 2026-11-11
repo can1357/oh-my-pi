@@ -40,7 +40,7 @@ export function imageReferenceHyperlink(
 ): string {
 	const rendered = renderLabel(label);
 	const target = imageLinks?.[index - 1];
-	return target ? fileHyperlink(target, rendered) : rendered;
+	return target ? fileHyperlink({ path: target, kind: "file" }, rendered) : rendered;
 }
 
 async function materializeImageReferenceLinkAsync(
@@ -164,7 +164,7 @@ export function linkedImageText(
 ): string {
 	if (!isHyperlinkEnabled()) return text;
 	const target = transcriptImageLink(image, sourcePath);
-	return target ? fileHyperlink(target, text) : text;
+	return target ? fileHyperlink({ path: target, kind: "file" }, text) : text;
 }
 
 /** Native counterpart of {@link linkedImageText}: a span linking to the image's file when one exists. */
@@ -175,5 +175,5 @@ export function linkedImageSpan(
 	s?: string,
 ): TspSpan {
 	const target = transcriptImageLink(image, sourcePath);
-	return target ? fileLinkSpan(target, text, s) : span(text, s);
+	return target ? fileLinkSpan({ path: target, kind: "file" }, text, s) : span(text, s);
 }

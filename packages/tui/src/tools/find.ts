@@ -176,7 +176,7 @@ function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, ra
 	const link = (text: string, line?: number): string => {
 		if (isUrlHit) return uriHyperlink(line === undefined ? hit.rel : `${hit.rel}:${line}`, text);
 		const absPath = cwd === undefined ? undefined : path.join(cwd, rawRel);
-		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
+		return absPath === undefined ? text : fileHyperlink({ path: absPath, kind: "file", line }, text);
 	};
 	const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
 	// URL hits show whole in the file-name color; file hits get the dim directory.
@@ -220,7 +220,7 @@ function describeHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, 
 				"muted",
 			),
 		],
-		href: isUrlHit || cwd === undefined ? undefined : fileHref(path.join(cwd, rawRel)),
+		href: isUrlHit || cwd === undefined ? undefined : fileHref(path.join(cwd, rawRel), "file"),
 		key: "hit",
 	});
 	const snippets = ranges.map(range =>

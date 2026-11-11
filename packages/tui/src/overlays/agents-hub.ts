@@ -31,6 +31,7 @@ import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "..
 import { actionHint, type NativeHint, hintsRow } from "../native/overlay";
 import { CLOSE_ACTION, type PickerEvent, picker, pickerEvent, pickerQuery } from "../native/picker";
 import type { AgentSource } from "../tools/task";
+import { fileLinkSpan } from "../render/hyperlink";
 import { shortenPath } from "../render/render-utils";
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { getEditorTheme, theme } from "../theme";
@@ -1550,8 +1551,11 @@ export class AgentsHubComponent implements Component {
 		];
 		if (agent.filePath) {
 			// Bundled agents live in the binary (`embedded:…`): nothing to open.
-			const href = agent.filePath.startsWith("/") ? { href: `file://${agent.filePath}` } : undefined;
-			facts.push({ k: "File", v: [span(shortenPath(agent.filePath), "path", href)] });
+			const shown = shortenPath(agent.filePath);
+			const file = agent.filePath.startsWith("/")
+				? fileLinkSpan({ path: agent.filePath, kind: "file" }, shown)
+				: span(shown, "path");
+			facts.push({ k: "File", v: [file] });
 		}
 		const out: NativeChild[] = [
 			node("text", { text: agent.name, role: "omp.picker.title" }, undefined, "title"),

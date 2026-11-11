@@ -391,12 +391,16 @@ export function createGroupedRowStyler(
 			const name = replaceTabs(ctx.displayPath ?? "");
 			const label = ctx.url ? theme.fg(FILE_NAME_COLOR, name) : formatStyledPath(name, theme);
 			const suffix = ctx.suffix ? ` ${theme.fg("dim", replaceTabs(ctx.suffix))}` : "";
-			const linked = target ? fileHyperlink(target, label) : ctx.url ? uriHyperlink(ctx.url, label) : label;
+			const linked = target
+				? fileHyperlink({ path: target, kind: "file" }, label)
+				: ctx.url
+					? uriHyperlink(ctx.url, label)
+					: label;
 			row = linked + suffix;
 		} else {
 			row = replaceTabs(options.styleBody(index));
 			const line = options.linkLines && target ? GROUPED_NUMBERED_LINE_RE.exec(lines[index]!)?.[2] : undefined;
-			if (line) row = fileHyperlink(target!, row, { line: Number(line) });
+			if (line) row = fileHyperlink({ path: target!, kind: "file", line: Number(line) }, row);
 		}
 		styled[index] = row;
 		return row;

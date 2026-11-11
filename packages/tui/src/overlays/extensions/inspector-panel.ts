@@ -16,6 +16,7 @@ import { Section } from "../../components/section";
 import { renderTableRow } from "../../components/table";
 import { theme } from "../../theme";
 import { divider } from "../../chrome/overlay-box";
+import { fileLinkSpan } from "../../render/hyperlink";
 import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../render/render-utils";
 import {
 	sanitizeDisplayField,
@@ -165,7 +166,7 @@ export class InspectorPanel implements Component {
 		const name = sanitizeDisplayLine(ext.displayName);
 		const title = sanitizeDisplayLineField(view.title);
 		const levelLabel = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
-		const filePath = sanitizeDisplayText(ext.path);
+		const shownPath = sanitizeDisplayText(shortenPath(ext.path, os.homedir()));
 		const facts = kv([
 			...view.runtime,
 			["Status", view.health && ext.state === "active" ? undefined : this.#nativeStatus(ext)],
@@ -173,11 +174,9 @@ export class InspectorPanel implements Component {
 			[
 				"Path",
 				[
-					span(
-						sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
-						"path dim",
-						filePath.startsWith("/") ? { href: `file://${filePath}` } : undefined,
-					),
+					ext.path.startsWith("/")
+						? fileLinkSpan({ path: ext.path, kind: "unknown" }, shownPath, "path dim")
+						: span(shownPath, "path dim"),
 				],
 			],
 		]);

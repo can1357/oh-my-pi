@@ -23,7 +23,7 @@ import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-vi
 import { numberedCode } from "./grouped-file-output";
 import { getLanguageFromPath } from "../lang-from-path";
 import type { Theme } from "../theme/theme";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
+import { type FileLinkKind, fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
 import { markFramedBlockComponent } from "../render/output-block";
 import { framedToolCard } from "../render/tool-card";
 import {
@@ -384,15 +384,21 @@ function readLinkTarget(details: unknown): string | undefined {
 	return readSourceFsPath(details);
 }
 
+/** What a read links: `dir` or `file` once the result says which, `unknown` while the call is pending. */
+export function readLinkKind(details: ReadToolDetails | undefined): FileLinkKind {
+	if (!details) return "unknown";
+	return details.isDirectory ? "dir" : "file";
+}
+
 function formatReadPathLink(
 	rawPath: string,
 	options: {
+		kind: FileLinkKind;
 		resolvedPath?: string;
 		sourcePath?: string;
 		suffixResolution?: { from: string; to: string };
 		offset?: number;
 		fallbackLabel?: string;
-		directory?: boolean;
 	},
 ): string {
 	const split = splitReadRenderPath(rawPath);
@@ -412,8 +418,9 @@ function formatReadPathLink(
 			: undefined;
 	const target = options.resolvedPath ?? options.sourcePath ?? inputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
-	const linkOptions = line !== undefined ? { line } : options.directory ? { directory: true } : undefined;
-	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;
+	const linkedPath = target
+		? fileHyperlink({ path: target, kind: options.kind, line }, plainDisplayPath)
+		: plainDisplayPath;
 	return `${linkedPath}${selectorSuffix}`;
 }
 
@@ -464,9 +471,10 @@ function readNativeHead(
 		title: "Read",
 		target: sanitizeText(target) || "…",
 		targetKind: "path",
-		href: fileHref(linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details), {
-			directory: details?.isDirectory,
-		}),
+		href: fileHref(
+			linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details),
+			readLinkKind(details),
+		),
 		meta,
 		badges:
 			conflicts > 0 ? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }] : undefined,
@@ -556,7 +564,7 @@ export const readToolRenderer = {
 		const offset = args.offset;
 		const limit = args.limit;
 
-		let pathDisplay = formatReadPathLink(rawPath, { offset, fallbackLabel: "…" }) || "…";
+		let pathDisplay = formatReadPathLink(rawPath, { kind: "unknown", offset, fallbackLabel: "…" }) || "…";
 		if (offset !== undefined || limit !== undefined) {
 			const startLine = offset ?? 1;
 			const endLine = limit !== undefined ? startLine + limit - 1 : "";
@@ -599,6 +607,7 @@ export const readToolRenderer = {
 				typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
 			const filePath =
 				formatReadPathLink(rawPath, {
+					kind: readLinkKind(result.details),
 					offset: args?.offset,
 					sourcePath: linkPath ?? result.details?.displayTarget ?? readSourceFsPath(result.details),
 				}) || sanitizeText(shortenPath(rawPath));
@@ -653,6 +662,7 @@ export const readToolRenderer = {
 		if (imageContent) {
 			const suffix = details?.suffixResolution;
 			const displayPath = formatReadPathLink(rawPath, {
+				kind: readLinkKind(details),
 				resolvedPath: linkPath ?? details?.resolvedPath,
 				sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 				suffixResolution: suffix,
@@ -685,11 +695,11 @@ export const readToolRenderer = {
 		// reads only record the absolute path in meta.source, so fall back to that
 		// to keep the title clickable.
 		const displayPath = formatReadPathLink(rawPath, {
+			kind: readLinkKind(details),
 			resolvedPath: linkPath ?? details?.resolvedPath,
 			sourcePath: details?.displayTarget ?? readSourceFsPath(details),
 			suffixResolution: suffix,
 			offset: args?.offset,
-			directory: details?.isDirectory,
 		});
 		const correction = suffix ? ` ${uiTheme.fg("dim", `(corrected from ${shortenPath(suffix.from)})`)}` : "";
 		let title = displayPath ? `Read ${displayPath}${correction}` : "Read";

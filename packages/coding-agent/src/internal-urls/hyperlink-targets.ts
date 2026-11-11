@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { resolveFileLink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
 
@@ -47,7 +47,10 @@ export async function resolveMarkdownLinkHrefs(
 				}
 				const stat = await fs.stat(sourcePath);
 				if (!stat.isFile() && !stat.isDirectory()) return;
-				const target = fileUriForTerminal(sourcePath, { directory: stat.isDirectory() }, TERMINAL.id);
+				const target = resolveFileLink(
+					{ path: sourcePath, kind: stat.isDirectory() ? "dir" : "file" },
+					TERMINAL.id,
+				);
 				if (!target) return;
 				targets.set(href, target + suffix);
 			} catch {

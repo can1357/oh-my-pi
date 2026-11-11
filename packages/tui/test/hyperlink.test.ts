@@ -7,11 +7,11 @@ import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import {
 	applyFileLinkSetting,
 	applyHyperlinkSetting,
+	type FileLink,
 	fileHyperlink,
 	fileLinkSpan,
-	fileUriForTerminal,
 	isHyperlinkEnabled,
-	tryFileUri,
+	resolveFileLink,
 	uriHyperlink,
 	urlHyperlink,
 	urlHyperlinkAlways,
@@ -42,6 +42,11 @@ function extractAnyTerminatorLinkUri(text: string): string | undefined {
 /** Returns true if the string contains an OSC 8 hyperlink wrapping a given display text. */
 function isHyperlinked(text: string): boolean {
 	return text.includes(`${OSC}8;`) && text.includes(LINK_END);
+}
+
+/** A link to the file at `path`, optionally at a position. */
+function file(path: string, at?: Pick<FileLink, "line" | "col">): FileLink {
+	return { path, kind: "file", ...at };
 }
 
 /** Push the hyperlink policy as a host would when its preferences change. */
@@ -123,14 +128,14 @@ describe("fileHyperlink", () => {
 	it("returns plain text when hyperlinks are disabled (mode=off)", () => {
 		setHyperlinkMode("off");
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts");
+		const result = fileHyperlink(file(filePath), "bar.ts");
 		expect(result).toBe("bar.ts");
 	});
 
 	it("wraps text in OSC 8 when hyperlinks are enabled (mode=always)", () => {
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts");
+		const result = fileHyperlink(file(filePath), "bar.ts");
 		expect(isHyperlinked(result)).toBe(true);
 		expect(result).toContain("bar.ts");
 	});
@@ -138,7 +143,7 @@ describe("fileHyperlink", () => {
 	it("percent-encodes URL-reserved path bytes without appending a query", () => {
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/Users/foo/a#b?c% d.ts");
-		const result = fileHyperlink(filePath, "a#b?c% d.ts", { line: 12 });
+		const result = fileHyperlink(file(filePath, { line: 12 }), "a#b?c% d.ts");
 		const uri = extractLinkUri(result);
 		// The location must not ride in the URI: `Paths.get(URI)` rejects a file
 		// URI with a query or a fragment, which is what broke JVM language
@@ -150,7 +155,7 @@ describe("fileHyperlink", () => {
 
 	it("resolves relative paths before building file URIs", () => {
 		setHyperlinkMode("always");
-		const result = fileHyperlink("relative file#1.ts", "relative file#1.ts");
+		const result = fileHyperlink(file("relative file#1.ts"), "relative file#1.ts");
 		const uri = extractLinkUri(result);
 		expect(uri).toBeDefined();
 		expect(decodeURIComponent(new URL(uri!).pathname)).toEndWith("/relative file#1.ts");
@@ -159,7 +164,7 @@ describe("fileHyperlink", () => {
 	it("keeps the location out of the URI when line and col are provided", () => {
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts", { line: 42, col: 7 });
+		const result = fileHyperlink(file(filePath, { line: 42, col: 7 }), "bar.ts");
 		const uri = extractLinkUri(result);
 		expect(uri).toBe(url.pathToFileURL(filePath).href);
 		expect(uri).not.toContain("line");
@@ -170,19 +175,19 @@ describe("fileHyperlink", () => {
 		const filePath = path.resolve("/Users/foo/bar.ts");
 		// vscode://file takes the forward-slash path: `/Users/foo/bar.ts`, or `/C:/Users/foo/bar.ts` on Windows.
 		const vscodePath = url.pathToFileURL(filePath).pathname;
-		expect(fileUriForTerminal(filePath, { line: 42, col: 7 }, "vscode")).toBe(`vscode://file${vscodePath}:42:7`);
-		expect(fileUriForTerminal(filePath, { line: 42 }, "vscode")).toBe(`vscode://file${vscodePath}:42`);
+		expect(resolveFileLink(file(filePath, { line: 42, col: 7 }), "vscode")).toBe(`vscode://file${vscodePath}:42:7`);
+		expect(resolveFileLink(file(filePath, { line: 42 }), "vscode")).toBe(`vscode://file${vscodePath}:42`);
 		// Without a line there is nothing to navigate to, so the bare path stands.
-		expect(fileUriForTerminal(filePath, undefined, "vscode")).toBe(`vscode://file${vscodePath}`);
+		expect(resolveFileLink(file(filePath), "vscode")).toBe(`vscode://file${vscodePath}`);
 	});
 
 	it("encodes reserved path bytes in vscode://file targets without hiding the location", () => {
-		const uri = fileUriForTerminal("/Users/foo/a#b?c% d.ts", { line: 42, col: 7 }, "vscode");
+		const uri = resolveFileLink(file("/Users/foo/a#b?c% d.ts", { line: 42, col: 7 }), "vscode");
 		expect(uri).toBe("vscode://file/Users/foo/a%23b%3Fc%25%20d.ts:42:7");
 		// The vscode:// branch never builds a `file:` URL, so it always has a target.
 		expect(new URL(uri!).search).toBe("");
 		expect(new URL(uri!).hash).toBe("");
-		expect(fileUriForTerminal("C:\\Users\\foo bar\\a.ts", { line: 4 }, "vscode")).toBe(
+		expect(resolveFileLink(file("C:\\Users\\foo bar\\a.ts", { line: 4 }), "vscode")).toBe(
 			"vscode://file/C:/Users/foo%20bar/a.ts:4",
 		);
 	});
@@ -190,7 +195,9 @@ describe("fileHyperlink", () => {
 	it("keeps a plain file URI on terminals that are not the VS Code family", () => {
 		const filePath = path.resolve("/Users/foo/bar.ts");
 		for (const terminalId of ["iterm2", "kitty", "base"] as const) {
-			expect(fileUriForTerminal(filePath, { line: 42, col: 7 }, terminalId)).toBe(url.pathToFileURL(filePath).href);
+			expect(resolveFileLink(file(filePath, { line: 42, col: 7 }), terminalId)).toBe(
+				url.pathToFileURL(filePath).href,
+			);
 		}
 	});
 
@@ -199,8 +206,8 @@ describe("fileHyperlink", () => {
 		// encodeURIComponent throws URIError on a lone surrogate, which a
 		// model-authored path can carry; the row must keep its text.
 		const filePath = "/tmp/\uD800";
-		expect(fileUriForTerminal(filePath, { line: 3 }, "vscode")).toBeUndefined();
-		expect(() => fileHyperlink(filePath, "odd.ts")).not.toThrow();
+		expect(resolveFileLink(file(filePath, { line: 3 }), "vscode")).toBeUndefined();
+		expect(() => fileHyperlink(file(filePath), "odd.ts")).not.toThrow();
 	});
 
 	it.skipIf(process.platform !== "win32")(
@@ -210,11 +217,11 @@ describe("fileHyperlink", () => {
 			// A UNC path escaped twice by its author, as a resumed session can still
 			// hold it: Node rejects it with ERR_INVALID_ARG_VALUE ("Empty UNC servername").
 			const malformed = String.raw`\\\wsl.localhost\Ubuntu-24.04\opt\build-armv7\crypto\evp.h`;
-			expect(fileUriForTerminal(malformed, undefined, "kitty")).toBeUndefined();
-			expect(fileHyperlink(malformed, "evp.h")).toBe("evp.h");
-			expect(fileLinkSpan(malformed, "evp.h")).toEqual({ t: "evp.h", s: "path" });
+			expect(resolveFileLink(file(malformed), "kitty")).toBeUndefined();
+			expect(fileHyperlink(file(malformed), "evp.h")).toBe("evp.h");
+			expect(fileLinkSpan(file(malformed), "evp.h")).toEqual({ t: "evp.h", s: "path" });
 			// Native heads and image props share the same converter.
-			expect(fileHref(malformed)).toBeUndefined();
+			expect(fileHref(malformed, "file")).toBeUndefined();
 			expect(openableImageProps(malformed)).toEqual({});
 		},
 	);
@@ -223,36 +230,38 @@ describe("fileHyperlink", () => {
 		applyFileLinkSetting({ scheme: "ompfile" });
 		const filePath = path.resolve("/Users/foo/bar.ts");
 		const expectedPathname = url.pathToFileURL(filePath).pathname;
-		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(`ompfile://${os.hostname()}${expectedPathname}`);
+		expect(resolveFileLink(file(filePath), "kitty")).toBe(`ompfile://${os.hostname()}${expectedPathname}`);
 	});
 
 	it("overrides vscode terminal target when PI_LINK_SCHEME is set", () => {
 		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
 		const filePath = path.resolve("/Users/foo/bar.ts");
 		const expectedPathname = url.pathToFileURL(filePath).pathname;
-		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`ompfile://beelink${expectedPathname}?line=10`);
+		expect(resolveFileLink(file(filePath, { line: 10 }), "vscode")).toBe(
+			`ompfile://beelink${expectedPathname}?line=10`,
+		);
 	});
 
 	it("leaves URIs unchanged when only PI_LINK_HOST is set without PI_LINK_SCHEME", () => {
 		applyFileLinkSetting({ host: "remote-server" });
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		expect(fileUriForTerminal(filePath, undefined, "base")).toBe(url.pathToFileURL(filePath).href);
+		expect(resolveFileLink(file(filePath), "base")).toBe(url.pathToFileURL(filePath).href);
 	});
 
 	it("leaves file and vscode URIs unchanged when PI_LINK_SCHEME and PI_LINK_HOST are unset", () => {
 		applyFileLinkSetting({});
 		const filePath = path.resolve("/Users/foo/bar.ts");
 		const expectedFileUri = url.pathToFileURL(filePath).href;
-		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(expectedFileUri);
+		expect(resolveFileLink(file(filePath), "kitty")).toBe(expectedFileUri);
 		const vscodePath = url.pathToFileURL(filePath).pathname;
-		expect(fileUriForTerminal(filePath, { line: 10 }, "vscode")).toBe(`vscode://file${vscodePath}:10`);
+		expect(resolveFileLink(file(filePath, { line: 10 }), "vscode")).toBe(`vscode://file${vscodePath}:10`);
 	});
 
 	it("wraps custom scheme and host URI in OSC 8 via fileHyperlink", () => {
 		setHyperlinkMode("always");
 		applyFileLinkSetting({ scheme: "ompfile", host: "mybox" });
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, "bar.ts");
+		const result = fileHyperlink(file(filePath), "bar.ts");
 		const uri = extractLinkUri(result);
 		const expectedPathname = url.pathToFileURL(filePath).pathname;
 		expect(uri).toBe(`ompfile://mybox${expectedPathname}`);
@@ -264,21 +273,21 @@ describe("fileHyperlink", () => {
 		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/tmp/a#b?c% 中文.ts");
-		const uri = extractLinkUri(fileHyperlink(filePath, "a.ts", { line: 42, col: 7 }));
+		const uri = extractLinkUri(fileHyperlink(file(filePath, { line: 42, col: 7 }), "a.ts"));
 		const parsed = new URL(uri!);
 		expect(parsed.pathname).toBe(url.pathToFileURL(filePath).pathname);
 		expect(parsed.searchParams.get("line")).toBe("42");
 		expect(parsed.searchParams.get("col")).toBe("7");
 		expect(parsed.hash).toBe("");
-		expect(tryFileUri(filePath, { col: 3 })).toEndWith("?col=3");
+		expect(resolveFileLink(file(filePath, { col: 3 }))).toEndWith("?col=3");
 	});
 
 	it("routes native file links to the remote handler while image open actions stay local", () => {
 		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
 		const filePath = path.resolve("/tmp/remote project/a.ts");
 		const href = `ompfile://beelink${url.pathToFileURL(filePath).pathname}`;
-		expect(fileLinkSpan(filePath, "a.ts")).toEqual({ t: "a.ts", s: "path", href });
-		expect(fileHref(filePath)).toBe(href);
+		expect(fileLinkSpan(file(filePath), "a.ts")).toEqual({ t: "a.ts", s: "path", href });
+		expect(fileHref(filePath, "file")).toBe(href);
 		expect(openableImageProps(filePath)).toEqual({
 			href: url.pathToFileURL(filePath).href,
 			actions: { menu: ["open"] },
@@ -313,11 +322,11 @@ describe("fileHyperlink", () => {
 		// malformed-UNC failure that a resumed session can contain.
 		const pathToFileURL = url.pathToFileURL;
 		spyOn(url, "pathToFileURL").mockImplementation(filePath => pathToFileURL(filePath, { windows: true }));
-		expect(tryFileUri(malformed)).toBeUndefined();
-		expect(fileUriForTerminal(malformed, undefined, "vscode")).toBeUndefined();
-		expect(fileHyperlink(malformed, "a.ts")).toBe("a.ts");
-		expect(fileLinkSpan(malformed, "a.ts")).toEqual({ t: "a.ts", s: "path" });
-		expect(fileHref(malformed)).toBeUndefined();
+		expect(resolveFileLink(file(malformed))).toBeUndefined();
+		expect(resolveFileLink(file(malformed), "vscode")).toBeUndefined();
+		expect(fileHyperlink(file(malformed), "a.ts")).toBe("a.ts");
+		expect(fileLinkSpan(file(malformed), "a.ts")).toEqual({ t: "a.ts", s: "path" });
+		expect(fileHref(malformed, "file")).toBeUndefined();
 		expect(openableImageProps(malformed)).toEqual({});
 	});
 
@@ -325,7 +334,7 @@ describe("fileHyperlink", () => {
 		applyFileLinkSetting({ scheme: "ompfile", host: "beelink" });
 		const pathToFileURL = url.pathToFileURL;
 		spyOn(url, "pathToFileURL").mockImplementation(filePath => pathToFileURL(filePath, { windows: true }));
-		expect(tryFileUri("\\\\nas\\share\\a#b% 中文.ts")).toBe(
+		expect(resolveFileLink(file("\\\\nas\\share\\a#b% 中文.ts"))).toBe(
 			"ompfile://beelink//nas/share/a%23b%25%20%E4%B8%AD%E6%96%87.ts",
 		);
 	});
@@ -335,7 +344,7 @@ describe("fileHyperlink", () => {
 		const warning = spyOn(logger, "warn").mockImplementation(() => {});
 		applyFileLinkSetting({ scheme: "ompfile://", host: "beelink" });
 		const filePath = path.resolve("/tmp/a.ts");
-		expect(fileUriForTerminal(filePath, undefined, "kitty")).toBe(url.pathToFileURL(filePath).href);
+		expect(resolveFileLink(file(filePath), "kitty")).toBe(url.pathToFileURL(filePath).href);
 		expect(warning).toHaveBeenCalledTimes(1);
 	});
 
@@ -344,24 +353,26 @@ describe("fileHyperlink", () => {
 		const filePath = path.resolve("/tmp/a.ts");
 		for (const host of ["my box", "box/evil", "user@box", "box?x"]) {
 			applyFileLinkSetting({ scheme: "ompfile", host });
-			expect(tryFileUri(filePath)).toBe(url.pathToFileURL(filePath).href);
+			expect(resolveFileLink(file(filePath))).toBe(url.pathToFileURL(filePath).href);
 		}
 		expect(warning).toHaveBeenCalledTimes(4);
 		applyFileLinkSetting({ scheme: "ompfile", host: "beelink.lan:2222" });
-		expect(tryFileUri(filePath)).toBe(`ompfile://beelink.lan:2222${url.pathToFileURL(filePath).pathname}`);
+		expect(resolveFileLink(file(filePath))).toBe(`ompfile://beelink.lan:2222${url.pathToFileURL(filePath).pathname}`);
 	});
 
 	it("accepts extended scheme characters case-insensitively", () => {
 		applyFileLinkSetting({ scheme: "OMP+File.v2-remote", host: "beelink" });
 		const filePath = path.resolve("/tmp/a.ts");
-		expect(tryFileUri(filePath)).toBe(`omp+file.v2-remote://beelink${url.pathToFileURL(filePath).pathname}`);
+		expect(resolveFileLink(file(filePath))).toBe(
+			`omp+file.v2-remote://beelink${url.pathToFileURL(filePath).pathname}`,
+		);
 	});
 
 	it("produces a stable id for the same path", () => {
 		setHyperlinkMode("always");
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const r1 = fileHyperlink(filePath, "bar.ts");
-		const r2 = fileHyperlink(filePath, "different display text");
+		const r1 = fileHyperlink(file(filePath), "bar.ts");
+		const r2 = fileHyperlink(file(filePath), "different display text");
 		// Extract id= from params (between "id=" and next ";")
 		const id1 = r1.match(/id=([^;]+)/)?.[1];
 		const id2 = r2.match(/id=([^;]+)/)?.[1];
@@ -373,7 +384,7 @@ describe("fileHyperlink", () => {
 		setHyperlinkMode("always");
 		const alreadyWrappedUri = url.pathToFileURL(path.resolve("/foo/bar.ts")).href;
 		const alreadyWrapped = `${OSC}8;id=abc123;${alreadyWrappedUri}${ST}bar.ts${LINK_END}`;
-		const result = fileHyperlink(path.resolve("/Users/foo/other.ts"), alreadyWrapped);
+		const result = fileHyperlink(file(path.resolve("/Users/foo/other.ts")), alreadyWrapped);
 		// Should return the already-wrapped text unchanged
 		expect(result).toBe(alreadyWrapped);
 	});
@@ -382,7 +393,7 @@ describe("fileHyperlink", () => {
 		setHyperlinkMode("always");
 		const colored = "\x1b[32mbar.ts\x1b[0m";
 		const filePath = path.resolve("/Users/foo/bar.ts");
-		const result = fileHyperlink(filePath, colored);
+		const result = fileHyperlink(file(filePath), colored);
 		expect(result).toContain(colored);
 		expect(isHyperlinked(result)).toBe(true);
 	});
@@ -397,9 +408,9 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
 		const filePath = "/mnt/projects/q3/report.csv";
 		const mapped = "file:///Z:/q3/report.csv";
-		expect(extractLinkUri(fileHyperlink(filePath, "report.csv"))).toBe(mapped);
-		expect(fileLinkSpan(filePath, "report.csv")).toEqual({ t: "report.csv", s: "path", href: mapped });
-		expect(fileHref(filePath)).toBe(mapped);
+		expect(extractLinkUri(fileHyperlink(file(filePath), "report.csv"))).toBe(mapped);
+		expect(fileLinkSpan(file(filePath), "report.csv")).toEqual({ t: "report.csv", s: "path", href: mapped });
+		expect(fileHref(filePath, "file")).toBe(mapped);
 		const skill = new SkillMessageComponent({
 			role: "custom",
 			customType: "skill-prompt",
@@ -420,10 +431,10 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 
 	it("keeps the vscode://file form for a file target on the VS Code family", () => {
 		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
-		expect(fileUriForTerminal("/mnt/projects/a b.ts", { line: 3, col: 2 }, "vscode")).toBe(
+		expect(resolveFileLink(file("/mnt/projects/a b.ts", { line: 3, col: 2 }), "vscode")).toBe(
 			"vscode://file/Z:/a%20b.ts:3:2",
 		);
-		expect(fileUriForTerminal("/mnt/projects/a b.ts", { line: 3, col: 2 }, "kitty")).toBe("file:///Z:/a%20b.ts");
+		expect(resolveFileLink(file("/mnt/projects/a b.ts", { line: 3, col: 2 }), "kitty")).toBe("file:///Z:/a%20b.ts");
 	});
 
 	it("puts the position where each target scheme reads it", () => {
@@ -434,29 +445,42 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 		});
 		const at = { line: 42, col: 7 };
 		for (const terminalId of ["kitty", "vscode"] as const) {
-			expect(fileUriForTerminal("/srv/handbook/a.md", at, terminalId)).toBe(
+			expect(resolveFileLink(file("/srv/handbook/a.md", at), terminalId)).toBe(
 				"https://git.contoso.example/handbook/blob/main/a.md",
 			);
-			expect(fileUriForTerminal("/home/alice/src/a.ts", at, terminalId)).toBe(
+			expect(resolveFileLink(file("/home/alice/src/a.ts", at), terminalId)).toBe(
 				"vscode://vscode-remote/ssh-remote+devbox/home/alice/src/a.ts:42:7",
 			);
-			expect(fileUriForTerminal("/work/a b.ts", at, terminalId)).toBe(
+			expect(resolveFileLink(file("/work/a b.ts", at), terminalId)).toBe(
 				"ompfile://devbox/work/a%20b.ts?line=42&col=7",
 			);
 		}
-		expect(tryFileUri("/home/alice/src/a.ts", { line: 9 })).toBe(
+		expect(resolveFileLink(file("/home/alice/src/a.ts", { line: 9 }))).toBe(
 			"vscode://vscode-remote/ssh-remote+devbox/home/alice/src/a.ts:9",
 		);
+	});
+
+	it("lets the link's kind decide the position of a VS Code Remote target", () => {
+		const remote = "vscode://vscode-remote/ssh-remote+devbox/home/alice/src";
+		applyLinkMapSetting({ "/home/alice/src": remote });
+		// VS Code opens a remote path without `:<line>` as a folder: a file needs one, a directory must not get one.
+		expect(resolveFileLink({ path: "/home/alice/src/a.ts", kind: "file" })).toBe(`${remote}/a.ts:1`);
+		expect(resolveFileLink({ path: "/home/alice/src/a.ts", kind: "file", line: 30 })).toBe(`${remote}/a.ts:30`);
+		expect(resolveFileLink({ path: "/home/alice/src/lib", kind: "dir" })).toBe(`${remote}/lib`);
+		// A paginated directory listing still passes its first line; the link drops it.
+		expect(resolveFileLink({ path: "/home/alice/src/lib", kind: "dir", line: 30 })).toBe(`${remote}/lib`);
 	});
 
 	it("takes precedence over PI_LINK_SCHEME, which still handles paths no entry covers", () => {
 		applyFileLinkSetting({ scheme: "ompfile", host: "devbox" });
 		applyLinkMapSetting({ "/mnt/projects": "file:///Z:/" });
 		for (const terminalId of ["kitty", "vscode"] as const) {
-			expect(fileUriForTerminal("/mnt/projects/x.ts", { line: 3 }, terminalId)).toBe(
+			expect(resolveFileLink(file("/mnt/projects/x.ts", { line: 3 }), terminalId)).toBe(
 				terminalId === "vscode" ? "vscode://file/Z:/x.ts:3" : "file:///Z:/x.ts",
 			);
-			expect(fileUriForTerminal("/other/x.ts", { line: 3 }, terminalId)).toBe("ompfile://devbox/other/x.ts?line=3");
+			expect(resolveFileLink(file("/other/x.ts", { line: 3 }), terminalId)).toBe(
+				"ompfile://devbox/other/x.ts?line=3",
+			);
 		}
 	});
 });

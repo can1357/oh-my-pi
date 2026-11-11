@@ -831,7 +831,7 @@ function lspNativeHead(
 		title: lspActionTitle(request?.action ?? fallbackAction),
 		target,
 		targetKind,
-		href: request?.file ? fileHref(request.file) : undefined,
+		href: request?.file ? fileHref(request.file, request.line === undefined ? "unknown" : "file") : undefined,
 		meta: [...(facts.length > 0 ? [plainText(facts.join(" \u00b7 "))] : []), ...meta],
 	};
 }

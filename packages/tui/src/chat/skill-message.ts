@@ -9,7 +9,7 @@ import { Text } from "../components/text";
 import { getMarkdownTheme, theme } from "../theme";
 import type { CustomMessage, SkillPromptDetails } from "./messages";
 import { fileHyperlink } from "../render";
-import { tryFileUri } from "../render/hyperlink";
+import { resolveFileLink } from "../render/hyperlink";
 import { collapseSkillTokens, skillChipLabel, skillChipStyle, skillToken } from "../prompt/composer-attachments";
 import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from "./user-message";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
@@ -90,7 +90,11 @@ export class SkillMessageComponent extends Container {
 			const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
 			const draft = leading ? display.slice(label.length).trim() : display;
 			const head: TspSpan[] = [
-				span(label, "customMessageLabel strong", details?.path ? { href: tryFileUri(details.path) } : undefined),
+				span(
+					label,
+					"customMessageLabel strong",
+					details?.path ? { href: resolveFileLink({ path: details.path, kind: "file" }) } : undefined,
+				),
 			];
 			if (typeof details?.lineCount === "number") {
 				head.push(span(`  ${details.lineCount} ${details.lineCount === 1 ? "line" : "lines"}`, "muted"));
@@ -218,7 +222,7 @@ export class SkillMessageComponent extends Container {
 	/** Chip linked to its SKILL.md, then the muted prompt size. */
 	#header(label: string, details: SkillPromptDetails | undefined): string {
 		const chip = skillChipStyle(label, bubbleReset());
-		const parts = [details?.path ? fileHyperlink(details.path, chip, { line: 1 }) : chip];
+		const parts = [details?.path ? fileHyperlink({ path: details.path, kind: "file", line: 1 }, chip) : chip];
 		if (typeof details?.lineCount === "number") {
 			parts.push(theme.fg("muted", `${details.lineCount} ${details.lineCount === 1 ? "line" : "lines"}`));
 		}

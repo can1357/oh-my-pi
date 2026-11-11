@@ -126,6 +126,7 @@ export class SessionInfoOverlay implements Component {
 	readonly #host: SessionInfoOverlayHost;
 	readonly #onClose: () => void;
 	readonly #context: ContextUsage | undefined;
+	readonly #sessionFile: string | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #info: Text;
 	readonly #scrollView: ScrollView;
@@ -136,11 +137,21 @@ export class SessionInfoOverlay implements Component {
 	#lastInfoLines: readonly string[] | undefined;
 	#lastHeight: number | undefined;
 
-	/** `context` adds a context-window meter to the native sheet. */
-	constructor(host: SessionInfoOverlayHost, info: string, onClose: () => void, context?: ContextUsage) {
+	/**
+	 * `context` adds a context-window meter to the native sheet. `sessionFile`, the path behind the
+	 * report's File row, links the native File field.
+	 */
+	constructor(
+		host: SessionInfoOverlayHost,
+		info: string,
+		onClose: () => void,
+		context?: ContextUsage,
+		sessionFile?: string,
+	) {
 		this.#host = host;
 		this.#onClose = onClose;
 		this.#context = context;
+		this.#sessionFile = sessionFile;
 		this.#infoSource = info;
 		this.#info = new Text(info, 0, 0);
 		this.#scrollView = new ScrollView([], {
@@ -229,14 +240,17 @@ export class SessionInfoOverlay implements Component {
 						identity.unshift(identityField("ID", [span(joined(entry.v), "mono")], "id", "Copy session ID"));
 					else if (entry.k === "File") {
 						const path = joined(entry.v);
-						const href = entry.v.find(part => part.href !== undefined)?.href;
+						const sessionFile = this.#sessionFile;
 						identity.push(
-							// A Windows path has no `/`; its link still marks it as a file.
-							href !== undefined || path.includes("/")
+							// A Windows path has no `/`; the session file passed as data still marks it as a file.
+							sessionFile !== undefined || path.includes("/")
 								? identityField(
 										"File",
-										// Without OSC 8 the report text carries no link; the native field still gets one.
-										[href ? span(path, "path", { href }) : fileLinkSpan(path, path)],
+										[
+											sessionFile === undefined
+												? span(path, "path")
+												: fileLinkSpan({ path: sessionFile, kind: "file" }, path),
+										],
 										"file",
 										`Copy ${path}`,
 									)

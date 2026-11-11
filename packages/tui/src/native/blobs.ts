@@ -8,7 +8,7 @@
  * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
-import { tryFileUri } from "../render/hyperlink";
+import { resolveFileLink } from "../render/hyperlink";
 import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
@@ -101,7 +101,7 @@ export function base64ImageNode(
  * even when remote file handlers are configured. Empty without a file.
  */
 export function openableImageProps(filePath: string | undefined): Pick<TspProps<"image">, "href" | "actions"> {
-	const href = filePath ? tryFileUri(filePath, { local: true }) : undefined;
+	const href = filePath ? resolveFileLink({ path: filePath, kind: "file", local: true }) : undefined;
 	return href ? { href, actions: { menu: ["open"] } } : {};
 }
 

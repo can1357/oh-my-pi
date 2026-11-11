@@ -2,13 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- File links resolve through `resolveFileLink(link, terminalId?)` (`render/hyperlink`), which replaces `tryFileUri` and `fileUriForTerminal`. `fileHyperlink`, `fileLinkSpan` and `FileListOptions.hyperlinkFn` take a `FileLink` (`{ path, kind, line?, col? }`) in place of a path and position options, and `fileHref` (`tools/native-view`) takes the kind as its second argument. `kind` is required: `file`, `dir`, or `unknown` where the caller cannot tell; a `dir` link never carries a line or column ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ### Added
 
 - Added the Sofya label for `sofya` web search results ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
-- `applyLinkMapSetting` (`render/link-map`) maps path prefixes to URI prefixes for file links: `tryFileUri`, `fileUriForTerminal`, `fileHyperlink` and `fileLinkSpan` send a path under a mapped prefix to that prefix's URI, except for local image open actions. A record setting with `ui.editor: "linkMap"` opens an entry editor in the settings overlay ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- The session info sheet's native File field carries the transcript link from the report's File row ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `applyLinkMapSetting` (`render/link-map`) maps path prefixes to URI prefixes for file links: `resolveFileLink`, `fileHyperlink` and `fileLinkSpan` send a path under a mapped prefix to that prefix's URI, except for local image open actions. A record setting with `ui.editor: "linkMap"` opens an entry editor in the settings overlay ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `SessionInfoOverlay` takes the session file path as an optional last argument and links the native File field to it ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ### Fixed
 

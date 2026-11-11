@@ -101,7 +101,7 @@ export function userBubbleColor(
 				renderSkill: (label, name) => {
 					const styled = skillChipStyle(label, bubbleReset);
 					const path = skillPath?.(name);
-					return path ? fileHyperlink(path, styled, { line: 1 }) : styled;
+					return path ? fileHyperlink({ path, kind: "file", line: 1 }, styled) : styled;
 				},
 				renderMention: label => modelChipStyle(label, bubbleReset),
 				renderReference: (label, kind, index, form) => {
@@ -394,7 +394,7 @@ function tokenMarks(text: string, tokens: RegExp, imageLinks: readonly (string |
 			renderReference: (label, kind, index) => {
 				const s = "accent strong";
 				const link = kind === "image" || kind === "video" ? imageLinks?.[index - 1] : undefined;
-				marks.set(label, link ? fileLinkSpan(link, label, s) : { t: label, s });
+				marks.set(label, link ? fileLinkSpan({ path: link, kind: "file" }, label, s) : { t: label, s });
 				return "";
 			},
 		},

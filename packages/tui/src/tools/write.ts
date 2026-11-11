@@ -571,7 +571,7 @@ function writeToolHead(
 		title: "Write",
 		target: rawPath ? sanitizeText(displayPath(rawPath)) : undefined,
 		targetKind: "path",
-		href: fileHref(details?.resolvedPath),
+		href: fileHref(details?.resolvedPath, "file"),
 		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
 		badges: badges.length > 0 ? badges : undefined,
 	};
@@ -634,7 +634,9 @@ export const writeToolRenderer = {
 		// The result has not resolved its target yet. Link the containing file
 		// rather than an archive member or database row selector.
 		const pathDisplay =
-			filePath && args.content !== undefined ? fileHyperlink(pendingFileLinkPath(rawPath), styledPath) : styledPath;
+			filePath && args.content !== undefined
+				? fileHyperlink({ path: pendingFileLinkPath(rawPath), kind: "file" }, styledPath)
+				: styledPath;
 		// Raw content, not normalizeDisplayText(args.content): the collapsed
 		// streaming path normalizes only its tail window, so a full-payload
 		// normalize on every reveal tick would re-introduce the O(n²) streaming
@@ -720,7 +722,8 @@ export const writeToolRenderer = {
 		// `file://` URI). Falls back to plain text when the result lacks a path.
 		const linkTarget = writeResolvedPath(options.renderContext?.rawDetails, result.details?.resolvedPath);
 		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
-		const pathDisplay = filePath && linkTarget ? fileHyperlink(linkTarget, styledPath) : styledPath;
+		const pathDisplay =
+			filePath && linkTarget ? fileHyperlink({ path: linkTarget, kind: "file" }, styledPath) : styledPath;
 
 		if (result.isError) {
 			const errorText = result.content?.find(c => c.type === "text")?.text ?? "";

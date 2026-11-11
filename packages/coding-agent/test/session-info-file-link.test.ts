@@ -5,10 +5,15 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
-import { applyHyperlinkSetting, fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { applyHyperlinkSetting, type FileLink, resolveFileLink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const OSC8_OPEN = /\x1b\]8;[^;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)/g;
+const ORIGINAL_NO_COLOR = Bun.env.NO_COLOR;
+const SESSION_FILES = [
+	"/home/alice/.omp/agent/sessions/demo/2026-11-02_s-1.jsonl",
+	"C:\\Users\\alice\\.omp\\agent\\sessions\\demo\\2026-11-02_s-1.jsonl",
+];
 const cx = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
 
 function isNode(child: NativeChild | undefined): child is NativeNode {
@@ -25,9 +30,9 @@ function findAll(root: NativeNode, pred: (n: NativeNode) => boolean): NativeNode
 	return found;
 }
 
-/** The report `/session` hands to its overlay for a session stored at `sessionFile`. */
-async function sessionReport(sessionFile: string): Promise<string> {
-	const showSessionInfo = vi.fn();
+/** The overlay `/session` opens for a session stored at `sessionFile`, built from what the command hands over. */
+async function sessionOverlay(sessionFile: string): Promise<SessionInfoOverlay> {
+	const showSessionInfo = vi.fn<InteractiveModeContext["showSessionInfo"]>();
 	const settings = Settings.isolated();
 	const ctx = {
 		settings,
@@ -54,7 +59,8 @@ async function sessionReport(sessionFile: string): Promise<string> {
 		showSessionInfo,
 	} as unknown as InteractiveModeContext;
 	await new CommandController(ctx).handleSessionCommand();
-	return showSessionInfo.mock.calls[0]![0] as string;
+	const [info, context, file] = showSessionInfo.mock.calls[0]!;
+	return new SessionInfoOverlay({ terminal: { rows: 40 } }, info, () => {}, context, file);
 }
 
 describe("/session File row", () => {
@@ -62,21 +68,36 @@ describe("/session File row", () => {
 		await initTheme(false);
 	});
 
-	afterEach(() => applyHyperlinkSetting("auto"));
+	afterEach(() => {
+		applyHyperlinkSetting("auto");
+		if (ORIGINAL_NO_COLOR === undefined) delete Bun.env.NO_COLOR;
+		else Bun.env.NO_COLOR = ORIGINAL_NO_COLOR;
+	});
 
 	it("links the transcript file in the terminal sheet and the native one", async () => {
 		applyHyperlinkSetting("always");
-		for (const sessionFile of [
-			"/home/alice/.omp/agent/sessions/demo/2026-11-02_s-1.jsonl",
-			"C:\\Users\\alice\\.omp\\agent\\sessions\\demo\\2026-11-02_s-1.jsonl",
-		]) {
-			const target = fileUriForTerminal(sessionFile, undefined, TERMINAL.id)!;
-			const overlay = new SessionInfoOverlay({ terminal: { rows: 40 } }, await sessionReport(sessionFile), () => {});
+		for (const sessionFile of SESSION_FILES) {
+			const link: FileLink = { path: sessionFile, kind: "file" };
+			const overlay = await sessionOverlay(sessionFile);
 
 			const rows = overlay.render(140).join("\n");
-			expect([...rows.matchAll(OSC8_OPEN)].map(match => match[1])).toContain(target);
+			expect([...rows.matchAll(OSC8_OPEN)].map(match => match[1])).toContain(resolveFileLink(link, TERMINAL.id)!);
 			const [, fileCopy] = findAll(overlay.describe(cx), n => n.p?.role === "omp.info.copy");
-			expect(JSON.stringify(fileCopy)).toContain(`"href":"${target}"`);
+			expect(JSON.stringify(fileCopy)).toContain(`"href":"${resolveFileLink(link)}"`);
+		}
+	});
+
+	it("keeps the native File link when the terminal sheet has no clickable links", async () => {
+		applyHyperlinkSetting("auto");
+		Bun.env.NO_COLOR = "1";
+		for (const sessionFile of SESSION_FILES) {
+			const overlay = await sessionOverlay(sessionFile);
+
+			const rows = overlay.render(140).join("\n");
+			expect(rows).toContain(sessionFile);
+			expect(rows).not.toContain("\x1b]8;");
+			const [, fileCopy] = findAll(overlay.describe(cx), n => n.p?.role === "omp.info.copy");
+			expect(JSON.stringify(fileCopy)).toContain(`"href":"${resolveFileLink({ path: sessionFile, kind: "file" })}"`);
 		}
 	});
 });

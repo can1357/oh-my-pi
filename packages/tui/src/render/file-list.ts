@@ -5,7 +5,7 @@ import { getLanguageFromPath } from "../lang-from-path";
 import { node, span } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import type { Theme } from "../theme/theme";
-import { fileLinkSpan } from "./hyperlink";
+import { type FileLink, fileLinkSpan } from "./hyperlink";
 import { formatStyledPath } from "./render-utils";
 import { renderTreeList } from "./tree-list";
 
@@ -25,9 +25,10 @@ export interface FileListOptions {
 	expanded?: boolean;
 	maxCollapsed?: number;
 	showIcons?: boolean;
-	/** When provided, called with the entry's absolute path and the ANSI-styled display string to
-	 * optionally wrap the path in an OSC 8 hyperlink. Only invoked when {@link FileEntry.absPath} is set. */
-	hyperlinkFn?: (absPath: string, displayText: string) => string;
+	/** When provided, called with the entry's link (its absolute path, as a file or a directory) and the
+	 * ANSI-styled display string to optionally wrap the path in an OSC 8 hyperlink. Only invoked when
+	 * {@link FileEntry.absPath} is set. */
+	hyperlinkFn?: (link: FileLink, displayText: string) => string;
 }
 
 /**
@@ -41,7 +42,9 @@ export function describeFileList(options: Omit<FileListOptions, "hyperlinkFn">):
 	const items = files.map(entry => {
 		const isDirectory = entry.isDirectory ?? entry.path.endsWith("/");
 		const s = isDirectory ? "path accent" : "path";
-		const label = entry.absPath ? fileLinkSpan(entry.absPath, entry.path, s) : span(entry.path, s);
+		const label = entry.absPath
+			? fileLinkSpan({ path: entry.absPath, kind: isDirectory ? "dir" : "file" }, entry.path, s)
+			: span(entry.path, s);
 		return node(
 			"item",
 			{
@@ -75,7 +78,10 @@ export function renderFileList(options: FileListOptions, theme: Theme): string[]
 				const meta = entry.meta ? ` ${theme.fg("dim", entry.meta)}` : "";
 				const iconPrefix = icon ? `${icon} ` : "";
 				const pathStr = formatStyledPath(displayPath, theme);
-				const linkedPath = entry.absPath && hyperlinkFn ? hyperlinkFn(entry.absPath, pathStr) : pathStr;
+				const linkedPath =
+					entry.absPath && hyperlinkFn
+						? hyperlinkFn({ path: entry.absPath, kind: isDirectory ? "dir" : "file" }, pathStr)
+						: pathStr;
 				return `${iconPrefix}${linkedPath}${meta}`;
 			},
 		},

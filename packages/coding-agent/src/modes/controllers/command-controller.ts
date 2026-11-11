@@ -582,7 +582,9 @@ export class CommandController {
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
 		let info = "";
-		const file = stats.sessionFile ? fileHyperlink(stats.sessionFile, stats.sessionFile) : "In-memory";
+		const file = stats.sessionFile
+			? fileHyperlink({ path: stats.sessionFile, kind: "file" }, stats.sessionFile)
+			: "In-memory";
 		info += `${theme.fg("dim", "File:")} ${file}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
 		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
@@ -722,7 +724,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage());
+		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage(), stats.sessionFile);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
