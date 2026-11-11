@@ -4,16 +4,18 @@
 
 ### Added
 
+- Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Prompt history scope now follows the session, not just `/move`: `/wt` and resuming a session recorded in another directory re-point the workspace, so `cwd` — and `repo` across unrelated repositories — can read empty right after the switch. Nothing is lost, only out of scope ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Added `HistoryStorage.getRecentOrThrow()` for callers that need to retry read failures; scope-bound editor history uses it without changing the editor's `getRecent()` interface ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ### Changed
 
 - Directory-scoped prompt recall no longer scans every stored prompt on each history keypress ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 ### Fixed
+
 - Fixed Hindsight outbox delivery observing partially published retain calls, batch items arriving out of order when file timestamps tie, and expired quarantine files surviving drains without new rejections ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-- Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed session-scoped prompt history using the main conversation while a subagent was focused. Persistent writes, Up-arrow recall and newly opened Ctrl+R searches now use the focused conversation's persistent identity, including worker-hosted agents. Delayed submissions retain their original conversation and project without leaking into another conversation's recall list; canceled drafts remain shared and nonpersistent ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed SDK prompt history reads returning no results when passed existing `{ cwd }`, `{ sessionId }`, combined, or empty filter objects; scoped reads remain supported ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Restored `HistoryStorage.getRecent()` returning `[]` after storage or SQL failures, while editor recall uses strict reads and retries after storage recovers ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
@@ -32,13 +34,6 @@
 - Fixed collaboration input disappearing when the local relay queue refuses admission during join, leave, closure, or overload. Reconnect backlogs remain supported; admitted prompts are not automatically replayed after later transport errors, and rejected batches return in submission order. Refused detached host-only builtins retain their images and links beside newer drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed queued prompts and attachments disappearing when compaction or a session change cancels credential lookup beside a newer draft; cancellation recovery no longer clears a newer submission's UI ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed ovnfs searches ignoring cancellation while waiting for the daemon handshake, without cancelling other callers sharing the connection ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
-
-### Added
-
-- Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
-
-### Fixed
-
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
 
 ## [18.18.9] - 2026-11-11
