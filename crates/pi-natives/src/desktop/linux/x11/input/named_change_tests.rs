@@ -3,12 +3,17 @@ use std::{
 	cell::RefCell,
 	io::{BufRead, BufReader},
 	process::{Child, Command, Stdio},
+	sync::{
+		atomic::{AtomicBool, Ordering},
+		mpsc,
+	},
+	thread,
 };
 
 use x11rb::{
 	protocol::{
 		Event,
-		xproto::{CreateWindowAux, PropMode, WindowClass},
+		xproto::{Atom, CreateWindowAux, PropMode, WindowClass},
 	},
 	wrapper::ConnectionExt as _,
 };
@@ -18,6 +23,7 @@ use super::*;
 thread_local! {
 	static AFTER_TIME: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
 	static BEFORE_BODY: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+	static AFTER_SEND: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
 }
 
 pub(crate) fn after_server_time() {
@@ -29,6 +35,13 @@ pub(crate) fn after_server_time() {
 
 pub(crate) fn before_body() {
 	let hook = BEFORE_BODY.with(|hook| hook.borrow_mut().take());
+	if let Some(hook) = hook {
+		hook();
+	}
+}
+
+pub(crate) fn after_send() {
+	let hook = AFTER_SEND.with(|hook| hook.borrow_mut().take());
 	if let Some(hook) = hook {
 		hook();
 	}
@@ -48,6 +61,7 @@ struct Fixture {
 	user:     Arc<RustConnection>,
 	target:   Window,
 	previous: Window,
+	display:  String,
 }
 
 impl Fixture {
@@ -68,7 +82,7 @@ impl Fixture {
 		let user = Arc::new(x11rb::connect(Some(&display)).expect("user connection").0);
 		let conn = Arc::new(x11rb::connect(Some(&display)).expect("OMP connection").0);
 		let root = conn.setup().roots[0].root;
-		let mut input = X11Input::new(conn, root, Some(display)).expect("input");
+		let mut input = X11Input::new(conn, root, Some(display.clone())).expect("input");
 		let mut windows = [0; 2];
 		for (i, window) in windows.iter_mut().enumerate() {
 			*window = user.generate_id().expect("window id");
@@ -96,7 +110,7 @@ impl Fixture {
 		input.watch_user().expect("watch");
 		// Admission is not under test: no input has been sent on this server.
 		input.admitted = Some(0);
-		Self { _server: server, input, user, target: windows[0], previous: windows[1] }
+		Self { _server: server, input, user, target: windows[0], previous: windows[1], display }
 	}
 
 	fn press(user: &RustConnection, root: Window, release: bool) {
@@ -216,4 +230,89 @@ fn named_change_pointer_is_not_warped_after_a_user_button_press() {
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert_eq!(f.input.core_pointer(), Some((30, 40)), "no warp while the user owns the pointer");
 	}
+}
+
+/// A WM that applies `_NET_ACTIVE_WINDOW` requests, the first one only after
+/// the user has pressed.
+fn late_wm(
+	wm: RustConnection,
+	root: Window,
+	active: Atom,
+	stop: &AtomicBool,
+	pressed: &mpsc::Receiver<()>,
+) {
+	let mut forward = true;
+	while !stop.load(Ordering::Acquire) {
+		let Some(event) = wm.poll_for_event().expect("WM event") else {
+			thread::sleep(Duration::from_millis(1));
+			continue;
+		};
+		let Event::ClientMessage(event) = event else {
+			continue;
+		};
+		if event.type_ != active {
+			continue;
+		}
+		if forward {
+			forward = false;
+			pressed
+				.recv_timeout(Duration::from_secs(5))
+				.expect("user pressed");
+			thread::sleep(Duration::from_millis(50));
+		}
+		let window = event.window;
+		wm.change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[window])
+			.expect("activate");
+		wm.set_input_focus(InputFocus::PARENT, window, CURRENT_TIME)
+			.expect("focus");
+		wm.sync().expect("WM applied");
+	}
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn named_change_handback_undoes_an_activation_the_wm_takes_after_a_post_send_press() {
+	let mut f = Fixture::new();
+	let root = f.input.root;
+	let active = f.input.atoms.net_active_window;
+	f.user
+		.change_property32(PropMode::REPLACE, root, active, AtomEnum::WINDOW, &[f.previous])
+		.expect("user's window active");
+	f.user.sync().expect("EWMH state");
+	// The WM consumes the forward request only after the user's press.
+	let wm = x11rb::connect(Some(&f.display)).expect("WM connection").0;
+	wm.change_window_attributes(
+		root,
+		&x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+			.event_mask(EventMask::SUBSTRUCTURE_REDIRECT),
+	)
+	.expect("select redirect")
+	.check()
+	.expect("sole WM");
+	let (pressed, user_pressed) = mpsc::channel();
+	let stop = Arc::new(AtomicBool::new(false));
+	let wm_stop = Arc::clone(&stop);
+	let wm_thread = thread::spawn(move || late_wm(wm, root, active, &wm_stop, &user_pressed));
+	let user = Arc::clone(&f.user);
+	AFTER_SEND.with(|hook| {
+		*hook.borrow_mut() = Some(Box::new(move || {
+			Fixture::press(&user, root, true);
+			pressed.send(()).expect("WM waiting");
+		}));
+	});
+	let error = f
+		.input
+		.with_foreground(f.target, Duration::from_secs(1), |_| Ok(()))
+		.expect_err("press after the request is sent stops the takeover");
+	assert_eq!(error.code, ErrorCode::UserIntervened);
+	thread::sleep(Duration::from_millis(500));
+	stop.store(true, Ordering::Release);
+	wm_thread.join().expect("WM thread");
+	let wm_state = f.input.wm();
+	assert_eq!(
+		wm_state.input_focus().map(|(window, _)| window),
+		Some(f.previous),
+		"the WM's late activation must be handed back"
+	);
+	assert_eq!(wm_state.active_window(), Some(f.previous));
 }

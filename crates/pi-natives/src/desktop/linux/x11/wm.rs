@@ -385,6 +385,8 @@ impl Wm<'_> {
 			.map_err(wm_failed)?
 			.check()
 			.map_err(wm_failed)?;
+		#[cfg(test)]
+		super::input::named_change_tests::after_send();
 		control::check()?;
 		// Never override a newer focus switch while the WM handles the request.
 		if restoring
