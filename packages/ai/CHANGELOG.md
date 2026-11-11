@@ -5,6 +5,9 @@
 ### Fixed
 
 - LiteLLM side requests preserve the live prefix-cache affinity while keeping independent transport sessions
+### Added
+
+- Added the `liquid-systemone` judgment API for Liquid AI's decision models, which rejects image sets over Liquid's 10,000 32×32-patch request cap before sending ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.18.9] - 2026-11-11
 
