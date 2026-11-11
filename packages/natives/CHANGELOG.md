@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed your running Qt 6.5+ apps crashing on Linux X11 when a `computer` session that used background window input ended or was cancelled, or after an omp process using it was killed ([#18825](https://github.com/can1357/oh-my-pi/pull/18825) by [@will-bogusz](https://github.com/will-bogusz))
+- Limited retained X11 background-input master pairs to two per display, reusing free pairs and falling back or refusing when both are busy; legacy pairs are not adopted because older omp versions can still remove them ([#18825](https://github.com/can1357/oh-my-pi/pull/18825) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

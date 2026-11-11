@@ -13,10 +13,13 @@
 //! master makes running Qt 6.5+ xcb clients delete that master's child
 //! devices twice and crash (QTBUG-146876), and adding and removing masters per
 //! action crashes mutter 42 and `LibreOffice` VCL. So a session takes a pair
-//! no live session holds, or adds one, and records itself as the holder in a
-//! property of the master pointer; when it ends it unplugs its uinput slaves
-//! and marks the pair free for the next session. Holders are named after
-//! their process incarnation, so a pair a killed process held is taken again.
+//! no live session holds, or adds one up to a two-pair cap, and records itself
+//! as the holder in a property of the master pointer; when it ends it unplugs
+//! its uinput slaves and marks the pair free for the next session. Holders are
+//! named after their process incarnation, so a killed holder's pair is reused.
+//! At the cap, the existing XSendEvent/refusal path handles further sessions.
+//! The pool uses at most eight persistent device slots, rather than growing
+//! into Xorg's 40-slot device limit; active sessions also need uinput slaves.
 
 use std::{
 	fs, io,
@@ -82,7 +85,8 @@ const WARM_UP_SETTLE: Duration = Duration::from_millis(120);
 /// versions that removed pairs also remove every `v1.` master whose creator
 /// has died, which is now a held pair's normal state; new pairs are `v2.`.
 const OWNER_PREFIX: &str = "OMP MPX v2.";
-const LEGACY_OWNER_PREFIX: &str = "OMP MPX v1.";
+/// Two pairs leave room for real-device hotplug even after concurrent sessions.
+const MAX_PAIRS: usize = 2;
 /// Master pointer property naming the session that holds the pair.
 const HOLDER_PROPERTY: &str = "_OMP_MPX_HOLDER";
 /// How long a session's end waits for the server to drop its unplugged slaves.
@@ -166,7 +170,7 @@ impl Mpx {
 		let owner = Owner::current();
 		let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
 		let name = owner.as_ref().map_or_else(
-			|| format!("OMP MPX {}.{nonce:x}", std::process::id()),
+			|| format!("{OWNER_PREFIX}unidentified.{}.{nonce:x}", std::process::id()),
 			|owner| owner.master_name(nonce),
 		);
 		// Prove hotplug before touching the hierarchy: a pair once added stays,
@@ -187,8 +191,7 @@ impl Mpx {
 			)
 		}) {
 			pointer.destroy();
-			wait_unplugged(&conn, &[pointer_slave]);
-			release_pair(&conn, holder, root, park, master_pointer, master_keyboard);
+			release_pair(&conn, holder, root, park, master_pointer, master_keyboard, &[pointer_slave]);
 			return Err(error);
 		}
 		set_flat_acceleration(&conn, pointer_slave);
@@ -769,7 +772,6 @@ impl Drop for Mpx {
 			slaves.push(keyboard.slave);
 		}
 		self.pointer.destroy();
-		wait_unplugged(&self.conn, &slaves);
 		release_pair(
 			&self.conn,
 			self.holder,
@@ -777,6 +779,7 @@ impl Drop for Mpx {
 			self.park,
 			self.master_pointer,
 			self.master_keyboard,
+			&slaves,
 		);
 	}
 }
@@ -1028,29 +1031,43 @@ fn claim_pair(
 		.map_err(mpx_failed)?;
 	let _grab = Grab(conn);
 	let mut taken = None;
-	for info in query_devices(conn)?
+	let mut pairs = 0;
+	let devices = query_devices(conn)?;
+	for info in devices
 		.iter()
 		.filter(|info| info.type_ == DeviceType::MASTER_POINTER)
 	{
 		let Ok(pointer) = std::str::from_utf8(&info.name) else {
 			continue;
 		};
+		if !pointer.starts_with(MASTER_PREFIX) {
+			continue;
+		}
+		pairs += 1;
 		let value = read_holder(conn, holder, info.deviceid);
-		if !pointer.starts_with(MASTER_PREFIX)
-			|| !is_claimable(value.as_deref(), pointer, owner, process_start)
-		{
+		if !is_claimable(value.as_deref(), pointer, owner, process_start)
+			|| devices.iter().any(|slave| {
+				(slave.attachment == info.deviceid || slave.attachment == info.attachment)
+					&& (slave.name.ends_with(b" uinput pointer")
+						|| slave.name.ends_with(b" uinput keyboard"))
+			}) {
 			continue;
 		}
 		if taken.is_none() {
 			taken = Some((info.deviceid, info.attachment));
 		} else if value.as_deref() != Some(HOLDER_FREE) {
-			release_pair(conn, holder, root, park, info.deviceid, info.attachment);
+			release_pair(conn, holder, root, park, info.deviceid, info.attachment, &[]);
 		}
 	}
 	let pair = if let Some(pair) = taken {
 		unfocus(conn, pair.1);
 		pair
 	} else {
+		if pairs >= MAX_PAIRS {
+			return Err(DesktopError::input_failed(format!(
+				"XI2-MPX pair limit ({MAX_PAIRS}) reached; no reusable pair is free"
+			)));
+		}
 		add_master(conn, name)?;
 		find_masters(conn, name)?
 	};
@@ -1068,7 +1085,14 @@ fn release_pair(
 	park: (i16, i16),
 	master_pointer: u16,
 	master_keyboard: u16,
+	slaves: &[u16],
 ) {
+	if !wait_unplugged(conn, slaves) {
+		// A timed-out teardown must never be reclaimed, even after its holder
+		// dies.
+		let _ = write_holder(conn, holder, master_pointer, b"unplug-timeout");
+		return;
+	}
 	let _ = warp_master(conn, root, master_pointer, park);
 	unfocus(conn, master_keyboard);
 	let _ = write_holder(conn, holder, master_pointer, HOLDER_FREE);
@@ -1106,12 +1130,18 @@ fn warp_master(
 
 /// Waits, bounded, until the server no longer lists `slaves`: kernel hot-unplug
 /// is asynchronous, and events written before it may still be delivered.
-fn wait_unplugged(conn: &RustConnection, slaves: &[u16]) {
+fn wait_unplugged(conn: &RustConnection, slaves: &[u16]) -> bool {
 	let deadline = Instant::now() + UNPLUG_TIMEOUT;
-	while Instant::now() < deadline
-		&& query_devices(conn)
-			.is_ok_and(|devices| devices.iter().any(|info| slaves.contains(&info.deviceid)))
-	{
+	loop {
+		let Ok(devices) = query_devices(conn) else {
+			return false;
+		};
+		if !devices.iter().any(|info| slaves.contains(&info.deviceid)) {
+			return true;
+		}
+		if Instant::now() >= deadline {
+			return false;
+		}
 		std::thread::sleep(Duration::from_millis(20));
 	}
 }
@@ -1149,16 +1179,18 @@ fn write_holder(
 		.map_err(mpx_failed)
 }
 
-/// Whether a session of `current` may take the pair whose master pointer is
-/// named `pointer` and whose holder property reads `holder`. A pair without
-/// the property was added by an earlier version and is held by the owner its
-/// name encodes. Holders whose death cannot be proven keep their pair.
+/// Whether a session of `current` may take a v2 pair. Older omp releases can
+/// remove v1 masters even while held, so those pairs are never adopted.
+/// Holders whose death cannot be proven keep their pair.
 fn is_claimable(
 	holder: Option<&[u8]>,
 	pointer: &str,
 	current: Option<&Owner>,
 	start_of: impl FnOnce(u32) -> io::Result<u64>,
 ) -> bool {
+	if !pointer.starts_with(OWNER_PREFIX) {
+		return false;
+	}
 	let holder = match holder {
 		Some(value) if value == HOLDER_FREE => return true,
 		Some(value) => std::str::from_utf8(value).ok().and_then(Owner::from_name),
@@ -1211,10 +1243,7 @@ impl Owner {
 
 	/// The owner a session or master name (`master_name`) encodes.
 	fn from_name(name: &str) -> Option<Self> {
-		let mut parts = name
-			.strip_prefix(OWNER_PREFIX)
-			.or_else(|| name.strip_prefix(LEGACY_OWNER_PREFIX))?
-			.split('.');
+		let mut parts = name.strip_prefix(OWNER_PREFIX)?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;
@@ -1280,9 +1309,9 @@ mod tests {
 		assert!(format!("{} uinput keyboard", owner.master_name(u16::MAX)).len() < 80);
 		assert_eq!(Owner::from_pointer_name("OMP MPX 4242.1 pointer"), None);
 		// omp versions that removed pairs reap dead creators' `v1.` masters.
-		assert!(!pointer.starts_with(LEGACY_OWNER_PREFIX), "new pairs stay out of that reaper");
-		let legacy = pointer.replacen(OWNER_PREFIX, LEGACY_OWNER_PREFIX, 1);
-		assert_eq!(Owner::from_pointer_name(&legacy), Some(owner), "their pairs still parse");
+		assert!(!pointer.starts_with("OMP MPX v1."), "new pairs stay out of that reaper");
+		let legacy = pointer.replacen(OWNER_PREFIX, "OMP MPX v1.", 1);
+		assert_eq!(Owner::from_pointer_name(&legacy), None, "v1 pairs are never adopted");
 	}
 
 	#[test]
@@ -1324,10 +1353,11 @@ mod tests {
 			"unidentifiable holder"
 		);
 		assert!(!is_claimable(Some(peer.as_bytes()), &creator, None, gone), "we cannot prove death");
-		// Pairs added before the holder property name their owner.
-		let legacy = creator.replacen(OWNER_PREFIX, LEGACY_OWNER_PREFIX, 1);
-		assert!(is_claimable(None, &legacy, Some(&OWNER), gone), "earlier version, dead");
-		assert!(!is_claimable(None, &legacy, Some(&OWNER), live), "earlier version, live");
+		// An older omp can remove v1 masters even while a new session holds them.
+		let legacy = creator.replacen(OWNER_PREFIX, "OMP MPX v1.", 1);
+		assert!(!is_claimable(None, &legacy, Some(&OWNER), gone), "dead v1 creator");
+		assert!(!is_claimable(Some(HOLDER_FREE), &legacy, Some(&OWNER), gone), "free v1 pair");
+		assert!(!is_claimable(None, &legacy, Some(&OWNER), live), "live v1 creator");
 	}
 
 	/// The server `DISPLAY` names: connection, root and park corner.
@@ -1338,6 +1368,70 @@ mod tests {
 		let (root, park) = (info.root, (corner(info.width_in_pixels), corner(info.height_in_pixels)));
 		conn.xinput_xi_query_version(2, 2).unwrap().reply().unwrap();
 		(conn, root, park)
+	}
+
+	#[test]
+	#[ignore = "needs an isolated X server"]
+	fn the_pair_pool_refuses_growth_at_its_limit_but_reuses_a_released_pair() {
+		let (conn, root, park) = display();
+		let holder = conn
+			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let owner = Owner::current().unwrap();
+		let mut pairs = Vec::new();
+		for nonce in 1..=2 {
+			pairs.push(
+				claim_pair(&conn, holder, &owner.master_name(nonce), Some(&owner), root, park).unwrap(),
+			);
+		}
+		let before = query_devices(&conn).unwrap().len();
+		let refused = claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park);
+		assert!(refused.is_err(), "a burst must not permanently consume more device slots");
+		assert_eq!(query_devices(&conn).unwrap().len(), before, "refusal adds no devices");
+		let pair = pairs[0];
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[]);
+		assert_eq!(
+			claim_pair(&conn, holder, &owner.master_name(4), Some(&owner), root, park).unwrap(),
+			pair,
+			"a free pair remains usable at the cap"
+		);
+	}
+
+	#[test]
+	#[ignore = "needs an isolated X server"]
+	fn a_teardown_timeout_does_not_publish_a_reusable_pair() {
+		let (conn, root, park) = display();
+		let holder = conn
+			.intern_atom(false, HOLDER_PROPERTY.as_bytes())
+			.unwrap()
+			.reply()
+			.unwrap()
+			.atom;
+		let owner = Owner::current().unwrap();
+		let pair =
+			claim_pair(&conn, holder, &owner.master_name(1), Some(&owner), root, park).unwrap();
+		// An XTEST slave stays present until X exits, modeling delayed
+		// hot-unplug.
+		let slave = query_devices(&conn)
+			.unwrap()
+			.into_iter()
+			.find(|info| info.type_ == DeviceType::SLAVE_POINTER && info.attachment == pair.0)
+			.unwrap()
+			.deviceid;
+		release_pair(&conn, holder, root, park, pair.0, pair.1, &[slave]);
+		let value = read_holder(&conn, holder, pair.0).unwrap();
+		assert!(
+			!is_claimable(
+				Some(&value),
+				&format!("{} pointer", owner.master_name(1)),
+				Some(&owner),
+				|_| Err(io::ErrorKind::NotFound.into())
+			),
+			"the pair stays unavailable even after its holder dies"
+		);
 	}
 
 	/// Removing a master crashes running Qt 6.5+ clients, so a session hands
@@ -1365,9 +1459,9 @@ mod tests {
 	}
 
 	/// Pairs whose holders were killed get parked and freed by the next claim,
-	/// whichever one it takes. Needs Xorg with uinput hotplug.
+	/// whichever one it takes. Fixture pairs are reused on subsequent runs.
 	#[test]
-	#[ignore = "needs Xorg with uinput hotplug"]
+	#[ignore = "needs an isolated X server"]
 	fn a_killed_holders_pair_is_parked_and_freed() {
 		let (conn, root, park) = display();
 		let holder = conn
@@ -1376,25 +1470,22 @@ mod tests {
 			.reply()
 			.unwrap()
 			.atom;
-		let dead = Owner {
-			pid: u32::MAX - 1,
-			start: u64::from(std::process::id()),
-			..Owner::current().unwrap()
-		};
-		let pairs: Vec<u16> = (1..=2)
+		let owner = Owner::current().unwrap();
+		let dead = Owner { pid: u32::MAX - 1, start: u64::from(std::process::id()), ..owner };
+		let pairs: Vec<(u16, u16)> = (1..=2)
 			.map(|nonce| {
-				let name = dead.master_name(nonce);
-				add_master(&conn, &name).unwrap();
-				let (pointer, _) = find_masters(&conn, &name).unwrap();
-				write_holder(&conn, holder, pointer, name.as_bytes()).unwrap();
-				warp_master(&conn, root, pointer, (100, 100)).unwrap();
-				pointer
+				claim_pair(&conn, holder, &owner.master_name(nonce), Some(&owner), root, park).unwrap()
 			})
 			.collect();
-		let session = Mpx::create().unwrap();
-		for pointer in pairs
+		for &(pointer, _) in &pairs {
+			write_holder(&conn, holder, pointer, dead.master_name(1).as_bytes()).unwrap();
+			warp_master(&conn, root, pointer, (100, 100)).unwrap();
+		}
+		let session =
+			claim_pair(&conn, holder, &owner.master_name(3), Some(&owner), root, park).unwrap();
+		for (pointer, _) in pairs
 			.into_iter()
-			.filter(|&pointer| pointer != session.master_pointer)
+			.filter(|&(pointer, _)| pointer != session.0)
 		{
 			assert_eq!(read_holder(&conn, holder, pointer).as_deref(), Some(HOLDER_FREE));
 			let at = conn
@@ -1404,6 +1495,7 @@ mod tests {
 				.unwrap();
 			assert_eq!((at.root_x >> 16, at.root_y >> 16), (i32::from(park.0), i32::from(park.1)));
 		}
+		release_pair(&conn, holder, root, park, session.0, session.1, &[]);
 	}
 
 	/// Without hotplug the slave never binds; `main` added a pair, waited and
