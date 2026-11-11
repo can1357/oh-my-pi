@@ -777,13 +777,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "unauth", description: "Remove OAuth auth from a server", usage: "<name>" },
 			{ name: "enable", description: "Enable an MCP server", usage: "<name>" },
 			{ name: "disable", description: "Disable an MCP server", usage: "<name>" },
-			{
-				name: "smithery-search",
-				description: "Search Smithery registry and deploy an MCP server",
-				usage: "<keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
-			},
-			{ name: "smithery-login", description: "Login to Smithery and cache API key" },
-			{ name: "smithery-logout", description: "Remove cached Smithery API key" },
 			{ name: "reconnect", description: "Reconnect to a specific MCP server", usage: "<name>" },
 			{ name: "reload", description: "Force reload MCP runtime tools" },
 			{ name: "resources", description: "List available resources from connected servers" },
