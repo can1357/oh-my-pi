@@ -4064,7 +4064,7 @@ mod capture_tests {
 	#[test]
 	fn a_relabelled_desktop_ref_names_its_current_control_and_window_candidate() {
 		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
-		let (backend, registry) = (&mut worker.backend, &mut worker.registry);
+		let (backend, registry) = (&mut worker.worker.backend, &mut worker.worker.registry);
 		let node = register_node(
 			backend.as_mut().unwrap().ax().unwrap(),
 			registry,
