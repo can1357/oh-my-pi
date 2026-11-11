@@ -673,7 +673,7 @@ export class ExtensionUiController {
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider },
+		extra?: { slider?: HookSelectorSlider; kind?: BlockedKind },
 	): Promise<string | undefined> {
 		const request: CollabUiRequestDraft = {
 			kind: "select",
@@ -684,6 +684,7 @@ export class ExtensionUiController {
 			checkedIndices: dialogOptions?.checkedIndices ? [...dialogOptions.checkedIndices] : undefined,
 			markableCount: dialogOptions?.markableCount,
 			helpText: dialogOptions?.helpText,
+			...(extra?.kind === "permission" ? { approval: true } : {}),
 		};
 		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
 			this.showHookSelector(title, options, { ...dialogOptions, signal }, extra),
@@ -724,6 +725,7 @@ export class ExtensionUiController {
 			kind: "select",
 			title: prompt.full,
 			options: approvalChoiceLabels(prompt),
+			approval: true,
 		};
 		const session = this.ctx.session;
 		const agent = session.agent;

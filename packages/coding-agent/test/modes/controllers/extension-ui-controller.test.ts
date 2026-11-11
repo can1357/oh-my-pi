@@ -929,4 +929,20 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		expect(await answer).toBe("deny");
 		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
 	});
+
+	it("reports a selector that asks for a permission (a cfg:// change) as blocked on permission", async () => {
+		const harness = makeHarness();
+		await harness.init();
+
+		const answer = harness.controller.showCollabAwareSelector(
+			"Your agent wants to change tui.theme",
+			["Approve", "Deny"],
+			undefined,
+			{ kind: "permission" },
+		);
+		expect(writes).toEqual([blocked("permission", "Your agent wants to change tui.theme")]);
+
+		harness.handleInput("\x1b");
+		expect(await answer).toBeUndefined();
+	});
 });

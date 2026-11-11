@@ -14,7 +14,6 @@ import { estimateInlineSavings } from "./snapcompact-inline";
 import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { resolveSpeculationLeadTokens } from "./speculation-lead";
 
-import { cfgSkillful } from "./settings";
 import { cfgSnapcompactShape, cfgSnapcompactSystemPrompt, cfgSnapcompactToolResults } from "./context-settings";
 
 /** Resolve session policy before handing pure boundary arithmetic to the UI. */
@@ -58,7 +57,6 @@ export function computeSessionContextBreakdown(
 	return computeContextBreakdown(session, {
 		compaction: resolveModelCompactionSettings(session.settings, session.model),
 		sourceRevision: session.settings.revision,
-		skillful: cfgSkillful.get(session.settings),
 		snapcompact,
 	});
 }
