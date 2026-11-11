@@ -66,9 +66,12 @@ const SLEEP_TRUNCATION_MARKER = "\n[... sleep_consolidation episode truncated by
 const PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS = REGEX_EXTRACTION_MAX_INPUT_CHARS;
 /** Dotted number that may name a version: `v1.2`, `1.2.3`, `1.2.3-beta.1`, or a bare `1.2`. */
 const VERSION_CANDIDATE = /\b(v?\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9.]+)?)\b/g;
-/** Keyword immediately before a bare `x.y` marking it as a version rather than a decimal or price. */
+/**
+ * Keyword immediately before a bare `x.y` marking it as a version rather than a decimal or price.
+ * Opening prose/Markdown delimiters may sit between them: `version (2.4)`, ``version `2.4` ``, `version **2.4**`.
+ */
 const VERSION_CUE_BEFORE =
-	/\b(?:versions?|ver|releases?|released|upgraded?|downgraded?|bumped?)(?:\s+(?:is|was|to|from|of|at|on))?[\s:=#]*$/i;
+	/\b(?:versions?|ver|releases?|released|upgraded?|downgraded?|bumped?)(?:\s+(?:is|was|to|from|of|at|on))?[\s:=#([`"'*_]*$/i;
 
 /**
  * Whether a {@link VERSION_CANDIDATE} match at `index` is a version mention.
