@@ -82,7 +82,7 @@ describe("todo backends in a real session", () => {
 		});
 	}
 
-	test("native todos commit a list inline, as released, without waiting for deferred extensions, and keep only the list's own fields", async () => {
+	test("native todos commit a list inline, without waiting for deferred extensions, and keep only the list's own fields", async () => {
 		const deferred = await writeSource("deferred.ts", "export default function() {}\n");
 		const session = await createSessionWithDeferred(deferred, "native");
 		// RPC clients send JSON, so a list can carry fields `TodoPhase` does not declare.
@@ -759,7 +759,7 @@ export default function(pi) {
 		expect(notices).toEqual([]);
 	});
 
-	test("a native todo call whose signal already aborted still commits, as on main", async () => {
+	test("a native todo call whose signal already aborted still commits", async () => {
 		const session = await createSession();
 		const controller = new AbortController();
 		controller.abort();

@@ -124,7 +124,8 @@ function createCursor(h: Harness) {
 		cwd: h.dir,
 		tools: new Map(),
 		getTodoPhases: () => h.session.getTodoPhases(),
-		commitTodoPhases: update => h.session.commitTodoPhases(update),
+		commitTodoPhases: phases => h.session.commitTodoPhases(phases),
+		updateTodoPhases: update => h.session.commitTodoPhases(update),
 	});
 }
 
@@ -257,8 +258,11 @@ describe("todo writers reach the selected backend's replace", () => {
 		const seeded = await seedList(h);
 		const toolSession = {
 			getToolByName: (name: string) => h.session.getToolByName(name),
-			commitTodoPhases: (update: TodoPhasesUpdate) => h.session.commitTodoPhases(update),
-		} satisfies Pick<ToolSession, "getToolByName" | "commitTodoPhases">;
+			commitTodoPhases: (phases: TodoPhase[]) => {
+				void h.session.commitTodoPhases(phases);
+			},
+			updateTodoPhases: (update: TodoPhasesUpdate) => h.session.commitTodoPhases(update),
+		} satisfies Pick<ToolSession, "getToolByName" | "commitTodoPhases" | "updateTodoPhases">;
 		const gate = hold(h.recorder, "apply");
 		const { controller } = controllerContext(h.session);
 

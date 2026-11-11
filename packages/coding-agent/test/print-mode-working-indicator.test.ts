@@ -10,6 +10,7 @@ import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 
 function makeAssistantMessage(text: string): AssistantMessage {
 	const timestamp = Date.now();
@@ -289,6 +290,22 @@ describe("print mode working indicator", () => {
 
 		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${signedOut}\n`);
 		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
+	it("writes a todo backend notice to stderr in text mode", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"));
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "hello" });
+		const fallback = 'Todo backend "missing" is not registered by any enabled extension; using native todos.';
+
+		await delayed.promptStarted;
+		try {
+			delayed.emit({ type: "notice", level: "warning", message: fallback, source: TODO_BACKEND_NOTICE_SOURCE });
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stderrOutput.join("")).toBe(`Working...\nWarning: ${fallback}\n`);
 	});
 
 	it("flushes late JSON advisor events after catch-up before disposing", async () => {

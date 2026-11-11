@@ -106,7 +106,7 @@ export class TodoWrites {
 		const assertSameList = (): void => {
 			if (this.#epoch !== epoch) throw new TodoListChangedError();
 		};
-		// Native writes run inline and, as on `main`, ignore the caller's signal.
+		// Native writes run inline to completion; nothing waits, so there is nothing for a signal to cut short.
 		if (!this.queued) return (async () => write(undefined, assertSameList))();
 		const assertCurrent = (): void => {
 			signal?.throwIfAborted();
@@ -148,7 +148,7 @@ export class TodoWrites {
 	commit(input: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
 		const update = typeof input === "function" ? input : () => input;
 		if (!this.queued) {
-			// Native todos commit before this returns and throw to the caller, as on `main`.
+			// Native todos commit before this returns and throw to the caller, so a synchronous caller sees both.
 			const phases = update(this.#host.todo.phases);
 			return Promise.resolve(phases && this.#save(phases));
 		}

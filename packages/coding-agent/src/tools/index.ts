@@ -489,7 +489,12 @@ export interface ToolSession {
 	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
-	commitTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Like {@link commitTodoPhases}, with the list computed from the one committed when the write
+	 * runs, behind any todo write still queued for a backend. Preferred when the host provides it.
+	 */
+	updateTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
 	runTodoWrite?: <T>(write: TodoWrite<T>, signal?: AbortSignal) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];

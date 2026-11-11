@@ -401,6 +401,8 @@ type ManagedSessionRecord = {
 	commandMetadataUnsubscribe: (() => void) | undefined;
 	lifetimeUpdatesReady: boolean;
 	pendingCompactionNotifications: AcpCompactionNotification[] | undefined;
+	/** Todo backend notices held while an assistant message streams, so none lands inside the answer. */
+	pendingNotices: string[] | undefined;
 	closedError: RequestError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -1989,6 +1991,7 @@ export class AcpAgent implements Agent {
 			commandMetadataUnsubscribe: undefined,
 			lifetimeUpdatesReady: false,
 			pendingCompactionNotifications: undefined,
+			pendingNotices: undefined,
 		};
 	}
 
@@ -2017,18 +2020,9 @@ export class AcpAgent implements Agent {
 		} else {
 			if (record.lifetimeUpdatesReady && event.type === "notice" && event.source === TODO_BACKEND_NOTICE_SOURCE) {
 				// ACP has no notice update; a todo backend that is not in use must not pass as one that mirrors the list.
-				this.#trackLifetimeDelivery(
-					record,
-					event.type,
-					this.#connection.sessionUpdate({
-						sessionId,
-						update: {
-							sessionUpdate: "agent_message_chunk",
-							content: { type: "text", text: `Warning: ${event.message}` },
-							messageId: crypto.randomUUID(),
-						},
-					}),
-				);
+				if (record.liveMessageId && record.promptTurn && !record.promptTurn.settled) {
+					(record.pendingNotices ??= []).push(event.message);
+				} else this.#deliverNotice(record, event.message);
 			}
 			if (
 				record.lifetimeUpdatesReady &&
@@ -2041,6 +2035,28 @@ export class AcpAgent implements Agent {
 		// Compaction transitions cannot be rebuilt from a snapshot, so buffer them until delivery opens.
 		if (record.lifetimeUpdatesReady) this.#deliverCompactionNotification(record, notification);
 		else (record.pendingCompactionNotifications ??= []).push(notification);
+	}
+
+	/** A notice goes out as its own message. */
+	#deliverNotice(record: ManagedSessionRecord, message: string): void {
+		this.#trackLifetimeDelivery(
+			record,
+			"notice",
+			this.#connection.sessionUpdate({
+				sessionId: record.protocolSessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: `Warning: ${message}` },
+					messageId: crypto.randomUUID(),
+				},
+			}),
+		);
+	}
+
+	#flushPendingNotices(record: ManagedSessionRecord): void {
+		const pending = record.pendingNotices;
+		record.pendingNotices = undefined;
+		for (const message of pending ?? []) this.#deliverNotice(record, message);
 	}
 
 	#deliverCompactionNotification(record: ManagedSessionRecord, notification: AcpCompactionNotification): void {
@@ -2169,6 +2185,7 @@ export class AcpAgent implements Agent {
 			await this.#waitForAcpPromptIdle(record);
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
+			this.#flushPendingNotices(record);
 			this.#finishPrompt(record, {
 				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
 				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
@@ -2296,6 +2313,7 @@ export class AcpAgent implements Agent {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
+			this.#flushPendingNotices(record);
 		}
 	}
 
@@ -2325,6 +2343,7 @@ export class AcpAgent implements Agent {
 		}
 		promptTurn.settled = true;
 		promptTurn.unsubscribe?.();
+		this.#flushPendingNotices(record);
 		// Keep the slot occupied until cancel cleanup finishes — `#runCancelCleanup`
 		// evicts the slot in its finally block once both flags say it's safe.
 		if (!promptTurn.cleanup && record.promptTurn === promptTurn) {

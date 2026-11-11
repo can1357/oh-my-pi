@@ -5197,7 +5197,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			next = completeFinishedSubagentTodos(current, completedDescs);
 			return next;
 		});
-		// Native todos commit before `commitTodoPhases` returns (a failure throws), so the HUD updates now, as on `main`.
+		// Native todos commit before `commitTodoPhases` returns (a failure throws), so the HUD updates in the same tick.
 		if (ran) {
 			if (next) show(next);
 			return;

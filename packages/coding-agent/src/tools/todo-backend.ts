@@ -99,8 +99,8 @@ export type TodoPhasesUpdate = (current: TodoPhase[]) => TodoPhase[] | undefined
  * A todo write: gets the backend resolved when it starts (`undefined` = native todos) and
  * `assertCurrent`, which it must call after any backend call and before committing: it throws when
  * the list was reset or reloaded (`/new`, switch, rewind, tree navigation, fork) since the write was
- * enqueued, or, for a queued write, when its abort signal fired. A native write runs inline and, as
- * on `main`, ignores the signal.
+ * enqueued, or, for a queued write, when its abort signal fired. A native write runs inline to
+ * completion and ignores the signal.
  */
 export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, assertCurrent: () => void) => Promise<T>;
 
@@ -111,7 +111,7 @@ export interface TodoBackendRegistration {
 
 /**
  * An id already taken is kept with a warning, behind the first registration: it is used only while
- * every earlier registrant of the id is disabled, as a tool's surviving registrant is. The second
+ * every earlier registrant of the id is disabled. The second
  * extension keeps its other registrations, as a conflicting command or shortcut does not fail its
  * extension either.
  */
