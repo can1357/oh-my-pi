@@ -290,7 +290,7 @@ mod tests {
 			windows
 		}
 
-		fn text(&self, window: HWND) -> String {
+		fn text(window: HWND) -> String {
 			let mut buffer = [0u16; 256];
 			// SAFETY: `buffer` holds the length WM_GETTEXT is told.
 			let length =
@@ -337,7 +337,7 @@ mod tests {
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
 		}
-		assert_eq!(windows.text(windows.target), "xtyped");
-		assert_eq!(windows.text(windows.user), "");
+		assert_eq!(Windows::text(windows.target), "xtyped");
+		assert_eq!(Windows::text(windows.user), "");
 	}
 }
