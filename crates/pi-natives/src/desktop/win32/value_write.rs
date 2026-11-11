@@ -120,12 +120,16 @@ pub(super) fn set_combo(
 	enabled: bool,
 	secure: bool,
 ) -> CoreResult<()> {
-	use windows_sys::Win32::UI::{
-		Controls::{COMBOBOXINFO, GetComboBoxInfo},
-		WindowsAndMessaging::{
-			CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE,
-			CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW, IsWindow,
-			SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_GETTEXT, WM_SETTEXT,
+	use windows_sys::Win32::{
+		System::Threading::{GetCurrentProcessId, GetCurrentThreadId},
+		UI::{
+			Controls::{COMBOBOXINFO, GetComboBoxInfo},
+			WindowsAndMessaging::{
+				CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE,
+				CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW,
+				GetWindowThreadProcessId, IsWindow, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND,
+				WM_GETTEXT, WM_SETTEXT,
+			},
 		},
 	};
 
@@ -133,9 +137,29 @@ pub(super) fn set_combo(
 	let writing = std::cell::Cell::new(false);
 	let failed = || combo_failure(writing.get());
 	let send = |target, message, wparam, lparam| {
+		if matches!(message, CB_FINDSTRINGEXACT | WM_SETTEXT | WM_GETTEXT) {
+			let mut process = 0;
+			// SAFETY: these APIs only query window/process/thread identifiers.
+			let local_other_thread = unsafe {
+				let thread = GetWindowThreadProcessId(target, &mut process);
+				process == GetCurrentProcessId() && thread != GetCurrentThreadId()
+			};
+			if local_other_thread {
+				return Err(DesktopError::ax_failed(if writing.get() {
+					"the combo box's value could not be confirmed safely; pointer-bearing messages to \
+					 another thread in this process are unsafe after a timeout; the value may already \
+					 have changed, so inspect the target before trying again"
+				} else {
+					"the combo box's value could not be confirmed safely; pointer-bearing messages to \
+					 another thread in this process are unsafe after a timeout; nothing was written; \
+					 use press/click instead"
+				}));
+			}
+		}
 		let mut result = 0;
-		// SAFETY: string buffers remain valid until the synchronous message
-		// returns.
+		// SAFETY: pointer-bearing system messages are marshalled for another
+		// process. Same-thread dispatch is synchronous; same-process dispatch
+		// to another thread is refused above before a buffer can outlive us.
 		let answered = unsafe {
 			SendMessageTimeoutW(target, message, wparam, lparam, SMTO_ABORTIFHUNG, 3000, &mut result)
 		};
@@ -387,6 +411,7 @@ mod tests {
 		static ORIGINAL_COMBO_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
 		static ITEM_NAME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+		static SLEEPING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 		static ORIGINAL_PARENT_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
 			= const { std::cell::Cell::new(None) };
 		static DESTROY_ON_NOTIFICATION: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
@@ -516,6 +541,7 @@ mod tests {
 	) -> isize {
 		use windows_sys::Win32::UI::WindowsAndMessaging::{CB_FINDSTRINGEXACT, CallWindowProcW};
 		if message == CB_FINDSTRINGEXACT {
+			SLEEPING_CALLS.with(|calls| calls.set(calls.get() + 1));
 			std::thread::sleep(std::time::Duration::from_secs(6));
 			// Do not dereference the caller's message pointer after its timeout.
 			return -1;
@@ -527,7 +553,7 @@ mod tests {
 
 	#[cfg(target_os = "windows")]
 	#[test]
-	fn a_combo_that_stops_pumping_does_not_block_the_worker() {
+	fn same_process_cross_thread_messages_are_unconfirmed() {
 		use std::sync::{
 			Arc,
 			atomic::{AtomicBool, Ordering},
@@ -538,6 +564,24 @@ mod tests {
 			CreateWindowExW, DestroyWindow, DispatchMessageW, GWLP_WNDPROC, MSG, PM_REMOVE,
 			PeekMessageW, SetWindowLongPtrW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
 		};
+		// Keep the target and sender in one isolated child process, while
+		// their window procedures run on different threads.
+		const CHILD: &str = "PI_NATIVE_COMBO_TIMEOUT_CHILD";
+		if std::env::var_os(CHILD).is_none() {
+			let output = std::process::Command::new(std::env::current_exe().unwrap())
+				.args(["--exact", "desktop::win32::value_write::tests::same_process_cross_thread_messages_are_unconfirmed", "--nocapture"])
+				.env(CHILD, "1")
+				.output()
+				.unwrap();
+			assert!(
+				output.status.success(),
+				"{}{}",
+				String::from_utf8_lossy(&output.stdout),
+				String::from_utf8_lossy(&output.stderr)
+			);
+			print!("{}", String::from_utf8_lossy(&output.stdout));
+			return;
+		}
 		let stop = Arc::new(AtomicBool::new(false));
 		let stopped = Arc::clone(&stop);
 		let (ready, handle) = mpsc::channel();
@@ -588,6 +632,11 @@ mod tests {
 					std::thread::sleep(std::time::Duration::from_millis(1));
 				}
 				DestroyWindow(parent);
+				assert_eq!(
+					SLEEPING_CALLS.with(|calls| calls.get()),
+					0,
+					"pointer-bearing message must not reach the other thread"
+				);
 			}
 		});
 		let hwnd = handle
@@ -599,11 +648,11 @@ mod tests {
 		stop.store(true, Ordering::Relaxed);
 		owner.join().unwrap();
 		let error = result.unwrap_err().to_string();
-		assert!(error.contains("no value or selection was confirmed"), "{error}");
+		assert!(error.contains("value could not be confirmed safely"), "{error}");
+		assert!(error.contains("another thread in this process"), "{error}");
 		assert!(error.contains("nothing was written"), "{error}");
-		assert!(elapsed >= std::time::Duration::from_secs(2), "{elapsed:?}");
-		assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
-		println!("hung combo: returned in {elapsed:?}: {error}");
+		assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+		println!("same-process cross-thread target: returned in {elapsed:?}: {error}");
 	}
 
 	#[cfg(target_os = "windows")]
