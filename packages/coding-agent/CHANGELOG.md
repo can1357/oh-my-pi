@@ -4,12 +4,13 @@
 
 ### Changed
 
-- Manual compaction honors the preferred handoff method and reuses the live prompt prefix, with soft compaction as fallback
+- Manual compaction honors the preferred handoff method and reuses the live prompt prefix, with soft compaction as fallback ([#18940](https://github.com/can1357/oh-my-pi/pull/18940) by [@alvarogarciapiz](https://github.com/alvarogarciapiz))
 
 ### Fixed
 
-- Automatic handoff preserves extension system-prompt overrides for prompt-cache reuse
-- Speculative compaction keeps its isolated provider session and transport preferences
+- Automatic handoff preserves extension system-prompt overrides for prompt-cache reuse ([#18940](https://github.com/can1357/oh-my-pi/pull/18940) by [@alvarogarciapiz](https://github.com/alvarogarciapiz))
+- Speculative compaction keeps its isolated provider session and transport preferences ([#18940](https://github.com/can1357/oh-my-pi/pull/18940) by [@alvarogarciapiz](https://github.com/alvarogarciapiz))
+
 ### Added
 
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))

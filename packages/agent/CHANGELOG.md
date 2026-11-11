@@ -4,7 +4,7 @@
 
 ### Added
 
-- Handoff prompt rendering accepts compaction-hook instructions and additional context without reserializing history
+- Handoff prompt rendering accepts compaction-hook instructions and additional context without reserializing history ([#18940](https://github.com/can1357/oh-my-pi/pull/18940) by [@alvarogarciapiz](https://github.com/alvarogarciapiz))
 
 ## [18.18.9] - 2026-11-11
 
