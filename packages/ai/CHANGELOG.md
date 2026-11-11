@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` now accept the `openai-codex/codex-transcribe` model and transcribe with an existing `openai-codex` login (WAV, MP3, M4A, FLAC, WebM and Ogg/Opus; uploads are renamed to match their container, since the backend rejects mismatched extensions) ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.18.8] - 2026-11-11
 
 - Fixed provider in-flight lock cleanup failures being swallowed silently — they are now logged instead of ignored ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
@@ -12,10 +16,6 @@
 
 - Fixed concurrent OAuth requests rejected as `claude_code_version_too_old` failing instead of retrying with the required version ([#18651](https://github.com/can1357/oh-my-pi/issues/18651))
 - Chat Completions gateway requests preserve explicit tool strict-mode choices, so Codex tools can omit optional arguments when callers set `strict: false` ([#18672](https://github.com/can1357/oh-my-pi/pull/18672) by [@0xeb](https://github.com/0xeb)).
-
-### Added
-
-- Added Codex subscription speech-to-text: `transcribeAudio` and the auth gateway's `/v1/audio/transcriptions` now accept the `openai-codex/codex-transcribe` model and transcribe with an existing `openai-codex` login (WAV, MP3, M4A, FLAC, WebM and Ogg/Opus; uploads are renamed to match their container, since the backend rejects mismatched extensions) ([#15391](https://github.com/can1357/oh-my-pi/pull/15391) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.18.7] - 2026-11-10
 
