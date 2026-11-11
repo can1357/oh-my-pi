@@ -74,7 +74,8 @@ struct Journal {
 	/// The user's button events of each type the HID counters never
 	/// counted, such as a remote tool's posts to the session tap, and when
 	/// the tap delivered the latest; kept across restarts, so readings only
-	/// ever count up.
+	/// ever count up. An event the counters did count but the tap delivered
+	/// only after the record gave up on it counts here too, a second time.
 	skipped: ([u32; 6], Option<Instant>),
 	recent:  VecDeque<Button>,
 }
@@ -143,16 +144,47 @@ impl ClickJournal {
 	}
 
 	/// What a reading of the user's clicks sees now: the HID button counters
-	/// plus the user's presses and releases they skipped, whether the latest
-	/// click went to `user`'s app rather than `target`, `None` while the tap
-	/// has not delivered it yet or missed it, and when the latest skipped one
-	/// came.
-	pub(in crate::desktop) fn place(&self, user: pid_t, target: pid_t) -> Reading {
+	/// plus the user's presses and releases they skipped, and when the latest
+	/// skipped one came. It also says whether the latest click went to the
+	/// user's app rather than the target: `None` while the tap has not
+	/// delivered it yet or missed it.
+	pub(in crate::desktop) fn place(&self, apps: Apps) -> Reading {
 		let mut journal = self.0.lock();
 		// Read under the lock, after `seen`.
 		let hid = hid_buttons();
 		let idle = since_last_click().is_some_and(|since| since > DELIVERY);
-		journal.reading(user, target, hid, idle)
+		journal.reading(apps, hid, idle)
+	}
+}
+
+/// The user's app and the target of an action, as a reading tells their
+/// clicks apart.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::desktop) struct Apps {
+	user:    pid_t,
+	target:  pid_t,
+	/// A press routed to a process that is no app of its own counts for the
+	/// app macOS holds responsible for it.
+	helpers: bool,
+}
+
+impl Apps {
+	pub(in crate::desktop) fn new(user: pid_t, target: pid_t) -> Self {
+		Self::hosted(user, target, responsible_pid(user), responsible_pid(target))
+	}
+
+	/// The two apps, with the processes macOS holds responsible for each.
+	/// Helpers count for their app only while those differ: responsibility
+	/// is inherited, so a target started from the user's terminal has the
+	/// terminal responsible for it and for the services drawing its panels,
+	/// as a user's app started from the target has the target.
+	fn hosted(
+		user: pid_t,
+		target: pid_t,
+		user_host: Option<pid_t>,
+		target_host: Option<pid_t>,
+	) -> Self {
+		Self { user, target, helpers: user_host != target_host }
 	}
 }
 
@@ -279,8 +311,8 @@ impl Journal {
 		self.recent.push_back(Button { kind, went, drags });
 	}
 
-	/// Whether the latest click the HID counters `hid` count went to
-	/// `user`'s app; `None` while the tap trails `WindowServer`. Once no
+	/// Whether the latest click the HID counters `hid` count went to the
+	/// user's app; `None` while the tap trails `WindowServer`. Once no
 	/// button event has come for [`DELIVERY`] (`idle`), an event the tap
 	/// still has not delivered is lost: the record starts again. What it
 	/// missed counts as in the user's app, since a tool that swallows a
@@ -288,11 +320,11 @@ impl Journal {
 	/// app; after macOS disabled the tap it is unknown, as those events
 	/// reached apps.
 	///
-	/// A press routed to `target` goes to it; one routed to `user`, or to a
-	/// process that is no app of its own and draws for `user`, such as the
-	/// service that draws a sandboxed app's Open panel, goes to the user's
-	/// app.
-	fn place(&mut self, user: pid_t, target: pid_t, hid: [u32; 6], idle: bool) -> Option<bool> {
+	/// A press routed to the target goes to it; one routed to the user's
+	/// app, or while `apps.helpers` to a process that is no app of its
+	/// own and draws for the user's app, such as the service that draws a
+	/// sandboxed app's Open panel, goes to the user's app.
+	fn place(&mut self, apps: Apps, hid: [u32; 6], idle: bool) -> Option<bool> {
 		let behind =
 			(0..hid.len()).any(|kind| self.seen[kind] != hid[kind].wrapping_sub(self.base[kind]));
 		if behind {
@@ -310,18 +342,16 @@ impl Journal {
 			.back()
 			.map_or(Went::Before, |button| button.went)
 		{
-			Went::To(pid, _) if pid == target => Some(false),
-			Went::To(pid, host) => Some(pid == user || host == Some(user)),
+			Went::To(pid, _) if pid == apps.target => Some(false),
+			Went::To(pid, host) => Some(pid == apps.user || (apps.helpers && host == Some(apps.user))),
 			Went::Nowhere => Some(false),
 			Went::Before => self.before,
 		}
 	}
-}
 
-impl Journal {
 	/// A reading at HID counters `hid`: see [`ClickJournal::place`].
-	fn reading(&mut self, user: pid_t, target: pid_t, hid: [u32; 6], idle: bool) -> Reading {
-		let placed = self.place(user, target, hid, idle);
+	fn reading(&mut self, apps: Apps, hid: [u32; 6], idle: bool) -> Reading {
+		let placed = self.place(apps, hid, idle);
 		let mut buttons = hid;
 		for (button, skipped) in buttons.iter_mut().zip(self.skipped.0) {
 			*button = button.wrapping_add(skipped);
@@ -352,10 +382,12 @@ mod tests {
 
 	/// A journal started at `WindowServer`'s HID counters `hid`, which the
 	/// tests move on as `WindowServer` counts events, before or after the
-	/// tap delivers them.
+	/// tap delivers them; read for `apps`, by default the user's app and the
+	/// target each launched on its own.
 	struct Session {
 		journal: Journal,
 		hid:     [u32; 6],
+		apps:    Apps,
 	}
 
 	impl Session {
@@ -363,7 +395,7 @@ mod tests {
 			let hid = [5, 5, 0, 0, 0, 0];
 			let mut journal = ClickJournal::default().0.into_inner();
 			journal.start(hid);
-			Self { journal, hid }
+			Self { journal, hid, apps: Apps::hosted(USER, TARGET, Some(USER), Some(TARGET)) }
 		}
 
 		/// `WindowServer` counts an event of `kind`.
@@ -402,7 +434,7 @@ mod tests {
 		}
 
 		fn reading(&mut self, idle: bool) -> Reading {
-			self.journal.reading(USER, TARGET, self.hid, idle)
+			self.journal.reading(self.apps, self.hid, idle)
 		}
 	}
 
@@ -561,5 +593,25 @@ mod tests {
 		assert_eq!(press(PANEL_SERVICE, Some(OTHER_APP)), Some(false));
 		// A regular app, which `service_host` never maps.
 		assert_eq!(press(OTHER_APP, None), Some(false));
+	}
+
+	#[test]
+	fn a_service_counts_for_its_app_only_while_the_two_apps_have_different_hosts() {
+		let press = |apps: Apps| {
+			let mut session = Session { apps, ..Session::started() };
+			let routed = Routed { target: i64::from(PANEL_SERVICE), host: Some(USER) };
+			session.counted(LEFT_DOWN);
+			session.routed(LEFT_DOWN, routed, 3, None);
+			session.place(false)
+		};
+		// Each app launched on its own.
+		assert_eq!(press(Apps::hosted(USER, TARGET, Some(USER), Some(TARGET))), Some(true));
+		// The target started from the user's terminal, which macOS then holds
+		// responsible for the service drawing the target's own Open panel;
+		// the user's app started from the target; both started from one
+		// terminal. Nothing is mapped.
+		for host in [USER, TARGET, OTHER_APP] {
+			assert_eq!(press(Apps::hosted(USER, TARGET, Some(host), Some(host))), Some(false));
+		}
 	}
 }

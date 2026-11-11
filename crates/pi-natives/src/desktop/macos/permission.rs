@@ -65,8 +65,14 @@ pub(super) fn denied(pane: &str) -> DesktopError {
 /// The process macOS holds responsible for `pid`: for a view service or an
 /// XPC helper, the app it works for.
 pub(super) fn responsible_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
-	// SAFETY: as in `responsible_app`.
-	let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, RESPONSIBLE_PID.as_ptr()) };
+	responsible(RESPONSIBLE_PID, pid)
+}
+
+/// [`responsible_pid`] through the libSystem export `symbol_name`.
+fn responsible(symbol_name: &CStr, pid: libc::pid_t) -> Option<libc::pid_t> {
+	// SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name only reads the
+	// loaded images. The private libSystem export may be absent.
+	let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr()) };
 	if symbol.is_null() {
 		return None;
 	}
@@ -78,19 +84,8 @@ pub(super) fn responsible_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
 }
 
 fn responsible_app(symbol_name: &CStr) -> Option<String> {
-	// SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name only reads the
-	// loaded images. The private libSystem export may be absent.
-	let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr()) };
-	if symbol.is_null() {
-		return None;
-	}
-	// SAFETY: the export has the signature `pid_t (pid_t)`.
-	let responsible: ResponsiblePid = unsafe { std::mem::transmute(symbol) };
-	// SAFETY: the call only reads the kernel's responsibility record.
-	let pid = unsafe { responsible(libc::getpid()) };
-	if pid <= 0 {
-		return None;
-	}
+	// SAFETY: getpid only reads this process's id.
+	let pid = responsible(symbol_name, unsafe { libc::getpid() })?;
 	if let Some(name) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
 		.and_then(|app| app.localizedName())
 	{

@@ -27,7 +27,7 @@ use super::{
 		types::DesktopFocusReturn,
 	},
 	ax, capture,
-	clicks::{ClickJournal, Reading},
+	clicks::{Apps, ClickJournal, Reading},
 	key_reroute::KeyReroute,
 	permission, process,
 	release::Route,
@@ -637,7 +637,8 @@ pub(super) fn since_last_click() -> Option<Duration> {
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
 struct SwitchSignals {
-	/// HID counters of `MOUSE_BUTTON_EVENTS`.
+	/// HID counters of `MOUSE_BUTTON_EVENTS`, plus the user's button events
+	/// they skipped that the session's tap delivered.
 	buttons:     [u32; 6],
 	/// When a mouse button last went down or up.
 	last_click:  Option<Instant>,
@@ -711,7 +712,7 @@ impl SwitchSignals {
 	/// land. Nothing here waits on another app.
 	fn read(spi: &ForegroundSpi, now: Instant, placement: Placement<'_>) -> Self {
 		let reading = match placement {
-			Placement::Tap(clicks, user, target) => clicks.place(user, target),
+			Placement::Tap(clicks, apps) => clicks.place(apps),
 			Placement::HitTest(placer) => {
 				let buttons = hid_buttons();
 				Reading { buttons, placed: placer.in_user_app(buttons).then_some(true), skipped: None }
@@ -813,7 +814,7 @@ enum Placement<'a> {
 	/// The tap of the session the input belongs to, which names the process
 	/// `WindowServer` routed each click to as it delivers it; with the user's
 	/// app and the target.
-	Tap(&'a ClickJournal, pid_t, pid_t),
+	Tap(&'a ClickJournal, Apps),
 	/// [`ClickPlacer`]'s hit-test, without a tap that sees input.
 	HitTest(&'a ClickPlacer),
 }
@@ -851,8 +852,8 @@ enum ClickPlacement {
 /// action between the user's app and the `target`, whose own focus grabs are
 /// not the user's doing. It sees every reading of the switch sampler, which
 /// no AX probe blocks, so a whole ⌘-Tab or launcher pick between two of the
-/// observer's polls is still seen when it happened. Clicks are timed exactly
-/// from the HID state.
+/// observer's polls is still seen when it happened. Clicks are timed from the
+/// HID state, or by their delivery when the HID counters skipped them.
 struct UserSwitchWatch {
 	user:      ProcessSerialNumber,
 	target:    ProcessSerialNumber,
@@ -1273,7 +1274,7 @@ pub(super) fn with_background_watch<T>(
 	let placer = ClickPlacer::new(previous.pid);
 	let placement = match (clicks.as_deref(), previous.pid) {
 		(Some(clicks), Some(user)) if permission::listen_events() => {
-			Placement::Tap(clicks, user, pid)
+			Placement::Tap(clicks, Apps::new(user, pid))
 		},
 		_ => {
 			placer.place();
@@ -4572,20 +4573,22 @@ mod tests {
 		// target comes forward because of it. The HID state dates the user's
 		// last click of their own seconds before.
 		let t0 = Instant::now();
-		let signals = |reading| SwitchSignals::of(reading, Some(t0 - ms(5000)), NO_MODIFIERS, None);
+		let signals =
+			|reading| SwitchSignals::of(reading, t0.checked_sub(ms(5000)), NO_MODIFIERS, None);
+		let idle = signals(Reading { buttons: [0; 6], placed: Some(true), skipped: None });
+		let pressed = signals(Reading {
+			buttons: [1, 0, 0, 0, 0, 0],
+			placed:  Some(false),
+			skipped: Some(t0 + ms(10)),
+		});
 		let pick = |came: Duration| {
-			let clicks = ClickJournal::default();
-			clicks.start();
 			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
 			assert_eq!(
-				guard.observe(PREVIOUS, Some(42), signals(clicks.place(7, 8)), t0 + ms(1)),
+				guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)),
 				FocusDecision::Observe
 			);
-			clicks.record(1, 8, 0);
-			let now = Instant::now();
-			let pressed = signals(clicks.place(7, 8));
-			assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, now), FocusDecision::Observe);
-			guard.observe(TARGET, None, pressed, now + came)
+			guard.observe(TARGET, None, pressed, t0 + ms(10) + came)
 		};
 		assert_eq!(pick(ms(40)), FocusDecision::Disarm);
 		// The target coming forward on its own once that click is past the
