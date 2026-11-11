@@ -6,6 +6,10 @@
 
 - Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
+### Fixed
+
+- `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
+
 ## [18.18.9] - 2026-11-11
 
 ### Added
@@ -17,6 +21,7 @@
 - `/context` shows loaded instruction files and skills in their own categories; System Prompt marks where each one sits without counting it twice, and notes when an extension or SDK callback changed the prompt after it was built ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - JetBrains AIR now renders `task`-tool subagents as native child sessions: the ACP server announces each spawn, streams per-child transcripts, reports terminal states, and accepts per-child cancel ([#18936](https://github.com/can1357/oh-my-pi/pull/18936) by [@nvandamme](https://github.com/nvandamme))
 - Added Hacker News search (`web/hackernews`): `web_search` queries scoped to `site:news.ycombinator.com` now search HN stories and comments through the keyless HN Search API before the configured engines
+- `task.autoParallel` (`off`/`suggest`/`on`): the native judge splits each new prompt into subtasks that can run concurrently; `suggest` reports the split, `on` tells the agent to delegate the subtasks in one parallel `task` call
 
 ### Changed
 

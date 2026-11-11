@@ -64,7 +64,7 @@ import type { SessionManager } from "../session/session-manager";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
-import type { JudgmentCache } from "./cache";
+import { type JudgmentCache, sharedJudgmentCache } from "./cache";
 
 export * from "./cache";
 
@@ -374,6 +374,46 @@ export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boo
 /** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
 	return new ChainJudge(deps);
+}
+
+/** What a per-turn classifier needs to judge on its session's behalf through {@link judgeNatively}. */
+export interface NativeJudgmentDeps {
+	settings: Settings;
+	registry: ModelRegistry;
+	sessionId?: string;
+	signal?: AbortSignal;
+	onUsage?: (usage: JudgmentUsage) => void;
+	telemetry?: AgentTelemetryConfig;
+}
+
+/**
+ * Answers `request` on the native backend the `judge` role resolves to, for per-turn classifiers
+ * (auto-prewalk, auto-parallel) whose thresholds assume calibrated probabilities. Answers are shared
+ * across the session tree through {@link sharedJudgmentCache}; usage is labelled `purpose`.
+ * @throws when the cached role chain does not lead with a native backend (it can lag {@link hasNativeJudge}
+ * after a credential or discovery change), after `timeoutMs`, on abort, or when the provider fails.
+ */
+export async function judgeNatively<Q extends Questions>(
+	purpose: string,
+	request: JudgmentRequest<Q>,
+	deps: NativeJudgmentDeps,
+	timeoutMs: number,
+): Promise<JudgmentResult<Q>> {
+	const judge = resolveJudge({
+		settings: deps.settings,
+		registry: deps.registry,
+		sessionId: deps.sessionId,
+		purpose,
+		onUsage: deps.onUsage,
+		telemetry: deps.telemetry,
+		cache: sharedJudgmentCache(),
+	});
+	const timeout = AbortSignal.timeout(timeoutMs);
+	const options = { signal: deps.signal ? AbortSignal.any([deps.signal, timeout]) : timeout };
+	return judge.withCandidate((candidate, kind) => {
+		if (kind !== "native") throw new Error(`${purpose}: the judge role has no native backend`);
+		return candidate.judge(request, options);
+	}, options);
 }
 
 /**
