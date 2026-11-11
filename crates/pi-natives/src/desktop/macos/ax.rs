@@ -1419,9 +1419,7 @@ fn perform_choosing(
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
 	let actions = copy_strings_from_action_names(element)?;
-	let Some(native) = supported_action(&actions, action).cloned() else {
-		return Err(unsupported_action(&native_action_name(action), &actions));
-	};
+	let native = choose_action(&actions, action, || copy_bool(element, "AXEnabled"))?.clone();
 	// AXRaise is an explicit request to change stacking, including the
 	// takeover preparation path. Other semantic actions must stay background.
 	if is_raise_action(action) {
@@ -1485,6 +1483,29 @@ fn perform_choosing(
 			},
 		)
 	})
+}
+
+/// The element's spelling of `action` among its `actions`. A press of an
+/// element that reports itself disabled (`enabled` reads its `AXEnabled`,
+/// `None` when it reports none) is refused before anything is sent: a
+/// disabled `AppKit` button still lists `AXPress` and answers it with
+/// success while its action never runs. Other actions, such as a scroll into
+/// view or a raise, still act on a disabled element.
+fn choose_action<'a>(
+	actions: &'a [String],
+	action: &str,
+	enabled: impl FnOnce() -> Option<bool>,
+) -> CoreResult<&'a String> {
+	let Some(native) = supported_action(actions, action) else {
+		return Err(unsupported_action(&native_action_name(action), actions));
+	};
+	if native.eq_ignore_ascii_case("AXPress") && enabled() == Some(false) {
+		return Err(DesktopError::ax_failed(
+			"the element reports itself disabled, so nothing was sent: wait for it to become \
+			 enabled, or do what enables it first",
+		));
+	}
+	Ok(native)
 }
 
 /// The refusal of `native`, an action the element does not list among
@@ -2727,6 +2748,28 @@ mod tests {
 			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
 		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
 		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_press_of_a_disabled_element_is_refused_before_anything_is_sent() {
+		let actions = ["AXPress", "AXScrollToVisible", "AXShowMenu"].map(String::from);
+		let choose = |action, enabled| {
+			super::choose_action(&actions, action, || enabled)
+				.map(String::as_str)
+				.map_err(|error| (error.code, error.message))
+		};
+		let refused = choose("press", Some(false)).unwrap_err();
+		assert_eq!(refused.0, ErrorCode::AxFailed);
+		assert!(refused.1.contains("disabled"), "{}", refused.1);
+		// Enabled, or silent about it: the press goes ahead.
+		assert_eq!(choose("press", Some(true)), Ok("AXPress"));
+		assert_eq!(choose("press", None), Ok("AXPress"));
+		// Other actions still act on a disabled element.
+		assert_eq!(choose("AXScrollToVisible", Some(false)), Ok("AXScrollToVisible"));
+		assert_eq!(choose("showMenu", Some(false)), Ok("AXShowMenu"));
+		// An action the element lacks is refused as unsupported, not disabled.
+		let unlisted = choose("AXRaise", Some(false)).unwrap_err();
+		assert!(!unlisted.1.contains("disabled"), "{}", unlisted.1);
 	}
 
 	#[test]
