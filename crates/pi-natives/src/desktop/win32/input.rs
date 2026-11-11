@@ -993,13 +993,15 @@ mod foreground {
 		}
 
 		/// Records for the host where the takeover left the foreground, read
-		/// after restoration. Focus was handed back only when the target had
-		/// to be activated and the user's window is in front again.
+		/// after restoration. Focus was handed back when the target had to be
+		/// activated and restoring the user's window succeeded; the front
+		/// process is read afterwards, so a window the user switched to since
+		/// shows as front.
 		fn report(&self, restored: bool) {
 			// SAFETY: GetForegroundWindow has no preconditions.
 			let front = unsafe { GetForegroundWindow() };
 			control::report_focus_return(DesktopFocusReturn {
-				handed_back:  restored && self.previous != self.target && front == self.previous,
+				handed_back:  restored && self.previous != self.target,
 				previous_pid: window::process_id(self.previous),
 				front_pid:    window::process_id(front),
 			});
