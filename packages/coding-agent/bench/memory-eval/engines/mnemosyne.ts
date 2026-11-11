@@ -1,9 +1,10 @@
 /** Mnemosyne adapter: upstream Mnemosyne 4.0.0b4 in a Python child process, driven over JSON lines. */
 import * as path from "node:path";
-import { normalizeEnvKey, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { DroppedRow, EngineAdapter, ProtocolName, RecallHit } from "../engine";
 import { PythonProcess } from "./python-process";
+import { envWithout } from "../env";
 import { enginePython, resolveCacheRoot } from "../paths";
 
 const EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
@@ -68,9 +69,8 @@ export function mnemosyneEngine(options: MnemosyneEngineOptions = {}): EngineAda
 		dataDir = await TempDir.create("@mnemosyne-data-");
 		// Parent MNEMOSYNE_* settings (recall weights, prefixes, ...) would silently change ranking or embeddings;
 		// PythonProcess drops PYTHON* import overrides itself.
-		const inherited = Object.entries(Bun.env).filter(([key]) => !normalizeEnvKey(key).startsWith("MNEMOSYNE_"));
 		proc = new PythonProcess("mnemosyne engine", python, script, {
-			...Object.fromEntries(inherited),
+			...envWithout("MNEMOSYNE_"),
 			MNEMOSYNE_DATA_DIR: dataDir.path(),
 			MNEMOSYNE_FASTEMBED_CACHE_DIR: path.join(cacheRoot, "fastembed"),
 			MNEMOSYNE_EMBEDDING_MODEL: EMBEDDING_MODEL,

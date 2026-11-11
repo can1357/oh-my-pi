@@ -1,18 +1,17 @@
 import { afterAll, beforeAll, expect, it, setDefaultTimeout } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { TempDir, ptree } from "@oh-my-pi/pi-utils";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
 // Each case spawns the CLI, which loads the harness and Mnemopi; on a loaded machine that exceeds bun's 5 s default.
 setDefaultTimeout(30_000);
 
-let tmp: string;
+let tmp: TempDir;
 beforeAll(async () => {
-	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-diff-"));
+	tmp = await TempDir.create("@memory-eval-diff-");
 });
 afterAll(async () => {
-	await fs.rm(tmp, { recursive: true, force: true });
+	await tmp.remove();
 });
 
 interface FakeResult {
@@ -51,7 +50,7 @@ async function writeResult(
 		questions = [["q1", 1]],
 	}: FakeResult,
 ) {
-	const file = path.join(tmp, `${name}.json`);
+	const file = tmp.join(`${name}.json`);
 	await Bun.write(
 		file,
 		JSON.stringify({
@@ -81,14 +80,9 @@ async function writeResult(
 	return file;
 }
 
-async function diff(a: string, b: string): Promise<{ stdout: string; stderr: string; code: number }> {
-	const proc = Bun.spawn([process.execPath, RUN, "diff", a, b], { stdout: "pipe", stderr: "pipe" });
-	const [stdout, stderr, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	return { stdout, stderr, code };
+async function diff(a: string, b: string): Promise<{ stdout: string; stderr: string; code: number | null }> {
+	const { stdout, stderr, exitCode } = await ptree.exec([process.execPath, RUN, "diff", a, b], { allowNonZero: true });
+	return { stdout, stderr, code: exitCode };
 }
 
 it("diff prints both configs and compares matching results", async () => {

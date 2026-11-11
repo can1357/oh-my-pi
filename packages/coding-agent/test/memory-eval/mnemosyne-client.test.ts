@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { mnemosyneEngine } from "../../bench/memory-eval/engines/mnemosyne";
 import { runCases } from "../../bench/memory-eval/runner";
 import type { EvalCase } from "../../bench/memory-eval/types";
@@ -20,12 +18,14 @@ const twoMessageCase: EvalCase = {
 	questions: [{ questionId: "q1", text: "q", category: "cat", goldMessageIds: ["m2"], goldSessionIds: [] }],
 };
 
+let tmpDir: TempDir;
 let tmp: string;
 beforeAll(async () => {
-	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-mnemosyne-"));
+	tmpDir = await TempDir.create("@memory-eval-mnemosyne-");
+	tmp = tmpDir.path();
 });
 afterAll(async () => {
-	await removeWithRetries(tmp);
+	await tmpDir.remove();
 });
 
 /** Writes a stub engine script; Mnemosyne itself is not needed. */
@@ -128,6 +128,22 @@ describe.skipIf(!pythonPath)("mnemosyne client", () => {
 		await expect(runCases(engine, [twoMessageCase], "standard", 10, tmp)).rejects.toThrow(/code 3.*kaput/s);
 		await expect(engine.vectorCount()).rejects.toThrow("kaput");
 		await engine.dispose();
+	});
+
+	it("a line that is not JSON aborts the run and keeps failing later calls", async () => {
+		// Answers the first request, then writes a line that is not protocol.
+		const script = await stub(
+			"garbage.py",
+			`import json, sys\nreq = json.loads(sys.stdin.readline())\nprint(json.dumps({"id": req["id"], "result": {}}), flush=True)\nsys.stdin.readline()\nprint("not json", flush=True)\nsys.stdin.read()\n`,
+		);
+		const engine = mnemosyneEngine({ python: python(), script });
+		try {
+			await engine.warmup("standard");
+			await expect(engine.vectorCount()).rejects.toThrow(/non-protocol line/);
+			await expect(engine.vectorCount()).rejects.toThrow(/non-protocol line/);
+		} finally {
+			await engine.dispose();
+		}
 	});
 
 	it("a process that closes stdout but stays alive fails the pending call promptly, with its stderr", async () => {

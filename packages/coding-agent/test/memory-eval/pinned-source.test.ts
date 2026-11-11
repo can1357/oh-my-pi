@@ -1,12 +1,13 @@
 import { expect, it } from "bun:test";
 import * as path from "node:path";
+import { ptree } from "@oh-my-pi/pi-utils";
 import { pythonPath } from "./python";
 
 const PY = path.join(import.meta.dir, "../../bench/memory-eval/py");
 
 /** Runs `body` (Python) after building a one-commit repo `repo` holding `evaluator.py` (`PINNED = True`). */
-async function inRepo(mode: string, body: string): Promise<{ code: number; stdout: string; stderr: string }> {
-	const proc = Bun.spawn(
+async function inRepo(mode: string, body: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+	const { exitCode, stdout, stderr } = await ptree.exec(
 		[
 			pythonPath!,
 			"-c",
@@ -42,14 +43,9 @@ ${body}
 			PY,
 			mode,
 		],
-		{ stdout: "pipe", stderr: "pipe" },
+		{ allowNonZero: true },
 	);
-	const [code, stdout, stderr] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
-	return { code, stdout: stdout.trim(), stderr };
+	return { code: exitCode, stdout: stdout.trim(), stderr };
 }
 
 // Each mode edits or shadows the evaluator in the clone in a way git status does not report (or, for CRLF, in a

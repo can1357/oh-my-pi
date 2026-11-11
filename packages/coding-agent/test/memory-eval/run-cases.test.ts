@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeWithRetries, stripGitRepoLocationEnv } from "@oh-my-pi/pi-utils";
+import { stripGitRepoLocationEnv, TempDir, ptree } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { envWithout } from "../../bench/memory-eval/env";
 import { pinnedCheckout } from "../../bench/memory-eval/run";
 
 const RUN = path.join(import.meta.dir, "../../bench/memory-eval/run.ts");
@@ -15,14 +15,16 @@ const BEAM_REVISION = "3205395e897e7318c7b094ef4e6047b9b82dbb03";
 setDefaultTimeout(30_000);
 
 // Inject a private benchmark cache: HOME/USERPROFILE remain unchanged on every platform.
+let rootDir: TempDir;
 let root: string;
 let cacheRoot: string;
 beforeAll(async () => {
-	root = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-cases-"));
+	rootDir = await TempDir.create("@memory-eval-cases-");
+	root = rootDir.path();
 	cacheRoot = await fixtureCache("pinned", BEAM_REVISION);
 });
 afterAll(async () => {
-	await removeWithRetries(root);
+	await rootDir.remove();
 });
 
 /**
@@ -41,19 +43,15 @@ async function fixtureCache(name: string, revision: string | undefined, sha256?:
 }
 
 /** `run --dataset beam-100k` plus `args` using an explicit cache root, with no MNEMOPI_* overrides. */
-async function runAt(cacheDir: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.startsWith("MNEMOPI_")));
-	const proc = Bun.spawn([process.execPath, RUN, "run", "--dataset", "beam-100k", "--cache-root", cacheDir, ...args], {
-		env,
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, code] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	return { stdout, stderr, code };
+async function runAt(
+	cacheDir: string,
+	args: string[],
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+	const { stdout, stderr, exitCode } = await ptree.exec(
+		[process.execPath, RUN, "run", "--dataset", "beam-100k", "--cache-root", cacheDir, ...args],
+		{ env: envWithout("MNEMOPI_"), allowNonZero: true },
+	);
+	return { stdout, stderr, code: exitCode };
 }
 
 const run = (...args: string[]) => runAt(cacheRoot, args);

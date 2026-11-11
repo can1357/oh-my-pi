@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { loadDataset } from "../../bench/memory-eval/datasets";
 import type { DroppedRow, EngineAdapter, RecallHit, RememberItem } from "../../bench/memory-eval/engine";
 import { oracleEngine, randomEngine } from "../../bench/memory-eval/engines/sanity";
@@ -10,12 +10,14 @@ import type { EvalCase, EvalMessage } from "../../bench/memory-eval/types";
 
 const fixtureDir = path.join(import.meta.dir, "fixtures", "data");
 
+let tmpDir: TempDir;
 let tmp: string;
 beforeAll(async () => {
-	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "memory-eval-runner-"));
+	tmpDir = await TempDir.create("@memory-eval-runner-");
+	tmp = tmpDir.path();
 });
 afterAll(async () => {
-	await fs.rm(tmp, { recursive: true, force: true });
+	await tmpDir.remove();
 });
 
 const msg = (messageId: string, content: string): EvalMessage => ({

@@ -1,4 +1,5 @@
 import { $which } from "@oh-my-pi/pi-utils";
+import { envWithout } from "../../bench/memory-eval/env";
 
 // The harness's Python helpers need 3.10 or newer (`str | Path` is evaluated at import time).
 const PROBE = 'import sys; print("omp-py", *sys.version_info[:2])';
@@ -17,7 +18,7 @@ export function findPython(
 	candidates: Array<string | null | undefined> = [Bun.env.PYTHON, $which("python3"), $which("python")],
 ): string | undefined {
 	// A Windows Store alias or an unrelated PYTHON command can exist without being a usable Python interpreter.
-	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.toUpperCase().startsWith("PYTHON")));
+	const env = envWithout("PYTHON");
 	for (const candidate of candidates) {
 		if (!candidate) continue;
 		try {

@@ -1,6 +1,7 @@
 import { expect, it } from "bun:test";
 import * as path from "node:path";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, ptree } from "@oh-my-pi/pi-utils";
+import { envWithout } from "../../bench/memory-eval/env";
 import { pythonPath } from "./python";
 
 const PY = path.join(import.meta.dir, "../../bench/memory-eval/py");
@@ -18,13 +19,10 @@ const SCRIPTS = [
 
 it.skipIf(pythonPath === undefined).each(SCRIPTS)("%s refuses to start outside isolated mode", async script => {
 	await using dir = await TempDir.create("@memory-eval-isolated-");
-	const env = Object.fromEntries(Object.entries(Bun.env).filter(([key]) => !key.toUpperCase().startsWith("PYTHON")));
-	const proc = Bun.spawn([pythonPath!, path.join(PY, script), "--out", dir.join("a.json")], {
-		env: { ...env, HOME: dir.path(), USERPROFILE: dir.path() },
-		stdout: "pipe",
-		stderr: "pipe",
+	const { stderr, exitCode } = await ptree.exec([pythonPath!, path.join(PY, script), "--out", dir.join("a.json")], {
+		env: { ...envWithout("PYTHON"), HOME: dir.path(), USERPROFILE: dir.path() },
+		allowNonZero: true,
 	});
-	const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
-	expect(code).toBe(1);
+	expect(exitCode).toBe(1);
 	expect(stderr).toContain(`${script}: run it with \`python -I\``);
 });
