@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- Fixed Windows element typing and key presses that ran in takeover, such as `el.type()` into a Chrome, Electron or WPF field, leaving the target window in front instead of handing focus back to the user's window
+- Fixed Windows element typing and key presses that ran in takeover, such as `el.type()` into a Chrome, Electron or WPF field, leaving the target window in front instead of handing focus back to the user's window ([#18919](https://github.com/can1357/oh-my-pi/pull/18919) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
