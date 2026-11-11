@@ -300,7 +300,7 @@
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 ### Fixed
 
-- Deleting a session now purges its prompts, title, recaps and per-message stats rows from `history.db` / `stats.db`, the same set `omp gc --archive --apply` removes, so none of the deleted conversation outlives the transcript ([#18674](https://github.com/can1357/oh-my-pi/issues/18674))
+- Deleting a session now purges its prompts, title, recaps and per-message stats rows from `history.db` / `stats.db`, the same set `omp gc --archive --apply` removes, so none of the deleted conversation outlives the transcript ([#18674](https://github.com/can1357/oh-my-pi/issues/18674), [#18877](https://github.com/can1357/oh-my-pi/pull/18877) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.18.8] - 2026-11-11
 
