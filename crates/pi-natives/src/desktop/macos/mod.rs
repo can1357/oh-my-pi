@@ -32,7 +32,7 @@ use self::{
 	release_guard::Presses,
 };
 use super::{
-	ax::AxHandle,
+	ax::{AxHandle, require_read_as},
 	backend::{
 		AxBackend, Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery,
 		ElementInput, PointerEvent, locate_element_click,
@@ -251,6 +251,7 @@ impl Backend for MacosBackend {
 		// is busy; the user's front app is read before it
 		// ([`EntryFront::before`]).
 		let (entry_front, id) = EntryFront::before(skylight::front_pid, || {
+			require_read_as(|| ax::read_as(ax::mac_handle(element)?))?;
 			let windows = self.capture.windows()?;
 			self.ax.window_id(element, &windows)
 		})?;
@@ -276,8 +277,10 @@ impl Backend for MacosBackend {
 		Self::require_input_permission()?;
 		// The element's bounds and window are read from its application, which
 		// blocks while it is busy; the user's front app is read before them.
-		let (entry_front, (target, event)) =
-			EntryFront::before(skylight::front_pid, || locate_element_click(self, element, click))?;
+		let (entry_front, (target, event)) = EntryFront::before(skylight::front_pid, || {
+			require_read_as(|| ax::read_as(ax::mac_handle(element)?))?;
+			locate_element_click(self, element, click)
+		})?;
 		if click.checks_menu_press() {
 			self.refuse_menu_press(&target, &event)?;
 		}

@@ -56,6 +56,10 @@
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
 
+### Fixed
+
+- Fixed the macOS `computer` tool typing into or pressing a different control than the ref named, and reporting success, once the app reused the control's element (Contacts put the city in the street field): the call now sends nothing and fails with `StaleRef`, naming the control that now reads as the ref did when there is one
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
