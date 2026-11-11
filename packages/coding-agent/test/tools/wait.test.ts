@@ -149,7 +149,9 @@ describe("wait", () => {
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager));
+		const context = session(manager);
+		context.getLastPromptTokens = () => 100_000;
+		const tool = new WaitTool(context);
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
@@ -164,6 +166,30 @@ describe("wait", () => {
 		expect(report(capped)).toContain("within 5m");
 		expect(report(capped)).toContain("up to 5m");
 		expect(notice(capped)).toContain("11m45s");
+		build.resolve("done");
+	});
+
+	test("large-context idle waits start at one minute, climb, and reset to one minute after news or a gap", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const build = Promise.withResolvers<string>();
+		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
+		const context = session(manager);
+		context.getLastPromptTokens = () => 100_001;
+		const tool = new WaitTool(context);
+		await elapse(tool, 60_000);
+		await elapse(tool, 300_000);
+		vi.advanceTimersByTime(60_000);
+		await elapse(tool, 60_000);
+		const lint = Promise.withResolvers<string>();
+		manager.register("bash", "lint", async () => lint.promise, { ownerId: "Main" });
+		const woke = tool.execute("wait-news", {});
+		await flushMicrotasks();
+		lint.resolve("clean");
+		await flushMicrotasks();
+		vi.advanceTimersByTime(1_500);
+		expect((await woke).useless).toBeUndefined();
+		await elapse(tool, 60_000);
 		build.resolve("done");
 	});
 

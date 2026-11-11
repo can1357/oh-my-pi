@@ -10,6 +10,10 @@
 
 - `computer.close()` no longer disables desktop control for the rest of the session: the next `computer` call opens a fresh desktop session instead of failing with `Computer session is closed`
 
+### Changed
+
+- Idle `wait` calls start with a one-minute window above 100,000 prompt tokens, reducing empty model turns while still waking immediately for results and messages.
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

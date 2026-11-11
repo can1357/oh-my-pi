@@ -505,6 +505,8 @@ export interface ToolSession {
 	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
 	 */
 	getLastAssistantText?: () => string | undefined;
+	/** Prompt tokens (input + cache read + cache write) of the most recent model request. */
+	getLastPromptTokens?: () => number;
 	/** Resolve a terminal yield's current or immediately preceding report, bound to its call ID. */
 	getYieldReportText?: (toolCallId: string) => string | undefined;
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */

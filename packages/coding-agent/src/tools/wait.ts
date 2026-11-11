@@ -28,6 +28,8 @@ const waitSchema = type({});
  * its turn back early while work warms up, and a wait loop backs off.
  */
 const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+const LARGE_CONTEXT_PROMPT_TOKENS = 100_000;
+const LARGE_CONTEXT_START_RUNG = 3;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
 /** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
@@ -287,7 +289,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
+		const floor = (this.session.getLastPromptTokens?.() ?? 0) > LARGE_CONTEXT_PROMPT_TOKENS ? LARGE_CONTEXT_START_RUNG : 0;
+		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : floor;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
