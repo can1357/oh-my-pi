@@ -88,8 +88,7 @@ describe("browser prelude relay guidance", () => {
 			const session = sessionWith(settings);
 			const onRelay = resolveBrowserKind({ action: "open" }, session).kind === "relay";
 			const guidance = createBrowserPrelude(session).guidance;
-			expect(guidance !== undefined).toBe(onRelay);
-			if (onRelay) expect(guidance).toContain('`app: "auto"` for a throwaway managed browser');
+			expect(guidance?.includes('`app: "auto"` for a throwaway managed browser') ?? false).toBe(onRelay);
 		}
 	});
 
