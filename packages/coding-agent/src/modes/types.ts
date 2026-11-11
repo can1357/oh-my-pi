@@ -103,6 +103,8 @@ export type SubmittedUserInput = {
 	followUps?: string[];
 	/** Set by `submitInteractiveInput` for a custom-message submission: the session took it (started a turn or queued it into one). */
 	dispatched?: boolean;
+	/** Tied only to a user-typed editor submission, never an automatic continuation. */
+	onAccepted?: () => void;
 	cancelled: boolean;
 	started: boolean;
 };
@@ -176,6 +178,9 @@ export interface AgentHubOpenOptions {
 	initialSection?: "agents" | "activity";
 }
 
+/** Mode command outcome: submitted agent prompt, rejected prompt, or consumed local action. */
+export type ModeCommandResult = boolean | "consumed";
+
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
@@ -211,6 +216,10 @@ export interface InteractiveModeContext {
 	 * changes how links are drawn.
 	 */
 	syncExtensionLinks(): void;
+	/** Temporarily replace the empty composer hint after a prompt is stashed. */
+	notifyComposerStash(): void;
+	/** Cancel the temporary stash hint when the saved draft is restored. */
+	cancelComposerStashNotice(): void;
 
 	// Session access
 	session: AgentSession;
@@ -502,6 +511,7 @@ export interface InteractiveModeContext {
 			display?: boolean;
 			streamingBehavior?: "steer" | "followUp";
 			followUps?: string[];
+			onAccepted?: () => void;
 		},
 		options?: { preserveDraft?: boolean; clearEditor?: boolean },
 	): SubmittedUserInput;
@@ -680,14 +690,10 @@ export interface InteractiveModeContext {
 	handleImagePaste(): Promise<boolean>;
 	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
 	handleImagePathPaste(path: string): Promise<void>;
-	/**
-	 * Queue a message for delivery only after the active agent turn would stop.
-	 * `detached` is a submission whose draft already left the editor: its attachments
-	 * are queued and its text is restored if queueing fails.
-	 */
+	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(
 		message: string,
-		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted"> & { text?: string },
 	): Promise<void>;
 	/** `title` heads the side question instead of its text, e.g. a side file command's `/sitrep the migration`. */
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;
@@ -735,14 +741,20 @@ export interface InteractiveModeContext {
 	toggleThinkingBlockVisibility(): void;
 	handlePlanModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean>;
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
 	handleVibeModeCommand(
 		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
+	handleGoalModeCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
+	): Promise<ModeCommandResult>;
+	handleGuidedGoalCommand(
+		rest?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks" | "onAccepted">,
 	): Promise<boolean>;
-	handleGoalModeCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
-	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
 	/** True while `/guided-goal` is interviewing the user and no goal record exists yet. */
 	isGuidedGoalInterviewActive(): boolean;
 	handleLoopCommand(args?: string): Promise<string | undefined>;

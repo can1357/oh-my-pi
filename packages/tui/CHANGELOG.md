@@ -6,15 +6,24 @@
 
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Added
+
+- Added the `app.editor.stash` shortcut and editor draft snapshot APIs to preserve text, cursor state, pastes, and attachments when swapping drafts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
+
 ### Changed
 
 - Ask forms support notes on options: `n` on radio/checkbox rows and `Alt+n` on select menus (`app.ask.note`), with selected notes shown alongside submitted answers and notes on unchosen options marked as drafts ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+- Ctrl+S now stashes a prompt instead of opening Agent Hub; Alt+A still opens Hub, including after migrating saved observer shortcuts ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ### Fixed
 
 - Ask form textareas edited from Tern now restart the inactivity timeout instead of submitting mid-edit
 - Fixed a picture in an `ask` form staying painted on screen after the form closed ([#18693](https://github.com/can1357/oh-my-pi/pull/18693) by [@jaredlyon](https://github.com/jaredlyon))
 - Fixed terminal Device Attributes replies (such as `^[[?64;1;2;4;6;17;18;21;22c`) leaking into the shell prompt on exit ([#18662](https://github.com/can1357/oh-my-pi/pull/18662) by [@asuffield](https://github.com/asuffield))
+
+### Breaking Changes
+
+- Replaced the `app.session.observe` keybinding action with `app.agents.hub`; saved observer shortcuts migrate automatically, and API consumers must use the new action ([#13468](https://github.com/can1357/oh-my-pi/pull/13468) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.18.7] - 2026-11-10
 

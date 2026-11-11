@@ -481,10 +481,13 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			input.dispatched = await session.promptCustomMessage(message, { streamingBehavior });
+			input.dispatched = await session.promptCustomMessage(message, {
+				streamingBehavior,
+				onAccepted: input.onAccepted,
+			});
 		} else if (input.resume) {
 			// No queue intent: a continue shortcut interrupts a running turn instead.
-			await session.resume();
+			await session.resume({ onAccepted: input.onAccepted });
 		} else if (isKnownSkillCommand(skillHost, input.text)) {
 			// Resubmitted skill text must dispatch through the skill path, or the
 			// model receives a literal `/skill:` token.
@@ -494,6 +497,7 @@ export async function submitInteractiveInput(
 				optimistic: true,
 				propagateErrors: true,
 				followUps: input.followUps,
+				onAccepted: input.onAccepted,
 			});
 		} else {
 			let forwarded = false;
@@ -502,7 +506,9 @@ export async function submitInteractiveInput(
 					images: input.images,
 					streamingBehavior,
 					followUps: input.followUps,
+					onAccepted: input.onAccepted,
 				});
+				if (!forwarded) input.onAccepted?.();
 			} catch (error: unknown) {
 				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
 			}

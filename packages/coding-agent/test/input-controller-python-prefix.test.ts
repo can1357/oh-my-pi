@@ -9,6 +9,7 @@ type FakeEditor = {
 	setText(text: string): void;
 	getText(): string;
 	addToHistory(text: string): void;
+	clearDraft(historyText?: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
 	clearCustomKeyHandlers(): void;
@@ -33,6 +34,13 @@ function createContext() {
 			return editorText;
 		},
 		addToHistory: vi.fn(),
+		clearDraft(historyText) {
+			if (historyText !== undefined) this.addToHistory(historyText);
+			this.setText("");
+			this.imageLinks = undefined;
+			this.pendingImages = [];
+			this.pendingImageLinks = [];
+		},
 		setActionKeys: vi.fn(),
 		setCustomKeyHandler: vi.fn(),
 		clearCustomKeyHandlers: vi.fn(),
@@ -98,6 +106,7 @@ describe("InputController Python prompt prefix", () => {
 				images: undefined,
 				imageLinks: undefined,
 				streamingBehavior: "steer",
+				onAccepted: undefined,
 			},
 			{ clearEditor: false },
 		);
@@ -108,6 +117,7 @@ describe("InputController Python prompt prefix", () => {
 				images: undefined,
 				imageLinks: undefined,
 				streamingBehavior: "steer",
+				onAccepted: undefined,
 			},
 		]);
 	});
@@ -131,6 +141,7 @@ describe("InputController Python prompt prefix", () => {
 				images: undefined,
 				imageLinks: undefined,
 				streamingBehavior: "steer",
+				onAccepted: undefined,
 			},
 			{ clearEditor: false },
 		);
@@ -141,6 +152,7 @@ describe("InputController Python prompt prefix", () => {
 				images: undefined,
 				imageLinks: undefined,
 				streamingBehavior: "steer",
+				onAccepted: undefined,
 			},
 		]);
 	});
@@ -153,6 +165,8 @@ describe("InputController Python prompt prefix", () => {
 		await editor.onSubmit?.("$ print(1)");
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", false);
+		expect(editor.addToHistory).toHaveBeenCalledTimes(1);
+		expect(editor.addToHistory).toHaveBeenCalledWith("$ print(1)");
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 
@@ -164,6 +178,8 @@ describe("InputController Python prompt prefix", () => {
 		await editor.onSubmit?.("$$ print(1)");
 
 		expect(handlePythonCommand).toHaveBeenCalledWith("print(1)", true);
+		expect(editor.addToHistory).toHaveBeenCalledTimes(1);
+		expect(editor.addToHistory).toHaveBeenCalledWith("$$ print(1)");
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 });

@@ -594,7 +594,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	ensureOnDisk: async publisher => settle(publisher, publisher.session.sessionManager.ensureOnDisk()),
 	getArtifactPath: (publisher, id) => publisher.session.sessionManager.getArtifactPath(id),
 	getArtifactContent: (publisher, id) => publisher.session.sessionManager.getArtifactContent(id),
-	resume: async publisher => settle(publisher, publisher.session.resume()),
+	resume: async (publisher, options) => settle(publisher, publisher.session.resume(options)),
 	retry: async publisher => settle(publisher, publisher.session.retry()),
 	abortRetry: publisher => {
 		publisher.session.abortRetry();
