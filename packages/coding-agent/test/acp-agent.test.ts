@@ -33,6 +33,7 @@ import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-ind
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -1046,6 +1047,52 @@ describe("ACP agent", () => {
 				}),
 			},
 		]);
+	});
+
+	it("shows a todo backend notice as its own message after the streaming answer, and keeps other session notices hidden", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("session not registered");
+
+		const answer = makeAssistantMessage("Hello there");
+		const emit = (event: AgentSessionEvent) => {
+			for (const listener of session.listeners()) listener(event);
+		};
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			const delta = (part: string) =>
+				emit({
+					type: "message_update",
+					message: answer,
+					assistantMessageEvent: { type: "text_delta", delta: part },
+				} as AgentSessionEvent);
+			delta("Hello");
+			emit({ type: "notice", level: "warning", message: "other", source: "extensions" });
+			emit({ type: "notice", level: "warning", message: "backend gone", source: TODO_BACKEND_NOTICE_SOURCE });
+			delta(" there");
+			emit({ type: "message_end", message: answer } as AgentSessionEvent);
+			session.sessionManager.appendMessage(answer);
+			emit({ type: "agent_end", messages: [answer] } as AgentSessionEvent);
+			session.isStreaming = false;
+			return true;
+		};
+
+		await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "Say hello" }] });
+
+		const texts = harness.updates
+			.filter(notification => notification.sessionId === created.sessionId)
+			.map(notification => notification.update)
+			.flatMap(update =>
+				update.sessionUpdate === "agent_message_chunk" && update.content.type === "text"
+					? [update.content.text]
+					: [],
+			);
+		expect(texts).toEqual(["Hello", " there", "Warning: backend gone"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
 	});
 
 	it("pushes config_option_update when thinking level changes internally", async () => {

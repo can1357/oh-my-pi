@@ -366,7 +366,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			// rehydration reads; without this the in-memory update is lost on the
 			// next resume/rewind/fork and stale todos trigger a false reminder.
 			const phases = committedTodoPhases(result);
-			if (phases) options.session.commitTodoPhases?.(phases);
+			if (phases && options.session.updateTodoPhases) {
+				// The call already went through `TodoTool.execute`, which updated the cache and reached any
+				// backend's `apply`. The identity update records the list as of its queue slot, so a `/todo`
+				// edit queued between the bridged write and this entry is not rolled back on reload.
+				await options.session.updateTodoPhases(current => current);
+			} else if (phases) options.session.commitTodoPhases?.(phases);
 		}
 		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
 		if (replies.length > 0) {

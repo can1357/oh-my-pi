@@ -30,6 +30,7 @@ import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgAsyncPrintWake } from "../tools/settings";
+import { TODO_BACKEND_NOTICE_SOURCE } from "../tools/todo-backend";
 
 /**
  * Options for print mode.
@@ -390,13 +391,15 @@ async function runPrintModeCore(
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
 				event.source === HINDSIGHT_NOTICE_SOURCE ||
-				event.source === SPOTLIGHT_NOTICE_SOURCE)
+				event.source === SPOTLIGHT_NOTICE_SOURCE ||
+				event.source === TODO_BACKEND_NOTICE_SOURCE)
 		) {
 			// Text mode renders no session notices, but an automatic sign-out must not stay
 			// hidden behind a sibling account that quietly answers the prompt, a run must
 			// say when it crossed its cost thresholds, a memory failure must not pass
-			// as an answer that used memories, and Spotlight must say when it lost its
-			// credential and fell back to unranked cuts.
+			// as an answer that used memories, Spotlight must say when it lost its
+			// credential and fell back to unranked cuts, and a todo backend that is not in
+			// use must not pass as one that mirrors the list.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying

@@ -92,6 +92,7 @@ import {
 	parseConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../../tools";
+import { NATIVE_TODO_BACKEND_ID } from "../../tools/todo-backend";
 import { AskTool } from "../../tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -326,6 +327,14 @@ export class SelectorController {
 		const menu = this.#claimMenu("settings");
 		getAvailableThemes()
 			.then(availableThemes => {
+				const todoBackendOptions = () => [
+					{ value: NATIVE_TODO_BACKEND_ID, label: "Native", description: "omp's built-in todo list" },
+					...(this.ctx.session.extensionRunner?.listTodoBackends() ?? []).map(backend => ({
+						value: backend.id,
+						label: backend.label,
+						description: backend.description,
+					})),
+				];
 				// Fullscreen settings editor on the alternate screen: the overlay
 				// enables mouse tracking (click/hover/wheel) for its lifetime and
 				// the transcript stays untouched underneath.
@@ -340,6 +349,7 @@ export class SelectorController {
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
 						availableThemes,
+						runtimeOptions: new Map([["todo.backend", todoBackendOptions]]),
 						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
 							(a, b) => a.localeCompare(b),
 						),

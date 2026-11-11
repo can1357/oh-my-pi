@@ -36,7 +36,7 @@ import {
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { editDiffString } from "@oh-my-pi/pi-natives";
-import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
@@ -56,6 +56,7 @@ import {
 } from "./tools/path-utils";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhasesUpdate } from "./tools/todo-backend";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -126,6 +127,8 @@ interface CursorExecBridgeOptions {
 	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Preferred over {@link commitTodoPhases} when present; see `ToolSession.updateTodoPhases`. */
+	updateTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
 	getTodoPhases?: () => TodoPhase[];
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
@@ -1100,7 +1103,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		error: string | null = null,
 		origin: "read" | "update" = "update",
 	): ToolResultMessage {
-		const commitPhases = this.options.commitTodoPhases;
+		const { commitTodoPhases: commitPhases, updateTodoPhases: updatePhases } = this.options;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
 		// Mirroring is gated on having both a snapshot and somewhere to put it.
@@ -1108,7 +1111,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// only on a matching `tool_execution_end`, so a refusal, a server error,
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
-		if (snapshot && commitPhases) {
+		const mapSnapshot = (snapshot: CursorTodoSnapshot, existing: TodoPhase[]): TodoPhase[] => {
 			const phaseByContent = new Map<string, string>();
 			for (const phase of existing) {
 				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
@@ -1134,10 +1137,21 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				grouped.delete(phase.name);
 			}
 			for (const [name, tasks] of grouped) next.push({ name, tasks });
+			return next;
+		};
+		if (snapshot && (updatePhases || commitPhases)) {
+			const next = mapSnapshot(snapshot, existing);
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				commitPhases(next);
+				// Stays synchronous: the result below is returned mid-parse. A queued update settles later
+				// and maps the snapshot again onto the list committed at its queue slot, so an earlier
+				// queued edit that renamed or regrouped phases survives.
+				if (updatePhases) {
+					updatePhases(current => mapSnapshot(snapshot, current)).catch((commitError: unknown) => {
+						logger.warn("Could not record the Cursor todo list", { error: String(commitError) });
+					});
+				} else commitPhases?.(next);
 				phases = next;
 			}
 		}

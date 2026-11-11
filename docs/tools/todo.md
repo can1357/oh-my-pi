@@ -121,6 +121,10 @@ The same file also exposes non-tool helpers used by `/todo`:
 - `phasesToMarkdown(...)` serializes phases as headings plus checklist items (`[ ]`, `[/]`, `[x]`, `[-]`, `[!]`). A blocked reason is preserved in a trailing `<!-- blocker: ... -->` comment.
 - `markdownToPhases(...)` parses that format, defaults orphan tasks into a `Todos` phase, also accepts `>` as `in_progress` and `~` as `abandoned`, restores blocked notes, and runs the same normalization step.
 
+### Todo backends
+
+In the main session, an extension-registered todo backend (`todo.backend`) mirrors every successful state-changing op. `TodoTool.execute(...)` runs compute → `backend.apply(op, params, next, signal)` → `setTodoPhases` inside `session.runTodoWrite(...)`, the per-session serial queue. `apply` runs before the commit, so a throw, the 30 s handler budget running out, or an abort returns an `isError` result and leaves the list unchanged; `view` and failed batches never call `apply`. `params` holds only keys the todo schema declares. Subagents (prewalk-armed ones included), `/tan` clones and sessions without extensions use native todos. See [Todo backends](../extensions.md#todo-backends-registertodobackend).
+
 ## Side Effects
 
 - Filesystem

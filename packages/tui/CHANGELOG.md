@@ -4,6 +4,7 @@
 
 ### Added
 
+- `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 - The context breakdown counts instruction files and skills from the system prompt as built, matching `/context`, and lists Instruction files as its own category ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Context Viewer adds an Instruction Files category and opens Skills like any other category; `ContextViewEntry.sourceMarkers` colors viewer-only source markers by category in previews and full content, and `ContextViewData.notices` lists snapshot caveats under the Overview legend ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 

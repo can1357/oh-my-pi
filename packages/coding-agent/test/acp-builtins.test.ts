@@ -25,6 +25,8 @@ import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/setti
 import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
+type FakeTodoPhase = { name: string; tasks: Array<{ content: string; status: string }> };
+
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
 	forcedToolChoice: string | undefined;
@@ -67,7 +69,9 @@ interface FakeAcpBuiltinSession {
 	setSlashCommands(commands: unknown[]): void;
 	refreshSkillsAndCommands(): Promise<void>;
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
-	commitTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
+	editTodoPhases(
+		update: (current: FakeTodoPhase[]) => FakeTodoPhase[] | undefined,
+	): Promise<FakeTodoPhase[] | undefined>;
 	refreshBaseSystemPrompt(): Promise<void>;
 	getHindsightSessionState(): undefined;
 	applyMemoryBackend(): Promise<void>;
@@ -162,9 +166,12 @@ function createRuntime() {
 		getTodoPhases() {
 			return this._todoPhases;
 		},
-		commitTodoPhases(phases) {
+		async editTodoPhases(update) {
+			const phases = update(this._todoPhases);
+			if (!phases) return undefined;
 			this._todoPhases = phases;
 			fakeSessionManager.appendCustomEntry("user_todo_edit", { phases });
+			return phases;
 		},
 		async refreshBaseSystemPrompt() {},
 		// Headless `/move` and `/wt` rebind memory for the destination project.

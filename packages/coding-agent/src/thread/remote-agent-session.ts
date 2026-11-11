@@ -38,6 +38,7 @@ import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/th
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhasesUpdate } from "../tools/todo-backend";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -679,10 +680,16 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#notify("setTodoPhases", toWireData(phases));
 	}
 
-	/** Same two steps as a home session: the optimistic entry and the mirror update reach the worker in order. */
-	commitTodoPhases(phases: TodoPhase[]): void {
+	/**
+	 * Worker-homed sessions are subagents, which never use a todo backend. The optimistic entry and
+	 * the mirror update reach the worker in order.
+	 */
+	commitTodoPhases(input: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		const phases = typeof input === "function" ? input(this.getTodoPhases()) : input;
+		if (phases === undefined) return Promise.resolve(undefined);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 		this.setTodoPhases(phases);
+		return Promise.resolve(phases);
 	}
 
 	/**

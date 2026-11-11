@@ -76,6 +76,7 @@ import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
+import type { TodoPhasesUpdate, TodoWrite } from "./todo-backend";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
@@ -497,6 +498,12 @@ export interface ToolSession {
 	 * use this so branch rehydration agrees with the in-memory list.
 	 */
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	/**
+	 * Like {@link commitTodoPhases}, with the list computed from the one committed when the write
+	 * runs, behind any todo write still queued for a backend. Preferred when the host provides it.
+	 */
+	updateTodoPhases?: (update: TodoPhasesUpdate) => Promise<TodoPhase[] | undefined>;
+	runTodoWrite?: <T>(write: TodoWrite<T>, signal?: AbortSignal) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**

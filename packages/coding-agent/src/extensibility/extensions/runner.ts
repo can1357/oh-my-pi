@@ -40,6 +40,7 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import type { TodoBackend, TodoBackendDefinition } from "../../tools/todo-backend";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -882,6 +883,22 @@ export class ExtensionRunner {
 	 */
 	get cwd(): string {
 		return this.sessionManager.getCwd();
+	}
+
+	/**
+	 * A suspended extension's backends are left out until it resumes, like its tools and commands. An
+	 * id registered twice lists its first enabled registration.
+	 */
+	listTodoBackends(): TodoBackendDefinition[] {
+		const byId = new Map<string, TodoBackendDefinition>();
+		for (const { definition, sourceId } of this.runtime.todoBackends ?? []) {
+			if (!byId.has(definition.id) && !this.isExtensionSuspended(sourceId)) byId.set(definition.id, definition);
+		}
+		return [...byId.values()];
+	}
+
+	getTodoBackend(id: string): TodoBackendDefinition | undefined {
+		return this.listTodoBackends().find(definition => definition.id === id);
 	}
 
 	/**
@@ -1759,6 +1776,25 @@ export class ExtensionRunner {
 	 */
 	runScoped<T>(fn: () => T): T {
 		return withActiveSettings(this.settings, fn);
+	}
+
+	/**
+	 * A backend that never settles must not hold the session's todo queue: the call rejects at once
+	 * when the budget runs out or `signal` aborts, without waiting for `work`.
+	 */
+	async runTodoBackendCall<T>(work: (signal: AbortSignal) => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+		const timeoutMs = extensionHandlerTimeoutMs;
+		const result = await this.runScoped(() => raceHandlerWithTimeout(work, timeoutMs, signal));
+		if (result === EXTENSION_HANDLER_TIMEOUT) throw new Error(`did not respond within ${timeoutMs}ms`);
+		if (result === EXTENSION_HANDLER_ABORTED) {
+			throw signal?.reason ?? new DOMException("This operation was aborted", "AbortError");
+		}
+		return result;
+	}
+
+	createTodoBackend(definition: TodoBackendDefinition): Promise<TodoBackend> {
+		const ctx = this.createContext();
+		return this.runTodoBackendCall(handlerSignal => definition.create(createHandlerContext(ctx, handlerSignal)));
 	}
 
 	/**

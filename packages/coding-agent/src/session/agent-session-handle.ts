@@ -14,6 +14,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhasesUpdate } from "../tools/todo-backend";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -364,7 +365,7 @@ export interface AgentViewSession extends AgentSessionHandle {
 	/** Replace the todo phases of the session. */
 	setTodoPhases(phases: TodoPhase[]): void;
 	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
-	commitTodoPhases(phases: TodoPhase[]): void;
+	commitTodoPhases(phases: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined>;
 	/** Registered tool by name. */
 	getToolByName(name: string): AgentTool | undefined;
 	/** Whether a built-in tool with this name is registered. */

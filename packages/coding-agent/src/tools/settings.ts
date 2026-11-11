@@ -439,6 +439,20 @@ export const cfgTodoEager = register({
 	},
 });
 
+export const cfgTodoBackend = register({
+	id: "todo.backend",
+	type: "string",
+	default: "native",
+	ui: {
+		tab: "tools",
+		group: "Todos",
+		label: "Todo Backend",
+		description:
+			"Where the session todo list is mirrored. Native keeps omp's built-in list; extensions add choices. Takes effect in the current session",
+		options: "runtime",
+	},
+});
+
 export const cfgTasksTodoClearDelay = register({
 	id: "tasks.todoClearDelay",
 	type: "number",

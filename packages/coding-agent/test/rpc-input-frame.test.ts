@@ -334,7 +334,10 @@ describe("RpcInputDispatcher", () => {
 		expect((outputs[1] as RpcResponse).command).toBe("get_state");
 	});
 
-	test("a steer_subagent waiting for the subagent to accept does not block a later abort", async () => {
+	test.each([
+		{ type: "steer_subagent", subagentId: "SubagentA", message: "go" },
+		{ type: "set_todos", phases: [] },
+	] as const)("a $type waiting on its target does not block a later abort", async slow => {
 		const accepted = Promise.withResolvers<void>();
 		const started: string[] = [];
 		const { deps, outputs } = makeDeps(async command => {
@@ -343,21 +346,51 @@ describe("RpcInputDispatcher", () => {
 				await accepted.promise;
 				return { id: command.id, type: "response", command: "steer_subagent", success: true };
 			}
+			if (command.type === "set_todos") {
+				await accepted.promise;
+				return { id: command.id, type: "response", command: "set_todos", success: true, data: { todoPhases: [] } };
+			}
 			if (command.type === "abort") return { id: command.id, type: "response", command: "abort", success: true };
 			throw new Error(`unexpected command type: ${command.type}`);
 		});
+		deps.todoWritesQueued = () => true;
 		const dispatcher = new RpcInputDispatcher({ deps });
 
-		dispatcher.dispatch({ id: "steer", type: "steer_subagent", subagentId: "SubagentA", message: "go" });
+		dispatcher.dispatch({ ...slow, id: "slow" });
 		dispatcher.dispatch({ id: "abort", type: "abort" });
 		await flushMicrotasks();
 
-		expect(started).toEqual(["steer_subagent", "abort"]);
+		expect(started).toEqual([slow.type, "abort"]);
 		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort"]);
 
 		accepted.resolve();
 		await flushMicrotasks();
-		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort", "steer"]);
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["abort", "slow"]);
+	});
+
+	test("a set_todos with native todos finishes before a later command starts", async () => {
+		const release = Promise.withResolvers<void>();
+		const started: string[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type === "set_todos") {
+				await release.promise;
+				return { id: command.id, type: "response", command: "set_todos", success: true, data: { todoPhases: [] } };
+			}
+			if (command.type === "abort") return { id: command.id, type: "response", command: "abort", success: true };
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		deps.todoWritesQueued = () => false;
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "todos", type: "set_todos", phases: [] });
+		dispatcher.dispatch({ id: "abort", type: "abort" });
+		await flushMicrotasks();
+		expect(started).toEqual(["set_todos"]);
+
+		release.resolve();
+		await flushMicrotasks();
+		expect(outputs.map(frame => (frame as RpcResponse).id)).toEqual(["todos", "abort"]);
 	});
 
 	test("a pending predict_word does not hold back later commands", async () => {

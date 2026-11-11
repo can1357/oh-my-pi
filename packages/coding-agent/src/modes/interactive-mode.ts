@@ -630,6 +630,22 @@ const HUD_NOTE_SUP_DIGITS: Record<string, string> = {
 	"9": "\u2079",
 };
 
+function completeFinishedSubagentTodos(phases: TodoPhase[], completedDescs: string[]): TodoPhase[] | undefined {
+	let mutated = false;
+	const next: TodoPhase[] = phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => {
+			if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") return task;
+			if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
+			mutated = true;
+			// Drop any blocker note along with the blocked status — the wait the
+			// note described is over.
+			return { content: task.content, status: "completed" as const };
+		}),
+	}));
+	return mutated ? next : undefined;
+}
+
 function formatHudNoteMarker(count: number): string {
 	if (count <= 0) return "";
 	const sub = String(count)
@@ -5162,32 +5178,41 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (completedDescs.length === 0) return;
 
-		let mutated = false;
-		const next: TodoPhase[] = this.todoPhases.map(phase => ({
-			name: phase.name,
-			tasks: phase.tasks.map(task => {
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
-					return task;
-				}
-				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
-				mutated = true;
-				// Drop any blocker note along with the blocked status — the wait the
-				// note described is over.
-				return { content: task.content, status: "completed" as const };
-			}),
-		}));
-		if (!mutated) return;
-		// Persist into the session that owns the snapshot we derived `next` from,
+		// The HUD snapshot only gates whether a commit is worth queueing; the committed list is
+		// recomputed inside the queued updater so a `todo` write queued ahead of it is never overwritten.
+		if (!completeFinishedSubagentTodos(this.todoPhases, completedDescs)) return;
+		// Persist into the session that owns the HUD snapshot checked above,
 		// not `viewSession`: the two diverge mid focus-attach, and writing to the
 		// destination there would clobber its canonical plan. Leaving the owner
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.commitTodoPhases(next);
-		this.todoPhases = next;
-		this.#syncTodoHudState(owner);
-		this.#renderTodoList();
-		this.ui.requestRender();
+		const show = (committed: TodoPhase[]): void => {
+			this.todoPhases = committed;
+			this.#syncTodoHudState(owner);
+			this.#renderTodoList();
+			this.ui.requestRender();
+		};
+		let ran = false;
+		let next: TodoPhase[] | undefined;
+		const committing = owner.commitTodoPhases(current => {
+			ran = true;
+			next = completeFinishedSubagentTodos(current, completedDescs);
+			return next;
+		});
+		// Native todos commit before `commitTodoPhases` returns (a failure throws), so the HUD updates in the same tick.
+		if (ran) {
+			if (next) show(next);
+			return;
+		}
+		committing.then(
+			committed => {
+				if (committed && (this.#todoPhasesOwner ?? this.session) === owner) show(committed);
+			},
+			(error: unknown) => {
+				logger.warn("Could not record subagent todo completions", { error: String(error) });
+			},
+		);
 	}
 
 	#cancelTodoAutoClearTimer(): void {

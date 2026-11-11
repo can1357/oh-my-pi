@@ -379,6 +379,7 @@ export interface RpcInputFrameDeps {
 	output: RpcOutput;
 	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
+	todoWritesQueued?: () => boolean;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
 	onHostToolResult: (frame: RpcHostToolResult) => void;
 	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
@@ -455,12 +456,15 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>([
  * backgrounded too, so a cold prediction engine never stalls the command queue
  * behind a keystroke. `live_start`, `live_connect` and `dictation_start` respond only once
  * connected or recording, so they are backgrounded and their stop commands can cancel them.
+ * With an extension todo backend selected, `set_todos` waits for its `replace` (and any todo
+ * write queued before it), so it is backgrounded then: an `abort` sent after it reaches the
+ * pending `todo` call at once. With native todos it stays inline.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
+ *   background (`bash`, `predict_word`, `live_start`, `live_connect`, `dictation_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`, and `set_todos` with a todo backend). Otherwise a promise that
  *   resolves once the response for the command has been emitted via `output`.
  *   Errors from `handleCommand` on a command dispatched inline propagate; the
  *   caller is expected to wrap them.
@@ -475,7 +479,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 
 	// `bash` can run for a long time, and `prompt`'s response is held until
 	// admission (see PromptOptions.onPromptAdmitted), which can likewise span
-	// real wall-clock time; `steer_subagent` waits for the subagent to accept.
+	// real wall-clock time; `steer_subagent` waits for the subagent to accept,
+	// and `set_todos` for an extension todo backend's `replace`.
 	// Dispatch them in the background so a subsequent frame — `abort_bash` for
 	// a running `bash`, or `abort`/`steer`/`follow_up`/`get_state` for an
 	// admitting `prompt` — can be read and handled without waiting for the
@@ -489,7 +494,8 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 		command.type === "steer" ||
 		command.type === "dictation_start" ||
 		command.type === "follow_up" ||
-		command.type === "steer_subagent"
+		command.type === "steer_subagent" ||
+		(command.type === "set_todos" && deps.todoWritesQueued?.() === true)
 	) {
 		const task = (async () => {
 			try {
@@ -577,7 +583,7 @@ export class RpcUserInputGate {
 	}
 }
 
-/** Starts prompts, steers, follow-ups and `steer_subagent` after earlier ordinary commands, without
+/** Starts prompts, steers, follow-ups, `steer_subagent` and a backend's `set_todos` after earlier ordinary commands, without
  * awaiting admission. Control frames, `bash` and `predict_word` dispatch immediately (see
  * dispatchRpcInputFrame). `acceptInput` runs synchronously in {@link dispatch}, before the
  * handler is queued, so an abort can invalidate a frame that has not started yet. */
@@ -605,8 +611,8 @@ export class RpcInputDispatcher {
 			const command = parsed as RpcCommand;
 			this.#acceptInput?.(command);
 			// Bash and predict_word retain their immediate side channel. Prompts,
-			// steers, follow-ups and steer_subagent start through the serial tail, but
-			// dispatchRpcInputFrame backgrounds their admission.
+			// steers, follow-ups, steer_subagent and a backend's set_todos start through
+			// the serial tail, but dispatchRpcInputFrame backgrounds their completion.
 			if (BACKGROUND_COMMANDS.has(command.type)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
@@ -2362,9 +2368,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				session.commitTodoPhases(command.phases);
-				const phases = session.getTodoPhases();
-				return success(id, "set_todos", { todoPhases: phases });
+				const committed = await session.editTodoPhases(() => command.phases);
+				// The committed list, not a later read: a write queued behind this one can land before this handler resumes.
+				return success(id, "set_todos", { todoPhases: committed ?? session.getTodoPhases() });
 			}
 
 			case "set_host_tools": {
@@ -2931,6 +2937,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		output,
 		errorResponse: error,
 		trackBackgroundTask: task => shutdownCoordinator.track(task),
+		todoWritesQueued: () => session.todoWritesQueued,
 		pendingExtensionRequests,
 		onHostToolResult: frame => hostToolBridge.handleResult(frame),
 		onHostToolUpdate: frame => hostToolBridge.handleUpdate(frame),

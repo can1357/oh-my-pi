@@ -23,6 +23,18 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		ui: { tab: "appearance", group: "Theme", label: "Color-blind mode", description: "Blue additions" },
 	},
 	{
+		path: "todo.backend",
+		type: "string",
+		defaultValue: "native",
+		ui: {
+			tab: "appearance",
+			group: "Theme",
+			label: "Todo backend",
+			description: "Where todos live",
+			options: "runtime",
+		},
+	},
+	{
 		path: "display.risky",
 		type: "boolean",
 		defaultValue: false,
@@ -84,6 +96,11 @@ interface Harness {
 	previews: string[];
 }
 
+const BACKENDS = () => [
+	{ value: "native", label: "Native" },
+	{ value: "ext", label: "Ext\x1b[31m Backend\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
+];
+
 function harness(initial: Record<string, unknown> = {}): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
@@ -120,6 +137,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			plugins,
 			availableThinkingLevels: [],
 			thinkingLevel: undefined,
+			runtimeOptions: new Map([["todo.backend", BACKENDS]]),
 			availableThemes: ["dark", "light", "titanium"],
 			providers: [],
 		},
@@ -194,6 +212,22 @@ describe("settings as a native prefs page", () => {
 		});
 		expect(row(props, "display.risky").warning).toBe("Can get you flagged");
 		expect(props.focus).toBe("theme.dark");
+	});
+
+	it("selects runtime choices by value, strips control sequences from their text and opens on the stored value", () => {
+		const { selector } = harness({ "todo.backend": "ext" });
+		const control = row(prefs(selector).props, "todo.backend").control;
+		if (control.k !== "choice") throw new Error(`expected a choice control, got ${control.k}`);
+		expect(control.value).toBe("ext");
+		const ext = control.options.find(option => option.value === "ext");
+		if (!ext) throw new Error("expected the ext option");
+		for (const text of [ext.label, ext.detail]) {
+			expect(text).toBeString();
+			expect(text).not.toMatch(/[\x00-\x1f\x7f]/);
+		}
+		expect(ext.detail).toBe("line one line two");
+		send(selector, { type: "activate", key: "", item: "todo.backend" });
+		expect(prefs(selector).props.editing).toEqual({ row: "todo.backend", option: "ext" });
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {

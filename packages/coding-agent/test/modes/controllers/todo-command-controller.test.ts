@@ -6,6 +6,7 @@ import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controlle
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { TodoPhasesUpdate } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 
 function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext {
 	return {
@@ -14,7 +15,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		session: {
 			getTodoPhases: () => phases,
-			commitTodoPhases: vi.fn(),
+			editTodoPhases: vi.fn(async (update: TodoPhasesUpdate) => update(phases)),
 		},
 		sessionManager: {
 			appendMessage: vi.fn(),
@@ -74,7 +75,6 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		const expected: TodoPhase[] = [{ name: "Imported", tasks: [{ content: "From cwd", status: "in_progress" }] }];
-		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
 		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
@@ -94,7 +94,7 @@ describe("TodoCommandController", () => {
 		const expected: TodoPhase[] = [
 			{ name: "Quoted", tasks: [{ content: "From quoted path", status: "in_progress" }] },
 		];
-		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
+		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
@@ -109,7 +109,7 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining(`Could not parse ${target}:`));
-		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.editTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
@@ -122,7 +122,7 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to read todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
-		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.editTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
