@@ -1019,7 +1019,9 @@ mod foreground {
 		}
 
 		fn run(mut self, operation: impl FnOnce(HWND) -> CoreResult<()>) -> CoreResult<()> {
-			let result = control::check().and_then(|()| operation(self.target));
+			let result = control::check()
+				.and_then(|()| ensure_foreground(self.target))
+				.and_then(|()| operation(self.target));
 			// Preserve the target's consumption window after any delivery, even
 			// a partial one; a cancel during it leaves sent input reported sent.
 			control::settle(self.settle);
@@ -1112,13 +1114,20 @@ mod foreground {
 	/// newly opened sibling/modal windows never become silent input targets.
 	fn send_to(target: HWND, events: &[INPUT]) -> CoreResult<()> {
 		control::check()?;
+		ensure_foreground(target)?;
+		send(events)
+	}
+
+	/// Check before activation-capable callbacks as well as input delivery:
+	/// element SetFocus must not undo a user switch during activation settle.
+	fn ensure_foreground(target: HWND) -> CoreResult<()> {
 		// SAFETY: GetForegroundWindow has no preconditions.
 		if unsafe { GetForegroundWindow() } != target {
 			return Err(DesktopError::input_failed(
 				"the exact target lost foreground; stopped sending takeover input",
 			));
 		}
-		send(events)
+		Ok(())
 	}
 
 	fn send(events: &[INPUT]) -> CoreResult<()> {
@@ -1591,6 +1600,28 @@ mod foreground {
 	#[cfg(test)]
 	mod tests {
 		use super::*;
+
+		#[test]
+		fn foreground_loss_skips_activation_capable_callback() {
+			use std::cell::Cell;
+
+			use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+			// SAFETY: neither foreground query has preconditions.
+			let previous = unsafe { GetForegroundWindow() };
+			let target = unsafe { GetDesktopWindow() };
+			assert_ne!(previous, target);
+			let called = Cell::new(false);
+			let guard = ForegroundGuard { previous, target, settle: Duration::ZERO, armed: true };
+			let result = guard.run(|_| {
+				called.set(true);
+				Ok(())
+			});
+			assert!(result.is_err());
+			assert!(!called.get(), "focus callbacks must not undo the user's window switch");
+			// SAFETY: GetForegroundWindow has no preconditions.
+			assert_eq!(unsafe { GetForegroundWindow() }, previous);
+		}
 
 		#[test]
 		fn cancellation_stops_packets_but_allows_cleanup_and_a_later_operation() {
