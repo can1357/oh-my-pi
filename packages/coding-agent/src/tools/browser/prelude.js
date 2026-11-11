@@ -36,52 +36,59 @@
 	// through util.inspect's custom hook; the object, `.elements` and every field stay as they are for code.
 	// Nested in another value (a smaller `depth` than the top level's), the same lines sit inside brackets, so
 	// the outer value's keys stay apart. An unlimited `depth` (`null`, `Infinity`) is the same at every level, so
-	// the bracketed form is used there too. With `elements` replaced by a non-array it prints as plain inspect.
-	// The top-level form ends with a newline, so a further `print` argument starts a line of its own instead
-	// of reading as fields of the last element.
+	// the bracketed form is used there too. The top-level form ends with a newline, so a further `print`
+	// argument starts a line of its own instead of reading as fields of the last element.
+	//
+	// The short form is only for an observation whose objects are all as `observe()` returned them: `snapshot`
+	// records each one's prototype and own properties, and `untouched` compares those, reading nothing but the
+	// recorded objects' own descriptors. Anything Eval code changed (a field, a getter, a Proxy, a prototype) is
+	// therefore never read or run here: that observation goes to plain inspect, with no cut at 100 items.
 	const inspectCustom = Symbol.for("nodejs.util.inspect.custom");
 	const knownElementKeys = new Set(["id", "role", "name", "value", "description", "keyshortcuts", "states"]);
-	const showField = (value, inspect) => {
-		if (typeof value === "string") return JSON.stringify(value);
-		// Native inspection preserves cycles and accessors without running nested getters or toJSON.
-		return inspect(value, {
-			customInspect: false,
-			getters: false,
-			depth: null,
-			compact: true,
-			breakLength: Infinity,
-			maxArrayLength: null,
-			maxStringLength: null,
-		});
+	const snapshot = root => {
+		const records = [];
+		const seen = new Set();
+		const visit = value => {
+			if (value === null || typeof value !== "object" || seen.has(value)) return;
+			seen.add(value);
+			const keys = Reflect.ownKeys(value);
+			const properties = keys.map(key => Object.getOwnPropertyDescriptor(value, key));
+			records.push({ object: value, prototype: Object.getPrototypeOf(value), keys, properties });
+			for (const property of properties) visit(property.value);
+		};
+		visit(root);
+		return records;
 	};
-	const showProperty = (descriptor, inspect) => {
-		if ("value" in descriptor) return descriptor.value === undefined ? undefined : showField(descriptor.value, inspect);
-		return descriptor.get ? (descriptor.set ? "[Getter/Setter]" : "[Getter]") : "[Setter]";
+	const untouched = records => {
+		for (const { object, prototype, keys, properties } of records) {
+			const now = Reflect.ownKeys(object);
+			if (Object.getPrototypeOf(object) !== prototype || now.length !== keys.length) return false;
+			for (let at = 0; at < keys.length; at++) {
+				const was = properties[at];
+				const is = now[at] === keys[at] && Object.getOwnPropertyDescriptor(object, keys[at]);
+				if (!is || !("value" in is) || !Object.is(is.value, was.value)) return false;
+				if (is.enumerable !== was.enumerable) return false;
+			}
+		}
+		return true;
 	};
-	const printedAtTop = (depth, options) => Number.isFinite(depth) && depth === options.depth;
-	const elementLine = (element, inspect) => {
-		if (element === null || typeof element !== "object") return showField(element, inspect);
-		const properties = Object.getOwnPropertyDescriptors(element);
-		const id = properties.id;
-		const role = properties.role;
-		const shownId = id ? (showProperty(id, inspect) ?? "undefined") : "undefined";
-		const shownRole =
-			typeof role?.value === "string" && /^\S+$/.test(role.value)
-				? role.value
-				: role ? (showProperty(role, inspect) ?? "undefined") : "undefined";
-		let line = `[${shownId}] ${shownRole}`;
+	const plain = { depth: null, compact: true, breakLength: Infinity, maxArrayLength: null, maxStringLength: null };
+	const showField = (value, inspect) =>
+		typeof value === "string" ? JSON.stringify(value) : inspect(value, { ...plain, customInspect: false });
+	const elementLine = (entry, inspect) => {
+		if (entry === null || typeof entry !== "object") return showField(entry, inspect);
+		// Own fields only: one this element lacks is not looked up on a prototype Eval code can reach.
+		const element = Object.assign(Object.create(null), entry);
+		const role = element.role;
+		let line = `[${showField(element.id, inspect)}] ${typeof role === "string" && /^\S+$/.test(role) ? role : showField(role, inspect)}`;
 		for (const key of ["name", "value", "description", "keyshortcuts"]) {
-			const shown = properties[key] ? showProperty(properties[key], inspect) : undefined;
-			if (shown !== undefined) line += key === "name" ? ` ${shown}` : ` ${key}=${shown}`;
+			if (element[key] !== undefined)
+				line += ` ${key === "name" ? "" : `${key}=`}${showField(element[key], inspect)}`;
 		}
-		for (const [key, descriptor] of Object.entries(properties)) {
-			if (knownElementKeys.has(key) || !descriptor.enumerable) continue;
-			const shown = showProperty(descriptor, inspect);
-			if (shown !== undefined) line += ` ${key}=${shown}`;
+		for (const [key, value] of Object.entries(element)) {
+			if (!knownElementKeys.has(key) && value !== undefined) line += ` ${key}=${showField(value, inspect)}`;
 		}
-		const states = properties.states;
-		if (states && !("value" in states)) line += ` states=${showProperty(states, inspect)}`;
-		else if (Array.isArray(states?.value) && states.value.length > 0) line += ` ${states.value.join(" ")}`;
+		if (Array.isArray(element.states) && element.states.length > 0) line += ` ${element.states.join(" ")}`;
 		return line;
 	};
 	const withPrintForm = observation => {
@@ -89,33 +96,33 @@
 			return observation;
 		}
 		const elements = observation.elements;
-		Object.defineProperty(elements, inspectCustom, {
-			value: (depth, options, inspect) => {
-				if (elements.length === 0) return "[]";
-				const lines = elements.map(element => elementLine(element, inspect));
-				return printedAtTop(depth, options)
-					? `${lines.join("\n")}\n`
-					: ["[", ...lines.map(line => `  ${line}`), "]"].join("\n");
-			},
+		let records = [];
+		const printAs = (target, open, close, rows) =>
+			Object.defineProperty(target, inspectCustom, {
+				value(depth, options, inspect) {
+					// Reached through another object (inherited, or copied onto it): that object prints itself.
+					if (this !== target) return this;
+					if (!untouched(records)) {
+						return inspect(target, { ...options, depth, customInspect: false, maxArrayLength: null });
+					}
+					const lines = rows(inspect);
+					if (lines.length === 0) return `${open}${close}`;
+					return Number.isFinite(depth) && depth === options.depth
+						? `${lines.join("\n")}\n`
+						: [open, ...lines.map(line => `  ${line}`), close].join("\n");
+				},
+			});
+		printAs(elements, "[", "]", inspect => elements.map(element => elementLine(element, inspect)));
+		printAs(observation, "Observation {", "}", inspect => {
+			const lines = [];
+			for (const [key, value] of Object.entries(observation)) {
+				if (key !== "elements" && value !== undefined) lines.push(`${key}: ${showField(value, inspect)}`);
+			}
+			lines.push(`elements (${elements.length}; tab.id(n) acts on [n]):`);
+			for (const element of elements) lines.push(elementLine(element, inspect));
+			return lines;
 		});
-		Object.defineProperty(observation, inspectCustom, {
-			value: (depth, options, inspect) => {
-				const descriptor = Object.getOwnPropertyDescriptor(observation, "elements");
-				if (!descriptor || !("value" in descriptor) || !Array.isArray(descriptor.value)) return observation;
-				const currentElements = descriptor.value;
-				const lines = [];
-				for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(observation))) {
-					if (key === "elements" || !descriptor.enumerable) continue;
-					const shown = showProperty(descriptor, inspect);
-					if (shown !== undefined) lines.push(`${key}: ${shown}`);
-				}
-				lines.push(`elements (${currentElements.length}; tab.id(n) acts on [n]):`);
-				for (const element of currentElements) lines.push(elementLine(element, inspect));
-				return printedAtTop(depth, options)
-					? `${lines.join("\n")}\n`
-					: ["Observation {", ...lines.map(line => `  ${line}`), "}"].join("\n");
-			},
-		});
+		records = snapshot(observation);
 		return observation;
 	};
 	const callValue = async (name, chain) => {

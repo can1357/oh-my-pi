@@ -399,56 +399,54 @@ describe("browser facade in real Eval runtimes", () => {
 		);
 	});
 
+	const ran = '{ enumerable: true, configurable: true, get() { globalThis.ran++; throw new Error("ran"); } }';
 	it.each([
-		["observation BigInt", "o.extra = 1n", "extra: 1n"],
-		["observation cycle", "o.self = o", "[Circular"],
-		["element BigInt", "o.elements[0].extra = 1n", "extra=1n"],
-		["element cycle", "o.elements[0].self = o.elements[0]", "[Circular"],
-		["throwing toJSON", 'o.extra = { toJSON() { throw new Error("not JSON"); } }', "extra:"],
+		["annotation", "o.elements[0].extra = 1n", "extra: 1n"],
+		["cycle", "o.self = o", "[Circular"],
+		["getter annotation", `Object.defineProperty(o, "extra", ${ran})`, "extra: [Getter]"],
+		["getter field", `Object.defineProperty(o.elements[0], "name", ${ran})`, "name: [Getter]"],
+		["getter elements", `Object.defineProperty(o, "elements", ${ran})`, "elements: [Getter]"],
+		["Symbol state", 'o.elements[0].states.push(Symbol("busy"))', "Symbol(busy)"],
+		["getter slot", `Object.defineProperty(o.elements, 0, ${ran})`, "[Getter]"],
 		[
-			"observation getter",
-			'Object.defineProperty(o, "extra", { enumerable: true, get() { throw new Error("getter ran"); } })',
-			"extra: [Getter]",
+			"Proxy element",
+			"o.elements[0] = new Proxy({}, { ownKeys() { globalThis.ran++; throw new Error('ran'); } })",
+			"id: 150",
 		],
+		["assigned field", 'o.elements[0].name = "Renamed"', "name: 'Renamed'"],
 		[
-			"element getter",
-			'Object.defineProperty(o.elements[0], "extra", { enumerable: true, get() { throw new Error("getter ran"); } })',
-			"extra=[Getter]",
+			"swapped prototype",
+			"Object.setPrototypeOf(o.elements[0].states, { join() { globalThis.ran++; throw new Error('ran'); } })",
+			"id: 150",
 		],
-		...["id", "role", "name", "value", "description", "keyshortcuts", "states"].map(key => [
-			`element ${key} getter`,
-			`Object.defineProperty(o.elements[0], "${key}", { enumerable: true, get() { throw new Error("getter ran"); } })`,
-			"[Getter]",
-		]),
-		[
-			"observation elements getter",
-			'Object.defineProperty(o, "elements", { enumerable: true, get() { throw new Error("getter ran"); } })',
-			"elements: [Getter]",
-		],
-		[
-			"nested observation getter",
-			"o.extra = { get value() { globalThis.annotationHits++; return 1; } }",
-			"extra: { value: [Getter] }",
-		],
-		[
-			"nested element getter",
-			"o.elements[0].extra = { get value() { globalThis.annotationHits++; return 1; } }",
-			"extra={ value: [Getter] }",
-		],
-	])("prints non-JSON annotations: %s", async (_name, annotation, expected) => {
-		let definitions: readonly EvalPreludeDefinition[] = [];
-		const session = makeSession(() => definitions);
-		definitions = [recorderDefinition(session, [])];
-		// Nested cases isolate this custom hook from Eval's separate JSON-view serialization.
-		const display = _name.startsWith("nested ") ? 'value => print(require("node:util").inspect(value))' : "print";
-		const result = await executeJs(
-			`globalThis.annotationHits = 0; const tab = await browser.open(); const o = await tab.observe(); ${annotation}; const display = ${display}; display(o); display(Object.getOwnPropertyDescriptor(o, "elements").value); print("getter hits:", globalThis.annotationHits);`,
-			{ cwd: process.cwd(), sessionId: `browser-facade-annotation-${crypto.randomUUID()}`, session },
-		);
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain(expected);
-		expect(result.output).toContain("getter hits: 0");
-	});
+		["hidden field", 'Object.defineProperty(o.elements[0], "id", { enumerable: false })', "id: 150"],
+	])(
+		"prints an edited observation through plain inspect, whole, running none of its code: %s",
+		async (_name, edit, expected) => {
+			let definitions: readonly EvalPreludeDefinition[] = [];
+			const session = makeSession(() => definitions);
+			const elements = Array.from({ length: 150 }, (_, index) => ({ id: index + 1, role: "button", states: [] }));
+			definitions = [
+				{
+					...createBrowserPrelude(session),
+					invoke: async parameters => ({
+						content: [],
+						details:
+							field(parameters, "action") === "open" ? { name: "edited" } : { value: { url: "u", elements } },
+					}),
+				},
+			];
+			// util.inspect is the call under test; `print` adds its own JSON view, which reads the value separately.
+			const result = await executeJs(
+				`globalThis.ran = 0; const { inspect } = require("node:util"); const tab = await browser.open({ name: "edited" }); const o = await tab.observe(); ${edit}; const text = inspect(o, { depth: 6, breakLength: 120 }); print(text); print(inspect(Object.getOwnPropertyDescriptor(o, "elements").value ?? null, { depth: 6 })); print("ids:", text.match(/\\bid: \\d+/g)?.length ?? 0, "ran:", globalThis.ran);`,
+				{ cwd: process.cwd(), sessionId: `browser-facade-edited-${crypto.randomUUID()}`, session },
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain(expected);
+			expect(result.output).not.toContain("more items");
+			expect(result.output).toMatch(_name === "getter elements" ? /ids: 0 ran: 0/ : /ids: 1(49|50) ran: 0/);
+		},
+	);
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
 		const calls: unknown[] = [];
