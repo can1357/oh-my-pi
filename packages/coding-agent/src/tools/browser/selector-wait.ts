@@ -1,0 +1,52 @@
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { untilAborted } from "@oh-my-pi/pi-utils";
+import type { ElementHandle, Frame, Page } from "puppeteer-core";
+
+export interface SelectorWaitOptions {
+	timeout?: number;
+	state?: "attached" | "detached" | "visible" | "hidden";
+	visible?: boolean;
+	hidden?: boolean;
+}
+
+const FORMS =
+	'waitForSelector() accepts { timeout?: non-negative finite number, state?: "attached" | "detached" | "visible" | "hidden", visible?: boolean, hidden?: boolean }';
+
+/** Validate before starting a wait; never silently discard a misspelled option. */
+export function selectorWaitOptions(options: unknown): SelectorWaitOptions {
+	if (options === undefined) return {};
+	if (!options || typeof options !== "object" || Array.isArray(options)) throw new ToolError(FORMS);
+	const unknown = Object.keys(options).filter(key => !["timeout", "state", "visible", "hidden"].includes(key));
+	if (unknown.length) throw new ToolError(`waitForSelector(): unknown option(s): ${unknown.join(", ")}. ${FORMS}`);
+	const opts = options as SelectorWaitOptions;
+	if (
+		(opts.timeout !== undefined &&
+			(typeof opts.timeout !== "number" || !Number.isFinite(opts.timeout) || opts.timeout < 0)) ||
+		(opts.state !== undefined && !["attached", "detached", "visible", "hidden"].includes(opts.state)) ||
+		(opts.visible !== undefined && typeof opts.visible !== "boolean") ||
+		(opts.hidden !== undefined && typeof opts.hidden !== "boolean")
+	)
+		throw new ToolError(FORMS);
+	if (opts.state !== undefined) {
+		const visible = opts.state === "visible";
+		const hidden = opts.state === "hidden";
+		if (
+			(opts.visible !== undefined && opts.visible !== visible) ||
+			(opts.hidden !== undefined && opts.hidden !== hidden)
+		) {
+			throw new ToolError(`waitForSelector(): state conflicts with visible/hidden. ${FORMS}`);
+		}
+		return { timeout: opts.timeout, state: opts.state, visible, hidden };
+	}
+	return opts;
+}
+
+/** Puppeteer's hidden wait also accepts a present invisible node; detached must require absence. */
+export async function waitForDetached(root: Page | Frame, selector: string, signal: AbortSignal): Promise<null> {
+	while (true) {
+		const handle: ElementHandle | null = await untilAborted(signal, () => root.$(selector));
+		if (!handle) return null;
+		await handle.dispose();
+		await untilAborted(signal, () => Bun.sleep(100));
+	}
+}

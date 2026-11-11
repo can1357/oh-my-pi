@@ -23,6 +23,15 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 				surfaceId: "page-text",
 			});
 			await page.setContent("<p>Hello <b>page</b></p>");
+			expect(await tab.waitForSelector("#gone", { state: "hidden" })).toBeNull();
+			expect(await tab.waitForSelector("#gone", { state: "detached" })).toBeNull();
+			await page.setContent('<div id="hidden" style="display:none">secret</div><div id="shown">shown</div>');
+			expect(await tab.waitForSelector("#hidden", { state: "hidden" })).toBeNull();
+			expect(await tab.waitForSelector("#shown", { state: "visible" })).not.toBeNull();
+			await expect(tab.waitForSelector("#shown", JSON.parse('{"state":"gone"}'))).rejects.toThrow(
+				"waitForSelector() accepts",
+			);
+			await page.setContent("<p>Hello <b>page</b></p>");
 			expect(await tab.text()).toBe("Hello page");
 			expect(await tab.html()).toBe("<p>Hello <b>page</b></p>");
 			// Only script and hidden text: the rendered text is empty, and so is the read.

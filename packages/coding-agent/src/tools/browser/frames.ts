@@ -12,6 +12,7 @@ import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement
 import { readPageViewport } from "./launch";
 import { RunOutput } from "./run-output";
 import { whileDrawing } from "./screenshot";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached } from "./selector-wait";
 import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
@@ -35,14 +36,7 @@ export interface FramePressOptions {
 }
 
 /** Options accepted by frame-scoped selector waits. */
-export interface FrameWaitOptions {
-	/** Maximum wait in milliseconds. */
-	timeout?: number;
-	/** Require a visible matching element. */
-	visible?: boolean;
-	/** Require the matching element to become hidden. */
-	hidden?: boolean;
-}
+export type FrameWaitOptions = SelectorWaitOptions;
 
 /** A frame-scoped helper object exposed by `tab.frame()`. */
 export interface BrowserFrameApi {
@@ -193,11 +187,16 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 		zeroMatchAfterMs: hooks.zeroMatchAfterMs,
 	});
 	const waitForSelector = (selector: string, options?: FrameWaitOptions): Promise<boolean> => {
+		options = selectorWaitOptions(options);
 		const deadline = hooks.waitMs(options?.timeout);
 		return hooks.op(
 			`frame.waitForSelector(${JSON.stringify(selector)})`,
 			deadline,
 			async signal => {
+				if (options?.state === "detached") {
+					await waitForDetached(frame, hooks.normalizeSelector(selector), signal);
+					return true;
+				}
 				const handle = await untilAborted(signal, () =>
 					frame.waitForSelector(hooks.normalizeSelector(selector), {
 						timeout: deadline,
@@ -211,7 +210,10 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			},
 			{
 				selector,
-				zeroMatchAfterMs: options?.timeout === undefined && !options?.hidden ? hooks.zeroMatchAfterMs : undefined,
+				zeroMatchAfterMs:
+					options?.timeout === undefined && !options?.hidden && options?.state !== "detached"
+						? hooks.zeroMatchAfterMs
+						: undefined,
 			},
 		);
 	};

@@ -49,6 +49,7 @@ import type {
 } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
+import { selectorWaitOptions, type SelectorWaitOptions } from "../selector-wait";
 import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
@@ -1015,10 +1016,26 @@ export class CmuxTab implements InProcessRunTab {
 		return new CmuxElementHandle(this, selector);
 	}
 
-	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
-		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
-		await this.#waitForSelector(selector, timeoutMs);
-		return new CmuxElementHandle(this, selector);
+	async waitForSelector(selector: string, options?: SelectorWaitOptions): Promise<CmuxElementHandle | null> {
+		const opts = selectorWaitOptions(options);
+		const timeoutMs = opts.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		if ((opts.state === undefined && !opts.visible && !opts.hidden) || opts.state === "attached") {
+			await this.#waitForSelector(selector, timeoutMs);
+			return new CmuxElementHandle(this, selector);
+		}
+		const signal = this.#runContext?.signal;
+		const deadline = Date.now() + timeoutMs;
+		do {
+			const exists = await this.elementExists(selector);
+			const detached = opts.state === "detached";
+			const hidden = detached || opts.hidden;
+			const visible = exists && !detached ? await this.isVisible(selector) : false;
+			if (hidden ? !exists || (!detached && !visible) : visible) {
+				return hidden ? null : new CmuxElementHandle(this, selector);
+			}
+			await untilAborted(signal, () => Bun.sleep(100));
+		} while (Date.now() <= deadline);
+		throw new ToolError(`tab.waitForSelector(${JSON.stringify(selector)}) timed out after ${timeoutMs}ms`);
 	}
 
 	async evaluate<R, TArgs extends unknown[]>(
@@ -2428,8 +2445,8 @@ class CmuxPageFacade {
 		return (await this.#tab.elementExists(selector)) ? this.#tab.elementHandle(selector) : null;
 	}
 
-	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
-		return await this.#tab.waitFor(selector, opts);
+	async waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<CmuxElementHandle | null> {
+		return await this.#tab.waitForSelector(selector, opts);
 	}
 
 	async waitForFunction(

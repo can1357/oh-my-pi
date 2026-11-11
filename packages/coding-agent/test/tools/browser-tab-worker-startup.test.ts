@@ -148,6 +148,102 @@ describe("browser tab worker startup", () => {
 
 describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"accepts selector wait states on tabs and frames",
+		async () => {
+			const name = `selector-states-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				const html =
+					'<div id="visible">shown</div><div id="hidden" style="display:none">hidden</div><iframe name="child" srcdoc="<div id=hidden style=display:none>hidden</div><div id=visible>shown</div>"></iframe>';
+				await acquireTab(name, headless(), {
+					url: `data:text/html,${encodeURIComponent(html)}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const hidden = await tab.waitForSelector("#removed", {state:"hidden", timeout:250});
+					const detached = await tab.waitForSelector("#removed", {state:"detached", timeout:250});
+					const invisible = await tab.waitForSelector("#hidden", {state:"hidden", timeout:250});
+					const attached = await tab.waitForSelector("#hidden", {state:"attached", timeout:250});
+					const visible = await tab.waitForSelector("#visible", {state:"visible", timeout:250});
+					const legacyHidden = await tab.waitForSelector("#removed", {hidden:true, timeout:250});
+					const legacyVisible = await tab.waitForSelector("#visible", {visible:true, timeout:250});
+					const frame = await tab.frame("child");
+					const frameHidden = await frame.waitForSelector("#removed", {state:"hidden", timeout:250});
+					const frameDetached = await frame.waitForSelector("#removed", {state:"detached", timeout:250});
+					const frameAttached = await frame.waitForSelector("#hidden", {state:"attached", timeout:250});
+					let stillAttached = "";
+					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
+					catch (e) { stillAttached = e.message; }
+					await Promise.all([attached.dispose(), visible.dispose(), legacyVisible.dispose()]);
+					return { hidden, detached, invisible, attached:!!attached, visible:!!visible, legacyHidden,
+						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached };
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toMatchObject({
+					hidden: null,
+					detached: null,
+					invisible: null,
+					attached: true,
+					visible: true,
+					legacyHidden: null,
+					legacyVisible: true,
+					frameHidden: true,
+					frameDetached: true,
+					frameAttached: true,
+					stillAttached: expect.stringContaining("timed out"),
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"rejects unknown selector wait options instead of waiting",
+		async () => {
+			const name = `selector-options-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, headless(), {
+					url: "data:text/html,<div id=present>present</div>",
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+					const errors = [];
+					for (const opts of [{state:"gone"}, {visble:true}, {visible:"true"}, {hidden:1}, {timeout:"250"}]) {
+						try { await tab.waitForSelector("#present", opts); errors.push("accepted"); }
+						catch (e) { errors.push(e.message); }
+					}
+					return errors;
+				`,
+					timeoutMs: 10_000,
+					session,
+				});
+				expect(result.returnValue).toEqual(
+					Array.from({ length: 5 }, () => expect.stringContaining("waitForSelector() accepts")),
+				);
+			} finally {
+				await releaseTab(name, { kill: true });
+			}
+		},
+		45_000,
+	);
+	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"adopts isolated element arguments into the main world without consuming caller handles",
 		async () => {
 			const browser = headless();

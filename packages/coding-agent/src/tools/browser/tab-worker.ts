@@ -73,6 +73,7 @@ import {
 } from "./launch";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "./readable";
 import { assertTabPressArgs } from "./tab-arguments";
+import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached } from "./selector-wait";
 import {
 	type BrowserCookie,
 	type ClearCookiesOptions,
@@ -415,10 +416,7 @@ interface TabApi {
 		pattern: string | RegExp | ((response: HTTPResponse) => boolean | Promise<boolean>),
 		opts?: { timeout?: number },
 	): Promise<HTTPResponse>;
-	waitForSelector(
-		selector: string,
-		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
-	): Promise<ActionableHandle | null>;
+	waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<ActionableHandle | null>;
 	waitForNavigation(opts?: {
 		waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 		timeout?: number;
@@ -2690,11 +2688,13 @@ export class WorkerCore {
 				);
 			},
 			waitForSelector: (selector, opts) => {
+				opts = selectorWaitOptions(opts);
 				const w = waitMs(opts?.timeout);
 				return act(
 					`tab.waitForSelector(${JSON.stringify(selector)})`,
 					w,
 					async sig => {
+						if (opts?.state === "detached") return await waitForDetached(page, normalizeSelector(selector), sig);
 						if (parseAriaRefSelector(selector) !== null) return enrich(await this.#resolveAriaRef(selector));
 						const handle = (await untilAborted(sig, () =>
 							page.waitForSelector(normalizeSelector(selector), {
@@ -2709,7 +2709,10 @@ export class WorkerCore {
 					{
 						selector,
 						// `hidden: true` waits for zero matches — that is success, never a fast-fail.
-						zeroMatchAfterMs: opts?.timeout === undefined && !opts?.hidden ? ZERO_MATCH_FAIL_FAST_MS : undefined,
+						zeroMatchAfterMs:
+							opts?.timeout === undefined && !opts?.hidden && opts?.state !== "detached"
+								? ZERO_MATCH_FAIL_FAST_MS
+								: undefined,
 					},
 				);
 			},
