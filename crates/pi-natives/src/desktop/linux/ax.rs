@@ -1035,6 +1035,62 @@ fn atspi_window_id(frame: &ObjectRefOwned) -> String {
 	format!("atspi:{name}:{}", frame.path())
 }
 
+/// How long a numeric write's read-back waits for the value to arrive, for
+/// a toolkit that applies the write a moment after answering it.
+const VALUE_SETTLE: Duration = Duration::from_millis(500);
+
+/// Sets an element's numeric value and reads it back: a toolkit clamps the
+/// value to its range, rounds it to its steps or ignores it while answering
+/// the write (Qt answers every `CurrentValue` write), so the call reports
+/// what the element holds. The proxy keeps no property cache, whose
+/// `GetAll` crashes Qt 6 before 6.9.2 (QTBUG-137344).
+async fn write_value(
+	connection: &atspi::zbus::Connection,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+	value: f64,
+) -> CoreResult<()> {
+	let failed = |err: atspi::zbus::Error| DesktopError::ax_failed(format!("AT-SPI value: {err}"));
+	let proxy = atspi::proxy::value::ValueProxy::builder(connection)
+		.destination(name.clone())
+		.and_then(|b| b.path(object.path().clone()))
+		.map_err(failed)?
+		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.map_err(failed)?;
+	proxy.set_current_value(value).await.map_err(failed)?;
+	let deadline = tokio::time::Instant::now() + VALUE_SETTLE;
+	loop {
+		let Ok(actual) = proxy.current_value().await else {
+			return Err(DesktopError::ax_failed(format!(
+				"wrote {value}, but the control's value could not be read back; inspect the target \
+				 before writing again"
+			)));
+		};
+		// Within float precision: a toolkit that stores the value as `float`
+		// reads back 0.3 as 0.30000001192092896.
+		if (actual - value).abs() <= value.abs().max(1.0) * f64::from(f32::EPSILON) {
+			return Ok(());
+		}
+		if tokio::time::Instant::now() >= deadline {
+			// The range only where it explains the value: an unbounded control
+			// reports ±f64::MAX, hundreds of digits each.
+			let range = match (proxy.minimum_value().await, proxy.maximum_value().await) {
+				(Ok(min), Ok(max)) if value < min || value > max => {
+					format!(" (its range is {min} to {max})")
+				},
+				_ => String::new(),
+			};
+			return Err(DesktopError::ax_failed(format!(
+				"wrote {value}; the control now reads {actual}{range}. The app may have clamped, \
+				 rounded or not taken it: inspect the target before writing again"
+			)));
+		}
+		tokio::time::sleep(Duration::from_millis(25)).await;
+	}
+}
+
 /// Replaces an element's text and reads it back: Gecko (Firefox, Thunderbird)
 /// accepts the write and keeps the old text. A field that hides its text reads
 /// back one mask character per character, whatever its role (a GTK4 entry
@@ -1439,17 +1495,7 @@ impl AxBackend for AtSpiAx {
 				if !numeric.is_finite() {
 					return Err(DesktopError::ax_failed("AT-SPI numeric value must be finite"));
 				}
-				let proxy = atspi::proxy::value::ValueProxy::builder(&self.connection)
-					.destination(name)
-					.and_then(|b| b.path(object.path().clone()))
-					.map_err(|err| DesktopError::ax_failed(err.to_string()))?
-					.build()
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))?;
-				proxy
-					.set_current_value(numeric)
-					.await
-					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI value: {err}")))
+				write_value(&self.connection, &name, &object, numeric).await
 			})
 			.map_err(unconfirmed)
 	}
@@ -1938,6 +1984,131 @@ mod tests {
 					if !err.message.contains("new") && !err.message.contains(r#""old""#) => {},
 				(Verdict::Emptied, Err(err))
 					if err.message.contains("emptied") && !err.message.contains("new") => {},
+				(_, result) => panic!("{path}: {result:?}"),
+			}
+		}
+	}
+
+	#[test]
+	fn a_numeric_write_the_app_clamps_or_ignores_fails() {
+		use std::sync::{Arc, Mutex};
+
+		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
+
+		/// What a control does with a write: takes it, clamps it to its range
+		/// (GTK, Qt), keeps its old value while answering (Qt), or takes it a
+		/// What a control does with a write: takes it, clamps it to its range
+		/// (GTK, Qt), keeps its old value while answering (Qt), takes it after
+		/// the first read back, or stores it as `float`.
+		#[derive(Clone, Copy)]
+		enum Takes {
+			Exact,
+			Clamped,
+			Ignored,
+			Later,
+			Single,
+		}
+
+		/// `org.a11y.atspi.Value` over the range 0 to 100, or one that cannot
+		/// say its range.
+		struct Value {
+			current: Arc<Mutex<f64>>,
+			pending: Mutex<Option<f64>>,
+			takes:   Takes,
+			ranged:  bool,
+		}
+
+		#[interface(name = "org.a11y.atspi.Value")]
+		impl Value {
+			#[zbus(property)]
+			fn current_value(&self) -> f64 {
+				let current = *self.current.lock().unwrap();
+				// A write the toolkit applies late shows from the second read on.
+				let pending = self.pending.lock().unwrap().take();
+				if let Some(value) = pending {
+					*self.current.lock().unwrap() = value;
+				}
+				current
+			}
+
+			#[zbus(property)]
+			fn set_current_value(&mut self, value: f64) {
+				let mut current = self.current.lock().unwrap();
+				match self.takes {
+					Takes::Exact => *current = value,
+					Takes::Clamped => *current = value.clamp(0.0, 100.0),
+					Takes::Ignored => {},
+					Takes::Later => *self.pending.get_mut().unwrap() = Some(value),
+					#[expect(clippy::cast_possible_truncation, reason = "a float-storing toolkit")]
+					Takes::Single => *current = f64::from(value as f32),
+				}
+			}
+
+			#[zbus(property)]
+			fn minimum_value(&self) -> atspi::zbus::fdo::Result<f64> {
+				self.range(0.0)
+			}
+
+			#[zbus(property)]
+			fn maximum_value(&self) -> atspi::zbus::fdo::Result<f64> {
+				self.range(100.0)
+			}
+		}
+
+		impl Value {
+			fn range(&self, bound: f64) -> atspi::zbus::fdo::Result<f64> {
+				if self.ranged {
+					Ok(bound)
+				} else {
+					Err(atspi::zbus::fdo::Error::Failed("no range".to_owned()))
+				}
+			}
+		}
+
+		const PEER: &str = ":1.7";
+		// Path, what the control does, whether it says its range, the value
+		// written, and the error's text (`None`: the write succeeds).
+		let cases: [(&str, Takes, bool, f64, Option<&str>); 6] = [
+			("/exact", Takes::Exact, true, 37.25, None),
+			("/later", Takes::Later, true, 37.0, None),
+			("/single", Takes::Single, true, 0.3, None),
+			(
+				"/clamped",
+				Takes::Clamped,
+				true,
+				150.0,
+				Some("wrote 150; the control now reads 100 (its range is 0 to 100)"),
+			),
+			("/ignored", Takes::Ignored, true, 37.0, Some("wrote 37; the control now reads 20.")),
+			("/unranged", Takes::Clamped, false, 150.0, Some("wrote 150; the control now reads 100.")),
+		];
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let results = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let mut builder = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for &(path, takes, ranged, ..) in &cases {
+				let current = Arc::new(Mutex::new(20.0));
+				let control = Value { current, pending: Mutex::new(None), takes, ranged };
+				builder = builder.serve_at(path, control).unwrap();
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
+			let mut results = Vec::new();
+			for &(path, _, _, value, _) in &cases {
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
+				let name = object.name().unwrap().clone();
+				results.push(write_value(&client, &name, &object, value).await);
+			}
+			drop(server);
+			results
+		});
+		for ((path, .., error), result) in cases.iter().zip(results) {
+			match (error, result) {
+				(None, Ok(())) => {},
+				(Some(text), Err(err)) if err.message.contains(text) => {},
 				(_, result) => panic!("{path}: {result:?}"),
 			}
 		}
