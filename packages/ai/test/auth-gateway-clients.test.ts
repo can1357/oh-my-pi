@@ -12,9 +12,11 @@ import {
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { completionsChunks } from "./helpers/factory-droid";
 
 const GATEWAY_TOKEN = "gateway-token";
 const CI_TOKEN = "ci-token";
@@ -70,7 +72,7 @@ describe("auth-gateway scoped clients", () => {
 	 * a bare id the first listed model of that id the caller accepts.
 	 */
 	function boot(
-		models: MockModel[],
+		models: Model<Api>[],
 		clients: readonly AuthGatewayClient[] | undefined,
 		bearerTokens = [GATEWAY_TOKEN],
 	): AuthGatewayServerHandle {
@@ -115,6 +117,112 @@ describe("auth-gateway scoped clients", () => {
 		if (!gateway) throw new Error("gateway not started");
 		return fetch(`${gateway.url}${route}`, { headers: { Authorization: `Bearer ${token}` } });
 	}
+
+	it.each(["/v1/pi/stream", "/v1/chat/completions", "/v1/messages", "/v1/responses"])(
+		"drops scoped caller headers on %s without dropping the bound credential or unscoped headers",
+		async route => {
+			const received: Headers[] = [];
+			const upstream = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async req => {
+					await req.arrayBuffer();
+					received.push(new Headers(req.headers));
+					const chunks = [...completionsChunks("ok", "granted"), "[DONE]"];
+					return new Response(chunks.map(chunk => `data: ${chunk}\n\n`).join(""), {
+						headers: { "Content-Type": "text/event-stream" },
+					});
+				},
+			});
+			try {
+				const model = buildModel({
+					id: "granted",
+					name: "granted",
+					provider: "mock",
+					api: "openai-completions",
+					baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 128,
+				});
+				const handle = boot([model], [CI_CLIENT]);
+				const callerHeaders = {
+					Host: "caller.invalid",
+					Authorization: "Bearer caller-key",
+					"OpenAI-Organization": "caller-org",
+					"x-proof-neutral": "caller-marker",
+				};
+				for (const stream of [false, true]) {
+					for (const token of [CI_TOKEN, GATEWAY_TOKEN]) {
+						const response = await fetch(`${handle.url}${route}`, {
+							method: "POST",
+							headers: {
+								Authorization: `Bearer ${token}`,
+								"Content-Type": "application/json",
+								"OpenAI-Project": "outer-project",
+								"chatgpt-account-id": "outer-account",
+								"x-stainless-proof": "outer-marker",
+							},
+							body: JSON.stringify(
+								route === "/v1/pi/stream"
+									? {
+											modelId: "mock/granted",
+											context: { messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+											options: { headers: callerHeaders },
+											stream,
+										}
+									: {
+											model: "mock/granted",
+											messages: [{ role: "user", content: "hi" }],
+											input: "hi",
+											max_tokens: 128,
+											stream,
+										},
+							),
+						});
+						expect(response.status).toBe(200);
+						expect(await response.text()).toContain("ok");
+						expect(received).toHaveLength(1);
+						const headers = received.pop()!;
+						if (token === CI_TOKEN) {
+							expect({
+								authorization: headers.get("authorization"),
+								host: headers.get("host"),
+								organization: headers.get("openai-organization"),
+								neutral: headers.get("x-proof-neutral"),
+								outerProject: headers.get("openai-project"),
+								outerAccount: headers.get("chatgpt-account-id"),
+								outerNeutral: headers.get("x-stainless-proof"),
+							}).toEqual({
+								authorization: "Bearer access-b",
+								host: `127.0.0.1:${upstream.port}`,
+								organization: null,
+								neutral: null,
+								outerProject: null,
+								outerAccount: null,
+								outerNeutral: null,
+							});
+						} else if (route === "/v1/pi/stream") {
+							for (const [name, value] of Object.entries(callerHeaders)) {
+								expect(headers.get(name)).toBe(value);
+							}
+						}
+						for (const [name, value] of [
+							["openai-project", "outer-project"],
+							["chatgpt-account-id", "outer-account"],
+							["x-stainless-proof", "outer-marker"],
+						]) {
+							expect(headers.get(name)).toBe(token === CI_TOKEN ? null : value);
+						}
+					}
+				}
+			} finally {
+				upstream.stop(true);
+			}
+		},
+	);
 
 	it("serves a client only from its bound account, never a sibling account or API key", async () => {
 		let accountBExhausted = false;

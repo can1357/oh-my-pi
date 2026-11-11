@@ -60,6 +60,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"cacheRetention",
 	"cachedContent",
 	"userProfileId",
+	// The gateway strips these for scoped clients; unscoped callers keep them.
 	"headers",
 	"initiatorOverride",
 	"maxRetryDelayMs",

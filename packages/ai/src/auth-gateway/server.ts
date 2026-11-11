@@ -361,11 +361,12 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
-	// Merge gateway-captured passthrough headers under the parser's own
-	// captures. Parsers that set `options.headers` themselves win (they may
-	// have stripped or normalized values); the gateway's allow-list fills in
-	// anything they didn't touch.
-	{
+	// A scoped client cannot choose headers sent with the gateway's credential,
+	// including headers captured by the format parser itself.
+	if (bootOpts.client) {
+		delete parsed.options.headers;
+	} else {
+		// Preserve the parser's precedence for the unscoped gateway token.
 		const captured = captureRequestHeaders(req.headers);
 		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
@@ -656,10 +657,14 @@ async function handlePiNative(
 		delete streamOpts.frequencyPenalty;
 		delete streamOpts.repetitionPenalty;
 	}
-	// Merge gateway-captured passthrough headers under the client's own
-	// headers — the client's values win when they collide.
-	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...streamOpts.headers };
+	// Drop both caller-header inputs for scoped clients, like server-owned
+	// options in the native parser. The gateway token keeps header passthrough.
+	if (bootOpts.client) {
+		delete streamOpts.headers;
+	} else {
+		const captured = captureRequestHeaders(req.headers);
+		streamOpts.headers = { ...captured, ...streamOpts.headers };
+	}
 	streamOpts.sessionId = sessionId;
 
 	logger.info("auth-gateway request", {
