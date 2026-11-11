@@ -168,10 +168,7 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import {
 	enterUserWait,
-	insideUserAction,
 	insideUserWait,
-	leaveUserAction,
-	runUserAction,
 	type UserPrompt,
 	type UserWaitOptions,
 } from "../extensibility/extensions/user-wait";
@@ -1566,11 +1563,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), as one wait for
 	 * the user. Every dialog that waits on the user runs through here, so this is where a run is known to be blocked.
 	 *
-	 * The wait is reported as a `user_wait_start`/`user_wait_end` pair described by `describe`, unless the user opened
-	 * it themselves while no prompt runs (a command they submitted, a key they pressed: {@link runUserAction}): during
-	 * a run the agent waits on them whatever opened it, and outside one a dialog they did not start (an extension's
-	 * own trigger, a sign-in at startup) waits on them too. Dialogs `dialog` opens through a tracked UI belong to this
-	 * wait ({@link enterUserWait}).
+	 * Every wait is reported as a `user_wait_start`/`user_wait_end` pair described by `describe`, whoever opened it:
+	 * the session cannot go on with it until the user answers. Whether that needs the user's attention is the
+	 * consumer's call (a terminal knows whether its pane has focus). Dialogs `dialog` opens through a tracked UI belong
+	 * to this wait ({@link enterUserWait}).
 	 *
 	 * Without a deadline, the computer turn ends while it is open, so an unattended Mac sleeps and locks on its own
 	 * timer rather than showing the pending question; once the last open wait settles, if a prompt is still in
@@ -1590,15 +1586,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			held && this.#agentId
 				? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
 				: undefined;
-		let waitId: number | undefined;
-		if (this.#promptInFlightCount > 0 || !insideUserAction()) {
-			waitId = ++this.#userWaitSeq;
-			this.#emit({ type: "user_wait_start", id: waitId, ...describe(), ...(held ? {} : { deadline: true }) });
-		}
+		const waitId = ++this.#userWaitSeq;
+		this.#emit({ type: "user_wait_start", id: waitId, ...describe(), ...(held ? {} : { deadline: true }) });
 		try {
 			return await enterUserWait(dialog);
 		} finally {
-			if (waitId !== undefined) this.#emit({ type: "user_wait_end", id: waitId });
+			this.#emit({ type: "user_wait_end", id: waitId });
 			releaseUserHold?.();
 			if (held && --this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
@@ -3908,33 +3901,28 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// Event Subscription
 	// =========================================================================
 
-	/**
-	 * Emit an event to all listeners. They react to the session, not to a user action, even when one caused the
-	 * event: a dialog they open waits on the user ({@link leaveUserAction}).
-	 */
+	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		leaveUserAction(() => {
-			// Listener array is copy-on-write (see `subscribe`), so iterating the
-			// current array is safe against (un)subscribes made by a listener.
-			for (const l of this.#eventListeners) {
-				try {
-					const result = l(event) as unknown;
-					// Listener may be an async function whose returned Promise we don't await;
-					// attach a catch so a rejection does not become an unhandled rejection.
-					if (isPromise(result)) {
-						result.catch(err => {
-							logger.warn("AgentSession listener rejected", {
-								error: err instanceof Error ? err.message : String(err),
-							});
+		// Listener array is copy-on-write (see `subscribe`), so iterating the
+		// current array is safe against (un)subscribes made by a listener.
+		for (const l of this.#eventListeners) {
+			try {
+				const result = l(event) as unknown;
+				// Listener may be an async function whose returned Promise we don't await;
+				// attach a catch so a rejection does not become an unhandled rejection.
+				if (isPromise(result)) {
+					result.catch(err => {
+						logger.warn("AgentSession listener rejected", {
+							error: err instanceof Error ? err.message : String(err),
 						});
-					}
-				} catch (err) {
-					logger.warn("AgentSession listener threw", {
-						error: err instanceof Error ? err.message : String(err),
 					});
 				}
+			} catch (err) {
+				logger.warn("AgentSession listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
 			}
-		});
+		}
 	}
 
 	#emitRunState(state: "running" | "idle"): void {
@@ -4139,8 +4127,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * event/persistence pipeline during teardown.
 	 */
 	#handleAgentEvent = (event: AgentEvent): Promise<void> => {
-		// The run's own doings, whoever submitted the prompt: a dialog they open waits on the user.
-		const processing = leaveUserAction(() => this.#dispatchAgentEvent(event));
+		const processing = this.#dispatchAgentEvent(event);
 		this.#inFlightEventHandlers.add(processing);
 		void processing.finally(() => this.#inFlightEventHandlers.delete(processing)).catch(() => {});
 		return processing;
@@ -9803,9 +9790,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const ctx = this.#extensionRunner.createCommandContext();
 
 		try {
-			// A command is the user's action, whoever hosts the session (TUI, RPC, ACP).
-			const runner = this.#extensionRunner;
-			await runUserAction(() => runner.runScoped(() => command.handler(args, ctx)));
+			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
 			return "ran";
 		} catch (err) {
 			// Emit error via extension runner
@@ -9934,9 +9919,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const args = parseCommandArgs(argsString);
 			// Commands that consult findScopedSettings, including /review, must see this
 			// session's cache kill switch instead of the default enabled cache.
-			const result = await runUserAction(() =>
-				withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString)),
-			);
+			const result = await withActiveSettings(this.settings, () => loaded.command.execute(args, ctx, argsString));
 			// If result is a string, it's a prompt to send to LLM
 			// If void/undefined, command handled everything
 			return result ?? "";

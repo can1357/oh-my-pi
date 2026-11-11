@@ -926,14 +926,14 @@ confirmation of a change rather than independent queue state.
 The session is waiting on the user's answer: a tool approval, `ask`, an
 extension's `confirm`/`select`/`input`/`editor`/`custom`/ask/form dialog, a
 `cfg://` change, an MCP sign-in, a coding-plan reserve confirmation, or a plan
-review. One wait is one pair, however many dialogs it shows: an `ask` answered
-field by field, or an approval shown as a `select`. `kind` is `permission` for
-an approval and `question` otherwise; `msg` is what it asks, in a line.
-`deadline: true` marks a wait that settles on its own when `ask.timeout`
-passes. The end with the same `id` follows when the wait settles. A dialog the
-user opened themselves while no prompt runs (a slash command they ran) sends
-neither; one the session opens on its own, such as an extension's timer or a
-sign-in at startup, does.
+review. Every such wait is reported, whoever opened it: whether it needs the
+user's attention is the client's call. One wait is one pair, however many
+dialogs it shows: an `ask` answered field by field, or an approval shown as a
+`select`. `kind` is `permission` for an approval, `auth` for a sign-in, and
+`question` otherwise; `msg` is what it asks, in a line. `deadline: true` marks
+a wait that settles on its own when `ask.timeout` passes. The end with the same
+`id` follows when the wait settles. omp's own menus (selectors, the paste
+picker, built-in command confirmations) are not waits and send neither.
 
 Extension runner errors are emitted separately as:
 

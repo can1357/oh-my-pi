@@ -14,8 +14,8 @@ import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
 import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
 
-/** What a blocked run waits on: an approval prompt or an `ask` question. */
-export type BlockedKind = "permission" | "question";
+/** What a blocked run waits on: an approval (`permission`), an answer (`question`), or a sign-in (`auth`). */
+export type BlockedKind = "permission" | "question" | "auth";
 
 /**
  * The agent's run status, in OSC 7501 terms:

@@ -254,7 +254,6 @@ import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
-import { runUserAction } from "../extensibility/extensions/user-wait";
 import {
 	closeUserWait,
 	disposeProgramStatus,
@@ -2159,7 +2158,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
 			this.session.waitForUser(
 				() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
-				() => ({ kind: "permission", msg: `Sign in to MCP server ${serverName}` }),
+				() => ({ kind: "auth", msg: `Sign in to MCP server ${serverName}` }),
 			),
 		);
 		this.#eventBus = eventBus;
@@ -2730,8 +2729,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		// What a keypress starts is the user's own doing: a dialog it opens while no prompt runs needs no alert.
-		this.ui.setInputScope(dispatch => runUserAction(dispatch));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
 		// paints that keep the user bubble must not resend on every update.

@@ -4438,10 +4438,11 @@
 				"kind": {
 					"enum": [
 						"permission",
-						"question"
+						"question",
+						"auth"
 					],
 					"type": "string",
-					"description": "An approval to grant, or a question to answer."
+					"description": "An approval to grant, a question to answer, or a sign-in to complete."
 				},
 				"msg": {
 					"type": "string",
@@ -4457,7 +4458,7 @@
 				"id",
 				"kind"
 			],
-			"description": "A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none."
+			"description": "The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."
 		},
 		"UserWaitEndEvent": {
 			"type": "object",

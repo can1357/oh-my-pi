@@ -948,8 +948,6 @@ export class TUI extends Container {
 		| undefined;
 	#debugNextWindowTop = 0;
 	#inputListeners = new Set<InputListener>();
-	/** Runs each input dispatch ({@link setInputScope}). */
-	#inputScope: ((dispatch: () => void) => void) | undefined;
 	#startListeners = new Set<StartListener>();
 	/** True from the end of start() until stop(): the terminal modes start listeners enable are live. */
 	#started = false;
@@ -2513,14 +2511,6 @@ export class TUI extends Container {
 		this.#inputListeners.delete(listener);
 	}
 
-	/**
-	 * Run every input dispatch through `scope`, so the app can mark what the user's keypresses start (and whatever
-	 * that goes on to do); `undefined` clears it.
-	 */
-	setInputScope(scope: ((dispatch: () => void) => void) | undefined): void {
-		this.#inputScope = scope;
-	}
-
 	#querySixelSupport(): void {
 		// A statically known protocol (Kitty/iTerm2 terminals) or an explicit
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
@@ -2998,12 +2988,6 @@ export class TUI extends Container {
 	}
 
 	#handleInput(data: string): void {
-		const scope = this.#inputScope;
-		if (scope) scope(() => this.#dispatchInput(data));
-		else this.#dispatchInput(data);
-	}
-
-	#dispatchInput(data: string): void {
 		// Tern Surface Protocol events (acks, pointer actions, resize, theme)
 		// are terminal reports, never keystrokes.
 		if (data.startsWith(TSP_PREFIX)) {

@@ -43,31 +43,6 @@ export function insideUserWait(): boolean {
 	return openWait.getStore() === true;
 }
 
-/** Whether what runs was started by the user (a command they submitted, a key they pressed) or by the session. */
-const userAction = new AsyncLocalStorage<boolean>();
-
-/**
- * Runs `action`, which the user started (a command they submitted, a key they pressed): a dialog it opens while no
- * prompt runs is their own doing, not a wait that needs their attention ({@link insideUserAction}).
- */
-export function runUserAction<T>(action: () => T): T {
-	return userAction.run(true, action);
-}
-
-/**
- * Runs `reaction`, which the session does on its own (an agent run's events, what listeners do with them), outside
- * any user action that led to it, so a dialog it opens waits on the user.
- */
-export function leaveUserAction<T>(reaction: () => T): T {
-	// Hot path (every session event): enter a scope only when there is one to leave.
-	return userAction.getStore() === true ? userAction.run(false, reaction) : reaction();
-}
-
-/** Whether the caller runs inside something the user started ({@link runUserAction}). */
-export function insideUserAction(): boolean {
-	return userAction.getStore() === true;
-}
-
 /** The tracker of each UI {@link trackUserWaits} returned. */
 const trackers = new WeakMap<object, UserWaitTracker>();
 

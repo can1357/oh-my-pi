@@ -1059,12 +1059,12 @@ export interface QueueUpdateEvent {
 	liveSteered?: number;
 }
 
-/** A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none. */
+/** The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it. */
 export interface UserWaitStartEvent {
 	type: "user_wait_start";
 	id: number;
-	/** An approval to grant, or a question to answer. */
-	kind: "permission" | "question";
+	/** An approval to grant, a question to answer, or a sign-in to complete. */
+	kind: "permission" | "question" | "auth";
 	/** What the dialog asks, in a line. */
 	msg?: string;
 	/** The dialog settles on its own when its deadline passes (`ask.timeout`) and the agent goes on. */

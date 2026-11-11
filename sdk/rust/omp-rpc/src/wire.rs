@@ -3992,11 +3992,11 @@ pub struct QueueUpdateEvent {
 	pub live_steered: i64,
 }
 
-/// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
+/// The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserWaitStartEvent {
 	pub id: i64,
-	/// An approval to grant, or a question to answer.
+	/// An approval to grant, a question to answer, or a sign-in to complete.
 	pub kind: UserWaitStartEventKind,
 	/// What the dialog asks, in a line.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4056,7 +4056,7 @@ pub enum RpcAgentEvent {
 	GoalUpdated(GoalUpdatedEvent),
 	/// Coalesced snapshot of the displayable steering/follow-up queue, sent whenever it changes.
 	QueueUpdate(QueueUpdateEvent),
-	/// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
+	/// The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it.
 	UserWaitStart(UserWaitStartEvent),
 	/// The dialog of the `user_wait_start` with the same `id` settled.
 	UserWaitEnd(UserWaitEndEvent),
@@ -6012,6 +6012,8 @@ pub enum UserWaitStartEventKind {
 	Permission,
 	#[serde(rename = "question")]
 	Question,
+	#[serde(rename = "auth")]
+	Auth,
 }
 
 impl UserWaitStartEventKind {
@@ -6020,6 +6022,7 @@ impl UserWaitStartEventKind {
 		match self {
 			Self::Permission => "permission",
 			Self::Question => "question",
+			Self::Auth => "auth",
 		}
 	}
 }

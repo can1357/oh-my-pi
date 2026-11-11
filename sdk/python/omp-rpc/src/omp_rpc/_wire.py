@@ -1266,11 +1266,11 @@ class QueueUpdateEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class UserWaitStartEvent:
-    """A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none."""
+    """The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."""
     type: Literal["user_wait_start"] = "user_wait_start"
     id: int
-    kind: Literal["permission", "question"]
-    """An approval to grant, or a question to answer."""
+    kind: Literal["permission", "question", "auth"]
+    """An approval to grant, a question to answer, or a sign-in to complete."""
     msg: str | None = None
     """What the dialog asks, in a line."""
     deadline: bool | None = None
@@ -2742,7 +2742,7 @@ def parse_user_wait_start_event(value: object, path: str = "UserWaitStartEvent")
     required(payload, "type", cast('Decoder[Literal["user_wait_start"]]', literal(frozenset({"user_wait_start"}))), path)
     return UserWaitStartEvent(
         id=required(payload, "id", decode_int, path),
-        kind=required(payload, "kind", cast('Decoder[Literal["permission", "question"]]', literal(frozenset({"permission", "question"}))), path),
+        kind=required(payload, "kind", cast('Decoder[Literal["permission", "question", "auth"]]', literal(frozenset({"permission", "question", "auth"}))), path),
         msg=optional(payload, "msg", decode_str, path),
         deadline=optional(payload, "deadline", decode_bool, path),
     )
@@ -4042,7 +4042,7 @@ class WireClient:
         return self._listen("queue_update", listener)
 
     def on_user_wait_start(self, listener: Callable[[UserWaitStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `user_wait_start`: A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none."""
+        """Subscribe to `user_wait_start`: The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it."""
         return self._listen("user_wait_start", listener)
 
     def on_user_wait_end(self, listener: Callable[[UserWaitEndEvent], None]) -> Callable[[], None]:

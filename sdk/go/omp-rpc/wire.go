@@ -4585,10 +4585,10 @@ func (v QueueUpdateEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"queue_update"`, nil)
 }
 
-// A running prompt waits on the user's answer (a tool approval, `ask`, an extension dialog) until the `user_wait_end` with the same `id`. Dialogs opened while no prompt runs send none.
+// The session waits on the user's answer (a tool approval, `ask`, an extension dialog, a plan review, a sign-in) until the `user_wait_end` with the same `id`, whoever opened it.
 type UserWaitStartEvent struct {
 	ID int64 `json:"id"`
-	// An approval to grant, or a question to answer.
+	// An approval to grant, a question to answer, or a sign-in to complete.
 	Kind UserWaitStartEventKind `json:"kind"`
 	// What the dialog asks, in a line.
 	Msg *string `json:"msg,omitempty"`
@@ -4625,6 +4625,7 @@ type UserWaitStartEventKind string
 const (
 	UserWaitStartEventKindPermission UserWaitStartEventKind = "permission"
 	UserWaitStartEventKindQuestion   UserWaitStartEventKind = "question"
+	UserWaitStartEventKindAuth       UserWaitStartEventKind = "auth"
 )
 
 func (v *UserWaitStartEventKind) UnmarshalJSON(data []byte) error {
@@ -4633,7 +4634,7 @@ func (v *UserWaitStartEventKind) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	switch value := UserWaitStartEventKind(s); value {
-	case UserWaitStartEventKindPermission, UserWaitStartEventKindQuestion:
+	case UserWaitStartEventKindPermission, UserWaitStartEventKindQuestion, UserWaitStartEventKindAuth:
 		*v = value
 		return nil
 	}
