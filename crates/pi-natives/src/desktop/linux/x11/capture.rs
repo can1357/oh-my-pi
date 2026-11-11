@@ -3,14 +3,17 @@ use std::sync::Arc;
 use image::{Rgba, RgbaImage};
 use x11rb::{
 	connection::{Connection, RequestConnection as _},
+	cookie::Cookie,
 	errors::ReplyError,
 	protocol::{
 		ErrorKind,
+		composite::{self, ConnectionExt as _},
 		randr::ConnectionExt as _,
 		render::{ConnectionExt as _, QueryPictFormatsReply},
+		shape::{self, ConnectionExt as _, GetRectanglesReply, QueryExtentsReply},
 		xproto::{
-			Atom, AtomEnum, ConnectionExt as _, GetImageReply, ImageFormat, ImageOrder, MapState,
-			VisualClass, Window, WindowClass,
+			Atom, AtomEnum, ConnectionExt as _, Drawable, GetImageReply, ImageFormat, ImageOrder,
+			MapState, Pixmap, Rectangle, VisualClass, Visualid, Window, WindowClass,
 		},
 	},
 	rust_connection::RustConnection,
@@ -29,13 +32,51 @@ const MIN_WINDOW_EDGE: u32 = 16;
 /// A rectangle in root coordinates: x, y, width, height.
 type Area = (i32, i32, u32, u32);
 
-/// What stacks above a window ([`X11Capture::above`]).
+/// `client`'s ancestry and what stacks above it ([`X11Capture::tree`]).
+struct Tree {
+	/// `client`, its parent, and so on up to a child of the root.
+	chain:    Vec<Window>,
+	/// Every window stacked above the chain, with the index in `chain` of the
+	/// window it is a sibling of.
+	siblings: Vec<(usize, Window)>,
+}
+
+/// A window of [`Tree::siblings`] over the capture area.
+struct Over {
+	/// Index in [`Tree::chain`] of the window it is a sibling of.
+	level:  usize,
+	window: Window,
+	/// The part of the area its rectangle, border included, covers.
+	part:   Area,
+	/// Its origin inside the border, in root coordinates.
+	origin: (i32, i32),
+	border: i32,
+}
+
+/// What stacks above a window over its area ([`X11Capture::above`]).
 struct Above {
-	/// Another client's window overlaps it.
-	covered: bool,
-	/// The window's own popups over it: each window, the part of the area it
-	/// covers, and its origin.
-	popups:  Vec<(Window, Area, (i32, i32))>,
+	/// Other clients' windows.
+	covers: Vec<Over>,
+	/// The window's own override-redirect popups.
+	popups: Vec<Over>,
+}
+
+/// A window's bounding shape, requested ([`X11Capture::request_shape`]).
+struct ShapeRequest<'a> {
+	extents:    Cookie<'a, RustConnection, QueryExtentsReply>,
+	rectangles: Cookie<'a, RustConnection, GetRectanglesReply>,
+}
+
+impl ShapeRequest<'_> {
+	/// The shape's rectangles, relative to the window's origin inside its
+	/// border; `None` for a window with the default shape, its rectangle. The X
+	/// server lists that default without the right and bottom border, so it is
+	/// never read.
+	fn reply(self) -> Result<Option<Vec<Rectangle>>, ReplyError> {
+		let shaped = self.extents.reply()?.bounding_shaped;
+		let rectangles = self.rectangles.reply()?.rectangles;
+		Ok(shaped.then_some(rectangles))
+	}
 }
 
 #[derive(Clone, Copy)]
@@ -83,8 +124,10 @@ pub struct X11Capture {
 	root_height: u32,
 	masks:       ColorMasks,
 	selector:    DisplaySelector,
-	/// The selection a compositing manager owns on this screen (EWMH).
-	compositor:  Atom,
+	/// The server names a window's pixmap (`CompositeNameWindowPixmap`).
+	composite:   bool,
+	/// The server keeps window shapes (the Shape extension).
+	shape:       bool,
 	/// Render defines alpha independently of the core `TrueColor` RGB masks.
 	pictformats: Option<Arc<QueryPictFormatsReply>>,
 }
@@ -129,12 +172,22 @@ impl X11Capture {
 		let root = screen.root;
 		let root_width = u32::from(screen.width_in_pixels);
 		let root_height = u32::from(screen.height_in_pixels);
-		let compositor = conn
-			.intern_atom(false, format!("_NET_WM_CM_S{screen_num}").as_bytes())
+		let composite = conn
+			.extension_information(composite::X11_EXTENSION_NAME)
 			.map_err(request_failed)?
-			.reply()
+			.is_some()
+			&& {
+				let version = conn
+					.composite_query_version(0, 2)
+					.map_err(request_failed)?
+					.reply()
+					.map_err(request_failed)?;
+				(version.major_version, version.minor_version) >= (0, 2)
+			};
+		let shape = conn
+			.extension_information(shape::X11_EXTENSION_NAME)
 			.map_err(request_failed)?
-			.atom;
+			.is_some();
 		let pictformats = if conn
 			.extension_information("RENDER")
 			.map_err(request_failed)?
@@ -150,8 +203,17 @@ impl X11Capture {
 		} else {
 			None
 		};
-		let capture =
-			Self { conn, root, root_width, root_height, masks, selector, compositor, pictformats };
+		let capture = Self {
+			conn,
+			root,
+			root_width,
+			root_height,
+			masks,
+			selector,
+			composite,
+			shape,
+			pictformats,
+		};
 		capture.capture_root(0, 0, 1, 1)?;
 		Ok(capture)
 	}
@@ -386,35 +448,12 @@ impl X11Capture {
 					.ok_or_else(|| {
 						DesktopError::window_not_found(format!("window {id} was not found"))
 					})?;
-				let area = clip_to_root(
-					window.x,
-					window.y,
-					window.width,
-					window.height,
-					self.root_width,
-					self.root_height,
-				)
-				.ok_or_else(|| {
-					DesktopError::capture_failed(format!("window {id} has no visible root area"))
-				})?;
-				let (x, y, width, height) = area;
-				// The root holds what is on screen, which is this window only where
-				// nothing covers it. A window's own drawable holds its covered part
-				// too only while a compositing manager redirects it into a pixmap.
-				let above = self.above(client, area)?;
-				let image = if !above.covered {
-					self.capture_root(x, y, width, height)?
-				} else if self.compositing()? {
-					let mut image =
-						self.capture_window(client, x - window.x, y - window.y, width, height)?;
-					self.overlay_popups(&mut image, (x, y), above)?;
-					image
-				} else {
-					return Err(DesktopError::capture_failed(format!(
-						"window {id} is covered by another window, and without a compositing manager \
-						 the X server keeps no image of its covered part; win.ax() still reads it, and \
-						 a screenshot of its display shows what is on top"
-					)));
+				// A compositing manager keeps each window's pixels in a pixmap of
+				// its own, which nothing over the window reaches; without one the
+				// screen is the only copy.
+				let (image, (x, y, width, height)) = match self.capture_named(client, id)? {
+					Some(capture) => capture,
+					None => self.capture_unredirected(client, id)?,
 				};
 				let frame_window = DesktopWindow { x, y, width, height, ..window };
 				let frame = FrameGeometry::for_window(&frame_window, image.width(), image.height());
@@ -465,33 +504,147 @@ impl X11Capture {
 		self.decode(&reply, width, height, self.masks)
 	}
 
-	/// A compositing manager owns this screen's `_NET_WM_CM_S<n>` selection.
-	fn compositing(&self) -> CoreResult<bool> {
-		let owner = self
+	/// `client` and its own popups, each read from the pixmap the server keeps
+	/// for it while a compositing manager redirects it, and cut to its shape;
+	/// `None` when no window from `client` up to the root is redirected.
+	fn capture_named(&self, client: Window, id: &str) -> CoreResult<Option<(RgbaImage, Area)>> {
+		if !self.composite {
+			return Ok(None);
+		}
+		let tree = self.tree(client)?;
+		let Some((level, pixmap)) = self.name_innermost(&tree.chain, id)? else {
+			return Ok(None);
+		};
+		// The holder's pixmap holds `client` and whatever inside the holder is
+		// drawn over it; its origin is the holder's outer (border) corner.
+		let holder = tree.chain[level];
+		let inner = &tree.chain[..=level];
+		let holder_geometry = self.conn.get_geometry(holder).map_err(request_failed)?;
+		let holder_attributes = self
 			.conn
-			.get_selection_owner(self.compositor)
-			.map_err(request_failed)?
-			.reply()
-			.map_err(request_failed)?
-			.owner;
-		Ok(owner != x11rb::NONE)
+			.get_window_attributes(holder)
+			.map_err(request_failed)?;
+		let geometry = self.conn.get_geometry(client).map_err(request_failed)?;
+		let origins = inner
+			.iter()
+			.map(|&window| self.conn.translate_coordinates(window, self.root, 0, 0))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(request_failed)?;
+		let shapes = inner
+			.iter()
+			.map(|&window| self.request_shape(window))
+			.collect::<CoreResult<Vec<_>>>()?;
+		let failed = |error| window_reply_failed(id, error);
+		let holder_border = i32::from(holder_geometry.reply().map_err(failed)?.border_width);
+		let holder_visual = holder_attributes.reply().map_err(failed)?.visual;
+		let geometry = geometry.reply().map_err(failed)?;
+		let origins = origins
+			.into_iter()
+			.map(|cookie| {
+				cookie
+					.reply()
+					.map(|origin| (i32::from(origin.dst_x), i32::from(origin.dst_y)))
+			})
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(failed)?;
+		let area = self.root_area(id, origins[0], geometry.width, geometry.height)?;
+		let (x, y, width, height) = area;
+		let above = self.above(client, area, &tree.siblings)?;
+		if self.covered(above.covers.iter().filter(|over| over.level < level), area)? {
+			return Err(DesktopError::capture_failed(format!(
+				"window {id} is covered by another window inside its own frame"
+			)));
+		}
+		let (holder_x, holder_y) = origins[level];
+		let mut image = self.read_drawable(
+			pixmap.1,
+			holder_visual,
+			x - (holder_x - holder_border),
+			y - (holder_y - holder_border),
+			width,
+			height,
+		)?;
+		drop(pixmap);
+		for (&(window_x, window_y), shape) in origins.iter().zip(shapes) {
+			if let Some(shape) = shape
+				&& let Some(shape) = shape.reply().map_err(failed)?
+			{
+				clip_to_shape(&mut image, (x - window_x, y - window_y), &shape);
+			}
+		}
+		// A popup inside the holder is in its pixmap already.
+		for popup in above.popups.iter().filter(|popup| popup.level >= level) {
+			self.overlay_popup(&mut image, (x, y), popup)?;
+		}
+		Ok(Some((image, area)))
 	}
 
-	/// What the server stacks above `client` at every level of its ancestry
-	/// inside `area`, frames and virtual-root containers included. A window of
-	/// the server's own, such as the compositing overlay, covers nothing; an
-	/// override-redirect window `client`'s own process made belongs to it.
-	fn above(&self, client: Window, area: Area) -> CoreResult<Above> {
-		let mut child = client;
+	/// Where no window from `client` up to the root is redirected, the screen
+	/// is the only copy of its pixels: a root crop, refused where the server
+	/// stacks another client's window over it. The server stays grabbed from
+	/// the stacking check through the read, so nothing maps over the window in
+	/// between.
+	fn capture_unredirected(&self, client: Window, id: &str) -> CoreResult<(RgbaImage, Area)> {
+		let _grab = ServerGrab::new(&self.conn)?;
+		self.capture_screen(client, id)
+	}
+
+	fn capture_screen(&self, client: Window, id: &str) -> CoreResult<(RgbaImage, Area)> {
+		let attributes = self
+			.conn
+			.get_window_attributes(client)
+			.map_err(request_failed)?;
+		let geometry = self.conn.get_geometry(client).map_err(request_failed)?;
+		let origin = self
+			.conn
+			.translate_coordinates(client, self.root, 0, 0)
+			.map_err(request_failed)?;
+		let failed = |error| window_reply_failed(id, error);
+		if attributes.reply().map_err(failed)?.map_state != MapState::VIEWABLE {
+			return Err(DesktopError::window_not_found(format!("window {id} was not found")));
+		}
+		let geometry = geometry.reply().map_err(failed)?;
+		let origin = origin.reply().map_err(failed)?;
+		let area = self.root_area(
+			id,
+			(i32::from(origin.dst_x), i32::from(origin.dst_y)),
+			geometry.width,
+			geometry.height,
+		)?;
+		let tree = self.tree(client)?;
+		let above = self.above(client, area, &tree.siblings)?;
+		if self.covered(above.covers.iter(), area)? {
+			return Err(DesktopError::capture_failed(format!(
+				"window {id} is covered by another window, and no compositing manager keeps an image \
+				 of it, so the X server holds no pixels for its covered part; win.ax() still reads \
+				 it, and a screenshot of its display shows what is on top"
+			)));
+		}
+		let (x, y, width, height) = area;
+		Ok((self.capture_root(x, y, width, height)?, area))
+	}
+
+	fn root_area(&self, id: &str, (x, y): (i32, i32), width: u16, height: u16) -> CoreResult<Area> {
+		clip_to_root(x, y, u32::from(width), u32::from(height), self.root_width, self.root_height)
+			.ok_or_else(|| {
+				DesktopError::capture_failed(format!("window {id} has no visible root area"))
+			})
+	}
+
+	/// `client`'s ancestry up to a child of the root, and what stacks above it
+	/// at every level, frames and virtual-root containers included.
+	fn tree(&self, client: Window) -> CoreResult<Tree> {
+		let mut chain = vec![client];
+		let mut siblings = Vec::new();
 		let mut tree = self
 			.conn
-			.query_tree(child)
+			.query_tree(client)
 			.map_err(request_failed)?
 			.reply()
 			.map_err(request_failed)?;
-		let mut children = Vec::new();
 		while tree.parent != x11rb::NONE {
 			let parent = tree.parent;
+			let level = chain.len() - 1;
 			tree = self
 				.conn
 				.query_tree(parent)
@@ -502,30 +655,97 @@ impl X11Capture {
 			let start = tree
 				.children
 				.iter()
-				.position(|&window| window == child)
+				.position(|&window| window == chain[level])
 				.map_or(tree.children.len(), |index| index + 1);
-			children.extend_from_slice(&tree.children[start..]);
-			child = parent;
+			siblings.extend(tree.children[start..].iter().map(|&window| (level, window)));
+			if tree.parent != x11rb::NONE {
+				chain.push(parent);
+			}
 		}
-		let attributes = children
+		Ok(Tree { chain, siblings })
+	}
+
+	/// The pixmap the server keeps for the innermost window of `chain` it
+	/// redirects, named for this connection, with that window's index; `None`
+	/// when it redirects none of them.
+	fn name_innermost(
+		&self,
+		chain: &[Window],
+		id: &str,
+	) -> CoreResult<Option<(usize, NamedPixmap<'_>)>> {
+		let mut cookies = Vec::with_capacity(chain.len());
+		for &window in chain {
+			let pixmap = self.conn.generate_id().map_err(request_failed)?;
+			let cookie = self
+				.conn
+				.composite_name_window_pixmap(window, pixmap)
+				.map_err(request_failed)?;
+			cookies.push((pixmap, cookie));
+		}
+		let mut found = None;
+		let mut failed = None;
+		for (level, (pixmap, cookie)) in cookies.into_iter().enumerate() {
+			match cookie.check() {
+				Ok(()) => {
+					let named = NamedPixmap(&self.conn, pixmap);
+					if found.is_none() && failed.is_none() {
+						found = Some((level, named));
+					}
+				},
+				// Not redirected, or not viewable.
+				Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Match => {},
+				Err(error) => {
+					if found.is_none() {
+						failed.get_or_insert(error);
+					}
+				},
+			}
+		}
+		match failed {
+			Some(error) => Err(window_reply_failed(id, error)),
+			None => Ok(found),
+		}
+	}
+
+	/// The bounding shape of `window`, read later; `None` without the Shape
+	/// extension, where every window is its rectangle.
+	fn request_shape(&self, window: Window) -> CoreResult<Option<ShapeRequest<'_>>> {
+		if !self.shape {
+			return Ok(None);
+		}
+		let conn = self.conn.as_ref();
+		Ok(Some(ShapeRequest {
+			extents:    conn.shape_query_extents(window).map_err(request_failed)?,
+			rectangles: conn
+				.shape_get_rectangles(window, shape::SK::BOUNDING)
+				.map_err(request_failed)?,
+		}))
+	}
+
+	/// The windows of `siblings` whose rectangle meets `area`: another
+	/// client's, and `client`'s own override-redirect popups. A window of the
+	/// server's own, such as the compositing overlay, covers nothing; an
+	/// override-redirect window `client`'s own process made belongs to it.
+	fn above(&self, client: Window, area: Area, siblings: &[(usize, Window)]) -> CoreResult<Above> {
+		let attributes = siblings
 			.iter()
-			.map(|&window| self.conn.get_window_attributes(window))
+			.map(|&(_, window)| self.conn.get_window_attributes(window))
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(request_failed)?;
-		let geometries = children
+		let geometries = siblings
 			.iter()
-			.map(|&window| self.conn.get_geometry(window))
+			.map(|&(_, window)| self.conn.get_geometry(window))
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(request_failed)?;
-		let origins = children
+		let origins = siblings
 			.iter()
-			.map(|&window| self.conn.translate_coordinates(window, self.root, 0, 0))
+			.map(|&(_, window)| self.conn.translate_coordinates(window, self.root, 0, 0))
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(request_failed)?;
 		let owner = |window: Window| window & !self.conn.setup().resource_id_mask;
-		let mut above = Above { covered: false, popups: Vec::new() };
-		for (((&window, attributes), geometry), origin) in
-			children.iter().zip(attributes).zip(geometries).zip(origins)
+		let mut above = Above { covers: Vec::new(), popups: Vec::new() };
+		for (((&(level, window), attributes), geometry), origin) in
+			siblings.iter().zip(attributes).zip(geometries).zip(origins)
 		{
 			// A window destroyed since the tree was read covers nothing.
 			let (Ok(attributes), Ok(geometry)) = (attributes.reply(), geometry.reply()) else {
@@ -540,59 +760,121 @@ impl X11Capture {
 			let Ok(origin) = origin.reply() else {
 				continue;
 			};
-			let border = u32::from(geometry.border_width);
+			let border = i32::from(geometry.border_width);
+			let origin = (i32::from(origin.dst_x), i32::from(origin.dst_y));
 			let outer = (
-				i32::from(origin.dst_x) - i32::from(geometry.border_width),
-				i32::from(origin.dst_y) - i32::from(geometry.border_width),
-				u32::from(geometry.width) + 2 * border,
-				u32::from(geometry.height) + 2 * border,
+				origin.0 - border,
+				origin.1 - border,
+				u32::from(geometry.width) + 2 * u32::from(geometry.border_width),
+				u32::from(geometry.height) + 2 * u32::from(geometry.border_width),
 			);
+			let Some(part) = intersect(area, outer) else {
+				continue;
+			};
+			let over = Over { level, window, part, origin, border };
 			if attributes.override_redirect && owner(window) == owner(client) {
-				let origin = (i32::from(origin.dst_x), i32::from(origin.dst_y));
-				if let Some(part) = intersect(area, outer) {
-					above.popups.push((window, part, origin));
-				}
-			} else if intersect(area, outer).is_some() {
-				above.covered = true;
+				above.popups.push(over);
+			} else {
+				above.covers.push(over);
 			}
 		}
 		Ok(above)
 	}
 
-	fn overlay_popups(
+	/// Whether any of `covers` puts part of its bounding shape over `area`.
+	fn covered<'a>(&self, covers: impl Iterator<Item = &'a Over>, area: Area) -> CoreResult<bool> {
+		let shapes = covers
+			.map(|over| Ok((over.origin, self.request_shape(over.window)?)))
+			.collect::<CoreResult<Vec<_>>>()?;
+		for (origin, shape) in shapes {
+			// Without the Shape extension a window is its rectangle.
+			let Some(shape) = shape else {
+				return Ok(true);
+			};
+			// A window destroyed since it was listed covers nothing.
+			let Ok(shape) = shape.reply() else {
+				continue;
+			};
+			let Some(shape) = shape else {
+				return Ok(true);
+			};
+			if shape
+				.iter()
+				.any(|rectangle| intersect(area, rectangle_at(origin, rectangle)).is_some())
+			{
+				return Ok(true);
+			}
+		}
+		Ok(false)
+	}
+
+	/// Draws `popup` over `image`, whose top-left is `(x, y)` on the root, from
+	/// the popup's own pixmap and cut to its shape. A popup unmapped or
+	/// destroyed since the tree was read is skipped; any other failure fails.
+	fn overlay_popup(
 		&self,
 		image: &mut RgbaImage,
 		(x, y): (i32, i32),
-		above: Above,
+		popup: &Over,
 	) -> CoreResult<()> {
-		for (popup, (px, py, pw, ph), (ox, oy)) in above.popups {
-			let part = match self.capture_window(popup, px - ox, py - oy, pw, ph) {
-				Ok(part) => part,
-				Err(error) => {
-					// A popup unmapped or destroyed since above() covers nothing.
-					match self
-						.conn
-						.get_window_attributes(popup)
-						.map_err(request_failed)?
-						.reply()
-					{
-						Ok(attributes) if attributes.map_state != MapState::VIEWABLE => continue,
-						Err(ReplyError::X11Error(error)) if error.error_kind == ErrorKind::Window => {
-							continue;
-						},
-						_ => return Err(error),
-					}
+		let pixmap = self.conn.generate_id().map_err(request_failed)?;
+		let named = self
+			.conn
+			.composite_name_window_pixmap(popup.window, pixmap)
+			.map_err(request_failed)?;
+		let attributes = self
+			.conn
+			.get_window_attributes(popup.window)
+			.map_err(request_failed)?;
+		let shape = self.request_shape(popup.window)?;
+		let named = named.check().map(|()| NamedPixmap(&self.conn, pixmap));
+		let gone = |error: &ReplyError| matches!(error, ReplyError::X11Error(error) if error.error_kind == ErrorKind::Window);
+		let attributes = match attributes.reply() {
+			Ok(attributes) => attributes,
+			Err(error) if gone(&error) => return Ok(()),
+			Err(error) => return Err(request_failed(error)),
+		};
+		let pixmap = match named {
+			Ok(pixmap) => pixmap,
+			Err(error) if gone(&error) || attributes.map_state != MapState::VIEWABLE => return Ok(()),
+			Err(error) => {
+				return Err(DesktopError::capture_failed(format!(
+					"X11 popup {} has no pixmap of its own: {error}",
+					popup.window
+				)));
+			},
+		};
+		let (part_x, part_y, width, height) = popup.part;
+		let (origin_x, origin_y) = popup.origin;
+		let mut part = self.read_drawable(
+			pixmap.1,
+			attributes.visual,
+			part_x - (origin_x - popup.border),
+			part_y - (origin_y - popup.border),
+			width,
+			height,
+		)?;
+		drop(pixmap);
+		if let Some(shape) = shape {
+			match shape.reply() {
+				Ok(Some(shape)) => {
+					clip_to_shape(&mut part, (part_x - origin_x, part_y - origin_y), &shape);
 				},
-			};
-			image::imageops::overlay(image, &part, i64::from(px - x), i64::from(py - y));
+				Ok(None) => {},
+				Err(error) if gone(&error) => return Ok(()),
+				Err(error) => return Err(request_failed(error)),
+			}
 		}
+		image::imageops::overlay(image, &part, i64::from(part_x - x), i64::from(part_y - y));
 		Ok(())
 	}
 
-	/// The rectangle at `x, y` inside `window`, read from its own drawable.
-	fn capture_window(
+	/// The rectangle at `x, y` inside `drawable`, a window or pixmap holding
+	/// pixels of `visual`.
+	fn read_drawable(
 		&self,
-		window: Window,
+		drawable: Drawable,
+		visual: Visualid,
 		x: i32,
 		y: i32,
 		width: u32,
@@ -606,24 +888,24 @@ impl X11Capture {
 		})?;
 		let reply = self
 			.conn
-			.get_image(ImageFormat::Z_PIXMAP, window, x, y, edge(width)?, edge(height)?, !0)
+			.get_image(ImageFormat::Z_PIXMAP, drawable, x, y, edge(width)?, edge(height)?, !0)
 			.map_err(request_failed)?
 			.reply()
 			.map_err(|error| {
-				DesktopError::capture_failed(format!("X11 GetImage of window {window} failed: {error}"))
+				DesktopError::capture_failed(format!("X11 GetImage of {drawable} failed: {error}"))
 			})?;
-		let visual = self
+		let visual_type = self
 			.conn
 			.setup()
 			.roots
 			.iter()
 			.flat_map(|screen| &screen.allowed_depths)
 			.flat_map(|depth| &depth.visuals)
-			.find(|visual| visual.visual_id == reply.visual)
+			.find(|candidate| candidate.visual_id == visual)
 			.ok_or_else(|| {
 				DesktopError::capture_failed("X11 setup does not describe the window's visual")
 			})?;
-		if visual.class != VisualClass::TRUE_COLOR {
+		if visual_type.class != VisualClass::TRUE_COLOR {
 			return Err(DesktopError::capture_failed(
 				"X11 window capture requires a TrueColor visual; colormap-based visuals are \
 				 unsupported",
@@ -631,13 +913,13 @@ impl X11Capture {
 		}
 		// Core visual masks say nothing about alpha, including at depth 32.
 		let masks = ColorMasks {
-			red:   visual.red_mask,
-			green: visual.green_mask,
-			blue:  visual.blue_mask,
+			red:   visual_type.red_mask,
+			green: visual_type.green_mask,
+			blue:  visual_type.blue_mask,
 			alpha: self
 				.pictformats
 				.as_deref()
-				.map_or(0, |formats| visual_alpha(formats, reply.visual)),
+				.map_or(0, |formats| visual_alpha(formats, visual)),
 		};
 		self.decode(&reply, width, height, masks)
 	}
@@ -742,6 +1024,18 @@ fn request_failed(error: impl std::fmt::Display) -> DesktopError {
 	DesktopError::capture_failed(format!("X11 request failed: {error}"))
 }
 
+/// A failed reply about the window being captured: `WindowNotFound` once it is
+/// destroyed.
+fn window_reply_failed(id: &str, error: ReplyError) -> DesktopError {
+	if let ReplyError::X11Error(x11) = &error
+		&& x11.error_kind == ErrorKind::Window
+	{
+		DesktopError::window_not_found(format!("window {id} was not found"))
+	} else {
+		request_failed(error)
+	}
+}
+
 fn root_capture_failed(error: ReplyError) -> DesktopError {
 	if let ReplyError::X11Error(x11) = &error
 		&& matches!(x11.error_kind, ErrorKind::Match | ErrorKind::Drawable)
@@ -810,12 +1104,13 @@ fn zpixmap_to_rgba(
 	lsb_first: bool,
 	masks: ColorMasks,
 ) -> CoreResult<RgbaImage> {
-	if !(24..=32).contains(&depth) {
+	if !(15..=32).contains(&depth) {
 		return Err(DesktopError::capture_failed(format!(
-			"unsupported X11 image depth {depth}; TrueColor depth 24 through 32 is required"
+			"unsupported X11 image depth {depth}; TrueColor depth 15 through 32 is required"
 		)));
 	}
 	let bytes_per_pixel = match bits_per_pixel {
+		16 => 2usize,
 		24 => 3usize,
 		32 => 4usize,
 		other => {
@@ -876,19 +1171,99 @@ fn zpixmap_to_rgba(
 		.ok_or_else(|| DesktopError::capture_failed("X11 image dimensions are inconsistent"))
 }
 
+/// A shape rectangle, relative to a window's origin at `origin`, in root
+/// coordinates.
+fn rectangle_at((x, y): (i32, i32), rectangle: &Rectangle) -> Area {
+	(
+		x + i32::from(rectangle.x),
+		y + i32::from(rectangle.y),
+		u32::from(rectangle.width),
+		u32::from(rectangle.height),
+	)
+}
+
+/// Clears the pixels of `image` outside `shape`, rectangles relative to the
+/// window's origin, where `origin` is the window coordinate of the image's
+/// top-left pixel. Nothing draws there, so what a pixmap holds there is not
+/// the window's.
+fn clip_to_shape(image: &mut RgbaImage, origin: (i32, i32), shape: &[Rectangle]) {
+	let (width, height) = image.dimensions();
+	let whole = (0, 0, width, height);
+	let at = (-origin.0, -origin.1);
+	if shape
+		.iter()
+		.any(|rectangle| intersect(whole, rectangle_at(at, rectangle)) == Some(whole))
+	{
+		return;
+	}
+	let mut inside = vec![false; width as usize * height as usize];
+	for rectangle in shape {
+		let Some((left, top, columns, rows)) = intersect(whole, rectangle_at(at, rectangle)) else {
+			continue;
+		};
+		for row in top as usize..top as usize + rows as usize {
+			let start = row * width as usize + left as usize;
+			inside[start..start + columns as usize].fill(true);
+		}
+	}
+	for (pixel, inside) in image.pixels_mut().zip(inside) {
+		if !inside {
+			*pixel = Rgba([0; 4]);
+		}
+	}
+}
+
+/// A pixmap named for a window's storage, freed on drop.
+struct NamedPixmap<'a>(&'a RustConnection, Pixmap);
+
+impl Drop for NamedPixmap<'_> {
+	fn drop(&mut self) {
+		if let Ok(cookie) = self.0.free_pixmap(self.1) {
+			cookie.ignore_error();
+		}
+	}
+}
+
+/// The server grabbed: no other client's request runs until drop.
+struct ServerGrab<'a>(&'a RustConnection);
+
+impl<'a> ServerGrab<'a> {
+	fn new(conn: &'a RustConnection) -> CoreResult<Self> {
+		conn.grab_server().map_err(request_failed)?.ignore_error();
+		Ok(Self(conn))
+	}
+}
+
+impl Drop for ServerGrab<'_> {
+	fn drop(&mut self) {
+		if let Ok(cookie) = self.0.ungrab_server() {
+			cookie.ignore_error();
+		}
+		let _ = self.0.flush();
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	//! The Xvfb tests start their own server and play its window manager:
 	//! `cargo test -p pi-natives desktop::linux::x11::capture -- --ignored`
 
 	use std::{
-		io::{BufRead, BufReader, IoSlice},
+		io::{BufRead, BufReader},
 		process::{Child, Command, Stdio},
+		sync::mpsc,
+		thread,
 	};
 
 	use x11rb::{
 		CURRENT_TIME,
-		protocol::xproto::{ColormapAlloc, ConfigureWindowAux, CreateWindowAux, PropMode, StackMode},
+		protocol::{
+			composite::Redirect,
+			shape::SO,
+			xproto::{
+				ClipOrdering, ColormapAlloc, ConfigureWindowAux, CreateWindowAux, PropMode, StackMode,
+			},
+		},
 		wrapper::ConnectionExt as _,
 	};
 
@@ -1139,25 +1514,20 @@ mod tests {
 		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
 	}
 
-	/// Does what a compositing manager does on start: redirects every top-level
-	/// into a pixmap of its own and takes the screen's `_NET_WM_CM_S0`.
-	fn become_compositing_manager(conn: &RustConnection) {
+	/// Does the first half of what a compositing manager does on start:
+	/// redirects every top-level into a pixmap of its own.
+	fn redirect_top_levels(conn: &RustConnection) {
 		let root = conn.setup().roots[0].root;
-		let opcode = conn
-			.extension_information("Composite")
-			.expect("query Composite")
-			.expect("Xvfb has Composite")
-			.major_opcode;
-		// CompositeRedirectSubwindows(root, Manual): minor opcode 2, three words.
-		let mut request = vec![opcode, 2];
-		request.extend_from_slice(&3u16.to_ne_bytes());
-		request.extend_from_slice(&root.to_ne_bytes());
-		request.extend_from_slice(&[1, 0, 0, 0]);
 		conn
-			.send_request_without_reply(&[IoSlice::new(&request)], Vec::new())
+			.composite_redirect_subwindows(root, Redirect::MANUAL)
 			.expect("redirect")
 			.check()
 			.expect("redirect accepted");
+	}
+
+	/// The second half: takes the screen's `_NET_WM_CM_S0`.
+	fn own_compositor_selection(conn: &RustConnection) {
+		let root = conn.setup().roots[0].root;
 		let owner = conn.generate_id().expect("owner id");
 		conn
 			.create_window(
@@ -1184,6 +1554,27 @@ mod tests {
 			.set_selection_owner(owner, selection, CURRENT_TIME)
 			.expect("own selection");
 		conn.sync().expect("sync");
+	}
+
+	fn become_compositing_manager(conn: &RustConnection) {
+		redirect_top_levels(conn);
+		own_compositor_selection(conn);
+	}
+
+	fn set_shape(conn: &RustConnection, window: Window, rectangles: &[Rectangle]) {
+		conn
+			.shape_rectangles(
+				SO::SET,
+				shape::SK::BOUNDING,
+				ClipOrdering::UNSORTED,
+				window,
+				0,
+				0,
+				rectangles,
+			)
+			.expect("shape")
+			.check()
+			.expect("shape accepted");
 	}
 
 	#[test]
@@ -1214,36 +1605,192 @@ mod tests {
 		become_compositing_manager(&wm);
 		let (red, ..) = covered_pair(&wm);
 		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
-		let above = capture.above(red, (0, 0, 200, 150)).expect("stacking");
-		assert!(above.covered);
+		let area = (0, 0, 200, 150);
+		let tree = capture.tree(red).expect("tree");
+		let above = capture.above(red, area, &tree.siblings).expect("stacking");
 		assert_eq!(above.popups.len(), 1);
-		let popup = above.popups[0].0;
-		let mut image = capture
-			.capture_window(red, 0, 0, 200, 150)
-			.expect("target pixels");
+		let popup = above.popups[0].window;
+		let mut image = RgbaImage::from_pixel(200, 150, Rgba([255, 0, 0, 255]));
 
 		wm.unmap_window(popup).expect("unmap popup");
-		wm.sync().expect("popup is unmapped before GetImage");
+		wm.sync().expect("popup is unmapped before it is read");
 		capture
-			.overlay_popups(&mut image, (0, 0), above)
+			.overlay_popup(&mut image, (0, 0), &above.popups[0])
 			.expect("capture without vanished popup");
-
-		assert_eq!(image.dimensions(), (200, 150));
-		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
 		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
 
 		wm.map_window(popup).expect("remap popup");
 		wm.sync().expect("popup is mapped");
 		let above = capture
-			.above(red, (0, 0, 200, 150))
+			.above(red, area, &tree.siblings)
 			.expect("stacking before destroy");
 		assert_eq!(above.popups.len(), 1);
 		wm.destroy_window(popup).expect("destroy popup");
-		wm.sync().expect("popup is destroyed before GetImage");
+		wm.sync().expect("popup is destroyed before it is read");
 		capture
-			.overlay_popups(&mut image, (0, 0), above)
+			.overlay_popup(&mut image, (0, 0), &above.popups[0])
 			.expect("capture without destroyed popup");
 		assert_eq!(pixel(&image, POPUP), [255, 0, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn uncovered_window_under_a_compositing_manager_is_read_from_its_own_pixels() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		become_compositing_manager(&wm);
+		let (red, _, frame) = covered_pair(&wm);
+		wm.configure_window(frame, &ConfigureWindowAux::new().x(210))
+			.expect("move cover away");
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		// The screen holds what the manager painted last, which this one never
+		// does; the window's pixmap holds the window.
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("uncovered window");
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn redirected_window_is_read_from_its_own_pixels_without_a_selection_owner() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		redirect_top_levels(&wm);
+		let (red, ..) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("covered but redirected window");
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn covered_window_a_compositing_manager_does_not_redirect_is_reported_covered() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		// The selection is owned, as by a manager that unredirected a window.
+		own_compositor_selection(&wm);
+		let (red, ..) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let error = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect_err("the screen is the only copy of a window nobody redirects");
+		assert_eq!(error.code, ErrorCode::CaptureFailed);
+		assert!(error.message.contains("covered"), "{}", error.message);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn shaped_window_is_clear_outside_its_shape() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		become_compositing_manager(&wm);
+		let (red, ..) = covered_pair(&wm);
+		set_shape(&wm, red, &[Rectangle { x: 0, y: 0, width: 100, height: 150 }]);
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("shaped window");
+		assert_eq!(pixel(&image, (80, 100)), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, (150, 20)), [0, 0, 0, 0]);
+		assert_eq!(pixel(&image, STRIP), [0, 0, 0, 0]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn shaped_popup_is_drawn_only_inside_its_shape() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		become_compositing_manager(&wm);
+		let (red, ..) = covered_pair(&wm);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let tree = capture.tree(red).expect("tree");
+		let popup = capture
+			.above(red, (0, 0, 200, 150), &tree.siblings)
+			.expect("stacking")
+			.popups[0]
+			.window;
+		// The popup's left half and left border; its rectangle is 46x36 at 10,10.
+		set_shape(&wm, popup, &[Rectangle { x: -3, y: -3, width: 23, height: 36 }]);
+		wm.sync().expect("sync");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("window with a shaped popup");
+		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+		assert_eq!(pixel(&image, (10, 10)), [0, 0, 255, 255]);
+		assert_eq!(pixel(&image, (45, 25)), [255, 0, 0, 255]);
+		assert_eq!(pixel(&image, (55, 45)), [255, 0, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn shaped_window_covers_only_where_its_shape_is() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let (red, _, frame) = covered_pair(&wm);
+		// The frame's title bar, the part over red, is cut away.
+		set_shape(&wm, frame, &[Rectangle { x: 0, y: 15, width: 200, height: 145 }]);
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+
+		let (image, _) = capture
+			.capture(&Target::Window(red.to_string()), None)
+			.expect("nothing's shape is over red");
+		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn window_mapped_by_another_client_waits_for_the_screen_read() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let (red, _, frame) = covered_pair(&wm);
+		wm.configure_window(frame, &ConfigureWindowAux::new().x(210))
+			.expect("move cover away");
+		let root = wm.setup().roots[0].root;
+		let (other, _) = x11rb::connect(Some(&display)).expect("second client");
+		let cover =
+			window(&other, root, (50, 50, 100, 60), &CreateWindowAux::new().background_pixel(BLUE));
+		other.unmap_window(cover).expect("unmap cover");
+		other.sync().expect("sync");
+		wm.sync().expect("sync");
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let id = red.to_string();
+
+		let grab = ServerGrab::new(&capture.conn).expect("grab");
+		capture.conn.sync().expect("the server is grabbed");
+		let (sent, mapped) = mpsc::channel();
+		let mapper = thread::spawn(move || {
+			other.map_window(cover).expect("map cover");
+			other.flush().expect("map sent");
+			sent.send(()).expect("report");
+			other.sync().expect("cover mapped");
+			other
+		});
+		// The server holds the map until the grab ends.
+		mapped.recv().expect("map sent");
+		let (image, _) = capture
+			.capture_screen(red, &id)
+			.expect("nothing is over red yet");
+		assert_eq!(pixel(&image, (60, 60)), [255, 0, 0, 255]);
+		drop(grab);
+		let _other = mapper.join().expect("mapper");
+
+		let error = capture
+			.capture(&Target::Window(id), None)
+			.expect_err("the cover is mapped now");
+		assert!(error.message.contains("covered"), "{}", error.message);
 	}
 
 	#[test]
@@ -1299,5 +1846,14 @@ mod tests {
 			.collect();
 		let image = zpixmap_to_rgba(&data, 3, 1, 32, 32, 32, true, masks).expect("decode");
 		assert_eq!(image.as_raw().as_slice(), [255, 0, 0, 128, 0, 0, 0, 0, 255, 0, 0, 255]);
+	}
+
+	#[test]
+	fn sixteen_bit_pixels_decode() {
+		let masks = ColorMasks { red: 0xf800, green: 0x07e0, blue: 0x001f, alpha: 0 };
+		// Three 16-bit pixels and the padding to a 32-bit scanline.
+		let data = [0x00, 0xf8, 0xe0, 0x07, 0x1f, 0x00, 0, 0];
+		let image = zpixmap_to_rgba(&data, 3, 1, 16, 16, 32, true, masks).expect("decode");
+		assert_eq!(image.as_raw().as_slice(), [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255]);
 	}
 }

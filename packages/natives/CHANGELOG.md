@@ -61,6 +61,7 @@
 - Fixed X11 window screenshots of a covered window returning the pixels of the window on top, including inside virtual roots: under a compositing manager the capture now reads the window's own pixels with Render-defined alpha and tolerates closing popups, and without one it fails `CaptureFailed` saying the window is covered; unsupported colormap-based visuals fail clearly instead of returning incorrect colors, and stacking checks pipeline coordinate requests ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed covered X11 window screenshots showing another window: captures now return the target's own pixels when available, or explain why they cannot ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed covered X11 window screenshots showing another window: captures now return the target's own pixels, including its popups and their borders, when available, or explain why they cannot ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed X11 window screenshots showing whatever was on screen over the window: under a compositing manager they come from the window's own pixels with its own menus and tooltips, cut to their shapes, and otherwise a covered window is reported covered instead of returning the window on top ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
