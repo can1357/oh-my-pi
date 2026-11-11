@@ -1710,7 +1710,9 @@ fn aimed_row_check(event: &PointerEvent) -> impl Fn() -> CoreResult<()> + use<> 
 
 impl EntryFront {
 	pub(super) fn now() -> Self {
-		PINNED_FRONT.get().unwrap_or_else(|| Self(skylight::front_pid()))
+		PINNED_FRONT
+			.get()
+			.unwrap_or_else(|| Self(skylight::front_pid()))
 	}
 
 	/// Whether `pid` was behind another application as the input began.
