@@ -55,6 +55,30 @@ async function call(watch: NativeWindowWatch): Promise<string[]> {
 	return await watch.endCall();
 }
 
+describe("native-window frame timeout cleanup", () => {
+	test.each(["tab", "browser"] as const)("cancels the %s probe timer when its read wins", async probe => {
+		const pending = Promise.withResolvers<typeof FRAME>();
+		const page = {
+			mainFrame: () => ({ isolatedRealm: () => ({ evaluate: () => pending.promise }) }),
+		} as unknown as Parameters<typeof readTabFrame>[0];
+		const timer = vi.spyOn(globalThis, "setTimeout");
+		const clear = vi.spyOn(globalThis, "clearTimeout");
+		try {
+			const result =
+				probe === "tab"
+					? readTabFrame(page)
+					: nativeWindows.readBrowserPageFrames({ pages: async () => [] });
+			pending.resolve(FRAME);
+			expect(await result).toEqual(probe === "tab" ? FRAME : []);
+			expect(timer).toHaveBeenCalledWith(expect.any(Function), 300);
+			expect(clear).toHaveBeenCalledWith(timer.mock.results[0].value);
+		} finally {
+			timer.mockRestore();
+			clear.mockRestore();
+		}
+	});
+});
+
 describe("browsers that show windows", () => {
 	test("leaves headless and unidentified CDP browsers out, including recycled tabs", () => {
 		expect(browserShowsWindows({ kind: "headless", headless: true })).toBe(false);
