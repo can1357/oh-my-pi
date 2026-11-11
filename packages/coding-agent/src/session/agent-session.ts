@@ -290,8 +290,8 @@ import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { AgentOutputManager } from "../task/output-manager";
-import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
+import type { ModelMention, ResolvedModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { ModelMentionRegistry } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditModeSetting } from "../edit/settings";
 import { getEditStore } from "../edit/store";
@@ -2389,6 +2389,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#modelMentions = new ModelMentionRegistry({
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
+			settings: this.settings,
 			scopedModels: () => this.scopedModels.map(s => s.model),
 			inheritedAgents: config.inheritedSessionAgents,
 		});
@@ -11993,7 +11994,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#modelMentions.mentions;
 	}
 
-	/** Resolve a `provider/id[:level]` mention within the session picker's scope. */
+	/** Resolve a concrete or `@role[:level]` mention within the session picker's scope. */
 	resolveModelMention(selector: string): ResolvedModelMention | undefined {
 		return this.#modelMentions.resolve(selector);
 	}

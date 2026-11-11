@@ -941,6 +941,7 @@ describe("persisted subagent revival", () => {
 			sessionManager: SessionManager.inMemory(parentCwd),
 			modelRegistry,
 			scopedModels: () => models,
+			settings: Settings.isolated(),
 		});
 		parentMentions.syncFromBranch();
 		parentMentions.expandMentions("^mock/mentioned");
@@ -1027,6 +1028,7 @@ describe("persisted subagent revival", () => {
 				sessionManager: SessionManager.inMemory(cwd),
 				modelRegistry,
 				scopedModels: () => models,
+				settings: Settings.isolated(),
 			});
 			mentions.syncFromBranch();
 			mentions.expandMentions("^mock/mentioned");
@@ -1164,6 +1166,7 @@ describe("persisted subagent revival", () => {
 			sessionManager: SessionManager.inMemory(cwd),
 			modelRegistry,
 			scopedModels: () => [target],
+			settings: Settings.isolated(),
 		});
 		mentions.syncFromBranch();
 		mentions.expandMentions("^mock/mentioned");
