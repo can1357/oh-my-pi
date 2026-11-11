@@ -719,9 +719,16 @@ export function parseClaudeUsagePayload(
 	if (!isRecord(raw)) return null;
 	const payload: ClaudeUsageResponse = raw;
 	const apiLimitEntries = parseApiLimitEntries(payload.limits);
-	const fiveHour = parseBucket(payload.five_hour) ?? apiLimitEntries.find(entry => entry.kind === "session")?.bucket;
 	const sevenDay =
 		parseBucket(payload.seven_day) ?? apiLimitEntries.find(entry => entry.kind === "weekly_all")?.bucket;
+	// `five_hour: null` beside a live weekly window is the server reporting no
+	// open 5-hour session: nothing spent since the last one lapsed. Read it as
+	// an idle 0% window so a fresh report still vouches for every shared gate;
+	// an absent key stays unknown.
+	const fiveHour =
+		parseBucket(payload.five_hour) ??
+		apiLimitEntries.find(entry => entry.kind === "session")?.bucket ??
+		(payload.five_hour === null && sevenDay !== undefined ? { utilization: 0, resetsAt: undefined } : undefined);
 	const sevenDayOpus = parseBucket(payload.seven_day_opus);
 	const sevenDaySonnet = parseBucket(payload.seven_day_sonnet);
 

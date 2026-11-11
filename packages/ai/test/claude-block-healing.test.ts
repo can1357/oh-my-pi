@@ -6,7 +6,7 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeRankingStrategy, parseClaudeUsagePayload } from "@oh-my-pi/pi-ai/usage/claude";
 
 /**
  * A reactive Fable 429 blocks the credential until the reset that error
@@ -234,6 +234,38 @@ describe("claude usage-block healing", () => {
 		expect(clearedScopes).toEqual([""]);
 		expect(health.accounts[0]?.state).toBe("healthy");
 		expect(await storage.keys.get("anthropic", "global-heal", { modelId: "claude-fable-5-1" })).toBe("access-1");
+	});
+
+	it("heals a stale account-wide block when the live payload has no open 5-hour session", async () => {
+		// Anthropic reports `five_hour: null` once the last 5-hour window lapses
+		// unused; the account is idle, not missing a gate. Without reading that as
+		// 0%, a block from a past week pinned a healthy account until its weekly
+		// reset and routed every request to an exhausted sibling.
+		const weeklyReset = new Date(Date.now() + 2 * 24 * 60 * 60_000).toISOString();
+		const report = parseClaudeUsagePayload({
+			five_hour: null,
+			seven_day: { utilization: 11, resets_at: weeklyReset },
+			seven_day_opus: null,
+			seven_day_sonnet: null,
+			limits: [
+				{ kind: "weekly_all", percent: 11, resets_at: weeklyReset },
+				{
+					kind: "weekly_scoped",
+					percent: 19,
+					resets_at: weeklyReset,
+					scope: { model: { display_name: "Fable" } },
+				},
+			],
+		});
+		if (!report) throw new Error("payload did not parse");
+		const { storage, clearedScopes } = makeHarness(report, "");
+		storages.push(storage);
+		await storage.credentials.reload();
+
+		const health = await storage.health.model("anthropic", { modelId: "claude-opus-5-5", reserveFraction: 0.1 });
+
+		expect(clearedScopes).toEqual([""]);
+		expect(health.accounts[0]?.state).toBe("healthy");
 	});
 
 	for (const scope of ["auth", "account-policy"]) {
