@@ -591,36 +591,44 @@ describe("OMP-owned browser evaluation", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)("runs numeric polling on the page interval", async () => {
 		expect(
 			await runPageContract(`
-			await page.evaluate(() => {
-				globalThis.__ompSetInterval = setInterval;
-				globalThis.__ompNumericChecks = 0;
-				globalThis.setInterval = (callback, ms) => {
-					if (ms === 17) {
-						globalThis.__ompNumericTimer = true;
-						queueMicrotask(callback);
-						return 0;
-					}
-					return globalThis.__ompSetInterval(callback, ms);
-				};
-			});
+			const clock = await page.createCDPSession();
+			await clock.send("Emulation.setVirtualTimePolicy", { policy: "pause" });
+			const advance = async budget => {
+				const elapsed = Promise.withResolvers();
+				clock.once("Emulation.virtualTimeBudgetExpired", elapsed.resolve);
+				await clock.send("Emulation.setVirtualTimePolicy", { policy: "advance", budget });
+				await elapsed.promise;
+			};
+			const pending = page.waitForFunction(() => {
+				globalThis.__ompNumericChecks = (globalThis.__ompNumericChecks ?? 0) + 1;
+				return globalThis.__ompNumericChecks === 3;
+			}, { polling: 17, timeout: 0 });
 			try {
-				const handle = await page.waitForFunction(() => ++globalThis.__ompNumericChecks === 2, { polling: 17 });
+				const ready = await page.waitForFunction(() => globalThis.__ompNumericChecks >= 1, { polling: "mutation" });
+				await ready.dispose();
+				const checks = [await page.evaluate(() => globalThis.__ompNumericChecks)];
+				for (const budget of [16, 1, 17]) {
+					await advance(budget);
+					checks.push(await page.evaluate(() => globalThis.__ompNumericChecks));
+				}
+				const handle = await pending;
 				await handle.dispose();
-				return page.evaluate(() => globalThis.__ompNumericTimer === true);
+				return checks;
 			} finally {
-				await page.evaluate(() => { globalThis.setInterval = globalThis.__ompSetInterval; });
+				await clock.detach();
 			}
 		`),
-		).toBe(true);
+		).toEqual([1, 1, 2, 3]);
 	});
 
-	it.skipIf(!CHROMIUM_AVAILABLE)("rejects an unknown polling mode before evaluating the predicate", async () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)("rejects unsupported polling values before evaluating the predicate", async () => {
 		expect(
 			await runPageContract(`
-			return page.waitForFunction(() => { throw new Error("predicate ran"); }, { polling: "rafx", timeout: 0 })
-				.then(() => "resolved", error => error.message);
+			return Promise.all(["rafx", true].map(polling =>
+				page.waitForFunction(() => { throw new Error("predicate ran"); }, { polling, timeout: 0 })
+					.then(() => "resolved", error => error.message)));
 		`),
-		).toBe("Unknown polling option: rafx");
+		).toEqual(["Unknown polling option: rafx", "Unknown polling option: true"]);
 	});
 
 	it.skipIf(!CHROMIUM_AVAILABLE)("preserves abort reasons and stops the page poller", async () => {

@@ -913,7 +913,7 @@ function createRunPage(page: Page, signal: AbortSignal): Page {
 			async (fn: PageFunction, options: FrameWaitForFunctionOptions = {}, ...args: unknown[]) => {
 				const timeout = options.timeout ?? page.getDefaultTimeout();
 				const polling = options.polling ?? 100;
-				if (typeof polling === "string" && polling !== "raf" && polling !== "mutation") {
+				if (typeof polling !== "number" && polling !== "raf" && polling !== "mutation") {
 					throw new Error(`Unknown polling option: ${polling}`);
 				}
 				if (typeof polling === "number" && polling < 0) {
