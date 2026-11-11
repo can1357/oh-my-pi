@@ -87,9 +87,6 @@ let
     )
     ++ cudaRuntimeLibraries;
 in
-assert lib.assertMsg (
-  withAppleFm -> apple-sdk_27 != null
-) "Apple Foundation Models requires apple-sdk_27; provide it or set withAppleFm = false.";
 stdenv.mkDerivation {
   pname = "omp";
   inherit (packageJson) version;
@@ -295,6 +292,16 @@ stdenv.mkDerivation {
       if grep -q "/nix/store/" <<<"$addonDeps"; then
         echo "embedded addon references /nix/store paths:" >&2
         echo "$addonDeps" >&2
+        exit 1
+      fi
+      # Linking against a newer SDK (apple-sdk_27 for the Foundation Models
+      # bridge) must not raise the addon's minimum macOS above the platform
+      # floor; only the embedded bridge targets macOS 27.
+      addonLoadCommands="$(otool -l "packages/natives/native/${platform.addon}")"
+      addonMinos="$(awk '$1 == "cmd" { build = $2 == "LC_BUILD_VERSION" } build && $1 == "minos" { print $2; exit }' <<<"$addonLoadCommands")"
+      darwinFloor=${stdenv.hostPlatform.darwinMinVersion}
+      if [ -z "$addonMinos" ] || [ "$(printf '%s\n' "$addonMinos" "$darwinFloor" | sort -V | tail -n 1)" != "$darwinFloor" ]; then
+        echo "embedded addon requires macOS ''${addonMinos:-unknown}, above the platform floor $darwinFloor" >&2
         exit 1
       fi
     ''}

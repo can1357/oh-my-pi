@@ -218,21 +218,25 @@ craneLib.buildPackage (
   // {
     cargoArtifacts = dependencyArtifacts;
     # Only real sources compile the bridge; Swift must not invalidate the
-    # dummy dependency artifacts.
+    # dummy dependency artifacts. build.rs fails instead of substituting a
+    # host Xcode/CLT compiler or a stub when this compiler is unusable.
     env =
       commonArgs.env
       // lib.optionalAttrs withAppleFm {
         OMP_APPLEFM_SWIFTC = lib.getExe' swiftPackages.swift "swiftc";
       };
-    # Only the real-source stage has the bridge script; dependency sources
-    # contain dummy build scripts. Never allow fallback to host Xcode/CLT.
-    preBuild = lib.optionalString withAppleFm ''
-      toolchain="$(/bin/sh crates/pi-natives/src/applefm/build-bridge.sh detect)"
-      if [ -z "$toolchain" ] || [ "''${toolchain%%$'\t'*}" != "$OMP_APPLEFM_SWIFTC" ]; then
-        echo "OMP requires its Nix Swift 6.4+ compiler and the macOS 27 SDK; host toolchains are not supported" >&2
-        exit 1
-      fi
-      echo "Apple Foundation Models toolchain: $toolchain"
+    # The final package compresses the addon, so Nix reference scanning cannot
+    # see a /nix/store dylib or rpath that the Swift wrapper leaves in the
+    # embedded bridge; it would fail to load after garbage collection.
+    postBuild = lib.optionalString withAppleFm ''
+      for bridge in target/release/build/pi-natives-*/out/libomp_applefm.dylib; do
+        bridgeLoadCommands="$(otool -l "$bridge")"
+        if grep -q /nix/store/ <<<"$bridgeLoadCommands"; then
+          echo "Apple Foundation Models bridge load commands reference /nix/store:" >&2
+          echo "$bridgeLoadCommands" >&2
+          exit 1
+        fi
+      done
     '';
     passthru = {
       inherit platform dependencyArtifacts;

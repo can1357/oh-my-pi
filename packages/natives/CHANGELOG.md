@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A set `OMP_APPLEFM_SWIFTC` must name a usable Swift 6.4+ compiler with a macOS 27+ SDK: the build now fails instead of falling back to Xcode, the Command Line Tools, or a build without Apple Foundation Models ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
