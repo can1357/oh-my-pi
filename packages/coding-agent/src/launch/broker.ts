@@ -23,6 +23,7 @@ import {
 	writeDaemonScopeMeta,
 } from "./paths";
 import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { moveBrokerIntoOwnScope } from "./broker-scope";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -1607,6 +1608,12 @@ export interface DaemonBrokerStartOptions {
 	 * spawns a competing broker process.
 	 */
 	onListening?: () => void;
+	/**
+	 * Move this process into a transient systemd user scope of its own (Linux
+	 * with a user manager; see `broker-scope.ts`). Only for a dedicated broker
+	 * process: an embedding host would move itself.
+	 */
+	ownScope?: boolean;
 }
 
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
@@ -1656,11 +1663,18 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		restartBackoffBaseMs,
 		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
 	);
+	// A dedicated broker leaves the cgroup of the session that spawned it, in the
+	// background so that a slow user manager never delays clients; daemons it
+	// starts before the move are moved after it (broker-scope.ts).
+	const scopeAbort = new AbortController();
+	const scopeMove = options.ownScope ? moveBrokerIntoOwnScope(scopeAbort.signal) : undefined;
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
 		await broker.run(options.onListening);
 	} finally {
 		cancelCleanup();
+		scopeAbort.abort();
+		await scopeMove;
 		await releaseBrokerLease(lease);
 	}
 }
