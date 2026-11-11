@@ -5,13 +5,15 @@
 mod unix;
 #[cfg(windows)]
 mod windows;
-
 use std::{
 	fs,
 	future::{Future, ready},
 	io,
 	path::{Path, PathBuf},
 };
+
+#[cfg(windows)]
+pub use windows::with_windows_exe;
 
 #[cfg(unix)]
 pub(crate) use self::unix::{
@@ -37,6 +39,16 @@ use crate::{
 };
 
 pub(crate) fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
+	#[cfg(windows)]
+	if !options.is_writable()
+		&& !options.is_create()
+		&& !options.is_create_new()
+		&& !options.is_truncate()
+	{
+		return windows::with_windows_exe(path, |candidate| {
+			options.to_std().open(candidate).map(File::from)
+		});
+	}
 	options.to_std().open(path).map(File::from)
 }
 
@@ -45,12 +57,12 @@ pub(crate) fn open(path: &Path, options: &OpenOptions) -> io::Result<File> {
 // work the way the unix dev/ino pair does.
 #[cfg(windows)]
 pub(crate) fn metadata(path: &Path) -> io::Result<Metadata> {
-	windows::path_metadata(path, true)
+	windows::with_windows_exe(path, |candidate| windows::path_metadata(candidate, true))
 }
 
 #[cfg(windows)]
 pub(crate) fn symlink_metadata(path: &Path) -> io::Result<Metadata> {
-	windows::path_metadata(path, false)
+	windows::with_windows_exe(path, |candidate| windows::path_metadata(candidate, false))
 }
 
 #[cfg(not(windows))]
@@ -64,7 +76,33 @@ pub(crate) fn symlink_metadata(path: &Path) -> io::Result<Metadata> {
 }
 
 pub(crate) fn read_dir(path: &Path) -> io::Result<ReadDir> {
+	#[cfg(windows)]
+	return windows::with_windows_exe(path, |candidate| {
+		fs::read_dir(candidate).map(ReadDir::native)
+	});
+	#[cfg(not(windows))]
 	fs::read_dir(path).map(ReadDir::native)
+}
+
+pub(crate) fn read(path: &Path) -> io::Result<Vec<u8>> {
+	#[cfg(windows)]
+	return windows::with_windows_exe(path, |candidate| fs::read(candidate));
+	#[cfg(not(windows))]
+	fs::read(path)
+}
+
+pub(crate) fn canonicalize_native(path: &Path) -> io::Result<PathBuf> {
+	#[cfg(windows)]
+	return windows::with_windows_exe(path, |candidate| fs::canonicalize(candidate));
+	#[cfg(not(windows))]
+	fs::canonicalize(path)
+}
+
+pub(crate) fn read_link(path: &Path) -> io::Result<PathBuf> {
+	#[cfg(windows)]
+	return windows::with_windows_exe(path, |candidate| fs::read_link(candidate));
+	#[cfg(not(windows))]
+	fs::read_link(path)
 }
 
 pub(crate) fn create_dir(path: &Path, mode: Option<u32>, recursive: bool) -> io::Result<()> {

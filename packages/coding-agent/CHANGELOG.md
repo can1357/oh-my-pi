@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, Gradle and Maven launchers can use a JDK whose `JAVA_HOME/bin` contains `java.exe` without an extensionless `java`.
+
 ## [18.18.9] - 2026-11-11
 
 ### Added

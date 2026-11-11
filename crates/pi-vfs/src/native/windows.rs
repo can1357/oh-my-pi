@@ -156,6 +156,33 @@ pub(crate) fn chown(
 	Err(unsupported("chown"))
 }
 
+/// Tries a host path exactly first, then its `.exe` spelling on a miss.
+///
+/// The original error is retained when neither spelling exists. This is for
+/// lookup-only operations; callers must not use it for writes or removals.
+pub fn with_windows_exe<T>(
+	path: &Path,
+	mut op: impl FnMut(&Path) -> io::Result<T>,
+) -> io::Result<T> {
+	match op(path) {
+		Err(original) if original.kind() == io::ErrorKind::NotFound => {
+			if path
+				.extension()
+				.is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+			{
+				return Err(original);
+			}
+			let mut name = path.as_os_str().to_os_string();
+			name.push(".exe");
+			match op(Path::new(&name)) {
+				Err(error) if error.kind() == io::ErrorKind::NotFound => Err(original),
+				result => result,
+			}
+		},
+		result => result,
+	}
+}
+
 static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
 	let parsed: Vec<String> = std::env::var_os("PATHEXT").map_or_default(|value| {
 		value
@@ -176,6 +203,10 @@ static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
 /// (honouring ACLs and the read-only attribute) and executability follows
 /// `PATHEXT`, matching the shell's historical Windows test operators.
 pub(crate) fn access(path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
+	with_windows_exe(path, |candidate| access_exact(candidate, read, write, execute))
+}
+
+fn access_exact(path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
 	let meta = fs::metadata(path)?;
 	if meta.is_dir() {
 		if write && meta.permissions().readonly() {
@@ -203,7 +234,7 @@ pub(crate) fn access(path: &Path, read: bool, write: bool, execute: bool) -> io:
 }
 
 pub(crate) fn file_id(path: &Path, follow: bool) -> io::Result<FileId> {
-	file_id_of(&open_for_info(path, follow, 0)?)
+	with_windows_exe(path, |candidate| file_id_of(&open_for_info(candidate, follow, 0)?))
 }
 
 pub(crate) fn file_id_of(file: &fs::File) -> io::Result<FileId> {
@@ -215,19 +246,21 @@ pub(crate) fn file_id_of(file: &fs::File) -> io::Result<FileId> {
 }
 
 pub(crate) fn link_count(path: &Path, follow: bool) -> io::Result<u64> {
-	Ok(handle_info(&open_for_info(path, follow, 0)?)?.nlink)
+	with_windows_exe(path, |candidate| Ok(handle_info(&open_for_info(candidate, follow, 0)?)?.nlink))
 }
 
 pub(crate) fn allocated_size(path: &Path) -> io::Result<u64> {
-	let name = wide(path)?;
-	let mut high = 0u32;
-	// SAFETY: `name` is NUL-terminated and `high` is writable.
-	let low = unsafe { GetCompressedFileSizeW(name.as_ptr(), &raw mut high) };
-	// SAFETY: plain thread-local error query.
-	if low == INVALID_FILE_SIZE && unsafe { GetLastError() } != NO_ERROR {
-		return Err(io::Error::last_os_error());
-	}
-	Ok((u64::from(high) << 32) | u64::from(low))
+	with_windows_exe(path, |candidate| {
+		let name = wide(candidate)?;
+		let mut high = 0u32;
+		// SAFETY: `name` is NUL-terminated and `high` is writable.
+		let low = unsafe { GetCompressedFileSizeW(name.as_ptr(), &raw mut high) };
+		// SAFETY: plain thread-local error query.
+		if low == INVALID_FILE_SIZE && unsafe { GetLastError() } != NO_ERROR {
+			return Err(io::Error::last_os_error());
+		}
+		Ok((u64::from(high) << 32) | u64::from(low))
+	})
 }
 
 /// Host metadata plus handle identity; non-disk handles (pipes, consoles)

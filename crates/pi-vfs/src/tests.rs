@@ -409,6 +409,74 @@ fn native_path_metadata_matches_the_open_file_identity() {
 	}
 }
 
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_windows_exe_lookup_prefers_exact_path_and_keeps_providers_verbatim() {
+	let dir = TempDir::new("exe-lookup");
+	let java = dir.0.join("java");
+	let exe = dir.0.join("java.exe");
+	let missing = dir.0.join("missing");
+	std::fs::write(&exe, "executable").unwrap();
+	let fs = Fs::native();
+	let blocking = BlockingFs::native();
+
+	assert_eq!(fs.metadata(&java).await.unwrap().len(), 10);
+	assert_eq!(fs.symlink_metadata(&java).await.unwrap().len(), 10);
+	assert_eq!(blocking.metadata(&java).unwrap().len(), 10);
+	assert_eq!(blocking.open(&java).unwrap().metadata().unwrap().len(), 10);
+	assert_eq!(fs.read(&java).await.unwrap(), b"executable");
+	assert_eq!(blocking.read(&java).unwrap(), b"executable");
+	assert_eq!(fs.canonicalize(&java).await.unwrap(), std::fs::canonicalize(&exe).unwrap());
+	assert!(fs.access(&java, false, false, true).await.is_ok());
+	assert!(blocking.access(&java, false, false, true).is_ok());
+	assert!(fs.read_dir(&java).await.is_err());
+	assert!(fs.read_link(&java).await.is_err());
+	let link = dir.0.join("alias.exe");
+	if std::os::windows::fs::symlink_file("java.exe", &link).is_ok() {
+		assert_eq!(fs.read_link(dir.0.join("alias")).await.unwrap(), Path::new("java.exe"));
+		assert_eq!(blocking.read_link(dir.0.join("alias")).unwrap(), Path::new("java.exe"));
+	}
+
+	std::fs::write(&java, "plain").unwrap();
+	assert_eq!(fs.metadata(&java).await.unwrap().len(), 5);
+	assert_eq!(blocking.symlink_metadata(&java).unwrap().len(), 5);
+	assert_eq!(blocking.open(&java).unwrap().metadata().unwrap().len(), 5);
+	assert_eq!(fs.read(&java).await.unwrap(), b"plain");
+	assert_eq!(blocking.canonicalize(&java).unwrap(), std::fs::canonicalize(&java).unwrap());
+	assert_eq!(
+		fs.access(&java, false, false, true)
+			.await
+			.unwrap_err()
+			.kind(),
+		io::ErrorKind::PermissionDenied
+	);
+	assert!(fs.access(&exe, false, false, true).await.is_ok());
+
+	for path in [&missing, &missing.with_extension("exe")] {
+		assert_eq!(fs.metadata(path).await.unwrap_err().kind(), io::ErrorKind::NotFound);
+		assert_eq!(
+			blocking
+				.access(path, false, false, false)
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::NotFound
+		);
+		assert_eq!(blocking.open(path).unwrap_err().kind(), io::ErrorKind::NotFound);
+	}
+
+	let provider = Fs::new(MemFs::new());
+	assert_eq!(provider.metadata("mem://java").await.unwrap_err().kind(), io::ErrorKind::NotFound);
+	assert_eq!(
+		provider
+			.access("mem://java", false, false, false)
+			.await
+			.unwrap_err()
+			.kind(),
+		io::ErrorKind::NotFound
+	);
+	assert_eq!(provider.open("mem://java").await.unwrap_err().kind(), io::ErrorKind::NotFound);
+}
+
 #[cfg(unix)]
 #[test]
 fn native_canonicalize_matches_uucore_modes() {

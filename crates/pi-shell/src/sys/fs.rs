@@ -612,6 +612,13 @@ fn open(path: &BStr, flags: OpenFlags, mode: u32, umask: Option<u32>) -> io::Res
 		return server;
 	}
 	let path = host_path(path)?;
+	#[cfg(windows)]
+	if !flags.contains(OpenFlags::WRITE) && !flags.contains(OpenFlags::CREATE) {
+		return pi_vfs::with_windows_exe(path, |resolved| {
+			create_with_mode(resolved, flags, mode, umask, false)
+				.map(|file| Box::new(StdFile::opened(file, flags)) as Box<dyn File>)
+		});
+	}
 	Ok(Box::new(StdFile::opened(create_with_mode(path, flags, mode, umask, false)?, flags)))
 }
 
@@ -901,18 +908,20 @@ fn access(path: &BStr, mode: Access) -> io::Result<()> {
 			};
 		}
 		let p = host_path(path)?;
-		let meta = fs::metadata(p)?;
-		if mode.contains(Access::WRITE) && meta.permissions().readonly() {
-			return Err(io::ErrorKind::PermissionDenied.into());
-		}
-		if mode.contains(Access::EXEC)
-			&& !meta.is_dir()
-			&& !crate::sys::pathext::Pathext::from_env().has_executable_extension(p)
-			&& !crate::sys::shebang::has_shebang(p)
-		{
-			return Err(io::ErrorKind::PermissionDenied.into());
-		}
-		Ok(())
+		pi_vfs::with_windows_exe(p, |resolved| {
+			let meta = fs::metadata(resolved)?;
+			if mode.contains(Access::WRITE) && meta.permissions().readonly() {
+				return Err(io::ErrorKind::PermissionDenied.into());
+			}
+			if mode.contains(Access::EXEC)
+				&& !meta.is_dir()
+				&& !crate::sys::pathext::Pathext::from_env().has_executable_extension(resolved)
+				&& !crate::sys::shebang::has_shebang(resolved)
+			{
+				return Err(io::ErrorKind::PermissionDenied.into());
+			}
+			Ok(())
+		})
 	}
 }
 
@@ -1174,17 +1183,23 @@ impl Fs for StdFs {
 				blksize:  4096,
 			}));
 		}
-		FsPoll::Ready(
-			host_path(path)
-				.and_then(|p| {
-					if follow {
-						fs::metadata(p)
-					} else {
-						fs::symlink_metadata(p)
-					}
-				})
-				.map(|m| stat_of(&m)),
-		)
+		FsPoll::Ready(host_path(path).and_then(|p| {
+			#[cfg(windows)]
+			let result = pi_vfs::with_windows_exe(p, |resolved| {
+				if follow {
+					fs::metadata(resolved)
+				} else {
+					fs::symlink_metadata(resolved)
+				}
+			});
+			#[cfg(not(windows))]
+			let result = if follow {
+				fs::metadata(p)
+			} else {
+				fs::symlink_metadata(p)
+			};
+			result.map(|m| stat_of(&m))
+		}))
 	}
 
 	fn access(&mut self, path: &BStr, mode: Access) -> FsPoll<()> {
@@ -1196,22 +1211,30 @@ impl Fs for StdFs {
 	}
 
 	fn readlink(&mut self, path: &BStr) -> FsPoll<BString> {
-		FsPoll::Ready(
-			host_path(path)
-				.and_then(fs::read_link)
-				.map(|p| engine_path(&p)),
-		)
+		FsPoll::Ready(host_path(path).and_then(|p| {
+			#[cfg(windows)]
+			let result = pi_vfs::with_windows_exe(p, |resolved| fs::read_link(resolved));
+			#[cfg(not(windows))]
+			let result = fs::read_link(p);
+			result.map(|target| engine_path(&target))
+		}))
 	}
 
 	fn realpath(&mut self, path: &BStr) -> FsPoll<BString> {
-		FsPoll::Ready(host_path(path).and_then(fs::canonicalize).map(|p| {
-			// `C:\x`, not `\\?\C:\x`, where both name the file.
-			let p = engine_path(&p);
-			if cfg!(windows) {
-				BString::from(crate::bash::fs::plain_windows_path(&p).into_owned())
-			} else {
-				p
-			}
+		FsPoll::Ready(host_path(path).and_then(|p| {
+			#[cfg(windows)]
+			let result = pi_vfs::with_windows_exe(p, |resolved| fs::canonicalize(resolved));
+			#[cfg(not(windows))]
+			let result = fs::canonicalize(p);
+			result.map(|p| {
+				// `C:\x`, not `\\?\C:\x`, where both name the file.
+				let p = engine_path(&p);
+				if cfg!(windows) {
+					BString::from(crate::bash::fs::plain_windows_path(&p).into_owned())
+				} else {
+					p
+				}
+			})
 		}))
 	}
 
@@ -1391,6 +1414,37 @@ mod tests {
 		let missing = ready(fs.stat(b"/definitely/not/here".as_bstr(), true)).unwrap_err();
 		assert_eq!(missing.kind(), io::ErrorKind::NotFound);
 		assert!(ready(fs.chdir_check(dir_bytes.as_bstr())).is_ok());
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn java_launcher_finds_exe_only_when_extensionless_name_is_absent() {
+		let dir = tempfile::tempdir().unwrap();
+		let java = dir.path().join("java");
+		let exe = dir.path().join("java.exe");
+		fs::write(&exe, b"exe").unwrap();
+		let name = engine_path(&java);
+		let mut host = StdFs::default();
+
+		assert!(ready(host.access(name.as_bstr(), Access::EXEC)).is_ok());
+		assert_eq!(ready(host.stat(name.as_bstr(), true)).unwrap().size, 3);
+		let mut file = ready(host.open(name.as_bstr(), OpenFlags::READ, 0)).unwrap();
+		let mut bytes = [0; 3];
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let Poll::Ready(Ok(n)) = file.poll_read(&mut cx, &mut bytes) else {
+			panic!("regular file read must complete");
+		};
+		assert_eq!(n, 3);
+		assert_eq!(&bytes, b"exe");
+
+		fs::write(&java, b"not executable").unwrap();
+		assert_eq!(ready(host.stat(name.as_bstr(), true)).unwrap().size, 14);
+		assert_eq!(
+			ready(host.access(name.as_bstr(), Access::EXEC))
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::PermissionDenied
+		);
 	}
 
 	#[cfg(unix)]

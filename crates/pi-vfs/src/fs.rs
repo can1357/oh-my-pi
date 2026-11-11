@@ -519,7 +519,7 @@ fn may_access(path: &Path, mode: libc::c_int) -> bool {
 /// (`/dev/zero`, a large sparse file); otherwise it is `std::fs::read`.
 fn native_read(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
 	if scope.cancel.is_none() {
-		return std::fs::read(path);
+		return native::read(path);
 	}
 	let mut file = native_open_scoped(scope, path, &read_options())?;
 	let mut contents = Vec::new();
@@ -533,7 +533,7 @@ fn native_read(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
 /// would hold the very task that cancels it.
 async fn native_read_async(scope: &Scope, path: &Path) -> io::Result<Vec<u8>> {
 	if scope.cancel.is_none() {
-		return std::fs::read(path);
+		return native::read(path);
 	}
 	let (scope, path) = (scope.clone(), path.to_path_buf());
 	offload(move || native_read(&scope, &path)).await
@@ -1022,7 +1022,7 @@ impl Fs {
 	pub async fn canonicalize(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => std::fs::canonicalize(path),
+			Route::Native => native::canonicalize_native(path),
 			Route::Provider(provider) => {
 				self
 					.guard(provider.canonicalize(path, &CanonicalizeOptions::default()))
@@ -1059,7 +1059,7 @@ impl Fs {
 	pub async fn read_link(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
 		let path = path.as_ref();
 		match self.route(path)? {
-			Route::Native => std::fs::read_link(path),
+			Route::Native => native::read_link(path),
 			Route::Provider(provider) => self.guard(provider.read_link(path)).await,
 			Route::Mounted(_) => Err(invalid_argument()),
 		}
@@ -1643,7 +1643,7 @@ impl BlockingFs {
 	pub fn canonicalize(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => std::fs::canonicalize(path),
+			Route::Native => native::canonicalize_native(path),
 			Route::Provider(provider) => {
 				self.run(provider.canonicalize(path, &CanonicalizeOptions::default()))
 			},
@@ -1677,7 +1677,7 @@ impl BlockingFs {
 	pub fn read_link(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
 		let path = path.as_ref();
 		match self.fs.route(path)? {
-			Route::Native => std::fs::read_link(path),
+			Route::Native => native::read_link(path),
 			Route::Provider(provider) => self.run(provider.read_link(path)),
 			Route::Mounted(_) => Err(invalid_argument()),
 		}

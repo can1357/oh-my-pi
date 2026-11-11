@@ -58,6 +58,8 @@ pub use file::{File, FileHandle};
 pub use file::{POLL_SLICE, fd_reads_can_block, readable_within, reads_can_block, wait_readable};
 pub use fs::{BlockingFs, Fs};
 pub use metadata::Metadata;
+#[cfg(windows)]
+pub use native::with_windows_exe;
 pub use options::{
 	CanonicalizeOptions, DirOptions, MissingHandling, OpenOptions, ResolveMode, TempOptions,
 };
