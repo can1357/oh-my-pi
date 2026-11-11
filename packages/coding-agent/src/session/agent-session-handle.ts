@@ -133,9 +133,8 @@ export interface AgentSessionHandle {
 	getSessionAgents(): AgentDefinition[];
 	/** Whether a message from `from` still waits for a turn of its own. */
 	hasQueuedIrcFrom(from: string): boolean;
-	/** Surface and consume every pending IRC record before automatic injection; with `ifAny`,
-	 *  none unless at least one of them satisfies it. */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[];
+	/** Whether a queued IRC message, injected as a user turn at the next step boundary, ends a `wait`. */
+	hasIrcInterrupts(): boolean;
 	/** Emit a display-only IRC relay observation on this session's UI. */
 	emitIrcRelayObservation(record: CustomMessage): void;
 	/** Deliver an IRC message into this recipient session. */

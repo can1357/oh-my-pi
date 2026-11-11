@@ -13533,9 +13533,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	// IRC Delivery
 	// =========================================================================
 
-	/** Surfaces and consumes every pending IRC record before automatic injection (see {@link IrcBridge.drainInboxMessages}). */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { ifAny?: (msg: IrcMessage) => boolean }): IrcMessage[] {
-		return this.#irc.drainInboxMessages(agentId, opts);
+	/** Whether a queued IRC message ends a `wait` (see {@link IrcBridge.hasInterrupts}). */
+	hasIrcInterrupts(): boolean {
+		return this.#irc.hasInterrupts();
 	}
 
 	/** Delivers an IRC message into this recipient session. */
