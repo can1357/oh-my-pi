@@ -694,23 +694,36 @@ index 8c406cf90e0f9d899efaa5acb6a636a86f32e37e..185ef5954b2b95b708855ed68e8327a8
                  catch (e_3) {
                      env_4.error = e_3;
 diff --git a/lib/puppeteer/common/WaitTask.js b/lib/puppeteer/common/WaitTask.js
-index eee0d68b24442c5628266663a2d6334a7f1f1540..24a07eec697f644c4f6219d66efbd7420cc1ffe3 100644
+index eee0d68b24442c5628266663a2d6334a7f1f1540..1216fe4ee94de5544652973227180574c272dab2 100644
 --- a/lib/puppeteer/common/WaitTask.js
 +++ b/lib/puppeteer/common/WaitTask.js
-@@ -156,6 +156,12 @@ export class WaitTask {
+@@ -6,5 +6,6 @@
++import { JSHandle } from '../api/JSHandle.js';
+ import { Deferred } from '../util/Deferred.js';
+ import { isErrorLike } from '../util/ErrorLike.js';
+ import { stringifyFunction } from '../util/Function.js';
+-import { TimeoutError } from './Errors.js';
++import { ProtocolError, TimeoutError } from './Errors.js';
+ import { LazyArg } from './LazyArg.js';
+@@ -156,6 +157,17 @@ export class WaitTask {
              if (error.message.includes('Cannot find context with specified id')) {
                  return;
              }
-+            // A cross-process navigation can reuse the numeric context id
++            // xxx-stealth: navigation can reuse the numeric context id
 +            // before Page.frameNavigated invalidates the old utility handle.
-+            // Let the replacement context rearm this wait, as above.
-+            if (error.message.includes('Argument should belong to the same JavaScript world as target object')) {
++            // A user handle or root cannot survive replacement; keep its error.
++            if (
++                error instanceof ProtocolError &&
++                !this.#root &&
++                !this.#args.some(arg => arg instanceof JSHandle) &&
++                error.message.includes('Argument should belong to the same JavaScript world as target object')
++            ) {
 +                return;
 +            }
              // Errors coming from WebDriver BiDi. TODO: Adjust messages after
              // https://github.com/w3c/webdriver-bidi/issues/540 is resolved.
              if (error.message.includes('DiscardedBrowsingContextError')) {
-@@ -176,6 +176,9 @@ export class WaitTask {
+@@ -176,6 +188,9 @@ export class WaitTask {
   */
  export class TaskManager {
      #tasks = new Set();
