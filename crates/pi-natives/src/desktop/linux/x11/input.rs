@@ -520,8 +520,12 @@ impl X11Input {
 		let retry_at = start + budget.mul_f32(0.4);
 		let mut retried = false;
 		loop {
-			control::check()?;
-			self.check_user()?;
+			// The request is out: a cancel or press still lets the WM finish
+			// it, so the hand-back sees the move and undoes it.
+			if let Err(error) = control::check().and_then(|()| self.check_user()) {
+				wm.await_activation(window);
+				return Err(error);
+			}
 			if wm.is_focused(window, ewmh) {
 				return Ok(());
 			}
@@ -533,7 +537,8 @@ impl X11Input {
 				retried = true;
 				let _ = wm.request_activation(window, wm.active_window(), || self.check_user());
 			}
-			control::wait(FOREGROUND_POLL)?;
+			// A cancel is handled at the top of the loop.
+			let _ = control::wait(FOREGROUND_POLL);
 		}
 		Err(DesktopError::input_failed(format!(
 			"window {window} did not become the active, focused window within {}ms (it may be \

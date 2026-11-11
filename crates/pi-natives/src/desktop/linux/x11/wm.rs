@@ -393,19 +393,19 @@ impl Wm<'_> {
 			.map_err(wm_failed)?;
 		#[cfg(test)]
 		super::input::named_change_tests::after_send();
-		control::check()?;
+		// The WM holds the request and can move the focus once the caller has
+		// looked; let it, so the hand-back sees the move and undoes it. Escape
+		// both cancels and counts as a press, so neither may skip the wait.
+		if let Err(error) = control::check().and_then(|()| check_user()) {
+			self.await_activation(window);
+			return Err(error);
+		}
 		// Never override a newer focus switch while the WM handles the request.
 		if restoring
 			&& !self.is_focused(window, false)
 			&& !current.is_some_and(|current| self.is_focused(current, false))
 		{
 			return Ok(());
-		}
-		if let Err(error) = check_user() {
-			// The WM holds the request and can move the focus once the caller
-			// has looked; let it, so the hand-back sees the move and undoes it.
-			self.await_activation(window);
-			return Err(error);
 		}
 		// BadMatch on a not-yet-viewable window is expected; callers confirm.
 		if let Ok(cookie) = self.conn.set_input_focus(InputFocus::PARENT, window, time) {
@@ -415,13 +415,12 @@ impl Wm<'_> {
 	}
 
 	/// Waits, bounded, for core focus to reach `window` after its activation
-	/// was sent; a WM that declines the request leaves it at the bound.
-	fn await_activation(&self, window: Window) {
+	/// was sent; a WM that declines the request leaves it at the bound. A
+	/// cancel does not end it: the caller's hand-back needs to see the move.
+	pub(super) fn await_activation(&self, window: Window) {
 		let deadline = Instant::now() + QUEUED_ACTIVATION_WAIT;
 		while Instant::now() < deadline && !self.is_focused(window, false) {
-			if control::wait(QUEUED_ACTIVATION_POLL).is_err() {
-				break;
-			}
+			control::settle(QUEUED_ACTIVATION_POLL);
 		}
 	}
 
