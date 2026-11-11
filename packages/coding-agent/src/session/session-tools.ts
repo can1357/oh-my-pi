@@ -2104,6 +2104,7 @@ export class SessionTools {
 
 	/** Preludes with a first-call guide that this conversation has called; cleared when the conversation changes. */
 	#evalPreludesCalled = new Set<string>();
+	#evalPreludeGuideHits = new Map<string, { index: number; message: CustomMessage; content: string; guide: string }>();
 
 	noteEvalPreludeCall(name: string): void {
 		this.#evalPreludesCalled.add(name);
@@ -2111,6 +2112,7 @@ export class SessionTools {
 
 	clearEvalPreludeCalls(): void {
 		this.#evalPreludesCalled.clear();
+		this.#evalPreludeGuideHits.clear();
 	}
 
 	/**
@@ -2124,18 +2126,47 @@ export class SessionTools {
 	 */
 	takeEvalPreludeGuide(): CustomMessage<EvalPreludeGuideDetails> | undefined {
 		const called = this.#evalPreludesCalled;
-		if (called.size === 0) return undefined;
-		const sent = this.#host.agent.state.messages.flatMap(message =>
-			message.role === "custom" &&
-			message.customType === EVAL_PRELUDE_GUIDE_MESSAGE_TYPE &&
-			typeof message.content === "string"
-				? [message.content]
-				: [],
-		);
-		const guides = this.#host.evalPreludes().flatMap(definition => {
+		if (called.size === 0 || !this.getActiveToolNames().includes("read")) return undefined;
+		const messages = this.#host.agent.state.messages;
+		const definitions = this.#host.evalPreludes();
+		const guides: Array<{ name: string; guide: string }> = [];
+		for (const definition of definitions) {
 			const guide = called.has(definition.name) ? definition.firstCallDocumentation?.trim() : undefined;
-			return guide && !sent.some(content => content.includes(guide)) ? [{ name: definition.name, guide }] : [];
-		});
+			if (!guide) continue;
+			const hit = this.#evalPreludeGuideHits.get(definition.name);
+			if (
+				hit &&
+				messages[hit.index] === hit.message &&
+				hit.message.customType === EVAL_PRELUDE_GUIDE_MESSAGE_TYPE &&
+				hit.message.content === hit.content &&
+				hit.guide === guide
+			) {
+				continue;
+			}
+			let found = false;
+			for (let index = messages.length - 1; index >= 0; index--) {
+				const message = messages[index];
+				if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_GUIDE_MESSAGE_TYPE) continue;
+				const details = message.details;
+				if (!isRecord(details) || !Array.isArray(details.names) || !details.names.includes(definition.name))
+					continue;
+				const expected = details.names.flatMap(name => {
+					const prelude = definitions.find(candidate => candidate.name === name);
+					const text = prelude?.firstCallDocumentation?.trim();
+					return prelude && text ? [{ name: prelude.name, guide: text }] : [];
+				});
+				if (expected.length !== details.names.length) continue;
+				const content = prompt.render(evalPreludeGuidePrompt, { guides: expected });
+				if (message.content !== content) continue;
+				this.#evalPreludeGuideHits.set(definition.name, { index, message, content, guide });
+				found = true;
+				break;
+			}
+			if (!found) {
+				this.#evalPreludeGuideHits.delete(definition.name);
+				guides.push({ name: definition.name, guide });
+			}
+		}
 		if (guides.length === 0) return undefined;
 		return {
 			role: "custom",

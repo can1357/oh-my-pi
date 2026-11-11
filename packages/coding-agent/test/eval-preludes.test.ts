@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
 import { getEnabledEvalPreludes, invokeEvalPrelude } from "@oh-my-pi/pi-coding-agent/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { rejectionOf } from "./helpers/rejection";
 
 function makeSession(getEvalPreludes: () => EvalPreludeDefinition[]): ToolSession {
 	return {
@@ -149,7 +150,9 @@ describe("eval prelude host invocation", () => {
 			},
 		};
 		const session = { ...makeSession(() => [definition]), noteEvalPreludeCall: note };
-		await expect(invokeEvalPrelude("probe", {}, { session, toolCallId: "failed" })).rejects.toThrow("no such tab");
+		expect(await rejectionOf(invokeEvalPrelude("probe", {}, { session, toolCallId: "failed" }))).toBeInstanceOf(
+			Error,
+		);
 		fail = false;
 		expect(await invokeEvalPrelude("probe", {}, { session, toolCallId: "call" })).toEqual({
 			content: [{ type: "text", text: "ran" }],

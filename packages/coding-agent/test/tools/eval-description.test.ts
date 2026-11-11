@@ -242,9 +242,10 @@ describe("eval tool description", () => {
 				return { content: [] };
 			},
 		};
-		const description = new EvalTool(makeSession({ preludes: () => [prelude] })).description;
-		expect(description).toContain("xd://eval/fixture");
-		expect(description).not.toContain("FIRST CALL GUIDE");
+		const session = makeSession({ preludes: () => [prelude] });
+		expect(new EvalTool(session).description).not.toContain("No `read` needed");
+		session.noteEvalPreludeCall = () => {};
+		expect(new EvalTool(session).description).toContain("No `read` needed");
 	});
 });
 

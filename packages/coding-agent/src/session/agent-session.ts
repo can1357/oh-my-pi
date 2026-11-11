@@ -2640,11 +2640,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// one: that turn's text is its result.
 			const keepPeerMessages =
 				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
-			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
-			thunks.push(...this.yieldQueue.drainLazy());
-			// A prelude's first-call guide follows the tool batch that called it, or rides a delivery that
-			// already continues the run; alone it never extends a finished turn.
-			if (boundary === "work" || thunks.length > 0) thunks.push(() => this.#tools.takeEvalPreludeGuide() ?? null);
+			let hasDelivery = false;
+			const queued: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
+			queued.push(...this.yieldQueue.drainLazy());
+			const thunks: AsideMessage[] = queued.map(entry => () => {
+				const message = typeof entry === "function" ? entry() : entry;
+				if (message) hasDelivery = true;
+				return message;
+			});
+			// A guide follows work, or rides an actual delivery; a stale queued entry cannot extend the turn.
+			thunks.push(() => (boundary === "work" || hasDelivery ? (this.#tools.takeEvalPreludeGuide() ?? null) : null));
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
