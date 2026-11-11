@@ -180,8 +180,8 @@ describe("OMP-owned browser evaluation", () => {
 					let stillAttached = "";
 					try { await tab.waitForSelector("#hidden", {state:"detached", timeout:50}); }
 					catch (e) { stillAttached = e.message; }
-					await Promise.all([attached.dispose(), visible.dispose(), legacyVisible.dispose()]);
-					return { hidden, detached, invisible, attached:!!attached, visible:!!visible, legacyHidden,
+					await Promise.all([attached.dispose(), invisible.dispose(), visible.dispose(), legacyVisible.dispose()]);
+					return { hidden, detached, invisible:!!invisible, attached:!!attached, visible:!!visible, legacyHidden,
 						legacyVisible:!!legacyVisible, frameHidden, frameDetached, frameAttached, stillAttached };
 				`,
 					timeoutMs: 10_000,
@@ -190,7 +190,7 @@ describe("OMP-owned browser evaluation", () => {
 				expect(result.returnValue).toMatchObject({
 					hidden: null,
 					detached: null,
-					invisible: null,
+					invisible: true,
 					attached: true,
 					visible: true,
 					legacyHidden: null,
