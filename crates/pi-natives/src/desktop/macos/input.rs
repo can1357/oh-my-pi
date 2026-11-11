@@ -3085,6 +3085,7 @@ fn background_scroll(
 		(FIELD_WINDOW_UNDER_POINTER_THAT_CAN_HANDLE, i64::from(wid)),
 	])?;
 	skylight::set_window_location(&event, window_local(window, x, y))?;
+	// Not stamped: the wheel event keeps Quartz's timestamp 0.
 	skylight::post_dual(pid, &event)
 }
 
