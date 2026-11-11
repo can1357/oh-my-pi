@@ -32,8 +32,6 @@ const LARGE_CONTEXT_PROMPT_TOKENS = 100_000;
 const LARGE_CONTEXT_START_RUNG = 3;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
-/** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
-const WAIT_NOTICE_RUNG = 1;
 /** After one watched job settles, keep collecting briefly so near-simultaneous completions share one wait result. */
 const WAIT_SETTLE_WINDOW_MS = 1500;
 const PROGRESS_INTERVAL_MS = 500;
@@ -289,7 +287,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const floor = (this.session.getLastPromptTokens?.() ?? 0) > LARGE_CONTEXT_PROMPT_TOKENS ? LARGE_CONTEXT_START_RUNG : 0;
+		const floor =
+			(this.session.getLastPromptTokens?.() ?? 0) > LARGE_CONTEXT_PROMPT_TOKENS ? LARGE_CONTEXT_START_RUNG : 0;
 		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : floor;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
@@ -453,8 +452,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 	/**
 	 * End a wait whose window elapsed with nothing new: extend the idle streak
-	 * and, from {@link WAIT_NOTICE_RUNG} on, append the reminder to get on with
-	 * work that does not need the result instead of waiting again.
+	 * and, from the second back-to-back idle wait on, append the reminder to get
+	 * on with work that does not need the result instead of waiting again.
 	 */
 	#elapsed(
 		result: AgentToolResult<CoordinationDetails>,
@@ -463,7 +462,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	): AgentToolResult<CoordinationDetails> {
 		const waitedMs = (streak?.waitedMs ?? 0) + WAIT_LADDER_MS[rung];
 		this.#idle = { rung, endedAt: Date.now(), waitedMs };
-		if (rung < WAIT_NOTICE_RUNG) return result;
+		if (!streak) return result;
 		const notice = prompt.render(waitIdleTemplate, { waited: formatDuration(waitedMs) });
 		return { ...result, content: [...result.content, { type: "text", text: notice }] };
 	}

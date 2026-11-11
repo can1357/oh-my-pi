@@ -177,8 +177,8 @@ describe("wait", () => {
 		const context = session(manager);
 		context.getLastPromptTokens = () => 100_001;
 		const tool = new WaitTool(context);
-		await elapse(tool, 60_000);
-		await elapse(tool, 300_000);
+		expect(notice(await elapse(tool, 60_000))).toBeUndefined();
+		expect(notice(await elapse(tool, 300_000))).toContain("6m");
 		vi.advanceTimersByTime(60_000);
 		await elapse(tool, 60_000);
 		const lint = Promise.withResolvers<string>();
