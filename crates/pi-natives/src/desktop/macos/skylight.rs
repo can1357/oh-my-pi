@@ -694,14 +694,21 @@ impl SwitchSignals {
 	/// Reads the signals at `now`, with where `placement` has the latest click
 	/// land. Nothing here waits on another app.
 	fn read(spi: &ForegroundSpi, now: Instant, placement: Placement<'_>) -> Self {
-		let (buttons, placed) = match placement {
-			Placement::Tap(clicks, user) => clicks.place(user),
+		let (buttons, placed, skipped) = match placement {
+			Placement::Tap(clicks, user, target) => {
+				let reading = clicks.place(user, target);
+				(reading.buttons, reading.placed, reading.skipped)
+			},
 			Placement::HitTest(placer) => {
 				let buttons = hid_buttons();
-				(buttons, placer.in_user_app(buttons).then_some(true))
+				(buttons, placer.in_user_app(buttons).then_some(true), None)
 			},
 		};
-		let last_click = since_last_click().and_then(|since| now.checked_sub(since));
+		// A click the HID counters skipped, such as a remote tool's post to
+		// the session tap, is dated by its delivery.
+		let last_click = since_last_click()
+			.and_then(|since| now.checked_sub(since))
+			.max(skipped);
 		// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
 		// query.
 		let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
@@ -798,8 +805,8 @@ impl ClickPlacer {
 enum Placement<'a> {
 	/// The tap of the session the input belongs to, which names the process
 	/// `WindowServer` routed each click to as it delivers it; with the user's
-	/// app.
-	Tap(&'a ClickJournal, pid_t),
+	/// app and the target.
+	Tap(&'a ClickJournal, pid_t, pid_t),
 	/// [`ClickPlacer`]'s hit-test, without a tap that sees input.
 	HitTest(&'a ClickPlacer),
 }
@@ -1258,7 +1265,9 @@ pub(super) fn with_background_watch<T>(
 	let clicks = control::intervention::clicks();
 	let placer = ClickPlacer::new(previous.pid);
 	let placement = match (clicks.as_deref(), previous.pid) {
-		(Some(clicks), Some(user)) if permission::listen_events() => Placement::Tap(clicks, user),
+		(Some(clicks), Some(user)) if permission::listen_events() => {
+			Placement::Tap(clicks, user, pid)
+		},
 		_ => {
 			placer.place();
 			Placement::HitTest(&placer)
@@ -4547,5 +4556,33 @@ mod tests {
 		let desktop = FakeHold { over_at: Some(1), ..FakeHold::new(&[]) };
 		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
 		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_target_pick_the_hid_counters_skip_still_picks_it() {
+		// A remote tool posts the user's click on the target to the session
+		// tap: the tap delivers it, the HID counters never count it, and the
+		// target comes forward because of it.
+		let signals = |reading: super::super::clicks::Reading| {
+			let signals = SwitchSignals::new(reading.buttons, reading.skipped, NO_MODIFIERS, None);
+			if reading.placed == Some(false) {
+				signals.placed_elsewhere()
+			} else {
+				signals
+			}
+		};
+		let t0 = Instant::now();
+		let clicks = ClickJournal::default();
+		clicks.start();
+		let mut guard = lease_at(t0, None);
+		assert_eq!(
+			guard.observe(PREVIOUS, Some(42), signals(clicks.place(7, 8)), t0 + ms(1)),
+			FocusDecision::Observe
+		);
+		clicks.record(1, 8, 0);
+		let now = Instant::now();
+		let pressed = signals(clicks.place(7, 8));
+		assert_eq!(guard.observe(PREVIOUS, Some(42), pressed, now), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, pressed, now + ms(40)), FocusDecision::Disarm);
 	}
 }

@@ -62,6 +62,21 @@ pub(super) fn denied(pane: &str) -> DesktopError {
 	DesktopError::permission_denied(message)
 }
 
+/// The process macOS holds responsible for `pid`: for a view service or an
+/// XPC helper, the app it works for.
+pub(super) fn responsible_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+	// SAFETY: as in `responsible_app`.
+	let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, RESPONSIBLE_PID.as_ptr()) };
+	if symbol.is_null() {
+		return None;
+	}
+	// SAFETY: the export has the signature `pid_t (pid_t)`.
+	let responsible: ResponsiblePid = unsafe { std::mem::transmute(symbol) };
+	// SAFETY: the call only reads the kernel's responsibility record.
+	let host = unsafe { responsible(pid) };
+	(host > 0).then_some(host)
+}
+
 fn responsible_app(symbol_name: &CStr) -> Option<String> {
 	// SAFETY: dlsym with RTLD_DEFAULT and a NUL-terminated name only reads the
 	// loaded images. The private libSystem export may be absent.
