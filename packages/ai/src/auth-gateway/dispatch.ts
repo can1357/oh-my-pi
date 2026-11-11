@@ -151,7 +151,7 @@ export async function resolveGatewayApiKey(
  * that's rotatable — today that's HTTP 401 (credential is bad) and
  * usage-limit phrasing matched by {@link isUsageLimitError} (Codex's
  * `usage_limit_reached`, Anthropic's `usage_limit_reached`, Google's
- * `resource_exhausted`, …). The two cases need different storage actions:
+ * `resource_exhausted`, …). The cases need different storage actions:
  *
  * - **usage-limit** → {@link AuthStorage.limits.markReached}. Marks just
  *   the current session's credential as temporarily blocked (honouring
@@ -162,8 +162,12 @@ export async function resolveGatewayApiKey(
  *   to avoid.
  * - **auth-failure** → {@link AuthStorage.limits.invalidateMatching}.
  *   Suspect/delete the row so it doesn't get re-picked next request.
+ * - **model-not-found** (Anthropic's 404 naming the requested model) →
+ *   {@link AuthStorage.limits.rotate}. Blocks only that model on the denied
+ *   credential; the account stays usable for other models, so it must never
+ *   reach the invalidation branch.
  *
- * In both branches we return the next `getWithCredential` result (sticky on the
+ * In every branch we return the next `getWithCredential` result (sticky on the
  * same `sessionId`) so the client can transparently retry the pre-emit
  * failure with a fresh credential. Returning `undefined` aborts the retry
  * and surfaces the original error to the caller.
@@ -179,6 +183,21 @@ async function refreshGatewayApiKeyAfterAuthError(
 	format: string,
 	peer: string,
 ): Promise<ResolvedApiKey | undefined> {
+	if (AIError.isAnthropicModelNotFoundError(error, provider, model.id)) {
+		const { switched } = await storage.limits.rotate(provider, sessionId, {
+			error,
+			modelId: model.id,
+			apiKey: oldKey,
+			signal,
+		});
+		logger.debug(
+			switched
+				? "auth-gateway retrying provider request after model-policy block"
+				: "auth-gateway model-policy block, returning the error without retry",
+			{ format, provider, peer, modelId: model.id, switched },
+		);
+		return switched ? storage.keys.getWithCredential(provider, sessionId, modelKeyOptions(model, signal)) : undefined;
+	}
 	const message = error instanceof Error ? error.message : String(error);
 	const status = extractHttpStatusFromError(error);
 	if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {

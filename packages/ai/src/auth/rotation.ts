@@ -430,8 +430,9 @@ export class RateLimits implements LimitsApi {
 	 * - usage-limit / account-rate-limit error → {@link RateLimits.markReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
 	 *   reset; sticky left intact so the next resolve re-ranks around the block).
-	 * - exact model-entitlement denial (Codex ChatGPT account or Cursor plan) →
-	 *   temporarily block only that requested model, then rotate.
+	 * - exact model-entitlement denial (Codex ChatGPT account, Cursor plan, or
+	 *   Anthropic model-not-found 404) → temporarily block only that requested
+	 *   model, then rotate.
 	 * - other account-scoped policy denial → temporarily block that account
 	 *   without marking its credential suspect, then rotate through siblings.
 	 * - otherwise (hard 401 / auth failure) → mark the credential suspect (or
@@ -454,8 +455,16 @@ export class RateLimits implements LimitsApi {
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
 		const exactCursorModelPolicy = AIError.isCursorPlanAccountPolicyError(error, provider);
+		const anthropicDeniedModel = AIError.anthropicModelNotFoundId(error);
+		const exactAnthropicModelPolicy = AIError.isAnthropicModelNotFoundError(error, provider, options?.modelId);
+		// A provider-controlled model id must match the provider and request before any mutation.
+		if (anthropicDeniedModel !== undefined && !exactAnthropicModelPolicy) return { switched: false };
 		const accountPolicy = exactCursorModelPolicy || AIError.isAccountPolicyError(error);
-		if (!accountPolicy && (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))) {
+		if (
+			!exactAnthropicModelPolicy &&
+			!accountPolicy &&
+			(AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message))
+		) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
 			// is not reselected and hammered while the cap remains active.
@@ -474,7 +483,7 @@ export class RateLimits implements LimitsApi {
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
-		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy;
+		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy || exactAnthropicModelPolicy;
 		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,

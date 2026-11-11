@@ -32,6 +32,7 @@ const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
 const MODEL_ACCOUNT_POLICY_PROVIDERS: Readonly<Record<string, true>> = {
 	"openai-codex": true,
 	cursor: true,
+	anthropic: true,
 };
 
 /** Scope key for one model-specific account-policy block, shared by selectors and rate limits. */

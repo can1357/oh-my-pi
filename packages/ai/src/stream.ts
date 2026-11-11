@@ -1110,7 +1110,8 @@ function isRetryableUpstreamError(
 	// denied by plan, model policy, or org restriction — a sibling account may
 	// not share it). Explicit account-scoped policy errors such as Codex
 	// `cyber_policy` are likewise rotatable. The exact ChatGPT-account model
-	// denial is rotatable only when its provider and requested model match.
+	// denial and Anthropic's model-not-found 404 are rotatable only when their
+	// provider and requested model match.
 	// Usage-limit phrasing (Codex's
 	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
 	// Google's "resource_exhausted", OpenAI's "insufficient_quota") and 429s
@@ -1122,6 +1123,7 @@ function isRetryableUpstreamError(
 	// classify as RATE_LIMIT_EXCEEDED in `parseRateLimitReason` and stay in the
 	// provider's own backoff layer instead of burning siblings.
 	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) return true;
+	if (AIError.isAnthropicModelNotFoundError(error, model.provider, model.id)) return true;
 	if (status === 401 || (status === 403 && !isConcurrencyCapExclusion(status, message))) return true;
 	return isUsageLimitOutcome(status, message);
 }
@@ -1137,14 +1139,14 @@ function createAssistantAuthError(message: AssistantMessage): Error {
 }
 
 function contextualizeAuthRetryError(model: Model<Api>, error: unknown): unknown {
-	if (
-		!error ||
-		typeof error !== "object" ||
-		!AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)
-	) {
-		return error;
+	if (!error || typeof error !== "object") return error;
+	if (AIError.isCodexChatGPTAccountPolicyError(error, model.provider, model.id)) {
+		return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
 	}
-	return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy | AIError.Flag.ContentBlocked));
+	if (AIError.isAnthropicModelNotFoundError(error, model.provider, model.id)) {
+		return AIError.attach(error, AIError.create(AIError.Flag.AccountPolicy));
+	}
+	return error;
 }
 
 function emitBufferedEvents(stream: AssistantMessageEventStream, events: AssistantMessageEvent[]): void {

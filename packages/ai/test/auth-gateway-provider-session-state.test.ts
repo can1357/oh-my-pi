@@ -20,13 +20,19 @@ import {
 	startAuthGateway,
 } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle, AuthGatewaySessionStateRequest } from "@oh-my-pi/pi-ai/auth-gateway";
-import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
-import { captureFetch, type CapturedRequest, completionsChunks, kimiK3 } from "./helpers/factory-droid";
+import {
+	anthropicChunks,
+	captureFetch,
+	type CapturedRequest,
+	completionsChunks,
+	kimiK3,
+} from "./helpers/factory-droid";
 
 function makeAnthropicModel(baseUrl: string): Model<"anthropic-messages"> {
 	return buildModel({
@@ -367,6 +373,129 @@ async function priorityChatTurn(
 withOfficialAnthropicEndpoint();
 
 describe("auth-gateway provider session state", () => {
+	it("serves a model 404 on a sibling without invalidating the denied OAuth credential", async () => {
+		const previousApiKey = process.env.ANTHROPIC_API_KEY;
+		const previousOAuthToken = process.env.ANTHROPIC_OAUTH_TOKEN;
+		delete process.env.ANTHROPIC_API_KEY;
+		delete process.env.ANTHROPIC_OAUTH_TOKEN;
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-anthropic-model-404-"));
+		const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(path.join(dir, "auth.db"));
+		if (!store.listCredentialBlocks) throw new Error("test setup lacks persisted credential blocks");
+		store.markCredentialSuspect = async () => {
+			throw new Error("A model 404 must not mark an OAuth credential suspect");
+		};
+		const suspect = spyOn(store, "markCredentialSuspect");
+		const storage = new AuthStorage(store, { usageProviderResolver: () => undefined });
+		const invalidate = spyOn(storage.limits, "invalidateMatching");
+		await storage.credentials.set(
+			"anthropic",
+			["A", "B"].map(suffix => ({
+				type: "oauth" as const,
+				access: `sk-ant-oat01-gateway-${suffix}`,
+				refresh: `test-refresh-${suffix}`,
+				expires: Date.now() + 3_600_000,
+				accountId: `test-account-${suffix}`,
+				orgId: `test-org-${suffix}`,
+				email: `${suffix}@example.test`,
+			})),
+		);
+		const model = buildModel({
+			id: "claude-mythos-5-2",
+			name: "claude-mythos-5-2",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "http://127.0.0.1:1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64,
+		});
+		const captured: CapturedRequest[] = [];
+		const success = captureFetch(captured, anthropicChunks("ok"));
+		const realFetch = globalThis.fetch;
+		const unexpectedRequests: string[] = [];
+		const network = spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (input: string | URL | Request, init?: RequestInit) => {
+					const url = new URL(input instanceof Request ? input.url : input);
+					if (url.hostname !== "127.0.0.1") {
+						unexpectedRequests.push(url.toString());
+						throw new Error("OAuth refresh and non-loopback network requests are forbidden");
+					}
+					return realFetch(input, init);
+				},
+				{ preconnect: realFetch.preconnect },
+			),
+		);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => model,
+			fetch: async (input, init) => {
+				const response = await success(input, init);
+				if (captured.length !== 1) return response;
+				return new Response(
+					JSON.stringify({
+						type: "error",
+						error: { type: "not_found_error", message: `model: ${model.id}` },
+						request_id: "req_test",
+					}),
+					{ status: 404, headers: { "Content-Type": "application/json" } },
+				);
+			},
+			version: "test",
+		});
+		try {
+			const response = await fetch(`${gateway.url}/v1/messages`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					model: model.id,
+					max_tokens: 64,
+					messages: [{ role: "user", content: "hello" }],
+					stream: false,
+				}),
+			});
+			const body = await response.json();
+			expect(response.status).toBe(200);
+			expect(body).toMatchObject({ content: [{ type: "text", text: "ok" }] });
+			expect(captured.map(request => [request.headers.authorization, request.body.model])).toEqual([
+				["Bearer sk-ant-oat01-gateway-A", model.id],
+				["Bearer sk-ant-oat01-gateway-B", model.id],
+			]);
+			const rows = store.listAuthCredentials("anthropic");
+			expect(
+				store.listCredentialBlocks(rows.map(row => row.id)).map(block => ({
+					credentialId: block.credentialId,
+					providerKey: block.providerKey,
+					blockScope: block.blockScope,
+				})),
+			).toEqual([
+				{
+					credentialId: rows[0]!.id,
+					providerKey: "anthropic:oauth",
+					blockScope: `model-policy:${model.id}`,
+				},
+			]);
+			expect(invalidate).not.toHaveBeenCalled();
+			expect(suspect).not.toHaveBeenCalled();
+			expect(unexpectedRequests).toEqual([]);
+		} finally {
+			await gateway.close();
+			network.mockRestore();
+			suspect.mockRestore();
+			invalidate.mockRestore();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+			else process.env.ANTHROPIC_API_KEY = previousApiKey;
+			if (previousOAuthToken === undefined) delete process.env.ANTHROPIC_OAUTH_TOKEN;
+			else process.env.ANTHROPIC_OAUTH_TOKEN = previousOAuthToken;
+		}
+	});
+
 	it("carries a session's learned fast-mode fallback into its next request", async () => {
 		const upstream = startUpstream();
 		const model = makeAnthropicModel(upstream.url);
