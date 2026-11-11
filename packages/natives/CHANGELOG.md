@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added a `browserPid` argument to `macOSFrontApp()`: for a second after the read and while `keepInFront` holds the app in front, the user's keys macOS sends to that browser go to the read app instead (needs Accessibility), without holding desktop control while the key tap starts; and `macOSLoopbackPeerApp(localAddress, localPort, peerAddress, peerPort)`, which finds the app holding the other end of that exact loopback TCP connection to this process ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a `browserPid` argument to `macOSFrontApp()`: for a second after the read and while `keepInFront` holds the app in front, the user's keys macOS sends to that browser go to the read app instead (needs Accessibility and modifier-listening access), without holding desktop control while the key tap starts; `watchInput(durationMs)` extends that watch without rereading the front app; and `macOSLoopbackPeerApp(localAddress, localPort, peerAddress, peerPort)`, which finds the app holding the other end of that exact loopback TCP connection to this process ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

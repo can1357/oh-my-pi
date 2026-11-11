@@ -793,23 +793,31 @@ impl KeyReroute {
 	}
 
 	/// Starts watching for the target taking the user's keyboard. `None` when
-	/// the taps cannot be created (no Accessibility permission, or the target
-	/// exited): the action then runs as before, without key repair.
+	/// the taps cannot be created (no Accessibility or input-listening access,
+	/// or the target exited): the action runs as before, without key repair.
 	pub(super) fn arm(user: pid_t, target: pid_t) -> Option<Self> {
-		Self::arm_with_access(user, target, permission::post_events, secure_entry, Self::setup)
+		Self::arm_with_access(
+			user,
+			target,
+			permission::post_events,
+			permission::listen_events,
+			secure_entry,
+			Self::setup,
+		)
 	}
 
 	fn arm_with_access(
 		user: pid_t,
 		target: pid_t,
 		post_events: impl FnOnce() -> bool,
+		listen_events: impl FnOnce() -> bool,
 		secure_entry: impl FnOnce() -> bool,
 		setup: impl FnOnce(pid_t, pid_t) -> Option<Self>,
 	) -> Option<Self> {
 		// The user is typing a password or into a secure terminal: their keys
 		// are never tapped, even after the target takes the keyboard and secure
 		// entry goes off with their app.
-		if user == target || !post_events() || secure_entry() {
+		if user == target || !post_events() || !listen_events() || secure_entry() {
 			return None;
 		}
 		setup(user, target)
@@ -973,6 +981,7 @@ mod tests {
 				USER,
 				TARGET,
 				|| false,
+				|| true,
 				|| false,
 				|_, _| {
 					setup_calls.set(setup_calls.get() + 1);
@@ -981,6 +990,24 @@ mod tests {
 			)
 			.is_none()
 		);
+		assert_eq!(setup_calls.get(), 0);
+	}
+
+	#[test]
+	fn missing_modifier_listening_access_never_arms_a_reroute() {
+		let setup_calls = std::cell::Cell::new(0);
+		let reroute = KeyReroute::arm_with_access(
+			USER,
+			TARGET,
+			|| true,
+			|| false,
+			|| false,
+			|_, _| {
+				setup_calls.set(setup_calls.get() + 1);
+				Some(KeyReroute::unwatched_for_test(0).0)
+			},
+		);
+		assert!(reroute.is_none());
 		assert_eq!(setup_calls.get(), 0);
 	}
 
@@ -1560,8 +1587,7 @@ mod tests {
 		assert!(!typed_by_user(4321, SYNTHETIC_EVENT_TAG));
 	}
 
-	#[test]
-	fn reusing_an_armed_reroute_keeps_delivering_the_users_keys() {
+	fn keys_after_reusing_a_reroute(flags: u64) -> [Option<pid_t>; 3] {
 		let _serial = control::OWNERSHIP_TEST.lock();
 		struct RestoreRegistry(Option<Registry>);
 		impl Drop for RestoreRegistry {
@@ -1579,15 +1605,21 @@ mod tests {
 		reroute.armed.buttons = mouse_buttons();
 		// The same caller that rearms browser reads must keep the armed tap.
 		// Exercise delivery after publication, not the snapshot predicates.
-		skylight::with_reused_reroute_for_test(reroute, || {
-			for stroke in [Stroke::Press, Stroke::Repeat, Stroke::Release] {
-				assert_eq!(
-					rig.theft
-						.route(&mut REGISTRY.lock(), user_key(Q, stroke), false, BUTTONS),
-					MOVED,
-					"{stroke:?} after reusing the armed reroute",
-				);
-			}
-		});
+		skylight::with_reused_reroute_for_test(reroute, flags, || {
+			[Stroke::Press, Stroke::Repeat, Stroke::Release].map(|stroke| {
+				rig.theft
+					.route(&mut REGISTRY.lock(), user_key(Q, stroke), false, BUTTONS)
+			})
+		})
+	}
+
+	#[test]
+	fn reusing_an_armed_reroute_keeps_delivering_the_users_keys() {
+		assert_eq!(keys_after_reusing_a_reroute(0), [MOVED; 3]);
+	}
+
+	#[test]
+	fn an_option_pick_keeps_the_users_keys_in_the_chosen_app() {
+		assert_eq!(keys_after_reusing_a_reroute(0x8_0000), [KEPT; 3]);
 	}
 }

@@ -331,6 +331,8 @@ function canOpenWindow(method: string, params: Record<string, unknown> | undefin
 
 /** The app in front of the user, as `macOSFrontApp` from `@oh-my-pi/pi-natives` reads it. */
 export interface FrontApp {
+	/** Extends the captured app's existing key-reroute watch without reading the current front app or moving focus. */
+	watchInput(durationMs: number): void;
 	/**
 	 * Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the
 	 * user picks an app. Resolves how many times.
@@ -391,12 +393,8 @@ export class RelayBridge {
 	#switchTransitions = new Map<string, Promise<void>>();
 	/** Reads the app in front of the user; set by {@link keepFrontAppWith} where the relay can put it back (macOS). */
 	#readFrontApp: ((browserPid: number | null) => FrontApp | null) | undefined;
-	/**
-	 * When the running hold on the user's app ends (`Date.now()` ms), at its deadline or once it settles, whichever is
-	 * first; 0 with none. A window opened meanwhile shares it, and omp's input reads no front app then: the browser may
-	 * be in front, and a later hold would keep it there.
-	 */
-	#keepingFrontUntil = 0;
+	/** The app held in front and its deadline. Later input extends its watch without sampling a frontmost browser. */
+	#keepingFront: { app: FrontApp; until: number } | null = null;
 
 	constructor(
 		opts: {
@@ -1268,8 +1266,14 @@ export class RelayBridge {
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
 			// Chrome can activate for a window this input opens before the relay hears of it: the browser's keyboard is
 			// watched from the input on.
+			const held = this.#keepingFront;
 			tab.frontAtInput =
-				Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp, browserPid);
+				held && Date.now() < held.until
+					? this.#readFrontAtInput(() => {
+							held.app.watchInput(POPUP_AFTER_INPUT_MS);
+							return held.app;
+						}, browserPid)
+					: this.#readFrontAtInput(this.#readFrontApp, browserPid);
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
@@ -1329,13 +1333,18 @@ export class RelayBridge {
 	#keepFrontApp(tab: TabState): void {
 		const front = tab.frontAtInput;
 		tab.frontAtInput = null;
-		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
-		const until = Date.now() + KEEP_FRONT_MS;
-		this.#keepingFrontUntil = until;
+		if (
+			!front ||
+			(this.#keepingFront && Date.now() < this.#keepingFront.until) ||
+			Date.now() - front.at > POPUP_AFTER_INPUT_MS
+		)
+			return;
+		const hold = { app: front.app, until: Date.now() + KEEP_FRONT_MS };
+		this.#keepingFront = hold;
 		front.app.keepInFront(KEEP_FRONT_MS).then(
 			times => {
 				if (times > 0) this.#log("put the user's app back in front", { times });
-				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;
+				if (this.#keepingFront === hold) this.#keepingFront = null;
 			},
 			err => {
 				this.#log("could not keep the user's app in front", {

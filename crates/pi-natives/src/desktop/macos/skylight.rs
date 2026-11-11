@@ -1582,18 +1582,29 @@ fn read_front_app(
 		on_wait();
 	}
 	with_reroute_setup(|| {
-		loop {
+		for attempt in 0..3 {
 			let (read_at, picks, rearm) = prepare()?;
+			// A changing watch must not keep the relay's synchronous read
+			// spinning: publish the latest app without key repair instead.
+			let rearm = if attempt == 2 {
+				rearm.cancel_candidate();
+				Rearm::Replace(None)
+			} else {
+				rearm
+			};
 			let psn = picks.front?;
 			if publish(picks, read_at, rearm) {
 				return Some(FrontApp { psn, read_at });
 			}
 		}
+		None
 	})
 }
 
 /// Tap setup may block while the user switches apps or clicks in the same
 /// app. Publish only a snapshot the completed setup still covers.
+/// A continuously changing desktop returns the latest read without a reroute
+/// after three setups, rather than blocking the relay until input stops.
 fn rearm_for_front<T>(
 	mut read: impl FnMut() -> Option<(pid_t, T)>,
 	mut arm: impl FnMut(pid_t) -> Rearm,
@@ -1601,7 +1612,7 @@ fn rearm_for_front<T>(
 	mut cancel: impl FnMut(Rearm),
 ) -> Option<(T, Rearm)> {
 	let (mut user, _) = read()?;
-	loop {
+	for attempt in 0..3 {
 		let armed = arm(user);
 		let Some((after, snapshot)) = read() else {
 			cancel(armed);
@@ -1611,8 +1622,12 @@ fn rearm_for_front<T>(
 			return Some((snapshot, armed));
 		}
 		cancel(armed);
+		if attempt == 2 {
+			return Some((snapshot, Rearm::Replace(None)));
+		}
 		user = after;
 	}
+	None
 }
 
 impl FrontApp {
@@ -1770,6 +1785,7 @@ impl PickLog {
 		}
 		if picks.flags & OPTION_MODIFIER != 0 {
 			self.option = self.option.max(Some(now));
+			self.cancel_reroute(KeyReroute::cancel);
 		}
 		if let Some(panel) = picks.panel() {
 			let mut panels = [self.panels[0], self.panels[1], Some((panel, now))];
@@ -1914,6 +1930,7 @@ fn rearm(browser: pid_t, user: pid_t, now: Instant) -> Rearm {
 #[cfg(test)]
 pub(super) fn with_reused_reroute_for_test<T>(
 	reroute: KeyReroute,
+	flags: u64,
 	deliver: impl FnOnce() -> T,
 ) -> T {
 	struct RestoreLog(Option<PickLog>);
@@ -1940,7 +1957,7 @@ pub(super) fn with_reused_reroute_for_test<T>(
 	let candidate = rearm(200, 100, now);
 	PICK_LOG
 		.lock()
-		.watch_read(Picks { flags: 0, front: None, key_focus: None }, now, candidate);
+		.watch_read(Picks { flags, front: None, key_focus: None }, now, candidate);
 	deliver()
 }
 
@@ -1949,7 +1966,9 @@ pub(super) fn with_reused_reroute_for_test<T>(
 /// the browser coming forward for the user's choice for good, so a new one
 /// replaces it. A break in the watch cannot rule out that choice either.
 fn keeps_reroute(seen: Option<PickEvidence>) -> bool {
-	seen.is_some_and(|seen| seen.chord.is_none() && seen.panels.iter().all(Option::is_none))
+	seen.is_some_and(|seen| {
+		seen.chord.is_none() && !seen.option && seen.panels.iter().all(Option::is_none)
+	})
 }
 
 /// Orders a read's tap setup through watch publication against other reads
@@ -1965,13 +1984,22 @@ fn with_reroute_setup<T>(setup: impl FnOnce() -> T) -> T {
 /// desktop input/focus control: arming makes this the latest action, which
 /// would end that operation's own reroute.
 fn arm_reroute(user: pid_t, browser: pid_t) -> Option<KeyReroute> {
-	arm_reroute_with(|| KeyReroute::arm(user, browser))
+	arm_reroute_with(
+		|| permission::post_events() && permission::listen_events(),
+		|| control::own_focus().ok(),
+		|| KeyReroute::arm(user, browser),
+	)
 }
 
-fn arm_reroute_with<T>(setup: impl FnOnce() -> Option<T>) -> Option<T> {
-	if control::own_focus().is_err() {
+fn arm_reroute_with<T, G>(
+	access: impl FnOnce() -> bool,
+	own_focus: impl FnOnce() -> Option<G>,
+	setup: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+	if !access() {
 		return None;
 	}
+	drop(own_focus()?);
 	setup()
 }
 
@@ -2938,10 +2966,61 @@ mod tests {
 	fn a_read_does_not_replace_a_computer_tasks_reroute() {
 		let _serial = control::OWNERSHIP_TEST.lock();
 		let _owner = control::own_focus().unwrap();
-		let reroute = arm_reroute_with(|| -> Option<()> {
-			panic!("an operation's reroute must not be superseded by a read");
-		});
+		let reroute = arm_reroute_with(
+			|| true,
+			|| control::own_focus().ok(),
+			|| -> Option<()> {
+				panic!("an operation's reroute must not be superseded by a read");
+			},
+		);
 		assert!(reroute.is_none());
+	}
+
+	#[test]
+	fn denied_key_access_skips_ownership_and_is_rechecked_on_later_input() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let setup = Cell::new(0);
+		let owned = Cell::new(0);
+		for granted in [false, true] {
+			let result = arm_reroute_with(
+				|| granted,
+				|| {
+					owned.set(owned.get() + 1);
+					Some(())
+				},
+				|| {
+					setup.set(setup.get() + 1);
+					Some(42)
+				},
+			);
+			assert_eq!(result, granted.then_some(42));
+		}
+		assert_eq!(setup.get(), 1);
+		assert_eq!(owned.get(), 1, "denied input must not acquire ownership");
+	}
+
+	#[test]
+	fn a_front_read_stops_rearming_while_the_user_keeps_switching() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let mut reads = (0..8).map(|user| (user, user));
+		let setups = Cell::new(0);
+		let mut ended = Vec::new();
+		let (snapshot, candidate) = rearm_for_front(
+			|| reads.next(),
+			|_| {
+				setups.set(setups.get() + 1);
+				let (reroute, end) = KeyReroute::unwatched_for_test(0);
+				ended.push(end);
+				Rearm::Replace(Some(reroute))
+			},
+			|_, _| true,
+			Rearm::cancel_candidate,
+		)
+		.expect("return the latest front app even if no setup interval is quiet");
+		assert_eq!(snapshot, 3);
+		assert_eq!(setups.get(), 3);
+		assert!(matches!(candidate, Rearm::Replace(None)));
+		assert!(ended.iter().all(|end| end.load(Ordering::Acquire)));
 	}
 
 	/// Signals after `clicks` hardware clicks (left down and up), timed between

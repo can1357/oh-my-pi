@@ -2599,6 +2599,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 				const app = ++reads;
 				readBrowsers.push(browserPid);
 				return {
+					watchInput: () => undefined,
 					keepInFront: async ms => {
 						holds.push({ app, ms });
 						return 1;
@@ -3028,41 +3029,49 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(reads).toBe(1);
 	});
 
-	it("reads no front app while a hold runs, so a window opened after it never holds the browser in front", async () => {
-		let reads = 0;
-		const holds: number[] = [];
-		const ends: Array<() => void> = [];
-		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(() => {
-			const app = ++reads;
-			return {
-				keepInFront: () => {
-					holds.push(app);
-					const { promise, resolve } = Promise.withResolvers<number>();
-					ends.push(() => resolve(1));
-					return promise;
-				},
-			};
-		});
-		const ext = new FakeExtSocket();
-		connect(bridge, ext, [tab({ tabId: 1 })]);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
-		await sendInput(bridge, ext, connId, sessionId);
-		windowOpen(bridge, ext, 1);
-		await flush();
-		expect(holds).toEqual([2]);
-		// The browser is in front while the hold runs; omp clicks again, and that click's window comes during the
-		// hold and once more after it.
-		await sendInput(bridge, ext, connId, sessionId);
-		windowOpen(bridge, ext, 1);
-		for (const end of ends) end();
-		await flush();
-		windowOpen(bridge, ext, 1);
-		await flush();
-		expect(reads).toBe(2);
-		expect(holds).toEqual([2]);
+	it("extends the original app's watch for input during a hold and handles its popup after that hold ends", async () => {
+		jest.useFakeTimers();
+		try {
+			let reads = 0;
+			const holds: number[] = [];
+			const watches: Array<{ app: number; ms: number }> = [];
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(() => {
+				const app = ++reads;
+				return {
+					watchInput: ms => watches.push({ app, ms }),
+					keepInFront: () => {
+						holds.push(app);
+						return Promise.withResolvers<number>().promise;
+					},
+				};
+			});
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })]);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			await sendInput(bridge, ext, connId, sessionId);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(holds).toEqual([2]);
+			jest.advanceTimersByTime(400);
+			// Chrome may be temporarily frontmost: extend the captured app's
+			// watch instead of reading Chrome as the user's new app.
+			await sendInput(bridge, ext, connId, sessionId);
+			// The popup arrives after both the original hold and its one-second watch.
+			jest.advanceTimersByTime(700);
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(reads).toBe(2);
+			expect(holds).toEqual([2, 2]);
+			expect(watches).toEqual([
+				{ app: 2, ms: 1000 },
+				{ app: 2, ms: 1000 },
+			]);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	it("ends a hold at its deadline even while the native hold has not settled", async () => {
@@ -3075,6 +3084,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			bridge.keepFrontAppWith(() => {
 				const app = ++reads;
 				return {
+					watchInput: () => undefined,
 					keepInFront: () => {
 						holds.push(app);
 						return Promise.withResolvers<number>().promise;
@@ -3109,6 +3119,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			bridge.keepFrontAppWith(() => {
 				const app = ++reads;
 				return {
+					watchInput: () => undefined,
 					keepInFront: async () => {
 						holds.push(app);
 						throw new Error("desktop control is busy");

@@ -438,6 +438,12 @@ export declare class MacAppearanceObserver {
 /** The app the user had in front when `macOSFrontApp()` read it. */
 export declare class MacOSFrontApp {
   /**
+   * Extends the captured app's existing key-reroute watch through the next
+   * `durationMs`, without reading a temporarily frontmost browser or
+   * putting an app in front. A watch with a gap is never restarted.
+   */
+  watchInput(durationMs: number): void
+  /**
    * Puts this app back in front, without raising its windows, each time the
    * app that took the front from it takes it again during the next
    * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
@@ -447,7 +453,7 @@ export declare class MacOSFrontApp {
    * meanwhile is asked again. Extends the read's key reroute watch through
    * the hold: with `browserPid` passed to `macOSFrontApp()`, the keys the
    * user types while that browser holds the keyboard go to this app
-   * instead (when omp may tap keys: Accessibility). Holds nothing
+   * instead (with Accessibility and modifier-listening access). Holds nothing
    * when called over a second after the latest read, as picks made since
    * then went unwatched. Owns desktop input/focus control only for each
    * hand-back, and rejects if another operation owns it then. Resolves how
@@ -2874,7 +2880,8 @@ export declare function macOSCheckSpelling(text: string): Promise<Array<Spelling
  * front-process SPI is unavailable. With `browserPid`, the app omp's input
  * is about to reach, the keys the user types while that app holds the
  * keyboard uninvited go to this app for the next second, or through
- * `keepInFront` (when omp may tap keys: Accessibility).
+ * `keepInFront` or `watchInput` (with Accessibility and modifier-listening
+ * access).
  */
 export declare function macOSFrontApp(browserPid?: number | undefined | null): MacOSFrontApp | null
 
