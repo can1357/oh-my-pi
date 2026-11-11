@@ -38,7 +38,7 @@ pub(super) enum ComboPlan {
 	Edit,
 }
 
-pub(super) fn plan(enabled: bool, style: u32, exact_index: Option<usize>) -> ComboPlan {
+pub(super) const fn plan(enabled: bool, style: u32, exact_index: Option<usize>) -> ComboPlan {
 	if !enabled || (style & 0x30 != 0 && style & 0x200 == 0) {
 		ComboPlan::Refuse
 	} else if let Some(index) = exact_index {
