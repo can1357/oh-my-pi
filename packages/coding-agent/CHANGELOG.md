@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Auto Thinking Source setting (`providers.autoThinkingSource`): `vendor` makes the `auto` thinking level use the model vendor's default effort (for example `medium` on Claude Opus 5.5 and GPT-5.6, `high` on other Claude models) instead of classifying each prompt ([#14114](https://github.com/can1357/oh-my-pi/pull/14114) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
