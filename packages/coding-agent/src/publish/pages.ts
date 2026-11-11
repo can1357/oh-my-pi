@@ -16,13 +16,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getPublishedDir, isEnoent } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "../blob-broker/destinations";
-import type { BlobPublication, BlobUploader, BlobUploadRequest } from "../blob-broker/publication";
+import type { BlobPublication, BlobUploader } from "../blob-broker/publication";
 import { destinationRuntimeConfig } from "../blob-broker/service";
 import { createConfiguredUploader } from "../blob-broker/uploaders";
 import type { Settings } from "../config/settings";
 import { writeFileAtomically } from "../utils/atomic-file";
 import markdownPageTemplate from "./markdown-page.html.txt" with { type: "text" };
-import { type ClaudeArtifactsClient, claudeArtifactUrl } from "./claude-artifacts";
+import { type ClaudeAccount, type ClaudeArtifactsClient, claudeArtifactUrl } from "./claude-artifacts";
 import { cfgPublishBackends } from "./settings";
 
 const PAGE_ID_PATTERN = /^[0-9a-f]{32}$/;
@@ -69,11 +69,13 @@ export interface PublishedPage {
 	assets: PageAsset[];
 	/** claude.ai artifact slug; set exactly for pages hosted on claude.ai. */
 	claudeSlug?: string;
+	/** Anthropic account that owns the claude.ai artifact; later calls must use it. */
+	claudeOwner?: ClaudeAccount;
 }
 
 /** Outcome of deleting a page's remote copies. */
 export interface PageRemoval {
-	/** Whether the local record was removed (every remote copy is gone). */
+	/** Whether the local record was deleted: no remote deletion failed. Stranded copies do not block it. */
 	removed: boolean;
 	/** URLs deleted remotely. */
 	deleted: string[];
@@ -217,22 +219,38 @@ export class PagePublisher {
 	}
 
 	/**
-	 * Upload through the chain, trying `preferred` (the page's current
-	 * destination) first so an update keeps its URL whenever it can.
+	 * Upload `name` for `page`: inside its folder where the destination keeps
+	 * folders, else flat as `<pageId>-<name>` so pages never collide. Tries
+	 * `preferred` (the page's destination) first even after it left the
+	 * chain, so existing pages stay put; failures before the success are
+	 * returned for reporting.
 	 */
-	async #upload(request: BlobUploadRequest, preferred: BlobDestinationId | undefined): Promise<BlobPublication> {
+	async #upload(
+		page: PublishedPage,
+		name: string,
+		bytes: Uint8Array,
+		mimeType: string,
+		preferred: BlobDestinationId | undefined,
+	): Promise<{ publication: BlobPublication; failures: string[] }> {
 		const chain = cfgPublishBackends.get(this.#settings) as BlobDestinationId[];
-		if (chain.length === 0) throw new Error("No publish destination is configured (publish.backends is empty)");
-		const order = preferred && chain.includes(preferred) ? [preferred, ...chain.filter(d => d !== preferred)] : chain;
-		const errors: string[] = [];
+		const order = preferred ? [preferred, ...chain.filter(d => d !== preferred)] : chain;
+		if (order.length === 0) throw new Error("No publish destination is configured (publish.backends is empty)");
+		const extension = path.extname(name).slice(1);
+		const failures: string[] = [];
 		for (const destination of order) {
 			try {
-				return await this.#uploader(destination).upload(request);
+				const uploader = this.#uploader(destination);
+				const publication = await uploader.upload(
+					uploader.folders
+						? { bytes, mimeType, extension, filename: name, folder: page.id }
+						: { bytes, mimeType, extension, filename: `${page.id}-${name}` },
+				);
+				return { publication, failures };
 			} catch (error) {
-				errors.push(`${destination}: ${error instanceof Error ? error.message : String(error)}`);
+				failures.push(`${destination}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
-		throw new Error(`Every publish destination failed:\n${errors.join("\n")}`);
+		throw new Error(`Every publish destination failed:\n${failures.join("\n")}`);
 	}
 
 	/**
@@ -248,7 +266,7 @@ export class PagePublisher {
 		projectDir: string;
 		existing?: PublishedPage;
 		force?: boolean;
-	}): Promise<{ page: PublishedPage; version: PageVersion; previousUrl: string | undefined }> {
+	}): Promise<{ page: PublishedPage; version: PageVersion; previousUrl: string | undefined; failures: string[] }> {
 		const page: PublishedPage = options.existing ?? {
 			id: crypto.getRandomValues(new Uint8Array(16)).toHex(),
 			title: options.title,
@@ -263,31 +281,32 @@ export class PagePublisher {
 			? page.claudeSlug !== undefined
 			: cfgPublishBackends.get(this.#settings).length === 0;
 		let hosted: Pick<PageVersion, "url" | "publication" | "claudeVersion">;
+		let failures: string[] = [];
 		let html = options.html;
 		if (onClaude) {
 			// claude.ai only serves content that sniffs as an HTML document.
 			if (!/^\s*<!doctype html/i.test(html)) html = `<!DOCTYPE html>\n${html}`;
 			const deployment = await this.#requireClaude().deploy({
 				slug: page.claudeSlug,
+				owner: page.claudeOwner,
 				baseVersion: previous?.claudeVersion,
 				title: options.title,
 				content: html,
 				force: options.force,
 			});
 			page.claudeSlug = deployment.slug;
+			page.claudeOwner = deployment.owner;
 			hosted = { url: claudeArtifactUrl(deployment.slug), claudeVersion: deployment.version };
 		} else {
-			const publication = await this.#upload(
-				{
-					bytes: new TextEncoder().encode(html),
-					mimeType: HTML_MIME,
-					extension: "html",
-					filename: PAGE_FILE,
-					folder: page.id,
-				},
+			const uploaded = await this.#upload(
+				page,
+				PAGE_FILE,
+				new TextEncoder().encode(html),
+				HTML_MIME,
 				previous?.publication?.destination,
 			);
-			hosted = { url: publication.url, publication };
+			failures = uploaded.failures;
+			hosted = { url: uploaded.publication.url, publication: uploaded.publication };
 		}
 		const version: PageVersion = { version: (previous?.version ?? 0) + 1, source: options.source, ...hosted };
 		await this.store.writeVersion(page.id, version.version, html);
@@ -295,10 +314,10 @@ export class PagePublisher {
 		page.title = options.title;
 		page.updatedAt = Date.now();
 		await this.store.save(page);
-		return { page, version, previousUrl: previous?.url };
+		return { page, version, previousUrl: previous?.url, failures };
 	}
 
-	/** Upload a file into `page`'s remote folder, replacing a same-named asset. */
+	/** Upload a file beside `page`, replacing a same-named asset. */
 	async uploadAsset(page: PublishedPage, name: string, bytes: Uint8Array, mimeType: string): Promise<PageAsset> {
 		if (page.claudeSlug) {
 			throw new Error(
@@ -306,8 +325,11 @@ export class PagePublisher {
 			);
 		}
 		const replaced = page.assets.find(asset => asset.name === name);
-		const publication = await this.#upload(
-			{ bytes, mimeType, extension: path.extname(name).slice(1), filename: name, folder: page.id },
+		const { publication } = await this.#upload(
+			page,
+			name,
+			bytes,
+			mimeType,
 			replaced?.publication.destination ?? page.versions.at(-1)?.publication?.destination,
 		);
 		const asset: PageAsset = { name, publication };
@@ -319,21 +341,22 @@ export class PagePublisher {
 
 	/** Pin or unpin locally; claude.ai pages also pin to the claude.ai sidebar. */
 	async setPinned(page: PublishedPage, pinned: boolean): Promise<void> {
-		if (page.claudeSlug) await this.#requireClaude().setPinned(page.claudeSlug, pinned);
+		if (page.claudeSlug) await this.#requireClaude().setPinned(page.claudeSlug, page.claudeOwner, pinned);
 		page.pinned = pinned;
 		await this.store.save(page);
 	}
 
 	/**
 	 * Delete every remote copy of `page`, then its local record. The record
-	 * stays when a deletion fails so the call can be retried.
+	 * stays when a deletion fails so the call can be retried; copies whose
+	 * destination cannot delete are reported as stranded.
 	 */
 	async remove(page: PublishedPage): Promise<PageRemoval> {
 		const result: PageRemoval = { removed: false, deleted: [], stranded: [], errors: [] };
 		if (page.claudeSlug) {
 			const url = claudeArtifactUrl(page.claudeSlug);
 			try {
-				await this.#requireClaude().remove(page.claudeSlug);
+				await this.#requireClaude().remove(page.claudeSlug, page.claudeOwner);
 				result.deleted.push(url);
 			} catch (error) {
 				result.errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);

@@ -2809,7 +2809,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						knownProvider.storeCredentialsAs ?? knownProvider.id,
 						"online",
 					);
-					await session.refreshScopedModels();
+					await session.refreshAfterCredentialChange();
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));

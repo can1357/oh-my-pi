@@ -1,7 +1,6 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
-import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import publishDescription from "../prompts/tools/publish.md" with { type: "text" };
@@ -77,11 +76,21 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 	#publisher: PagePublisher;
 
 	constructor(private readonly session: ToolSession) {
-		const registry = session.modelRegistry;
-		const claude = registry
-			? new ClaudeArtifactsClient(async () => {
-					const token = await registry.getApiKeyForProvider("anthropic", session.getSessionId?.() ?? undefined);
-					return token && isAnthropicOAuthToken(token) ? token : undefined;
+		const auth = session.authStorage;
+		const claude = auth
+			? new ClaudeArtifactsClient(async owner => {
+					if (!owner) {
+						const access = await auth.oauth.access("anthropic", session.getSessionId?.() ?? undefined);
+						if (!access) return undefined;
+						const { accessToken, accountId, orgId, email } = access;
+						return { token: accessToken, account: { accountId, orgId, email } };
+					}
+					// An artifact belongs to one account and organization: reach exactly that login.
+					const login = auth.oauth
+						.accounts("anthropic")
+						.find(account => account.accountId === owner.accountId && account.orgId === owner.orgId);
+					const access = login && (await auth.oauth.accessById("anthropic", login.credentialId));
+					return access?.ok ? { token: access.accessToken, account: owner } : undefined;
 				})
 			: undefined;
 		this.#publisher = new PagePublisher(session.settings, { claude });
@@ -123,7 +132,7 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		const existing = params.page ? await this.#requirePage(params.page, "publish") : undefined;
 		const text = await readSource(Bun.file(absolute), params.path!, file => file.text());
 		const rendered = renderPageSource(absolute, text, params.title ?? existing?.title);
-		const { page, version, previousUrl } = await this.#publisher.publish({
+		const { page, version, previousUrl, failures } = await this.#publisher.publish({
 			html: rendered.html,
 			title: rendered.title,
 			source: absolute,
@@ -133,7 +142,11 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		});
 		const lines = [`Published "${page.title}" v${version.version} (${page.id}): ${version.url}`];
 		if (previousUrl && previousUrl !== version.url) {
-			lines.push(`URL changed from ${previousUrl}: ${pageHost(page)} cannot overwrite in place.`);
+			lines.push(
+				failures.length > 0
+					? `URL changed from ${previousUrl}: published to ${pageHost(page)} after ${failures.join("; ")}. The old copy still serves the previous version.`
+					: `URL changed from ${previousUrl}: ${pageHost(page)} cannot overwrite in place.`,
+			);
 		}
 		if (page.claudeSlug && !previousUrl) {
 			lines.push("The artifact is private to the user's claude.ai account until they share it.");
@@ -191,9 +204,11 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		if (page.pinned) throw new ToolError(`Page ${page.id} is pinned; unpin it before deleting`);
 		const result = await this.#publisher.remove(page);
 		const lines = [
-			result.removed
-				? `Deleted "${page.title}" (${page.id}).`
-				: `Kept the record of "${page.title}" (${page.id}) because some deletions failed; retry delete.`,
+			!result.removed
+				? `Kept the record of "${page.title}" (${page.id}) because some deletions failed; retry delete.`
+				: result.stranded.length > 0
+					? `Deleted the record of "${page.title}" (${page.id}); ${result.stranded.length} cop${result.stranded.length === 1 ? "y stays" : "ies stay"} online because the destination cannot delete.`
+					: `Deleted "${page.title}" (${page.id}).`,
 		];
 		for (const url of result.deleted) lines.push(`removed ${url}`);
 		for (const url of result.stranded) lines.push(`still online (destination cannot delete): ${url}`);

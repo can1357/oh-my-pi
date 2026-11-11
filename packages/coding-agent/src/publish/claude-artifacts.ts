@@ -10,14 +10,32 @@ import type { FetchImpl } from "../blob-broker/uploader-runtime";
 const FRAME_API = "https://api.anthropic.com/api/frame";
 const OAUTH_BETA = "oauth-2025-04-20";
 
-/** Resolves the Anthropic OAuth access token; `undefined` when not logged in. */
-export type ClaudeTokenResolver = () => Promise<string | undefined>;
+/** Non-secret identity of the Anthropic account (and organization) an artifact belongs to. */
+export interface ClaudeAccount {
+	accountId?: string;
+	orgId?: string;
+	email?: string;
+}
+
+/** An access token and the account it authenticates. */
+export interface ClaudeAccess {
+	token: string;
+	account: ClaudeAccount;
+}
+
+/**
+ * Resolves Anthropic OAuth access: the session's account without `owner`,
+ * otherwise exactly `owner`. `undefined` when that login is not available.
+ */
+export type ClaudeAccessResolver = (owner?: ClaudeAccount) => Promise<ClaudeAccess | undefined>;
 
 /** A published artifact revision. */
 export interface ClaudeDeployment {
 	slug: string;
 	/** Live version id; the base for the next publish. */
 	version: string;
+	/** Account that owns the artifact. */
+	owner: ClaudeAccount;
 }
 
 /** Shareable claude.ai URL of an artifact. */
@@ -26,22 +44,33 @@ export function claudeArtifactUrl(slug: string): string {
 }
 
 export class ClaudeArtifactsClient {
-	#token: ClaudeTokenResolver;
+	#access: ClaudeAccessResolver;
 	#fetch: FetchImpl;
 
-	constructor(token: ClaudeTokenResolver, fetchFn: FetchImpl = globalThis.fetch) {
-		this.#token = token;
+	constructor(access: ClaudeAccessResolver, fetchFn: FetchImpl = globalThis.fetch) {
+		this.#access = access;
 		this.#fetch = fetchFn;
 	}
 
-	async #request(method: string, route: string, body?: unknown): Promise<Response> {
-		const token = await this.#token();
-		if (!token) throw new Error("claude.ai artifacts need an Anthropic OAuth login; log in to Anthropic with /login");
-		return this.#fetch(`${FRAME_API}${route}`, {
+	async #request(
+		owner: ClaudeAccount | undefined,
+		method: string,
+		route: string,
+		body?: unknown,
+	): Promise<{ response: Response; account: ClaudeAccount }> {
+		const access = await this.#access(owner);
+		if (!access) {
+			throw new Error(
+				owner
+					? `The Anthropic account that owns this artifact${owner.email ? ` (${owner.email})` : ""} is not logged in`
+					: "claude.ai artifacts need an Anthropic OAuth login; log in to Anthropic with /login",
+			);
+		}
+		const response = await this.#fetch(`${FRAME_API}${route}`, {
 			method,
 			redirect: "manual",
 			headers: {
-				Authorization: `Bearer ${token}`,
+				Authorization: `Bearer ${access.token}`,
 				"anthropic-beta": OAUTH_BETA,
 				"User-Agent": getClaudeCodeUserAgent(),
 				"X-Frame-CP": "go",
@@ -53,6 +82,7 @@ export class ClaudeArtifactsClient {
 			},
 			...(body === undefined ? {} : { body: JSON.stringify(body) }),
 		});
+		return { response, account: access.account };
 	}
 
 	/**
@@ -62,6 +92,7 @@ export class ClaudeArtifactsClient {
 	 */
 	async deploy(options: {
 		slug?: string;
+		owner?: ClaudeAccount;
 		baseVersion?: string;
 		title: string;
 		content: string;
@@ -73,7 +104,7 @@ export class ClaudeArtifactsClient {
 			title: options.title,
 			content: options.content,
 		};
-		let response = await this.#request("POST", "/deploy/direct", body);
+		let { response, account } = await this.#request(options.owner, "POST", "/deploy/direct", body);
 		if (response.status === 409 && options.slug) {
 			const conflict = (await response.json().catch(() => ({}))) as { live?: unknown };
 			const live = typeof conflict.live === "string" ? conflict.live : undefined;
@@ -82,26 +113,33 @@ export class ClaudeArtifactsClient {
 					`The artifact changed on claude.ai since omp last published it${live ? ` (live version ${live})` : ""}; publish with force to overwrite that version`,
 				);
 			}
-			response = await this.#request("POST", "/deploy/direct", { ...body, baseVersion: live });
+			({ response, account } = await this.#request(account, "POST", "/deploy/direct", {
+				...body,
+				baseVersion: live,
+			}));
 		}
 		if (!response.ok) throw await failure("publish", response);
 		const result = (await response.json()) as { slug?: unknown; version?: unknown };
 		if (typeof result.slug !== "string" || typeof result.version !== "string") {
 			throw new Error("claude.ai publish returned no artifact slug or version");
 		}
-		return { slug: result.slug, version: result.version };
+		return { slug: result.slug, version: result.version, owner: account };
 	}
 
-	/** Delete an artifact; deleting an already deleted one succeeds. */
-	async remove(slug: string): Promise<void> {
-		const response = await this.#request("DELETE", `/${encodeURIComponent(slug)}`);
-		if (!response.ok && response.status !== 404) throw await failure("delete", response);
+	/** Delete an artifact. The API answers 204 for an already deleted one, so 404 is a failure. */
+	async remove(slug: string, owner: ClaudeAccount | undefined): Promise<void> {
+		const { response } = await this.#request(owner, "DELETE", `/${encodeURIComponent(slug)}`);
+		if (!response.ok) throw await failure("delete", response);
 		await response.body?.cancel();
 	}
 
-	/** Pin to or unpin from the user's claude.ai sidebar. */
-	async setPinned(slug: string, pinned: boolean): Promise<void> {
-		const response = await this.#request(pinned ? "POST" : "DELETE", `/favorite/${encodeURIComponent(slug)}`);
+	/** Pin to or unpin from the owner's claude.ai sidebar. */
+	async setPinned(slug: string, owner: ClaudeAccount | undefined, pinned: boolean): Promise<void> {
+		const { response } = await this.#request(
+			owner,
+			pinned ? "POST" : "DELETE",
+			`/favorite/${encodeURIComponent(slug)}`,
+		);
 		if (!response.ok) throw await failure(pinned ? "pin" : "unpin", response);
 		await response.body?.cancel();
 	}

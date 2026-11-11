@@ -219,6 +219,7 @@ function createS3Uploader(destination: BlobDestinationId, config: DestinationRun
 
 	return {
 		destination,
+		folders: true,
 		async upload(uploadRequest) {
 			const key = objectKey(settings.keyPrefix, uploadRequest);
 			const target = requestObjectUrl(settings, key);
@@ -304,8 +305,12 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 	const cacheControl = optionString(config, "cacheControl");
 	const request = fetchFor(config);
 
+	const objectUrl = (name: string) =>
+		`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(name)}`;
+
 	return {
 		destination,
+		folders: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
 			const boundary = `omp-${crypto.randomUUID()}`;
@@ -334,7 +339,7 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 			);
 			const responseBody: unknown = await response.json();
 			const remoteName = optionalStringField(responseBody, "name") ?? key;
-			const deleteUrl = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(remoteName)}`;
+			const deleteUrl = objectUrl(remoteName);
 			const publicUrl = publicBaseUrl
 				? publicObjectUrl(publicBaseUrl, remoteName)
 				: `https://storage.googleapis.com/${encodeURIComponent(bucket)}/${encodePath(remoteName)}`;
@@ -342,6 +347,17 @@ function createGcsUploader(config: DestinationRuntimeConfig): BlobUploader {
 				remoteId: remoteName,
 				delete: { method: "DELETE", url: deleteUrl, headers: { authorization: `Bearer ${token}` } },
 			});
+		},
+		async remove(published) {
+			if (!published.remoteId) throw new Error(`${destination} publication has no object name`);
+			const response = await request(objectUrl(published.remoteId), {
+				method: "DELETE",
+				headers: { authorization: `Bearer ${token}` },
+			});
+			await response.body?.cancel();
+			if (!response.ok && response.status !== 404) {
+				throw new Error(`${destination} delete failed with HTTP ${response.status}`);
+			}
 		},
 	};
 }
@@ -421,15 +437,21 @@ function createAzureUploader(config: DestinationRuntimeConfig): BlobUploader {
 	const publicBaseUrl = optionString(config, "publicBaseUrl");
 	const request = fetchFor(config);
 
+	const objectTarget = (key: string) => {
+		const url = new URL(endpoint);
+		const resourcePath = joinPath(decodedPathname(url), container, key);
+		url.pathname = encodePath(resourcePath);
+		url.search = "";
+		url.hash = "";
+		return { url, resourcePath };
+	};
+
 	return {
 		destination,
+		folders: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
-			const url = new URL(endpoint);
-			const resourcePath = joinPath(decodedPathname(url), container, key);
-			url.pathname = encodePath(resourcePath);
-			url.search = "";
-			url.hash = "";
+			const { url, resourcePath } = objectTarget(key);
 			const headers = await azureHeaders(
 				"PUT",
 				accountName,
@@ -446,6 +468,16 @@ function createAzureUploader(config: DestinationRuntimeConfig): BlobUploader {
 				remoteId: key,
 				delete: { method: "DELETE", url: url.toString(), headers: deleteHeaders },
 			});
+		},
+		async remove(published) {
+			if (!published.remoteId) throw new Error(`${destination} publication has no blob name`);
+			const { url, resourcePath } = objectTarget(published.remoteId);
+			const headers = await azureHeaders("DELETE", accountName, accountKey, resourcePath, 0);
+			const response = await request(url, { method: "DELETE", headers });
+			await response.body?.cancel();
+			if (!response.ok && response.status !== 404) {
+				throw new Error(`${destination} delete failed with HTTP ${response.status}`);
+			}
 		},
 	};
 }
@@ -581,6 +613,7 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 
 	return {
 		destination,
+		folders: true,
 		async upload(uploadRequest) {
 			const key = objectKey(prefix, uploadRequest);
 			const authorization = await authorizeB2(config);
@@ -617,6 +650,21 @@ function createNativeB2Uploader(config: DestinationRuntimeConfig): BlobUploader 
 					body: JSON.stringify({ fileName: uploadedName, fileId }),
 				},
 			});
+		},
+		async remove(published) {
+			// The captured delete body names the file; only its authorization token expires.
+			const fileName = optionalStringField(JSON.parse(published.delete?.body ?? "{}"), "fileName");
+			if (!published.remoteId || !fileName) throw new Error(`${destination} publication has no file id or name`);
+			const authorization = await authorizeB2(config);
+			await b2Json(
+				config,
+				`${authorization.apiUrl}/b2api/v2/b2_delete_file_version`,
+				authorization.authorizationToken,
+				{
+					fileName,
+					fileId: published.remoteId,
+				},
+			);
 		},
 	};
 }
