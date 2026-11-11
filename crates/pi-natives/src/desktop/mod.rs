@@ -819,13 +819,27 @@ impl Worker {
 		})
 	}
 
+	/// The frame of `target`'s last capture. On macOS the refusal without one
+	/// names the element click first: agents send coordinates read off an
+	/// element's `bounds()`, desktop points there, and the element's own click
+	/// needs no capture. Elsewhere it does not: Wayland bounds can be
+	/// window-relative and its window input is refused.
 	fn frame(&self, target: &Target) -> CoreResult<FrameGeometry> {
 		self.frames.get(target.key()).cloned().ok_or_else(|| {
-			DesktopError::invalid_coordinate_frame(format!(
-				"no capture of '{}' yet — take a screenshot of this target first; coordinate input is \
-				 in pixels of that screenshot",
-				target.key()
-			))
+			let key = target.key();
+			DesktopError::invalid_coordinate_frame(if cfg!(target_os = "macos") {
+				format!(
+					"no capture of '{key}' yet. Coordinate input is in pixels of a screenshot of this \
+					 target, not the desktop coordinates an element's bounds() gives: to click an \
+					 element, call its own click() (`await el.click()`), which needs no screenshot; \
+					 for a pixel click, take a screenshot of this target first"
+				)
+			} else {
+				format!(
+					"no capture of '{key}' yet — take a screenshot of this target first; coordinate \
+					 input is in pixels of that screenshot"
+				)
+			})
 		})
 	}
 
@@ -4875,9 +4889,17 @@ mod capture_tests {
 		let target = Target::Window(WAYLAND_ID.to_string());
 		let region = CaptureRegion { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
 		let request = zoom_request(target.clone(), region, CaptureCaps::default());
+		let missing = worker.process(&request, &token).err().unwrap();
+		assert_eq!(missing.code, ErrorCode::InvalidCoordinateFrame);
+		// On macOS, where agents send coordinates read off an element's bounds()
+		// before any capture, the refusal names the element's own click.
+		let names_click = missing.message.contains("`await el.click()`");
+		assert_eq!(names_click, cfg!(target_os = "macos"), "{}", missing.message);
 		assert_eq!(
-			worker.process(&request, &token).err().unwrap().code,
-			ErrorCode::InvalidCoordinateFrame
+			missing.message.contains("element's bounds()"),
+			cfg!(target_os = "macos"),
+			"{}",
+			missing.message
 		);
 		assert_eq!(*captures.lock(), 0);
 		worker
