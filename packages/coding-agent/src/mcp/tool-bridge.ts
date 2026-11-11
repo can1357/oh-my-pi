@@ -261,11 +261,15 @@ function formatStructuredContent(structured: Record<string, unknown>): string {
 }
 
 /**
- * True when a text block already carries the structured payload verbatim. A
- * spec-compliant server duplicates `structuredContent` into a TextContent block
- * for back-compat; detecting that avoids emitting the JSON twice.
+ * True when text already carries the structured payload, including the MCP
+ * SDK's `{ result: value }` wrapper for non-object tool returns.
  */
 function structuredContentAlreadyInText(structured: Record<string, unknown>, content: MCPContent[]): boolean {
+	const wrapped =
+		Object.hasOwn(structured, "result") && Object.keys(structured).length === 1 ? structured.result : undefined;
+	const items = Array.isArray(wrapped) ? wrapped : undefined;
+	let textCount = 0;
+	let matchedItems = 0;
 	for (const item of content) {
 		if (item.type !== "text") continue;
 		const trimmed = item.text.trim();
@@ -274,11 +278,26 @@ function structuredContentAlreadyInText(structured: Record<string, unknown>, con
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch {
-			continue;
+			// Plain text can still match an SDK-wrapped string return.
 		}
 		if (Bun.deepEquals(parsed, structured)) return true;
+		if (
+			wrapped !== undefined &&
+			((typeof wrapped === "string" && trimmed === wrapped) || Bun.deepEquals(parsed, wrapped))
+		) {
+			return true;
+		}
+		textCount++;
+		const next = items?.[matchedItems];
+		if (
+			next !== undefined &&
+			matchedItems === textCount - 1 &&
+			((typeof next === "string" && trimmed === next) || Bun.deepEquals(parsed, next))
+		) {
+			matchedItems++;
+		}
 	}
-	return false;
+	return textCount > 0 && items !== undefined && textCount === items.length && matchedItems === textCount;
 }
 
 /** Build a CustomToolResult from a callTool response. */
