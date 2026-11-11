@@ -458,4 +458,26 @@ describe("overlapping session switches", () => {
 		await expect(starting).rejects.toThrow("disposed before this session transition could run");
 		expect(target.sessionManager.getSessionFile()).toBe(sessionFile);
 	}, 30_000);
+
+	it("runs a transition requested on an already-disposed session", async () => {
+		const target = createSession();
+		const originalSessionFile = target.sessionManager.getSessionFile();
+		await target.dispose();
+
+		const nextManager = SessionManager.create(
+			target.sessionManager.getCwd(),
+			path.join(tempDir.path(), "after-dispose-sessions"),
+		);
+		nextManager.appendMessage({ role: "user", content: "after dispose", timestamp: Date.now() });
+		await nextManager.ensureOnDisk();
+		const nextFile = nextManager.getSessionFile();
+		await nextManager.close();
+		if (!nextFile) throw new Error("Expected target session file");
+
+		expect(await target.switchSession(nextFile)).toBe(true);
+		expect(target.sessionManager.getSessionFile()).toBe(nextFile);
+		expect(await target.newSession()).toBe(true);
+		expect(target.sessionManager.getSessionFile()).not.toBe(originalSessionFile);
+		expect(target.sessionManager.getSessionFile()).not.toBe(nextFile);
+	}, 30_000);
 });
