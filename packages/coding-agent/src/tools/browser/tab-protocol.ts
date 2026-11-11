@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export type Transferable = Bun.Transferable;
 
@@ -61,10 +62,15 @@ const PAGE_ONLY_GLOBAL_RE =
 
 /**
  * Whether run code itself, in omp's runtime, reached for a page-only global. An exception thrown in the page arrives
- * as a plain `Error` that Puppeteer names after it, so it never counts.
+ * as a plain `Error` that Puppeteer names after it, so it never counts. A floating rejection arrives wrapped: one
+ * reason as the wrapper's `cause`, or, once an in-process run returned, all of them in its `rejections`.
  */
 export function isMissingPageGlobal(error: unknown): boolean {
-	return error instanceof ReferenceError && PAGE_ONLY_GLOBAL_RE.test(error.message);
+	if (error instanceof ReferenceError) return PAGE_ONLY_GLOBAL_RE.test(error.message);
+	if (!(error instanceof Error)) return false;
+	if (error.cause instanceof ReferenceError) return isMissingPageGlobal(error.cause);
+	const rejections = error instanceof ToolError ? error.context?.rejections : undefined;
+	return Array.isArray(rejections) && rejections.some(isMissingPageGlobal);
 }
 
 export type WorkerInitPayload =
