@@ -4595,4 +4595,48 @@ mod tests {
 		// switch window is still sent back.
 		assert_eq!(pick(ms(300)), FocusDecision::Restore);
 	}
+
+	#[test]
+	fn a_press_read_once_after_a_reading_gave_up_on_it_leaves_the_target_sent_back() {
+		// The user's press at 10 ms, which `WindowServer` counts and a reading
+		// gives up on at 70 ms before the tap delivers it: the journal reads
+		// it once, whatever the tap delivers next.
+		let t0 = Instant::now();
+		let reading = |buttons, placed| Reading { buttons, placed, skipped: None };
+		let idle = SwitchSignals::of(
+			reading([0; 6], Some(true)),
+			t0.checked_sub(ms(5000)),
+			NO_MODIFIERS,
+			None,
+		);
+		let pressed = |placed| {
+			SwitchSignals::of(
+				reading([1, 0, 0, 0, 0, 0], placed),
+				Some(t0 + ms(10)),
+				NO_MODIFIERS,
+				None,
+			)
+		};
+		let lease_after = |readings: &[(Option<bool>, Duration)]| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			for &(placed, at) in [(None, ms(20)), (None, ms(70))].iter().chain(readings) {
+				let decision = guard.observe(PREVIOUS, Some(42), pressed(placed), t0 + at);
+				assert_eq!(decision, FocusDecision::Observe);
+			}
+			guard
+		};
+		// The tap delivers it in the user's app at 100 ms: the target coming
+		// forward on its own right after is sent back.
+		let mut guard = lease_after(&[(Some(true), ms(100))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(true)), t0 + ms(140));
+		assert_eq!(decision, FocusDecision::Restore);
+		// The trade-off: a remapping tool swallowed it, so it stays owed, and a
+		// remote tool's press on the target at 1 s, posted to the session tap,
+		// pays it off and adds no click; the target coming forward because of
+		// it is sent back too, leaving the user's app in front.
+		let mut guard = lease_after(&[(Some(true), ms(80)), (Some(false), ms(1000))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(false)), t0 + ms(1040));
+		assert_eq!(decision, FocusDecision::Restore);
+	}
 }

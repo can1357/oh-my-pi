@@ -74,9 +74,14 @@ struct Journal {
 	/// The user's button events of each type the HID counters never
 	/// counted, such as a remote tool's posts to the session tap, and when
 	/// the tap delivered the latest; kept across restarts, so readings only
-	/// ever count up. An event the counters did count but the tap delivered
-	/// only after the record gave up on it counts here too, a second time.
+	/// ever count up.
 	skipped: ([u32; 6], Option<Instant>),
+	/// Counted events of each type the tap had not delivered when the record
+	/// gave up on them, kept across restarts: the next ones of that type the
+	/// tap delivers beyond the counters pay these off rather than count as
+	/// skipped, since one delivered late was counted already. One a tool
+	/// swallowed stays owed, so the next post the counters skip goes unseen.
+	owed:    [u32; 6],
 	recent:  VecDeque<Button>,
 }
 
@@ -88,6 +93,7 @@ impl Default for ClickJournal {
 			before:  None,
 			lost:    false,
 			skipped: ([0; 6], None),
+			owed:    [0; 6],
 			recent:  VecDeque::with_capacity(RECENT),
 		}))
 	}
@@ -241,15 +247,18 @@ impl Journal {
 	/// never counts more than `WindowServer` did: an event beyond that is one
 	/// the HID counters skip, or one counted before the record started, and
 	/// moves `base` on rather than stand in for an event still on its way.
-	/// Returns how many events beyond `WindowServer`'s count that was.
-	const fn see(&mut self, kind: usize, hid: [u32; 6]) -> u32 {
+	/// Returns how many events beyond `WindowServer`'s count that was, less
+	/// any [`Self::owed`] it pays off.
+	fn see(&mut self, kind: usize, hid: [u32; 6]) -> u32 {
 		self.seen[kind] = self.seen[kind].wrapping_add(1);
 		let counted = hid[kind].wrapping_sub(self.base[kind]);
 		let beyond = self.seen[kind].wrapping_sub(counted);
 		// Wrapping difference: positive when the tap saw more.
 		if beyond as i32 > 0 {
 			self.base[kind] = hid[kind].wrapping_sub(self.seen[kind]);
-			return beyond;
+			let late = beyond.min(self.owed[kind]);
+			self.owed[kind] -= late;
+			return beyond - late;
 		}
 		0
 	}
@@ -330,6 +339,10 @@ impl Journal {
 		if behind {
 			if idle {
 				let lost = self.lost;
+				for (kind, owed) in self.owed.iter_mut().enumerate() {
+					let counted = hid[kind].wrapping_sub(self.base[kind]);
+					*owed = owed.wrapping_add(counted.wrapping_sub(self.seen[kind]));
+				}
 				self.start(hid);
 				if lost {
 					self.before = None;
@@ -574,6 +587,39 @@ mod tests {
 		session.counted(OTHER_DOWN);
 		session.reading(true);
 		assert_eq!(session.reading(false).buttons, [6, 6, 0, 0, 1, 0]);
+	}
+
+	#[test]
+	fn a_press_the_tap_delivers_after_a_reading_gave_up_on_it_counts_once() {
+		// The user's press in their own app, which `WindowServer` counted, comes
+		// through the tap only after a reading gave up waiting for it.
+		let mut session = Session::started();
+		session.counted(LEFT_DOWN);
+		assert_eq!(session.reading(true).placed, None);
+		session.delivered(LEFT_DOWN, USER, 3, None);
+		let late = session.reading(false);
+		assert_eq!(late.buttons, [6, 5, 0, 0, 0, 0], "one press, read once");
+		assert_eq!(late.skipped, None);
+		assert_eq!(late.placed, Some(true));
+		// Paid off: the next press the counters skip reaches readings again.
+		session.delivered(LEFT_DOWN, TARGET, 3, None);
+		assert_eq!(session.reading(false).buttons, [7, 5, 0, 0, 0, 0]);
+	}
+
+	#[test]
+	fn a_press_the_counters_skip_after_a_swallowed_one_goes_unseen() {
+		// A press a remapping tool swallowed stays owed once given up, so a
+		// remote tool's next press on the target, posted to the session tap,
+		// pays it off instead of reaching readings as a click.
+		let mut session = Session::started();
+		session.counted(LEFT_DOWN);
+		session.reading(true);
+		assert_eq!(session.place(false), Some(true));
+		session.delivered(LEFT_DOWN, TARGET, 3, None);
+		let posted = session.reading(false);
+		assert_eq!(posted.buttons, [6, 5, 0, 0, 0, 0], "no new press");
+		assert_eq!(posted.skipped, None);
+		assert_eq!(posted.placed, Some(false));
 	}
 
 	#[test]
