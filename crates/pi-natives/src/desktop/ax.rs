@@ -94,32 +94,35 @@ impl Hash for AxHandle {
 
 #[derive(Debug, Clone)]
 pub struct AxProps {
-	pub role:           String,
-	pub native_role:    String,
-	pub title:          Option<String>,
-	pub value:          Option<String>,
-	pub description:    Option<String>,
-	pub enabled:        bool,
-	pub focused:        bool,
-	pub bounds:         Option<AxBounds>,
-	pub actions:        Vec<String>,
-	pub child_count:    u32,
+	pub role:                String,
+	pub native_role:         String,
+	pub title:               Option<String>,
+	pub value:               Option<String>,
+	pub description:         Option<String>,
+	pub enabled:             bool,
+	pub focused:             bool,
+	pub bounds:              Option<AxBounds>,
+	pub actions:             Vec<String>,
+	pub child_count:         u32,
 	/// Hash of the fields that tell the element apart in its window, compared
 	/// to name the one element left with them once the app has destroyed it;
 	/// `None` where the backend reads none or could not read them all.
-	pub identity:       Option<u64>,
+	pub identity:            Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
-	pub partial:        bool,
+	pub partial:             bool,
 	/// The backend answered the role and every field needed to choose the
 	/// displayed label. Unrelated identity fields may still be unanswered.
-	pub label_complete: bool,
+	pub label_complete:      bool,
+	/// The read-as guard's fingerprint when it differs from the displayed
+	/// label's fingerprint. None uses the displayed fingerprint.
+	pub read_as_fingerprint: Option<u64>,
 	/// Whether a row, cell, button or file icon reports itself selected.
-	pub selected:       bool,
+	pub selected:            bool,
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
-	pub role_name:      Option<String>,
+	pub role_name:           Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -176,11 +179,10 @@ struct Registered {
 	/// role or label gets a new ref.
 	fingerprint: u64,
 	proof:       Option<Proof>,
-	/// Whether an action through the ref is held to the label it was read
-	/// with ([`require_read_as`]): not when its role or chosen label was
-	/// unanswered, nor for a window, whose title names its document.
+	/// The fingerprint held by an action through this ref; not held when its
+	/// own label was unanswered, nor for a window naming its document.
 	#[cfg(any(target_os = "macos", test))]
-	held:        bool,
+	held:        Option<u64>,
 }
 
 pub struct AxRegistry {
@@ -287,7 +289,8 @@ impl AxRegistry {
 			fingerprint,
 			proof,
 			#[cfg(any(target_os = "macos", test))]
-			held: props.label_complete && props.role != "window",
+			held: (props.label_complete && props.role != "window")
+				.then(|| props.read_as_fingerprint.unwrap_or(fingerprint)),
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -321,11 +324,7 @@ impl AxRegistry {
 	/// to its label.
 	#[cfg(any(target_os = "macos", test))]
 	pub(crate) fn expect_read_as(&self, reference: &str) -> Option<ReadAsScope> {
-		let fingerprint = self
-			.entry(reference)
-			.ok()
-			.filter(|entry| entry.held)?
-			.fingerprint;
+		let fingerprint = self.entry(reference).ok()?.held?;
 		READ_AS.with_borrow_mut(|read_as| {
 			*read_as = Some(ReadAs {
 				reference: reference.to_owned(),
@@ -383,7 +382,7 @@ fn ref_id(reference: &str) -> Option<u64> {
 
 /// The role and label a ref was read with, as [`AxRegistry::register`]
 /// compares them: an element read again with others gets a new ref.
-fn fingerprint(props: &AxProps) -> u64 {
+pub(crate) fn fingerprint(props: &AxProps) -> u64 {
 	label_fingerprint(&props.role, label(props))
 }
 
@@ -1835,21 +1834,22 @@ mod tests {
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
-			role:           role.into(),
-			native_role:    role.into(),
-			title:          title.map(str::to_string),
-			value:          None,
-			description:    None,
-			enabled:        true,
-			focused:        false,
-			bounds:         None,
-			actions:        Vec::new(),
-			child_count:    0,
-			identity:       Some(test_identity((role, title))),
-			partial:        false,
-			label_complete: true,
-			selected:       false,
-			role_name:      None,
+			read_as_fingerprint: None,
+			role:                role.into(),
+			native_role:         role.into(),
+			title:               title.map(str::to_string),
+			value:               None,
+			description:         None,
+			enabled:             true,
+			focused:             false,
+			bounds:              None,
+			actions:             Vec::new(),
+			child_count:         0,
+			identity:            Some(test_identity((role, title))),
+			partial:             false,
+			label_complete:      true,
+			selected:            false,
+			role_name:           None,
 		}
 	}
 	fn window() -> DesktopWindow {

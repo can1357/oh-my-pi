@@ -62,7 +62,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 17] = [
+const NODE_ATTRIBUTES: [&str; 18] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -78,6 +78,7 @@ const NODE_ATTRIBUTES: [&str; 17] = [
 	"AXIdentifier",
 	"AXURL",
 	"AXPlaceholderValue",
+	"AXTitleUIElement",
 	"AXPosition",
 	"AXSize",
 ];
@@ -96,14 +97,16 @@ const HELP: usize = 11;
 const IDENTIFIER: usize = 12;
 const URL: usize = 13;
 const PLACEHOLDER: usize = 14;
-const POSITION: usize = 15;
-const SIZE: usize = 16;
+const TITLE_ELEMENT: usize = 15;
+const POSITION: usize = 16;
+const SIZE: usize = 17;
 
 /// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
-/// ([`read_identity`]) or to name a field by its placeholder. A batch that
-/// fails as a whole skips them, so a hung app costs no more lone reads, each
-/// with its own timeout, than the element's role, labels, state and children;
-/// the element then has no identity, and a field without a label no name.
+/// ([`read_identity`]) or to name an element by its placeholder or linked
+/// label. A batch that fails as a whole skips them, so a hung app costs no
+/// more lone reads, each with its own timeout, than the element's role,
+/// labels, state and children; the element then has no identity, and an
+/// element without a label of its own no name.
 const IDENTITY_ONLY: Range<usize> = SUBROLE..POSITION;
 
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
@@ -1312,12 +1315,57 @@ impl AxBackend for MacAx {
 	}
 }
 
+fn element_props(
+	values: &NodeValues,
+	child_count: usize,
+	read_bounds: WalkBounds,
+) -> CoreResult<AxProps> {
+	labelled_props(values, child_count, read_bounds, copy_attribute_result)
+}
+
+/// [`element_props`], reading a linked label with `read_label`.
+fn labelled_props(
+	values: &NodeValues,
+	child_count: usize,
+	read_bounds: WalkBounds,
+	read_label: impl FnMut(&AXUIElement, &str) -> Result<Option<CFRetained<CFType>>, AXError>,
+) -> CoreResult<AxProps> {
+	let (mut props, has_own_label) = own_props(values, child_count, read_bounds)?;
+	if has_own_label {
+		return Ok(props);
+	}
+	let linked = values.get(TITLE_ELEMENT);
+	let label = if answered(&linked) {
+		linked_label(linked.ok().flatten().as_deref(), read_label)
+	} else {
+		Err(AXError::CannotComplete)
+	};
+	match label {
+		Ok(Some(title)) => {
+			props.read_as_fingerprint = Some(super::super::ax::fingerprint(&props));
+			props.title = Some(title);
+			props.description = None;
+			props.role_name = None;
+			props.identity = read_identity(values, &props.native_role, [
+				&props.title,
+				&props.value,
+				&props.description,
+			]);
+		},
+		Ok(None) => {},
+		Err(_) => props.identity = None,
+	}
+	props.partial = props.identity.is_none();
+	Ok(props)
+}
+
 struct ElementLabels {
 	native_role: String,
 	title:       Option<String>,
 	description: Option<String>,
 	role_name:   Option<String>,
 	complete:    bool,
+	has_own_label: bool,
 }
 
 /// Decodes only labels already in the batch. In particular, an `AXValue` can
@@ -1334,6 +1382,7 @@ fn element_labels(values: &NodeValues) -> CoreResult<ElementLabels> {
 	};
 	let title = nonempty(string(TITLE));
 	let description = nonempty(string(DESCRIPTION));
+	let has_own_label = title.is_some() || description.is_some();
 	let uses_placeholder = title.is_none() && description.is_none();
 	let description = description.or_else(|| {
 		if title.is_none() {
@@ -1351,15 +1400,15 @@ fn element_labels(values: &NodeValues) -> CoreResult<ElementLabels> {
 					|| label_answered(values, SUBROLE))));
 	let role_name =
 		window_control_name(&native_role, [&title, &description], string(SUBROLE)).map(str::to_owned);
-	Ok(ElementLabels { native_role, title, description, role_name, complete })
+	Ok(ElementLabels { native_role, title, description, role_name, complete, has_own_label })
 }
 
-fn element_props(
+fn own_props(
 	values: &NodeValues,
 	child_count: usize,
 	read_bounds: WalkBounds,
-) -> CoreResult<AxProps> {
-	let ElementLabels { native_role, title, description, role_name, complete: label_complete } =
+) -> CoreResult<(AxProps, bool)> {
+	let ElementLabels { native_role, title, description, role_name, complete: label_complete, has_own_label } =
 		element_labels(values)?;
 	let read = |index| values.get(index).ok().flatten();
 	let boolean = |index| {
@@ -1370,28 +1419,32 @@ fn element_props(
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
 	let selected = selected(values, &native_role);
-	Ok(AxProps {
-		role: normalize_role_macos(&native_role),
-		native_role,
-		title,
-		value,
-		description,
-		enabled: boolean(ENABLED).unwrap_or(true),
-		focused: boolean(FOCUSED).unwrap_or(false),
-		bounds: match read_bounds {
-			WalkBounds::Read => read(POSITION)
-				.zip(read(SIZE))
-				.and_then(|(position, size)| frame(&position, &size)),
-			WalkBounds::Skip => None,
+	Ok((
+		AxProps {
+			read_as_fingerprint: None,
+			role: normalize_role_macos(&native_role),
+			native_role,
+			title,
+			value,
+			description,
+			enabled: boolean(ENABLED).unwrap_or(true),
+			focused: boolean(FOCUSED).unwrap_or(false),
+			bounds: match read_bounds {
+				WalkBounds::Read => read(POSITION)
+					.zip(read(SIZE))
+					.and_then(|(position, size)| frame(&position, &size)),
+				WalkBounds::Skip => None,
+			},
+			actions: Vec::new(),
+			child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
+			partial: identity.is_none(),
+			label_complete,
+			identity,
+			selected,
+			role_name,
 		},
-		actions: Vec::new(),
-		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
-		partial: identity.is_none(),
-		label_complete,
-		identity,
-		selected,
-		role_name,
-	})
+		has_own_label,
+	))
 }
 
 /// An absent string is an answer; an error or a value of another type is
@@ -1404,6 +1457,32 @@ fn label_answered(values: &NodeValues, index: usize) -> bool {
 	}
 }
 
+/// The text of the element an `AXTitleUIElement` value links to, read with
+/// `read`: its `AXValue`, as static text carries it, else its `AXTitle`.
+/// `Err` is a read the app did not answer.
+fn linked_label(
+	linked: Option<&CFType>,
+	mut read: impl FnMut(&AXUIElement, &str) -> Result<Option<CFRetained<CFType>>, AXError>,
+) -> Result<Option<String>, AXError> {
+	let Some(label) = linked.and_then(|linked| linked.downcast_ref::<AXUIElement>()) else {
+		return Ok(None);
+	};
+	for attribute in ["AXValue", "AXTitle"] {
+		let text = read(label, attribute);
+		if !answered(&text) {
+			return text.map(|_| None);
+		}
+		let text = text
+			.ok()
+			.flatten()
+			.and_then(|text| text.downcast::<CFString>().ok())
+			.map(|text| text.to_string());
+		if let Some(text) = nonempty(text) {
+			return Ok(Some(text));
+		}
+	}
+	Ok(None)
+}
 /// Whether the element reports itself selected. Only list and table rows and
 /// cells, buttons, and the file icons of Finder's icon view count: Finder's
 /// icon list reports a section rather than the icons as its selected
@@ -1443,7 +1522,7 @@ fn window_control_name(
 
 /// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
 /// window.
-const IDENTIFYING: [usize; 10] = [
+const IDENTIFYING: [usize; 11] = [
 	SUBROLE,
 	ROLE_DESCRIPTION,
 	TITLE,
@@ -1454,6 +1533,7 @@ const IDENTIFYING: [usize; 10] = [
 	IDENTIFIER,
 	URL,
 	PLACEHOLDER,
+	TITLE_ELEMENT,
 ];
 
 /// The element's [`AxProps::identity`], hashed from its role and
@@ -2739,8 +2819,10 @@ mod tests {
 		ptr::NonNull,
 	};
 
-	use objc2_application_services::{AXError, AXValue, AXValueType};
-	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, CFURL, Type, kCFNull};
+	use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
+	use objc2_core_foundation::{
+		CFArray, CFNumber, CFRetained, CFString, CFType, CFURL, Type, kCFNull,
+	};
 
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
@@ -2852,6 +2934,41 @@ mod tests {
 	}
 
 	#[test]
+	fn a_control_without_a_label_of_its_own_is_named_by_its_linked_label() {
+		use super::linked_label;
+
+		let link = create_system_wide();
+		let link: &CFType = &link;
+		let text =
+			|text: &'static str| -> CFRetained<CFType> { CFString::from_static_str(text).into() };
+		let mut reads = Vec::new();
+		let mut label = |value: Result<Option<&'static str>, AXError>, title| {
+			reads.clear();
+			linked_label(Some(link), |_, attribute| {
+				reads.push(attribute.to_owned());
+				match attribute {
+					"AXValue" => value.map(|value| value.map(text)),
+					_ => Ok(Some(text(title))),
+				}
+			})
+		};
+		// SwiftUI's toggle label is static text, named by its value.
+		assert_eq!(label(Ok(Some("Launch at login")), "x"), Ok(Some("Launch at login".into())));
+		// An empty or missing value falls back to the label's title.
+		assert_eq!(label(Ok(Some("")), "Mode"), Ok(Some("Mode".into())));
+		assert_eq!(label(Err(AXError::NoValue), "Mode"), Ok(Some("Mode".into())));
+		// A read the app did not answer is no name, and says so.
+		assert_eq!(label(Err(AXError::CannotComplete), "Mode"), Err(AXError::CannotComplete));
+		assert_eq!(reads, ["AXValue"]);
+		// No link, or a link that is not an element, reads nothing.
+		let unread = |_: &AXUIElement, _: &str| -> Result<Option<CFRetained<CFType>>, AXError> {
+			unreachable!("no label to read")
+		};
+		assert_eq!(linked_label(None, unread), Ok(None));
+		assert_eq!(linked_label(Some(&*text("Mode")), unread), Ok(None));
+	}
+
+	#[test]
 	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
 		use super::{
 			HELP, MacAx, WalkBounds, answered, element_props, read_as_values, read_identity,
@@ -2874,7 +2991,7 @@ mod tests {
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
 		let walk_as = |title: &CFType, help: &CFType| {
-			let entries: [&CFType; 15] = [
+			let entries: [&CFType; 16] = [
 				null,
 				&role,
 				title,
@@ -2887,6 +3004,7 @@ mod tests {
 				null,
 				null,
 				help,
+				null,
 				null,
 				null,
 				null,
@@ -2983,7 +3101,7 @@ mod tests {
 
 	#[test]
 	fn a_field_without_a_label_is_named_by_its_placeholder() {
-		use super::{PLACEHOLDER, WalkBounds, element_props};
+		use super::{PLACEHOLDER, TITLE_ELEMENT, WalkBounds, labelled_props};
 
 		let role = CFString::from_static_str("AXTextField");
 		let role: &CFType = &role;
@@ -2997,20 +3115,37 @@ mod tests {
 			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut busy).cast()) }.unwrap();
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let link = create_system_wide();
+		let link: &CFType = &link;
 		// One walk read of a Reminders date field, with `title` and
-		// `description` as its own labels.
-		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
-			let mut entries = [null; 15];
+		// `description` as its own labels and `link` as its `AXTitleUIElement`,
+		// whose text `label` answers.
+		let read = |title: &CFType,
+		            description: &CFType,
+		            placeholder: &CFType,
+		            link: &CFType,
+		            label: Result<Option<&'static str>, AXError>| {
+			let mut entries = [null; NodeRead::Walk.attributes().end];
 			entries[ROLE] = role;
 			entries[TITLE] = title;
 			entries[DESCRIPTION] = description;
 			entries[PLACEHOLDER] = placeholder;
+			entries[TITLE_ELEMENT] = link;
 			let values = NodeValues::from_batch(
 				Ok(CFArray::from_objects(&entries)),
 				NodeRead::Walk.attributes(),
 				|_| unreachable!("an answered batch needs no lone reads"),
 			);
-			element_props(&values, 0, WalkBounds::Skip).unwrap()
+			let text =
+				|text: &'static str| -> CFRetained<CFType> { CFString::from_static_str(text).into() };
+			labelled_props(&values, 0, WalkBounds::Skip, |_, attribute| match attribute {
+				"AXValue" => label.map(|label| label.map(text)),
+				_ => Ok(None),
+			})
+			.unwrap()
+		};
+		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
+			read(title, description, placeholder, null, Ok(None))
 		};
 		let unlabeled = field(null, null, add_date);
 		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));
@@ -3020,11 +3155,92 @@ mod tests {
 		let titled = field(due, null, add_date);
 		assert_eq!(titled.title.as_deref(), Some("Due"));
 		assert_eq!(titled.description, None);
-		// A placeholder the app was too busy to answer leaves the field
-		// unnamed and without an identity, so no ref is matched by its name.
+		// A linked label names an unlabelled field and outranks its
+		// placeholder, but not a description of its own.
+		let linked = read(null, null, add_date, link, Ok(Some("Mode")));
+		assert_eq!((linked.title.as_deref(), linked.description), (Some("Mode"), None));
+		assert!(!linked.partial);
+		let described = read(null, due, null, link, Ok(Some("Mode")));
+		assert_eq!((described.title, described.description.as_deref()), (None, Some("Due")));
+		// A placeholder or linked label the app was too busy to answer leaves
+		// the field unnamed by it and without an identity, so no ref is
+		// matched by its name.
 		let unanswered = field(null, null, &busy);
 		assert_eq!(unanswered.description, None);
 		assert!(unanswered.partial);
+		let unread = read(null, null, null, link, Err(AXError::CannotComplete));
+		assert_eq!(unread.title, None);
+		assert!(unread.partial);
+		assert!(unread.label_complete);
+		let unread = read(null, null, add_date, &busy, Ok(Some("Mode")));
+		assert!(unread.partial);
+		assert!(unread.label_complete);
+	}
+
+	fn linked_field(
+		title: Option<&'static str>,
+		label: Result<Option<&'static str>, AXError>,
+	) -> crate::desktop::ax::AxProps {
+		let role = CFString::from_static_str("AXTextField");
+		let title = title.map(CFString::from_static_str);
+		let link = create_system_wide();
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let mut entries = [null; NodeRead::Walk.attributes().end];
+		entries[ROLE] = &role;
+		entries[TITLE] = title.as_deref().map_or(null, |title| title);
+		entries[super::TITLE_ELEMENT] = &link;
+		let values = NodeValues::from_batch(
+			Ok(CFArray::from_objects(&entries)),
+			NodeRead::Walk.attributes(),
+			|_| unreachable!("an answered batch needs no lone reads"),
+		);
+		super::labelled_props(&values, 0, super::WalkBounds::Skip, |_, attribute| {
+			if attribute == "AXValue" {
+				label.map(|label| label.map(|label| CFString::from_static_str(label).into()))
+			} else {
+				Ok(None)
+			}
+		})
+		.unwrap()
+	}
+
+	fn check_linked_field(
+		before: &crate::desktop::ax::AxProps,
+		after: crate::desktop::ax::AxProps,
+	) -> crate::desktop::error::CoreResult<()> {
+		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
+		let mut registry = AxRegistry::default();
+		let reference = registry.register(
+			&mut super::MacAx,
+			"fixture",
+			1,
+			AxHandle::Test(1),
+			before,
+			Uniqueness::Unknown,
+		);
+		let _scope = registry.expect_read_as(&reference).unwrap();
+		super::require_read_as(|| Ok(Some(after)))
+	}
+
+	#[test]
+	fn an_own_label_disappearing_is_refused_even_when_the_link_is_unread() {
+		let before = linked_field(Some("City"), Ok(None));
+		let after = linked_field(None, Err(AXError::CannotComplete));
+		assert_eq!(check_linked_field(&before, after).unwrap_err().code, ErrorCode::StaleRef);
+	}
+
+	#[test]
+	fn a_changed_linked_label_alone_is_not_an_action_guard() {
+		let before = linked_field(None, Ok(Some("City")));
+		let after = linked_field(None, Ok(Some("Street")));
+		assert!(check_linked_field(&before, after).is_ok());
+	}
+
+	#[test]
+	fn an_unchanged_linked_label_does_not_refuse_its_control() {
+		let before = linked_field(None, Ok(Some("City")));
+		assert!(check_linked_field(&before, before.clone()).is_ok());
 	}
 
 	#[test]
@@ -3145,7 +3361,7 @@ mod tests {
 		let null: &CFType = unsafe { kCFNull }.unwrap();
 		let yes: &CFType = objc2_core_foundation::CFBoolean::new(true);
 		let walk = |slot: &CFType| {
-			let mut entries = [null; 15];
+			let mut entries = [null; NodeRead::Walk.attributes().end];
 			entries[SELECTED] = slot;
 			NodeValues::from_batch(
 				Ok(CFArray::from_objects(&entries)),

@@ -2977,6 +2977,7 @@ mod capture_tests {
 				None => ("button", None, None, false),
 			};
 			Ok(AxProps {
+				read_as_fingerprint: None,
 				role: role.to_string(),
 				native_role: role.to_string(),
 				identity: (!partial).then(|| ax::test_identity((role, &title))),
