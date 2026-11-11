@@ -469,7 +469,8 @@ pub trait AxBackend {
 	fn perform_menu(&mut self, _h: &AxHandle, _action: &str, _path: &[String]) -> CoreResult<()> {
 		Err(DesktopError::new(
 			ErrorCode::Unsupported,
-			"choosing a menu item in the action that opens the menu is available only on macOS",
+			"choosing a menu item in the action that opens the menu is available only on macOS, and \
+			 on Linux for a combo box's options",
 		))
 	}
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;
