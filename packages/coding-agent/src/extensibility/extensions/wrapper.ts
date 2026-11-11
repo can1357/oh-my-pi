@@ -28,6 +28,7 @@ import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { recordToolApprovalRequested, recordToolApprovalResolved } from "../../session/tool-approval-records";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
@@ -420,6 +421,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
+			recordToolApprovalRequested(this.runner.approvalRecords, {
+				toolCallId,
+				toolName: this.tool.name,
+				approvalMode,
+				...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+			});
 			if (hasApprovalHandlers) {
 				await this.runner.emit({
 					type: "tool_approval_requested",
@@ -432,6 +439,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+				recordToolApprovalResolved(this.runner.approvalRecords, {
+					toolCallId,
+					toolName: this.tool.name,
+					approved,
+					...(reason ? { reason } : {}),
+				});
 				if (!hasApprovalHandlers) return;
 				await this.runner.emit({
 					type: "tool_approval_resolved",

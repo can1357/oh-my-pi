@@ -584,6 +584,7 @@
 ### Removed
 
 - Removed `/mcp smithery-search`, `/mcp smithery-login` and `/mcp smithery-logout`; Smithery shut down its API on October 31, 2026 ([#18822](https://github.com/can1357/oh-my-pi/pull/18822) by [@samettemizer](https://github.com/samettemizer))
+- Sessions now record approval prompts in their session file: a `tool_approval_requested` entry when a tool call starts waiting on you and a `tool_approval_resolved` entry when it is approved, denied, aborted, or refused, so tools that read session files (sidebars, dashboards) can show a session waiting on approval
 
 ## [18.18.8] - 2026-11-11
 
