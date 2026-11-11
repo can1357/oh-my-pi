@@ -288,6 +288,7 @@ export type OpenAIReasoningDisableMode =
 	| "omit"
 	| "lowest-effort"
 	| "none-effort"
+	| "off-effort"
 	| "openrouter-enabled-false"
 	| "cline-enabled-false"
 	| "venice-disable-thinking"

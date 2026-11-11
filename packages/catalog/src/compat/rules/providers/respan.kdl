@@ -13,16 +13,22 @@ provider "respan" {
 	dynamic-models-authoritative #true
 	discovery label="Respan" allow-unauthenticated=#true
 
-	// The gateway maps `reasoning_effort` onto every upstream's native dial.
+	// The gateway maps `reasoning_effort` onto every upstream's native dial;
+	// `off` is the documented disable value, so selection "Off" emits it
+	// instead of collapsing to the lowest supported tier.
 	thinking-mode "effort"
+	reasoning-disable-mode "off-effort"
 
 	// Respan dot-spells Anthropic ids (`claude-opus-4.7`, `claude-sonnet-4.5`),
 	// so same-id reference fills never carry reasoning into these rows; the
 	// gateway's documented reasoning_effort mapping (off, minimal–high) opens
-	// the ladder instead.
+	// the ladder instead. Every Claude row the roster carries is 4.1+, i.e.
+	// vision-capable, but only unprefixed dot-spelled ids lack a same-id
+	// reference to carry `input` — assert the modalities here.
 	class "anthropic" {
 		thinking-upgrade-neutral #true
 		thinking-efforts "minimal" "low" "medium" "high"
+		input-modalities "text" "image"
 	}
 	// `/models` carries no capability metadata: an id no reference or taxonomy
 	// knows is offered this ladder for the user to opt into.

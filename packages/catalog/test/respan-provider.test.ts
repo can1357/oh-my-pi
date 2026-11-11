@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
 import { respanModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -55,6 +56,15 @@ describe("Respan discovery", () => {
 			contextWindow: 200000,
 			cost: { input: 5, output: 25 },
 		});
+
+		// The dot-spelled Claude row has no same-id reference to carry `input`,
+		// so the class rule asserts the vision modalities; "Off" emits the
+		// gateway's documented `off` effort, not the lowest supported tier.
+		const claude = buildModel(byId.get("claude-opus-4.7")!);
+		expect(claude.input).toEqual(["text", "image"]);
+		expect(claude.compat.reasoningDisableMode).toEqual("off-effort");
+		const gpt = buildModel(byId.get("gpt-5.5")!);
+		expect(gpt.compat.reasoningDisableMode).toEqual("off-effort");
 	});
 
 	test("prices only token-priced legs and drops rows that cannot answer a chat completion", async () => {
@@ -80,6 +90,16 @@ describe("Respan discovery", () => {
 				// Tencent's instruct LLM is chat: kept (regression for the
 				// over-broad `hunyuan` exclusion the live roster caught).
 				{ id: "hunyuan-a13b-instruct", object: "model", owned_by: "tencent" },
+				// Video-generation families the roster also mirrors under
+				// `openrouter/`; their OpenRouter counterparts are video rows, so
+				// routing them to the chat endpoint would fail (regression for
+				// the missing video-family exclusions).
+				{ id: "avatar-iv", object: "model", owned_by: "heygen" },
+				{ id: "openrouter/avatar-iv", object: "model", owned_by: "openrouter" },
+				{ id: "hailuo-2.3", object: "model", owned_by: "minimax" },
+				{ id: "openrouter/hailuo-2.3", object: "model", owned_by: "openrouter" },
+				{ id: "gen-4.5", object: "model", owned_by: "runway" },
+				{ id: "openrouter/gen-4.5", object: "model", owned_by: "openrouter" },
 				// Gemini's -image rows stay in: the gateway serves them as chat.
 				{ id: "gemini-3-pro-image", object: "model", owned_by: "google_gemini_ai" },
 			]),

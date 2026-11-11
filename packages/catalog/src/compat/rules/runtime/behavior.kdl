@@ -203,14 +203,17 @@ behavior {
 	// the image/video vendors whose generation APIs are not the chat endpoint
 	// (hunyuan narrowed to its media rows: hunyuan-a13b-instruct is Tencent's
 	// instruct LLM); Gemini's `-image` rows stay in, because the gateway serves
-	// them as chat (live hosted roster, 2026-11-11).
+	// them as chat (live hosted roster, 2026-11-11). `avatar-iv`,
+	// `hailuo-2.3` and `gen-4.5` are video-generation families the roster also
+	// mirrors under `openrouter/` whose OpenRouter counterparts are video rows.
 	exclude-models provider="respan" substring="embed" substring="whisper" substring="tts" substring="speech" \
 		substring="transcri" substring="asr" substring="realtime" substring="voice" substring="gpt-image" \
 		substring="chatgpt-image" substring="flux" substring="recraft" substring="stable-" substring="eleven" \
 		substring="veo" substring="kling" substring="hunyuan-image" substring="hunyuan-video" \
 		substring="grok-imagine" substring="qwen-image" substring="ming-image" substring="mai-image" \
 		substring="hy-image" substring="moss-image" substring="muse-image" substring="seedream" \
-		substring="seedance" substring="pixverse" substring="sd3" substring="wan-" substring="wan2-"
+		substring="seedance" substring="pixverse" substring="sd3" substring="wan-" substring="wan2-" \
+		substring="avatar-iv" substring="hailuo-2.3" substring="gen-4.5"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \

@@ -6,6 +6,10 @@
 
 - Added Respan gateway provider: `/login respan` with `RESPAN_API_KEY`, requests over OpenAI Chat Completions at `https://gateway.respan.ai/v1`; the public global roster is bundled and refreshed keylessly, with live token pricing ([#18852](https://github.com/can1357/oh-my-pi/pull/18852) by [@sauryagur](https://github.com/sauryagur))
 
+### Fixed
+
+- Respan now sends `reasoning_effort: "off"` when reasoning is switched off instead of the lowest supported tier, dot-spelled `claude-*` rows keep image input, and video-generation rows (`avatar-iv`, `hailuo-2.3`, `gen-4.5` and prefixed copies) are no longer offered as chat models ([#18852](https://github.com/can1357/oh-my-pi/pull/18852) by [@sauryagur](https://github.com/sauryagur))
+
 ## [18.18.8] - 2026-11-11
 
 ### Added

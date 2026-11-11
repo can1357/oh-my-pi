@@ -1133,6 +1133,9 @@ function encodeChatCompletionsDisabledReasoning(
 		case "none-effort":
 			params.reasoning_effort = "none";
 			break;
+		case "off-effort":
+			params.reasoning_effort = "off";
+			break;
 		case "zai-thinking-disabled":
 			params.thinking = { type: "disabled" };
 			break;
