@@ -1574,6 +1574,20 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
+	 * Connection for a non-tool surface (resource read, prompt execution). A
+	 * deferred `lifecycle` `"lazy"` server starts on first use of any surface,
+	 * not only on its first tool call; every other server reports its current
+	 * state without spawning, so an eager server still handshaking stays absent.
+	 */
+	async #surfaceConnection(name: string): Promise<MCPServerConnection | undefined> {
+		const connected = this.#connections.get(name);
+		if (connected) return connected;
+		const config = this.#serverConfigs.get(name);
+		if (!config || config.lifecycle !== "lazy") return undefined;
+		return this.#ensureConnected(name);
+	}
+
+	/**
 	 * Wait for every in-flight connect, tool load, and reconnect to settle.
 	 *
 	 * One-shot callers (e.g. `omp read <mcp-resource>`) discover servers and read
@@ -2271,7 +2285,7 @@ export class MCPManager implements MCPManagerApi {
 		uri: string,
 		options?: MCPRequestOptions,
 	): Promise<MCPResourceReadResult | undefined> {
-		const connection = this.#connections.get(name);
+		const connection = await this.#surfaceConnection(name);
 		if (!connection) return undefined;
 		return readResource(connection, uri, options);
 	}
@@ -2294,7 +2308,7 @@ export class MCPManager implements MCPManagerApi {
 		args?: Record<string, string>,
 		options?: MCPRequestOptions,
 	): Promise<MCPGetPromptResult | undefined> {
-		const connection = this.#connections.get(name);
+		const connection = await this.#surfaceConnection(name);
 		if (!connection) return undefined;
 		return getPrompt(connection, promptName, args, options);
 	}

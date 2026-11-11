@@ -15,7 +15,14 @@ import { MCPToolCache } from "@oh-my-pi/pi-coding-agent/mcp/tool-cache";
 import type { MCPStdioServerConfig, MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { AgentStorageApi } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { MANY_TOOL_COUNT, manyToolName } from "./fixtures/many-tools-mcp";
+import {
+	FIXTURE_PROMPT_NAME,
+	FIXTURE_PROMPT_TEXT,
+	FIXTURE_RESOURCE_TEXT,
+	FIXTURE_RESOURCE_URI,
+	MANY_TOOL_COUNT,
+	manyToolName,
+} from "./fixtures/many-tools-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 const SERVER = "lazy";
@@ -156,4 +163,32 @@ describe("MCP lazy lifecycle", () => {
 		await cache.set(SERVER, explicit, cachedTools, "/project-a");
 		expect(await cache.get(SERVER, explicit, "/project-b")).toHaveLength(MANY_TOOL_COUNT);
 	}, 20_000);
+
+	it("starts the process on a resource read", async () => {
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools, workDir);
+		await manager.connectServers({ [SERVER]: config }, {});
+		expect(manager.getConnectedServers()).toEqual([]);
+
+		const result = await manager.readServerResource(SERVER, FIXTURE_RESOURCE_URI);
+
+		expect(result?.contents[0]?.text).toBe(FIXTURE_RESOURCE_TEXT);
+		expect(manager.getConnectedServers()).toEqual([SERVER]);
+	}, 20_000);
+
+	it("starts the process on a prompt execution", async () => {
+		const config = fixtureConfig("lazy");
+		await cache.set(SERVER, config, cachedTools, workDir);
+		await manager.connectServers({ [SERVER]: config }, {});
+		expect(manager.getConnectedServers()).toEqual([]);
+
+		const result = await manager.executePrompt(SERVER, FIXTURE_PROMPT_NAME);
+
+		expect(result?.messages[0]).toEqual({ role: "user", content: { type: "text", text: FIXTURE_PROMPT_TEXT } });
+		expect(manager.getConnectedServers()).toEqual([SERVER]);
+	}, 20_000);
+
+	it("keeps unknown servers undefined on a resource read", async () => {
+		expect(await manager.readServerResource("nope", FIXTURE_RESOURCE_URI)).toBeUndefined();
+	});
 });

@@ -22,6 +22,7 @@
 - `task.autoParallel` (`off`/`suggest`/`on`): the native judge splits each new prompt into subtasks that can run concurrently; `suggest` reports the split, `on` tells the agent to delegate the subtasks in one parallel `task` call
 
 - MCP servers accept an opt-in `lifecycle: "lazy"` in OMP-owned configs: their tools are advertised from the previous session's cache and the process starts on the first tool call instead of at session startup ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
+- MCP servers accept an opt-in `lifecycle: "lazy"` in OMP-owned configs: their tools are advertised from the previous session's cache and the process starts on that server's first use — a tool call, a prompt execution, or a resource read addressed to it — instead of at session startup ([#6819](https://github.com/can1357/oh-my-pi/issues/6819))
 ### Changed
 
 - A role edit in another omp instance no longer rewrites the `task` and `eval` tool descriptions of every running session, which was invalidating the Anthropic prompt cache from the tool definitions onward and dropping signed thinking blocks on prefix-bound models; the per-call model advertisement is now frozen into the base prompt surface and changes only when that surface rebuilds ([#18716](https://github.com/can1357/oh-my-pi/issues/18716), [#18732](https://github.com/can1357/oh-my-pi/pull/18732) by [@yuzu-octopus](https://github.com/yuzu-octopus))
