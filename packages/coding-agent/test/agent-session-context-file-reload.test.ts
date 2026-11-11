@@ -28,27 +28,29 @@ function buildLocalModel(api: string): Model<Api> {
 	} as ModelSpec<Api>) as Model<Api>;
 }
 
-async function expectContextReload(reset: (session: AgentSession) => Promise<unknown>): Promise<void> {
-	using tempDir = TempDir.createSync("@pi-context-reload-");
-	const marker = Bun.nanoseconds().toString(36);
-	const original = `ORIGINAL_RULES_${marker}`;
-	const updated = `UPDATED_RULES_${marker}`;
-	const agentsMd = path.join(tempDir.path(), "AGENTS.md");
-	await fs.writeFile(agentsMd, original);
+interface ReloadSession {
+	session: AgentSession;
+	close(): Promise<void>;
+}
 
-	const api = `context-reload-${marker}`;
+/** Session whose prompt inputs are discovered from `cwd` on disk. */
+async function openReloadSession(
+	tempDir: TempDir,
+	cwd: string,
+	settings: Parameters<typeof Settings.isolated>[0] = {},
+	sessionManager: SessionManager = SessionManager.inMemory(cwd),
+): Promise<ReloadSession> {
 	const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
 	authStorage.keys.setRuntime("managed-primary", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-
 	const { session } = await createAgentSession({
-		cwd: tempDir.path(),
+		cwd,
 		agentDir: tempDir.path(),
-		sessionManager: SessionManager.inMemory(tempDir.path()),
+		sessionManager,
 		authStorage,
 		modelRegistry,
-		settings: Settings.isolated({ "compaction.enabled": false }),
-		model: buildLocalModel(api),
+		settings: Settings.isolated({ "compaction.enabled": false, ...settings }),
+		model: buildLocalModel(`context-reload-${Bun.nanoseconds().toString(36)}`),
 		disableExtensionDiscovery: true,
 		skills: [],
 		// contextFiles intentionally omitted so discovery runs against disk.
@@ -58,7 +60,24 @@ async function expectContextReload(reset: (session: AgentSession) => Promise<unk
 		enableLsp: false,
 		skipPythonPreflight: true,
 	});
+	return {
+		session,
+		async close() {
+			await session.dispose();
+			authStorage.close();
+		},
+	};
+}
 
+async function expectContextReload(reset: (session: AgentSession) => Promise<unknown>): Promise<void> {
+	using tempDir = TempDir.createSync("@pi-context-reload-");
+	const marker = Bun.nanoseconds().toString(36);
+	const original = `ORIGINAL_RULES_${marker}`;
+	const updated = `UPDATED_RULES_${marker}`;
+	const agentsMd = path.join(tempDir.path(), "AGENTS.md");
+	await fs.writeFile(agentsMd, original);
+
+	const { session, close } = await openReloadSession(tempDir, tempDir.path());
 	try {
 		await session.refreshBaseSystemPrompt();
 		expect(session.systemPrompt.join("\n")).toContain(original);
@@ -70,8 +89,29 @@ async function expectContextReload(reset: (session: AgentSession) => Promise<unk
 		expect(rebuilt).toContain(updated);
 		expect(rebuilt).not.toContain(original);
 	} finally {
-		await session.dispose();
-		authStorage.close();
+		await close();
+	}
+}
+
+async function withTreeSession(
+	run: (session: AgentSession, tempDir: TempDir) => Promise<void>,
+	options: { persisted?: boolean } = {},
+): Promise<void> {
+	using tempDir = TempDir.createSync("@pi-workspace-tree-");
+	await fs.mkdir(tempDir.join("project"));
+	await Bun.write(tempDir.join("project", "original_entry.txt"), "x");
+	const cwd = tempDir.join("project");
+	const { session, close } = await openReloadSession(
+		tempDir,
+		cwd,
+		{ includeWorkspaceTree: true },
+		options.persisted ? SessionManager.create(cwd, tempDir.join("sessions")) : undefined,
+	);
+	try {
+		expect(session.systemPrompt.join("\n")).toContain("original_entry.txt");
+		await run(session, tempDir);
+	} finally {
+		await close();
 	}
 }
 
@@ -127,6 +167,88 @@ describe("AgentSession context-file reload on session reset", () => {
 			expect(observedAtRepoCompletion.length).toBeGreaterThan(0);
 			expect(observedAtRepoCompletion[0]).toBe(true);
 			return reset;
+		});
+	});
+});
+
+describe("workspace tree in the system prompt", () => {
+	it("keeps the tree within a transcript and rescans it after a context reset", async () => {
+		await withTreeSession(async (session, tempDir) => {
+			await Bun.write(tempDir.join("project", "checked_out_entry.txt"), "x");
+
+			// Same transcript: the cached prefix must stay byte-stable.
+			await session.refreshBaseSystemPrompt();
+			expect(session.systemPrompt.join("\n")).not.toContain("checked_out_entry.txt");
+
+			expect(await session.resetSessionContext()).toBeTruthy();
+			expect(session.systemPrompt.join("\n")).toContain("checked_out_entry.txt");
+		});
+	});
+
+	it("rescans the tree when a new session starts", async () => {
+		await withTreeSession(async (session, tempDir) => {
+			await Bun.write(tempDir.join("project", "checked_out_entry.txt"), "x");
+
+			expect(await session.newSession()).toBe(true);
+			expect(session.systemPrompt.join("\n")).toContain("checked_out_entry.txt");
+		});
+	});
+
+	it("rescans the tree after switching to a different session", async () => {
+		await withTreeSession(
+			async (session, tempDir) => {
+				const cwd = session.sessionManager.getCwd();
+				const target = SessionManager.create(cwd, tempDir.join("sessions"));
+				target.appendMessage({ role: "user", content: "target", timestamp: 1 });
+				await target.ensureOnDisk();
+				await target.flush();
+				const targetFile = target.getSessionFile();
+				await target.close();
+				if (!targetFile) throw new Error("Expected the target session to be on disk");
+				await Bun.write(path.join(cwd, "checked_out_entry.txt"), "x");
+
+				expect(await session.switchSession(targetFile)).toBe(true);
+				expect(session.systemPrompt.join("\n")).toContain("checked_out_entry.txt");
+			},
+			{ persisted: true },
+		);
+	});
+
+	it("keeps the tree when the current session is reloaded from disk", async () => {
+		await withTreeSession(
+			async session => {
+				await session.sendCustomMessage(
+					{ customType: "note", content: "persist the session", display: true },
+					{ triggerTurn: false },
+				);
+				const before = [...session.systemPrompt];
+				await Bun.write(path.join(session.sessionManager.getCwd(), "checked_out_entry.txt"), "x");
+
+				// Same conversation: a reload must not change the cached prefix.
+				await session.reload();
+				expect(session.systemPrompt).toEqual(before);
+			},
+			{ persisted: true },
+		);
+	});
+
+	it("rescans the tree and nested AGENTS.md list after the session cwd moves", async () => {
+		await withTreeSession(async (session, tempDir) => {
+			await Bun.write(tempDir.join("project", "old_pkg", "AGENTS.md"), "old");
+			expect(await session.resetSessionContext()).toBeTruthy();
+			expect(session.systemPrompt.join("\n")).toContain("old_pkg/AGENTS.md");
+
+			await Bun.write(tempDir.join("moved", "moved_entry.txt"), "x");
+			await Bun.write(tempDir.join("moved", "new_pkg", "AGENTS.md"), "new");
+
+			session.sessionManager.setCwdWithoutRelocation(tempDir.join("moved"));
+			await session.refreshBaseSystemPrompt();
+
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).toContain("moved_entry.txt");
+			expect(prompt).toContain("new_pkg/AGENTS.md");
+			expect(prompt).not.toContain("original_entry.txt");
+			expect(prompt).not.toContain("old_pkg/AGENTS.md");
 		});
 	});
 });
