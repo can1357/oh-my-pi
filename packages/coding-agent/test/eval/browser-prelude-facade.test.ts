@@ -322,6 +322,7 @@ describe("browser facade in real Eval runtimes", () => {
 			scroll: { x: 0, y: 40, width: 800, height: 600, scrollWidth: 800, scrollHeight: 4000 },
 			elements,
 		};
+		let runValue: unknown = observation;
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session = makeSession(() => definitions);
 		const shipped = createBrowserPrelude(session);
@@ -331,7 +332,7 @@ describe("browser facade in real Eval runtimes", () => {
 				async invoke(parameters) {
 					const action = field(parameters, "action");
 					if (action === "open") return { content: [], details: { name: "many" } };
-					return { content: [], details: { value: structuredClone(observation) } };
+					return { content: [], details: { value: structuredClone(action === "run" ? runValue : observation) } };
 				},
 			},
 		];
@@ -398,6 +399,13 @@ describe("browser facade in real Eval runtimes", () => {
 		expect(await run("const p = await tab.observe(); delete p.elements; print(p);")).toContain(
 			"url: 'https://example.test/list'",
 		);
+		runValue = { elements: [{ href: "https://example.test/link" }], count: 1 };
+		const ordinary = await run(
+			'const value = await tab.run(() => ({ elements: [], count: 1 })); print(value); print(Object.hasOwn(value, Symbol.for("nodejs.util.inspect.custom")), Object.hasOwn(value.elements, Symbol.for("nodejs.util.inspect.custom")));',
+		);
+		expect(ordinary).toContain("href:");
+		expect(ordinary).not.toContain("tab.id");
+		expect(ordinary).toEndWith("false false");
 	});
 
 	const ran = '{ enumerable: true, configurable: true, get() { globalThis.ran++; throw new Error("ran"); } }';

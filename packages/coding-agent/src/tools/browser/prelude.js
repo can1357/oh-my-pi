@@ -348,7 +348,22 @@
 				parameters.code = fnOrCode;
 			}
 			const details = await invoke("run", parameters);
-			return withPrintForm(details.value);
+			const value = details.value;
+			const isObservation =
+				typeof value?.url === "string" &&
+				["width", "height"].every(key => typeof value.viewport?.[key] === "number") &&
+				["x", "y", "width", "height", "scrollWidth", "scrollHeight"].every(
+					key => typeof value.scroll?.[key] === "number",
+				) &&
+				Array.isArray(value.elements) &&
+				value.elements.every(
+					element =>
+						typeof element?.id === "number" &&
+						typeof element.role === "string" &&
+						Array.isArray(element.states) &&
+						element.states.every(state => typeof state === "string"),
+				);
+			return isObservation ? withPrintForm(value) : value;
 		};
 		tab.close = async options => {
 			const opts = validateOptions("tab.close", options);
