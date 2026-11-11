@@ -6,7 +6,8 @@ import {
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
-import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeRankingStrategy, parseClaudeUsagePayload } from "@oh-my-pi/pi-ai/usage/claude";
+import { claudeResetClearedBlockScopes } from "@oh-my-pi/pi-ai/usage/claude-reset";
 
 /**
  * A reactive Fable 429 blocks the credential until the reset that error
@@ -46,6 +47,37 @@ function claudeReport(limits: UsageLimit[], fetchedAt = Date.now()): UsageReport
 		limits,
 		metadata: { accountId: "account-1" },
 	};
+}
+
+/**
+ * The live `/usage` shape of an account with no running 5-hour window:
+ * `five_hour: null` and no `session` row in `limits[]`.
+ */
+function noSessionPayload(weeklyPercent: number): Record<string, unknown> {
+	// Same reset horizon as the harness sibling, so ranking prefers this account whenever it is unblocked.
+	const weeklyReset = new Date(Date.now() + 60 * 60_000).toISOString();
+	return {
+		five_hour: null,
+		seven_day: { utilization: weeklyPercent, resets_at: weeklyReset },
+		seven_day_opus: null,
+		seven_day_sonnet: null,
+		limits: [
+			{ kind: "weekly_all", percent: weeklyPercent, resets_at: weeklyReset, scope: null, is_active: false },
+			{
+				kind: "weekly_scoped",
+				percent: 81,
+				resets_at: weeklyReset,
+				scope: { model: { id: null, display_name: "Fable" }, surface: null },
+				is_active: true,
+			},
+		],
+	};
+}
+
+function parsedReport(payload: Record<string, unknown>): UsageReport {
+	const report = parseClaudeUsagePayload(payload, { accountId: "account-1" });
+	if (!report) throw new Error("payload did not parse");
+	return report;
 }
 
 /**
@@ -340,5 +372,65 @@ describe("claude usage-block healing", () => {
 		expect(health.accounts.find(account => account.credentialId === 1)?.state).toBe("healthy");
 		expect(blocks.has("1:")).toBe(false);
 		expect(blocks.has("1:tier:fable")).toBe(false);
+	});
+
+	it("rotates a usage-limited session onto a sibling whose stale block live usage lifts", async () => {
+		// Every sibling looked blocked, so rotation reported no switch and the turn
+		// waited out the provider's multi-day retry-after, though the next resolve
+		// would have served the recovered account.
+		const { storage } = makeHarness(
+			claudeReport([sharedLimit("5h", "5h", 0.1), sharedLimit("7d", "7d", 0.2), tierLimit("fable", 0)]),
+			"",
+		);
+		storages.push(storage);
+		await storage.credentials.reload();
+		storage.sessions.pin("anthropic", "s-rotate", 2);
+
+		const mark = await storage.limits.markReached("anthropic", "s-rotate", {
+			modelId: "claude-sonnet-5-5",
+			retryAfterMs: 38 * 60 * 60_000,
+			providerTimed: true,
+		});
+
+		expect(mark.switched).toBe(true);
+		expect(await storage.keys.get("anthropic", "s-rotate", { modelId: "claude-sonnet-5-5" })).toBe("access-1");
+	});
+
+	describe("an account with no running 5-hour window", () => {
+		it("heals a stale account-wide block", async () => {
+			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(55)), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-session", { modelId: "claude-opus-5-5" })).toBe("access-1");
+			expect(blocks.has("1:")).toBe(false);
+		});
+
+		it("keeps the block while the weekly window is spent", async () => {
+			const { storage, blocks } = makeHarness(parsedReport(noSessionPayload(100)), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-session-spent", { modelId: "claude-opus-5-5" })).toBe(
+				"access-2",
+			);
+			expect(blocks.has("1:")).toBe(true);
+		});
+
+		it("keeps the block when the 5-hour field is missing rather than null", async () => {
+			const { five_hour: _omitted, ...payload } = noSessionPayload(55);
+			const { storage, blocks } = makeHarness(parsedReport(payload), "");
+			storages.push(storage);
+			await storage.credentials.reload();
+
+			expect(await storage.keys.get("anthropic", "no-field", { modelId: "claude-opus-5-5" })).toBe("access-2");
+			expect(blocks.has("1:")).toBe(true);
+		});
+
+		it("clears the account-wide block after a weekly reset", () => {
+			expect(claudeResetClearedBlockScopes(["anthropic:7d"], parsedReport(noSessionPayload(55)))).toContain(
+				undefined,
+			);
+		});
 	});
 });
