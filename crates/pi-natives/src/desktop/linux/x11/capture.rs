@@ -35,23 +35,23 @@ struct Above {
 	covered: bool,
 	/// The window's own popups over it: each window, the part of the area it
 	/// covers, and its origin.
-	popups: Vec<(Window, Area, (i32, i32))>,
+	popups:  Vec<(Window, Area, (i32, i32))>,
 }
 
 #[derive(Clone, Copy)]
 struct ColorMasks {
-	red: u32,
+	red:   u32,
 	green: u32,
-	blue: u32,
+	blue:  u32,
 	/// Premultiplied alpha of a 32-bit ARGB visual; 0 for opaque visuals.
 	alpha: u32,
 }
 
 #[derive(Clone, Copy)]
 struct ComponentMask {
-	mask: u32,
+	mask:  u32,
 	shift: u32,
-	max: u32,
+	max:   u32,
 }
 
 impl ComponentMask {
@@ -77,14 +77,14 @@ impl ComponentMask {
 
 #[derive(Clone)]
 pub struct X11Capture {
-	conn: Arc<RustConnection>,
-	root: Window,
-	root_width: u32,
+	conn:        Arc<RustConnection>,
+	root:        Window,
+	root_width:  u32,
 	root_height: u32,
-	masks: ColorMasks,
-	selector: DisplaySelector,
+	masks:       ColorMasks,
+	selector:    DisplaySelector,
 	/// The selection a compositing manager owns on this screen (EWMH).
-	compositor: Atom,
+	compositor:  Atom,
 	/// Render defines alpha independently of the core TrueColor RGB masks.
 	pictformats: Option<Arc<QueryPictFormatsReply>>,
 }
@@ -121,9 +121,9 @@ impl X11Capture {
 			)));
 		}
 		let masks = ColorMasks {
-			red: visual.red_mask,
+			red:   visual.red_mask,
 			green: visual.green_mask,
-			blue: visual.blue_mask,
+			blue:  visual.blue_mask,
 			alpha: 0,
 		};
 		let root = screen.root;
@@ -201,18 +201,18 @@ impl X11Capture {
 		}
 		if displays.is_empty() {
 			displays.push(DesktopDisplay {
-				id: "0".into(),
-				name: "Screen".into(),
-				x: 0,
-				y: 0,
-				width: self.root_width,
-				height: self.root_height,
-				scale: 1.0,
-				pixel_x: 0,
-				pixel_y: 0,
-				pixel_width: self.root_width,
+				id:           "0".into(),
+				name:         "Screen".into(),
+				x:            0,
+				y:            0,
+				width:        self.root_width,
+				height:       self.root_height,
+				scale:        1.0,
+				pixel_x:      0,
+				pixel_y:      0,
+				pixel_width:  self.root_width,
 				pixel_height: self.root_height,
-				is_primary: true,
+				is_primary:   true,
 			});
 		}
 		let min_x = displays.iter().map(|display| display.x).min().unwrap_or(0);
@@ -632,9 +632,9 @@ impl X11Capture {
 		}
 		// Core visual masks say nothing about alpha, including at depth 32.
 		let masks = ColorMasks {
-			red: visual.red_mask,
+			red:   visual.red_mask,
 			green: visual.green_mask,
-			blue: visual.blue_mask,
+			blue:  visual.blue_mask,
 			alpha: self
 				.pictformats
 				.as_deref()
@@ -1255,17 +1255,17 @@ mod tests {
 			}],
 			screens: vec![Pictscreen {
 				fallback: 0,
-				depths: vec![Pictdepth {
-					depth: 32,
+				depths:   vec![Pictdepth {
+					depth:   32,
 					visuals: vec![Pictvisual { visual: 7, format: 1 }],
 				}],
 			}],
 			..Default::default()
 		};
 		let mut masks = ColorMasks {
-			red: 0x00ff_0000,
+			red:   0x00ff_0000,
 			green: 0x0000_ff00,
-			blue: 0x0000_00ff,
+			blue:  0x0000_00ff,
 			alpha: visual_alpha(&formats, 7),
 		};
 		assert_eq!(masks.alpha, 0xf000_0000);
@@ -1282,8 +1282,12 @@ mod tests {
 
 	#[test]
 	fn argb_pixels_come_out_with_straight_alpha() {
-		let masks =
-			ColorMasks { red: 0x00ff_0000, green: 0x0000_ff00, blue: 0x0000_00ff, alpha: 0xff00_0000 };
+		let masks = ColorMasks {
+			red:   0x00ff_0000,
+			green: 0x0000_ff00,
+			blue:  0x0000_00ff,
+			alpha: 0xff00_0000,
+		};
 		let data: Vec<u8> = [0x8080_0000u32, 0, 0xffff_0000]
 			.iter()
 			.flat_map(|pixel| pixel.to_le_bytes())
