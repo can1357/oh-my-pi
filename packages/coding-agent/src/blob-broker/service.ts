@@ -23,7 +23,6 @@ import {
 	supportsRemoteImageUrls,
 } from "./context-images";
 import { connectDaemonBlobBackend, type RenderCallbackHost } from "./daemon";
-import type { BlobDestinationId } from "./destinations";
 import type { BlobBrokerWorkerConfig } from "./protocol";
 import { RENDER_CALLBACK_PATH, RENDER_CALLBACK_TOKEN_HEADER } from "./protocol";
 import { ProviderFileCache } from "./provider-file-types";
@@ -604,22 +603,6 @@ function destinationOptions(
 	return options;
 }
 
-/**
- * Options and credentials configured for one destination. Shared by every
- * blob consumer (image URLs, published pages) so a destination is configured once.
- */
-export function destinationRuntimeConfig(
-	settings: Settings,
-	destination: BlobDestinationId,
-): { options: Record<string, DestinationOptionValue>; credentials: Record<string, string> } {
-	const options = destinationOptions(cfgImagesUrlsOptions.get(settings)[destination]);
-	if (destination === "command" && typeof options.command !== "string") {
-		const command = cfgImagesUrlsCommand.get(settings);
-		if (command) options.command = command;
-	}
-	return { options, credentials: { ...cfgImagesUrlsCredentials.get(settings)[destination] } };
-}
-
 /** Deterministic durable provider-file cache path for one project. */
 export function providerFileCachePath(settings: Settings, projectDir: string): string {
 	const projectHash = Bun.hash.wyhash(path.resolve(projectDir)).toString(16);
@@ -631,10 +614,16 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 	const blobsDir = getBlobsDir(settings.getAgentDir());
 	const projectHash = Bun.hash.wyhash(path.resolve(projectDir)).toString(16);
 	const savingsPath = blobBrokerSavingsJournalPath(settings, projectDir);
+	const optionsByDestination = cfgImagesUrlsOptions.get(settings);
+	const credentialsByDestination = cfgImagesUrlsCredentials.get(settings);
 	const configs: BlobBrokerWorkerConfig[] = [];
 	for (const destination of cfgImagesUrlsBackends.get(settings)) {
 		if (destination === "provider-files") continue;
-		const { options, credentials } = destinationRuntimeConfig(settings, destination);
+		const options = destinationOptions(optionsByDestination[destination]);
+		if (destination === "command" && typeof options.command !== "string") {
+			const command = cfgImagesUrlsCommand.get(settings);
+			if (command) options.command = command;
+		}
 		const configuredBaseUrl = options.publicBaseUrl;
 		const configuredBindHost = options.bindHost;
 		const configuredSshTarget = options.sshTarget ?? options.host;
@@ -642,7 +631,7 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 		configs.push({
 			kind: destination,
 			options,
-			credentials,
+			credentials: { ...credentialsByDestination[destination] },
 			publicBaseUrl:
 				typeof configuredBaseUrl === "string"
 					? configuredBaseUrl || undefined

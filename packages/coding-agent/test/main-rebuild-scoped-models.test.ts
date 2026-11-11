@@ -201,7 +201,7 @@ describe("rebuildScopedModels after login", () => {
 			session: {
 				model: active,
 				modelRegistry: registry,
-				refreshAfterCredentialChange: async () => {
+				refreshScopedModels: async () => {
 					await rebuildScopedModels(session, parseArgs([]), registry, settings);
 				},
 			},
