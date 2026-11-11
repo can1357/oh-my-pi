@@ -51,26 +51,33 @@
 		}
 	};
 	const showProperty = (descriptor, inspect) => {
-		if (!descriptor.enumerable) return undefined;
 		if ("value" in descriptor) return descriptor.value === undefined ? undefined : showField(descriptor.value, inspect);
 		return descriptor.get ? (descriptor.set ? "[Getter/Setter]" : "[Getter]") : "[Setter]";
 	};
 	const printedAtTop = (depth, options) => Number.isFinite(depth) && depth === options.depth;
 	const elementLine = (element, inspect) => {
 		if (element === null || typeof element !== "object") return showField(element, inspect);
-		const role =
-			typeof element.role === "string" && /^\S+$/.test(element.role) ? element.role : showField(element.role, inspect);
-		let line = `[${element.id}] ${role}`;
-		if (element.name !== undefined) line += ` ${showField(element.name, inspect)}`;
-		for (const key of ["value", "description", "keyshortcuts"]) {
-			if (element[key] !== undefined) line += ` ${key}=${showField(element[key], inspect)}`;
+		const properties = Object.getOwnPropertyDescriptors(element);
+		const id = properties.id;
+		const role = properties.role;
+		const shownId = id && "value" in id ? String(id.value) : id ? showProperty(id, inspect) : "undefined";
+		const shownRole =
+			typeof role?.value === "string" && /^\S+$/.test(role.value)
+				? role.value
+				: role ? (showProperty(role, inspect) ?? "undefined") : "undefined";
+		let line = `[${shownId}] ${shownRole}`;
+		for (const key of ["name", "value", "description", "keyshortcuts"]) {
+			const shown = properties[key] ? showProperty(properties[key], inspect) : undefined;
+			if (shown !== undefined) line += key === "name" ? ` ${shown}` : ` ${key}=${shown}`;
 		}
-		for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(element))) {
-			if (knownElementKeys.has(key)) continue;
+		for (const [key, descriptor] of Object.entries(properties)) {
+			if (knownElementKeys.has(key) || !descriptor.enumerable) continue;
 			const shown = showProperty(descriptor, inspect);
 			if (shown !== undefined) line += ` ${key}=${shown}`;
 		}
-		if (Array.isArray(element.states) && element.states.length > 0) line += ` ${element.states.join(" ")}`;
+		const states = properties.states;
+		if (states && !("value" in states)) line += ` states=${showProperty(states, inspect)}`;
+		else if (Array.isArray(states?.value) && states.value.length > 0) line += ` ${states.value.join(" ")}`;
 		return line;
 	};
 	const withPrintForm = observation => {
@@ -92,7 +99,7 @@
 				if (!Array.isArray(observation.elements)) return observation;
 				const lines = [];
 				for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(observation))) {
-					if (key === "elements") continue;
+					if (key === "elements" || !descriptor.enumerable) continue;
 					const shown = showProperty(descriptor, inspect);
 					if (shown !== undefined) lines.push(`${key}: ${shown}`);
 				}

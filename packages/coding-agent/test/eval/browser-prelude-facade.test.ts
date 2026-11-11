@@ -415,6 +415,11 @@ describe("browser facade in real Eval runtimes", () => {
 			'Object.defineProperty(o.elements[0], "extra", { enumerable: true, get() { throw new Error("getter ran"); } })',
 			"extra=[Getter]",
 		],
+		...["id", "role", "name", "value", "description", "keyshortcuts", "states"].map(key => [
+			`element ${key} getter`,
+			`Object.defineProperty(o.elements[0], "${key}", { enumerable: true, get() { throw new Error("getter ran"); } })`,
+			"[Getter]",
+		]),
 	])("prints non-JSON annotations: %s", async (_name, annotation, expected) => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session = makeSession(() => definitions);
@@ -425,7 +430,7 @@ describe("browser facade in real Eval runtimes", () => {
 		);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain(expected);
-		expect(result.output).toContain('[5] button "Save"');
+		expect(result.output).toContain("elements (1; tab.id(n) acts on [n]):");
 	});
 
 	it("unwraps values, prints host text, and preserves Python helper chains in a real kernel", async () => {
