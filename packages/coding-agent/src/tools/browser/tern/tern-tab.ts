@@ -133,7 +133,6 @@ import {
 	writeStorageInPage,
 } from "../storage-state";
 import { assertTabPressArgs } from "../tab-arguments";
-import { selectorWaitOptions, type SelectorWaitOptions } from "../selector-wait";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
 import { readFilePayloads } from "../upload-files";
 import {
@@ -2336,17 +2335,19 @@ export class TernTab implements InProcessRunTab {
 	}
 
 	/** Wait for a matching element (`visible`/`hidden` like Puppeteer); null once hidden/absent. */
-	async waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<TernElementHandle | null> {
+	async waitForSelector(
+		selector: string,
+		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
+	): Promise<TernElementHandle | null> {
 		return await this.waitForSelectorIn(selector, opts, null);
 	}
 
 	/** {@link waitForSelector} inside `frame`. */
 	async waitForSelectorIn(
 		selector: string | TernSelector,
-		opts: SelectorWaitOptions | undefined,
+		opts: { timeout?: number; visible?: boolean; hidden?: boolean } | undefined,
 		frame: FramePath,
 	): Promise<TernElementHandle | null> {
-		opts = selectorWaitOptions(opts);
 		const spec = this.#spec(selector);
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		if (this.#native) {
@@ -2362,8 +2363,6 @@ export class TernTab implements InProcessRunTab {
 			return new TernElementHandle(this, await this.#waitedSpec(spec, frame, nodes, state === "visible"), frame);
 		}
 		const found = await this.#poll(`tab.waitForSelector(${describe(selector)})`, timeoutMs, async () => {
-			if (opts?.state === "detached")
-				return (await this.#kit<number>("count", [spec], frame)) === 0 ? false : undefined;
 			if (opts?.hidden) {
 				const count = await this.#kit<number>("count", [spec], frame);
 				if (count === 0) return false;
@@ -3888,7 +3887,10 @@ export class TernFrame {
 	}
 
 	/** Wait for an element; reports whether it appeared. */
-	async waitForSelector(selector: string, options?: SelectorWaitOptions): Promise<boolean> {
+	async waitForSelector(
+		selector: string,
+		options?: { timeout?: number; visible?: boolean; hidden?: boolean },
+	): Promise<boolean> {
 		return (await this.#tab.waitForSelectorIn(selector, options, this.#path)) !== null;
 	}
 
@@ -4045,7 +4047,10 @@ export class TernPageFacade {
 		await this.#tab.type(selector, text);
 	}
 
-	async waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<TernElementHandle | null> {
+	async waitForSelector(
+		selector: string,
+		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
+	): Promise<TernElementHandle | null> {
 		return await this.#tab.waitForSelector(selector, opts);
 	}
 

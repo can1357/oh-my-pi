@@ -8,7 +8,6 @@ import { parseTernSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/
 import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
-import { rejectionOf } from "../helpers/rejection";
 
 interface FakePage {
 	/** Event batches the `events` op hands out, one per poll. */
@@ -108,27 +107,6 @@ async function openTab(
 }
 
 describe("TernTab", () => {
-	it("normalizes selector wait states before polling and rejects unknown options", async () => {
-		let count = 0;
-		let visible = false;
-		const fake = await startPage({ eventBatches: [], kit: { count: () => count, read: () => visible } });
-		const tab = await openTab(fake);
-		expect(await tab.waitForSelector("#gone", { state: "hidden" })).toBeNull();
-		expect(await tab.waitForSelector("#gone", { state: "detached" })).toBeNull();
-		count = 1;
-		expect(await tab.waitForSelector("#hidden", { state: "hidden" })).toBeNull();
-		expect(await rejectionOf(tab.waitForSelector("#hidden", { state: "detached", timeout: 1 }))).toMatchObject({
-			message: expect.stringContaining("timed out"),
-		});
-		expect(await tab.waitForSelector("#hidden", { state: "attached" })).toBeInstanceOf(TernElementHandle);
-		visible = true;
-		expect(await tab.waitForSelector("#shown", { state: "visible" })).toBeInstanceOf(TernElementHandle);
-		const before = fake.requests.length;
-		expect(await rejectionOf(tab.waitForSelector("#shown", JSON.parse('{"visble":true}')))).toMatchObject({
-			message: expect.stringContaining("unknown option"),
-		});
-		expect(fake.requests.length).toBe(before);
-	});
 	it("configures the PiP before its first navigation and resolves on that navigation's own load", async () => {
 		// Tern reports the initial about:blank load only in its third events answer: a goto sent
 		// before it would take that late `loaded` for its own and resolve before the page loads.

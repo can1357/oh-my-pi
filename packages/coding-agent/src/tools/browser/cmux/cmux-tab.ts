@@ -38,7 +38,6 @@ import {
 	reloadInPage,
 } from "../navigation";
 import { DEFAULT_STYLE_PROPERTIES } from "../queries";
-import { resolveWaitTimeout } from "../op-timeouts";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -50,7 +49,6 @@ import type {
 } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
-import { selectorWaitOptions, type SelectorWaitOptions } from "../selector-wait";
 import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
@@ -296,7 +294,7 @@ const semanticElements = spec => {
 		return spec.exact ? name === spec.name.toLowerCase() : name.includes(spec.name.toLowerCase());
 	});
 };
-const findElement = (spec, { includeHidden = false } = {}) => {
+const findElement = spec => {
 	const semantic = semanticElements(spec);
 	if (semantic) return semantic[0] || null;
 	if (spec.kind === "css") return document.querySelector(spec.value);
@@ -321,14 +319,14 @@ const findElement = (spec, { includeHidden = false } = {}) => {
 	}
 	if (spec.kind === "text") {
 		const wanted = spec.value.trim();
-		return allElements().find(element => (includeHidden || isVisible(element)) && textOf(element).includes(wanted)) || null;
+		return allElements().find(element => isVisible(element) && textOf(element).includes(wanted)) || null;
 	}
 	if (spec.kind === "aria" || spec.kind === "ax") {
 		const wanted = (spec.name || spec.value).trim();
 		const role = spec.role || "";
 		return (
 			allElements().find(element => {
-				if (!includeHidden && !isVisible(element)) return false;
+				if (!isVisible(element)) return false;
 				if (role && element.getAttribute("role") !== role) return false;
 				const name = accessibleName(element);
 				return name === wanted || name.includes(wanted);
@@ -1017,27 +1015,10 @@ export class CmuxTab implements InProcessRunTab {
 		return new CmuxElementHandle(this, selector);
 	}
 
-	async waitForSelector(selector: string, options?: SelectorWaitOptions): Promise<CmuxElementHandle | null> {
-		const opts = selectorWaitOptions(options);
-		const cellMs = this.#runContext?.timeoutMs ?? 30_000;
-		const timeoutMs = opts.timeout === undefined ? cellMs : resolveWaitTimeout(cellMs, opts.timeout);
-		if ((opts.state === undefined && !opts.visible && !opts.hidden) || opts.state === "attached") {
-			await this.#waitForSelector(selector, timeoutMs);
-			return new CmuxElementHandle(this, selector);
-		}
-		const signal = this.#runContext?.signal;
-		const deadline = Date.now() + timeoutMs;
-		do {
-			const exists = await this.elementExists(selector);
-			const detached = opts.state === "detached";
-			const hidden = detached || opts.hidden;
-			const visible = exists && !detached ? await this.isVisible(selector) : false;
-			if (hidden ? !exists || (!detached && !visible) : visible) {
-				return hidden ? null : new CmuxElementHandle(this, selector);
-			}
-			await untilAborted(signal, () => Bun.sleep(100));
-		} while (Date.now() <= deadline);
-		throw new ToolError(`tab.waitForSelector(${JSON.stringify(selector)}) timed out after ${timeoutMs}ms`);
+	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
+		await this.#waitForSelector(selector, timeoutMs);
+		return new CmuxElementHandle(this, selector);
 	}
 
 	async evaluate<R, TArgs extends unknown[]>(
@@ -1518,12 +1499,6 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async isVisible(selector: string): Promise<boolean> {
-		const spec = this.#selectorSpec(selector);
-		if (spec.kind === "ref") {
-			if (!this.#elementRefs.has(Number(spec.value))) return false;
-			const result = await this.#request("browser.is.visible", { selector: spec.ref });
-			return result.value === true;
-		}
 		return (
 			(await this.queryElement<boolean>(
 				selector,
@@ -2035,15 +2010,11 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async #selectorExists(spec: SelectorSpec): Promise<boolean> {
-		if (spec.kind === "ref") {
-			if (!this.#elementRefs.has(Number(spec.value))) return false;
-			const result = await this.#request("browser.get.count", { selector: spec.ref });
-			return numberFrom(result.count, 0) > 0;
-		}
+		if (spec.kind === "ref") return this.#elementRefs.has(Number(spec.value));
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
 			${PAGE_SELECTOR_HELPERS}
-			return !!findElement(spec, { includeHidden: true });
+			return !!findElement(spec);
 		})()`;
 		return !!(await this.#evalScript<unknown>(script));
 	}
@@ -2457,8 +2428,8 @@ class CmuxPageFacade {
 		return (await this.#tab.elementExists(selector)) ? this.#tab.elementHandle(selector) : null;
 	}
 
-	async waitForSelector(selector: string, opts?: SelectorWaitOptions): Promise<CmuxElementHandle | null> {
-		return await this.#tab.waitForSelector(selector, opts);
+	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		return await this.#tab.waitFor(selector, opts);
 	}
 
 	async waitForFunction(
