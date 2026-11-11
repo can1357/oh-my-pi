@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `web/sofya` search model ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 
 ### Removed
