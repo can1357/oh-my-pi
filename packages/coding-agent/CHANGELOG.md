@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `mcp.workspaceRoots` in user settings to inherit MCP servers across multi-repository workspaces, with closest whole-definition overrides, canonical bounded discovery, source-aware controls, and session-owned dashboard persistence ([#18599](https://github.com/can1357/oh-my-pi/pull/18599) by [@l3wi](https://github.com/l3wi)).
 ## [18.18.8] - 2026-11-11
 
 ### Changed

@@ -30,6 +30,69 @@ OMP also accepts fallback standalone files in the project root:
 
 Use `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want OMP to own the configuration. Use root `mcp.json` / `.mcp.json` only when you want a portable fallback file that other MCP clients may also read.
 
+### Trusted multi-repository workspaces
+
+To share MCP definitions across independent repositories without making their
+processes global, configure `mcp.workspaceRoots` in the active profile's **user**
+`config.yml` (or existing `config.yaml`):
+
+```yaml
+mcp:
+  workspaceRoots:
+    - ~/Documents/projects
+    - ~/Documents/eda
+```
+
+Place shared definitions in `<workspace>/.omp/mcp.json`. A launch beneath
+`projects/frontend/src` can then inherit `projects/.omp/mcp.json` even when
+`frontend` is a separate Git repository and `projects` is not a repository.
+The unrelated EDA workspace is not scanned.
+
+Only the owning profile's user settings grant this trust. Project settings,
+`--config` files, runtime overrides, and session/subagent overlays cannot grant
+or broaden it. Named profiles configure their own roots. The setting defaults
+to `[]`. Edit the user file, or run:
+
+```sh
+omp config set mcp.workspaceRoots '["~/Documents/projects","~/Documents/eda"]'
+```
+
+There is no interactive panel editor for this trust setting.
+
+Discovery rules:
+
+- Resolve the launch directory and configured roots to their real paths. Only
+  absolute paths and `~/...` roots are accepted; missing roots are ignored.
+- Select the most specific containing root when roots overlap. Scan from the
+  canonical launch directory through that root, inclusive, crossing Git roots.
+  Never scan above it or fall back to an outer workspace.
+- Filesystem roots, home/shared-temporary ceilings and roots above those
+  ceilings, and OMP user-configuration directories cannot grant inheritance.
+- A configured symlink root grants its canonical target. A launch symlink
+  outside that target does not inherit its logical ancestors. Config files or
+  configuration directories symlinked outside the selected boundary are skipped.
+- Accumulate native `.omp/mcp.json` / `.omp/.mcp.json` and standalone `mcp.json` /
+  `.mcp.json` separately, closest directory first and primary filename first
+  within each directory. Replace same-named definitions **as a whole**; never
+  merge arguments, environment variables, headers, or credentials.
+- Provider priority is unchanged: an ancestor native definition still beats a
+  closer foreign-provider or standalone definition. Foreign-tool discovery does
+  not gain an ancestor walk. Source metadata identifies each winning file.
+- Existing disable rules still apply. A complete child definition with
+  `enabled: false` suppresses the inherited name; the active-profile user
+  `enabledServers` list can force-enable it, but `disabledServers` wins.
+  `mcp.enableProjectConfig: false` excludes all inherited project entries before
+  deduplication, allowing user definitions to survive.
+
+Outside a configured workspace, native and standalone MCP discovery retains the
+launch-directory-only behavior. There is no unrestricted ancestor search.
+
+After changing shared definitions or workspace trust, use `/mcp reload` to
+rediscover and reconnect. User settings changes use the existing live file
+watcher; reload then drops removed/out-of-scope tools and closes their owned
+connections without closing the session. No daemon or cross-session process
+pool is introduced: separate in-scope sessions still own separate servers.
+
 ### Imported tool configs
 
 OMP also translates these current tool-native sources:
@@ -54,7 +117,7 @@ Named profiles (`omp --profile <name>` or `OMP_PROFILE`/`PI_PROFILE`) isolate us
 
 Discovery, the `/mcp` commands, and the config writer all follow the active profile, so a profile sees **only** its own user-level servers — never the default profile's `~/.omp/agent/mcp.json`. Add a server to a profile by launching under it (`omp --profile <name>`) and running `/mcp add` → User level, or by editing `~/.omp/profiles/<name>/agent/mcp.json` directly.
 
-Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, not the profile, so it applies under every profile. External-tool configs (`.claude/`, `.cursor/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
+Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, not the profile. Workspace inheritance additionally requires roots granted by the active profile's user settings. External-tool configs (`.claude/`, `.cursor/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
 
 MCP follows the same profile rules as the rest of OMP-native config; see [Configuration Discovery → Profiles](./config-usage.md#profiles).
 
@@ -137,6 +200,13 @@ Optional:
 - `args?: string[]`
 - `env?: Record<string, string>`
 - `cwd?: string`
+
+The stdio default remains `config.cwd ?? getProjectDir()`: an inherited server
+without `cwd` starts in the session's project directory, **not** beside its
+ancestor config. Explicit relative `cwd` keeps the transport's existing
+process-relative interpretation. Commands and arguments are not rebased or
+rewritten; use absolute paths when a shared server needs workspace-relative
+resources. Existing environment-variable expansion still applies.
 
 Example:
 
@@ -445,7 +515,11 @@ The active profile's user file supplies two cross-source overrides:
 }
 ```
 
-`/mcp enable` and `/mcp disable` update `enabled` directly when the definition is in an OMP-owned writable file. OMP does not mutate another tool's config: for such sources, those commands maintain the user-level allowlist or denylist instead and remove a conflicting stale override.
+Direct MCP controls use discovery's winning source, including inherited definitions and initially disabled servers that have no live manager entry. `/mcp enable` and `/mcp disable` update `enabled` directly when that definition is in an OMP-owned writable file. Disabling an inherited definition therefore edits the shared workspace file; use your profile's `disabledServers` instead when only that profile should opt out.
+
+OMP does not mutate another tool's config when toggling its servers. Those commands maintain the owning profile's user-level allowlist or denylist instead and remove a conflicting stale override. Dashboard toggles use the displayed session's profile even if another SDK session currently owns the process binding.
+
+For writable native and standalone definitions, auth cleanup preserves the raw source's `enabled` state and credential indirections; per-profile suppression is not written into the shared definition. Default `/mcp remove <name>` remains project-scoped and cannot remove a user-scoped definition without explicit `--scope user`.
 
 ## `/mcp add` vs editing JSON directly
 
@@ -496,7 +570,7 @@ OMP loads providers in descending priority. The MCP-capable order is:
 
 Across providers, the first definition wins. Duplicate names are not merged; OpenCode's internal config layers are the exception described above. A differently named definition is also shadowed when its transport, endpoint/command inputs, auth, and request-id mode are equivalent to a higher-priority definition.
 
-Within OMP native config, project `.omp/mcp.json` precedes `.omp/.mcp.json`, then the active profile's user `mcp.json` and `.mcp.json`. Root fallback `mcp.json` precedes root `.mcp.json`. In practice:
+Within OMP native config, project `.omp/mcp.json` precedes `.omp/.mcp.json`, then the active profile's user `mcp.json` and `.mcp.json`. Root fallback `mcp.json` precedes root `.mcp.json`. In a trusted workspace, each project provider visits every directory closest-first, preserving filename order within each directory; provider priority still outranks directory proximity. In practice:
 
 - prefer `.omp/mcp.json` or the active profile's user `mcp.json` for an OMP-specific override
 - keep names and endpoint definitions unique across tools when possible

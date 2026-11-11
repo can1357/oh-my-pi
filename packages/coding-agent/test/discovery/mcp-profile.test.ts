@@ -31,7 +31,8 @@ async function writeMcpJson(dir: string, servers: Record<string, unknown>): Prom
 
 async function loadNativeUserServers(cwd: string): Promise<MCPServer[]> {
 	clearFsCache();
-	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd, providers: ["native"] });
+	// Exercise the process-profile fallback, independently of another test's bound SDK owner.
+	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd, providers: ["native"], settings: null });
 	return result.items;
 }
 

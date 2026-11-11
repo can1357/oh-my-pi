@@ -124,14 +124,12 @@ export function boundSettings(): Settings | undefined {
 }
 
 /** Disabled provider IDs in effect: the bound settings' live value, else the unbound set. */
-function disabledProviders(): ReadonlySet<string> {
-	const settings = boundSettings();
+function disabledProviders(settings: Settings | null | undefined = boundSettings()): ReadonlySet<string> {
 	return settings ? cfgDisabledProviderSet.get(settings) : unboundDisabledProviders;
 }
 
 /** Explicitly enabled provider IDs in effect: the bound settings' live value, else the unbound set. */
-function enabledProviders(): ReadonlySet<string> {
-	const settings = boundSettings();
+function enabledProviders(settings: Settings | null | undefined = boundSettings()): ReadonlySet<string> {
 	return settings ? cfgEnabledProviderSet.get(settings) : unboundEnabledProviders;
 }
 
@@ -202,7 +200,7 @@ async function loadImpl<T>(
 	const disabledItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
 	const allWarnings: string[] = [];
 	const contributingProviders: string[] = [];
-	const settings = boundSettings();
+	const settings = ctx.settings;
 	const disabledExtensionIds = new Set<string>(
 		options.disabledExtensions ?? (settings ? cfgDisabledExtensions.get(settings) : undefined) ?? [],
 	);
@@ -310,6 +308,7 @@ async function loadImpl<T>(
 		if (suppressedItems.has(item)) {
 			// Claim key ownership (same-name precedence, including disabled
 			// state) without surviving or equivalence-shadowing survivors.
+			if (key === undefined || !seen.has(key)) options.onSuppressed?.(item);
 			if (key !== undefined) seen.add(key);
 			continue;
 		}
@@ -357,8 +356,12 @@ async function loadImpl<T>(
 /**
  * Filter providers based on options and disabled state.
  */
-function filterProviders<T>(capability: Capability<T>, options: LoadOptions<T>): Provider<T>[] {
-	const disabled = options.includeDisabledProviders ? null : disabledProviders();
+function filterProviders<T>(
+	capability: Capability<T>,
+	options: LoadOptions<T>,
+	settings: Settings | null,
+): Provider<T>[] {
+	const disabled = options.includeDisabledProviders ? null : disabledProviders(settings);
 	let providers = disabled
 		? (capability.providers as Provider<T>[]).filter(p => !disabled.has(p.id))
 		: (capability.providers as Provider<T>[]);
@@ -387,15 +390,17 @@ export async function loadCapability<T>(
 		throw new Error(`Unknown capability: "${capabilityId}"`);
 	}
 
+	const settings = options.settings === undefined ? (boundSettings() ?? null) : options.settings;
 	const cwd = options.cwd ?? getProjectDir();
 	const home = os.homedir();
 	const repoRoot = await findRepoRoot(cwd);
-	const ctx: LoadContext = { cwd, home, repoRoot };
-	if (options.agentDir !== undefined) ctx.agentDir = options.agentDir;
+	const ctx: LoadContext = { cwd, home, repoRoot, settings };
+	const agentDir = options.agentDir ?? settings?.getAgentDir();
+	if (agentDir !== undefined) ctx.agentDir = agentDir;
 	if (options.providers) ctx.explicitProviders = new Set(options.providers);
 	if (options.includeDisabled) ctx.includeOptOutUserSources = true;
 	if (options.extensionRoots !== undefined) ctx.extensionRoots = options.extensionRoots;
-	const providers = filterProviders(capability, options);
+	const providers = filterProviders(capability, options, settings);
 
 	return await loadImpl(capability, providers, ctx, options);
 }
@@ -416,12 +421,15 @@ export function isForeignUserProvider(providerId: string): boolean {
  * via `enabledProviders`. Project-level (cwd) config is unaffected; see
  * {@link isProviderEnabled} for the whole-provider switch.
  */
-export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean {
+export function isUserSourceEnabled(
+	source: string,
+	ctx?: Pick<LoadContext, "settings" | "explicitProviders" | "includeOptOutUserSources">,
+): boolean {
 	const id = source.replace(/^\./, "");
-	if (disabledProviders().has(id)) return false;
+	if (disabledProviders(ctx?.settings).has(id)) return false;
 	if (FOREIGN_USER_PROVIDERS[id] !== true) return true;
 	if (ctx?.explicitProviders?.has(id) || ctx?.includeOptOutUserSources) return true;
-	const enabled = enabledProviders();
+	const enabled = enabledProviders(ctx?.settings);
 	if (enabled.has(id) || enabled.has("*") || enabled.has("all")) return true;
 	if (id === "claude-plugins" && enabled.has("claude")) return true;
 	if (id === "claude" && process.env.CLAUDE_CONFIG_DIR?.trim()) return true;
@@ -429,13 +437,16 @@ export function isUserSourceEnabled(source: string, ctx?: LoadContext): boolean 
 }
 
 /** Opt a foreign provider's `~/` config in. */
-export function enableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders(), providerId]);
+export function enableUserSource(providerId: string, settings?: Settings): void {
+	setEnabledProviders([...enabledProviders(settings), providerId], settings);
 }
 
 /** Opt a foreign provider's `~/` config out (project config keeps loading). */
-export function disableUserSource(providerId: string): void {
-	setEnabledProviders([...enabledProviders()].filter(id => id !== providerId));
+export function disableUserSource(providerId: string, settings?: Settings): void {
+	setEnabledProviders(
+		[...enabledProviders(settings)].filter(id => id !== providerId),
+		settings,
+	);
 }
 
 /**
@@ -461,15 +472,18 @@ export function initializeWithSettings(activeSettings: Settings): () => void {
 /**
  * Disable a provider globally (across all capabilities).
  */
-export function disableProvider(providerId: string): void {
-	setDisabledProviders([...disabledProviders(), providerId]);
+export function disableProvider(providerId: string, settings?: Settings): void {
+	setDisabledProviders([...disabledProviders(settings), providerId], settings);
 }
 
 /**
  * Enable a previously disabled provider.
  */
-export function enableProvider(providerId: string): void {
-	setDisabledProviders([...disabledProviders()].filter(id => id !== providerId));
+export function enableProvider(providerId: string, settings?: Settings): void {
+	setDisabledProviders(
+		[...disabledProviders(settings)].filter(id => id !== providerId),
+		settings,
+	);
 }
 
 /**
@@ -477,8 +491,8 @@ export function enableProvider(providerId: string): void {
  * `disabledProviders`). Foreign `~/` config additionally needs
  * {@link isUserSourceEnabled}.
  */
-export function isProviderEnabled(providerId: string): boolean {
-	return !disabledProviders().has(providerId);
+export function isProviderEnabled(providerId: string, settings?: Settings | null): boolean {
+	return !disabledProviders(settings).has(providerId);
 }
 
 /**
@@ -489,10 +503,9 @@ export function getDisabledProviders(): string[] {
 }
 
 /**
- * Set disabled providers from a list (replaces current set), persisting to the bound settings.
+ * Set disabled providers from a list (replaces current set), persisting to the supplied or bound settings.
  */
-export function setDisabledProviders(providerIds: string[]): void {
-	const settings = boundSettings();
+export function setDisabledProviders(providerIds: string[], settings: Settings | undefined = boundSettings()): void {
 	if (settings) {
 		cfgDisabledProviders.set(settings, [...new Set(providerIds)]);
 		return;
@@ -509,10 +522,9 @@ export function getEnabledProviders(): string[] {
 }
 
 /**
- * Set enabled providers from a list (replaces current set), persisting to the bound settings.
+ * Set enabled providers from a list (replaces current set), persisting to the supplied or bound settings.
  */
-export function setEnabledProviders(providerIds: string[]): void {
-	const settings = boundSettings();
+export function setEnabledProviders(providerIds: string[], settings: Settings | undefined = boundSettings()): void {
 	if (settings) {
 		cfgEnabledProviders.set(settings, [...new Set(providerIds)]);
 		return;

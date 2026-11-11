@@ -29,6 +29,15 @@ On Linux and macOS, configured `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE
 
 Native project settings are intentionally scoped to the process working directory's `.omp/` folder — settings discovery does **not** walk ancestor directories looking for the nearest `.omp/`. Other discovery providers (Claude, Codex, Gemini, Cursor, OpenCode) can also contribute project-level settings from their own files; those are read-only from `omp` settings commands and can be turned off by provider id (see [Provider and source disabling](#provider-and-source-disabling)).
 
+`mcp.workspaceRoots` is an exception to ordinary merged settings authority: only
+the owning active profile's user layer can grant ancestor MCP discovery. Project
+files, CLI overlays, runtime overrides, and session/subagent overlays cannot add
+trusted roots. The default is `[]`; configure absolute or `~/...` paths in the
+user `config.yml`, or with `omp config set mcp.workspaceRoots '["~/work"]'`.
+The key is config-file/CLI-only, without a panel editor. See
+[trusted multi-repository workspaces](./mcp-config.md#trusted-multi-repository-workspaces)
+for boundaries, inheritance, symlinks, precedence, and reload behavior.
+
 ## Config file formats
 
 The canonical global file is YAML at `config.yml`; `config.yaml` is accepted as a compatibility filename. The generic config loader used for other files (for example `models.yml`) accepts `.yml`, `.yaml`, `.json`, and `.jsonc`:

@@ -1,18 +1,18 @@
 /**
  * MCP JSON Provider
  *
- * Discovers standalone mcp.json / .mcp.json files in the project root.
- * This is a fallback for projects that have a standalone mcp.json without any config directory.
+ * Discovers standalone mcp.json / .mcp.json files in the current directory,
+ * or through its explicitly trusted workspace boundary.
  *
  * Priority: 5 (low, as this is a fallback after tool-specific providers)
  */
-import * as path from "node:path";
 import { logger, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { getMCPProjectConfigPaths } from "./mcp-workspace";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -142,11 +142,12 @@ async function loadMCPJsonFile(
 	_ctx: LoadContext,
 	path: string,
 	level: "user" | "project",
+	readPath: string,
 ): Promise<LoadResult<MCPServer>> {
 	const warnings: string[] = [];
 	const items: MCPServer[] = [];
 
-	const content = await readFile(path);
+	const content = await readFile(readPath);
 	if (content === null) {
 		return { items, warnings };
 	}
@@ -168,10 +169,8 @@ async function loadMCPJsonFile(
  * MCP JSON Provider loader.
  */
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
-	const filenames = ["mcp.json", ".mcp.json"];
-	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),
-	);
+	const paths = await getMCPProjectConfigPaths(ctx);
+	const results = await Promise.all(paths.map(p => loadMCPJsonFile(ctx, p.path, "project", p.readPath)));
 
 	const allItems = results.flatMap(r => r.items);
 	const allWarnings = results.flatMap(r => r.warnings ?? []);
@@ -186,7 +185,7 @@ async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 registerProvider(mcpCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load MCP servers from standalone mcp.json or .mcp.json in project root",
+	description: "Load standalone MCP config from the current directory or trusted workspace",
 	priority: 5,
 	load,
 });

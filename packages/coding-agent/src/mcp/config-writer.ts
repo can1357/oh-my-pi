@@ -301,9 +301,10 @@ export interface SetMcpServerEnabledOptions {
 	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
 	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`
 	 * `mcp.json`/`.mcp.json`). Tool-owned configs (opencode.json, claude.json,
-	 * settings.json …) MUST be omitted; we never mutate another tool's file.
+	 * settings.json …) must never be supplied as writable source paths.
+	 * Pass null for a known non-writable source; this disables legacy path fallback.
 	 */
-	sourcePath?: string;
+	sourcePath?: string | null;
 	name: string;
 	enabled: boolean;
 }
@@ -332,7 +333,8 @@ export interface SetMcpServerEnabledOptions {
  */
 export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): Promise<void> {
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
-	const candidatePaths = [...new Set([sourcePath, projectPath, userPath].filter(path => path !== undefined))];
+	const candidatePaths =
+		sourcePath === undefined ? [...new Set([projectPath, userPath])] : sourcePath === null ? [] : [sourcePath];
 	let updatedInConfig = false;
 
 	for (const filePath of candidatePaths) {

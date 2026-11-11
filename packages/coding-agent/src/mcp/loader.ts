@@ -4,6 +4,8 @@
  * Integrates MCP tool discovery with the custom tools system.
  */
 import { logger } from "@oh-my-pi/pi-utils";
+import { boundSettings } from "../capability";
+import type { Settings } from "../config/settings";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
 import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
@@ -27,6 +29,8 @@ export interface MCPToolsLoadResult {
 
 /** Options for loading MCP tools */
 export interface MCPToolsLoadOptions {
+	/** Settings of the session owning the new manager. */
+	settings?: Settings | null;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
 	/** Initial non-blocking discovery window in milliseconds (environment override wins). */
@@ -62,8 +66,9 @@ async function resolveToolCache(storage: AgentStorageApi | null | undefined): Pr
  * @returns MCP tools in LoadedCustomTool format for integration
  */
 export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoadOptions): Promise<MCPToolsLoadResult> {
+	const settings = options?.settings === undefined ? (boundSettings() ?? null) : options.settings;
 	const toolCache = await resolveToolCache(options?.cacheStorage);
-	const manager = new MCPManager(cwd, toolCache);
+	const manager = new MCPManager(cwd, toolCache, undefined, undefined, settings);
 	if (options?.authStorage) {
 		manager.setAuthStorage(options.authStorage);
 	}

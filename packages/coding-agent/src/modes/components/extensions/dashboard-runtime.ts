@@ -1,9 +1,10 @@
+import * as path from "node:path";
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { EffectiveExtensionRoots } from "../../../capability/types";
 import type { Settings } from "../../../config/settings";
-import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
+import { getAllProvidersInfo, isForeignUserProvider, isProviderEnabled, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
@@ -34,17 +35,18 @@ export function createExtensionDashboardRuntime(options: {
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
 				...provider,
-				userSourceEnabled: isUserSourceEnabled(provider.id),
+				enabled: isProviderEnabled(provider.id, settings),
+				userSourceEnabled: isUserSourceEnabled(provider.id, { settings }),
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
-		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.()),
-		toggleProvider,
-		toggleUserSource,
+		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds, extensionRoots?.(), settings),
+		toggleProvider: providerId => toggleProvider(providerId, settings),
+		toggleUserSource: providerId => toggleUserSource(providerId, settings),
 		async persistMcpToggle(name, enabled, sourcePath) {
 			await setMcpServerEnabled({
-				userPath: getMCPConfigPath("user", cwd),
+				userPath: path.join(settings.getAgentDir(), "mcp.json"),
 				projectPath: getMCPConfigPath("project", cwd),
-				sourcePath,
+				sourcePath: sourcePath ?? null,
 				name,
 				enabled,
 			});
@@ -57,6 +59,7 @@ export function createExtensionDashboardRuntime(options: {
 				manager: mcpManager,
 				session: onMcpToolsChanged ? { refreshMCPTools: onMcpToolsChanged } : undefined,
 				discovery: {
+					settings,
 					enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 					filterExa: true,
 					filterBrowser: browserMcpFilterEnabled?.() ?? false,
