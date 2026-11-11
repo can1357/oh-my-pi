@@ -98,6 +98,8 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncProgressBlock,
+	buildAsyncProgressDisplayMessage,
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -329,6 +331,12 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
+					if (message.customType === "async-progress") {
+						const component = buildAsyncProgressBlock(message);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
 						const details = (
 							message as CustomMessage<{
@@ -398,9 +406,10 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(handoffComponent);
 						break;
 					}
+					const displayMessage = buildAsyncProgressDisplayMessage(message);
 					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
-					const component = new CustomMessageComponent(message as CustomMessage<unknown>, renderer);
+					const component = new CustomMessageComponent(displayMessage as CustomMessage<unknown>, renderer);
 					component.setExpanded(this.ctx.toolOutputExpanded);
 					this.ctx.chatContainer.addChild(component);
 				}

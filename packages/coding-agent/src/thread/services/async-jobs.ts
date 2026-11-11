@@ -153,6 +153,11 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		agentOutputPublished: job.agentOutputPublished,
 		queued: job.queued,
 		foreground: job.foreground,
+		progressDelivery: job.progressDelivery,
+		progressDeliveredCount: job.progressDeliveredCount,
+		completionLeftover: job.completionLeftover,
+		progressArtifactId: job.progressArtifactId,
+		terminalTextProvenance: job.terminalTextProvenance,
 		process: process
 			? {
 					command: process.command,
@@ -186,6 +191,7 @@ function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: Job
 		intent: options?.intent,
 		process: feed?.process,
 		widgetInputs: feed?.widgetInputs,
+		progressDelivery: options?.progressDelivery,
 	};
 	return result;
 }
@@ -212,6 +218,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 						jobId: ctx.jobId,
 						signal: toWireSignal(ctx.signal),
 						reportProgress: ctx.reportProgress,
+						reportAgentProgress: (text, info) => ctx.reportAgentProgress(text, info),
 						markRunning: ctx.markRunning,
 						pushFeed: feed ? delta => feed.apply(delta, true) : undefined,
 					};
@@ -249,6 +256,20 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 					sink(jobId, text, job ? toJobWire(job) : undefined),
 				),
 			),
+		registerProgressSink: (manager, ownerId, deliver, acknowledge, retune) =>
+			cleanups.track(
+				threadId,
+				manager.registerProgressSink(ownerId, {
+					deliver: (jobId, text, job, seq, info) => deliver(jobId, text, toJobWire(job), seq, info),
+					acknowledge: acknowledge ? jobId => ignoreSettle(acknowledge(jobId)) : undefined,
+					retune: retune ? (jobId, delivery) => ignoreSettle(retune(jobId, delivery)) : undefined,
+				}),
+			),
+		activateProgressDelivery: (manager, jobId, delivery, foregroundStreamProvenance, coverage) =>
+			manager.activateProgressDelivery(jobId, delivery, foregroundStreamProvenance, coverage),
+		setProgressArtifact: (manager, jobId, artifactId) => manager.setProgressArtifact(jobId, artifactId),
+		retuneProgressDelivery: (manager, jobId, delivery, ownerId) =>
+			manager.retuneProgressDelivery(jobId, delivery, ownerId),
 		waitForOwnerJobs: (manager, ownerId, options) => manager.waitForOwnerJobs(ownerId, options),
 		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt) => manager.cancelAndReapOwnerJobs(ownerId, deadlineAt),
 		drainDeliveries: (manager, options) => manager.drainDeliveries(options),

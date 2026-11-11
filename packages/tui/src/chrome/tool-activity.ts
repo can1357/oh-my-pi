@@ -12,6 +12,8 @@ export function isToolActivityComponent(component: Component): component is Comp
 export class ToolActivityContainer extends Container implements ToolActivityComponent {
 	#visible = true;
 	#native: { children: readonly Component[]; visible: boolean; node: NativeNode } | undefined;
+	/** Children that keep rendering while tool activity is hidden (failure rows punch through). */
+	#pinned = new Container();
 
 	constructor(component: Component | Component[]) {
 		super();
@@ -20,6 +22,12 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		} else {
 			this.addChild(component);
 		}
+	}
+
+	/** Add a child that stays visible when tool activity is hidden. */
+	pin(component: Component): void {
+		this.addChild(component);
+		this.#pinned.addChild(component);
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -40,12 +48,19 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		}
 	}
 
-	override render(width: number): readonly string[] {
-		if (!this.#visible) return [];
-		return super.render(width);
+	override invalidate(): void {
+		super.invalidate();
+		this.#pinned.invalidate();
 	}
 
-	/** The wrapped children; hidden tool activity stays mounted so toggling it is one prop change. */
+	override render(width: number): readonly string[] {
+		return this.#visible ? super.render(width) : this.#pinned.render(width);
+	}
+
+	/**
+	 * The wrapped children; hidden tool activity stays mounted so toggling it is one prop change.
+	 * Pinned children stay visible while the rest of the activity is hidden.
+	 */
 	override describe(): NativeNode {
 		const cached = this.#native;
 		const children = this.children;
@@ -57,7 +72,14 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 			return cached.node;
 		}
 		const snapshot = children.slice();
-		const node = col(snapshot, this.#visible ? { role: "omp.activity" } : { role: "omp.activity", hidden: true });
+		const pinned = this.#pinned.children;
+		const node =
+			this.#visible || pinned.length === 0
+				? col(snapshot, this.#visible ? { role: "omp.activity" } : { role: "omp.activity", hidden: true })
+				: col(
+						snapshot.map(child => (pinned.includes(child) ? child : col([child], { hidden: true }))),
+						{ role: "omp.activity" },
+					);
 		this.#native = { children: snapshot, visible: this.#visible, node };
 		return node;
 	}

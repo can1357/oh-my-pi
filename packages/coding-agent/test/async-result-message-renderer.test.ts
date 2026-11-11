@@ -6,7 +6,7 @@ import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
-const BUILT_IN = "Background job completed";
+const BUILT_IN = "Background command completed";
 
 function renderReplay(renderer: MessageRenderer): string {
 	const builder = new ChatTranscriptBuilder({
