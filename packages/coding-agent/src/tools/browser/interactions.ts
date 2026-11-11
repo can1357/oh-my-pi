@@ -398,14 +398,42 @@ async function actionableClickPoint(
 }
 
 /**
+ * Page function: whether an open modal dialog of the element's document leaves the element behind it, unfocusable
+ * and under the dialog's backdrop. A dialog inside a shadow root is not found.
+ */
+const behindModalDialogInPage = new Function(
+	"el",
+	`const contains = ${composedContains.toString()};
+	for (const dialog of el.ownerDocument.querySelectorAll("dialog:modal")) {
+		if (!contains(dialog, el)) return true;
+	}
+	return false;`,
+) as (el: unknown) => boolean;
+
+/** Which covers {@link refuseCoveredTarget} refuses, and whether it may scroll to look. */
+interface CoverCheck {
+	/**
+	 * Refuse only an element behind a modal dialog. Keys go wherever focus is, so a field focus reaches takes them
+	 * under any other layer; a modal dialog leaves the page behind it unfocusable, so they would go to the dialog.
+	 */
+	modalOnly: boolean;
+	/** Scroll an off-screen element into view to hit-test it; without it, an off-screen element is not refused. */
+	scroll: boolean;
+}
+
+/**
  * Refuse an element another one covers before input meant for it goes out, as a click is refused: this runs click's
  * hit test ({@link isClickActionable}) and refuses only a cover, once the element's box holds still, so a hidden or
  * zero-size element keeps the handling its action already gives it.
  */
-export async function refuseCoveredTarget(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
+export async function refuseCoveredTarget(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	{ modalOnly, scroll }: CoverCheck,
+): Promise<void> {
 	let result = await isClickActionable(handle, signal);
-	// The hit test needs the element on screen; a click scrolls it there too.
-	if (!result.ok && result.reason === "off-viewport") {
+	if (scroll && !result.ok && result.reason === "off-viewport") {
 		await untilAborted(signal, () =>
 			handle.evaluate(el => {
 				const element = el as unknown as PageElement;
@@ -415,6 +443,7 @@ export async function refuseCoveredTarget(handle: ElementHandle, label: string, 
 		result = await isClickActionable(handle, signal);
 	}
 	if (result.ok || !result.coveredBy) return;
+	if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
 	let coveredBy = result.coveredBy;
 	let previous = await untilAborted(signal, () => handle.boundingBox());
 	try {
@@ -443,7 +472,7 @@ export async function refuseCoveredTarget(handle: ElementHandle, label: string, 
 
 /**
  * Focus the element keys are pressed in, refusing one they could not reach: a disabled one, whose `focus()` leaves
- * focus where it was, or one focus did not reach because another element covers it, as a modal dialog does.
+ * focus where it was, or one behind a modal dialog, which leaves it unfocusable ({@link refuseCoveredTarget}).
  */
 export async function focusKeyTarget(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
 	const { disabled, focused } = await untilAborted(signal, () =>
@@ -469,7 +498,7 @@ export async function focusKeyTarget(handle: ElementHandle, label: string, signa
 		}),
 	);
 	if (disabled) throw new ToolError(`${label} blocked: the element is disabled`);
-	if (!focused) await refuseCoveredTarget(handle, label, signal);
+	if (!focused) await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
 }
 
 /**
@@ -631,8 +660,8 @@ export async function hoverElement(handle: ElementHandle, signal?: AbortSignal):
  * Focus a text-entry target, refusing one that cannot take keystrokes. A
  * disabled control ignores `focus()`, so they would land in whichever element
  * had focus; a read-only one drops them; one that focus did not reach is
- * refused when another element covers it ({@link refuseCoveredTarget}), as a
- * modal dialog makes the page behind it unfocusable. The checks run after
+ * refused when a modal dialog covers it ({@link refuseCoveredTarget}), since
+ * the dialog leaves the page behind it unfocusable. The checks run after
  * `focus()` so a focus handler that locks the field is seen.
  */
 async function focusTextEntryTarget(
@@ -679,9 +708,8 @@ async function focusTextEntryTarget(
 			return null;
 		}, action === "fill"),
 	);
-	// A miss is refused when another element covers this one, as a modal dialog does the page behind it; a miss
-	// with nothing over the element (a node inside an editor) keeps the handling it had.
-	if (refusal === "unfocused") await refuseCoveredTarget(handle, label, signal);
+	// Another miss (a node inside an editor, a focus handler that moved focus to a picker) keeps the handling it had.
+	if (refusal === "unfocused") await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
 	else if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
 

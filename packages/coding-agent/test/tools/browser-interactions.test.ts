@@ -475,15 +475,20 @@ return {
 		const prelude = createBrowserPrelude(session);
 		const tabName = `modal-${crypto.randomUUID()}`;
 		// The dialog's button takes focus when it opens; a key meant for the field behind it activated that button.
-		// A banner over a field focus still reaches leaves typing there as it was.
+		// Without a modal dialog keys keep going where focus goes: a field under a banner, a board under a HUD, a
+		// field whose focus handler opens a picker over it. A drag to an element off screen does not scroll its start away.
 		const modalHtml = `<!doctype html><label>Name <input id="name"></label> <button id="go">Go</button> <input id="off" disabled>
 <div id="src" draggable="true" style="width:80px;height:30px">Drag</div><div id="dst" style="width:80px;height:30px">Drop</div>
 <p style="position:relative"><input id="under"><span style="position:absolute;inset:0;background:#fec">Banner</span></p>
+<div style="position:relative"><div id="board" style="width:120px;height:30px">Board</div><div id="hud" style="position:absolute;inset:0"></div></div>
+<div style="position:relative"><input id="date"><div id="pop" hidden style="position:absolute;inset:0"><input id="popin"></div></div>
 <iframe id="inner" srcdoc="<input id=deep><dialog id=framed><button>OK</button></dialog><script>document.querySelector('dialog').showModal()</script>"></iframe>
+<div style="height:3000px"></div><div id="far">Far</div>
 <dialog id="modal"><button id="stay">Stay signed in</button></dialog>
 <script>
 window.received = [];
 for (const type of ["keydown", "click", "input", "mousedown", "dragstart"]) document.addEventListener(type, event => received.push(type + ":" + event.target.id), true);
+document.querySelector("#date").addEventListener("focus", () => { document.querySelector("#pop").hidden = false; document.querySelector("#popin").focus(); });
 </script>`;
 		const context = { session, toolCallId: "browser-modal-cover" };
 		await prelude.invoke(
@@ -511,8 +516,14 @@ const banner = {
 	fill: await attempt(() => tab.fill("#under", "kept")),
 	press: await attempt(() => tab.press("End", { selector: "#under" })),
 	value: await tab.value("#under"),
-	tern: await aim("#under", ["fill", "press"]),
+	board: await attempt(() => tab.press("ArrowLeft", { selector: "#board" })),
+	picker: await attempt(() => tab.type("#date", "abc")),
+	picked: await tab.value("#popin"),
+	tern: { under: await aim("#under", ["fill", "press"]), board: await aim("#board", ["press"]), date: await aim("#date", ["type"]) },
 };
+await tab.evaluate(() => { window.received = []; });
+const farDrag = await attempt(() => tab.drag("#src", "#far"));
+const farDragMisses = await tab.evaluate(() => window.received.filter(entry => !entry.endsWith(":src")));
 const observed = await tab.observe();
 const field = await tab.id(observed.elements.find(element => element.role === "textbox" && element.name.includes("Name")).id);
 await tab.evaluate(() => { document.querySelector("#modal").showModal(); window.received = []; });
@@ -520,6 +531,8 @@ const frame = await tab.frame("#inner");
 const refused = {
 	disabledPress,
 	banner,
+	farDrag,
+	farDragMisses,
 	fill: await attempt(() => tab.fill("#name", "Ada Lovelace")),
 	type: await attempt(() => tab.type("#name", "Ada Lovelace")),
 	press: await attempt(() => tab.press("Enter", { selector: "#name" })),
@@ -537,16 +550,26 @@ return { ...refused, received: await tab.evaluate(() => window.received), name: 
 				context,
 			);
 			expect(valueFrom<unknown>(result)).toEqual({
-				disabledPress: 'tab.press("Enter") blocked: the element is disabled',
-				banner: { fill: "sent", press: "sent", value: "kept", tern: { fill: "ok", press: "ok" } },
+				disabledPress: 'tab.press("Enter", { selector: "#off" }) blocked: the element is disabled',
+				banner: {
+					fill: "sent",
+					press: "sent",
+					value: "kept",
+					board: "sent",
+					picker: "sent",
+					picked: "abc",
+					tern: { under: { fill: "ok", press: "ok" }, board: { press: "ok" }, date: { type: "ok" } },
+				},
+				farDrag: "sent",
+				farDragMisses: [],
 				fill: 'tab.fill("#name") blocked: covered by <dialog#modal>',
 				type: 'tab.type("#name") blocked: covered by <dialog#modal>',
-				press: 'tab.press("Enter") blocked: covered by <dialog#modal>',
+				press: 'tab.press("Enter", { selector: "#name" }) blocked: covered by <dialog#modal>',
 				handleFill: "handle.fill() blocked: covered by <dialog#modal>",
 				handleType: "handle.type() blocked: covered by <dialog#modal>",
 				handlePress: "handle.press() blocked: covered by <dialog#modal>",
 				frameFill: 'frame.fill("#deep") blocked: covered by <dialog#framed>',
-				framePress: 'frame.press("Enter") blocked: covered by <dialog#framed>',
+				framePress: 'frame.press("Enter", { selector: "#deep" }) blocked: covered by <dialog#framed>',
 				drag: 'tab.drag() from "#src" blocked: covered by <dialog#modal>',
 				received: [],
 				name: "",
@@ -555,7 +578,7 @@ return { ...refused, received: await tab.evaluate(() => window.received), name: 
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
-	}, 60_000);
+	}, 30_000);
 
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();

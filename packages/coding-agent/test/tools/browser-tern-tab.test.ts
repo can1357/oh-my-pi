@@ -314,6 +314,50 @@ describe("TernTab", () => {
 		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "up", key: "Enter" }));
 	});
 
+	it("aims a key press at its selector before focusing it, and sends no key to an element a dialog covers", async () => {
+		const calls: unknown[] = [];
+		let covered = false;
+		const fake = await startPage({
+			eventBatches: [],
+			kit: {
+				target: args => {
+					calls.push(["target", ...(args as unknown[])]);
+					return covered
+						? { ok: false, reason: "covered", count: 1, detail: "<dialog#modal>" }
+						: { ok: true, x: 5, y: 5, width: 100, height: 20, count: 1 };
+				},
+				focus: args => {
+					calls.push(["focus", ...(args as unknown[])]);
+					return null;
+				},
+			},
+		});
+		const tab = await openTab(fake);
+		// A short cell budget, so the refused press stops polling the covered target quickly.
+		tab.setRunContext({
+			timeoutMs: 2_000,
+			deadline: Date.now() + 2_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots: [],
+		});
+		await tab.press("Enter", { selector: "#name" });
+		const spec = { engine: "css", query: "#name" };
+		expect(calls).toEqual([
+			["target", spec, "press"],
+			["target", spec, "focus"],
+			["focus", spec],
+		]);
+		const inputs = () => fake.requests.filter(request => request.op.op === "input").length;
+		expect(inputs()).toBe(1);
+		covered = true;
+		const refused = await tab.press("Enter", { selector: "#name" }).catch((error: unknown) => String(error));
+		expect(refused).toContain('tab.press("Enter", { selector: "#name" }) timed out');
+		expect(refused).toContain("covered by <dialog#modal>");
+		expect(inputs()).toBe(1);
+	});
+
 	it("reports a held dialog and answers it through the dialog op", async () => {
 		const fake = await startPage({
 			eventBatches: [

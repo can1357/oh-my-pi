@@ -3154,7 +3154,11 @@ export class WorkerCore {
 									: asElementHandle(await untilAborted(sig, () => page.$(normalized)));
 							if (!handle) throw new ToolError(`No element found for selector: ${normalized}`);
 							try {
-								await focusKeyTarget(handle, `tab.press(${JSON.stringify(key)})`, sig);
+								await focusKeyTarget(
+									handle,
+									`tab.press(${JSON.stringify(key)}, { selector: ${JSON.stringify(selector)} })`,
+									sig,
+								);
 							} finally {
 								await handle.dispose().catch(() => undefined);
 							}
@@ -3984,7 +3988,12 @@ export class WorkerCore {
 				if (!handle) throw new ToolError(`Drag ${role} selector did not resolve: ${target}`);
 				let box: { x: number; y: number; width: number; height: number } | null;
 				try {
-					await refuseCoveredTarget(handle, `tab.drag() ${role} ${JSON.stringify(target)}`, signal);
+					// A drag sends pointer input where the element is drawn, so any cover takes it, as for a click; no
+					// scroll, which would move the other end after its point was read.
+					await refuseCoveredTarget(handle, `tab.drag() ${role} ${JSON.stringify(target)}`, signal, {
+						modalOnly: false,
+						scroll: false,
+					});
 					box = await untilAborted(signal, () => handle.boundingBox());
 				} catch (error) {
 					await handle.dispose().catch(() => undefined);

@@ -312,7 +312,11 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					const handle = await untilAborted(signal, () => frame.$(selector));
 					if (!handle) throw new ToolError(`No element found for selector: ${selector}`);
 					try {
-						await focusKeyTarget(handle, `frame.press(${JSON.stringify(key)})`, signal);
+						await focusKeyTarget(
+							handle,
+							`frame.press(${JSON.stringify(key)}, { selector: ${JSON.stringify(options.selector)} })`,
+							signal,
+						);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}

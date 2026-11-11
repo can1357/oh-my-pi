@@ -214,14 +214,9 @@ const KIT_BODY = String.raw`
 const STATE_ROLES_CHECKED = new Set(["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"]);
 const SKIP_TAGS = new Set(["script", "style", "template", "noscript", "head", "meta", "link", "title"]);
 const POINTER_ACTIONS = new Set(["click", "dblclick", "hover", "check", "drag", "upload"]);
-// Keys go wherever focus is, and focus cannot reach an element behind a modal dialog: these actions refuse a cover
-// over an element focus misses. Focus on the element, inside it, or on the editing host around it takes the keys.
+// Keys go wherever focus is, and a modal dialog leaves the page behind it unfocusable, so these refuse an element a
+// modal dialog covers. Under any other layer focus still reaches the element and the keys with it.
 const KEY_ACTIONS = new Set(["type", "fill", "press"]);
-const takesFocus = el => {
-	el.focus?.({ preventScroll: true });
-	const active = el.getRootNode().activeElement;
-	return !!active && (active === el || el.contains(active) || (active.isContentEditable && active.contains(el)));
-};
 const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "press", "upload"]);
 const EDIT_ACTIONS = new Set(["type", "fill"]);
 const SETTER_INPUT_TYPES = new Set(["date", "datetime-local", "month", "week", "time", "color", "range"]);
@@ -255,6 +250,13 @@ const composedContains = (ancestor, descendant) => {
 	for (let current = descendant, depth = 0; current && depth < 256; depth++) {
 		if (current === ancestor) return true;
 		current = current.assignedSlot || composedParent(current);
+	}
+	return false;
+};
+// An open modal dialog of the element's document that does not hold it leaves it unfocusable under the backdrop.
+const behindModalDialog = el => {
+	for (const dialog of el.ownerDocument.querySelectorAll("dialog:modal")) {
+		if (!composedContains(dialog, el)) return true;
 	}
 	return false;
 };
@@ -835,10 +837,15 @@ const kit = {
 		if ((pointer || action === "point") && !inViewport) return { ok: false, reason: "offViewport", count };
 		const x = inViewport ? Math.floor((left + right) / 2) : Math.floor(rect.left + rect.width / 2);
 		const y = inViewport ? Math.floor((top + bottom) / 2) : Math.floor(rect.top + rect.height / 2);
-		if (pointer || (KEY_ACTIONS.has(action) && inViewport && !takesFocus(el))) {
+		if (pointer) {
 			const hit = hitTest(x, y);
 			if (!hit) return { ok: false, reason: "covered", count, detail: "elementFromPoint-null" };
 			if (!composedContains(el, hit) && !composedContains(hit, el)) {
+				return { ok: false, reason: "covered", count, detail: describeElement(hit) };
+			}
+		} else if (KEY_ACTIONS.has(action) && inViewport) {
+			const hit = hitTest(x, y);
+			if (hit && !composedContains(el, hit) && !composedContains(hit, el) && behindModalDialog(el)) {
 				return { ok: false, reason: "covered", count, detail: describeElement(hit) };
 			}
 		}
