@@ -6,8 +6,16 @@ import { detailsRecord, isRecord, normalizeWs, str, truncate } from "../util";
 
 /** One named field's question and its answer text, as the TUI records them. */
 interface AskAnswer {
+	name: string;
 	question: string;
 	answer: string;
+}
+
+interface AskOptionNote {
+	name: string;
+	question: string;
+	option: string;
+	text: string;
 }
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
@@ -55,9 +63,27 @@ function answersOf(details: Record<string, unknown> | null): AskAnswer[] | null 
 	const out: AskAnswer[] = [];
 	for (const entry of details.answers) {
 		if (!isRecord(entry)) continue;
+		const name = str(entry.name);
 		const question = str(entry.question);
 		const answer = str(entry.answer);
-		if (question !== null && answer !== null) out.push({ question, answer });
+		if (question !== null && answer !== null) out.push({ name: name ?? "", question, answer });
+	}
+	return out;
+}
+
+/** Valid selected-option notes from persisted details; ignore malformed entries. */
+function notesOf(details: Record<string, unknown> | null): AskOptionNote[] {
+	if (!details || !Array.isArray(details.notes)) return [];
+	const out: AskOptionNote[] = [];
+	for (const entry of details.notes) {
+		if (!isRecord(entry)) continue;
+		const name = str(entry.name);
+		const question = str(entry.question);
+		const option = str(entry.option);
+		const text = str(entry.text);
+		if (name !== null && question !== null && option !== null && text !== null) {
+			out.push({ name, question, option, text });
+		}
 	}
 	return out;
 }
@@ -80,6 +106,7 @@ function Summary({ args, result }: ToolRenderProps): ReactNode {
 function Body({ args, result }: ToolRenderProps): ReactNode {
 	const details = detailsRecord(result);
 	const answers = answersOf(details);
+	const notes = notesOf(details);
 	if (answers) {
 		return (
 			<>
@@ -96,6 +123,13 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 									<span className="tv-faint">(no answer)</span>
 								</Row>
 							)}
+							{notes
+								.filter(note => note.name === entry.name && note.question === entry.question)
+								.map((note, noteIndex) => (
+									<Note key={`${i}-${noteIndex}`}>
+										✎ {note.option}: {note.text}
+									</Note>
+								))}
 						</div>
 					))}
 				</div>

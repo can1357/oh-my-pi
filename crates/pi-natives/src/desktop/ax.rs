@@ -948,6 +948,25 @@ const FIND_MAX_NODES: u32 = 5_000;
 /// recursion, deep enough for the levels Electron nests its content in.
 const FIND_MAX_DEPTH: u32 = 64;
 
+/// Accepts printed substrings, compact printed substrings, exact compact native
+/// roles and aliases. Empty compact queries cannot add matches: separator-only
+/// queries must stay empty.
+fn matches_role(props: &AxProps, query: &str, compact: &str) -> bool {
+	let printed = props.role.to_lowercase();
+	printed.contains(query)
+		|| (!compact.is_empty()
+			&& ((compact.len() != query.len() && printed.contains(compact))
+				|| props
+					.native_role
+					.chars()
+					.filter(|c| !matches!(c, ' ' | '_' | '-'))
+					.flat_map(char::to_lowercase)
+					.eq(compact.chars())
+				|| ROLE_ALIASES
+					.iter()
+					.any(|&(alias, role)| compact == alias && printed == role)))
+}
+
 pub fn query(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
@@ -963,6 +982,9 @@ pub fn query(
 	};
 	let identities = ReadIdentities::new(&root, Some(&tree), &state);
 	let role = query.role.as_deref().map(str::to_lowercase);
+	let compact_role = role
+		.as_deref()
+		.map(|role| role.replace([' ', '_', '-'], ""));
 	let title = query.title.as_deref().map(str::to_lowercase);
 	let value = query.value.as_deref().map(str::to_lowercase);
 	let limit = query.limit.unwrap_or(100).min(5_000) as usize;
@@ -975,8 +997,9 @@ pub fn query(
 			expected
 				.is_none_or(|needle| actual.is_some_and(|text| text.to_lowercase().contains(needle)))
 		};
-		if contains(Some(&node.props.role), role.as_ref())
-			&& contains(label(&node.props), title.as_ref())
+		if role.as_deref().is_none_or(|role| {
+			matches_role(&node.props, role, compact_role.as_deref().unwrap_or(role))
+		}) && contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
 			let uniqueness = identities.of(&node.props);
@@ -1216,6 +1239,10 @@ pub(crate) fn truncate_chars(value: String, max: usize) -> String {
 	result.push('…');
 	result
 }
+
+/// Query aliases extend the vocabulary without changing printed roles or their
+/// substring matches.
+const ROLE_ALIASES: &[(&str, &str)] = &[("radiobutton", "radio")];
 
 /// Maps a raw `AX*` macOS accessibility role onto the cross-platform role
 /// vocabulary. Compiled only where it has a caller (macOS backend + tests).
@@ -2227,6 +2254,35 @@ mod tests {
 		assert_eq!(nodes[0].title, None);
 		assert_eq!(nodes[0].description.as_deref(), Some("Reload"));
 	}
+
+	#[test]
+	fn query_accepts_role_aliases_without_widening_printed_substrings() {
+		let mut radio = p(&normalize_role_macos("AXRadioButton"), Some("Choice"));
+		radio.native_role = "AXRadioButton".into();
+		let mut field = p(&normalize_role_macos("AXTextField"), Some("Name"));
+		field.native_role = "AXTextField".into();
+		let mut m = Mock {
+			props: [(1, p("window", None)), (2, radio), (3, field), (4, p("tabgroup", Some("Tabs")))]
+				.into(),
+			children: [(1, vec![2, 3, 4])].into(),
+			..Default::default()
+		};
+		for role in ["radiobutton", "AXRadioButton", "AX_radio-button"] {
+			let nodes = find(&mut m, Some(role), None);
+			assert_eq!(nodes.len(), 1, "{role}");
+			assert_eq!(nodes[0].role, "radio");
+		}
+		assert!(find(&mut m, Some("button"), None).is_empty());
+		let nodes = find(&mut m, Some("text field"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "textfield");
+		assert!(find(&mut m, Some("unknown-role"), None).is_empty());
+		assert!(find(&mut m, Some("-"), None).is_empty());
+		let nodes = find(&mut m, Some("tab"), None);
+		assert_eq!(nodes.len(), 1);
+		assert_eq!(nodes[0].role, "tabgroup");
+	}
+
 	fn tree(m: &mut Mock) -> String {
 		snapshot(m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
 			.unwrap()

@@ -897,11 +897,11 @@ export class ExtensionUiController {
 				tui: this.ctx.ui,
 				cwd: this.ctx.sessionManager.getCwd(),
 				timeout: dialogOptions?.timeout,
-				onTimeout: data => {
+				onTimeout: (data, notes) => {
 					dialogOptions?.onTimeout?.();
-					settle({ data, timedOut: true });
+					settle({ data, ...(notes.length ? { notes } : {}), timedOut: true });
 				},
-				onSubmit: data => settle({ data }),
+				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
 				inputGuard,
 			});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [18.18.8] - 2026-11-11
+
+- Fixed a cursor tool result transform failure being swallowed silently — it is now logged as a warning ([#18654](https://github.com/can1357/oh-my-pi/pull/18654) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.18.2] - 2026-11-08
 
 ### Added
