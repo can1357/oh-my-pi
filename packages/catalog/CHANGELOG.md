@@ -6,6 +6,7 @@
 
 - Fixed Gemini 4 Argon and Carbon on Command Code showing no reasoning levels; both now offer low, medium, and high
 - Fixed OpenCode Zen Gemini 4 Carbon requests going to the chat-completions endpoint instead of the native Gemini endpoint Zen serves it on
+- `models.db` now drops expired model-cache rows left behind by older app versions when refreshing a provider, instead of accumulating them across upgrades ([#18821](https://github.com/can1357/oh-my-pi/pull/18821) by [@iliaal](https://github.com/iliaal))
 
 ## [18.18.8] - 2026-11-11
 

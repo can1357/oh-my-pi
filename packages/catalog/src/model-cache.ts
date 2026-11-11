@@ -34,6 +34,16 @@ const CACHE_SCHEMA_VERSION = 15;
 const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;
 /**
+ * Retain incompatible rows (`version` or `materialization_policy` from another
+ * binary) long enough that switching between two active builds sharing
+ * `models.db` does not wipe each other's warm caches, then reap abandoned
+ * upgrade residue (`app-<old>`, retired `provider:models-vN` namespaces,
+ * disabled providers from old releases) on writes once past retention.
+ * Current-policy rows are never pruned here: even when expired, they remain
+ * the offline fallback until discovery succeeds.
+ */
+const STALE_POLICY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/**
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
  * semantics change without an app-version change. The compiled-rules content
  * hash catches every KDL policy edit even when the package version is unchanged;
@@ -673,6 +683,35 @@ function headersEqual(left: Record<string, string> | undefined, right: Record<st
 	return true;
 }
 
+function pruneExpiredIncompatibleRows(db: Database, policy: string, nowMs: number): boolean {
+	const cutoff = nowMs - STALE_POLICY_RETENTION_MS;
+	if (!Number.isFinite(cutoff) || cutoff <= 0) return false;
+	const result = db.run(
+		`DELETE FROM model_cache
+		WHERE (version != ? OR materialization_policy != ?)
+			AND COALESCE(
+				(
+					SELECT r.updated_at
+					FROM model_cache_refresh r
+					WHERE r.provider_id = model_cache.provider_id
+						AND r.payload_updated_at = model_cache.updated_at
+				),
+				updated_at
+			) <= ?`,
+		[CACHE_SCHEMA_VERSION, policy, cutoff],
+	);
+	if (result.changes > 0) {
+		db.run(
+			`DELETE FROM model_cache_refresh
+			WHERE NOT EXISTS (
+				SELECT 1 FROM model_cache m WHERE m.provider_id = model_cache_refresh.provider_id
+			)`,
+		);
+		return true;
+	}
+	return false;
+}
+
 /**
  * Persist a provider snapshot.
  *
@@ -745,6 +784,7 @@ export function writeModelCache<TApi extends Api>(
 			const serializedModels = JSON.stringify(cachedModels);
 			// Length prefix: a collision would also need an equal payload size.
 			const modelsHash = `${serializedModels.length.toString(36)}:${Bun.hash(serializedModels).toString(36)}`;
+			let prunedIncompatibleRows = false;
 			const outcome = db
 				.transaction((): "skipped" | "refreshed" | "written" => {
 					const matchStmt = db.prepare<
@@ -788,6 +828,7 @@ export function writeModelCache<TApi extends Api>(
 								authoritative = excluded.authoritative`,
 							[providerId, stored.updated_at, updatedAt, authoritativeFlag],
 						);
+						prunedIncompatibleRows = pruneExpiredIncompatibleRows(db, policy, updatedAt);
 						return "refreshed";
 					}
 					db.run(
@@ -811,9 +852,13 @@ export function writeModelCache<TApi extends Api>(
 						],
 					);
 					db.run("DELETE FROM model_cache_refresh WHERE provider_id = ?", [providerId]);
+					prunedIncompatibleRows = pruneExpiredIncompatibleRows(db, policy, updatedAt);
 					return "written";
 				})
 				.immediate();
+			if (prunedIncompatibleRows) {
+				invalidateReadPath(resolveCacheDb(dbPath).resolvedPath);
+			}
 			if (outcome === "skipped") {
 				writeStats.skippedWrites++;
 			} else if (outcome === "refreshed") {

@@ -1,9 +1,13 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthStorage, type Context, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { ModelRegistry, type ProviderConfigInput } from "../../src/config/model-registry";
 import { authService, prewarmModelRegistryMirror } from "../../src/thread/services/auth";
@@ -423,5 +427,87 @@ describe("worker model registry mirror", () => {
 		registry.registerProvider(PROVIDER, runtimeConfig({ apiKeys: [], aborted: false }), SOURCE);
 		await flushToMirrors();
 		expect(await probe.providerModels(registry, PROVIDER)).toBe(mainProviderModels(PROVIDER));
+	});
+
+	it("prewarmModelRegistryMirror warms available models without materializing unauthenticated cached providers", async () => {
+		const dbPath = path.join(dir, "models.db");
+		const nanogptCacheId = resolveModelCacheProviderId("nanogpt");
+		const openrouterCacheId = resolveModelCacheProviderId("openrouter");
+		writeModelCache(
+			nanogptCacheId,
+			Date.now(),
+			[
+				buildModel({
+					id: "nanogpt-poison",
+					name: "nanogpt-poison",
+					api: "openai-completions",
+					provider: "nanogpt",
+					baseUrl: "https://nano-gpt.com/api/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				}),
+			],
+			true,
+			"",
+			dbPath,
+		);
+		writeModelCache(
+			openrouterCacheId,
+			Date.now(),
+			[
+				buildModel({
+					id: "cached-worker-probe",
+					name: "Cached Worker Probe",
+					api: "openai-completions",
+					provider: "openrouter",
+					baseUrl: "https://openrouter.ai/api/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				}),
+			],
+			true,
+			"",
+			dbPath,
+		);
+		const writableDb = new Database(dbPath);
+		try {
+			writableDb.run("UPDATE model_cache SET models = '{corrupt-json' WHERE provider_id = ?", [nanogptCacheId]);
+		} finally {
+			writableDb.close();
+		}
+		const hasNanogptRow = (): boolean => {
+			const readonlyDb = new Database(dbPath, { readonly: true });
+			try {
+				return (
+					readonlyDb
+						.query<{ found: number }, [string]>("SELECT 1 AS found FROM model_cache WHERE provider_id = ?")
+						.get(nanogptCacheId) !== null
+				);
+			} finally {
+				readonlyDb.close();
+			}
+		};
+
+		authStorage.keys.setRuntime("openai", "sk-worker-prewarm");
+		const lazyOwner = new ModelRegistry(authStorage, path.join(dir, "models.yml"), { cacheDbPath: dbPath });
+
+		await prewarmModelRegistryMirror(fixture.peer, lazyOwner);
+		expect(hasNanogptRow()).toBe(true);
+		expect(await probe.available(lazyOwner, "openai", "gpt-4o-mini")).toBe(true);
+		expect(hasNanogptRow()).toBe(true);
+
+		// Provider-scoped worker lookup hydrates only `openrouter`, leaving `nanogpt` unread until `getAll`.
+		const openrouterFound = await probe.find(lazyOwner, "openrouter", "cached-worker-probe");
+		expect(openrouterFound ? JSON.parse(openrouterFound).name : undefined).toBe("Cached Worker Probe");
+		expect(hasNanogptRow()).toBe(true);
+
+		await probe.providerModels(lazyOwner, "openrouter");
+		expect(hasNanogptRow()).toBe(false);
 	});
 });
