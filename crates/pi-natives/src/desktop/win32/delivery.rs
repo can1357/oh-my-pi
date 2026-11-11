@@ -217,6 +217,55 @@ pub fn text_units(text: &str) -> impl Iterator<Item = TextUnit> + '_ {
 	})
 }
 
+/// Observed facts about a possible modal dialog opened by a menu command.
+#[derive(Clone, Copy, Debug)]
+pub struct ModalPopup {
+	/// Opaque window identity used to exclude windows present before dispatch.
+	pub id:              usize,
+	/// Whether the target directly owns this window.
+	pub owned_by_target: bool,
+	/// Whether this window belongs to the target's process and thread.
+	pub same_thread:     bool,
+	/// Whether this window accepts input.
+	pub enabled:         bool,
+	/// Whether this window is visible.
+	pub visible:         bool,
+	/// Whether this window answered the bounded responsiveness probe.
+	pub responsive:      bool,
+}
+
+impl ModalPopup {
+	/// Whether this new window is eligible for a modal responsiveness probe.
+	pub fn is_candidate(&self, before: &[usize]) -> bool {
+		!before.contains(&self.id)
+			&& self.owned_by_target
+			&& self.same_thread
+			&& self.enabled
+			&& self.visible
+	}
+}
+
+/// A completed send wins; otherwise confirmation needs a disabled owner and
+/// a new owned, same-thread, visible, enabled, responsive dialog.
+/// A missing `before` snapshot cannot confirm a timed-out send.
+pub fn command_completed(
+	sent: bool,
+	owner_enabled: bool,
+	before: Option<&[usize]>,
+	popups: &[ModalPopup],
+) -> bool {
+	if sent {
+		return true;
+	}
+	let Some(before) = before else {
+		return false;
+	};
+	!owner_enabled
+		&& popups
+			.iter()
+			.any(|popup| popup.is_candidate(before) && popup.responsive)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -385,5 +434,42 @@ mod tests {
 		assert_eq!(units("\r\r\n\n"), [Enter, Enter, Enter]);
 		assert_eq!(units("\n\r"), [Enter, Enter]);
 		assert_eq!(units("é\t"), [Char('é'), Char('\t')]);
+	}
+
+	const DIALOG: ModalPopup = ModalPopup {
+		id:              2,
+		owned_by_target: true,
+		same_thread:     true,
+		enabled:         true,
+		visible:         true,
+		responsive:      true,
+	};
+
+	#[test]
+	fn modal_command_timeout_is_confirmed_by_new_responsive_dialog() {
+		let popups = [ModalPopup { id: 1, ..DIALOG }, DIALOG];
+		assert!(command_completed(false, false, Some(&[1]), &popups));
+	}
+
+	#[test]
+	fn timeout_without_new_modal_evidence_stays_unconfirmed() {
+		assert!(!command_completed(false, false, Some(&[1]), &[]));
+		assert!(!command_completed(false, false, None, &[DIALOG]));
+		assert!(!command_completed(false, true, Some(&[1]), &[DIALOG]));
+		assert!(!command_completed(false, false, Some(&[1, 2]), &[DIALOG]));
+		for popup in [
+			ModalPopup { owned_by_target: false, ..DIALOG },
+			ModalPopup { same_thread: false, ..DIALOG },
+			ModalPopup { enabled: false, ..DIALOG },
+			ModalPopup { visible: false, ..DIALOG },
+			ModalPopup { responsive: false, ..DIALOG },
+		] {
+			assert!(!command_completed(false, false, Some(&[1]), &[popup]));
+		}
+	}
+
+	#[test]
+	fn completed_command_needs_no_dialog() {
+		assert!(command_completed(true, true, None, &[]));
 	}
 }

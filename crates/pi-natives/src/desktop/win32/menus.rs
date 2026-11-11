@@ -34,7 +34,7 @@ use super::{
 		types::DesktopWindow,
 	},
 	ax::Win32Ax,
-	menu_delivery::{ModalPopup, command_completed},
+	delivery::{ModalPopup, command_completed},
 	window,
 };
 
@@ -308,9 +308,6 @@ fn thread_windows(thread: u32) -> Option<Vec<usize>> {
 fn modal_popups(target: &Target, before: &[usize]) -> Vec<ModalPopup> {
 	let mut popups = Vec::new();
 	for id in thread_windows(target.thread).unwrap_or_default() {
-		if before.contains(&id) {
-			continue;
-		}
 		let hwnd = with_exposed_provenance_mut(id);
 		let mut pid = 0;
 		// SAFETY: pid is writable and Windows validates the window handles.
@@ -326,7 +323,7 @@ fn modal_popups(target: &Target, before: &[usize]) -> Vec<ModalPopup> {
 			visible: unsafe { IsWindowVisible(hwnd) } != 0,
 			responsive: false,
 		};
-		if popup.owned_by_target && popup.same_thread && popup.enabled && popup.visible {
+		if popup.is_candidate(before) {
 			let mut result = 0;
 			// SAFETY: WM_NULL carries no data and has no window side effects.
 			popup.responsive = unsafe {
