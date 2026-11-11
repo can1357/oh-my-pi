@@ -102,6 +102,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	ToolApprovalDecision,
 } from "./types";
 import {
 	ASIDE_MESSAGE_COMMIT,
@@ -3851,8 +3852,9 @@ async function executeToolCalls(
 
 	let lastExclusive: Promise<void> = Promise.resolve();
 	let sharedTasks: Promise<void>[] = [];
-	// The shared calls among `sharedTasks` whose approval tier is not "read":
-	// they may change files that a later call running beside them reads.
+	// The shared calls among `sharedTasks` whose approval, asked with the call's
+	// arguments, is not "read": they may change files that a later call running
+	// beside them reads.
 	let sharedEffects: Promise<void>[] = [];
 	const tasks: Promise<void>[] = [];
 
@@ -3953,16 +3955,19 @@ async function executeToolCalls(
 			sharedEffects = [];
 		} else {
 			sharedTasks.push(task);
-			// Dynamic approvals can depend on transformed arguments or the final
-			// per-call context. Neither is available while scheduling, so count
-			// those calls conservatively without invoking host code early.
+			// A dynamic approval is asked with the prepared arguments, as concurrency
+			// is above, and no context; one that throws, or that says anything but
+			// "read", counts as a call that may write. A resolver that says "write"
+			// only with a context or only for transformed arguments is not counted, so
+			// a read after it returns what it read first.
 			const approval = record.tool?.approval;
-			const tier =
-				typeof approval === "function"
-					? "exec"
-					: typeof approval === "string"
-						? approval
-						: (approval?.tier ?? "exec");
+			let decision: ToolApprovalDecision | undefined;
+			try {
+				decision = typeof approval === "function" ? approval(record.args) : approval;
+			} catch {
+				decision = undefined;
+			}
+			const tier = typeof decision === "string" ? decision : (decision?.tier ?? "exec");
 			if (tier !== "read") sharedEffects.push(task);
 		}
 	}

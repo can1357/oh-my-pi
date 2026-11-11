@@ -2578,36 +2578,30 @@ describe("agentLoop with AgentMessage", () => {
 		expect(settled["tool-read-later"]).toBeUndefined();
 	});
 
-	it("transforms a dynamic shared call once after the preceding exclusive call settles", async () => {
-		const toolSchema = type({ value: "string", tier: "'read' | 'exec'" });
+	it("counts a call as writing by what its approval resolver says for the call's arguments", async () => {
+		const toolSchema = type({ value: "string", tier: "'read' | 'exec' | 'throw'" });
 		const settled: Record<string, Promise<void> | undefined> = {};
-		const transformed: string[] = [];
-		const ran: Record<string, string> = {};
-		let currentTier = "read";
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "op",
 			label: "Op",
 			description: "Op tool",
 			parameters: toolSchema,
-			approval: args =>
-				args && typeof args === "object" && "tier" in args && args.tier === "read" ? "read" : "exec",
-			concurrency: args => (args.value === "barrier" ? "exclusive" : "shared"),
+			approval: args => {
+				const tier = args && typeof args === "object" && "tier" in args ? args.tier : undefined;
+				if (tier === "throw") throw new Error("cannot classify");
+				return tier === "read" ? "read" : "exec";
+			},
 			async execute(_toolCallId, params) {
-				if (params.value === "barrier") currentTier = "exec";
-				ran[params.value] = params.tier;
 				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
 			},
 		};
+		const call = (value: string, tier: "read" | "exec" | "throw") =>
+			({ type: "toolCall", id: `tool-${value}`, name: "op", arguments: { value, tier } }) as const;
 		const mock = createMockModel({
 			responses: [
-				{
-					content: [
-						{ type: "toolCall", id: "tool-barrier", name: "op", arguments: { value: "barrier", tier: "read" } },
-						// Asks as a read; the transform turns it into a write.
-						{ type: "toolCall", id: "tool-write", name: "op", arguments: { value: "write", tier: "read" } },
-						{ type: "toolCall", id: "tool-read", name: "op", arguments: { value: "read", tier: "read" } },
-					],
-				},
+				{ content: [call("read-1", "read"), call("read-2", "read")] },
+				{ content: [call("write", "exec"), call("read-3", "read")] },
+				{ content: [call("unknown", "throw"), call("read-4", "read")] },
 				{ content: ["done"] },
 			],
 		});
@@ -2615,10 +2609,6 @@ describe("agentLoop with AgentMessage", () => {
 		const config: AgentLoopConfig = {
 			model: mock.model,
 			convertToLlm: identityConverter,
-			transformToolCallArguments: args => {
-				transformed.push(String(args.value));
-				return args.value === "write" ? { ...args, tier: currentTier } : args;
-			},
 			getToolContext: toolCall => {
 				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
 				return {} as AgentToolContext;
@@ -2627,50 +2617,11 @@ describe("agentLoop with AgentMessage", () => {
 
 		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
 
-		expect(settled["tool-read"]).toBeInstanceOf(Promise);
-		expect(ran).toEqual({ barrier: "read", write: "exec", read: "read" });
-		expect(transformed.sort()).toEqual(["barrier", "read", "write"]);
-	});
-
-	it("counts a call as writing when its approval resolver requires the current call context", async () => {
-		const toolSchema = type({ value: "string" });
-		const settled: Record<string, Promise<void> | undefined> = {};
-		const tool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "op",
-			label: "Op",
-			description: "Op tool",
-			parameters: toolSchema,
-			approval: (...[, context]: [unknown, AgentToolContext?]) =>
-				context && "toolCall" in context && context.toolCall ? "write" : "read",
-			async execute(_toolCallId, params) {
-				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
-			},
-		};
-		const mock = createMockModel({
-			responses: [
-				{
-					content: [
-						{ type: "toolCall", id: "tool-write", name: "op", arguments: { value: "write" } },
-						{ type: "toolCall", id: "tool-read", name: "op", arguments: { value: "read" } },
-					],
-				},
-				{ content: ["done"] },
-			],
-		});
-		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
-		const config: AgentLoopConfig = {
-			model: mock.model,
-			convertToLlm: identityConverter,
-			getToolContext: toolCall => {
-				if (toolCall) settled[toolCall.toolCalls[toolCall.index].id] = toolCall.earlierEffectsSettled;
-				return { toolCall } as AgentToolContext;
-			},
-		};
-
-		await agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
-
-		expect(settled["tool-write"]).toBeUndefined();
-		expect(settled["tool-read"]).toBeInstanceOf(Promise);
+		// A resolver that says "read" for the earlier call's arguments leaves the later call alone;
+		// one that says anything else, or throws, makes it a writer.
+		expect(settled["tool-read-2"]).toBeUndefined();
+		expect(settled["tool-read-3"]).toBeInstanceOf(Promise);
+		expect(settled["tool-read-4"]).toBeInstanceOf(Promise);
 	});
 
 	it("drops incomplete tool calls when assistant aborts before toolcall_end", async () => {

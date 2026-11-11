@@ -605,3 +605,55 @@ describe("a read beside an earlier writing call", () => {
 		await expect(read).rejects.toThrow(/^Aborted/);
 	});
 });
+
+describe("a read after another read in the same message", () => {
+	it("resolves its target once, since the earlier read writes nothing", async () => {
+		const directory = await tempDirectory();
+		await Bun.write(path.join(directory, "a.txt"), "a\n");
+		let resolves = 0;
+		const router = InternalUrlRouter.instance();
+		const spec = router.spec("proc");
+		if (!spec) throw new Error("no proc:// handler");
+		// A device-backed view: a second resolution would be a second request.
+		router.register({
+			scheme: "proc",
+			spec: { ...spec, write: undefined },
+			resolve: async () => {
+				resolves++;
+				return { url: "proc://svc", content: "ready\n", contentType: "text/plain" };
+			},
+		});
+		const session = createSession(directory);
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "a.txt" } },
+						{ type: "toolCall", id: "read-2", name: "read", arguments: { path: "proc://svc" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const messages = await agentLoop(
+			[{ role: "user", content: "Read both", timestamp: Date.now() }],
+			{ systemPrompt: [""], messages: [], tools: [new ReadTool(session)] },
+			{
+				model: mock.model,
+				convertToLlm: (all: AgentMessage[]) =>
+					all.filter(
+						message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					) as Message[],
+				getToolContext: toolCall => ({ toolCall }) as AgentToolContext,
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		const read = messages.find(
+			(message): message is ToolResultMessage => message.role === "toolResult" && message.toolCallId === "read-2",
+		);
+		expect(read?.content.map(block => (block.type === "text" ? block.text : "")).join("")).toContain("ready");
+		expect(resolves).toBe(1);
+	});
+});

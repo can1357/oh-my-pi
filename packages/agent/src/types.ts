@@ -693,7 +693,8 @@ export interface ToolCallContext {
 	providerMetadata?: ToolCallProviderMetadata;
 	/**
 	 * Settles once every earlier call of this batch that runs alongside this one
-	 * and may change files (approval tier other than "read", e.g. `bash`) has
+	 * and may change files (its approval, asked with its arguments and no context,
+	 * is not "read", e.g. `bash`) has
 	 * finished; absent when there is none. The model sees the batch's results only
 	 * after the whole batch, so a read-only tool can check its target again here
 	 * and redo a read those calls changed instead of returning stale content.
