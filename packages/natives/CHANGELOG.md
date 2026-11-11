@@ -60,6 +60,7 @@
 
 - Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably ([#18915](https://github.com/can1357/oh-my-pi/pull/18915) by [@will-bogusz](https://github.com/will-bogusz))
 - Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably; combo errors distinguish failures before and after writing ([#18915](https://github.com/can1357/oh-my-pi/pull/18915) by [@will-bogusz](https://github.com/will-bogusz))
+- Windows `setValue()` now confirms text values, notifies the app for native combo changes, and refuses combo-box writes it cannot verify or notify reliably, including extended-combo descendants; combo item reads stay bounded while lists change, and errors distinguish failures before and after writing ([#18915](https://github.com/can1357/oh-my-pi/pull/18915) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 

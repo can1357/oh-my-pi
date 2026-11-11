@@ -61,10 +61,10 @@ pub(super) const fn plan(enabled: bool, style: u32, exact_index: Option<usize>) 
 	}
 }
 
-fn find_exact(
+fn find_exact<T: std::ops::Deref<Target = [u16]>>(
 	expected: &[u16],
 	count: usize,
-	mut next: impl FnMut(usize) -> CoreResult<Option<(usize, Vec<u16>)>>,
+	mut next: impl FnMut(usize) -> CoreResult<Option<(usize, T)>>,
 ) -> CoreResult<Option<usize>> {
 	let mut start = usize::MAX;
 	let mut first = None;
@@ -76,7 +76,7 @@ fn find_exact(
 			break;
 		}
 		first.get_or_insert(index);
-		if item == expected {
+		if &*item == expected {
 			return Ok(Some(index));
 		}
 		start = index;
@@ -101,6 +101,16 @@ pub(super) fn combo_target(
 		Controls::{COMBOBOXINFO, GetComboBoxInfo},
 		WindowsAndMessaging::GetParent,
 	};
+	// ComboBoxEx32 owns an ordinary combo (and edit) internally, but those
+	// descendants still need the extended control's unsupported notifications.
+	let mut ancestor = hwnd;
+	while !ancestor.is_null() {
+		if route(&super::window::class_name(ancestor)) == ValueRoute::RefuseCombo {
+			return ancestor;
+		}
+		// SAFETY: GetParent only queries the native ancestry.
+		ancestor = unsafe { GetParent(ancestor) };
+	}
 	// A raw UIA ref can name the edit child rather than the combo itself.
 	// Only normalize the edit handle the native combo API identifies.
 	// SAFETY: GetParent only queries the supplied handle.
@@ -117,6 +127,45 @@ pub(super) fn combo_target(
 }
 
 #[cfg(target_os = "windows")]
+fn combo_items(
+	hwnd: windows_sys::Win32::Foundation::HWND,
+) -> CoreResult<windows::Win32::UI::Accessibility::IAccessible> {
+	use windows::{
+		Win32::{
+			Foundation::HWND,
+			UI::Accessibility::{AccessibleObjectFromWindow, IAccessible},
+		},
+		core::Interface,
+	};
+	use windows_sys::Win32::UI::{
+		Controls::{COMBOBOXINFO, GetComboBoxInfo},
+		WindowsAndMessaging::OBJID_CLIENT,
+	};
+	let mut info =
+		COMBOBOXINFO { cbSize: std::mem::size_of::<COMBOBOXINFO>() as u32, ..Default::default() };
+	// SAFETY: info is writable and correctly sized for the native combo query.
+	if unsafe { GetComboBoxInfo(hwnd, &mut info) } == 0 || info.hwndList.is_null() {
+		return Err(combo_failure(false));
+	}
+	let mut raw = std::ptr::null_mut();
+	// SAFETY: the API returns an owned IAccessible reference for the list.
+	unsafe {
+		AccessibleObjectFromWindow(
+			HWND(info.hwndList),
+			OBJID_CLIENT as u32,
+			&IAccessible::IID,
+			&mut raw,
+		)
+	}
+	.map_err(|_| combo_failure(false))?;
+	if raw.is_null() {
+		return Err(combo_failure(false));
+	}
+	// SAFETY: the successful query transferred one reference of this interface.
+	Ok(unsafe { IAccessible::from_raw(raw) })
+}
+
+#[cfg(target_os = "windows")]
 pub(super) fn set_combo(
 	hwnd: windows_sys::Win32::Foundation::HWND,
 	text: &str,
@@ -125,9 +174,9 @@ pub(super) fn set_combo(
 	use windows_sys::Win32::UI::{
 		Controls::{COMBOBOXINFO, GetComboBoxInfo},
 		WindowsAndMessaging::{
-			CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_GETLBTEXTLEN,
-			CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE, CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID,
-			GetParent, GetWindowLongW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_SETTEXT,
+			CB_FINDSTRINGEXACT, CB_GETCOUNT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE,
+			CBN_SELCHANGE, CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW,
+			SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_SETTEXT,
 		},
 	};
 
@@ -160,19 +209,28 @@ pub(super) fn set_combo(
 	}
 	let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
 	let count = usize::try_from(send(hwnd, CB_GETCOUNT, 0, 0)?).map_err(|_| failed())?;
+	let items = (count > 0).then(|| combo_items(hwnd)).transpose()?;
 	let exact_index = find_exact(&wide[..wide.len() - 1], count, |start| {
 		let found = send(hwnd, CB_FINDSTRINGEXACT, start, wide.as_ptr() as isize)?;
 		let Ok(index) = usize::try_from(found) else {
 			return Ok(None);
 		};
-		let len = usize::try_from(send(hwnd, CB_GETLBTEXTLEN, index, 0)?).map_err(|_| failed())?;
-		let mut item = vec![0_u16; len + 1];
-		let copied = usize::try_from(send(hwnd, CB_GETLBTEXT, index, item.as_mut_ptr() as isize)?)
-			.map_err(|_| failed())?;
-		if copied > len {
-			return Err(failed());
+		// MSAA returns an owned BSTR. Unlike CB_GETLBTEXT, this API never
+		// writes an unbounded string into a caller-sized Rust buffer when an
+		// app changes its list between the length query and the text query.
+		let child = i32::try_from(index)
+			.ok()
+			.and_then(|index| index.checked_add(1))
+			.ok_or_else(failed)?;
+		// SAFETY: child is a one-based list-item identifier; COM owns the
+		// returned string allocation, including cross-process marshalling.
+		let item = unsafe {
+			items
+				.as_ref()
+				.ok_or_else(failed)?
+				.get_accName(&child.into())
 		}
-		item.truncate(copied);
+		.map_err(|_| failed())?;
 		Ok(Some((index, item)))
 	})?;
 	// SAFETY: GetParent accepts the native combo handle.
@@ -310,23 +368,84 @@ mod tests {
 			} else {
 				(1, "abc")
 			};
-			Ok(Some((index, text.encode_utf16().collect())))
+			Ok(Some((index, text.encode_utf16().collect::<Vec<_>>())))
 		})
 		.unwrap();
 		assert_eq!(actual, Some(1));
 		let actual =
-			find_exact(&expected, 2, |_| Ok(Some((0, "ABC".encode_utf16().collect())))).unwrap();
+			find_exact(&expected, 2, |_| Ok(Some((0, "ABC".encode_utf16().collect::<Vec<_>>()))))
+				.unwrap();
 		assert_eq!(actual, None);
+	}
+
+	#[cfg(target_os = "windows")]
+	std::thread_local! {
+		static ORIGINAL_COMBO_PROC: std::cell::Cell<windows_sys::Win32::UI::WindowsAndMessaging::WNDPROC>
+			= const { std::cell::Cell::new(None) };
+		static UNBOUNDED_COMBO_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+		static STALE_COMBO_LENGTH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+		static COMBO_WRITE_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+	}
+
+	#[cfg(target_os = "windows")]
+	unsafe extern "system" fn growing_combo(
+		hwnd: windows_sys::Win32::Foundation::HWND,
+		message: u32,
+		wparam: usize,
+		lparam: isize,
+	) -> isize {
+		use windows_sys::Win32::UI::WindowsAndMessaging::{
+			CB_DELETESTRING, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_INSERTSTRING, CB_SETCURSEL,
+			CallWindowProcW, SendMessageW,
+		};
+		let original = ORIGINAL_COMBO_PROC.with(|proc| proc.get());
+		if message == CB_SETCURSEL {
+			COMBO_WRITE_STARTED.with(|writing| writing.set(true));
+		}
+		if message == CB_GETLBTEXT
+			&& wparam == 2
+			&& !COMBO_WRITE_STARTED.with(|writing| writing.get())
+			&& STALE_COMBO_LENGTH.with(|stale| stale.get())
+		{
+			// Detect the unsafe second query after growth without overwriting
+			// its undersized buffer. Native atomic/internal reads are allowed.
+			UNBOUNDED_COMBO_READS.with(|count| count.set(count.get() + 1));
+			return -1;
+		}
+		// SAFETY: original is the native procedure saved when installing this
+		// test subclass, and this callback preserves the message arguments.
+		let result = unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) };
+		if message == CB_GETLBTEXTLEN
+			&& wparam == 2
+			&& !COMBO_WRITE_STARTED.with(|writing| writing.get())
+		{
+			STALE_COMBO_LENGTH.with(|stale| stale.set(true));
+			let larger: Vec<u16> = "a much longer dynamically replaced candidate"
+				.encode_utf16()
+				.chain(Some(0))
+				.collect();
+			// SAFETY: this thread owns the combo; the string outlives both
+			// synchronous messages. Simulate growth after returning its old size.
+			unsafe {
+				SendMessageW(hwnd, CB_DELETESTRING, wparam, 0);
+				SendMessageW(hwnd, CB_INSERTSTRING, wparam, larger.as_ptr() as isize);
+			}
+		}
+		result
 	}
 
 	#[cfg(target_os = "windows")]
 	#[test]
 	fn editing_an_unlisted_value_clears_the_previous_selection() {
 		use windows_sys::Win32::UI::{
-			Controls::{COMBOBOXINFO, GetComboBoxInfo},
+			Controls::{
+				CBEM_GETCOMBOCONTROL, CBEM_GETEDITCONTROL, COMBOBOXINFO, GetComboBoxInfo,
+				ICC_USEREX_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+			},
 			WindowsAndMessaging::{
 				CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWN, CBS_HASSTRINGS,
-				CreateWindowExW, DestroyWindow, GetWindowTextW, SendMessageW, WS_CHILD, WS_OVERLAPPED,
+				CreateWindowExW, DestroyWindow, GWLP_WNDPROC, GetWindowTextW, SendMessageW,
+				SetWindowLongPtrW, WNDPROC, WS_CHILD, WS_OVERLAPPED,
 			},
 		};
 		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -335,6 +454,12 @@ mod tests {
 		// calls; both are system classes, and messages to a window this thread
 		// created run synchronously.
 		unsafe {
+			windows::Win32::System::Com::CoInitializeEx(
+				None,
+				windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+			)
+			.ok()
+			.unwrap();
 			let parent = CreateWindowExW(
 				0,
 				frame.as_ptr(),
@@ -390,7 +515,57 @@ mod tests {
 			let mut buffer = [0_u16; 32];
 			let length = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
 			assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), "purple");
+			SendMessageW(hwnd, CB_ADDSTRING, 0, wide("grow").as_ptr() as isize);
+			let original = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, growing_combo as *const () as isize);
+			assert_ne!(original, 0);
+			ORIGINAL_COMBO_PROC.with(|proc| proc.set(std::mem::transmute::<isize, WNDPROC>(original)));
+			UNBOUNDED_COMBO_READS.with(|count| count.set(0));
+			STALE_COMBO_LENGTH.with(|stale| stale.set(false));
+			COMBO_WRITE_STARTED.with(|writing| writing.set(false));
+			let result = set_combo(hwnd, "grow", true);
+			SetWindowLongPtrW(hwnd, GWLP_WNDPROC, original);
+			result.unwrap();
+			assert!(STALE_COMBO_LENGTH.with(|stale| stale.get()));
+			assert!(UNBOUNDED_COMBO_READS.with(|count| count.get()) > 0);
+			// MSAA owns its buffers even when its provider encounters this
+			// race. The changed candidate no longer matches; write the
+			// requested value through the editable route instead.
+			assert_eq!(SendMessageW(hwnd, CB_GETCURSEL, 0, 0), -1);
+			let length = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
+			assert_eq!(String::from_utf16_lossy(&buffer[..length as usize]), "grow");
+
+			let common = INITCOMMONCONTROLSEX {
+				dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+				dwICC:  ICC_USEREX_CLASSES,
+			};
+			assert_ne!(InitCommonControlsEx(&common), 0);
+			let extended = CreateWindowExW(
+				0,
+				wide("ComboBoxEx32").as_ptr(),
+				empty.as_ptr(),
+				WS_CHILD | CBS_DROPDOWN as u32,
+				0,
+				0,
+				100,
+				100,
+				parent,
+				8 as _,
+				std::ptr::null_mut(),
+				std::ptr::null(),
+			);
+			assert!(!extended.is_null());
+			let inner = SendMessageW(extended, CBEM_GETCOMBOCONTROL, 0, 0)
+				as windows_sys::Win32::Foundation::HWND;
+			let edit = SendMessageW(extended, CBEM_GETEDITCONTROL, 0, 0)
+				as windows_sys::Win32::Foundation::HWND;
+			assert!(!inner.is_null() && !edit.is_null());
+			for descendant in [extended, inner, edit] {
+				let target = combo_target(descendant);
+				assert_eq!(target, extended);
+				assert_eq!(route(&super::super::window::class_name(target)), ValueRoute::RefuseCombo);
+			}
 			DestroyWindow(parent);
+			windows::Win32::System::Com::CoUninitialize();
 		}
 	}
 }
