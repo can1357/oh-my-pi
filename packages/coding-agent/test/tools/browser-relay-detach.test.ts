@@ -146,6 +146,16 @@ class ChromeBackedExtension {
 		if (message.t !== "rpc" || typeof message.id !== "number") return;
 		const id = message.id;
 		switch (message.op) {
+			// A relay open without a target creates its own tab: hand omp this page as that tab.
+			case "createTab": {
+				const tab = { tabId: TAB_ID, url: this.url, title: "Sign in", active: false, discarded: false };
+				return this.#reply(id, { result: { tab: { ...tab, windowId: 1, pinned: false, groupId: -1 } } });
+			}
+			case "removeTab": {
+				await this.#chromeSend("Target.closeTarget", { targetId: this.targetId }).promise;
+				this.#relay.send(JSON.stringify({ t: "tabRemoved", tabId: TAB_ID }));
+				return this.#reply(id, { result: {} });
+			}
 			case "attach": {
 				if (this.refuseAttach) return this.#reply(id, { error: FOREIGN_FRAME_REFUSAL });
 				const answer = await this.#chromeSend("Target.attachToTarget", { targetId: this.targetId, flatten: true })
@@ -185,16 +195,6 @@ class ChromeBackedExtension {
 				if (!this.#inFlight.delete(sent.id)) return;
 				if (isRecord(answer.error)) return this.#reply(id, { error: String(answer.error.message) });
 				return this.#reply(id, { result: answer.result });
-			}
-			// A relay open without a target creates its own tab: hand omp this page as that tab.
-			case "createTab": {
-				const tab = { tabId: TAB_ID, url: this.url, title: "Sign in", active: false, discarded: false };
-				return this.#reply(id, { result: { tab: { ...tab, windowId: 1, pinned: false, groupId: -1 } } });
-			}
-			case "removeTab": {
-				await this.#chromeSend("Target.closeTarget", { targetId: this.targetId }).promise;
-				this.#relay.send(JSON.stringify({ t: "tabRemoved", tabId: TAB_ID }));
-				return this.#reply(id, { result: {} });
 			}
 			default:
 				return this.#reply(id, { result: {} });
