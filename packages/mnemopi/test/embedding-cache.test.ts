@@ -243,10 +243,10 @@ describe("embedding cache", () => {
 			const created = new Date(Date.now() - 181 * 24 * 60 * 60 * 1000).toISOString();
 			memory.conn.run("UPDATE episodic_memory SET tier = 2, created_at = ? WHERE id = ?", [created, id]);
 			// Seeded before the first recall, so no cached copy can predate it.
-			memory.conn.run(
-				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)",
-				[id, currentEmbeddingModel()],
-			);
+			memory.conn.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)", [
+				id,
+				currentEmbeddingModel(),
+			]);
 			expect(await recallIds(memory)).toContain(id);
 
 			expect(memory.beam.degradeEpisodic(false).tier2_to_tier3).toBe(1);
@@ -297,10 +297,10 @@ describe("embedding cache", () => {
 							index < 10 ? 0.9 : 0.1,
 						],
 					);
-					beam.db.run(
-						"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)",
-						[id, currentEmbeddingModel()],
-					);
+					beam.db.run("INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, '[1,0]', ?)", [
+						id,
+						currentEmbeddingModel(),
+					]);
 				};
 				for (let index = 0; index < 10; index += 1) add(index);
 				if (warmFirst) await beam.recall("zorblat plan", 1, options);
