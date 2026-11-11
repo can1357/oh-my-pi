@@ -549,8 +549,7 @@ impl X11Capture {
 			);
 			if attributes.override_redirect && owner(window) == owner(client) {
 				let origin = (i32::from(origin.dst_x), i32::from(origin.dst_y));
-				let inner = (origin.0, origin.1, u32::from(geometry.width), u32::from(geometry.height));
-				if let Some(part) = intersect(area, inner) {
+				if let Some(part) = intersect(area, outer) {
 					above.popups.push((window, part, origin));
 				}
 			} else if intersect(area, outer).is_some() {
@@ -964,14 +963,18 @@ mod tests {
 			window(conn, root, (100, 140, 200, 160), &CreateWindowAux::new().background_pixel(GREY));
 		let blue =
 			window(conn, frame, (0, 10, 200, 150), &CreateWindowAux::new().background_pixel(BLUE));
-		window(
+		let popup = window(
 			conn,
 			root,
 			(10, 10, 40, 30),
 			&CreateWindowAux::new()
 				.background_pixel(YELLOW)
+				.border_pixel(BLUE)
 				.override_redirect(1),
 		);
+		conn
+			.configure_window(popup, &ConfigureWindowAux::new().border_width(3))
+			.expect("popup border");
 		let stacking = conn
 			.intern_atom(false, b"_NET_CLIENT_LIST_STACKING")
 			.expect("intern")
@@ -1198,6 +1201,9 @@ mod tests {
 		assert_eq!(image.dimensions(), (200, 150));
 		assert_eq!(pixel(&image, STRIP), [255, 0, 0, 255]);
 		assert_eq!(pixel(&image, POPUP), [255, 255, 0, 255]);
+		for corner in [(10, 10), (55, 10), (10, 45), (55, 45)] {
+			assert_eq!(pixel(&image, corner), [0, 0, 255, 255], "popup border at {corner:?}");
+		}
 	}
 
 	#[test]
