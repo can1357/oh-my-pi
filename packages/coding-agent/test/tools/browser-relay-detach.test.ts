@@ -52,6 +52,7 @@ class ChromeBackedExtension {
 		relay: WebSocket,
 		chrome: WebSocket,
 		readonly targetId: string,
+		readonly url: string,
 	) {
 		this.#relay = relay;
 		this.#chrome = chrome;
@@ -75,7 +76,7 @@ class ChromeBackedExtension {
 				return promise;
 			}),
 		);
-		const extension = new ChromeBackedExtension(relay, chrome, targetId);
+		const extension = new ChromeBackedExtension(relay, chrome, targetId, url);
 		relay.send(
 			JSON.stringify({
 				t: "hello",
@@ -184,6 +185,16 @@ class ChromeBackedExtension {
 				if (!this.#inFlight.delete(sent.id)) return;
 				if (isRecord(answer.error)) return this.#reply(id, { error: String(answer.error.message) });
 				return this.#reply(id, { result: answer.result });
+			}
+			// A relay open without a target creates its own tab: hand omp this page as that tab.
+			case "createTab": {
+				const tab = { tabId: TAB_ID, url: this.url, title: "Sign in", active: false, discarded: false };
+				return this.#reply(id, { result: { tab: { ...tab, windowId: 1, pinned: false, groupId: -1 } } });
+			}
+			case "removeTab": {
+				await this.#chromeSend("Target.closeTarget", { targetId: this.targetId }).promise;
+				this.#relay.send(JSON.stringify({ t: "tabRemoved", tabId: TAB_ID }));
+				return this.#reply(id, { result: {} });
 			}
 			default:
 				return this.#reply(id, { result: {} });
@@ -304,8 +315,11 @@ describe("relay tabs Chrome detaches omp from", () => {
 		return { text, value: isRecord(result.details) ? result.details.value : undefined };
 	}
 
-	/** Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. */
-	async function openRelayTab(query = ""): Promise<ChromeBackedExtension> {
+	/**
+	 * Adopt a page through the relay and leave state on it that only survives a re-adoption without reload. `owned`
+	 * opens it as omp's own tab (no target), which the harness's extension answers with this page.
+	 */
+	async function openRelayTab(query = "", options: { owned?: boolean } = {}): Promise<ChromeBackedExtension> {
 		if (!chromium || !site) throw new Error("Chromium not launched");
 		page = await chromium.newPage();
 		pageUrl = `${site.url}login?case=${crypto.randomUUID()}${query}`;
@@ -329,7 +343,8 @@ describe("relay tabs Chrome detaches omp from", () => {
 				"tools.maxTimeout": 0,
 			}),
 		};
-		await invoke({ action: "open", app: { relay: true, target: "case=" }, timeout: 20 });
+		const app = options.owned ? { relay: true } : { relay: true, target: "case=" };
+		await invoke({ action: "open", app, timeout: 20 });
 		await invoke({ action: "run", code: "await page.evaluate(() => { window.mark = 'kept'; });", timeout: 10 });
 		return extension;
 	}
@@ -716,6 +731,29 @@ describe("relay tabs Chrome detaches omp from", () => {
 			}
 			const later = String(await invoke(readMark).catch((error: unknown) => error));
 			expect(later).toContain("The user cancelled Chrome's debugging bar");
+		},
+		60_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE).each(["target_closed", "canceled_by_user"] as const)(
+		"closes the tab omp opened when it cannot re-adopt it, and says it closed it (%s)",
+		async reason => {
+			const ext = await openRelayTab("", { owned: true });
+			expect(getTab(name)).toMatchObject({ ownsPage: true });
+			ext.refuseAttach = true;
+			// The test's own connection learns of the close after the relay's reply, so wait for the event.
+			const pageClosed = Promise.withResolvers<void>();
+			page?.once("close", () => pageClosed.resolve());
+			const evaluating = ext.hanging();
+			const stalled = invoke({ action: "run", ...HANG }).catch((error: unknown) => error);
+			await evaluating;
+			await ext.chromeDetach(reason);
+			const failure = String(await stalled);
+			expect(failure).toContain(`Chrome detached omp from this tab (${reason}) during this call`);
+			expect(failure).toContain("it had opened");
+			// Nothing is left in the user's Chrome to look for: the relay closed the tab.
+			expect(failure).not.toContain("navigate it in Chrome");
+			await pageClosed.promise;
 		},
 		60_000,
 	);
