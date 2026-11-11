@@ -103,7 +103,7 @@ pub(super) struct Mpx {
 	/// Replaces only raw-event polling in typing regressions; emission, keymap,
 	/// focus, error mapping and the session gate still run normally.
 	#[cfg(test)]
-	release_events:  Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event>>>>,
+	release_events:  Option<std::cell::RefCell<Box<dyn FnMut() -> Option<Event> + Send>>>,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
