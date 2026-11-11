@@ -26,8 +26,13 @@ pub(super) fn verdict(
 	legacy: Option<&str>,
 	secure: bool,
 ) -> CoreResult<()> {
-	// An empty ValuePattern result is a confirmed value, not a missing read.
-	text_readback(expected, expected, pattern.or(legacy), secure)
+	let read = pattern.or(legacy);
+	if read.is_none() || (secure && read == Some("")) {
+		// A hidden or unavailable value supplies no evidence that the write
+		// failed. Preserve main's success without claiming confirmation.
+		return Ok(());
+	}
+	text_readback(expected, expected, read, secure)
 }
 
 /// Whether a rich edit that reads `actual` holds `expected`: it reports every
@@ -45,27 +50,6 @@ pub(super) fn rich_edit_holds(class: &str, expected: &str, actual: &str) -> bool
 					.map(|line| line.strip_suffix('\r').unwrap_or(line)),
 			)
 		})
-}
-
-/// Whether a hidden value's length confirms a write of `sent`: it must have
-/// changed to the sent length, since an equal length before proves nothing.
-pub(super) fn length_confirms(sent: &str, before: Option<usize>, after: Option<usize>) -> bool {
-	let sent = sent.encode_utf16().count();
-	after == Some(sent) && before.is_some_and(|before| before != sent)
-}
-
-/// UTF-16 length of a native control's text; `None` when it does not answer.
-#[cfg(target_os = "windows")]
-pub(super) fn text_length(hwnd: windows_sys::Win32::Foundation::HWND) -> Option<usize> {
-	use windows_sys::Win32::UI::WindowsAndMessaging::{
-		SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_GETTEXTLENGTH,
-	};
-	let mut length = 0;
-	// SAFETY: WM_GETTEXTLENGTH carries no pointer the target could outlive.
-	let answered = unsafe {
-		SendMessageTimeoutW(hwnd, WM_GETTEXTLENGTH, 0, 0, SMTO_ABORTIFHUNG, 3000, &mut length)
-	};
-	(answered != 0).then_some(length)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -226,10 +210,11 @@ pub(super) fn set_combo(
 	let candidate_index =
 		usize::try_from(send(hwnd, CB_FINDSTRINGEXACT, usize::MAX, wide.as_ptr() as isize)?).ok();
 	let mut actual = vec![0_u16; wide.len() + 1];
-	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?;
-	if usize::try_from(length).ok() == Some(wide.len() - 1)
+	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize).ok();
+	if length.and_then(|length| usize::try_from(length).ok()) == Some(wide.len() - 1)
 		&& actual[..wide.len() - 1] == wide[..wide.len() - 1]
-		&& send(hwnd, CB_GETCURSEL, 0, 0)? == candidate_index.map_or(-1, |index| index as isize)
+		&& send(hwnd, CB_GETCURSEL, 0, 0)
+			.is_ok_and(|index| index == candidate_index.map_or(-1, |index| index as isize))
 	{
 		return Ok(());
 	}
@@ -262,7 +247,7 @@ pub(super) fn set_combo(
 					return Err(failed());
 				}
 			}
-			if send(hwnd, CB_GETCURSEL, 0, 0)? != index as isize {
+			if send(hwnd, CB_GETCURSEL, 0, 0).is_ok_and(|actual| actual != index as isize) {
 				return Err(failed());
 			}
 			Ok(())
@@ -279,8 +264,9 @@ pub(super) fn set_combo(
 			// A native message can bypass an edit child's read-only policy.
 			// Refuse before clearing the combo's existing selection.
 			// SAFETY: GetWindowLongW only queries the identified edit handle.
-			if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::IsWindowEnabled(info.hwndItem) }
-				== 0
+			if unsafe {
+				windows_sys::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled(info.hwndItem)
+			} == 0
 				|| unsafe { GetWindowLongW(info.hwndItem, GWL_STYLE) }
 					& windows_sys::Win32::UI::WindowsAndMessaging::ES_READONLY
 					!= 0
@@ -302,7 +288,7 @@ pub(super) fn set_combo(
 			// child does not forward CBN_EDITCHANGE (verified on Windows 11).
 			// Send it explicitly so the app sees exactly one text change.
 			send(parent, WM_COMMAND, (id | (CBN_EDITCHANGE << 16)) as usize, hwnd as isize)?;
-			if send(hwnd, CB_GETCURSEL, 0, 0)? != -1 {
+			if send(hwnd, CB_GETCURSEL, 0, 0).is_ok_and(|actual| actual != -1) {
 				return Err(failed());
 			}
 			Ok(())
@@ -311,16 +297,16 @@ pub(super) fn set_combo(
 	// WM_GETTEXT takes the buffer capacity, unlike CB_GETLBTEXT. One extra
 	// code unit beyond the expected text distinguishes a longer value from
 	// an exact match even when the read is truncated.
-	let length =
-		usize::try_from(send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)?)
-			.map_err(|_| failed())?;
-	if length >= actual.len() {
-		return Err(failed());
-	}
+	let length = send(hwnd, WM_GETTEXT, actual.len(), actual.as_mut_ptr() as isize)
+		.ok()
+		.and_then(|length| usize::try_from(length).ok())
+		.filter(|&length| length < actual.len());
 	let expected_index = candidate_index.map_or(-1, |index| index as isize);
-	if send(hwnd, CB_GETCURSEL, 0, 0)? != expected_index {
+	if send(hwnd, CB_GETCURSEL, 0, 0).is_ok_and(|actual| actual != expected_index) {
 		return Err(failed());
 	}
+	// A successful write and notification are not disproved by a read timeout.
+	let Some(length) = length else { return Ok(()) };
 	if actual[..length] == wide[..wide.len() - 1] {
 		return Ok(());
 	}
@@ -351,63 +337,42 @@ mod tests {
 		assert!(verdict("", Some(""), Some("stale"), false).is_ok());
 		assert!(verdict("abc", None, Some("abc"), false).is_ok());
 		assert!(verdict("abc", Some("ABC"), Some("abc"), false).is_err());
-		assert!(verdict("abc", None, None, false).is_err());
-		let secure = verdict("secret", None, None, true).unwrap_err();
-		assert!(!secure.message.contains("secret"));
+		assert!(verdict("abc", None, None, false).is_ok());
+		assert!(verdict("secret", None, None, true).is_ok());
 		let secure = verdict("secret", Some("different"), None, true).unwrap_err();
 		assert!(!secure.message.contains("secret"));
 		assert!(!secure.message.contains("different"));
 	}
 
 	#[test]
-	fn rich_edit_paragraph_marks_and_a_changed_hidden_length_confirm_a_write() {
+	fn unreadable_password_empty_readback_keeps_main_success() {
+		assert!(verdict("secret", Some(""), None, true).is_ok());
+	}
+
+	#[test]
+	fn unreadable_password_missing_readback_keeps_main_success() {
+		assert!(verdict("secret", None, None, true).is_ok());
+	}
+
+	#[test]
+	fn unreadable_plain_value_keeps_main_success() {
+		assert!(verdict("ordinary", None, None, false).is_ok());
+	}
+
+	#[test]
+	fn readable_empty_values_still_disprove_a_nonempty_write() {
+		assert!(verdict("ordinary", Some(""), None, false).is_err());
+		assert!(verdict("ordinary", None, Some(""), false).is_err());
+	}
+
+	#[test]
+	fn rich_edit_paragraph_marks_confirm_a_write() {
 		let rich = "WindowsForms10.RichEdit20W.app.0.141b42a_r8_ad1";
 		assert!(rich_edit_holds(rich, "abc", "abc\r"));
 		assert!(rich_edit_holds("RICHEDIT50W", "a\r\nb\n", "a\rb\r\r"));
 		assert!(!rich_edit_holds("RICHEDIT50W", "abc", "ABC\r"));
 		assert!(!rich_edit_holds("RICHEDIT50W", "abc", "abc\rd\r"));
 		assert!(!rich_edit_holds("Edit", "abc", "abc\r"));
-		assert!(length_confirms("hünter2", Some(0), Some(7)));
-		for (before, after) in
-			[(Some(7), Some(7)), (Some(0), Some(6)), (None, Some(7)), (Some(0), None)]
-		{
-			assert!(!length_confirms("hünter2", before, after));
-		}
-	}
-
-	#[cfg(target_os = "windows")]
-	#[test]
-	fn a_native_password_edit_answers_for_its_length() {
-		use windows_sys::Win32::UI::WindowsAndMessaging::{
-			CreateWindowExW, DestroyWindow, ES_PASSWORD, SetWindowTextW, WS_OVERLAPPED,
-		};
-		let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-		let (class, empty, secret) = (wide("EDIT"), wide(""), wide("hunter2"));
-		// SAFETY: the strings are NUL-terminated and outlive the calls; the edit
-		// belongs to this thread, so its messages run synchronously.
-		unsafe {
-			let edit = CreateWindowExW(
-				0,
-				class.as_ptr(),
-				empty.as_ptr(),
-				WS_OVERLAPPED | ES_PASSWORD as u32,
-				0,
-				0,
-				100,
-				30,
-				std::ptr::null_mut(),
-				std::ptr::null_mut(),
-				std::ptr::null_mut(),
-				std::ptr::null(),
-			);
-			assert!(!edit.is_null());
-			let before = text_length(edit);
-			assert_eq!(before, Some(0));
-			assert_ne!(SetWindowTextW(edit, secret.as_ptr()), 0);
-			assert!(length_confirms("hunter2", before, text_length(edit)));
-			DestroyWindow(edit);
-			assert_eq!(text_length(edit), None);
-		}
 	}
 
 	#[test]
