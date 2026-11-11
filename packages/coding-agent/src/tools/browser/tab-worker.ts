@@ -2633,7 +2633,10 @@ export class WorkerCore {
 			}
 			this.#unanswered = null;
 			const error = errorPayload(failure.error);
-			if (nativeNotices.length > 0) error.message = [error.message, ...nativeNotices].join("\n");
+			if (nativeNotices.length > 0) {
+				error.message = [error.message, ...nativeNotices].join("\n");
+				if (error.stack) error.stack = [error.stack, ...nativeNotices].join("\n");
+			}
 			this.#sendResult({ id: msg.id, ok: false, error });
 			return;
 		}
