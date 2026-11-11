@@ -175,7 +175,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 				return Promise.withResolvers<void>().promise;
 			};
 
-			const error = await rejectionOf(fillViaHandle(editor, "new text", controller.signal));
+			const error = await rejectionOf(fillViaHandle(editor, "new text", "handle.fill()", controller.signal));
 			if (!(error instanceof TypingInterruptedError))
 				throw new Error(`Expected TypingInterruptedError, got ${error}`);
 			expect(error.progress).toContain("replacement text was already sent");
@@ -469,6 +469,93 @@ return {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 40_000);
+
+	test("refuses keys and drags aimed at a control a modal dialog covers, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `modal-${crypto.randomUUID()}`;
+		// The dialog's button takes focus when it opens; a key meant for the field behind it activated that button.
+		// A banner over a field focus still reaches leaves typing there as it was.
+		const modalHtml = `<!doctype html><label>Name <input id="name"></label> <button id="go">Go</button> <input id="off" disabled>
+<div id="src" draggable="true" style="width:80px;height:30px">Drag</div><div id="dst" style="width:80px;height:30px">Drop</div>
+<p style="position:relative"><input id="under"><span style="position:absolute;inset:0;background:#fec">Banner</span></p>
+<iframe id="inner" srcdoc="<input id=deep><dialog id=framed><button>OK</button></dialog><script>document.querySelector('dialog').showModal()</script>"></iframe>
+<dialog id="modal"><button id="stay">Stay signed in</button></dialog>
+<script>
+window.received = [];
+for (const type of ["keydown", "click", "input", "mousedown", "dragstart"]) document.addEventListener(type, event => received.push(type + ":" + event.target.id), true);
+</script>`;
+		const context = { session, toolCallId: "browser-modal-cover" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(modalHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const attempt = action => action().then(() => "sent", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const aim = (query, actions) => tab.evaluate(async (query, actions) => {
+	const aims = {};
+	for (const action of actions) {
+		const target = await globalThis.__ompTernKit.target({ engine: "css", query }, action);
+		aims[action] = target.ok ? "ok" : target.detail;
+	}
+	return aims;
+}, query, actions);
+await tab.evaluate(() => document.querySelector("#go").focus());
+const disabledPress = await attempt(() => tab.press("Enter", { selector: "#off" }));
+const banner = {
+	fill: await attempt(() => tab.fill("#under", "kept")),
+	press: await attempt(() => tab.press("End", { selector: "#under" })),
+	value: await tab.value("#under"),
+	tern: await aim("#under", ["fill", "press"]),
+};
+const observed = await tab.observe();
+const field = await tab.id(observed.elements.find(element => element.role === "textbox" && element.name.includes("Name")).id);
+await tab.evaluate(() => { document.querySelector("#modal").showModal(); window.received = []; });
+const frame = await tab.frame("#inner");
+const refused = {
+	disabledPress,
+	banner,
+	fill: await attempt(() => tab.fill("#name", "Ada Lovelace")),
+	type: await attempt(() => tab.type("#name", "Ada Lovelace")),
+	press: await attempt(() => tab.press("Enter", { selector: "#name" })),
+	handleFill: await attempt(() => field.fill("Ada Lovelace")),
+	handleType: await attempt(() => field.type("Ada Lovelace")),
+	handlePress: await attempt(() => field.press("Enter")),
+	frameFill: await attempt(() => frame.fill("#deep", "Ada Lovelace")),
+	framePress: await attempt(() => frame.press("Enter", { selector: "#deep" })),
+	drag: await attempt(() => tab.drag("#src", "#dst")),
+};
+const tern = await aim("#name", ["fill", "type", "press"]);
+return { ...refused, received: await tab.evaluate(() => window.received), name: await tab.value("#name"), tern };`,
+					timeout: 30,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				disabledPress: 'tab.press("Enter") blocked: the element is disabled',
+				banner: { fill: "sent", press: "sent", value: "kept", tern: { fill: "ok", press: "ok" } },
+				fill: 'tab.fill("#name") blocked: covered by <dialog#modal>',
+				type: 'tab.type("#name") blocked: covered by <dialog#modal>',
+				press: 'tab.press("Enter") blocked: covered by <dialog#modal>',
+				handleFill: "handle.fill() blocked: covered by <dialog#modal>",
+				handleType: "handle.type() blocked: covered by <dialog#modal>",
+				handlePress: "handle.press() blocked: covered by <dialog#modal>",
+				frameFill: 'frame.fill("#deep") blocked: covered by <dialog#framed>',
+				framePress: 'frame.press("Enter") blocked: covered by <dialog#framed>',
+				drag: 'tab.drag() from "#src" blocked: covered by <dialog#modal>',
+				received: [],
+				name: "",
+				tern: { fill: "<dialog#modal>", type: "<dialog#modal>", press: "<dialog#modal>" },
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 60_000);
 
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();

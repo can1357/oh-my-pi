@@ -9,7 +9,14 @@ import {
 	parseAriaRefSelector,
 	resolveAriaRefHandle,
 } from "./aria/aria-snapshot";
-import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
+import {
+	clickElement,
+	fillViaHandle,
+	focusKeyTarget,
+	pressKey,
+	typeIntoElement,
+	withLiveElement,
+} from "./interactions";
 import { readPageViewport } from "./launch";
 import { emitScreenshot, type ScreenshotRun, whileDrawing } from "./screenshot";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
@@ -276,7 +283,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				async signal => {
 					const handle = await actionHandle(`frame.fill(${JSON.stringify(selector)})`, selector, signal);
 					try {
-						await fillViaHandle(handle, value, signal);
+						await fillViaHandle(handle, value, `frame.fill(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -291,7 +298,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 					const handle = await untilAborted(signal, () => frame.$(hooks.normalizeSelector(selector)));
 					if (!handle) throw new ToolError(`frame.type(${JSON.stringify(selector)}) matched no element`);
 					try {
-						await typeIntoElement(handle, text, signal);
+						await typeIntoElement(handle, text, `frame.type(${JSON.stringify(selector)})`, signal);
 					} finally {
 						await handle.dispose().catch(() => undefined);
 					}
@@ -300,8 +307,16 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 			),
 		press: (key, options) =>
 			hooks.act(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
-				if (options?.selector)
-					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
+				if (options?.selector) {
+					const selector = hooks.normalizeSelector(options.selector);
+					const handle = await untilAborted(signal, () => frame.$(selector));
+					if (!handle) throw new ToolError(`No element found for selector: ${selector}`);
+					try {
+						await focusKeyTarget(handle, `frame.press(${JSON.stringify(key)})`, signal);
+					} finally {
+						await handle.dispose().catch(() => undefined);
+					}
+				}
 				await pressKey(frame.page(), key, undefined, signal);
 			}),
 		// Without a selector, the frame's `<body>`; any value passed, `null` included, is still checked as a selector.

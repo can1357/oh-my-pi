@@ -14,6 +14,7 @@ export type TernTargetAction =
 	| "type"
 	| "fill"
 	| "focus"
+	| "press"
 	| "drag"
 	| "upload"
 	| "point";
@@ -213,7 +214,15 @@ const KIT_BODY = String.raw`
 const STATE_ROLES_CHECKED = new Set(["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"]);
 const SKIP_TAGS = new Set(["script", "style", "template", "noscript", "head", "meta", "link", "title"]);
 const POINTER_ACTIONS = new Set(["click", "dblclick", "hover", "check", "drag", "upload"]);
-const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "upload"]);
+// Keys go wherever focus is, and focus cannot reach an element behind a modal dialog: these actions refuse a cover
+// over an element focus misses. Focus on the element, inside it, or on the editing host around it takes the keys.
+const KEY_ACTIONS = new Set(["type", "fill", "press"]);
+const takesFocus = el => {
+	el.focus?.({ preventScroll: true });
+	const active = el.getRootNode().activeElement;
+	return !!active && (active === el || el.contains(active) || (active.isContentEditable && active.contains(el)));
+};
+const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "press", "upload"]);
 const EDIT_ACTIONS = new Set(["type", "fill"]);
 const SETTER_INPUT_TYPES = new Set(["date", "datetime-local", "month", "week", "time", "color", "range"]);
 const UNTYPABLE_INPUT_TYPES = new Set(["checkbox", "radio", "button", "submit", "reset", "image", "hidden", "file"]);
@@ -826,7 +835,7 @@ const kit = {
 		if ((pointer || action === "point") && !inViewport) return { ok: false, reason: "offViewport", count };
 		const x = inViewport ? Math.floor((left + right) / 2) : Math.floor(rect.left + rect.width / 2);
 		const y = inViewport ? Math.floor((top + bottom) / 2) : Math.floor(rect.top + rect.height / 2);
-		if (pointer) {
+		if (pointer || (KEY_ACTIONS.has(action) && inViewport && !takesFocus(el))) {
 			const hit = hitTest(x, y);
 			if (!hit) return { ok: false, reason: "covered", count, detail: "elementFromPoint-null" };
 			if (!composedContains(el, hit) && !composedContains(hit, el)) {

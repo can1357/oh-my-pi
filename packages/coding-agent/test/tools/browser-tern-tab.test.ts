@@ -282,6 +282,38 @@ describe("TernTab", () => {
 		expect(input.events).toEqual([{ type: "text", text: "a@b.test" }]);
 	});
 
+	it("presses Enter on a native ref handle without sending that ref to the page kit", async () => {
+		const node = {
+			ref: "e1-5",
+			tag: "input",
+			role: "textbox",
+			states: ["editable"],
+			rect: [20, 10, 40, 20],
+		};
+		daemon = await startFakeDaemon(
+			(op): FakeAnswer => {
+				if (op.op === "dom") {
+					return {
+						ok:
+							op.read === "query"
+								? { nodes: [node], total: 1 }
+								: { state: "ok", point: [40, 20], rect: node.rect, node },
+					};
+				}
+				if (op.op === "eval") return { error: { kind: "js", message: "native refs cannot reach the page kit" } };
+				return { ok: {} };
+			},
+			{ welcome: { ops: ["dom"] } },
+		);
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		await client.connect();
+		const tab = new TernTab({ client, block: 7, name: "main", viewport: { width: 800, height: 600 } });
+		await new TernElementHandle(tab, { engine: "ref", ref: node.ref }, null).press("Enter");
+		const events = daemon.requests.filter(request => request.op.op === "input").flatMap(request => request.op.events);
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "down", key: "Enter" }));
+		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "up", key: "Enter" }));
+	});
+
 	it("reports a held dialog and answers it through the dialog op", async () => {
 		const fake = await startPage({
 			eventBatches: [
