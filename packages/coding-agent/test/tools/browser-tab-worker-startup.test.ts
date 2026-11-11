@@ -148,6 +148,35 @@ describe("browser tab worker startup", () => {
 });
 
 describe("OMP-owned browser evaluation", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)("completes public detached waits when navigation removes the element", async () => {
+		const name = `selector-navigation-${process.pid}`;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		try {
+			await acquireTab(name, headless(), {
+				url: "data:text/html,<button id=present>old document</button>",
+				timeoutMs: 30_000,
+			});
+			const result = await runInTab(name, {
+				code: `
+					const pending = tab.waitForSelector("#present", {state:"detached", timeout:2000});
+					await tab.evaluate("document.querySelector('#present').isConnected");
+					await page.goto("data:text/html,replacement-document");
+					return (await pending) === null;
+				`,
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(result.returnValue).toBe(true);
+		} finally {
+			await releaseTab(name, { kill: true });
+		}
+	}, 45_000);
+
 	it.skipIf(!CHROMIUM_AVAILABLE)("continues detached polling after a real document context replacement", async () => {
 		const page = await headless().browser.newPage();
 		const queried = Promise.withResolvers<void>();
