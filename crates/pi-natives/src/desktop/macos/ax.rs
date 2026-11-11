@@ -1433,18 +1433,18 @@ fn perform_choosing(
 						"AXRaise opens no menu to choose an item from",
 					));
 				}
-				return element_action_result(&native, send_action(element, &native));
+				return element_action_result(native, send_action(element, native));
 			}
 			let pid = element_pid(element)?;
-			let scroll = scroll_before_press(&native, &actions, || process::is_uikit(pid));
-			let perform = || press_into_view(&native, scroll, |action| send_action(element, action));
+			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
+			let perform = || press_into_view(native, scroll, |action| send_action(element, action));
 			// A menu that a background application opens takes the keyboard from
 			// the user's app, so it is closed before the action returns; a
 			// frontmost application's menu stays open for the next call unless an
 			// item is asked for.
 			let background = entry_front.behind(pid);
 			let watch = path.is_some()
-				|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
+				|| (background && open_menu::may_open(native, || copy_string(element, "AXRole")));
 			skylight::with_background_watch(pid, |visit| {
 				// A popup in a system Open or Save panel opens its menu in the
 				// process that draws the panel.
@@ -1469,7 +1469,7 @@ fn perform_choosing(
 					None
 				};
 				open_menu::guard(
-					open_menu::Press::Action(&native),
+					open_menu::Press::Action(native),
 					before.as_deref(),
 					path,
 					perform,
