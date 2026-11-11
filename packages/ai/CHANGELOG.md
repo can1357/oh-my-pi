@@ -653,6 +653,10 @@
 
 - Fixed Codex Fast (`priority`) and Ultrafast usage being recorded, billed, and reported as Standard when the backend echoed a default service tier; the requested tier is now preserved in usage and performance records.
 
+### Fixed
+
+- Fixed `/model` crashing when AWS credential files are inaccessible while using another provider ([#14817](https://github.com/can1357/oh-my-pi/issues/14817)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes
