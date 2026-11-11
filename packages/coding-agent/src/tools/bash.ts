@@ -835,11 +835,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// hosts are attributed by time process-wide, so they are named only for a failed command.
 		const sandbox = result.sandbox;
 		const blockedHosts = failedExit ? sandbox?.blockedHosts : undefined;
-		if (sandbox?.denied || blockedHosts?.length) {
+		if (sandbox?.denied || sandbox?.startFailed || blockedHosts?.length) {
 			notices.push(
 				prompt
 					.render(sandboxDenialNotice, {
 						denied: sandbox?.denied,
+						startFailed: sandbox?.startFailed,
 						blockedHosts,
 						requestTool: this.session.isToolActive?.("sandbox_request") === true,
 					})

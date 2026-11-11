@@ -93,6 +93,7 @@ export async function runInteractiveBashPty(
 						const meta = sandbox?.runtime.resultMeta({
 							blockedSince,
 							output: run.exitCode !== 0 ? summary.output : undefined,
+							exitCode: run.exitCode,
 						});
 						done({
 							exitCode: run.exitCode,

@@ -77,6 +77,9 @@ async function setSandboxEnabled(enabled: boolean, cwd: string): Promise<string>
 	}
 	if (!enabled) return "Sandbox disabled.";
 	const status = (await SandboxRuntime.for(cwd)).status();
+	if (status.state === "active") {
+		return ["Sandbox enabled.", ...status.warnings.map(warning => `  ⚠ ${sanitizeDisplayLine(warning)}`)].join("\n");
+	}
 	if (status.state !== "unavailable") return "Sandbox enabled.";
 	return `Sandbox enabled, but unavailable here: ${sanitizeDisplayLine(status.reason)} (${status.fallback === "block" ? "contained tools fail" : "commands run unsandboxed"}).`;
 }

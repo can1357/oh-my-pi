@@ -795,6 +795,8 @@ class SandboxResultMeta:
     """Hosts the egress proxy refused during this command."""
     denied: bool | None = None
     """The output looks like a filesystem denial by the sandbox."""
+    start_failed: bool | None = None
+    """Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2371,6 +2373,7 @@ def parse_sandbox_result_meta(value: object, path: str = "SandboxResultMeta") ->
         network=required(payload, "network", _decode_sandbox_network_mode, path),
         blocked_hosts=optional(payload, "blockedHosts", array(decode_str), path),
         denied=optional(payload, "denied", decode_bool, path),
+        start_failed=optional(payload, "startFailed", decode_bool, path),
     )
 
 

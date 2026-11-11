@@ -3227,6 +3227,9 @@ pub struct SandboxResultMeta {
 	/// The output looks like a filesystem denial by the sandbox.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub denied: Option<bool>,
+	/// Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start.
+	#[serde(rename = "startFailed", default, skip_serializing_if = "Option::is_none")]
+	pub start_failed: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

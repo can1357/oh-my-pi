@@ -2694,6 +2694,8 @@ type SandboxResultMeta struct {
 	BlockedHosts []string `json:"blockedHosts,omitempty"`
 	// The output looks like a filesystem denial by the sandbox.
 	Denied *bool `json:"denied,omitempty"`
+	// Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start.
+	StartFailed *bool `json:"startFailed,omitempty"`
 }
 
 func (v *SandboxResultMeta) UnmarshalJSON(data []byte) error {
@@ -2708,6 +2710,7 @@ func (v *SandboxResultMeta) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("network", &out.Network)
 	d.optional("blockedHosts", &out.BlockedHosts)
 	d.optional("denied", &out.Denied)
+	d.optional("startFailed", &out.StartFailed)
 	if d.err != nil {
 		return d.err
 	}

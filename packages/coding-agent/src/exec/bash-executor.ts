@@ -239,8 +239,9 @@ function sandboxResultMeta(
 	runtime: SandboxRuntime | undefined,
 	blockedSince: number,
 	output?: string,
+	exitCode?: number,
 ): { sandbox: SandboxResultMeta } | Record<string, never> {
-	const sandbox = runtime?.resultMeta({ blockedSince, output });
+	const sandbox = runtime?.resultMeta({ blockedSince, output, exitCode });
 	return sandbox ? { sandbox } : {};
 }
 
@@ -1195,7 +1196,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			workingDir: winner.result.workingDir,
 			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...trace,
-			...sandboxResultMeta(sandboxRuntime, blockedSince, exitCode !== 0 ? summary.output : undefined),
+			...sandboxResultMeta(sandboxRuntime, blockedSince, exitCode !== 0 ? summary.output : undefined, exitCode),
 			...summary,
 		};
 	} catch (err) {

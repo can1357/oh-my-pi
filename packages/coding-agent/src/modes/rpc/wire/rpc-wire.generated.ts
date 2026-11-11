@@ -571,6 +571,8 @@ export interface SandboxResultMeta {
 	blockedHosts?: string[];
 	/** The output looks like a filesystem denial by the sandbox. */
 	denied?: boolean;
+	/** Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start. */
+	startFailed?: boolean;
 }
 
 export interface LineRange {

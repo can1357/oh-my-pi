@@ -262,6 +262,24 @@ When a configured network mode cannot be enforced, the sandbox runs with `deny` 
 
 `omp --smoke-test` includes a sandbox probe: where a backend is available it starts the sandbox host contained, runs `echo`, and checks that a write outside the workspace fails; where none is available it prints the reason and passes. On a CI runner without a usable backend the probe therefore only confirms that omp starts and reports the reason.
 
+### Windows
+
+The processcontainer backend starts every contained process with Windows' **Mandatory ASLR** mitigation (`ForceRelocateImages`), which Windows applies to the container itself. Neither MXC nor omp can turn it off. Consequences:
+
+- **Some programs cannot start contained.** A program whose runtime needs a fixed load address fails before it runs any code, with exit code `0xC0000142` (`STATUS_DLL_INIT_FAILED`, `-1073741502` in a shell's `$?`). This includes Git Bash and every MSYS2 or Cygwin program: `bash.exe`, `sh.exe` and everything else in Git for Windows' `usr\bin` (`ssh`, `gpg`, `perl`, `vim`, `less`, `awk`, …).
+- **Git works, but not the parts of git that call those programs:**
+  - Hooks (`pre-commit`, husky, …) run under Git's `sh.exe`, so a commit in a repository with hooks fails contained.
+  - Signed commits (`gpg`) and git's default editor (`vim`) fail. Use `git commit -m` or point `core.editor` at a native editor.
+  - SSH remotes go through Windows OpenSSH, which starts contained: contained processes get `GIT_SSH` set to `%SystemRoot%\System32\OpenSSH\ssh.exe` unless `GIT_SSH` is already set; `GIT_SSH_COMMAND` and `core.sshCommand` still take precedence. The network mode must allow the host; SSH does not work in `allowlist` mode.
+- **What works:** native Windows programs (`git.exe`, `cmd`, PowerShell, Windows OpenSSH, Bun), and the `bash` tool's built-in commands (`ls`, `sed`, `grep`, `find`, `sort`, …), which run inside omp's own shell instead of Git's.
+- **Directories under read-only roots cannot be listed.** A contained process can open and read files below a readable root (the user profile, tool directories), but listing one of those directories fails with `EPERM`; writable roots such as the workspace can be listed.
+- **Running omp from a source checkout:** contained commands fail to start (`Module not found …\cli.ts`, `Cannot read directory …: EPERM`) unless the workspace is the checkout itself, because Bun cannot list the read-only source directories. The standalone binary is unaffected; a bun package install (`--source`) was not tested and may hit the same limit. For the same reason the contained tests under `packages/coding-agent/test/sandbox/` fail when run from source on Windows.
+- **UI access:** contained processes may make Win32k calls (without them every program that loads `user32.dll`, including `git` and PowerShell, fails to start), but they cannot read or write the clipboard or inject keyboard and mouse input.
+
+When a contained `bash` command fails with `0xC0000142`, the result carries a notice telling the agent the program cannot start in the sandbox and not to retry it. `/sandbox on`, `/sandbox status` and the panel's Overview page show the limitation as a warning. To run such a command anyway, run it yourself with `!` (your own commands run unsandboxed) or turn the sandbox off with `/sandbox off`.
+
+Upstream work that would lift this: MSYS2 building its runtime and packages relocatable ([msys2-runtime#381](https://github.com/msys2/msys2-runtime/pull/381), [MSYS2-packages#6789](https://github.com/msys2/MSYS2-packages/pull/6789)); even then the MSYS runtime also needs MXC support for its shared objects ([microsoft/mxc#1061](https://github.com/microsoft/mxc/issues/1061)).
+
 ### Unavailable backend
 
 When the sandbox is enabled but no backend can contain processes on this host:
@@ -272,7 +290,7 @@ When the sandbox is enabled but no backend can contain processes on this host:
 ## What the agent sees
 
 - While the sandbox is active, the system prompt gains a block naming what runs contained, the backend, the writable and unreadable paths, and the network mode. It tells the model that denials are expected and never to retry or work around them; when `sandbox_request` is available, to ask with it (narrowest target, clear intent), otherwise to tell you the path or host it needs.
-- When a contained `bash` result looks like a filesystem denial (a non-zero exit with `Operation not permitted`, `Permission denied`, `Read-only file system`, `EPERM`, `EACCES` or `EROFS` in the output) or the proxy refused a host during the call, a sandbox notice is appended to the result, pointing at `sandbox_request` when it is available.
+- When a contained `bash` result looks like a filesystem denial (a non-zero exit with `Operation not permitted`, `Permission denied`, `Read-only file system`, `EPERM`, `EACCES` or `EROFS` in the output), the proxy refused a host during the call, or (on Windows) a program failed to start with `0xC0000142`, a sandbox notice is appended to the result, pointing at `sandbox_request` when it is available.
 - A `sandbox_request` call shows as a tool card with the kind, target and intent, and, once answered, the decision (with your instructions or the refusal reason).
 - Contained `bash` and eval results carry a `sandboxed` badge on their tool card (its tooltip names backend, mode and network), plus a warning note: `blocked by sandbox: host …` or `possible sandbox denial`. A `bash` card shows the badge from the moment the command starts; an eval card when the cell finishes.
 
@@ -319,9 +337,10 @@ MXC can emit telemetry, on Windows only, as ETW events. omp turns it off at both
 - **Linux: no host loopback.** Contained processes cannot reach services on the host's `127.0.0.1`, even in `allow` mode.
 - **Contained JS eval and stdin.** Child processes a JS eval cell starts inherit the evaluator's protocol stdin; a child that reads stdin can stall the cell.
 - **Windows: Python eval tool helpers need network.** Their bridge to omp uses TCP on Windows, so they fail in `deny` mode.
+- **Windows: programs that cannot run under Mandatory ASLR fail to start**, Git Bash, MSYS2/Cygwin tools and git hooks included; see [Windows](#windows).
 - **The `sandboxed` badge of an eval cell appears when it finishes**, not while it runs.
 - **PTY on macOS:** a contained PTY works, but `tty` prints `not a tty`; programs that only check `isatty()` are unaffected.
-- **Linux and Windows** are compile-checked and exercised only by the CI smoke probe; the runtime behaviour described here was exercised on macOS.
+- **Linux** is compile-checked and exercised only by the CI smoke probe. Windows was exercised on Windows 11 build 26100 (smoke probe, contained `bash`, JS eval and git); the rest of the runtime behaviour described here was exercised on macOS.
 
 ## Implementation files
 

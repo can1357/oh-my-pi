@@ -194,6 +194,10 @@ export const stateDefs = {
 		network: "SandboxNetworkMode",
 		"blockedHosts?": doc("string[]", "Hosts the egress proxy refused during this command."),
 		"denied?": doc("boolean", "The output looks like a filesystem denial by the sandbox."),
+		"startFailed?": doc(
+			"boolean",
+			"Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start.",
+		),
 	},
 	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },

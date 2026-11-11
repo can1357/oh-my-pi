@@ -171,12 +171,41 @@ const cfgSandboxAll = combine({
 /** Output fragments that point at a filesystem denial by the sandbox (shell, Node/Bun and Python spellings). */
 const DENIAL_PATTERN = /operation not permitted|permission denied|read-only file system|\b(?:EPERM|EACCES|EROFS)\b/i;
 
+/**
+ * Windows STATUS_DLL_INIT_FAILED. The processcontainer sandbox launches every process with Mandatory
+ * ASLR, so programs whose runtime needs a fixed image base (MSYS2/Cygwin: Git Bash, `sh`, Git's own
+ * `ssh`, …) fail to start with it. Shells report it signed (-1073741502) or unsigned (3221225794).
+ */
+const STATUS_DLL_INIT_FAILED = 0xc0000142;
+const DLL_INIT_FAILED_PATTERN = /(?:^|[^\d])(?:-1073741502|3221225794)(?!\d)|\b0xc0000142\b/i;
+
+/** Windows OpenSSH, which (unlike the `ssh` Git for Windows bundles) runs inside the sandbox. */
+function windowsOpenSsh(): string | undefined {
+	const ssh = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "OpenSSH", "ssh.exe");
+	return fs.existsSync(ssh) ? ssh : undefined;
+}
+
+/**
+ * Contained environment additions on Windows. Git for Windows runs its bundled `ssh`, which cannot
+ * start in the sandbox; `GIT_SSH` has the lowest precedence of git's ssh settings, so an explicit
+ * `GIT_SSH_COMMAND` or `core.sshCommand` still wins.
+ */
+function windowsContainedEnv(env: Record<string, string>): Record<string, string> {
+	if (process.platform !== "win32" || env.GIT_SSH !== undefined) return {};
+	const ssh = windowsOpenSsh();
+	return ssh ? { GIT_SSH: ssh } : {};
+}
+
 /** Status warning for a configured network mode this host cannot enforce, which runs as `deny`. */
 function networkDegradedWarning(mode: SandboxNetworkMode, backend: string): string {
 	return mode === "allowlist"
 		? "Network allowlist needs loopback proxy confinement, which this host lacks; network is denied instead."
 		: `Network mode "${mode}" on ${backend} needs the host networking tools (slirp4netns, iptables), which this host lacks; network is denied instead.`;
 }
+
+/** Status warning on Windows: what the processcontainer sandbox cannot run (docs/sandbox.md, "Windows"). */
+const WINDOWS_LIMITATION_WARNING =
+	"Windows: some programs cannot start inside the sandbox and fail with exit code 0xC0000142 (STATUS_DLL_INIT_FAILED), for example Git Bash and other MSYS2/Cygwin tools, so git hooks fail too. Native Windows programs and the shell's built-in commands work. See the Windows section of docs/sandbox.md.";
 
 // ── Per-realm state ──────────────────────────────────────────────────────────
 // Module state lives per JS realm. Subagents on worker threads replicate the main thread's session
@@ -765,10 +794,9 @@ export class SandboxRuntime {
 		}
 		const network = this.#effectiveNetwork(config.networkMode);
 		const backend = probe.backend ?? "unknown";
-		const warnings =
-			network === config.networkMode
-				? probe.warnings
-				: [...probe.warnings, networkDegradedWarning(config.networkMode, backend)];
+		const warnings = [...probe.warnings];
+		if (network !== config.networkMode) warnings.push(networkDegradedWarning(config.networkMode, backend));
+		if (backend === "processcontainer") warnings.push(WINDOWS_LIMITATION_WARNING);
 		return { state: "active", backend, network, warnings };
 	}
 
@@ -859,7 +887,14 @@ export class SandboxRuntime {
 		return spawnSandboxChild({
 			argv: request.argv,
 			cwd: request.cwd,
-			env: { ...request.env, OMP_SANDBOX: "1", TMPDIR: tempDir, TMP: tempDir, TEMP: tempDir },
+			env: {
+				...request.env,
+				...windowsContainedEnv(request.env),
+				OMP_SANDBOX: "1",
+				TMPDIR: tempDir,
+				TMP: tempDir,
+				TEMP: tempDir,
+			},
 			policy,
 		});
 	}
@@ -867,9 +902,10 @@ export class SandboxRuntime {
 	/**
 	 * Result annotation for one contained call; `undefined` unless active. `blockedHosts` lists the
 	 * hosts the proxy refused since `blockedSince`; `denied` flags denial-looking `output` (callers
-	 * pass `output` only for a non-zero exit).
+	 * pass `output` only for a non-zero exit); `startFailed` flags a Windows program that could not
+	 * start under the sandbox, seen in `exitCode` or reported in `output`.
 	 */
-	resultMeta(extra?: { blockedSince?: number; output?: string }): SandboxResultMeta | undefined {
+	resultMeta(extra?: { blockedSince?: number; output?: string; exitCode?: number }): SandboxResultMeta | undefined {
 		const status = this.status();
 		if (status.state !== "active") return undefined;
 		const meta: SandboxResultMeta = {
@@ -883,6 +919,15 @@ export class SandboxRuntime {
 			if (hosts.length > 0) meta.blockedHosts = hosts;
 		}
 		if (extra?.output !== undefined && DENIAL_PATTERN.test(extra.output)) meta.denied = true;
+		if (process.platform === "win32") {
+			const exitCode = extra?.exitCode;
+			if (
+				(exitCode !== undefined && exitCode >>> 0 === STATUS_DLL_INIT_FAILED) ||
+				(extra?.output !== undefined && DLL_INIT_FAILED_PATTERN.test(extra.output))
+			) {
+				meta.startFailed = true;
+			}
+		}
 		return meta;
 	}
 

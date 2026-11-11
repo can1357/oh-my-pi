@@ -3029,6 +3029,10 @@
 				"denied": {
 					"type": "boolean",
 					"description": "The output looks like a filesystem denial by the sandbox."
+				},
+				"startFailed": {
+					"type": "boolean",
+					"description": "Windows: a program exited with STATUS_DLL_INIT_FAILED (0xC0000142), how a program the sandbox cannot host fails to start."
 				}
 			},
 			"required": [
