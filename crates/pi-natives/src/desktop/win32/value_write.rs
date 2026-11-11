@@ -26,10 +26,13 @@ pub(super) fn verify(expected: &str, actual: Option<&str>, secure: bool) -> Core
 
 #[cfg(target_os = "windows")]
 pub(super) fn set_combo(hwnd: windows_sys::Win32::Foundation::HWND, text: &str) -> CoreResult<()> {
-	use windows_sys::Win32::UI::WindowsAndMessaging::{
-		CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE, CBN_SELENDOK,
-		COMBOBOXINFO, GWL_STYLE, GetComboBoxInfo, GetDlgCtrlID, GetParent, GetWindowLongW,
-		SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_COMMAND, WM_SETTEXT,
+	use windows_sys::Win32::UI::{
+		Controls::{COMBOBOXINFO, GetComboBoxInfo},
+		WindowsAndMessaging::{
+			CB_FINDSTRINGEXACT, CB_GETCURSEL, CB_SETCURSEL, CBN_EDITCHANGE, CBN_SELCHANGE,
+			CBN_SELENDOK, GWL_STYLE, GetDlgCtrlID, GetParent, GetWindowLongW, SMTO_ABORTIFHUNG,
+			SendMessageTimeoutW, WM_COMMAND, WM_SETTEXT,
+		},
 	};
 
 	use super::super::error::DesktopError;
