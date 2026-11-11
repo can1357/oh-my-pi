@@ -7,7 +7,7 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 - Host facade: `packages/coding-agent/src/tools/browser.ts`
 - JavaScript/Python facades: `packages/coding-agent/src/tools/browser/prelude.{js,py}`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/browser.md`
-- Model-facing core, sent with the first browser call's output: `packages/coding-agent/src/prompts/tools/browser-core.md`
+- Model-facing core, sent as a hidden message after first use: `packages/coding-agent/src/prompts/tools/browser-core.md`
 - Tab lifecycle: `packages/coding-agent/src/tools/browser/tab-supervisor.ts`
 - Browser worker and inner tab API: `packages/coding-agent/src/tools/browser/tab-worker.ts`
 - Browser registry and launch modes: `packages/coding-agent/src/tools/browser/{registry,launch,attach}.ts`
@@ -21,11 +21,13 @@ The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Ele
 The prelude exists only while Eval and `browser.enabled` are enabled (`browser.enabled` defaults to `true`). It is not an AgentTool.
 All browser host operations request exec-tier approval, including inspection helpers.
 
-The first successful browser call of a conversation carries a short core of the browser guide (helpers with their signatures, selector forms, the re-observe rule) after its output, once per conversation (`firstCallDocumentation` on the prelude); the Eval description keeps its one-line browser entry, and the full guide stays readable at `xd://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
+After a conversation first calls the browser prelude, the session sends a short core of the browser guide as a hidden typed message at its next delivery point: after the tool batch or alongside a background job's result. The `firstCallDocumentation` property supplies the core; the Eval description keeps its one-line browser entry, and the full guide stays readable at `xd://eval/browser`. Every helper, option and parameter the core names must also appear in the full guide (`packages/coding-agent/test/tools/browser-prelude-documentation.test.ts`).
 
-Each advisor receives the guide in its own conversation, independently of the primary agent. Platform safety guidance, including the Linux X11 focus warning, stays in the pre-call system prompt rather than waiting for the first result, and follows browser endpoint changes in both primary and advisor requests. Real-session and borrowed-tab safety guidance is present before the first call in every browser mode, including explicit relay and target selection.
+Only typed guide messages count as delivery. A compaction, rewind or shake that drops or shortens the guide sends it again at the next delivery point; a resumed session retaining the whole guide does not repeat it. A new conversation starts with no guide owed until it calls the prelude.
 
-First-call guide blocks bypass artifact spilling and Spotlight output shaping; the cell's ordinary output remains eligible for both.
+The guide never enters Eval stdout, output sinks, artifact spilling or Spotlight shaping. Page and script text cannot claim delivery or bypass output limits by imitating a guide.
+
+Advisors lack this hidden-message channel and keep reading the full topic before first use. Safety rules that govern the first browser action, including Linux X11 focus, borrowed-session navigation and page-integrity rules, stay in pre-call guidance rather than the delayed guide.
 
 ## JavaScript API
 

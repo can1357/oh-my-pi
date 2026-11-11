@@ -230,7 +230,7 @@ describe("eval tool description", () => {
 		expect(withoutRead.description).not.toContain("xd://eval/fixture");
 	});
 
-	it("lists a prelude with a first-call guide apart from the read-first docs, without the guide", () => {
+	it("keeps first-call guides out of a session without a guide delivery channel", () => {
 		const prelude: EvalPreludeDefinition = {
 			name: "fixture",
 			documentation: "Fixture summary line.\n\nFULL PRELUDE DOCUMENTATION",

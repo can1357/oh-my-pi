@@ -1,7 +1,6 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolApproval } from "@oh-my-pi/pi-agent-core";
-import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
-import firstCallGuidePrompt from "../prompts/tools/eval-prelude-first-call.md" with { type: "text" };
 import {
 	approvalRestrictions,
 	denyError,
@@ -9,7 +8,6 @@ import {
 	resolveApproval,
 	resolveApprovalFromContext,
 } from "../tools/approval";
-import { isBareBridgeResult } from "./tool-result";
 
 /** Host context supplied when an eval prelude calls back out of its language VM. */
 export interface EvalPreludeContext {
@@ -47,11 +45,11 @@ export interface EvalPreludeDefinition {
 	 */
 	inlineDocumentation?: boolean;
 	/**
-	 * Short guide appended to the printed output of this prelude's first call
-	 * in a conversation that returns one (a thrown call or a bare-string result
-	 * leaves it for the next), so the model can start without reading the
-	 * `xd://eval/<name>` topic (which keeps `documentation`) while the always-on
-	 * tool description keeps one line. Delivered once per conversation.
+	 * Short guide the session sends as a hidden message after the tool batch
+	 * holding this prelude's first call, so the model can start without reading
+	 * the `xd://eval/<name>` topic (which keeps `documentation`) while the
+	 * always-on tool description keeps one line. Sent again once the context no
+	 * longer holds it. Sessions that cannot send it list the prelude as read-first.
 	 */
 	firstCallDocumentation?: string;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
@@ -173,79 +171,7 @@ export async function invokeEvalPrelude(
 			throw new Error(`Eval prelude "${name}" changed while authorizing the call.`);
 		}
 	}
-	const result = await definition.invoke(parameters, context);
-	// The bridge hands a result with no details or images to the VM as a bare string, which the facades
-	// return rather than print, so the guide waits for a call whose text reaches the cell output.
-	if (isBareBridgeResult(result)) return result;
-	const guide = takeFirstCallGuide(definition, context.session);
-	if (!guide) return result;
-	const lead = result.content.some(part => part.type === "text" && part.text.length > 0) ? "\n\n" : "";
-	return { ...result, content: [...result.content, { type: "text", text: `${lead}${guide}\n` }] };
-}
-
-/** Keep first-call control text outside transforms that shorten ordinary cell output. */
-export async function preserveEvalGuides<T extends AgentToolResult>(
-	result: T,
-	process: (result: T) => Promise<T>,
-): Promise<T> {
-	const guides: string[] = [];
-	const content = result.content.map(part => {
-		if (part.type !== "text") return part;
-		const text = part.text.replace(/(?:^|\n)<eval-guide name="[^"]+">[\s\S]*?<\/eval-guide>(?:\n|$)/g, guide => {
-			guides.push(guide.trim());
-			return "\n";
-		});
-		return text === part.text ? part : { ...part, text };
-	});
-	const processed = await process(guides.length > 0 ? { ...result, content } : result);
-	return guides.length > 0
-		? { ...processed, content: [...processed.content, { type: "text", text: guides.join("\n\n") }] }
-		: processed;
-}
-
-/** Prelude names whose first-call guide each tool session has delivered, for its current conversation and context. */
-const firstCallDeliveries = new WeakMap<
-	ToolSession,
-	{ conversation: string | null; revision: number; preludes: Set<string> }
->();
-
-/** Structural marker shared with the static first-call prompt, independent of its prose. */
-const FIRST_CALL_GUIDE_PATTERN = /(?:^|\n)<eval-guide name="([^"]+)">/g;
-
-/**
- * The prelude's first-call guide, headed, if this is its first call in the
- * session's conversation; marks it delivered. The guide rides the call's
- * output, so the cached prompt prefix is never edited. Sessions without
- * `read` already carry every topic in full in the eval description.
- * What counts as delivered is re-read from the context on the first call and
- * whenever the context lost or replaced messages since, so a compaction or
- * rewind that drops the guide sends it again and a resumed session whose
- * history holds it does not.
- */
-function takeFirstCallGuide(definition: EvalPreludeDefinition, session: ToolSession): string | undefined {
-	const guide = definition.firstCallDocumentation?.trim();
-	if (!guide || session.isToolActive?.("read") === false) return undefined;
-	const conversation = session.getSessionId?.() ?? null;
-	const revision = session.getContextRevision?.() ?? 0;
-	let delivered = firstCallDeliveries.get(session);
-	if (!delivered || delivered.conversation !== conversation || delivered.revision !== revision) {
-		delivered = { conversation, revision, preludes: guidesInContext(session) };
-		firstCallDeliveries.set(session, delivered);
-	}
-	if (delivered.preludes.has(definition.name)) return undefined;
-	delivered.preludes.add(definition.name);
-	return prompt.render(firstCallGuidePrompt, { name: definition.name, guide }).trimEnd();
-}
-
-/** Names of the preludes whose first-call guide a tool result in the session's context still carries. */
-function guidesInContext(session: ToolSession): Set<string> {
-	const names = new Set<string>();
-	for (const message of session.getContextMessages?.() ?? []) {
-		if (message.role !== "toolResult") continue;
-		for (const part of message.content) {
-			if (part.type !== "text") continue;
-			for (const [, name] of part.text.matchAll(FIRST_CALL_GUIDE_PATTERN)) names.add(name);
-		}
-	}
-	return names;
+	// Even a call that fails shows the model has reached for this prelude, so its guide is due.
+	if (definition.firstCallDocumentation?.trim()) context.session.noteEvalPreludeCall?.(definition.name);
+	return definition.invoke(parameters, context);
 }

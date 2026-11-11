@@ -37,7 +37,6 @@ import {
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
 import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
-import { isBareBridgeResult, isBridgeImage, toolResultHasError } from "../tool-result";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
@@ -84,6 +83,10 @@ type ToolValue =
 			images?: Omit<ImageContent, "type">[];
 			hasError?: boolean;
 	  };
+function toolResultHasError(result: AgentToolResult): boolean {
+	if (isRecord(result) && result.isError === true) return true;
+	return isRecord(result.details) && result.details.isError === true;
+}
 
 function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
@@ -180,14 +183,17 @@ export function bridgeValueFromToolResult(
 		(content): content is { type: "text"; text: string } =>
 			content.type === "text" && typeof content.text === "string",
 	);
-	const imageBlocks = result.content.filter(isBridgeImage);
+	const imageBlocks = result.content.filter(
+		(content): content is ImageContent =>
+			content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
+	);
 	const text = textBlocks.map(block => block.text).join("");
 	const hasError = toolResultHasError(result);
 	if (emitStatus) {
 		const event = summarize(name, args, result, text, hasError);
 		if (event) emitStatus(event);
 	}
-	if (isBareBridgeResult(result)) return text;
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
 	const value: Exclude<ToolValue, string> = { text, details: result.details };
 	if (imageBlocks.length > 0) {
 		value.images = imageBlocks.map(({ type: _type, ...image }) => image);

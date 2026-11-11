@@ -2538,9 +2538,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A transition swaps the transcript under the agent: hold idle deliveries until it
 			// settles, so a result from the outgoing session cannot start a turn in the target.
 			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
-			injectIdle: async messages => {
-				const first = messages[0];
+			injectIdle: async delivered => {
+				const first = delivered[0];
 				if (!first) return;
+				// A background job may have made a prelude's first call: its guide rides the job's delivery.
+				const guide = this.#tools.takeEvalPreludeGuide();
+				const messages = guide ? [...delivered, guide] : delivered;
 				if (this.#clientBridge?.deferAgentInitiatedTurns) {
 					this.#recordWithoutTurn(messages);
 					return;
@@ -2629,6 +2632,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
 			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
+			// A prelude's first-call guide follows the tool batch that called it, or rides a delivery that
+			// already continues the run; alone it never extends a finished turn.
+			if (boundary === "work" || thunks.length > 0) thunks.push(() => this.#tools.takeEvalPreludeGuide() ?? null);
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
@@ -2884,8 +2890,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
 			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
-			evalPreludeGuidance: () =>
-				this.getEvalPreludes().flatMap(definition => (definition.guidance ? [definition.guidance] : [])),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
@@ -7836,6 +7840,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#getEvalPreludes?.() ?? [];
 	}
 
+	/** Records a call into an eval prelude; its first-call guide follows the current tool batch. */
+	noteEvalPreludeCall(name: string): void {
+		this.#tools.noteEvalPreludeCall(name);
+	}
+
 	/** Eval preludes frozen into the provider-visible prompt (see {@link SessionTools.advertisedEvalPreludes}). */
 	getAdvertisedEvalPreludes(): readonly EvalPreludeDefinition[] {
 		return this.#tools.advertisedEvalPreludes;
@@ -8421,6 +8430,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		this.#tools.clearEvalPreludeCalls();
 		// A `/new`, session switch, or tree navigation reuses tool-call ids, so a
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).

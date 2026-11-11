@@ -408,7 +408,6 @@ interface QueuedMessageClaim {
 }
 
 export class Agent {
-	#messagesRevision = 0;
 	#state: AgentState = {
 		systemPrompt: [],
 		model: getBundledModel("google", "gemini-2.5-flash-lite-preview-06-17"),
@@ -910,14 +909,6 @@ export class Agent {
 	}
 
 	/**
-	 * Bumped whenever messages are replaced or removed (compaction, prune, rewind, tree navigation, load, clear,
-	 * reset); appending leaves it. Lets a reader of the history cache what it found until the next such change.
-	 */
-	get messagesRevision(): number {
-		return this.#messagesRevision;
-	}
-
-	/**
 	 * Tokenizer for the active model. The instance is replaced whenever the
 	 * active model's encoding, image or thinking-replay pricing, or
 	 * replayed-reasoning reader changes (see {@link setModel}), or its Responses
@@ -1377,7 +1368,6 @@ export class Agent {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
-		this.#messagesRevision++;
 	}
 
 	/** Signal after a queue transition has settled its pending, claim, and
@@ -1471,7 +1461,6 @@ export class Agent {
 
 	popMessage(): AgentMessage | undefined {
 		const removed = this.#state.messages.pop();
-		if (removed) this.#messagesRevision++;
 		if (removed && this.#state.streamMessage === removed) {
 			this.#state.streamMessage = null;
 		}
@@ -1693,7 +1682,6 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
-		this.#messagesRevision++;
 	}
 
 	abort(reason?: unknown) {
@@ -1736,7 +1724,6 @@ export class Agent {
 			this.#resolveRunningPrompt = undefined;
 		}
 		this.#state.messages.length = 0;
-		this.#messagesRevision++;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();
