@@ -1569,7 +1569,7 @@ mod tests {
 		input.takeover_presses = Some(1);
 		let completed = Ok(());
 		let error = input
-			.finish_takeover(completed, |input| {
+			.finish_takeover(completed, |_| {
 				for event in [KEY_PRESS_EVENT, KEY_RELEASE_EVENT] {
 					user
 						.xtest_fake_input(event, code, CURRENT_TIME, root, 0, 0, 0)
