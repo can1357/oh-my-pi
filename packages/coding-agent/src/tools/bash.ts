@@ -1052,6 +1052,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let latestText = "";
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let backgrounded = !options.foreground;
+		let settled = false;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 		const notices = [...(options.notices ?? [])];
 		const replies: string[] = [];
@@ -1086,12 +1087,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				const report = async (text: string, details: BashProgressDetails): Promise<void> => {
 					latestText = text;
 					const reported = reportProgress(text, { ...details });
-					// `output` feeds job listings; the card already shows `text`.
-					const { output: _output, ...frame } = details;
-					options.onUpdate?.({
-						content: [{ type: "text", text }],
-						details: withReplies(backgrounded ? frame : (latestProgressDetails ?? {})),
-					});
+					if (backgrounded || !settled) {
+						// `output` feeds job listings; the card already shows `text`.
+						const { output: _output, ...frame } = details;
+						options.onUpdate?.({
+							content: [{ type: "text", text }],
+							details: withReplies(backgrounded ? frame : (latestProgressDetails ?? {})),
+						});
+					}
 					await reported;
 				};
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
@@ -1161,6 +1164,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
+					settled = true;
 					completion.resolve({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
 						// A non-zero exit is a completed command that failed. Re-enter
@@ -1175,6 +1179,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					return finalText;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
+					settled = true;
 					completion.resolve({ kind: "failed", error });
 					// Only a cancel aborts the job's own signal (deadlines end in a timed-out result).
 					await report(message, {

@@ -3,6 +3,7 @@ import { scheduler } from "node:timers/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AsyncJobError, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import { logger } from "@oh-my-pi/pi-utils";
 
 async function waitForJobEviction(manager: AsyncJobManager, jobId: string): Promise<void> {
 	const deadline = Date.now() + 2_000;
@@ -1090,5 +1091,155 @@ describe("AsyncJobManager", () => {
 		manager.cancelAll({ ownerId: "Sub" });
 		await expect(reap).resolves.toBe(true);
 		expect(manager.getJob("hung-1")?.status).toBe("cancelled");
+	});
+
+	test("evicts a suppressed job on consumed grace without logging failure when parked delivery rejects", async () => {
+		vi.useFakeTimers();
+		try {
+			const warnSpy = vi.spyOn(logger, "warn");
+			const gate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async () => {
+				await gate.promise;
+			});
+
+			const jobId = manager.register("task", "parked-stale", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(1_000);
+			expect(manager.getJob(jobId)?.status).toBe("completed");
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.reject(new Error("Yield queue entry became stale: async-result"));
+			await scheduler.yield();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			expect(warnSpy).not.toHaveBeenCalledWith("Async job completion delivery failed", expect.anything());
+
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("evicts acknowledged jobs on consumed grace while preserving full retention for cancelled jobs", async () => {
+		vi.useFakeTimers();
+		try {
+			const firstAttempt = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({
+				retentionMs: 60_000,
+				consumedResultEvictionMs: 25,
+				onJobComplete: async () => {
+					firstAttempt.resolve();
+					throw new Error("delivery failed");
+				},
+			});
+
+			const ackJobId = manager.register("task", "ack-job", async () => "done");
+			const cancelJobId = manager.register("bash", "cancelled-job", async ({ signal }) => {
+				const aborted = Promise.withResolvers<void>();
+				if (signal.aborted) aborted.resolve();
+				else signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				return "cancelled";
+			});
+
+			await firstAttempt.promise;
+			await waitForCondition(() => manager.hasPendingDeliveries());
+			expect(manager.acknowledgeDeliveries([ackJobId])).toBeGreaterThanOrEqual(1);
+			expect(manager.isJobResultConsumed(ackJobId)).toBe(false);
+
+			manager.cancelAll();
+			await manager.waitForAll();
+			expect(manager.getJob(ackJobId)?.status).toBe("completed");
+			expect(manager.getJob(cancelJobId)?.status).toBe("cancelled");
+
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(ackJobId)).toBeUndefined();
+			expect(manager.getJob(cancelJobId)?.status).toBe("cancelled");
+
+			vi.advanceTimersByTime(60_000);
+			expect(manager.getJob(cancelJobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("marks an in-flight delivery consumed when it resolves while watched so unwatchJobs does not re-enqueue", async () => {
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<void>();
+			const delivered: string[] = [];
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async jobId => {
+				await gate.promise;
+				delivered.push(jobId);
+			});
+
+			const jobId = manager.register("task", "watched-inflight", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			expect(manager.watchJobs([jobId])).toBe(1);
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.resolve();
+			await waitForCondition(() => !manager.isDeliveryPending(jobId));
+			expect(delivered).toEqual([jobId]);
+			expect(manager.isJobResultConsumed(jobId)).toBe(true);
+
+			expect(manager.unwatchJobs([jobId])).toBe(1);
+			expect(manager.hasPendingDeliveries({ ownerId: "Main" })).toBe(false);
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			expect(delivered).toEqual([jobId]);
+
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("waits for run settlement before short-evicting consumed cancelled jobs", async () => {
+		vi.useFakeTimers();
+		try {
+			const cleanupGate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ retentionMs: 60_000, consumedResultEvictionMs: 25 });
+			const jobId = manager.register(
+				"bash",
+				"slow-abort-cleanup",
+				async () => {
+					await cleanupGate.promise;
+					return "cleaned up";
+				},
+				{ ownerId: "Main" },
+			);
+
+			expect(manager.cancel(jobId, { ownerId: "Main" })).toBe(true);
+			expect(manager.consumeJobResults([jobId])).toBe(0);
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+			expect(manager.getJob(jobId)?.endTime).toBeUndefined();
+
+			vi.advanceTimersByTime(100);
+			expect(manager.getJob(jobId)?.status).toBe("cancelled");
+			expect(await manager.waitForOwnerJobs("Main", { timeoutMs: 0 })).toBe(false);
+
+			cleanupGate.resolve();
+			await manager.waitForAll();
+			expect(manager.getJob(jobId)?.endTime).toBeDefined();
+
+			vi.advanceTimersByTime(24);
+			expect(manager.getJob(jobId)).toBeDefined();
+			vi.advanceTimersByTime(1);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

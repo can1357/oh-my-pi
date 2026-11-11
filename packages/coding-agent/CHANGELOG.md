@@ -49,6 +49,8 @@
 
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
+- Background jobs whose completion delivery was suppressed now clear on the short post-consumption grace instead of staying in job listings for the full 5-minute retention window or logging a spurious delivery failure warning ([#18814](https://github.com/can1357/oh-my-pi/pull/18814) by [@iliaal](https://github.com/iliaal))
+- Completed foreground tool calls no longer retain their streaming progress snapshots in session memory after their result is written to the transcript, and older settled background-call snapshots kept for focus rebuilds are now compacted to lightweight terminal summaries ([#18814](https://github.com/can1357/oh-my-pi/pull/18814) by [@iliaal](https://github.com/iliaal))
 
 ## [18.18.8] - 2026-11-11
 

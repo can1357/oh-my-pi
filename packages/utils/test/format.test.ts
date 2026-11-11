@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { formatDuration } from "@oh-my-pi/pi-utils/format";
+import { formatDuration, truncate } from "@oh-my-pi/pi-utils/format";
 
 describe("formatDuration", () => {
 	// Codex's wham/usage endpoint returns the prior window's reset_at until the
@@ -29,5 +29,18 @@ describe("formatDuration", () => {
 		expect(formatDuration(59_940)).toBe("59.9s");
 		expect(formatDuration(59_960)).toBe("1m");
 		expect(formatDuration(119_600)).toBe("1m59s");
+	});
+});
+
+describe("truncate", () => {
+	it("retains leading or trailing slices within maxLen and handles zero remaining budget", () => {
+		expect(truncate("abcdef", 6)).toBe("abcdef");
+		expect(truncate("abcdef", 6, { direction: "tail" })).toBe("abcdef");
+		expect(truncate("abcdef", 4)).toBe("abc…");
+		expect(truncate("abcdef", 5, "..")).toBe("abc..");
+		expect(truncate("abcdef", 4, { direction: "tail" })).toBe("…def");
+		expect(truncate("abcdef", 5, { direction: "tail", ellipsis: ".." })).toBe("..def");
+		expect(truncate("abcdef", 1, { direction: "tail" })).toBe("…");
+		expect(truncate("abcdef", 0, { direction: "tail" })).toBe("…");
 	});
 });

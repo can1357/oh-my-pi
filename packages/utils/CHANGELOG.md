@@ -7,6 +7,10 @@
 - Added `prompt.renderTracked`: renders a template like `prompt.render` and reports where each `{{#each}}` iteration over a tracked item lands in the output ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 - Added `prompt.closeCodeFence`: closes a code fence a text leaves open, by the same rule `prompt.format` uses ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
 
+### Changed
+
+- `truncate` now accepts `{ direction: "tail" }` to retain trailing characters with a leading ellipsis ([#18814](https://github.com/can1357/oh-my-pi/pull/18814) by [@iliaal](https://github.com/iliaal))
+
 ## [18.18.8] - 2026-11-11
 
 ### Removed

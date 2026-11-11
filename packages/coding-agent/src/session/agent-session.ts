@@ -295,6 +295,7 @@ import {
 import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import { ActiveToolExecutionUpdateCache } from "./active-tool-updates";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
 import {
@@ -1101,7 +1102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
-	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	#activeToolExecutionUpdates = new ActiveToolExecutionUpdateCache();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
@@ -4015,13 +4016,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #emitSessionEvent(event: AgentSessionEvent, options: { detachExtensions?: boolean } = {}): Promise<void> {
-		if (event.type === "tool_execution_update") {
-			// Returned background calls have no later tool result to persist their
-			// terminal frame. Keep the latest update for future focus rebuilds;
-			// logical session transitions clear the cache.
-			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
+		if (event.type === "tool_execution_start") {
+			this.#activeToolExecutionUpdates.recordStart(event.toolCallId);
+		} else if (event.type === "tool_execution_update") {
+			// Cache in-flight updates until `tool_execution_end`, and retain settled
+			// frames for returned background calls (compacting older ones) across
+			// focus rebuilds until a logical session transition clears the cache.
+			this.#activeToolExecutionUpdates.recordUpdate(event);
 		} else if (event.type === "tool_execution_end") {
-			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			this.#activeToolExecutionUpdates.recordEnd(event.toolCallId, event.result?.details);
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -6043,7 +6046,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * persisted transcript state.
 	 */
 	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
-		return [...this.#activeToolExecutionUpdates.values()];
+		return this.#activeToolExecutionUpdates.snapshot();
 	}
 
 	/**
@@ -6971,6 +6974,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#tools.releaseRestoredTranscript();
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
+		this.#activeToolExecutionUpdates.clear();
 		this.sessionManager.releaseRetainedEntries();
 	}
 

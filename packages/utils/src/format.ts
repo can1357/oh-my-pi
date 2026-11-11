@@ -82,13 +82,25 @@ export function countNewlines(text: string): number {
 	return count;
 }
 
+export interface TruncateOptions {
+	ellipsis?: string;
+	direction?: "head" | "tail";
+}
+
 /**
- * Truncate a string to maxLen characters, appending an ellipsis if truncated.
+ * Truncate a string to maxLen characters, adding an ellipsis if truncated.
+ * Retains the leading slice (`"head"`, default) or trailing slice (`"tail"`).
  * For display-width-aware truncation (terminals), use truncateToWidth from @oh-my-pi/pi-tui.
  */
-export function truncate(str: string, maxLen: number, ellipsis = "…"): string {
+export function truncate(str: string, maxLen: number, ellipsisOrOptions: string | TruncateOptions = "…"): string {
 	if (str.length <= maxLen) return str;
+	const ellipsis = typeof ellipsisOrOptions === "string" ? ellipsisOrOptions : (ellipsisOrOptions.ellipsis ?? "…");
+	const direction = typeof ellipsisOrOptions === "string" ? "head" : (ellipsisOrOptions.direction ?? "head");
 	const sliceLen = Math.max(0, maxLen - ellipsis.length);
+	if (direction === "tail") {
+		const kept = sliceLen > 0 ? str.slice(-sliceLen) : "";
+		return `${ellipsis}${kept}`;
+	}
 	return `${str.slice(0, sliceLen)}${ellipsis}`;
 }
 

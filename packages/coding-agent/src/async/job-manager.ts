@@ -590,7 +590,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 				}
 			}
 			if (this.#releasedForegroundJobs.has(id)) this.#discardForegroundJob(id);
-			else this.#scheduleEviction(id);
+			else {
+				this.#scheduleEviction(id);
+				this.#scheduleShortEvictionIfSettled(id);
+			}
 			for (const listener of this.#settleListeners) {
 				try {
 					listener();
@@ -639,6 +642,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
+		this.#scheduleShortEvictionIfSettled(id);
 		return id;
 	}
 
@@ -784,6 +788,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			...this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId)),
 		);
 		this.#notifyDeliveryQueueChanged();
+		for (const jobId of uniqueJobIds) {
+			this.#scheduleShortEvictionIfSettled(jobId);
+		}
 		return before - this.#deliveries.length;
 	}
 
@@ -1239,6 +1246,27 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#evictionTimers.set(jobId, timer);
 	}
 
+	/**
+	 * Arm the short {@link #consumedResultEvictionMs} grace once a settled
+	 * background job can no longer deliver (consumed or permanently suppressed
+	 * via {@link acknowledgeDeliveries}) and has no queued or in-flight delivery
+	 * still relying on its suppression marker.
+	 */
+	#scheduleShortEvictionIfSettled(jobId: string): void {
+		const job = this.#jobs.get(jobId);
+		if (!job || job.status === "running" || job.endTime === undefined || job.foreground) return;
+		if (!this.#consumedJobResults.has(jobId) && !this.#suppressedDeliveries.has(jobId)) {
+			return;
+		}
+		if (
+			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
+			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId)
+		) {
+			return;
+		}
+		this.#scheduleEviction(jobId, this.#consumedResultEvictionMs);
+	}
+
 	#clearEvictionTimers(): void {
 		for (const timer of this.#evictionTimers.values()) {
 			clearTimeout(timer);
@@ -1286,7 +1314,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			if (index === -1) continue;
 			this.#deliveries.splice(index, 1);
 			this.#notifyDeliveryQueueChanged();
-			if (this.isDeliverySuppressed(selected.jobId)) continue;
+			if (this.isDeliverySuppressed(selected.jobId)) {
+				this.#scheduleShortEvictionIfSettled(selected.jobId);
+				continue;
+			}
 
 			return this.#waitForDeliveryPromise(this.#deliverDelivery(selected), deadline);
 		}
@@ -1376,6 +1407,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			const delivery = this.#deliveries[0];
 			if (this.isDeliverySuppressed(delivery.jobId)) {
 				this.#deliveries.shift();
+				this.#scheduleShortEvictionIfSettled(delivery.jobId);
 				continue;
 			}
 			const waitMs = delivery.nextAttemptAt - Date.now();
@@ -1388,6 +1420,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			}
 			if (this.isDeliverySuppressed(delivery.jobId)) {
 				this.#deliveries.shift();
+				this.#scheduleShortEvictionIfSettled(delivery.jobId);
 				continue;
 			}
 
@@ -1432,35 +1465,35 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 					delivery.text,
 					this.#jobs.get(delivery.jobId) ?? this.#reconstructEvictedJob(delivery),
 				);
-				delivered = true;
-				// A foreground snapshot may have consumed this result while the
-				// sink receipt was parked. The receipt has now settled, so the
-				// suppression tombstone no longer needs the full retention window.
-				if (this.#consumedJobResults.has(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
-					this.#scheduleEviction(delivery.jobId, this.#consumedResultEvictionMs);
-				}
+				delivered = !this.#suppressedDeliveries.has(delivery.jobId);
 			} catch (error) {
 				delivery.attempt += 1;
 				delivery.lastError = error instanceof Error ? error.message : String(error);
 				delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
-				if (!this.isDeliverySuppressed(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
+				const suppressed = this.#disposed || this.isDeliverySuppressed(delivery.jobId);
+				if (!suppressed && this.#jobs.has(delivery.jobId)) {
 					this.#queueDelivery(delivery);
 				}
-				logger.warn("Async job completion delivery failed", {
-					jobId: delivery.jobId,
-					attempt: delivery.attempt,
-					nextRetryAt: delivery.nextAttemptAt,
-					error: delivery.lastError,
-				});
+				if (!suppressed) {
+					logger.warn("Async job completion delivery failed", {
+						jobId: delivery.jobId,
+						attempt: delivery.attempt,
+						nextRetryAt: delivery.nextAttemptAt,
+						error: delivery.lastError,
+					});
+				}
 			} finally {
 				const index = this.#inFlightDeliveries.indexOf(delivery);
 				if (index !== -1) this.#inFlightDeliveries.splice(index, 1);
 				if (this.#deliveries.length > 0) this.#ensureDeliveryLoop();
 			}
-			// A normally delivered result is consumed only after the attempt left
-			// #inFlightDeliveries, so it can arm the short eviction grace.
+			// Arm the short eviction grace only after the attempt leaves
+			// #inFlightDeliveries, whether it delivered normally or settled while
+			// suppressed (e.g. a parked yield-queue receipt rejected as stale).
 			if (delivered && !this.#consumedJobResults.has(delivery.jobId)) {
 				this.#consumeJobResult(delivery.jobId);
+			} else {
+				this.#scheduleShortEvictionIfSettled(delivery.jobId);
 			}
 		})();
 		delivery.promise = promise;

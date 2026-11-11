@@ -48,6 +48,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { ActiveToolExecutionUpdateCache } from "../session/active-tool-updates";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import {
@@ -270,7 +271,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	#toolNames = new Set<string>();
 	#builtInTools = new Set<string>();
 	#runToolCallIds = new Set<string>();
-	readonly #activeUpdates = new Map<string, ToolExecutionUpdateEvent>();
+	readonly #activeUpdates = new ActiveToolExecutionUpdateCache();
 	#entries: SessionEntry[] = [];
 	readonly #entryIndex = new SessionEntryIndex();
 	/** Custom entries appended here and not yet echoed back by the home worker. */
@@ -521,7 +522,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[] {
-		return [...this.#activeUpdates.values()];
+		return this.#activeUpdates.snapshot();
 	}
 
 	settleInFlightMessagePersistence(): Promise<void> {
@@ -855,6 +856,9 @@ export class RemoteAgentSession implements AgentViewSession {
 	/** Bridge only: merge a state patch from the publisher. */
 	applyPatch(patch: Partial<SessionMirrorState>): void {
 		if (this.#closed !== undefined) return;
+		if (patch.sessionId !== undefined && patch.sessionId !== this.#state.sessionId && this.#state.sessionId !== "") {
+			this.#activeUpdates.clear();
+		}
 		this.#state = { ...this.#state, ...patch };
 		if (patch.pendingToolCalls) this.#pendingToolCalls = new Set(patch.pendingToolCalls);
 	}
@@ -874,11 +878,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (this.#closed !== undefined) return;
 		this.#view = state;
 		this.#pruneSettled(state.restorableQueue);
-		this.#activeUpdates.clear();
-		for (const update of state.activeToolExecutionUpdates) this.#activeUpdates.set(update.toolCallId, update);
+		this.#syncViewDerived(state);
+		this.#activeUpdates.replaceSnapshot(state.activeToolExecutionUpdates, this.#pendingToolCalls);
 		if (entries) this.applyEntries(entries);
 		this.#entryIndex.setLeaf(state.leafId);
-		this.#syncViewDerived(state);
 		this.#reseedTokenRate();
 	}
 
@@ -983,11 +986,14 @@ export class RemoteAgentSession implements AgentViewSession {
 					);
 				}
 				return;
+			case "tool_execution_start":
+				this.#activeUpdates.recordStart(event.toolCallId);
+				return;
 			case "tool_execution_update":
-				this.#activeUpdates.set(event.toolCallId, event);
+				this.#activeUpdates.recordUpdate(event);
 				return;
 			case "tool_execution_end":
-				this.#activeUpdates.delete(event.toolCallId);
+				this.#activeUpdates.recordEnd(event.toolCallId, event.result?.details);
 				return;
 		}
 	}
