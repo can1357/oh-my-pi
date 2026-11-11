@@ -492,14 +492,7 @@ describe("IRC body wrapping", () => {
 
 	it("soft-wraps a long body line to the card width when expanded", () => {
 		const longLine = "word ".repeat(40).trim();
-		const result = {
-			content: [{ type: "text" as const, text: "" }],
-			details: {
-				op: "wait" as const,
-				waited: [{ id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() }],
-			},
-		};
-		const component = waitToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
 		const lines = component.render(120) as readonly string[];
 		const stripped = lines.map(line => Bun.stripANSI(line));
 		const bodyLines = stripped.filter(line => line.includes("word"));
@@ -515,29 +508,16 @@ describe("IRC body wrapping", () => {
 
 	it("shows an expand hint on a collapsed card with hidden lines", () => {
 		const body = ["line one", "line two", "line three", "line four"].join("\n");
-		const result = {
-			content: [{ type: "text" as const, text: "" }],
-			details: {
-				op: "wait" as const,
-				waited: [{ id: "1", from: "Peer", to: "Main", body, ts: Date.now() }],
-			},
-		};
-		const component = waitToolRenderer.renderResult(result, { expanded: false, isPartial: false }, theme);
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body }, () => false, theme);
 		const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
-		expect(output).toContain("+2 more lines");
+		// The card shows three lines collapsed, so one of four is hidden.
+		expect(output).toContain("+1 more line");
 		expect(output).toContain("Expand");
 	});
 
 	it("preserves ANSI escape codes across a wrap boundary", () => {
 		const longLine = `\x1b[31m${"red ".repeat(40)}\x1b[0m`;
-		const result = {
-			content: [{ type: "text" as const, text: "" }],
-			details: {
-				op: "wait" as const,
-				waited: [{ id: "1", from: "Peer", to: "Main", body: longLine, ts: Date.now() }],
-			},
-		};
-		const component = waitToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme);
+		const component = createIrcMessageCard({ kind: "incoming", from: "Peer", body: longLine }, () => true, theme);
 		const lines = component.render(120) as readonly string[];
 		const rawJoined = lines.join("\n");
 		// ANSI codes preserved in raw output
