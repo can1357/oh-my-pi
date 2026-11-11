@@ -2,7 +2,7 @@
 //! Neither route activates a window or substitutes keyboard input. Lazy menus
 //! absent from the provider's current tree are refused rather than guessed.
 
-use std::ptr::with_exposed_provenance_mut;
+use std::{ptr::with_exposed_provenance_mut, time::Instant};
 
 use uiautomation::{
 	UIAutomation, UIElement, UITreeWalker,
@@ -305,9 +305,18 @@ fn thread_windows(thread: u32) -> Option<Vec<usize>> {
 	Some(windows)
 }
 
-fn modal_popups(target: &Target, before: &[usize]) -> Vec<ModalPopup> {
-	let mut popups = Vec::new();
-	for id in thread_windows(target.thread).unwrap_or_default() {
+fn modal_popups<'a>(
+	target: &'a Target,
+	before: &'a [usize],
+) -> impl Iterator<Item = ModalPopup> + 'a {
+	let windows = thread_windows(target.thread).unwrap_or_default();
+	let started = Instant::now();
+	windows.into_iter().map_while(move |id| {
+		// Share one 200 ms budget across every candidate, not one per window.
+		let remaining = 200_u128.saturating_sub(started.elapsed().as_millis());
+		if remaining == 0 {
+			return None;
+		}
 		let hwnd = with_exposed_provenance_mut(id);
 		let mut pid = 0;
 		// SAFETY: pid is writable and Windows validates the window handles.
@@ -333,14 +342,13 @@ fn modal_popups(target: &Target, before: &[usize]) -> Vec<ModalPopup> {
 					0,
 					0,
 					SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
-					200,
+					remaining as u32,
 					&mut result,
 				)
 			} != 0;
 		}
-		popups.push(popup);
-	}
-	popups
+		Some(popup)
+	})
 }
 
 fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()> {
@@ -394,14 +402,11 @@ fn native_select(target: &Target, root: HMENU, path: &[String]) -> CoreResult<()
 	// observed, responsive owned dialog with a disabled owner confirms it.
 	// SAFETY: IsWindowEnabled only inspects the opaque HWND.
 	let owner_enabled = unsafe { IsWindowEnabled(target.hwnd) } != 0;
-	let popups = if sent || owner_enabled {
-		Vec::new()
-	} else if let Some(before) = before.as_deref() {
-		modal_popups(target, before)
-	} else {
-		Vec::new()
-	};
-	if !command_completed(sent, owner_enabled, before.as_deref(), &popups) {
+	let popups = before
+		.as_deref()
+		.into_iter()
+		.flat_map(|before| modal_popups(target, before));
+	if !command_completed(sent, owner_enabled, before.as_deref(), popups) {
 		return Err(failed(
 			"native menu command delivery failed or timed out and may already have taken effect; do \
 			 not replay automatically",

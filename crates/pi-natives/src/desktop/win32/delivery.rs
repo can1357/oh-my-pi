@@ -252,7 +252,7 @@ pub fn command_completed(
 	sent: bool,
 	owner_enabled: bool,
 	before: Option<&[usize]>,
-	popups: &[ModalPopup],
+	popups: impl IntoIterator<Item = ModalPopup>,
 ) -> bool {
 	if sent {
 		return true;
@@ -262,7 +262,7 @@ pub fn command_completed(
 	};
 	!owner_enabled
 		&& popups
-			.iter()
+			.into_iter()
 			.any(|popup| popup.is_candidate(before) && popup.responsive)
 }
 
@@ -448,15 +448,15 @@ mod tests {
 	#[test]
 	fn modal_command_timeout_is_confirmed_by_new_responsive_dialog() {
 		let popups = [ModalPopup { id: 1, ..DIALOG }, DIALOG];
-		assert!(command_completed(false, false, Some(&[1]), &popups));
+		assert!(command_completed(false, false, Some(&[1]), popups));
 	}
 
 	#[test]
 	fn timeout_without_new_modal_evidence_stays_unconfirmed() {
-		assert!(!command_completed(false, false, Some(&[1]), &[]));
-		assert!(!command_completed(false, false, None, &[DIALOG]));
-		assert!(!command_completed(false, true, Some(&[1]), &[DIALOG]));
-		assert!(!command_completed(false, false, Some(&[1, 2]), &[DIALOG]));
+		assert!(!command_completed(false, false, Some(&[1]), []));
+		assert!(!command_completed(false, false, None, [DIALOG]));
+		assert!(!command_completed(false, true, Some(&[1]), [DIALOG]));
+		assert!(!command_completed(false, false, Some(&[1, 2]), [DIALOG]));
 		for popup in [
 			ModalPopup { owned_by_target: false, ..DIALOG },
 			ModalPopup { same_thread: false, ..DIALOG },
@@ -464,12 +464,24 @@ mod tests {
 			ModalPopup { visible: false, ..DIALOG },
 			ModalPopup { responsive: false, ..DIALOG },
 		] {
-			assert!(!command_completed(false, false, Some(&[1]), &[popup]));
+			assert!(!command_completed(false, false, Some(&[1]), [popup]));
 		}
 	}
 
 	#[test]
+	fn modal_confirmation_stops_probing_after_first_responsive_dialog() {
+		let mut probes = 0;
+		let popups = [DIALOG, ModalPopup { id: 3, ..DIALOG }]
+			.into_iter()
+			.inspect(|_| {
+				probes += 1;
+			});
+		assert!(command_completed(false, false, Some(&[1]), popups));
+		assert_eq!(probes, 1);
+	}
+
+	#[test]
 	fn completed_command_needs_no_dialog() {
-		assert!(command_completed(true, true, None, &[]));
+		assert!(command_completed(true, true, None, []));
 	}
 }
