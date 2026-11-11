@@ -28,7 +28,9 @@ const waitSchema = type({});
  * its turn back early while work warms up, and a wait loop backs off.
  */
 const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+/** Above this prompt-token count, an empty model turn costs enough to skip the short idle windows. */
 const LARGE_CONTEXT_PROMPT_TOKENS = 100_000;
+/** Index of the one-minute window in WAIT_LADDER_MS. */
 const LARGE_CONTEXT_START_RUNG = 3;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
