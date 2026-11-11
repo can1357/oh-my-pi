@@ -1152,8 +1152,28 @@ impl Worker {
 		let Ok(target) = self.registry.target(reference) else {
 			return error;
 		};
-		let Ok(window) = self.window(&Target::Window(target.clone())) else {
-			return error;
+		let window = if target == "desktop" {
+			let found = self
+				.backend()
+				.and_then(|backend| backend.windows())
+				.and_then(|windows| {
+					let id = self.ax()?.window_id(&handle, &windows)?;
+					windows
+						.into_iter()
+						.find(|window| window.id == id)
+						.ok_or_else(|| {
+							DesktopError::window_not_found("the element's window is unavailable")
+						})
+				});
+			let Ok(window) = found else {
+				return error;
+			};
+			window
+		} else {
+			let Ok(window) = self.window(&Target::Window(target.clone())) else {
+				return error;
+			};
+			window
 		};
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {
@@ -1174,23 +1194,19 @@ impl Worker {
 		} else {
 			return error;
 		};
-		let proven = if registry.has_proof(reference) {
-			ax::refind(ax, registry, &window, reference).ok().flatten()
+		// A relabelled element only needs the role-and-label candidate. Do
+		// not first walk for its old value-bearing proof and then walk again
+		// when that proof misses: neither candidate authorizes retargeting.
+		let candidate = if relabelled {
+			ax::find_read_as(ax, registry, &window, reference)
+				.map(|found| (found, "this read of the window found with the role and label"))
 		} else {
-			None
+			ax::refind(ax, registry, &window, reference)
+				.map(|found| (found, "in the window with the role, labels and value"))
 		};
-		let (found, fields) = match proven {
-			Some(found) => (found, "in the window with the role, labels and value"),
-			// A relabelled element's control may still be in the window under
-			// another element, read with the role and label the ref was.
-			None if relabelled => {
-				let Ok(Some(found)) = ax::find_read_as(ax, registry, &window, reference) else {
-					message.push_str(" Re-run ax()/find()");
-					return DesktopError::stale_ref(message);
-				};
-				(found, "this read of the window found with the role and label")
-			},
-			None => return error,
+		let Ok((Some(found), fields)) = candidate else {
+			message.push_str(" Re-run ax()/find()");
+			return DesktopError::stale_ref(message);
 		};
 		let _ = write!(message, " {found} is the one element {fields} {reference} was read with.");
 		let _ = write!(
@@ -4034,7 +4050,8 @@ mod capture_tests {
 			.split(". ")
 			.find_map(|sentence| {
 				sentence.strip_suffix(
-					" is the one element in the window with the role, labels and value e3 was read with",
+					" is the one element this read of the window found with the role and label e3 was \
+					 read with",
 				)
 			})
 			.unwrap_or_else(|| panic!("{}", error.message));
@@ -4042,6 +4059,50 @@ mod capture_tests {
 		press(&mut worker, found).unwrap();
 		press(&mut worker, now).unwrap();
 		assert_eq!(tree.lock().pressed, [4, 3]);
+	}
+
+	#[test]
+	fn a_relabelled_desktop_ref_names_its_current_control_and_window_candidate() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		let (backend, registry) = (&mut worker.backend, &mut worker.registry);
+		let node = register_node(
+			backend.as_mut().unwrap().ax().unwrap(),
+			registry,
+			"desktop",
+			AxHandle::Test(3),
+			&mut AppFocus::default(),
+		)
+		.unwrap();
+		shift_address_row(&tree);
+		let error = press(&mut worker, &node.ref_).unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef);
+		assert!(
+			error
+				.message
+				.contains("now reads as button \"Street\" [ref="),
+			"{}",
+			error.message
+		);
+		assert!(error.message.contains("this read of the window found"), "{}", error.message);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_relabelled_ref_searches_its_window_only_once_when_its_proof_misses() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		shift_address_row(&tree);
+		{
+			let mut tree = tree.lock();
+			tree.titles.insert(5, "City");
+			tree.children.push(5);
+			tree.reads = 0;
+		}
+		let error = press(&mut worker, "e3").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef);
+		assert!(error.message.contains("Re-run ax()/find()"), "{}", error.message);
+		// One read for the element's new ref, then root + four children.
+		assert_eq!(tree.lock().reads, 6);
+		assert!(tree.lock().pressed.is_empty());
 	}
 
 	#[test]

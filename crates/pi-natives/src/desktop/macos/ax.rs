@@ -1091,7 +1091,9 @@ impl AxBackend for MacAx {
 		} else {
 			0
 		};
-		element_props(element, &values, child_count, WalkBounds::Read)
+		let mut props = element_props(&values, child_count, WalkBounds::Read)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
+		Ok(props)
 	}
 
 	fn walk_node(
@@ -1112,7 +1114,8 @@ impl AxBackend for MacAx {
 			.flatten()
 			.and_then(element_array)
 			.unwrap_or_default();
-		let mut props = element_props(element, &values, children.len(), read_bounds)?;
+		let mut props = element_props(&values, children.len(), read_bounds)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
 		props.partial |= !children_read;
 		Ok((props, children.into_iter().map(AxHandle::Mac).collect()))
 	}
@@ -1148,37 +1151,38 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		require_read_as(|| read_as(element))?;
-		// A popup's value is chosen from its menu, not written. This runs before
-		// the text-target refusals: nothing is typed or written, and the verdict
-		// is the popup's own read-back after a real menu press.
-		let role = copy_held_attribute(element, "AXRole")?
-			.and_then(|value| value.downcast::<CFString>().ok());
-		if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
-			// Choosing opens the popup's menu, so the release helper starts
-			// up front.
-			return release_guard::scope(Presses::Process, || {
-				skylight::with_background_guard(element_pid(element)?, || popup::choose(element, value))
-			});
-		}
-		// Web AXValue can echo a write without the renderer accepting it. The
-		// API has no "unverified" outcome, so refuse before mutating that
-		// surface.
-		ensure_native_text_target(element)?;
-		if !attribute_settable(element, "AXValue") {
-			return Err(DesktopError::ax_failed(
-				"AXValue is not settable; no typing fallback was attempted",
-			));
-		}
-		if let Some(current) = copy_date(element, "AXValue") {
-			return set_date_value(element, value, current);
-		}
 		let pid = element_pid(element)?;
-		// Focus is borrowed only from an app already in the background as the
-		// call starts: only then does the guard below watch for the user
-		// and restore the front app.
+		// Arm the front-app guard before any synchronous AX probe, including
+		// the ref fingerprint: the user can pick this app while it blocks.
 		let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
 		skylight::with_background_guard(pid, || {
+			require_read_as(|| read_as(element))?;
+			// A popup's value is chosen from its menu, not written. This runs
+			// before the text-target refusals: nothing is typed or written, and
+			// the verdict is the popup's own read-back after a real menu press.
+			let role = copy_held_attribute(element, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok());
+			if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
+				// Choosing opens the popup's menu, so the release helper starts
+				// up front.
+				return release_guard::scope(Presses::Process, || {
+					skylight::with_background_guard(element_pid(element)?, || {
+						popup::choose(element, value)
+					})
+				});
+			}
+			// Web AXValue can echo a write without the renderer accepting it. The
+			// API has no "unverified" outcome, so refuse before mutating that
+			// surface.
+			ensure_native_text_target(element)?;
+			if !attribute_settable(element, "AXValue") {
+				return Err(DesktopError::ax_failed(
+					"AXValue is not settable; no typing fallback was attempted",
+				));
+			}
+			if let Some(current) = copy_date(element, "AXValue") {
+				return set_date_value(element, value, current);
+			}
 			// Apps commit what reaches their field editor; several (Contacts,
 			// Font Book, System Settings search) echo an AXValue write without
 			// ever taking it, so replace the text the way `typeText` inserts it.
@@ -1286,13 +1290,11 @@ impl AxBackend for MacAx {
 }
 
 fn element_props(
-	element: &AXUIElement,
 	values: &NodeValues,
 	child_count: usize,
 	read_bounds: WalkBounds,
 ) -> CoreResult<AxProps> {
 	let native_role = required_string(values.get(ROLE), "AXRole")?;
-	let actions = copy_strings_from_action_names(element).unwrap_or_default();
 	let read = |index| values.get(index).ok().flatten();
 	let string = |index| {
 		read(index)
@@ -1327,7 +1329,7 @@ fn element_props(
 				.and_then(|(position, size)| frame(&position, &size)),
 			WalkBounds::Skip => None,
 		},
-		actions,
+		actions: Vec::new(),
 		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
 		partial: identity.is_none(),
 		identity,
@@ -1753,7 +1755,7 @@ pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxProps>> {
 		return Ok(None);
 	}
 	let values = NodeValues::from_batch(batch, read.attributes(), |_| Err(AXError::CannotComplete));
-	match element_props(element, &values, 0, WalkBounds::Skip) {
+	match element_props(&values, 0, WalkBounds::Skip) {
 		Ok(props) => Ok(Some(props)),
 		Err(error) if error.code == ErrorCode::StaleRef => Err(error),
 		Err(_) => Ok(None),
@@ -2795,7 +2797,7 @@ mod tests {
 				NodeRead::Walk.attributes(),
 				|_| unreachable!("an answered batch needs no lone reads"),
 			);
-			element_props(&create_system_wide(), &values, 0, WalkBounds::Skip).unwrap()
+			element_props(&values, 0, WalkBounds::Skip).unwrap()
 		};
 		let unlabeled = field(null, null, add_date);
 		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));

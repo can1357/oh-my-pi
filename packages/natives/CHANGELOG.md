@@ -60,6 +60,7 @@
 
 - Fixed the macOS `computer` tool typing into or pressing a different control than the ref named, and reporting success, once the app reused the control's element (Contacts put the city in the street field): the call now sends nothing and fails with `StaleRef`, naming the control that now reads as the ref did when there is one
 - Fixed the macOS `computer` tool typing into or pressing a different control than the ref named, and reporting success, once the app reused the control's element (Contacts put the city in the street field): the call now sends nothing and fails with `StaleRef`, naming the control that now reads as the ref did when there is one ([#18892](https://github.com/can1357/oh-my-pi/pull/18892) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS relabelled-ref recovery also works for refs read from the desktop, searches the owning window once, and checks `setValue` refs inside the front-app guard without an unused action-name query ([#18892](https://github.com/can1357/oh-my-pi/pull/18892) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.8] - 2026-11-11
 
