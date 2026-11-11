@@ -537,7 +537,7 @@ describe("computer prelude", () => {
 			);
 			expect(result.exitCode).not.toBe(0);
 			expect(result.output).toContain("MARK");
-			expect(result.output).toContain("TypeError: stop after act");
+			expect(result.output).toContain("RuntimeError: stop after act");
 			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
 		} finally {
 			await supervisor.close();
@@ -3446,51 +3446,75 @@ describe("expanded computer APIs", () => {
 		}
 	});
 
-	it("keeps the worker's own error ahead of the stop it reports", async () => {
-		let stops = 0;
-		const partial = "type: 3 of 10 characters were sent before the input was cancelled";
-		const output = {
-			displays: [{ type: "text" as const, text: "MARK" }],
-			screenshots: [],
-			returnValue: undefined,
-		};
-		const supervisor = new ComputerSupervisor(
-			toolSession(),
-			() => {
-				const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
-				const emit = (message: ComputerWorkerOutbound) => {
-					for (const handler of handlers) handler(message);
-				};
-				return {
-					send: message => {
-						if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
-						if (message.type !== "run") return;
-						stops += 1;
-						const error = { name: "ToolError", message: partial, isToolError: true, isAbort: false };
-						queueMicrotask(() => emit({ type: "result", id: message.id, ok: false, error, output }));
-					},
-					onMessage: handler => {
-						handlers.add(handler);
-						queueMicrotask(() => emit({ type: "ready" }));
-						return () => handlers.delete(handler);
-					},
-					onError: () => () => {},
-					terminate: async () => {},
-				};
-			},
-			{ startMs: 200, closeMs: 200 },
-			undefined,
-			{ read: () => stops, forget: () => {} },
-		);
-		try {
-			const result = await supervisor.run("1", 1_000, snapshot());
-			expect(result.displays).toEqual(output.displays);
-			expect(result.error?.message).toStartWith(partial);
-			expect(result.error?.message).toContain(ESCAPE_STOPPED_MESSAGE);
-		} finally {
-			await supervisor.close();
-		}
-	});
+	it.each(["no output", "partial error", "partial abort", "reported stop"])(
+		"keeps the worker's own error ahead of the stop it reports: %s",
+		async mode => {
+			let stops = 0;
+			const partial = "type: 3 of 10 characters were sent before the input was cancelled";
+			const output = {
+				displays: [{ type: "text" as const, text: "MARK" }],
+				screenshots: [],
+				returnValue: undefined,
+			};
+			const supervisor = new ComputerSupervisor(
+				toolSession(),
+				() => {
+					const handlers = new Set<(message: ComputerWorkerOutbound) => void>();
+					const emit = (message: ComputerWorkerOutbound) => {
+						for (const handler of handlers) handler(message);
+					};
+					return {
+						send: message => {
+							if (message.type === "close") queueMicrotask(() => emit({ type: "closed" }));
+							if (message.type !== "run") return;
+							stops += 1;
+							const isAbort = mode === "partial abort";
+							const error = {
+								name: isAbort ? "ToolAbortError" : "ToolError",
+								message: mode === "reported stop" ? ESCAPE_STOPPED_MESSAGE : partial,
+								isToolError: !isAbort,
+								isAbort,
+							};
+							queueMicrotask(() =>
+								emit({
+									type: "result",
+									id: message.id,
+									ok: false,
+									error,
+									...(mode === "no output" ? {} : { output }),
+								}),
+							);
+						},
+						onMessage: handler => {
+							handlers.add(handler);
+							queueMicrotask(() => emit({ type: "ready" }));
+							return () => handlers.delete(handler);
+						},
+						onError: () => () => {},
+						terminate: async () => {},
+					};
+				},
+				{ startMs: 200, closeMs: 200 },
+				undefined,
+				{ read: () => stops, forget: () => {} },
+			);
+			try {
+				if (mode === "no output") {
+					await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(partial);
+				} else {
+					const result = await supervisor.run("1", 1_000, snapshot());
+					expect(result.displays).toEqual(output.displays);
+					if (mode === "partial error") expect(result.error?.message).toStartWith(partial);
+					else expect(result.error?.message).toBe(ESCAPE_STOPPED_MESSAGE);
+					expect(result.error?.isAbort).toBe(false);
+					expect(result.error?.name).toBe("ToolError");
+					expect(result.error?.message).toContain(ESCAPE_STOPPED_MESSAGE);
+				}
+			} finally {
+				await supervisor.close();
+			}
+		},
+	);
 
 	it("delivers the user's message and keeps the stop when the native count cannot be read", async () => {
 		let stops = 0;

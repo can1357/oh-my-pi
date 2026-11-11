@@ -46,8 +46,6 @@ For transports that do not preserve original image detail, and as a Claude-famil
 
 The `computer` global exposes the desktop helpers directly. Each helper is one host call (`action: "call"`) carrying an allowlisted method chain of at most two steps — a desktop root method, optionally followed by one method on the window or element handle it resolved — which the host renders into JavaScript and runs in the persistent session:
 
-If a run or helper fails after producing text or screenshots, Eval shows that partial output and still raises the original error. User cancellation and worker crashes can discard output that has not reached the host.
-
 ```js
 const win = await computer.window({ app: "Code" });
 await win.screenshot();
@@ -227,6 +225,8 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 - `Unsupported`, `SpaceUnsupported`, `SpaceMoveDenied`
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above. A missing or mistyped text argument fails before any native call, naming the helper and parameter: `setValue(value) requires a string, got undefined`.
+
+If a run or helper fails after producing text or screenshots, Eval shows that partial output and still raises the original error. User cancellation and worker crashes can discard output that has not reached the host.
 
 `AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog, or the app answered with an attribute error that does not apply to actions, as Preview does after following a PDF link and Finder after opening an item. It may already have taken effect, so observe the window it names, with its app, before repeating it.
 
