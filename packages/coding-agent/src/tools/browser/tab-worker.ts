@@ -194,6 +194,7 @@ import {
 	TypingInterruptedError,
 	typeIntoElement,
 	wheel,
+	withLiveElement,
 } from "./interactions";
 import {
 	captureScreenshotBuffer,
@@ -2604,12 +2605,9 @@ export class WorkerCore {
 							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
 							return;
 						}
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, label, sig, click);
-						} finally {
-							void handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, label, sig, click),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3061,12 +3059,9 @@ export class WorkerCore {
 					`tab.dblclick(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 });
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 }),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3103,12 +3098,9 @@ export class WorkerCore {
 					`tab.check(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, true, `tab.check(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3117,12 +3109,9 @@ export class WorkerCore {
 					`tab.uncheck(${JSON.stringify(selector)})`,
 					actionOpMs,
 					async sig => {
-						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
-						try {
-							await setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig);
-						} finally {
-							await handle.dispose().catch(() => undefined);
-						}
+						await this.#clickSelector(selector, actionOpMs, sig, handle =>
+							setElementChecked(handle, false, `tab.uncheck(${JSON.stringify(selector)})`, sig),
+						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
@@ -3488,8 +3477,11 @@ export class WorkerCore {
 		}
 	}
 
-	/** Find what takes a `tab.uploadFile` under the action deadline; the result owns the resolved handle. */
-	async #prepareTabUpload(
+	/**
+	 * Find what takes a `tab.uploadFile` under the action deadline, looking the selector up again when the page
+	 * replaced a chooser trigger before its click ({@link withLiveElement}); the result owns the resolved handle.
+	 */
+	#prepareTabUpload(
 		selector: string,
 		filePaths: string[],
 		label: string,
@@ -3499,29 +3491,35 @@ export class WorkerCore {
 		session: SessionSnapshot,
 	): Promise<PreparedUpload> {
 		const page = this.#requirePage();
-		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
-		try {
-			const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
-			const prepared = await prepareElementUpload(
-				page,
-				handle,
-				absolute,
-				label,
-				route,
-				this.#requireUploads(),
-				signal,
-			);
-			return {
-				...prepared,
-				dispose: async () => {
-					await prepared.dispose();
+		const absolute = filePaths.map(filePath => resolveToCwd(filePath, session.cwd));
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, signal),
+			async handle => {
+				try {
+					const prepared = await prepareElementUpload(
+						page,
+						handle,
+						absolute,
+						label,
+						route,
+						this.#requireUploads(),
+						signal,
+					);
+					return {
+						...prepared,
+						dispose: async () => {
+							await prepared.dispose();
+							await handle.dispose().catch(() => undefined);
+						},
+					};
+				} catch (error) {
 					await handle.dispose().catch(() => undefined);
-				},
-			};
-		} catch (error) {
-			await handle.dispose().catch(() => undefined);
-			throw error;
-		}
+					throw error;
+				}
+			},
+			signal,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
 	}
 
 	async #waitForUrl(pattern: string | RegExp, timeout: number, signal: AbortSignal): Promise<string> {
@@ -3619,6 +3617,32 @@ export class WorkerCore {
 			this.#requirePage().locator(normalizeSelector(selector)).setTimeout(timeoutMs).waitHandle({ signal: sig }),
 		)) as ElementHandle;
 	}
+
+	/**
+	 * Runs `click` on the element `selector` resolves to, resolving it again whenever the page replaced it before the
+	 * click reached it ({@link withLiveElement}). An `aria-ref` resolves to the replaced node again, so its replacement
+	 * fails at once.
+	 */
+	#clickSelector(
+		selector: string,
+		timeoutMs: number,
+		sig: AbortSignal,
+		click: (handle: ElementHandle) => Promise<void>,
+	): Promise<void> {
+		return withLiveElement(
+			() => this.#resolveActionHandle(selector, timeoutMs, sig),
+			async handle => {
+				try {
+					await click(handle);
+				} finally {
+					void handle.dispose().catch(() => undefined);
+				}
+			},
+			sig,
+			{ retry: parseAriaRefSelector(selector) === null },
+		);
+	}
+
 	#clearElementCache(): void {
 		this.#observedElements.clear();
 		if (this.#elementCache.size === 0) {

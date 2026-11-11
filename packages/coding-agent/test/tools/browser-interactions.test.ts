@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,11 +7,15 @@ import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import {
+	ClickRefusedError,
 	clickElement,
 	clickQueryHandlerText,
+	ElementDetachedError,
 	fillViaHandle,
 	resolveActionableQueryHandlerClickTarget,
+	setElementChecked,
 	TypingInterruptedError,
+	withLiveElement,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
@@ -19,6 +23,7 @@ import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/pa
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+import type { ElementHandle } from "puppeteer-core";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_NAME = `interactions-${crypto.randomUUID()}`;
@@ -1988,4 +1993,318 @@ return [await tab.evaluate(() => window.presses), await inner.evaluate(() => win
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	// A trapped button takes no clicks, and the page rebuilds the list once a click scrolls the button to the middle
+	// of the view, as a page that rebuilds a list after a request does: the handle the click resolved is detached
+	// before it could take the click. `rebuild` is what the rebuild leaves: a clickable button, or nothing; `trapped`
+	// arms the trap at load. Clicks are counted in the DOM, which frame helpers read from their own world.
+	const replacingList = (rebuild: string, trapped = false) =>
+		`<!doctype html><style>body { margin: 0; height: 3000px; } #list { position: absolute; top: 500px; }</style><div id="list"></div>
+<script>window.render = trap => { scrollTo(0, 0); const list = document.querySelector("#list"); list.innerHTML = trap ? '<button id="vol" style="pointer-events: none">pgdata-2</button>' : '<button id="vol">pgdata-2</button>'; list.firstChild.addEventListener("click", () => { document.body.dataset.clicks = (document.body.dataset.clicks ?? "") + "vol "; }); };
+addEventListener("scroll", () => { const vol = document.querySelector("#vol"); if (scrollY > 0 && vol?.style.pointerEvents === "none") ${rebuild}; }); render(${trapped});</script>`;
+
+	test("looks a selector up again when the page replaces its element before the click, and fails a replaced handle at once", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-replaced-click" };
+		const tabName = `replaced-click-${crypto.randomUUID()}`;
+		const listHtml = replacingList("render(false)");
+		const frameHtml = replacingList("render(false)", true);
+		const frameScript = `const inner = document.createElement("iframe"); inner.name = "inner"; inner.style = "position: absolute; top: 0; left: 300px; width: 900px; height: 700px; border: 0"; inner.srcdoc = ${JSON.stringify(frameHtml).replaceAll("</", "<\\/")}; document.body.append(inner);`;
+		await prelude.invoke(
+			{
+				action: "open",
+				name: tabName,
+				url: `data:text/html,${encodeURIComponent(`${listHtml}<script>${frameScript}</script>`)}`,
+			},
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.evaluate(() => window.render(true));
+await tab.click("#vol");
+await tab.evaluate(() => window.render(true));
+await tab.click("text/pgdata-2");
+const inner = await tab.frame("inner");
+await inner.click("#vol");
+const { elements } = await tab.observe();
+const vol = await tab.id(elements.find(element => element.name === "pgdata-2").id);
+await tab.evaluate(() => window.render(false));
+let error = "";
+try { await vol.click(); } catch (caught) { error = String(caught?.message ?? caught); }
+const clicks = () => document.body.dataset.clicks;
+return { clicks: await tab.evaluate(clicks), frameClicks: await inner.evaluate(clicks), error };`,
+					timeout: 20,
+				},
+				context,
+			);
+			const { clicks, frameClicks, error } = valueFrom<{ clicks: string; frameClicks: string; error: string }>(
+				result,
+			);
+			expect(clicks).toBe("vol vol ");
+			expect(frameClicks).toBe("vol ");
+			expect(error).toContain("is detached from the document");
+			expect(error).not.toContain("timed out");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+
+	test("cleans up the click watcher when cancellation interrupts its detachment check", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent('<button id="target">Click</button>');
+			await page.evaluate(`(() => {
+				window.removed = [];
+				const remove = EventTarget.prototype.removeEventListener;
+				EventTarget.prototype.removeEventListener = function(type, ...args) {
+					if (["pointerdown", "mousedown", "click"].includes(type)) window.removed.push(type);
+					return remove.call(this, type, ...args);
+				};
+			})()`);
+			const handle = await page.locator("#target").waitHandle();
+			const controller = new AbortController();
+			const reason = new Error("cancel before dispatch");
+			const disposed = Promise.withResolvers<void>();
+			const evaluateHandle = handle.evaluateHandle.bind(handle);
+			spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
+				const watch = await evaluateHandle(...args);
+				const dispose = watch.dispose.bind(watch);
+				spyOn(watch, "evaluate").mockImplementationOnce(async () => {
+					controller.abort(reason);
+					throw reason;
+				});
+				spyOn(watch, "dispose").mockImplementationOnce(async () => {
+					await dispose();
+					disposed.resolve();
+				});
+				return watch;
+			});
+			expect(String(await rejectionOf(clickElement(handle, "tab.click", controller.signal)))).toContain(
+				"cancel before dispatch",
+			);
+			await disposed.promise;
+			expect(await page.evaluate("window.removed.sort()")).toEqual([
+				"click",
+				"click",
+				"mousedown",
+				"mousedown",
+				"pointerdown",
+				"pointerdown",
+			]);
+			await handle.dispose();
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
+	test.each(["before", "after"] as const)(
+		"re-resolves a selector replaced %s delivery watcher setup without sending stale input",
+		async timing => {
+			const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+			const page = await browserHandle.browser.newPage();
+			try {
+				await page.setContent('<button id="target">Click</button>');
+				await page.evaluate(`(() => {
+				document.body.dataset.clicks = "";
+				window.addEventListener("click", event => {
+					document.body.dataset.clicks += event.target.id + " ";
+				});
+			})()`);
+				let lookups = 0;
+				const signal = new AbortController().signal;
+				await withLiveElement(
+					async () => {
+						lookups++;
+						const handle = await page.locator("#target").waitHandle();
+						if (lookups === 1) {
+							const evaluateHandle = handle.evaluateHandle.bind(handle);
+							spyOn(handle, "evaluateHandle").mockImplementationOnce(async (...args) => {
+								const watch = timing === "after" ? await evaluateHandle(...args) : undefined;
+								await page.evaluate(`(() => {
+								const target = document.querySelector("#target");
+								const next = target.cloneNode(true);
+								next.style.marginLeft = "200px";
+								target.replaceWith(next);
+							})()`);
+								return watch ?? evaluateHandle(...args);
+							});
+						}
+						return handle;
+					},
+					async handle => {
+						try {
+							await clickElement(handle, "tab.click", signal);
+						} finally {
+							await handle.dispose();
+						}
+					},
+					signal,
+				);
+				expect(lookups).toBe(2);
+				expect(await page.evaluate("document.body.dataset.clicks")).toBe("target ");
+			} finally {
+				await page.close().catch(() => undefined);
+				if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+			}
+		},
+	);
+
+	test("looks replaced checkboxes up before returning their state and replaced radios up before unchecking", async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		try {
+			await page.setContent(
+				'<input id="check" type="checkbox"><input id="uncheck" type="checkbox" checked><input id="radio" type="radio" checked>',
+			);
+			const signal = new AbortController().signal;
+			for (const [id, desired] of [
+				["check", true],
+				["uncheck", false],
+				["radio", false],
+			] as const) {
+				let first = true;
+				await withLiveElement(
+					async () => {
+						const handle = await page.locator(`#${id}`).waitHandle();
+						if (first) {
+							first = false;
+							await handle.evaluate((input, desired) => {
+								if (input.type === "radio") {
+									// Detach after the state read, before the separate radio mutation.
+									Object.defineProperty(input, "checked", {
+										get() {
+											queueMicrotask(() => input.replaceWith(input.cloneNode()));
+											return true;
+										},
+									});
+								} else {
+									const next = input.cloneNode() as typeof input;
+									input.checked = desired;
+									next.checked = !desired;
+									input.replaceWith(next);
+								}
+							}, desired);
+						}
+						return handle;
+					},
+					async handle => {
+						try {
+							await setElementChecked(handle, desired, `tab.${desired ? "check" : "uncheck"}`, signal);
+						} finally {
+							await handle.dispose();
+						}
+					},
+					signal,
+				);
+			}
+			expect(await page.$$eval("input", inputs => inputs.map(input => input.checked))).toEqual([true, false, false]);
+		} finally {
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	});
+
+	test("a click whose element the page removed after replacing it reports the selector matching nothing", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-removed-click" };
+		const tabName = `removed-click-${crypto.randomUUID()}`;
+		const listHtml = replacingList('document.querySelector("#list").innerHTML = ""');
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(listHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `await tab.evaluate(() => window.render(true));
+try { await tab.click("#vol"); return "clicked"; } catch (caught) { return String(caught?.message ?? caught); }`,
+					timeout: 4,
+				},
+				context,
+			);
+			const error = valueFrom<string>(result);
+			expect(error).toContain("timed out");
+			expect(error).toContain("selector currently matches no elements");
+			expect(error).not.toContain("detached");
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+});
+
+describe("looking a replaced element up again", () => {
+	// Stands in for the handles `resolve` returns; `act` decides what happens to each.
+	const handle = {} as ElementHandle;
+
+	test("looks the element up again after each replacement, and reports a wait that runs out clicking as replaced", async () => {
+		const controller = new AbortController();
+		let lookups = 0;
+		const error = await rejectionOf(
+			withLiveElement(
+				async () => {
+					lookups++;
+					return handle;
+				},
+				async () => {
+					if (lookups < 3) throw new ElementDetachedError("tab.click(#vol)");
+					controller.abort(new Error("deadline"));
+					throw new Error("aborted");
+				},
+				controller.signal,
+			),
+		);
+		expect(lookups).toBe(3);
+		expect(error).toBeInstanceOf(ClickRefusedError);
+		expect(error instanceof ClickRefusedError ? error.refusal : "").toContain("kept replacing");
+	});
+
+	test("keeps the lookup's own error, and fails at once without retry", async () => {
+		const controller = new AbortController();
+		let lookups = 0;
+		const lookupFailed = new Error("selector matches nothing");
+		const lookupError = await rejectionOf(
+			withLiveElement(
+				async () => {
+					if (++lookups > 1) {
+						controller.abort(new Error("deadline"));
+						throw lookupFailed;
+					}
+					return handle;
+				},
+				async () => {
+					throw new ElementDetachedError("tab.click(#vol)");
+				},
+				controller.signal,
+			),
+		);
+		expect(lookupError).toBe(lookupFailed);
+		lookups = 0;
+		const once = await rejectionOf(
+			withLiveElement(
+				async () => {
+					lookups++;
+					return handle;
+				},
+				async () => {
+					throw new ElementDetachedError("tab.click(aria-ref=e3)");
+				},
+				new AbortController().signal,
+				{ retry: false },
+			),
+		);
+		expect(once).toBeInstanceOf(ElementDetachedError);
+		expect(lookups).toBe(1);
+	});
 });
