@@ -13,7 +13,6 @@ import { type CalledToolResult, shapeCalledTool } from "@oh-my-pi/pi-coding-agen
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import {
-	NO_CREDENTIAL_NOTICE,
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
 	startSpotlightExperiment,
@@ -285,7 +284,7 @@ describe("spotlight shaping hooks", () => {
 		expect(entry.error).toBeUndefined();
 	});
 
-	it("warns the session once per lost Stencil credential, not on warm-up, and again after a re-sign-in", async () => {
+	it("reports a lost Stencil credential once per loss, not on warm-up, and again after a re-sign-in", async () => {
 		const credential = new StencilCredential();
 		const tokens: (string | null)[] = [null, null, null, "test-token", null];
 		vi.spyOn(credential, "resolve").mockImplementation(async () => tokens.shift() ?? null);
@@ -295,26 +294,25 @@ describe("spotlight shaping hooks", () => {
 			credential,
 			fetch: fakeSpotlight({ score: () => 0.5 }),
 		});
-		const experiment = new SpotlightExperiment(client, "low", SessionManager.inMemory(await tmpDir()));
-		const notices: string[] = [];
-		experiment.setNotify(message => notices.push(message));
+		let missing = 0;
+		client.onCredentialMissing = () => missing++;
 		const ctx = buildCallContext([], "x", "./ingest.sh", undefined);
 		const score = async () => {
 			const scorer = new RecordingScorer(client, "low");
 			return { scores: await scorer.score(["a"], ctx), usage: scorer.usage };
 		};
 
-		// The warm-up finds no credential too, but leaves it to the first ranking: one notice below, not two.
+		// The warm-up finds no credential too, but leaves it to the first ranking: one report below, not two.
 		client.warm();
 		const unsigned = await score();
 		expect(unsigned.scores).toBeNull();
 		expect(unsigned.usage.failureCauses).toEqual({ no_credential: 1 });
-		expect(notices).toEqual([NO_CREDENTIAL_NOTICE]);
+		expect(missing).toBe(1);
 		expect((await score()).scores).toBeNull();
-		expect(notices).toHaveLength(1);
+		expect(missing).toBe(1);
 		expect((await score()).scores).toEqual([0.5]);
 		expect((await score()).scores).toBeNull();
-		expect(notices).toEqual([NO_CREDENTIAL_NOTICE, NO_CREDENTIAL_NOTICE]);
+		expect(missing).toBe(2);
 	});
 });
 

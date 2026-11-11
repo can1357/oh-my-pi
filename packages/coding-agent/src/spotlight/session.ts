@@ -94,8 +94,6 @@ export class SpotlightExperiment implements SpotlightSession {
 	#shapedCalls = new Set<string>();
 	readonly #sessionManager: SessionManager;
 	readonly #random: () => number;
-	/** Shows a warning to the user; unset until the agent session exists (rankings only run inside its tool calls). */
-	#notify: ((message: string) => void) | undefined;
 
 	constructor(
 		client: SpotlightClient,
@@ -117,12 +115,6 @@ export class SpotlightExperiment implements SpotlightSession {
 		this.#sessionManager = sessionManager;
 		this.#random = random;
 		this.sink = new ArtifactShapeSink(sessionManager);
-		client.onCredentialMissing = () => this.#notify?.(NO_CREDENTIAL_NOTICE);
-	}
-
-	/** Routes the experiment's warnings (a missing Stencil credential) to the user, typically the session's notices. */
-	setNotify(notify: (message: string) => void): void {
-		this.#notify = notify;
 	}
 
 	/** Whether the session shapes and journals the results of `tool` (`spotlight.experiment.tools`). */

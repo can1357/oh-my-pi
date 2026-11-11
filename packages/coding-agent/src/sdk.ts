@@ -246,6 +246,7 @@ import { SHAPE_RULE } from "./spotlight/shape";
 import { buildCallContext } from "./spotlight/context";
 import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
 import {
+	NO_CREDENTIAL_NOTICE,
 	SPOTLIGHT_INTENT_DESCRIPTION,
 	SPOTLIGHT_INTENT_GUIDANCE,
 	SPOTLIGHT_NOTICE_SOURCE,
@@ -5336,7 +5337,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
 		if (spotlightExperiment) {
 			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
-			spotlightExperiment.setNotify(message => session.emitNotice("warning", message, SPOTLIGHT_NOTICE_SOURCE));
+			spotlightExperiment.client.onCredentialMissing = () =>
+				session.emitNotice("warning", NO_CREDENTIAL_NOTICE, SPOTLIGHT_NOTICE_SOURCE);
 		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a

@@ -16,16 +16,10 @@ function Percentiles({ p50, p90 }: { p50: number | null; p90: number | null }) {
 	);
 }
 
-const CAUSE_LABELS: Record<string, string> = {
-	no_credential: "not signed in",
-	timeout: "timeout",
-	transport: "network",
-	rate_limited: "rate limited",
-	bad_reply: "bad reply",
-	unrecorded: "unrecorded",
-};
+/** Causes whose code words don't read well; the rest show their code with spaces. */
+const CAUSE_LABELS: Record<string, string> = { no_credential: "not signed in", transport: "network" };
 
-/** A failure cause as the card names it: `http_502` reads "HTTP 502", an unknown code its words. */
+/** A failure cause as the card names it: `http_502` reads "HTTP 502", any other code its words. */
 function causeLabel(cause: string): string {
 	const http = /^http_(\d+)$/.exec(cause);
 	if (http) return `HTTP ${http[1]}`;

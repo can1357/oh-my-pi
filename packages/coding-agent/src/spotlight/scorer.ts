@@ -23,8 +23,11 @@ export interface ScorerUsage {
 	calls: number;
 	/** Requests that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
 	failures: number;
-	/** The failed requests by {@link failureCause}. */
-	failureCauses: Record<string, number>;
+	/**
+	 * Failed requests by cause: the error code Spotlight or the client gave (`no_credential`, `timeout`, `transport`,
+	 * `bad_reply`, `rate_limited`, …), else `http_<status>`; absent while none failed.
+	 */
+	failureCauses?: Record<string, number>;
 	/** Wall time of the requests, summed. */
 	ms: number;
 	/** Prompt tokens Spotlight billed. */
@@ -33,20 +36,12 @@ export interface ScorerUsage {
 }
 
 /**
- * Why a ranking failed, as journaled: the error code Spotlight or the client gave (`no_credential`, `timeout`,
- * `transport`, `bad_reply`, `rate_limited`, …), else `http_<status>` for an answer without one.
- */
-export function failureCause(error: SpotlightError): string {
-	return error.code ?? (error.status > 0 ? `http_${error.status}` : "transport");
-}
-
-/**
  * A {@link Scorer} over {@link SpotlightClient} for one tool result: scores every item's relevance, splits
  * items that would overflow one request's token or body cap into several requests, and records what it spent and
  * what it asked.
  */
 export class RecordingScorer implements Scorer {
-	readonly usage: ScorerUsage = { calls: 0, failures: 0, failureCauses: {}, ms: 0, tokens: 0, costUsd: 0 };
+	readonly usage: ScorerUsage = { calls: 0, failures: 0, ms: 0, tokens: 0, costUsd: 0 };
 	/** What its requests sent besides the items (the same for every request of one result); unset until one is sent. */
 	params: SpotlightRequestParams | undefined;
 	readonly #client: SpotlightClient;
@@ -109,7 +104,8 @@ export class RecordingScorer implements Scorer {
 				} catch (error) {
 					if (!(error instanceof SpotlightError)) throw error;
 					this.usage.failures++;
-					const cause = failureCause(error);
+					const cause = error.code ?? `http_${error.status}`;
+					this.usage.failureCauses ??= {};
 					this.usage.failureCauses[cause] = (this.usage.failureCauses[cause] ?? 0) + 1;
 					logger.debug("spotlight ranking failed", {
 						status: error.status,
