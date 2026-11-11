@@ -307,19 +307,24 @@ fn actions(element: &UIElement) -> Vec<String> {
 	actions
 }
 
-fn value(element: &UIElement) -> Option<String> {
+fn pattern_value(element: &UIElement) -> Option<String> {
 	element
 		.get_pattern::<UIValuePattern>()
 		.and_then(|pattern| pattern.get_value())
 		.ok()
+}
+
+fn legacy_value(element: &UIElement) -> Option<String> {
+	element
+		.get_pattern::<UILegacyIAccessiblePattern>()
+		.and_then(|pattern| pattern.get_value())
+		.ok()
+}
+
+fn value(element: &UIElement) -> Option<String> {
+	pattern_value(element)
 		.filter(|value| !value.is_empty())
-		.or_else(|| {
-			element
-				.get_pattern::<UILegacyIAccessiblePattern>()
-				.and_then(|pattern| pattern.get_value())
-				.ok()
-				.filter(|value| !value.is_empty())
-		})
+		.or_else(|| legacy_value(element).filter(|value| !value.is_empty()))
 }
 
 fn truncate(value: impl ToString) -> String {
@@ -379,9 +384,9 @@ impl AxBackend for Win32Ax {
 		// UIA rectangles already use physical desktop pixels, the same
 		// native coordinate space as window metadata and capture geometry.
 		let bounds = element.get_bounding_rectangle().ok().map(|rect| AxBounds {
-			x:      f64::from(rect.get_left()),
-			y:      f64::from(rect.get_top()),
-			width:  f64::from(rect.get_right()) - f64::from(rect.get_left()),
+			x: f64::from(rect.get_left()),
+			y: f64::from(rect.get_top()),
+			width: f64::from(rect.get_right()) - f64::from(rect.get_left()),
 			height: f64::from(rect.get_bottom()) - f64::from(rect.get_top()),
 		});
 		Ok(AxProps {
@@ -481,6 +486,11 @@ impl AxBackend for Win32Ax {
 		let combo = element.get_control_type().map_err(ax_error)? == ControlType::ComboBox;
 		match super::value_write::route(&class, combo) {
 			super::value_write::ValueRoute::Combo => {
+				if !element.is_enabled().map_err(ax_error)? {
+					return Err(DesktopError::ax_failed(
+						"the combo box is disabled; nothing was written",
+					));
+				}
 				super::value_write::set_combo(
 					hwnd.ok_or_else(|| {
 						DesktopError::ax_failed(
@@ -503,7 +513,8 @@ impl AxBackend for Win32Ax {
 					.map_err(ax_error)
 			})?,
 		}
-		super::value_write::verify(text, value(element).as_deref(), secure)
+		let actual = pattern_value(element).or_else(|| legacy_value(element));
+		super::value_write::verify(text, actual.as_deref(), secure)
 	}
 
 	fn focus(&mut self, handle: &AxHandle) -> CoreResult<()> {
