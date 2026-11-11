@@ -46,6 +46,7 @@
 - Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
 - Browser selector waits now accept `state: "attached" | "detached" | "visible" | "hidden"` alongside Puppeteer's `visible`/`hidden` forms, including live tab and scoped-frame snapshot refs, and reject unknown options, invalid values or conflicting visibility flags instead of silently ignoring them ([#18924](https://github.com/can1357/oh-my-pi/pull/18924) by [@will-bogusz](https://github.com/will-bogusz))
 - Explicit cmux selector-wait timeouts now preserve the run's recovery budget instead of consuming the whole cell when a finite timeout exceeds it ([#18924](https://github.com/can1357/oh-my-pi/pull/18924) by [@will-bogusz](https://github.com/will-bogusz))
+- Detached selector waits survive Chromium document replacement, and cmux attachment waits distinguish hidden text matches from removed elements ([#18924](https://github.com/can1357/oh-my-pi/pull/18924) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Removed
 

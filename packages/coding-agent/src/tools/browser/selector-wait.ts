@@ -1,6 +1,7 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle } from "puppeteer-core";
+import { isNavigatedContextError } from "./navigation";
 import { untilAbortedOrReleased } from "./op-timeouts";
 
 export interface SelectorWaitOptions {
@@ -47,12 +48,8 @@ export function selectorWaitOptions(options: unknown): SelectorWaitOptions {
 
 /** Puppeteer's hidden wait also accepts a present invisible node; detached must require absence. */
 export async function waitForDetached(query: () => Promise<ElementHandle | null>, signal: AbortSignal): Promise<null> {
-	while (true) {
-		const handle = await untilAbortedOrReleased(signal, query(), async late => late?.dispose());
-		if (!handle) return null;
-		await handle.dispose();
-		await untilAborted(signal, () => Bun.sleep(100));
-	}
+	await waitForSelectorHandle(query, { state: "detached" }, signal);
+	return null;
 }
 
 /** Poll a live ref with Puppeteer's own visibility checks, in its owning tab or frame realm. */
@@ -62,19 +59,23 @@ export async function waitForSelectorHandle(
 	signal: AbortSignal,
 ): Promise<ElementHandle | null> {
 	while (true) {
-		const handle = await untilAbortedOrReleased(signal, query(), async late => late?.dispose());
-		if (!handle && (options.hidden || options.state === "detached")) return null;
-		if (handle) {
-			let keep = false;
-			try {
-				keep =
-					options.state !== "detached" &&
-					((!options.visible && !options.hidden) ||
-						(await untilAborted(signal, () => (options.hidden ? handle.isHidden() : handle.isVisible()))));
-				if (keep) return handle;
-			} finally {
-				if (!keep) await handle.dispose();
+		try {
+			const handle = await untilAbortedOrReleased(signal, query(), async late => late?.dispose());
+			if (!handle && (options.hidden || options.state === "detached")) return null;
+			if (handle) {
+				let keep = false;
+				try {
+					keep =
+						options.state !== "detached" &&
+						((!options.visible && !options.hidden) ||
+							(await untilAborted(signal, () => (options.hidden ? handle.isHidden() : handle.isVisible()))));
+					if (keep) return handle;
+				} finally {
+					if (!keep) await handle.dispose();
+				}
 			}
+		} catch (error) {
+			if (signal.aborted || !isNavigatedContextError(error)) throw error;
 		}
 		await untilAborted(signal, () => Bun.sleep(100));
 	}

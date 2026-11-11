@@ -296,7 +296,7 @@ const semanticElements = spec => {
 		return spec.exact ? name === spec.name.toLowerCase() : name.includes(spec.name.toLowerCase());
 	});
 };
-const findElement = spec => {
+const findElement = (spec, { includeHidden = false } = {}) => {
 	const semantic = semanticElements(spec);
 	if (semantic) return semantic[0] || null;
 	if (spec.kind === "css") return document.querySelector(spec.value);
@@ -321,14 +321,14 @@ const findElement = spec => {
 	}
 	if (spec.kind === "text") {
 		const wanted = spec.value.trim();
-		return allElements().find(element => isVisible(element) && textOf(element).includes(wanted)) || null;
+		return allElements().find(element => (includeHidden || isVisible(element)) && textOf(element).includes(wanted)) || null;
 	}
 	if (spec.kind === "aria" || spec.kind === "ax") {
 		const wanted = (spec.name || spec.value).trim();
 		const role = spec.role || "";
 		return (
 			allElements().find(element => {
-				if (!isVisible(element)) return false;
+				if (!includeHidden && !isVisible(element)) return false;
 				if (role && element.getAttribute("role") !== role) return false;
 				const name = accessibleName(element);
 				return name === wanted || name.includes(wanted);
@@ -2043,7 +2043,7 @@ export class CmuxTab implements InProcessRunTab {
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
 			${PAGE_SELECTOR_HELPERS}
-			return !!findElement(spec);
+			return !!findElement(spec, { includeHidden: true });
 		})()`;
 		return !!(await this.#evalScript<unknown>(script));
 	}

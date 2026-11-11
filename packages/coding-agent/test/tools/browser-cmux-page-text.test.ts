@@ -78,6 +78,19 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("cmux page reads", () => {
 		});
 	}, 30_000);
 
+	it("keeps hidden text attached until its element is removed", async () => {
+		await withCmuxPage(async (tab, page) => {
+			await page.setContent('<div id="hidden" style="display:none">secret</div>');
+			expect(await tab.elementExists("text/secret")).toBe(true);
+			expect(await tab.waitForSelector("text/secret", { state: "attached", timeout: 1 })).not.toBeNull();
+			expect(await rejectionOf(tab.waitForSelector("text/secret", { state: "detached", timeout: 1 }))).toMatchObject({
+				message: expect.stringContaining("timed out"),
+			});
+			await page.$eval("#hidden", element => element.remove());
+			expect(await tab.waitForSelector("text/secret", { state: "detached" })).toBeNull();
+		});
+	}, 30_000);
+
 	it("clamps finite selector wait timeouts below the run budget", async () => {
 		await withCmuxPage(async (tab, page) => {
 			await page.setContent('<div id="hidden" hidden>still attached</div>');

@@ -12,6 +12,7 @@ import {
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { waitForDetached } from "@oh-my-pi/pi-coding-agent/tools/browser/selector-wait";
 import type { ReadyInfo, WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import {
 	acquireTab,
@@ -147,6 +148,37 @@ describe("browser tab worker startup", () => {
 });
 
 describe("OMP-owned browser evaluation", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)("continues detached polling after a real document context replacement", async () => {
+		const page = await headless().browser.newPage();
+		const queried = Promise.withResolvers<void>();
+		const replaced = Promise.withResolvers<void>();
+		let first = true;
+		try {
+			await page.setContent('<button id="present">old document</button>');
+			const frame = page.mainFrame();
+			const pending = waitForDetached(async () => {
+				if (!first) return frame.$("#present");
+				first = false;
+				const stale = await frame.$("#present");
+				if (!stale) throw new Error("Expected an old-document handle");
+				queried.resolve();
+				await replaced.promise;
+				try {
+					return (await stale.evaluateHandle(element => element)).asElement();
+				} finally {
+					await stale.dispose().catch(() => undefined);
+				}
+			}, new AbortController().signal).then(value => ({ value }), error => ({ error }));
+			await queried.promise;
+			await page.goto("data:text/html,new-document");
+			replaced.resolve();
+			expect(await pending).toEqual({ value: null });
+		} finally {
+			replaced.resolve();
+			await page.close().catch(() => undefined);
+		}
+	}, 30_000);
+
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"accepts selector wait states on tabs and frames",
 		async () => {
