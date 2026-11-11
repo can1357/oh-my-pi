@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SandboxRuntime } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { sandboxThreadService } from "@oh-my-pi/pi-coding-agent/thread/services/sandbox";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { SandboxGrantsProbe } from "../fixtures/sandbox-grants-worker";
@@ -59,6 +60,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// The settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });

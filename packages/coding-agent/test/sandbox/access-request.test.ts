@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import {
 	type SandboxAccessAnswer,
 	type SandboxAccessRequest,
@@ -95,6 +96,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });

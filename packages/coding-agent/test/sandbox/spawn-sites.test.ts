@@ -31,6 +31,7 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { sandboxSupport } from "@oh-my-pi/pi-natives";
 import { MIN_BUN_VERSION, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { CONTAINED_SOURCE_RUNS } from "../helpers/sandbox-test-state";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 
 const backend = sandboxSupport();
@@ -42,6 +43,8 @@ const UNAVAILABLE = { supported: false, reason: "test: no backend", proxy: false
 const DENIAL = /Operation not permitted|Permission denied|Read-only file system|EPERM|EACCES|EROFS/;
 /** Pooled bash session the eval `sh()` bridge uses for a tool session without an id. */
 const EVAL_SHELL_SESSION_KEY = "eval:";
+/** Tests that drive `/bin/sh` (a contained command or a `#!/bin/sh` shim); Windows has neither. */
+const posixShell = process.platform !== "win32";
 
 let state: SettingsTestState | undefined;
 let settings: Settings;
@@ -97,12 +100,12 @@ describe("execCommand sandbox workspace", () => {
 		fs.mkdirSync(sub);
 		const spy = vi.spyOn(SandboxRuntime, "forScope");
 		cfgSandboxEnabled.set(settings, false);
-		await execCommand("/bin/sh", ["-c", "true"], sub, undefined, workspace.path());
+		await execCommand(process.execPath, ["-e", ""], sub, undefined, workspace.path());
 		expect(spy.mock.calls.map(([dir]) => dir)).toEqual([workspace.path()]);
 	});
 });
 
-describe.skipIf(!backend.supported)("contained execCommand", () => {
+describe.skipIf(!backend.supported || !posixShell)("contained execCommand", () => {
 	it("cannot write outside the workspace but can inside it", async () => {
 		const target = path.join(outside, "exec.txt");
 		const blocked = await execCommand("/bin/sh", ["-c", `echo attempt; touch '${target}'`], workspace.path());
@@ -215,6 +218,12 @@ describe.skipIf(!backend.supported)("workspace Python interpreter under the sand
 });
 
 describe.skipIf(!pythonAvailable || !backend.supported)("contained Python kernel", () => {
+	// The Windows container blocks loopback under `deny` and `allowlist`, and Python's asyncio
+	// needs it (`socket.socketpair()`): the kernel only starts with network `allow` there.
+	beforeEach(() => {
+		if (process.platform === "win32") cfgSandboxNetworkMode.set(settings, "allow");
+	});
+
 	it("executes cells and raises on a write outside the workspace", async () => {
 		const kernel = await PythonKernel.start({ cwd: workspace.path() });
 		try {
@@ -275,26 +284,30 @@ describe.skipIf(!pythonAvailable || !backend.supported)("contained Python kernel
 		expect(result.output).toContain("1 False");
 	}, 60_000);
 
-	it("reaches the tool bridge from a contained kernel under the allowlist", async () => {
-		cfgSandboxNetworkMode.set(settings, "allowlist");
-		const echo: AgentTool = {
-			name: "echo",
-			label: "Echo",
-			description: "Echoes its text",
-			parameters: { type: "object", properties: { text: { type: "string" } }, additionalProperties: false },
-			execute: async (_id, args) => ({
-				content: [{ type: "text", text: `echo:${JSON.stringify(args)}` }],
-				details: {},
-			}),
-		};
-		const result = await executePython('print(await tool.echo(text="bridged"))', {
-			cwd: workspace.path(),
-			sessionId: `spawn-sites-py-${crypto.randomUUID()}`,
-			toolSession: toolSession(workspace.path(), [echo]),
-		});
-		expect(result.exitCode).toBe(0);
-		expect(result.output).toContain('echo:{"text":"bridged"}');
-	}, 60_000);
+	it.skipIf(process.platform === "win32")(
+		"reaches the tool bridge from a contained kernel under the allowlist",
+		async () => {
+			cfgSandboxNetworkMode.set(settings, "allowlist");
+			const echo: AgentTool = {
+				name: "echo",
+				label: "Echo",
+				description: "Echoes its text",
+				parameters: { type: "object", properties: { text: { type: "string" } }, additionalProperties: false },
+				execute: async (_id, args) => ({
+					content: [{ type: "text", text: `echo:${JSON.stringify(args)}` }],
+					details: {},
+				}),
+			};
+			const result = await executePython('print(await tool.echo(text="bridged"))', {
+				cwd: workspace.path(),
+				sessionId: `spawn-sites-py-${crypto.randomUUID()}`,
+				toolSession: toolSession(workspace.path(), [echo]),
+			});
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain('echo:{"text":"bridged"}');
+		},
+		60_000,
+	);
 });
 
 // ── JS ───────────────────────────────────────────────────────────────────────
@@ -347,7 +360,7 @@ import { runStdioSubprocessWorker } from ${JSON.stringify(path.join(SRC, "eval/j
 await runStdioSubprocessWorker(transport => startJsEvalProcess(transport, interceptUnhandledRejections));
 `;
 
-describe.skipIf(!backend.supported)("contained JS eval (stdio transport entry)", () => {
+describe.skipIf(!backend.supported || !CONTAINED_SOURCE_RUNS)("contained JS eval (stdio transport entry)", () => {
 	let restoreEntry: (() => void) | undefined;
 	beforeEach(async () => {
 		const entry = path.join(workspace.path(), "js-eval-stdio-entry.ts");
@@ -406,7 +419,7 @@ describe.skipIf(!backend.supported)("contained JS eval startup failure", () => {
 	}, 60_000);
 });
 
-describe.skipIf(!backend.supported || !cliRuns)("contained JS eval (CLI selector)", () => {
+describe.skipIf(!backend.supported || !cliRuns || !CONTAINED_SOURCE_RUNS)("contained JS eval (CLI selector)", () => {
 	// `sh()` runs in the pooled bash session the bridge keys `eval:<session id>` (the test session
 	// has no id); release it so its sandbox host does not outlive the test.
 	afterEach(() => releaseShellSessions(EVAL_SHELL_SESSION_KEY));
@@ -663,32 +676,36 @@ describe.skipIf(!backend.supported)("contained MCP stdio server", () => {
 		expect(report.loopback).not.toBe("connected");
 	}, 60_000);
 
-	it("reports a missing command by name, and finds it once installed", async () => {
-		const bin = path.join(workspace.path(), "bin");
-		fs.mkdirSync(bin);
-		const script = path.join(workspace.path(), "mcp-server.cjs");
-		await Bun.write(script, MCP_SERVER);
-		const config: MCPStdioServerConfig = {
-			command: "omp-spawn-sites-mcp",
-			cwd: workspace.path(),
-			env: { PATH: bin, MCP_TARGET: path.join(workspace.path(), "mcp.txt") },
-			sandbox: true,
-		};
-		await expect(createStdioTransport(config)).rejects.toThrow("omp-spawn-sites-mcp");
-		// A lookup miss must not be cached: installing the command makes the next connect succeed.
-		const shim = path.join(bin, "omp-spawn-sites-mcp");
-		await Bun.write(shim, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
-		fs.chmodSync(shim, 0o755);
-		const transport = await createStdioTransport(config);
-		try {
-			const result = await transport.request<{ instructions: string }>("initialize", {
-				protocolVersion: "2025-11-25",
-				capabilities: {},
-				clientInfo: { name: "spawn-sites-test", version: "1.0.0" },
-			});
-			expect(JSON.parse(result.instructions)).toMatchObject({ sandbox: "1" });
-		} finally {
-			await transport.close();
-		}
-	}, 60_000);
+	it.skipIf(!posixShell)(
+		"reports a missing command by name, and finds it once installed",
+		async () => {
+			const bin = path.join(workspace.path(), "bin");
+			fs.mkdirSync(bin);
+			const script = path.join(workspace.path(), "mcp-server.cjs");
+			await Bun.write(script, MCP_SERVER);
+			const config: MCPStdioServerConfig = {
+				command: "omp-spawn-sites-mcp",
+				cwd: workspace.path(),
+				env: { PATH: bin, MCP_TARGET: path.join(workspace.path(), "mcp.txt") },
+				sandbox: true,
+			};
+			await expect(createStdioTransport(config)).rejects.toThrow("omp-spawn-sites-mcp");
+			// A lookup miss must not be cached: installing the command makes the next connect succeed.
+			const shim = path.join(bin, "omp-spawn-sites-mcp");
+			await Bun.write(shim, `#!/bin/sh\nexec '${process.execPath}' '${script}'\n`);
+			fs.chmodSync(shim, 0o755);
+			const transport = await createStdioTransport(config);
+			try {
+				const result = await transport.request<{ instructions: string }>("initialize", {
+					protocolVersion: "2025-11-25",
+					capabilities: {},
+					clientInfo: { name: "spawn-sites-test", version: "1.0.0" },
+				});
+				expect(JSON.parse(result.instructions)).toMatchObject({ sandbox: "1" });
+			} finally {
+				await transport.close();
+			}
+		},
+		60_000,
+	);
 });

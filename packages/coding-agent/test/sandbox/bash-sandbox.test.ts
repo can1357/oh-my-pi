@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as direnv from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import {
 	type BashExecutorOptions,
@@ -47,6 +48,7 @@ import {
 	restoreSettingsTestState,
 	type SettingsTestState,
 } from "../helpers/settings-test-state";
+import { CONTAINED_SOURCE_RUNS } from "../helpers/sandbox-test-state";
 
 const UNAVAILABLE = { supported: false, reason: "test: no backend", proxy: false, warnings: [] };
 
@@ -149,6 +151,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });
@@ -201,7 +205,7 @@ describe("agent bash when the sandbox does not contain it", () => {
 	});
 });
 
-describe.skipIf(!supported)("agent bash in the sandbox", () => {
+describe.skipIf(!supported || !CONTAINED_SOURCE_RUNS)("agent bash in the sandbox", () => {
 	beforeEach(() => {
 		cfgSandboxEnabled.set(settings, true);
 	});

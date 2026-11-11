@@ -137,7 +137,7 @@ export function expandSandboxPath(
 		Partial<Pick<SandboxPolicyContext, "platform" | "authDb" | "agentDir">>,
 ): string {
 	const api = pathApi(ctx.platform ?? process.platform);
-	let expanded = expandTilde(entry.trim(), ctx.home)
+	let expanded = expandTilde(entry.trim(), ctx.home, api)
 		.replaceAll("${home}", ctx.home)
 		.replaceAll("${workspace}", ctx.workspace)
 		.replaceAll("${tmp}", ctx.tmpdir);

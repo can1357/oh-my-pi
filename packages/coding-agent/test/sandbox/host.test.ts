@@ -81,6 +81,19 @@ function newShell(connection: SandboxHostConnection): SandboxedShell {
 	return new SandboxedShell(Promise.resolve(connection), { options: {} });
 }
 
+/**
+ * An external process that sleeps `seconds`: the builtin `sleep` runs in-process and leaves no
+ * child. Windows has no `/bin/sleep`; Bun stands in.
+ */
+function externalSleep(seconds: number): string {
+	return process.platform === "win32"
+		? `"${process.execPath}" -e "setTimeout(() => {}, ${seconds * 1000})"`
+		: `/bin/sleep ${seconds}`;
+}
+
+/** The host PTY starts its command through `sh -lc`, which Windows does not provide. */
+const ptySupported = process.platform !== "win32";
+
 async function run(
 	shell: SandboxedShell,
 	command: string,
@@ -152,7 +165,7 @@ describe("sandbox host protocol (plain subprocess)", () => {
 
 	it("keeps cd and export state across runs of one shell", async () => {
 		const shell = newShell(host.connection);
-		expect((await run(shell, `cd ${tmp} && export OMP_HOST_TEST=kept`)).exitCode).toBe(0);
+		expect((await run(shell, `cd '${tmp}' && export OMP_HOST_TEST=kept`)).exitCode).toBe(0);
 		const second = await run(shell, 'pwd; echo "$OMP_HOST_TEST"');
 		expect(second.output).toBe(`${tmp}\nkept\n`);
 	});
@@ -181,7 +194,7 @@ describe("sandbox host protocol (plain subprocess)", () => {
 
 	it("reports live pids during a run and none after", async () => {
 		const shell = newShell(host.connection);
-		const running = startRun(shell, "echo go; /bin/sleep 1");
+		const running = startRun(shell, `echo go; ${externalSleep(1)}`);
 		await running.started;
 		// The host pushes pid changes on its own poll cadence; wait for that report, bounded.
 		let seen: number[] = [];
@@ -230,11 +243,11 @@ describe("sandbox host protocol (plain subprocess)", () => {
 	it("counts live background jobs", async () => {
 		const shell = newShell(host.connection);
 		// An external process: the builtin `sleep` runs in-process and leaves no job child.
-		await run(shell, "/bin/sleep 2 &");
+		await run(shell, `${externalSleep(2)} &`);
 		expect(await shell.liveBackgroundJobCount()).toBe(1);
 	});
 
-	it("relays a PTY: output, exit status, and a terminal on stdout", async () => {
+	it.skipIf(!ptySupported)("relays a PTY: output, exit status, and a terminal on stdout", async () => {
 		const { connection } = host;
 		const data: string[] = [];
 		const exit = Promise.withResolvers<PtyRunResult>();
@@ -255,7 +268,7 @@ describe("sandbox host protocol (plain subprocess)", () => {
 		expect(data.join("")).not.toContain("notty");
 	});
 
-	it("delivers PTY input and reports a killed PTY as cancelled", async () => {
+	it.skipIf(!ptySupported)("delivers PTY input and reports a killed PTY as cancelled", async () => {
 		const { connection } = host;
 		const data: string[] = [];
 		const firstExit = Promise.withResolvers<PtyRunResult>();
@@ -352,7 +365,7 @@ describe("sandbox host lifecycle", () => {
 
 	it("ends its background jobs' processes when its parent goes away (stdin closes)", async () => {
 		const { connection, child } = await startPlainHost();
-		const pid = Number((await run(newShell(connection), "/bin/sleep 300 & echo $!")).output.trim());
+		const pid = Number((await run(newShell(connection), `${externalSleep(300)} & echo $!`)).output.trim());
 		expect(isAlive(pid)).toBe(true);
 		// Not `retire()`: that kills the descendants from the parent side. Only the host's own shutdown runs here.
 		child.stdin.end();
@@ -365,7 +378,7 @@ describe("sandbox host lifecycle", () => {
 		it(`ends a background job's process when the host is ${end === "kill" ? "killed" : "retired"}`, async () => {
 			const { connection, child } = await startPlainHost();
 			const shell = newShell(connection);
-			const pid = Number((await run(shell, "/bin/sleep 300 & echo $!")).output.trim());
+			const pid = Number((await run(shell, `${externalSleep(300)} & echo $!`)).output.trim());
 			expect(isAlive(pid)).toBe(true);
 			if (end === "kill") connection.kill("test done");
 			else connection.retire();
@@ -387,7 +400,8 @@ describe("sandbox host lifecycle", () => {
 		await expect(run(shell, "echo late")).rejects.toThrow(/Sandbox host exited unexpectedly/);
 	});
 
-	it(
+	// Windows has no SIGSTOP to freeze the host with.
+	it.skipIf(process.platform === "win32")(
 		"kills a host that does not stop an aborted command",
 		async () => {
 			const { connection, child } = await startPlainHost();

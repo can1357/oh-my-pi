@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { disposePyToolBridge, ensurePyToolBridge } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type SandboxChild, SandboxRuntime, SandboxUnavailableError } from "@oh-my-pi/pi-coding-agent/sandbox/runtime";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import {
 	cfgSandboxAllowedHosts,
 	cfgSandboxAllowRead,
@@ -122,6 +123,8 @@ afterEach(async () => {
 	} finally {
 		restoreSettingsTestState(state);
 		state = undefined;
+		// Persisted settings opened <agentDir>/agent.db; Windows cannot delete an open file.
+		AgentStorage.close();
 		scratch.removeSync();
 	}
 });
@@ -256,7 +259,8 @@ describe("SandboxRuntime", () => {
 		const instance = await runtime();
 		const tempDir = instance.tempDir();
 		expect(path.dirname(tempDir)).toBe(systemTmp);
-		expect(fs.statSync(tempDir).mode & 0o777).toBe(0o700);
+		// Windows has no POSIX permission bits.
+		if (process.platform !== "win32") expect(fs.statSync(tempDir).mode & 0o777).toBe(0o700);
 		const { readwritePaths } = instance.effectivePolicy();
 		expect(readwritePaths).toContain(tempDir);
 		expect(readwritePaths).not.toContain(systemTmp);
