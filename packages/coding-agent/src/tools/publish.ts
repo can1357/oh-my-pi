@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import publishDescription from "../prompts/tools/publish.md" with { type: "text" };
 import { ClaudeArtifactsClient } from "../publish/claude-artifacts";
@@ -180,10 +181,13 @@ export class PublishTool implements AgentTool<typeof publishSchema, PublishToolD
 		const page = await this.#requirePage(params.page, "read");
 		const version = page.versions[(params.version ?? page.versions.length) - 1];
 		if (!version) throw new ToolError(`Page ${page.id} has versions 1-${page.versions.length}`);
-		const html = await this.#publisher.store.readVersion(page.id, version.version);
+		const file = shortenPath(this.#publisher.store.versionPath(page.id, version.version));
 		return {
 			content: [
-				{ type: "text", text: `${describePage(page)}\nv${version.version} from ${version.source}:\n\n${html}` },
+				{
+					type: "text",
+					text: `${describePage(page)}\nv${version.version} was published from ${shortenPath(version.source)}; its HTML is at ${file} (open it with the read tool).`,
+				},
 			],
 			details: { action: "read", pageId: page.id, url: version.url },
 		};

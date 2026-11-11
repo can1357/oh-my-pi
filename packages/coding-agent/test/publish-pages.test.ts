@@ -72,7 +72,7 @@ describe("PagePublisher", () => {
 		expect(second.version.url).toBe(first.version.url);
 		expect(new URL(asset.publication.url).pathname).toBe(`/pages/${first.page.id}/chart.png`);
 		expect(store.objects.get(`/pages/${first.page.id}/index.html`)).toBe("<p>two</p>");
-		expect(await publisher.store.readVersion(first.page.id, 1)).toBe("<p>one</p>");
+		expect(await Bun.file(publisher.store.versionPath(first.page.id, 1)).text()).toBe("<p>one</p>");
 
 		const removal = await publisher.remove(second.page);
 		expect(removal.removed).toBe(true);

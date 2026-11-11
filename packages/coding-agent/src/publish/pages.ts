@@ -166,11 +166,12 @@ export class PageStore {
 	}
 
 	async writeVersion(id: string, version: number, html: string): Promise<void> {
-		await Bun.write(path.join(this.#dir(id), `v${version}.html`), html);
+		await Bun.write(this.versionPath(id, version), html);
 	}
 
-	async readVersion(id: string, version: number): Promise<string> {
-		return Bun.file(path.join(this.#dir(id), `v${version}.html`)).text();
+	/** Local file holding a version's published HTML. */
+	versionPath(id: string, version: number): string {
+		return path.join(this.#dir(id), `v${version}.html`);
 	}
 
 	async remove(id: string): Promise<void> {

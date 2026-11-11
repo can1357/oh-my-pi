@@ -42,7 +42,7 @@ images:
 | `path`    | `string`                                                                      |   Varies | `publish`: `.html`/`.htm`/`.md`/`.markdown`; `upload_asset`: any file. Resolved against cwd. |
 | `page`    | `string`                                                                      |   Varies | Page id or any URL the page or its assets were served at.                     |
 | `title`   | `string`                                                                      |       No | Title override.                                                              |
-| `version` | `number.integer >= 1`                                                         |       No | `read`: version to return; defaults to latest.                               |
+| `version` | `number.integer >= 1`                                                         |       No | `read`: version whose stored HTML path to return; defaults to latest. The tool returns the shortened path for the regular `read` tool, not the HTML itself. |
 | `scope`   | `project` \| `all`                                                            |       No | `list`: defaults to pages created from the current project.                  |
 | `force`   | `boolean`                                                                     |       No | `publish`: overwrite a claude.ai version changed elsewhere.                  |
 
