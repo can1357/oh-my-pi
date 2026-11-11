@@ -5184,20 +5184,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner
-			.commitTodoPhases(current => completeFinishedSubagentTodos(current, completedDescs))
-			.then(
-				committed => {
-					if (!committed || (this.#todoPhasesOwner ?? this.session) !== owner) return;
-					this.todoPhases = committed;
-					this.#syncTodoHudState(owner);
-					this.#renderTodoList();
-					this.ui.requestRender();
-				},
-				(error: unknown) => {
-					logger.warn("Could not record subagent todo completions", { error: String(error) });
-				},
-			);
+		const show = (committed: TodoPhase[]): void => {
+			this.todoPhases = committed;
+			this.#syncTodoHudState(owner);
+			this.#renderTodoList();
+			this.ui.requestRender();
+		};
+		let ran = false;
+		let next: TodoPhase[] | undefined;
+		const committing = owner.commitTodoPhases(current => {
+			ran = true;
+			next = completeFinishedSubagentTodos(current, completedDescs);
+			return next;
+		});
+		// Native todos commit before `commitTodoPhases` returns (a failure throws), so the HUD updates now, as on `main`.
+		if (ran) {
+			if (next) show(next);
+			return;
+		}
+		committing.then(
+			committed => {
+				if (committed && (this.#todoPhasesOwner ?? this.session) === owner) show(committed);
+			},
+			(error: unknown) => {
+				logger.warn("Could not record subagent todo completions", { error: String(error) });
+			},
+		);
 	}
 
 	#cancelTodoAutoClearTimer(): void {

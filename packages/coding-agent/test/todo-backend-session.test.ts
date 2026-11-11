@@ -82,7 +82,7 @@ describe("todo backends in a real session", () => {
 		});
 	}
 
-	test("native todos commit inline without waiting for deferred extensions, and keep only the list's own fields", async () => {
+	test("native todos commit a list inline, as released, without waiting for deferred extensions, and keep only the list's own fields", async () => {
 		const deferred = await writeSource("deferred.ts", "export default function() {}\n");
 		const session = await createSessionWithDeferred(deferred, "native");
 		// RPC clients send JSON, so a list can carry fields `TodoPhase` does not declare.
@@ -90,7 +90,7 @@ describe("todo backends in a real session", () => {
 		const input: TodoPhase[] = sent;
 		const stored: TodoPhase[] = [{ name: "Work", tasks: [{ content: "a", status: "pending" }] }];
 
-		const committed = session.commitTodoPhases(() => input);
+		const committed = session.commitTodoPhases(input);
 
 		expect(session.getTodoPhases()).toEqual(stored);
 		expect(session.hasPendingDeferredExtensions).toBe(true);
@@ -662,4 +662,111 @@ export default function(pi) {
 			expect(taskContents(session)).toEqual(["from the /todo edit"]);
 		},
 	);
+
+	const toolTurn = (...calls: Array<[name: string, args: Record<string, unknown>]>) => ({
+		content: calls.map(([name, args], index) => ({
+			type: "toolCall" as const,
+			id: `${name}-${index}`,
+			name,
+			arguments: args,
+		})),
+		stopReason: "toolUse" as const,
+	});
+
+	test.each([
+		{
+			transition: "a rewind",
+			second: [
+				toolTurn(["checkpoint", { goal: "explore" }]),
+				toolTurn(["todo", { op: "append", phase: "Tasks", items: ["B"] }]),
+				toolTurn(["rewind", { report: "found nothing" }]),
+				{ content: ["done 2"] },
+			],
+			move: async (_session: AgentSession, _ids: { settledLeaf: string; secondPrompt: string }) => {},
+		},
+		{
+			transition: "tree navigation",
+			second: [toolTurn(["todo", { op: "append", phase: "Tasks", items: ["B"] }]), { content: ["done 2"] }],
+			move: async (session: AgentSession, ids: { settledLeaf: string; secondPrompt: string }) => {
+				await session.navigateTree(ids.settledLeaf);
+			},
+		},
+		{
+			transition: "a branch from an earlier message",
+			second: [toolTurn(["todo", { op: "append", phase: "Tasks", items: ["B"] }]), { content: ["done 2"] }],
+			move: async (session: AgentSession, ids: { settledLeaf: string; secondPrompt: string }) => {
+				await session.branch(ids.secondPrompt);
+			},
+		},
+	])("$transition sends the backend the list the session now holds, once", async ({ second, move }) => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const session = await createSession({
+			settings: Settings.isolated({
+				"todo.backend": "tracker",
+				"todo.reminders": false,
+				"checkpoint.enabled": true,
+			}),
+			extensions: [recorder.extension()],
+			toolNames: ["read", "todo", "checkpoint", "rewind"],
+		});
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in the bundled catalog");
+		const mock = createMockModel({
+			responses: [toolTurn(["todo", { op: "init", items: ["A"] }]), { content: ["done 1"] }, ...second],
+		});
+		session.agent.streamFn = mock.stream;
+		session.agent.state.model = model;
+		session.agent.getApiKey = () => "test-key";
+		session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+
+		await session.prompt("first");
+		await session.waitForIdle();
+		const listA = structuredClone(session.getTodoPhases());
+		const settledLeaf = session.sessionManager.getLeafId();
+		await session.prompt("second");
+		await session.waitForIdle();
+		const secondPrompt = session.sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message" && entry.message.role === "user")
+			.at(-1)?.id;
+		if (!settledLeaf || !secondPrompt) throw new Error("Expected the two turns to be on the branch");
+		expect(contentsOf(listA)).toEqual(["A"]);
+
+		await move(session, { settledLeaf, secondPrompt });
+		await flushTodoWrites(session);
+
+		expect(session.getTodoPhases()).toEqual(listA);
+		expect(recorder.created).toBe(1);
+		expect(recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
+		expect(recorder.calls.at(-1)).toEqual({ method: "replace", phases: listA });
+	});
+
+	test("an id registered twice uses the later registrant, without a notice, while the first one's extension is disabled", async () => {
+		const first = createTodoBackendRecorder("tracker", "First");
+		const second = createTodoBackendRecorder("tracker", "Second");
+		const session = await createSession({ backend: "tracker", extensions: [first.extension(), second.extension()] });
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		const notices = collectNotices(session);
+		await todo(session, { op: "init", items: ["one"] });
+
+		const [firstExtension] = runner.getLoadedExtensions();
+		runner.setSuspendedExtensions(extension => extension === firstExtension);
+		await todo(session, { op: "append", phase: "Tasks", items: ["two"] });
+
+		expect(first.calls.map(call => `${call.method}:${call.op}`)).toEqual(["apply:init"]);
+		expect(second.calls.map(call => `${call.method}:${call.op}`)).toEqual(["apply:append"]);
+		expect(notices).toEqual([]);
+	});
+
+	test("a native todo call whose signal already aborted still commits, as on main", async () => {
+		const session = await createSession();
+		const controller = new AbortController();
+		controller.abort();
+
+		const result = await todo(session, { op: "init", items: ["one"] }, controller.signal);
+
+		expect(result.isError).toBeUndefined();
+		expect(taskContents(session)).toEqual(["one"]);
+	});
 });

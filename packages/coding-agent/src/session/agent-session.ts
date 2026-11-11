@@ -268,7 +268,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhasesUpdate, TodoWrite } from "../tools/todo-backend";
+import { TODO_BACKEND_NOTICE_SOURCE, type TodoPhasesUpdate, type TodoWrite } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -2310,7 +2310,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			extensionRunner: () => this.#extensionRunner,
 			isMainAgent: () => this.#agentKind === "main",
 			isDisposed: () => this.#isDisposed,
-			warn: message => this.emitNotice("warning", message, "todo-backend"),
+			warn: message => this.emitNotice("warning", message, TODO_BACKEND_NOTICE_SOURCE),
 			bindDeferredExtensions: async () => {
 				// A write issued from inside the deferred load must not wait on that load.
 				if (deferredExtensionLoadScope.getStore()) return false;
@@ -11530,9 +11530,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#todoWrites.queued;
 	}
 
-	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
-	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
-		return this.#todoWrites.commit(update);
+	/**
+	 * Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it.
+	 * Pass an update to compute the list from the one committed when the write runs.
+	 */
+	commitTodoPhases(phases: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		return this.#todoWrites.commit(phases);
 	}
 
 	editTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {

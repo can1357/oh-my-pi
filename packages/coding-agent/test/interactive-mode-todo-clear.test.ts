@@ -16,12 +16,6 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
-/** Awaits the reconcile's commits; its HUD update is chained on each, so it has run by then. */
-function watchReconcile(owner: AgentSession): () => Promise<unknown> {
-	const commit = vi.spyOn(owner, "commitTodoPhases");
-	return () => Promise.all(commit.mock.results.map(result => result.value));
-}
-
 function renderTodos(mode: InteractiveMode): string {
 	return Bun.stripANSI(mode.todoContainer.render(120).join("\n"));
 }
@@ -240,9 +234,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			status: "completed",
 			detached: true,
 		});
-		const settleReconcile = watchReconcile(session);
 		vi.advanceTimersByTime(100);
-		await settleReconcile();
 		vi.advanceTimersByTime(0);
 		await session.settleInFlightMessagePersistence();
 		await session.sessionManager.flush();
@@ -307,9 +299,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 				status: "completed",
 				detached: true,
 			});
-			const settleReconcile = watchReconcile(focusedSession);
 			vi.advanceTimersByTime(100);
-			await settleReconcile();
 
 			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
@@ -370,9 +360,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 				status: "completed",
 				detached: true,
 			});
-			const settleReconcile = watchReconcile(workerSession);
 			vi.advanceTimersByTime(100);
-			await settleReconcile();
 
 			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
 			expect(session.getTodoPhases()).toEqual(mainPhases);
@@ -409,9 +397,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			status: "completed",
 			detached: true,
 		});
-		const settleReconcile = watchReconcile(session);
 		vi.advanceTimersByTime(100);
-		await settleReconcile();
 
 		const task = session.getTodoPhases()[0]?.tasks[0];
 		expect(task?.status).toBe("completed");

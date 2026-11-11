@@ -885,11 +885,16 @@ export class ExtensionRunner {
 		return this.sessionManager.getCwd();
 	}
 
-	/** A suspended extension's backends are left out until it resumes, like its tools and commands. */
+	/**
+	 * A suspended extension's backends are left out until it resumes, like its tools and commands. An
+	 * id registered twice lists its first enabled registration.
+	 */
 	listTodoBackends(): TodoBackendDefinition[] {
-		return this.runtime.todoBackends
-			.filter(registration => !this.isExtensionSuspended(registration.sourceId))
-			.map(registration => registration.definition);
+		const byId = new Map<string, TodoBackendDefinition>();
+		for (const { definition, sourceId } of this.runtime.todoBackends ?? []) {
+			if (!byId.has(definition.id) && !this.isExtensionSuspended(sourceId)) byId.set(definition.id, definition);
+		}
+		return [...byId.values()];
 	}
 
 	getTodoBackend(id: string): TodoBackendDefinition | undefined {

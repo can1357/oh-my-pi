@@ -7,7 +7,11 @@ import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type TodoParams, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import type { TodoBackendParams, TodoOp } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
+import {
+	TODO_BACKEND_NOTICE_SOURCE,
+	type TodoBackendParams,
+	type TodoOp,
+} from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./agent-session-setup";
@@ -158,7 +162,7 @@ export function contentsOf(phases: TodoPhase[]): string[] {
 export function collectNotices(session: AgentSession): string[] {
 	const notices: string[] = [];
 	session.subscribe(event => {
-		if (event.type === "notice" && event.source === "todo-backend") notices.push(event.message);
+		if (event.type === "notice" && event.source === TODO_BACKEND_NOTICE_SOURCE) notices.push(event.message);
 	});
 	return notices;
 }

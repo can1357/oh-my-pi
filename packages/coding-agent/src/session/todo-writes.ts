@@ -103,16 +103,15 @@ export class TodoWrites {
 
 	run<T>(write: TodoWrite<T>, signal?: AbortSignal): Promise<T> {
 		const epoch = this.#epoch;
-		const assertCurrent = (): void => {
-			signal?.throwIfAborted();
+		const assertSameList = (): void => {
 			if (this.#epoch !== epoch) throw new TodoListChangedError();
 		};
-		if (!this.queued) {
-			return (async () => {
-				assertCurrent();
-				return write(undefined, assertCurrent);
-			})();
-		}
+		// Native writes run inline and, as on `main`, ignore the caller's signal.
+		if (!this.queued) return (async () => write(undefined, assertSameList))();
+		const assertCurrent = (): void => {
+			signal?.throwIfAborted();
+			assertSameList();
+		};
 		const queued = this.#track(
 			(async () => {
 				if (await this.#host.bindDeferredExtensions()) this.allowBackendResolution();
@@ -146,7 +145,13 @@ export class TodoWrites {
 		});
 	}
 
-	commit(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+	commit(input: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		const update = typeof input === "function" ? input : () => input;
+		if (!this.queued) {
+			// Native todos commit before this returns and throw to the caller, as on `main`.
+			const phases = update(this.#host.todo.phases);
+			return Promise.resolve(phases && this.#save(phases));
+		}
 		return this.run(async active => {
 			const phases = update(this.#host.todo.phases);
 			if (phases === undefined) return undefined;

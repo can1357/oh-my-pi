@@ -105,6 +105,7 @@ import {
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
+import { TODO_BACKEND_NOTICE_SOURCE } from "../../tools/todo-backend";
 
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
@@ -2014,6 +2015,21 @@ export class AcpAgent implements Agent {
 				},
 			};
 		} else {
+			if (record.lifetimeUpdatesReady && event.type === "notice" && event.source === TODO_BACKEND_NOTICE_SOURCE) {
+				// ACP has no notice update; a todo backend that is not in use must not pass as one that mirrors the list.
+				this.#trackLifetimeDelivery(
+					record,
+					event.type,
+					this.#connection.sessionUpdate({
+						sessionId,
+						update: {
+							sessionUpdate: "agent_message_chunk",
+							content: { type: "text", text: `Warning: ${event.message}` },
+							messageId: crypto.randomUUID(),
+						},
+					}),
+				);
+			}
 			if (
 				record.lifetimeUpdatesReady &&
 				(event.type === "thinking_level_changed" || event.type === "model_changed")

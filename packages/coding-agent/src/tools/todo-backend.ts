@@ -7,6 +7,9 @@ import type { TodoParams } from "./todo";
 
 export const NATIVE_TODO_BACKEND_ID = "native";
 
+/** `notice` source of todo backend warnings: a fallback to native todos, or a sync that failed. */
+export const TODO_BACKEND_NOTICE_SOURCE = "todo-backend";
+
 /**
  * Text an extension or the user supplied (a backend id or label, a thrown error) as one
  * display-safe line. It reaches notices, `/todo` errors and tool results, which render it as is.
@@ -54,7 +57,9 @@ export interface TodoBackend {
 	 * empty list; `create` does not run again) and carries no reason. While it runs,
 	 * `ctx.sessionManager.getSessionId()` already returns the new session's id, and it can arrive
 	 * before the extension's `session_switch` handler. A mirror takes the list as is; a backend whose
-	 * store outlives a session keys it by session id, or `/new` empties it.
+	 * store outlives a session keys it by session id, or `/new` empties it. When only the session id
+	 * changes (a whole-session fork, a `/btw` branch, a switch to a session with the same list), omp
+	 * sends nothing: the next call runs under the new id without the full list sent first.
 	 */
 	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }
@@ -63,7 +68,7 @@ export interface TodoBackend {
 export interface TodoBackendDefinition {
 	/**
 	 * Value users put in the `todo.backend` setting. Must not be `native`; an id already registered by
-	 * another extension is skipped with a warning.
+	 * another extension logs a warning and is used only while that extension is disabled.
 	 */
 	id: string;
 	label: string;
@@ -91,10 +96,11 @@ export interface ActiveTodoBackend {
 export type TodoPhasesUpdate = (current: TodoPhase[]) => TodoPhase[] | undefined;
 
 /**
- * A queued todo write: gets the backend resolved when it starts (`undefined` = native todos) and
+ * A todo write: gets the backend resolved when it starts (`undefined` = native todos) and
  * `assertCurrent`, which it must call after any backend call and before committing: it throws when
- * the write's abort signal fired or the list was reset or reloaded (`/new`, switch, rewind, tree
- * navigation, fork) since the write was enqueued.
+ * the list was reset or reloaded (`/new`, switch, rewind, tree navigation, fork) since the write was
+ * enqueued, or, for a queued write, when its abort signal fired. A native write runs inline and, as
+ * on `main`, ignores the signal.
  */
 export type TodoWrite<T> = (active: ActiveTodoBackend | undefined, assertCurrent: () => void) => Promise<T>;
 
@@ -104,7 +110,8 @@ export interface TodoBackendRegistration {
 }
 
 /**
- * An id already taken is skipped with a warning: the first registration stays, and the second
+ * An id already taken is kept with a warning, behind the first registration: it is used only while
+ * every earlier registrant of the id is disabled, as a tool's surviving registrant is. The second
  * extension keeps its other registrations, as a conflicting command or shortcut does not fail its
  * extension either.
  */
@@ -128,12 +135,11 @@ export function registerTodoBackend(
 	}
 	const existing = registrations.find(registration => registration.definition.id === id);
 	if (existing) {
-		logger.warn("Todo backend id already registered; skipping", {
+		logger.warn("Todo backend id already registered; used only while the earlier extension is disabled", {
 			id,
 			extensionPath: sourceId,
 			existingExtensionPath: existing.sourceId,
 		});
-		return;
 	}
 	registrations.push({ definition, sourceId });
 }

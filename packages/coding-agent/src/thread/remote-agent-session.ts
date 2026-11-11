@@ -689,8 +689,8 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * Worker-homed sessions are subagents, which never use a todo backend. The optimistic entry and
 	 * the mirror update reach the worker in order.
 	 */
-	commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
-		const phases = update(this.getTodoPhases());
+	commitTodoPhases(input: TodoPhase[] | TodoPhasesUpdate): Promise<TodoPhase[] | undefined> {
+		const phases = typeof input === "function" ? input(this.getTodoPhases()) : input;
 		if (phases === undefined) return Promise.resolve(undefined);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 		this.setTodoPhases(phases);

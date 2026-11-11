@@ -33,6 +33,7 @@ import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-ind
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TODO_BACKEND_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/todo-backend";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -1046,6 +1047,35 @@ describe("ACP agent", () => {
 				}),
 			},
 		]);
+	});
+
+	it("shows a todo backend notice as a message and keeps other session notices hidden", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+		const updatesBefore = harness.updates.length;
+
+		for (const listener of session.listeners()) {
+			listener({ type: "notice", level: "warning", message: "other", source: "extensions" });
+			listener({ type: "notice", level: "warning", message: "backend gone", source: TODO_BACKEND_NOTICE_SOURCE });
+		}
+		await Promise.resolve();
+
+		const texts = harness.updates
+			.slice(updatesBefore)
+			.map(notification => notification.update)
+			.flatMap(update =>
+				update.sessionUpdate === "agent_message_chunk" && update.content.type === "text"
+					? [update.content.text]
+					: [],
+			);
+		expect(texts).toEqual(["Warning: backend gone"]);
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
 	});
 
 	it("pushes config_option_update when thinking level changes internally", async () => {

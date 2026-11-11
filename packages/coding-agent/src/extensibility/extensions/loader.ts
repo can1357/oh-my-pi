@@ -221,7 +221,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		sourceId: string;
 	}> = [];
 
-	get todoBackends(): TodoBackendRegistration[] {
+	get todoBackends(): TodoBackendRegistration[] | undefined {
 		return this.runtime.todoBackends;
 	}
 
@@ -455,7 +455,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	registerTodoBackend(definition: TodoBackendDefinition): void {
-		registerTodoBackend(this.runtime.todoBackends, definition, this.extension.resolvedPath);
+		registerTodoBackend((this.runtime.todoBackends ??= []), definition, this.extension.resolvedPath);
 	}
 }
 
@@ -495,7 +495,7 @@ async function runExtensionFactory(
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
-	const todoBackendCheckpoint = runtime.todoBackends.length;
+	const todoBackendCheckpoint = runtime.todoBackends?.length ?? 0;
 
 	try {
 		await factory(api);
@@ -505,7 +505,7 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
-		runtime.todoBackends.length = todoBackendCheckpoint;
+		if (runtime.todoBackends) runtime.todoBackends.length = todoBackendCheckpoint;
 		throw error;
 	}
 }
