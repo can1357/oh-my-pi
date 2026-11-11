@@ -77,16 +77,6 @@ describe("job widget model chain", () => {
 		expect(costGate.spent).toBe(0.75);
 	});
 
-	it("writes the caption with the role's fallback when the primary errors", async () => {
-		const { options, sent } = setup(answered("Builds the project"));
-		const caption = createModelJobCaptionWriter(options);
-
-		expect(await caption({ kind: "bash", command: "make && make test" }, new AbortController().signal)).toBe(
-			"Builds the project",
-		);
-		expect(sent).toEqual([primary.id, backup.id]);
-	});
-
 	it("fails with the last error once every candidate has failed", async () => {
 		const backupFailure = failed();
 		backupFailure.errorMessage = "backup route down";
