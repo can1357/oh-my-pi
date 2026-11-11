@@ -454,11 +454,14 @@ pub trait AxBackend {
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
 	/// Reads an element and its children for a tree walk, letting a backend
-	/// share one children read and skip bounds the walk does not need.
+	/// share one children read and skip bounds the walk does not need. A
+	/// backend may read only the first `max_children` children of an element
+	/// that has very many, counting the rest in [`AxProps::unread_children`].
 	fn walk_node(
 		&mut self,
 		h: &AxHandle,
 		_bounds: WalkBounds,
+		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		Ok((self.props(h)?, self.children(h)?))
 	}

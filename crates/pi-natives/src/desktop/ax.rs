@@ -125,6 +125,9 @@ pub struct AxProps {
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
 	pub role_name:           Option<String>,
+	/// Children the backend left unread because the element has too many to
+	/// read whole, such as a table with a million rows.
+	pub unread_children:     u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -649,6 +652,8 @@ struct WalkState {
 	max_nodes:   u32,
 	max_depth:   u32,
 	truncated:   bool,
+	/// Children left unread under elements with too many to read whole.
+	unread:      u32,
 	bounds:      WalkBounds,
 	/// Whether the walk stops when the current operation is cancelled.
 	cancellable: bool,
@@ -666,6 +671,7 @@ impl WalkState {
 			max_nodes,
 			max_depth,
 			truncated: false,
+			unread: 0,
 			bounds,
 			cancellable: false,
 			line_states: false,
@@ -715,7 +721,13 @@ fn walk_raw(
 		control::check()?;
 	}
 	state.visited += 1;
-	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
+	// Children past the depth limit are never visited, so none is read.
+	let max_children = if depth < state.max_depth {
+		state.max_nodes - state.visited
+	} else {
+		0
+	};
+	let (props, child_handles) = match backend.walk_node(&handle, state.bounds, max_children) {
 		Ok(node) => node,
 		// An app that stops answering would make every node left wait it out,
 		// and every read after a cancel fails the same way.
@@ -731,6 +743,10 @@ fn walk_raw(
 		Err(error) => return Err(error),
 	};
 	state.partial |= props.partial;
+	if props.unread_children > 0 {
+		state.truncated = true;
+		state.unread = state.unread.saturating_add(props.unread_children);
+	}
 	let in_web = in_web || props.role == "webarea";
 	let writable = if state.line_states {
 		writable(backend, &handle, &props, in_web)
@@ -1213,6 +1229,9 @@ pub fn snapshot(
 			text.push('\n');
 		}
 		let _ = write!(text, "… truncated ({} nodes)", state.visited);
+		if state.unread > 0 {
+			let _ = write!(text, "; {} children of long lists and tables not read", state.unread);
+		}
 	}
 	if state.skipped > 0 {
 		if !text.is_empty() {
@@ -1934,7 +1953,7 @@ fn connection_screen(
 		let Some((handle, depth, parent)) = pending.pop() else {
 			break;
 		};
-		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip)?;
+		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip, 64)?;
 		let label = props
 			.value
 			.or(props.title)
@@ -2023,6 +2042,9 @@ mod tests {
 		settable:       HashMap<u64, bool>,
 		/// Settability questions asked.
 		settable_reads: u32,
+		/// Nodes with more children than a walk reads whole: their child
+		/// count, of which a walk gets only the first `max_children` listed.
+		long:           HashMap<u64, u32>,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -2081,13 +2103,19 @@ mod tests {
 			&mut self,
 			h: &AxHandle,
 			bounds: WalkBounds,
+			max_children: u32,
 		) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 			let mut props = self.props(h)?;
 			match bounds {
 				WalkBounds::Read => self.bounds_reads += u32::from(props.bounds.is_some()),
 				WalkBounds::Skip => props.bounds = None,
 			}
-			Ok((props, self.children(h)?))
+			let mut children = self.children(h)?;
+			if let Some(&count) = self.long.get(&node(h)) {
+				children.truncate(max_children as usize);
+				props.unread_children = count - children.len() as u32;
+			}
+			Ok((props, children))
 		}
 
 		fn parent(&mut self, _: &AxHandle) -> CoreResult<Option<AxHandle>> {
@@ -2160,6 +2188,7 @@ mod tests {
 			label_complete:      true,
 			selected:            false,
 			role_name:           None,
+			unread_children:     0,
 		}
 	}
 	fn window() -> DesktopWindow {
@@ -3251,6 +3280,31 @@ mod tests {
 		.unwrap();
 		assert!(s.truncated);
 		assert!(s.text.ends_with("… truncated (1 nodes)"));
+	}
+	#[test]
+	fn a_long_table_is_read_up_to_the_node_budget_and_its_unread_children_counted() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, p("table", None))]
+				.into_iter()
+				.chain((3..10).map(|id| (id, p("cell", Some("c")))))
+				.collect(),
+			children: [(1, vec![2]), (2, (3..10).collect())].into(),
+			long: [(2, 1_000_000)].into(),
+			..Default::default()
+		};
+		let s = snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions {
+			max_nodes: Some(4),
+			..Default::default()
+		})
+		.unwrap();
+		assert!(s.truncated);
+		assert_eq!(s.text.matches("- cell").count(), 2, "{}", s.text);
+		assert!(
+			s.text
+				.ends_with("… truncated (4 nodes); 999998 children of long lists and tables not read"),
+			"{}",
+			s.text
+		);
 	}
 	#[test]
 	fn unreadable_subtree_is_skipped_with_trailer() {

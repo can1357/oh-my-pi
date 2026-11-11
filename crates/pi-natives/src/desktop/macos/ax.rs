@@ -1124,6 +1124,7 @@ impl AxBackend for MacAx {
 		&mut self,
 		h: &AxHandle,
 		read_bounds: WalkBounds,
+		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		let element = mac_handle(h)?;
 		let read = match read_bounds {
@@ -1452,6 +1453,7 @@ fn own_props(
 			identity,
 			selected,
 			role_name,
+			unread_children: 0,
 		},
 		has_own_label,
 	))
