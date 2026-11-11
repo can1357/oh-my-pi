@@ -572,6 +572,7 @@ import {
 	cfgThemeDark,
 	cfgThemeLight,
 } from "../modes/settings";
+import type { PerCallModelAdvertisement } from "../task/model-approval";
 import { cfgTaskBatch, cfgTaskDisabledAgents, perCallModelEnabled } from "../task/settings";
 import {
 	cfgBranchSummaryReserveTokens,
@@ -7673,6 +7674,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	getAdvertisedSessionAgents(): readonly AgentDefinition[] {
 		return this.#tools.advertisedSessionAgents;
+	}
+
+	/**
+	 * Per-call model roles frozen into the task/eval descriptions (see
+	 * {@link SessionTools.advertisedPerCallModel}). Another instance's role edit
+	 * leaves them untouched until the next base-prompt rebuild.
+	 */
+	getAdvertisedPerCallModel(): PerCallModelAdvertisement {
+		return this.#tools.advertisedPerCallModel;
 	}
 
 	/** Cancels the local rollout-memory startup owned by this session. */
