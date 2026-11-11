@@ -141,18 +141,22 @@ describe("AgentSession eval preludes", () => {
 		const firstEval = first?.state.tools.find(tool => tool.name === "eval");
 		if (!firstEval) throw new Error("Expected first advisor Eval");
 		const firstResult = await firstEval.execute("first-browser", { language: "js", code: "await browser.tabs()" });
-		expect(firstResult.content).toEqual(expect.arrayContaining([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
-		]));
+		expect(firstResult.content).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
+			]),
+		);
 		session.applyAdvisorConfigs([...roster].reverse(), undefined);
 		const second = session.getAdvisorAgent();
 		const secondEval = second?.state.tools.find(tool => tool.name === "eval");
 		if (!secondEval) throw new Error("Expected second advisor Eval");
 		expect(secondEval).not.toBe(firstEval);
 		const secondResult = await secondEval.execute("second-browser", { language: "js", code: "await browser.tabs()" });
-		expect(secondResult.content).toEqual(expect.arrayContaining([
-			expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
-		]));
+		expect(secondResult.content).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "text", text: expect.stringContaining('<eval-guide name="browser">') }),
+			]),
+		);
 		if (!second) throw new Error("Expected second advisor");
 		const before = (await second.buildSideRequestContext([])).systemPrompt?.join("\n") ?? "";
 		if (process.platform !== "linux") expect(before).not.toContain("On Linux under X11");
@@ -166,15 +170,17 @@ describe("AgentSession eval preludes", () => {
 		await session.runToolRegistryMutation(async () => undefined);
 		if (process.platform !== "linux") {
 			expect(session.agent.state.systemPrompt.join("\n")).not.toContain("On Linux under X11");
-			expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).not.toContain("On Linux under X11");
+			expect((await second.buildSideRequestContext([])).systemPrompt?.join("\n")).not.toContain(
+				"On Linux under X11",
+			);
 		}
 		const movedCwd = path.join(registryDir, "moved");
 		fs.mkdirSync(movedCwd, { recursive: true });
 		await session.moveSession(movedCwd, path.join(registryDir, "moved-sessions"));
 		const moved = await secondEval.execute("advisor-after-move", { language: "js", code: 'print(await sh("pwd"))' });
-		expect(moved.content).toEqual(expect.arrayContaining([
-			expect.objectContaining({ type: "text", text: expect.stringContaining(movedCwd) }),
-		]));
+		expect(moved.content).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "text", text: expect.stringContaining(movedCwd) })]),
+		);
 	});
 
 	// `/computer on` mid-session used to rebuild the system prompt and eval
