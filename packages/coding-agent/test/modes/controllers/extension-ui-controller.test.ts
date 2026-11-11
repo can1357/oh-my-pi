@@ -925,6 +925,22 @@ describe("ExtensionUiController OSC 7501 run status", () => {
 		expect(writes.slice(1)).toEqual([report("state=working:app=omp")]);
 	});
 
+	it("leaves the record alone for omp's own prompts that share the hook dialogs", async () => {
+		const harness = makeHarness();
+		await harness.init();
+		setRunStatus({ state: "idle" });
+		writes.length = 0;
+
+		// e.g. the paste picker or a slash-command confirm the user just opened.
+		const input = harness.controller.showHookInput("Pasted 40 lines");
+		harness.handleInput("\x1b");
+		expect(await input).toBeUndefined();
+		const confirm = harness.controller.showHookConfirm("Reset session?", "This clears the transcript.");
+		harness.handleInput("\r");
+		expect(await confirm).toBe(true);
+		expect(writes).toEqual([]);
+	});
+
 	it("reports an extension approve as blocked on permission and releases it when the call aborts", async () => {
 		const harness = makeHarness();
 		const ui = await harness.init();

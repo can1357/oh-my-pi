@@ -173,8 +173,8 @@ export function resendProgramStatus(): void {
 /**
  * Claim the terminal's status record when the UI takes over the terminal: the
  * counterpart to {@link disposeProgramStatus} and the only release of its latch.
- * counterpart to {@link disposeProgramStatus} and the only release of its latch.
  * A UI starts with no dialog open, so holds left by a previous one are dropped.
+ *
  * `startupRun` marks a command-line prompt that runs once startup ends: the
  * first report is then `working`, not the `idle` that a supervisor waiting on
  * this terminal would take as "finished" before the prompt even starts.
