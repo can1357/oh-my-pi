@@ -11,7 +11,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include "geometry.h"
+
+// An on-screen window that lies wholly on `display` is cropped from it at
+// `sourceRect` (display-local points). Any other window (spanning displays,
+// partly off screen, or not on screen) is captured on its own instead.
+static BOOL WindowCaptureDisplay(CGRect window, BOOL onScreen, CGRect display, CGRect *sourceRect) {
+	if (!onScreen || CGRectIsEmpty(window) || !CGRectContainsRect(display, window)) return NO;
+	*sourceRect = CGRectOffset(window, -display.origin.x, -display.origin.y);
+	return YES;
+}
 
 static BOOL WriteAll(const void *bytes, size_t count) {
 	const uint8_t *cursor = bytes;
