@@ -20,9 +20,9 @@ use std::{
 
 use mxc_sdk::v1::{
 	self, BackendCapability, ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy,
-	MxcProcess, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy,
-	NetworkRuntimeConfig, ProxyEnforcement, RunOptions, SpawnOptions, TelemetryConfig, UiPolicy,
-	WaitResult,
+	MxcProcess, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeerPolicy,
+	NetworkPolicy, NetworkRulePolicy, NetworkRuntimeConfig, ProxyEnforcement, RunOptions,
+	SpawnOptions, TelemetryConfig, UiPolicy, WaitResult,
 	configs::{ProcessContainerConfig, ProcessContainerFilesystem},
 	policy::filesystem::{
 		FilesystemPolicyResult, ToolsPolicyOptions, available_tools_policy, temporary_files_policy,
@@ -299,7 +299,7 @@ fn probe_bubblewrap() -> std::result::Result<(), String> {
 		.collect();
 	let request = ContainerRequest {
 		filesystem: Some(FilesystemPolicy { readonly_paths, ..Default::default() }),
-		network: Some(network_policy(NetworkMode::Deny, None, Backend::Bubblewrap, false)?),
+		network: Some(network_policy(NetworkMode::Deny, None, Backend::Bubblewrap, false, false)?),
 		environment: Some(vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
 		inherit_default_environment: Some(false),
 		timeout_ms: Some(15_000),
@@ -388,6 +388,11 @@ pub struct SandboxPolicy {
 	/// lets contained processes list and stat the whole volume (Node needs it to
 	/// resolve script paths). Ignored where the native tier cannot enforce it.
 	pub list_volume_roots: Option<bool>,
+	/// Windows, `deny` network: let contained processes connect to loopback
+	/// (`127.0.0.0/8`, `::1`), their own listeners and every host service on it.
+	/// Ignored where the native tier cannot grant host loopback, and under a
+	/// proxy, whose policy form confines loopback to the proxy endpoint.
+	pub loopback:          Option<bool>,
 }
 
 /// Options for [`SandboxProcess::spawn`].
@@ -530,12 +535,16 @@ fn push_windows_arg(command: &mut String, arg: &str) {
 /// - processcontainer: a proxy needs `egress = deny`, and the identity-less
 ///   host proxy needs `ingress` and `hostLoopback = allow`; the `AppContainer`
 ///   fallback tiers refuse `hostLoopback = allow`, so `allow` only grants it
-///   when the host tier supports it.
+///   when the host tier supports it. An open loopback (`open_loopback`, where
+///   the host tier grants it) denies egress except to loopback, in `deny` and
+///   under a proxy alike: the native proxy form confines loopback to its
+///   endpoint.
 fn network_policy(
 	mode: NetworkMode,
 	proxy_url: Option<&str>,
 	backend: Backend,
 	host_loopback_allow: bool,
+	open_loopback: bool,
 ) -> std::result::Result<NetworkPolicy, String> {
 	let directional =
 		|egress: NetworkAction, ingress: NetworkAction, host_loopback: NetworkAction| NetworkPolicy {
@@ -555,11 +564,21 @@ fn network_policy(
 				directional(Allow, Allow, if host_loopback_allow { Allow } else { Deny })
 			},
 		}),
+		NetworkMode::Deny if opens_loopback(backend, host_loopback_allow, open_loopback) => {
+			Ok(loopback_only(directional))
+		},
 		NetworkMode::Deny => Ok(directional(Deny, Deny, Deny)),
 		NetworkMode::Proxy => {
 			let url =
 				proxy_url.ok_or_else(|| "sandbox network \"proxy\" requires proxyUrl".to_owned())?;
 			validate_proxy_url(url)?;
+			// The native proxy form confines loopback to the proxy endpoint and
+			// drops egress rules, so an open loopback takes the direct form;
+			// `build_request` then points `HTTP(S)_PROXY` at the proxy, which the
+			// loopback rule reaches.
+			if opens_loopback(backend, host_loopback_allow, open_loopback) {
+				return Ok(loopback_only(directional));
+			}
 			let mut policy = match backend {
 				Backend::Seatbelt | Backend::Bubblewrap => directional(Deny, Deny, Deny),
 				Backend::ProcessContainer => directional(Deny, Allow, Allow),
@@ -568,6 +587,31 @@ fn network_policy(
 			Ok(policy)
 		},
 	}
+}
+
+/// Whether a requested open loopback takes effect: only the processcontainer
+/// host tier grants host loopback (the `AppContainer` fallbacks refuse it).
+fn opens_loopback(backend: Backend, host_loopback_allow: bool, requested: bool) -> bool {
+	requested && host_loopback_allow && backend == Backend::ProcessContainer
+}
+
+/// Egress denied except to loopback (`127.0.0.0/8`, `::1`), host loopback
+/// allowed.
+fn loopback_only(
+	directional: impl Fn(NetworkAction, NetworkAction, NetworkAction) -> NetworkPolicy,
+) -> NetworkPolicy {
+	use NetworkAction::{Allow, Deny};
+	let mut policy = directional(Deny, Deny, Allow);
+	if let Some(egress) = policy.egress.as_mut() {
+		egress.allow = Some(vec![NetworkRulePolicy {
+			to:    Some(vec![
+				NetworkPeerPolicy::new("127.0.0.0/8"),
+				NetworkPeerPolicy::new("::1/128"),
+			]),
+			ports: None,
+		}]);
+	}
+	policy
 }
 
 /// Accept only `http://127.0.0.1:<port>` / `http://localhost:<port>`: the one
@@ -593,14 +637,36 @@ fn build_request(
 	windows: bool,
 	enumerate_paths: bool,
 ) -> std::result::Result<ContainerRequest, String> {
-	let SandboxSpawnOptions { argv, cwd, env, policy } = options;
+	let SandboxSpawnOptions { argv, cwd, mut env, policy } = options;
 	let command = if windows {
 		windows_command_line(&argv)?
 	} else {
 		unix_command_line(&argv)?
 	};
 	let mode = NetworkMode::parse(&policy.network)?;
-	let network = network_policy(mode, policy.proxy_url.as_deref(), backend, host_loopback_allow)?;
+	let open_loopback = policy.loopback == Some(true);
+	let network = network_policy(
+		mode,
+		policy.proxy_url.as_deref(),
+		backend,
+		host_loopback_allow,
+		open_loopback,
+	)?;
+	// The native proxy form sets these itself (processcontainer strips the four
+	// and sets the first two); the open-loopback form leaves the proxy to them,
+	// so it does the same.
+	if mode == NetworkMode::Proxy
+		&& opens_loopback(backend, host_loopback_allow, open_loopback)
+		&& let Some(url) = policy.proxy_url.as_deref()
+	{
+		env.retain(|key, _| {
+			!["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"]
+				.iter()
+				.any(|name| key.eq_ignore_ascii_case(name))
+		});
+		env.insert("HTTP_PROXY".to_owned(), url.to_owned());
+		env.insert("HTTPS_PROXY".to_owned(), url.to_owned());
+	}
 	let containment = if windows && enumerate_paths && policy.list_volume_roots == Some(true) {
 		volume_root_enumeration(&policy, cwd.as_deref())
 	} else {
@@ -1106,7 +1172,7 @@ mod tests {
 			(NetworkMode::Proxy, Backend::ProcessContainer, false, (Deny, Allow, Allow, proxy)),
 		];
 		for (mode, backend, loopback, (egress, ingress, host_loopback, url)) in cases {
-			let policy = network_policy(mode, proxy, backend, loopback).unwrap();
+			let policy = network_policy(mode, proxy, backend, loopback, false).unwrap();
 			assert_eq!(
 				actions(&policy),
 				(egress, ingress, host_loopback, url.map(str::to_owned)),
@@ -1116,9 +1182,86 @@ mod tests {
 	}
 
 	#[test]
+	fn loopback_opt_in_denies_egress_except_loopback_where_the_host_tier_grants_it() {
+		use NetworkAction::{Allow, Deny};
+		let proxy = Some("http://127.0.0.1:8080");
+		let loopback_rules = |policy: &NetworkPolicy| {
+			policy
+				.egress
+				.as_ref()
+				.and_then(|egress| egress.allow.clone())
+				.map(|rules| {
+					rules
+						.into_iter()
+						.flat_map(|rule| rule.to.unwrap_or_default())
+						.map(|peer| peer.cidr)
+						.collect::<Vec<_>>()
+				})
+		};
+		let opened =
+			network_policy(NetworkMode::Deny, None, Backend::ProcessContainer, true, true).unwrap();
+		assert_eq!(actions(&opened), (Deny, Deny, Allow, None));
+		assert_eq!(loopback_rules(&opened), Some(args(&["127.0.0.0/8", "::1/128"])));
+		// Without host-tier support the request would fall to a refused
+		// AppContainer tier.
+		let unsupported =
+			network_policy(NetworkMode::Deny, None, Backend::ProcessContainer, false, true).unwrap();
+		assert_eq!(actions(&unsupported), (Deny, Deny, Deny, None));
+		assert_eq!(loopback_rules(&unsupported), None);
+		// Under a proxy the opt-in leaves the native proxy form (which confines
+		// loopback to its endpoint) for the direct one; the proxy is reached
+		// through the loopback rule.
+		let proxied =
+			network_policy(NetworkMode::Proxy, proxy, Backend::ProcessContainer, true, true).unwrap();
+		assert_eq!(actions(&proxied), (Deny, Deny, Allow, None));
+		assert_eq!(loopback_rules(&proxied), Some(args(&["127.0.0.0/8", "::1/128"])));
+		let seatbelt =
+			network_policy(NetworkMode::Deny, None, Backend::Seatbelt, true, true).unwrap();
+		assert_eq!(loopback_rules(&seatbelt), None);
+	}
+
+	#[test]
+	fn open_loopback_under_a_proxy_points_the_proxy_variables_at_it() {
+		let options = |loopback: Option<bool>| SandboxSpawnOptions {
+			argv:   args(&["python.exe", "-V"]),
+			cwd:    None,
+			env:    HashMap::from([
+				("https_proxy".to_owned(), "http://corp:3128".to_owned()),
+				("No_Proxy".to_owned(), "*".to_owned()),
+				("PATH".to_owned(), "C:\\bin".to_owned()),
+			]),
+			policy: SandboxPolicy {
+				readwrite_paths: Vec::new(),
+				readonly_paths: Vec::new(),
+				denied_paths: Vec::new(),
+				network: "proxy".to_owned(),
+				proxy_url: Some("http://127.0.0.1:8080".to_owned()),
+				list_volume_roots: None,
+				loopback,
+			},
+		};
+		let env = |loopback| {
+			let request =
+				build_request(options(loopback), Backend::ProcessContainer, true, true, false).unwrap();
+			let mut env = request.environment.unwrap();
+			env.sort();
+			env
+		};
+		let proxy = "http://127.0.0.1:8080".to_owned();
+		assert_eq!(env(Some(true)), vec![
+			("HTTPS_PROXY".to_owned(), proxy.clone()),
+			("HTTP_PROXY".to_owned(), proxy),
+			("PATH".to_owned(), "C:\\bin".to_owned()),
+		]);
+		// The native proxy form injects the variables itself; the caller's env
+		// passes through.
+		assert!(env(None).contains(&("https_proxy".to_owned(), "http://corp:3128".to_owned())));
+	}
+
+	#[test]
 	fn proxy_mode_requires_a_loopback_http_url() {
 		for backend in [Backend::Seatbelt, Backend::Bubblewrap, Backend::ProcessContainer] {
-			assert!(network_policy(NetworkMode::Proxy, None, backend, false).is_err());
+			assert!(network_policy(NetworkMode::Proxy, None, backend, false, false).is_err());
 			for bad in [
 				"https://127.0.0.1:8080",
 				"http://[::1]:8080",
@@ -1129,13 +1272,13 @@ mod tests {
 				"http://127.0.0.1:99999",
 			] {
 				assert!(
-					network_policy(NetworkMode::Proxy, Some(bad), backend, false).is_err(),
+					network_policy(NetworkMode::Proxy, Some(bad), backend, false, false).is_err(),
 					"{bad}"
 				);
 			}
 			for good in ["http://127.0.0.1:8080", "http://localhost:1/"] {
 				assert!(
-					network_policy(NetworkMode::Proxy, Some(good), backend, false).is_ok(),
+					network_policy(NetworkMode::Proxy, Some(good), backend, false, false).is_ok(),
 					"{good}"
 				);
 			}
@@ -1163,6 +1306,7 @@ mod tests {
 				network:           "deny".to_owned(),
 				proxy_url:         None,
 				list_volume_roots: None,
+				loopback:          None,
 			},
 		};
 		let request = build_request(options, Backend::Seatbelt, false, false, false).unwrap();
@@ -1190,6 +1334,7 @@ mod tests {
 				network:           "allow".to_owned(),
 				proxy_url:         None,
 				list_volume_roots: None,
+				loopback:          None,
 			},
 		};
 		let request = build_request(options, Backend::ProcessContainer, false, true, false).unwrap();
@@ -1217,6 +1362,7 @@ mod tests {
 				network: "deny".to_owned(),
 				proxy_url: None,
 				list_volume_roots,
+				loopback: None,
 			},
 		};
 		let request =

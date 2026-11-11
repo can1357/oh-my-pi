@@ -383,6 +383,14 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		// No sandbox lookup at all when the configuration rules containment out.
 		const sandbox = evalSandboxRuledOut() ? undefined : await SandboxRuntime.for(options.cwd);
 		const contained = sandbox?.applies("eval") === true;
+		if (sandbox && contained) {
+			const closed = closedLoopbackMode(sandbox, await Settings.init());
+			if (closed) {
+				throw new Error(
+					`Python kernel cannot start: the Windows sandbox closes loopback in network mode ${closed}, and the Python kernel needs it. Set sandbox.network.windowsLoopback to true (contained commands can then reach every service on this machine's 127.0.0.1) or use network mode allow.`,
+				);
+			}
+		}
 		const kernel = new PythonKernel(
 			Snowflake.next(),
 			runtime.pythonPath,
@@ -482,6 +490,19 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 		return result.admissionRejected ? null : result;
 	}
+}
+
+/**
+ * The network mode a contained kernel would run under when the Windows sandbox keeps loopback
+ * closed there, else `undefined`. Loopback is closed outside network `allow` unless
+ * `sandbox.network.windowsLoopback` opens it, and the kernel (asyncio's socketpair, the TCP tool
+ * bridge) can never start without it: refusing up front spares a startup timeout per attempt.
+ */
+function closedLoopbackMode(sandbox: SandboxRuntime, settings: Settings): string | undefined {
+	if (process.platform !== "win32") return undefined;
+	const status = sandbox.status();
+	if (status.state !== "active" || status.network === "allow") return undefined;
+	return readSandboxConfig(settings).loopback ? undefined : status.network;
 }
 
 function buildInitScript(cwd: string, env?: Record<string, string | undefined>): string {

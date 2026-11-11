@@ -28,6 +28,7 @@ import {
 	cfgSandboxFallback,
 	cfgSandboxMode,
 	cfgSandboxListDrives,
+	cfgSandboxLoopback,
 	cfgSandboxNetworkMode,
 	cfgSandboxReadScope,
 	cfgSandboxScope,
@@ -77,6 +78,7 @@ const EFFECTIVE_VALUES = new Map<string, (settings: Settings) => unknown>([
 	[cfgSandboxReadScope.id, s => readSandboxConfig(s).readScope],
 	[cfgSandboxNetworkMode.id, s => readSandboxConfig(s).networkMode],
 	[cfgSandboxListDrives.id, s => readSandboxConfig(s).listDrives],
+	[cfgSandboxLoopback.id, s => readSandboxConfig(s).loopback],
 ]);
 
 /** Description suffix telling the panel user that an environment variable is in play. */

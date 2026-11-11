@@ -56,6 +56,7 @@ function config(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
 		networkMode: "deny",
 		allowedHosts: [],
 		listDrives: false,
+		loopback: false,
 		ignored: [],
 		...overrides,
 	};
@@ -413,6 +414,13 @@ describe("readSandboxConfig: project may only tighten", () => {
 			{ sandbox: { filesystem: { windowsListDrives: true } } },
 			{ listDrives: false },
 			"sandbox.filesystem.windowsListDrives",
+		],
+		[
+			"windowsLoopback",
+			{ sandbox: { enabled: true } },
+			{ sandbox: { network: { windowsLoopback: true } } },
+			{ loopback: false },
+			"sandbox.network.windowsLoopback",
 		],
 		// A project `null` resets a setting to its default; it must not bypass the clamp.
 		[

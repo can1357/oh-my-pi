@@ -3600,6 +3600,13 @@ export interface SandboxPolicy {
    * resolve script paths). Ignored where the native tier cannot enforce it.
    */
   listVolumeRoots?: boolean
+  /**
+   * Windows, `deny` network: let contained processes connect to loopback
+   * (`127.0.0.0/8`, `::1`), their own listeners and every host service on it.
+   * Ignored where the native tier cannot grant host loopback, and under a
+   * proxy, whose policy form confines loopback to the proxy endpoint.
+   */
+  loopback?: boolean
 }
 
 /** Options for [`SandboxProcess::spawn`]. */

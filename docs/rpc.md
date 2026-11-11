@@ -226,6 +226,8 @@ The TypeScript client exposes `setCacheWarming(mode): Promise<CacheWarmingMode>`
 `!!`: the output is still returned and recorded in the transcript, where
 extensions and `get_messages` see it. Non-boolean values are rejected.
 
+The RPC `bash` command is a host command, like the user's `!`: it runs unsandboxed even while the [OS sandbox](./sandbox.md) is enabled. Only the commands the agent issues through its own tools are contained. The sandbox commands below govern those tools, not this one.
+
 Older runtimes ignore unknown fields and would share the output, so send
 `excludeFromContext: true` only when the `ready` frame has
 `supportsBashExcludeFromContext: true`. `RpcClient.bash()` enforces this; with

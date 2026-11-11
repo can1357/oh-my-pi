@@ -265,6 +265,20 @@ export const cfgSandboxNetworkMode = register({
 	},
 });
 
+export const cfgSandboxLoopback = register({
+	id: "sandbox.network.windowsLoopback",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Sandbox",
+		label: "Sandbox Loopback (Windows)",
+		condition: "windows",
+		description:
+			"Let contained commands connect to 127.0.0.1 in the Allowlist and Deny network modes: their own sockets (Python's asyncio and the Python eval kernel need it) and every service on this machine's loopback, local proxies and debug ports included. A project config cannot turn it on",
+	},
+});
+
 export const cfgSandboxAllowedHosts = register({
 	id: "sandbox.network.allowedHosts",
 	type: "array",
