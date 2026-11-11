@@ -65,6 +65,7 @@ import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, them
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
+import { type BlockedKind, type BlockedStatus, holdBlockedStatus } from "../../utils/run-status";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
@@ -750,7 +751,7 @@ export class ExtensionUiController {
 		const signal = dialogOptions?.signal ? AbortSignal.any([dialogOptions.signal, steered.signal]) : steered.signal;
 		try {
 			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
-				this.#presentDialog(localSignal, settle => {
+				this.#presentDialog({ state: "blocked", kind: "permission", msg: prompt.compact }, localSignal, settle => {
 					const editor = this.ctx.editor;
 					const dialog = new ApprovalDialogComponent(
 						prompt.compact,
@@ -891,7 +892,13 @@ export class ExtensionUiController {
 		form: HtmlForm,
 		dialogOptions: ExtensionUIDialogOptions | undefined,
 	): Promise<ExtensionFormDialogResult | undefined> {
-		return this.#presentDialog<ExtensionFormDialogResult>(dialogOptions?.signal, settle => {
+		const question = form.fields.find(field => field.name);
+		const blocked: BlockedStatus = {
+			state: "blocked",
+			kind: "question",
+			msg: question ? fieldQuestions(form).get(question) : undefined,
+		};
+		return this.#presentDialog<ExtensionFormDialogResult>(blocked, dialogOptions?.signal, settle => {
 			const inputGuard = this.#draftInputGuard();
 			const dialog = new HtmlFormDialog(form, {
 				tui: this.ctx.ui,
@@ -1066,7 +1073,9 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
+		const msg = questions.map(question => question.question).join(" ");
+		const blocked: BlockedStatus = { state: "blocked", kind: "question", msg };
+		return this.#presentDialog<ExtensionAskDialogResult>(blocked, dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: AskDialogPromptValue | AskDialogPromptDraft | undefined) => void) | undefined;
 			let closed = false;
@@ -1375,15 +1384,17 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show a selector for hooks.
+	 * Show a selector for hooks. The run reports `blocked` on `extra.kind`
+	 * (default `question`) with `extra.msg` or the title while it is open.
 	 */
 	showHookSelector(
 		title: string,
 		options: ExtensionUISelectItem[],
 		dialogOptions?: InteractiveSelectorDialogOptions,
-		extra?: { slider?: HookSelectorSlider },
+		extra?: { slider?: HookSelectorSlider; kind?: BlockedKind; msg?: string },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		const blocked: BlockedStatus = { state: "blocked", kind: extra?.kind ?? "question", msg: extra?.msg ?? title };
+		return this.#presentDialog(blocked, dialogOptions?.signal, settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.hookSelector = new HookSelectorComponent(
 				title,
@@ -1442,14 +1453,18 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show a confirmation dialog for hooks.
+	 * Show a confirmation dialog for hooks; the run reports `blocked` on
+	 * `permission` with the title while it is open.
 	 */
 	async showHookConfirm(
 		title: string,
 		message: string,
 		dialogOptions?: InteractiveSelectorDialogOptions,
 	): Promise<boolean> {
-		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions);
+		const result = await this.showHookSelector(`${title}\n${message}`, ["Yes", "No"], dialogOptions, {
+			kind: "permission",
+			msg: title,
+		});
 		return result === "Yes";
 	}
 
@@ -1461,7 +1476,7 @@ export class ExtensionUiController {
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog({ state: "blocked", kind: "question", msg: title }, dialogOptions?.signal, settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
 				placeholder,
@@ -1504,7 +1519,7 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog({ state: "blocked", kind: "question", msg: title }, dialogOptions?.signal, settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
 				title,
@@ -1784,8 +1799,12 @@ export class ExtensionUiController {
 	 * presented at a time and the rest queue (FIFO). `settle` (or an abort) hides
 	 * the current dialog and hands the surface to the next queued request. A request
 	 * whose signal aborts before its turn resolves `undefined` and is never shown.
+	 *
+	 * While presented, the run reports `blocked` as described by `blocked`
+	 * (OSC 7501 and the title), since the session waits on the user.
 	 */
 	#presentDialog<T = string>(
+		blocked: BlockedStatus,
 		signal: AbortSignal | undefined,
 		present: (settle: (value: T | undefined) => void) => () => void,
 	): Promise<T | undefined> {
@@ -1793,6 +1812,7 @@ export class ExtensionUiController {
 		let settled = false;
 		let started = false;
 		let hide: (() => void) | undefined;
+		let releaseBlocked: (() => void) | undefined;
 
 		function onAbort(): void {
 			settle(undefined);
@@ -1805,7 +1825,10 @@ export class ExtensionUiController {
 			if (started) {
 				hide?.();
 				this.#dialogActive = false;
+				// Present the next dialog before releasing this hold; no intermediate
+				// done/working report may escape while another prompt is waiting.
 				this.#advanceDialogQueue();
+				releaseBlocked?.();
 			}
 			resolve(value);
 		};
@@ -1818,14 +1841,17 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
+			// Held before `present` so a synchronous settle still releases it.
+			releaseBlocked = holdBlockedStatus(blocked);
 			try {
 				hide = present(settle);
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);
 				this.#dialogActive = false;
-				reject(error);
 				this.#advanceDialogQueue();
+				releaseBlocked();
+				reject(error);
 			}
 		};
 

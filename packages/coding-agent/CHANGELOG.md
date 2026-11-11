@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Tern and other OSC 7501 terminals showing a session as `working`, with no needs-you alert, while an extension or hook dialog waits on you (`ctx.ui.confirm`, `select`, `input`, `editor`, `askDialog`, `formDialog`, `approve`), including one opened from a `tool_call` handler to gate a command; the run now reports `blocked` (confirm and approve as `permission`, the others as `question`) with the dialog's prompt until it closes ([#15107](https://github.com/can1357/oh-my-pi/issues/15107))
+
 ## [18.18.8] - 2026-11-11
 
 ### Changed
