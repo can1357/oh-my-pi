@@ -385,6 +385,65 @@ describe("Settings", () => {
 			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBe(Effort.Low);
 		});
 
+		it("keeps an entry another writer added to the file while adding one to a string shorthand", async () => {
+			await writeSettings({ task: { maxEffort: "low" } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			// Another instance expands the shorthand on disk before this one saves.
+			await writeSettings({ task: { maxEffort: { "*": "low", "openai/*": "minimal" } } });
+
+			cfgTaskMaxEffort.setEntry(settings, "anthropic/*", Effort.High);
+			await settings.flush();
+
+			expect((await readSettings()).task).toEqual({
+				maxEffort: { "*": "low", "openai/*": "minimal", "anthropic/*": "high" },
+			});
+		});
+
+		it("clears a string shorthand by deleting its `*` entry", async () => {
+			await writeSettings({ task: { maxEffort: "low" }, setupVersion: 1 });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			cfgTaskMaxEffort.setEntry(settings, "*", undefined);
+			await settings.flush();
+
+			expect((await readSettings()).task).toBeUndefined();
+			expect(resolveEffortCeilingForModel(cfgTaskMaxEffort.get(settings), gpt)).toBeUndefined();
+		});
+
+		it.each([
+			["an unrelated later overlay", { theme: { dark: "titanium" } }],
+			["a later overlay's entries", { task: { maxActualEffort: { "openai/*": "high" } } }],
+		])("lets a --config string replace the global map despite %s", async (_label, second) => {
+			await writeSettings({ task: { maxActualEffort: { "anthropic/*": "high" } } });
+			const first = tempDir.join("string-overlay.yml");
+			const later = tempDir.join("later-overlay.yml");
+			await Bun.write(first, YAML.stringify({ task: { maxActualEffort: "low" } }));
+			await Bun.write(later, YAML.stringify(second));
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [first, later] });
+
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), opus)).toBe(Effort.Low);
+		});
+
+		it("lets a project-source string replace the global map despite a later project source's entries", async () => {
+			await writeSettings({ task: { maxActualEffort: { "anthropic/*": "high" } } });
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				YAML.stringify({ task: { maxActualEffort: "low" } }),
+			);
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				JSON.stringify({ task: { maxActualEffort: { "openai/*": "high" } } }),
+			);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), opus)).toBe(Effort.Low);
+			expect(resolveEffortCeilingForModel(cfgTaskMaxActualEffort.get(settings), gpt)).toBe(Effort.High);
+			// The project layer as listed keeps its plain record form.
+			expect(settings.getProjectSettings().task).toEqual({ maxActualEffort: { "*": "low", "openai/*": "high" } });
+		});
+
 		it.each([
 			[{ maxEffort: ["low"] }, /Invalid task\.maxEffort: expected .*, got an array/],
 			[{ maxActualEffort: 3 }, /Invalid task\.maxActualEffort: expected .*, got a number/],
