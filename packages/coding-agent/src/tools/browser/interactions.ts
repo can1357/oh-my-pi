@@ -16,6 +16,7 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
 import { untilAbortedOrReleased } from "./op-timeouts";
+import { normalizeSelectOptions, type SelectOptionInput } from "./select-options";
 import {
 	createFilePicker,
 	openUploadSources,
@@ -65,6 +66,7 @@ export type InteractionHandle = ElementHandle & {
 	dblclick(): Promise<void>;
 	check(): Promise<void>;
 	uncheck(): Promise<void>;
+	select(...values: SelectOptionInput[]): Promise<string[]>;
 	highlight(options?: HighlightOptions): Promise<void>;
 };
 
@@ -1192,19 +1194,17 @@ export async function highlightElement(
 }
 
 /**
- * Select `<select>` options by value, then by visible label, and return the values selected once
- * the page's `input` and `change` handlers have run, so a choice the page resets or rejects is
- * reported as the page left it. An exact value match always wins over a label, so value-based
- * calls keep their meaning. A single `<select>` takes the first matching value. A value that
- * matches no option throws before the select is touched, so a typo never commits the browser's
- * default option.
+ * Select options by string (value before label), explicit label/value, or zero-based index.
+ * Return the values selected after the page's input and change handlers have run.
+ * A single `<select>` takes the first match. Invalid or unmatched choices leave it untouched.
  */
 export async function selectElementOptions(
 	handle: ElementHandle,
-	values: string[],
+	values: SelectOptionInput[],
 	label: string,
 	signal?: AbortSignal,
 ): Promise<string[]> {
+	const choices = normalizeSelectOptions(values);
 	const outcome = (await untilAborted(signal, () =>
 		handle.evaluate((el, vals) => {
 			interface SelectOption {
@@ -1226,15 +1226,23 @@ export async function selectElementOptions(
 			const page = globalThis as unknown as PageGlobals;
 			const options = Array.from(select.options);
 			const wanted: SelectOption[] = [];
-			const missing: string[] = [];
-			for (const value of vals as string[]) {
+			const missing: unknown[] = [];
+			for (const choice of vals) {
 				const option =
-					options.find(candidate => candidate.value === value) ??
-					options.find(
-						candidate => candidate.label === value || candidate.text.replace(/\s+/g, " ").trim() === value,
-					);
+					choice.kind === "index"
+						? options[choice.value]
+						: ((choice.kind !== "label"
+								? options.find(candidate => candidate.value === choice.value)
+								: undefined) ??
+							(choice.kind !== "value"
+								? options.find(
+										candidate =>
+											candidate.label === choice.value ||
+											candidate.text.replace(/\s+/g, " ").trim() === choice.value,
+									)
+								: undefined));
 				if (option) wanted.push(option);
-				else missing.push(value);
+				else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
 			}
 			if (missing.length > 0) return { missing };
 			if (wanted.length === 0) {
@@ -1251,8 +1259,8 @@ export async function selectElementOptions(
 				.filter(option => option.selected)
 				.map(option => option.value);
 			return { selected };
-		}, values),
-	)) as { missing: string[] } | { selected: string[] } | null;
+		}, choices),
+	)) as { missing: unknown[] } | { selected: string[] } | null;
 	if (!outcome) throw new ToolError(`${label} requires a <select> element`);
 	if ("missing" in outcome)
 		throw new ToolError(

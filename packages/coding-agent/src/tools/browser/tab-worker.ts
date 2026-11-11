@@ -205,6 +205,7 @@ import {
 	wheel,
 	withLiveElement,
 } from "./interactions";
+import type { SelectOptionInput } from "./select-options";
 import {
 	captureScreenshotBuffer,
 	createPngDiff,
@@ -447,7 +448,7 @@ interface TabApi {
 	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
-	select(selector: string, ...values: string[]): Promise<string[]>;
+	select(selector: string, ...values: SelectOptionInput[]): Promise<string[]>;
 	uploadFile(selector: string, ...filePaths: string[]): Promise<void>;
 	waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string>;
 	waitForResponse(
@@ -4016,7 +4017,12 @@ export class WorkerCore {
 		}
 	}
 
-	async #select(selector: string, values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
+	async #select(
+		selector: string,
+		values: SelectOptionInput[],
+		timeoutMs: number,
+		signal: AbortSignal,
+	): Promise<string[]> {
 		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
 		try {
 			return await selectElementOptions(handle, values, "tab.select()", signal);
