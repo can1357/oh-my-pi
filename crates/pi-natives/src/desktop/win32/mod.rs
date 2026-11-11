@@ -5,10 +5,10 @@ mod capture;
 pub mod delivery;
 #[cfg(any(target_os = "windows", test))]
 mod geometry;
-#[cfg(any(target_os = "windows", test))]
-mod keyboard;
 #[cfg(target_os = "windows")]
 mod input;
+#[cfg(any(target_os = "windows", test))]
+mod keyboard;
 #[cfg(target_os = "windows")]
 mod menus;
 #[cfg(any(target_os = "windows", test))]
