@@ -569,7 +569,8 @@ export class JsRuntime {
 						const finalValue = context.finalExpressionValue;
 						context.finalExpressionSet = false;
 						context.finalExpressionValue = undefined;
-						return await awaitMaybePromise(finalValue);
+						const settled = await awaitMaybePromise(finalValue);
+						return wrapped.finalExpressionSuppressed ? undefined : settled;
 					}
 					return awaited;
 				}

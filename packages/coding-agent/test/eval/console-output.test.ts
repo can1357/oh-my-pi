@@ -111,6 +111,8 @@ describe("JS console output", () => {
 		["a trailing loop", "for (let i = 0; i < 1; i++) { 42; }"],
 		["an expression followed by a declaration", "42; const ompEchoAfter = 1;"],
 		["an assigned promise", "globalThis.ompEchoItems = Promise.resolve(42)"],
+		["a sloppy await identifier assignment", "await = [1, 2, 3]"],
+		["an async-wrapped assigned promise", "await 0; globalThis.ompEchoItems = Promise.resolve(42)"],
 	])("returns nothing for %s", async (_label, code) => {
 		const { hooks } = collect();
 		expect(await runtime.run(code, undefined, hooks)).toBeUndefined();
@@ -131,10 +133,10 @@ describe("JS console output", () => {
 		expect(await runtime.run("await", undefined, hooks)).toBe(2);
 	});
 
-	it("reports rejected assigned promises as run errors without echoing their value", async () => {
+	it.each(["", "await 0; "])("reports rejected assigned promises as run errors with prefix %j", async prefix => {
 		const { hooks } = collect();
 		await expect(
-			runtime.run("globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))", undefined, hooks),
+			runtime.run(`${prefix}globalThis.ompEchoItems = Promise.reject(new Error('assignment failed'))`, undefined, hooks),
 		).rejects.toThrow("assignment failed");
 	});
 

@@ -117,12 +117,13 @@ type ParsedProgram = {
 
 async function tryParseProgram(
 	code: string,
+	sourceType: "module" | "script" = "module",
 ): Promise<{ ast: ParsedProgram; recovered: readonly unknown[] } | { error: unknown }> {
 	const { parse } = await loadBabelParser();
 	try {
 		const file = parse(code, {
-			sourceType: "module",
-			allowAwaitOutsideFunction: true,
+			sourceType,
+			allowAwaitOutsideFunction: sourceType === "module",
 			allowReturnOutsideFunction: true,
 			allowImportExportEverywhere: true,
 			allowNewTargetOutsideFunction: true,
@@ -138,8 +139,11 @@ async function tryParseProgram(
 }
 
 async function parseProgram(code: string): Promise<ParsedProgram | null> {
-	const result = await tryParseProgram(code);
-	return "ast" in result ? result.ast : null;
+	const moduleResult = await tryParseProgram(code);
+	if ("ast" in moduleResult) return moduleResult.ast;
+	// Indirect eval also accepts sloppy scripts, where `await` can be an identifier.
+	const scriptResult = await tryParseProgram(code, "script");
+	return "ast" in scriptResult ? scriptResult.ast : null;
 }
 
 const FRAME_CONTEXT_LINES = 2;
@@ -1077,18 +1081,21 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	return result;
 }
 
-async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean | null }> {
+async function returnFinalExpression(
+	code: string,
+): Promise<{ source: string; returned: boolean | null; suppressed?: boolean }> {
 	const ast = await parseProgram(code);
 	const program = ast?.program;
 	if (!program) return { source: code, returned: null };
 	const body = program.body;
-	const asCellResult = (node: { start: number; end: number }) => {
+	const asCellResult = (node: { start: number; end: number }, suppressed = false) => {
 		const statement = code.slice(node.start, node.end);
 		const semicolonMatch = statement.match(/;\s*$/);
 		const trimmedStatement = semicolonMatch ? statement.slice(0, semicolonMatch.index) : statement;
 		return {
 			source: `${code.slice(0, node.start)}__omp_set_final_expr__((${trimmedStatement}));${code.slice(node.end)}`,
 			returned: true,
+			suppressed,
 		};
 	};
 	let lastIndex = body.length - 1;
@@ -1110,7 +1117,7 @@ async function returnFinalExpression(code: string): Promise<{ source: string; re
 			assigned?.type === "AssignmentExpression" &&
 			(!assigned.extra?.parenthesized || assigned.left?.type === "ObjectPattern")
 		) {
-			return { source: code, returned: false };
+			return asCellResult(expression, true);
 		}
 		return asCellResult(expression);
 	}
@@ -1213,7 +1220,12 @@ const LOOKS_LIKE_TS =
 
 export async function wrapCode(
 	code: string,
-): Promise<{ source: string; asyncWrapped: boolean; finalExpressionReturned: boolean | null }> {
+): Promise<{
+	source: string;
+	asyncWrapped: boolean;
+	finalExpressionReturned: boolean | null;
+	finalExpressionSuppressed?: boolean;
+}> {
 	const instrumented = await instrumentRuntimeCallSites(code);
 	const finalExpression = await returnFinalExpression(instrumented);
 	const stripped = stripTypeScript(finalExpression.source);
@@ -1224,11 +1236,17 @@ export async function wrapCode(
 		returned: finalExpression.returned,
 	};
 	if (!needsAsyncWrapper) {
-		return { source: rewritten.source, asyncWrapped: false, finalExpressionReturned: rewritten.returned };
+		return {
+			source: rewritten.source,
+			asyncWrapped: false,
+			finalExpressionReturned: rewritten.returned,
+			finalExpressionSuppressed: finalExpression.suppressed,
+		};
 	}
 	return {
 		source: `(async () => {\n${rewritten.source}\n})()`,
 		asyncWrapped: true,
 		finalExpressionReturned: rewritten.returned,
+		finalExpressionSuppressed: finalExpression.suppressed,
 	};
 }
