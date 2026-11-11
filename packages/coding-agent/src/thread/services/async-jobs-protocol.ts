@@ -17,16 +17,21 @@
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/wait";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJob,
 	type AsyncJobDeliveryState,
 	type AsyncJobDetails,
 	type AsyncJobFilter,
+	type AsyncJobProgressDelivery,
+	type AsyncJobProgressInfo,
 	type AsyncJobReapResult,
 	type AsyncJobRunResult,
 	type AsyncJobType,
+	type ProgressDeliveryCoverage,
 } from "../../async/job-manager";
+import type { ProgressStreamProvenance } from "../../async/progress-lines";
 import type { JobWidgetBrief } from "../../job-widgets/types";
 import type { RpcMethod } from "../rpc";
 import type { WireCallback, WireUnsubscribe } from "./support";
@@ -53,6 +58,11 @@ export interface AsyncJobWire {
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
 	readonly foreground?: boolean;
+	readonly progressDelivery?: AsyncJob["progressDelivery"];
+	readonly progressDeliveredCount?: number;
+	readonly completionLeftover?: AsyncJob["completionLeftover"];
+	readonly progressArtifactId?: string;
+	readonly terminalTextProvenance?: AsyncJob["terminalTextProvenance"];
 	/** The job's process: command line, start directory, and its live pids at projection time. */
 	readonly process?: { readonly command: string; readonly cwd: string; readonly pids: readonly number[] };
 	/** Whether the job offers widget inputs on the root's thread. */
@@ -95,6 +105,7 @@ export interface WireRegisterOptions {
 	readonly foreground?: boolean;
 	readonly intent?: string;
 	readonly feed?: WireJobFeed;
+	readonly progressDelivery?: AsyncJobProgressDelivery;
 }
 
 /** The run context main hands a worker job body. */
@@ -103,6 +114,7 @@ export interface WireRunContext {
 	/** Aborts with the wire form of the job's abort reason (see {@link fromWireReason}). */
 	readonly signal: AbortSignal;
 	readonly reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
+	readonly reportAgentProgress: WireCallback<[text: string, info: AsyncJobProgressInfo | undefined]>;
 	readonly markRunning: WireCallback<[]>;
 	/** Present for jobs registered with a feed: applies the body's final delta before its result lands. */
 	readonly pushFeed?: WireCallback<[delta: JobFeedDelta]>;
@@ -113,6 +125,15 @@ export type WireJobRun = (ctx: WireRunContext) => Promise<string | AsyncJobRunRe
 
 /** A worker delivery sink as main calls it. */
 export type WireDeliverySink = (jobId: string, text: string, job?: AsyncJobWire) => void | Promise<void>;
+
+/** A worker progress sink's delivery as main calls it. */
+export type WireProgressDeliver = (
+	jobId: string,
+	text: string,
+	job: AsyncJobWire,
+	seq: number,
+	info: AsyncJobProgressInfo,
+) => void | Promise<void>;
 
 /** Remote-object protocol of kind {@link ASYNC_JOB_MANAGER_KIND}; sync methods are served synchronously on main. */
 export type AsyncJobManagerProtocol = {
@@ -150,6 +171,29 @@ export type AsyncJobManagerProtocol = {
 	evictCompletedJobs: RpcMethod<[filter: AsyncJobFilter | undefined], number>;
 	waitForAll: RpcMethod<[], void>;
 	registerDeliverySink: RpcMethod<[ownerId: string, sink: WireDeliverySink], WireUnsubscribe>;
+	registerProgressSink: RpcMethod<
+		[
+			ownerId: string,
+			deliver: WireProgressDeliver,
+			acknowledge: WireCallback<[jobId: string]> | undefined,
+			retune: WireCallback<[jobId: string, delivery: AsyncJobProgressDelivery]> | undefined,
+		],
+		WireUnsubscribe
+	>;
+	activateProgressDelivery: RpcMethod<
+		[
+			jobId: string,
+			delivery: AsyncJobProgressDelivery,
+			foregroundStreamProvenance: ProgressStreamProvenance | undefined,
+			coverage: ProgressDeliveryCoverage | undefined,
+		],
+		boolean
+	>;
+	setProgressArtifact: RpcMethod<[jobId: string, artifactId: string | undefined], boolean>;
+	retuneProgressDelivery: RpcMethod<
+		[jobId: string, delivery: AsyncJobProgressDelivery, ownerId: string | undefined],
+		JobRetuneStatus
+	>;
 	waitForOwnerJobs: RpcMethod<
 		[ownerId: string, options: { timeoutMs?: number; excludeSuppressed?: boolean } | undefined],
 		boolean
