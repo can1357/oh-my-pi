@@ -423,6 +423,30 @@ describe("AskTool without a form surface", () => {
 		);
 	});
 
+	it("keeps the text before a field that sits between another group's options with that field", async () => {
+		const titles: string[] = [];
+		const select: Select = async (title, options) => {
+			titles.push(title);
+			return label(options[0]);
+		};
+		await new AskTool(createSession()).execute(
+			"call-intervening",
+			{
+				html: `<form>
+  <label><input type="radio" name="plan" value="basic" checked> Basic</label>
+  <p>Choose a compliant region</p>
+  <label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
+  <label><input type="radio" name="plan" value="premium"> Premium</label>
+</form>`,
+			},
+			undefined,
+			undefined,
+			createContext({ select }),
+		);
+
+		expect(titles).toEqual(["plan", "Choose a compliant region\n\nRegion"]);
+	});
+
 	it("takes a radio's typed Other text as its value and appends a checkbox group's", async () => {
 		const selects: { title: string; checked?: readonly number[] }[] = [];
 		const picks = ["Other (type your own)", "Other (type your own)", "CI", "Other (type your own)"];

@@ -181,10 +181,10 @@ export function blockText(block: FormBlock): string | undefined {
 /**
  * The form text each named field's prompt carries when a host asks the form
  * one field at a time: section titles and context blocks since the previous
- * named field, text between the field's own options, and, for the last field,
- * the text after it. Text that already is the field's question
- * ({@link fieldQuestions}) is left out. Parts are separated by blank lines;
- * a field without context maps to `""`.
+ * named field, text between the field's own options (unless another named
+ * field sits among them), and, for the last field, the text after it. Text
+ * that already is the field's question ({@link fieldQuestions}) is left out.
+ * Parts are separated by blank lines; a field without context maps to `""`.
  */
 export function fieldContexts(form: HtmlForm): Map<FormField, string> {
 	const questions = fieldQuestions(form);
@@ -194,7 +194,8 @@ export function fieldContexts(form: HtmlForm): Map<FormField, string> {
 	for (const section of form.sections) {
 		const title = spansText(section.title).trim();
 		if (title) pending.push(title);
-		// A radio/checkbox group with text between its options keeps that text until `ownerEnd`.
+		// A radio/checkbox group with text between its options keeps that text until `ownerEnd`, unless a named
+		// field sits among those options: the text then stays with the field it precedes.
 		let owner: string[] | undefined;
 		let ownerEnd = 0;
 		for (const [index, block] of section.blocks.entries()) {
@@ -206,7 +207,11 @@ export function fieldContexts(form: HtmlForm): Map<FormField, string> {
 				pending = [];
 				last = own;
 				owner = own;
-				ownerEnd = block.optionsEnd ?? 0;
+				const end = block.optionsEnd ?? 0;
+				const intervening = section.blocks.some(
+					(later, at) => at > index && at < end && later.kind === "field" && later.field.name,
+				);
+				ownerEnd = intervening ? 0 : end;
 				continue;
 			}
 			const text = blockText(block);
