@@ -448,17 +448,20 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		let answered: { data: HtmlFormData; notes?: OptionNote[]; timedOut?: boolean } | undefined;
 		try {
-			// One wait for the whole form, a question with or without a deadline, however the host shows it.
-			answered = await askUser(
-				extensionUi,
-				() => {
-					if (!extensionUi.formDialog) return askFieldByField(extensionUi, form, timeout, dialogSignal);
-					const formDialog = extensionUi.formDialog.bind(extensionUi);
-					return untilAborted(dialogSignal, () => formDialog(params.html, { timeout, signal: dialogSignal }));
-				},
-				() => ({ kind: "question", msg: questions.get(named[0]!) }),
-				{ deadline: timeout !== undefined },
-			);
+			if (extensionUi.formDialog) {
+				const formDialog = extensionUi.formDialog.bind(extensionUi);
+				answered = await untilAborted(dialogSignal, () =>
+					formDialog(params.html, { timeout, signal: dialogSignal }),
+				);
+			} else {
+				// Asked field by field, the form is still one question.
+				answered = await askUser(
+					extensionUi,
+					() => askFieldByField(extensionUi, form, timeout, dialogSignal),
+					{ kind: "question", msg: questions.get(named[0]!) },
+					{ deadline: timeout !== undefined },
+				);
+			}
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") throw abortError();
 			throw error;

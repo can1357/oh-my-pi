@@ -5,7 +5,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import type { BlockedKind } from "../../utils/run-status";
 import type { ExtensionApprovalPrompt, ExtensionAskDialogQuestion, ExtensionUIContext } from "./types";
 
-/** What an open dialog asks of the user: a permission or an answer, with `msg` naming it in a line. */
+/** What an open dialog asks of the user: a permission, an answer, or a sign-in, with `msg` naming it in a line. */
 export interface UserPrompt {
 	kind: BlockedKind;
 	msg?: string;
@@ -20,13 +20,12 @@ export interface UserWaitOptions {
 }
 
 /**
- * Runs `dialog`, which waits for the user's answer, as one wait for the user: its session reports the wait while a
- * prompt runs and treats its time as the user's, not the agent's. `describe` says what the dialog asks; it is read
- * only when the wait is reported.
+ * Runs `dialog`, which waits for the user's answer, as one wait for the user asking `prompt`: its session reports
+ * the wait and treats its time as the user's, not the agent's.
  */
 export type UserWaitTracker = <T>(
 	dialog: () => Promise<T>,
-	describe: () => UserPrompt,
+	prompt: UserPrompt,
 	options?: UserWaitOptions,
 ) => Promise<T>;
 
@@ -47,18 +46,18 @@ export function insideUserWait(): boolean {
 const trackers = new WeakMap<object, UserWaitTracker>();
 
 /**
- * Runs `dialog` on `ui` as one wait for the user that its caller describes, whatever dialogs it opens: an `ask`
- * answered field by field is one question, and a tool approval shown as a `select` is still a permission. A `ui`
- * that {@link trackUserWaits} did not return belongs to no session, so the dialog just runs.
+ * Runs `dialog` on `ui` as one wait for the user asking `prompt`, whatever dialogs it opens: an `ask` answered field
+ * by field is one question, and a tool approval shown as a `select` is still a permission. A `ui` that
+ * {@link trackUserWaits} did not return (or none) belongs to no session, so the dialog just runs.
  */
 export function askUser<T>(
-	ui: object,
+	ui: object | undefined,
 	dialog: () => Promise<T>,
-	describe: () => UserPrompt,
+	prompt: UserPrompt,
 	options?: UserWaitOptions,
 ): Promise<T> {
-	const track = trackers.get(ui);
-	return track ? track(dialog, describe, options) : dialog();
+	const track = ui && trackers.get(ui);
+	return track ? track(dialog, prompt, options) : dialog();
 }
 
 const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
@@ -99,13 +98,9 @@ export function trackUserWaits(ui: ExtensionUIContext, track: UserWaitTracker): 
 				typeof property === "string" && Object.hasOwn(DIALOGS, property) ? DIALOGS[property] : undefined;
 			const method: Method = describe
 				? (...args) =>
-						track(
-							() => value.apply(target, args),
-							() => describe(args),
-							{
-								deadline: args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0),
-							},
-						)
+						track(() => value.apply(target, args), describe(args), {
+							deadline: args.some(arg => isRecord(arg) && typeof arg.timeout === "number" && arg.timeout > 0),
+						})
 				: value.bind(target);
 			methods.set(property, { value: value as Method, method });
 			return method;

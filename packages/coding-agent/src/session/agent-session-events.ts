@@ -100,9 +100,9 @@ export type AgentSessionEvent =
 			resolved?: Effort;
 	  }
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
-	// One pair per wait for the user's answer while a prompt runs (a tool approval, `ask`, an extension dialog,
-	// AgentSession.waitForUser): the run is blocked on the user until the matching end. Dialogs opened while no prompt
-	// runs (a slash command's own prompts) emit none. `deadline` marks a dialog that settles on its own (`ask.timeout`).
+	// One pair per wait for the user's answer (AgentSession.waitForUser: a tool approval, `ask`, an extension dialog,
+	// a plan review, a sign-in): the session cannot go on with it until the matching end. `deadline` marks a dialog
+	// that settles on its own (`ask.timeout`).
 	| ({ type: "user_wait_start"; id: number; deadline?: boolean } & UserPrompt)
 	| { type: "user_wait_end"; id: number }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted

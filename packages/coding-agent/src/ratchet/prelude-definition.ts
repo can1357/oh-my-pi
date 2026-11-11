@@ -150,47 +150,38 @@ async function askApproval(
 	// The reviewed material goes in the question body: every dialog surface renders it
 	// (ACP forwards the question text but not per-option previews).
 	const body = `${question}\n\n${preview}`;
-	// One permission wait for the review, its follow-up input included.
-	return askUser(
-		ui,
-		async (): Promise<ApprovalOutcome> => {
-			if (ui.askDialog) {
-				const askDialog = ui.askDialog;
-				const result: ExtensionAskDialogResult | undefined = await untilAborted(context.signal, () =>
-					askDialog([
-						{
-							id: stage,
-							header,
-							question: body,
-							options: [
-								{ label: "Approve", description: "Record this approval and continue" },
-								{ label: "Revise", description: "Say what to change; nothing is recorded" },
-								{ label: "Abort", description: "Stop the ratchet run" },
-							],
-						},
-					]),
-				);
-				if (!result) return { approved: false, aborted: true };
-				if (result.kind === "chat")
-					return { approved: false, aborted: false, feedback: "User asked to discuss first" };
-				const answer = result.results[0];
-				if (!answer || answer.timedOut)
-					return { approved: false, aborted: false, feedback: "No answer before timeout" };
-				const choice = answer.selectedOptions[0];
-				if (choice === "Approve") return { approved: true };
-				if (choice === "Abort") return { approved: false, aborted: true };
-				const feedback = answer.customInput ?? answer.note ?? (await ui.input("What should change?"));
-				return { approved: false, aborted: false, feedback: feedback ?? "" };
-			}
-			const choice = await untilAborted(context.signal, () =>
-				ui.select(`${header}\n\n${body}`, ["Approve", "Revise", "Abort"]),
-			);
-			if (choice === "Approve") return { approved: true };
-			if (choice !== "Revise") return { approved: false, aborted: true };
-			return { approved: false, aborted: false, feedback: (await ui.input("What should change?")) ?? "" };
-		},
-		() => ({ kind: "permission", msg: `${header}: ${question}` }),
+	if (ui.askDialog) {
+		const askDialog = ui.askDialog;
+		const result: ExtensionAskDialogResult | undefined = await untilAborted(context.signal, () =>
+			askDialog([
+				{
+					id: stage,
+					header,
+					question: body,
+					options: [
+						{ label: "Approve", description: "Record this approval and continue" },
+						{ label: "Revise", description: "Say what to change; nothing is recorded" },
+						{ label: "Abort", description: "Stop the ratchet run" },
+					],
+				},
+			]),
+		);
+		if (!result) return { approved: false, aborted: true };
+		if (result.kind === "chat") return { approved: false, aborted: false, feedback: "User asked to discuss first" };
+		const answer = result.results[0];
+		if (!answer || answer.timedOut) return { approved: false, aborted: false, feedback: "No answer before timeout" };
+		const choice = answer.selectedOptions[0];
+		if (choice === "Approve") return { approved: true };
+		if (choice === "Abort") return { approved: false, aborted: true };
+		const feedback = answer.customInput ?? answer.note ?? (await ui.input("What should change?"));
+		return { approved: false, aborted: false, feedback: feedback ?? "" };
+	}
+	const choice = await untilAborted(context.signal, () =>
+		ui.select(`${header}\n\n${body}`, ["Approve", "Revise", "Abort"]),
 	);
+	if (choice === "Approve") return { approved: true };
+	if (choice !== "Revise") return { approved: false, aborted: true };
+	return { approved: false, aborted: false, feedback: (await ui.input("What should change?")) ?? "" };
 }
 
 function result(text: string, details: unknown): AgentToolResult<unknown> {
@@ -237,7 +228,12 @@ async function invokeRatchet(
 			if (reviewed.approvals[params.stage]?.sha === sha) {
 				return result("", { approved: true, already: true });
 			}
-			const outcome = await askApproval(context, params.stage, params.question, params.preview);
+			// One permission wait for the review, its follow-up input included.
+			const outcome = await askUser(
+				context.context?.ui,
+				() => askApproval(context, params.stage, params.question, params.preview),
+				{ kind: "permission", msg: `ratchet · ${params.stage}: ${params.question}` },
+			);
 			if (!outcome.approved) return result("", outcome);
 			// Record against freshly loaded state so approvals made meanwhile survive, and only
 			// if the material is still what the user just reviewed.

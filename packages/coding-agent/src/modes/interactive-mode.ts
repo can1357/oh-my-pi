@@ -2156,10 +2156,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// An MCP sign-in can wait for the user mid-turn; like the auto-QA and cfg:// prompts below, it runs as a wait for
 		// the user (AgentSession.waitForUser).
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
-			this.session.waitForUser(
-				() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
-				() => ({ kind: "auth", msg: `Sign in to MCP server ${serverName}` }),
-			),
+			this.session.waitForUser(() => new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge), {
+				kind: "auth",
+				msg: `Sign in to MCP server ${serverName}`,
+			}),
 		);
 		this.#eventBus = eventBus;
 		this.#subagentEventBus = subagentEventBus;
@@ -2517,10 +2517,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// from a subagent whose own `Settings` is an in-memory snapshot.
 		setAutoQaConsentHandler(
 			() =>
-				this.session.waitForUser(
-					() => this.#promptAutoQaConsent(),
-					() => ({ kind: "permission", msg: "Report a tool issue?" }),
-				),
+				this.session.waitForUser(() => this.#promptAutoQaConsent(), {
+					kind: "permission",
+					msg: "Report a tool issue?",
+				}),
 			Settings.instance,
 		);
 		// Same wiring for cfg:// writes: every settings change the agent makes is
@@ -2534,7 +2534,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			approve: (request, options) =>
 				this.session.waitForUser(
 					() => this.#promptCfgChange(request, options?.signal),
-					() => ({ kind: "permission", msg: `${request.save ? "Save" : "Change"} ${request.path}?` }),
+					{ kind: "permission", msg: `${request.save ? "Save" : "Change"} ${request.path}?` },
 					{ deadline: askTimeoutMs(this.session.settings) !== undefined },
 				),
 			applied: change => {
@@ -7997,10 +7997,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			() => requestDelivered.resolve(),
 		);
 		// The plan waits on the user's approval after the turn that proposed it has ended.
-		const choice = await this.session.waitForUser(
-			() => choicePromise,
-			() => ({ kind: "permission", msg: `Review plan: ${details.title}` }),
-		);
+		const choice = await this.session.waitForUser(() => choicePromise, {
+			kind: "permission",
+			msg: `Review plan: ${details.title}`,
+		});
 		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 		const remote = pending.remote;
 		const closePlanReview = (): void => {

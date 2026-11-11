@@ -70,7 +70,7 @@ describe("AgentSession computer display hold per turn", () => {
 	let answered = Promise.withResolvers<string>();
 	const questionSchema = type({});
 	/** What the test dialogs ask. */
-	const asksQuestion = () => ({ kind: "question" as const });
+	const asksQuestion = { kind: "question" } as const;
 	/** A tool that waits for the user's answer, as `ask` and approvals do. */
 	const questionTool: AgentTool<typeof questionSchema, undefined> = {
 		name: "question",

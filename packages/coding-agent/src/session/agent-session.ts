@@ -1563,7 +1563,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Runs `dialog`, which waits for the user's answer (`ask`, a tool approval, an extension prompt), as one wait for
 	 * the user. Every dialog that waits on the user runs through here, so this is where a run is known to be blocked.
 	 *
-	 * Every wait is reported as a `user_wait_start`/`user_wait_end` pair described by `describe`, whoever opened it:
+	 * Every wait is reported as a `user_wait_start`/`user_wait_end` pair asking `prompt`, whoever opened it:
 	 * the session cannot go on with it until the user answers. Whether that needs the user's attention is the
 	 * consumer's call (a terminal knows whether its pane has focus). Dialogs `dialog` opens through a tracked UI belong
 	 * to this wait ({@link enterUserWait}).
@@ -1575,7 +1575,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * so a peer's wait for its reply ends. A dialog with a deadline settles on its own and the agent goes on, so its
 	 * time stays the agent's.
 	 */
-	async waitForUser<T>(dialog: () => Promise<T>, describe: () => UserPrompt, options?: UserWaitOptions): Promise<T> {
+	async waitForUser<T>(dialog: () => Promise<T>, prompt: UserPrompt, options?: UserWaitOptions): Promise<T> {
 		if (insideUserWait()) return dialog();
 		const held = options?.deadline !== true;
 		if (held && this.#userWaitCount++ === 0) {
@@ -1587,7 +1587,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				? this.#agentRegistry?.awaits.hold(this.#agentId, [USER_AWAIT_ID], { interruptible: false })
 				: undefined;
 		const waitId = ++this.#userWaitSeq;
-		this.#emit({ type: "user_wait_start", id: waitId, ...describe(), ...(held ? {} : { deadline: true }) });
+		this.#emit({ type: "user_wait_start", id: waitId, ...prompt, ...(held ? {} : { deadline: true }) });
 		try {
 			return await enterUserWait(dialog);
 		} finally {
@@ -2681,7 +2681,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			evalPreludes: () => this.getEvalPreludes(),
 			sessionAgents: () => this.getSessionAgents(),
-			waitForUser: (dialog, describe, options) => this.waitForUser(dialog, describe, options),
+			waitForUser: (dialog, prompt, options) => this.waitForUser(dialog, prompt, options),
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
@@ -3454,11 +3454,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** The handler can ask the user to approve the plan mid-turn (ACP), so it runs as a {@link waitForUser}. */
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void {
 		this.#planProposalHandler = handler
-			? title =>
-					this.waitForUser(
-						() => handler(title),
-						() => ({ kind: "permission", msg: title }),
-					)
+			? title => this.waitForUser(() => handler(title), { kind: "permission", msg: title })
 			: undefined;
 	}
 
@@ -7223,10 +7219,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
 		this.#usageFallbackConfirmer = confirmer
 			? (confirmation, signal) =>
-					this.waitForUser(
-						() => confirmer(confirmation, signal),
-						() => ({ kind: "permission", msg: `Switch to ${confirmation.to}?` }),
-					)
+					this.waitForUser(() => confirmer(confirmation, signal), {
+						kind: "permission",
+						msg: `Switch to ${confirmation.to}?`,
+					})
 			: undefined;
 	}
 
